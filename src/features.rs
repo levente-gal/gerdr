@@ -2570,7 +2570,7 @@ impl Rework {
             Rework::Waits => (NodeMark::Waiting, "waiting to send"),
             Rework::Closed => (NodeMark::Waiting, "agent closed"),
             Rework::Draft => (NodeMark::Waiting, "draft in T3 Code"),
-            Rework::Runs(_) => (NodeMark::Fixing, "running again"),
+            Rework::Runs(_) => (NodeMark::Fixing, "working again"),
         };
         (mark, line.to_owned())
     }
@@ -2586,11 +2586,11 @@ impl Rework {
     /// What its agent's card says.
     fn status(self) -> &'static str {
         match self {
-            Rework::Waits => "waiting for you \u{b7} send the prompt",
+            Rework::Waits => "your turn \u{b7} send the prompt",
             Rework::Closed => "its tab closed \u{b7} Start agent opens it again",
             Rework::Draft => "draft in T3 Code \u{b7} pick a model and send it",
-            Rework::Runs(Dot::Blocked) => "running again \u{b7} needs you",
-            Rework::Runs(_) => "running again",
+            Rework::Runs(Dot::Blocked) => "your turn \u{b7} it asks you something",
+            Rework::Runs(_) => "working again",
         }
     }
 
@@ -11818,7 +11818,8 @@ impl Gerdr {
             let watch_key = (panel.project.clone(), panel.slug.clone(), stage);
             let watch = self.features.agents.get(&watch_key);
             agent_read = watch.is_some_and(crate::feature_agents::Watch::reads);
-            crate::feature_agents::agent_line(run, stage, agent_status, watch, now)
+            let run = crate::feature_agents::as_read(feature, stage, run);
+            crate::feature_agents::agent_line(&run, stage, agent_status, watch, now)
         });
         let manual_counts = self.manual_counts(feature);
         let pane = run.and_then(|(_, run)| run.pane.as_deref());
@@ -11832,6 +11833,7 @@ impl Gerdr {
             shipping,
             agent,
             agent_status,
+            agent_standing: self.agent_standing_of(feature),
             agent_read,
             tail,
             ctx: self.row_ctx(feature),
@@ -11936,6 +11938,7 @@ impl Gerdr {
             verify: doing(Job::Verify),
             manual_gate: manual,
             code_counts: self.code_reviews.get(&key).copied(),
+            agent: self.agent_standing_of(f),
         };
         let gate = crate::feature_agents::gate_of(f, |_| manual).is_some();
         let busy = mine().next().is_some();
@@ -12612,6 +12615,8 @@ struct PanelState<'a> {
     agent: Option<String>,
     /// Its current stage's agent's status, while its tab is there.
     agent_status: Option<AgentStatus>,
+    /// Whose turn it is with that agent (see `Gerdr::agent_standing_of`).
+    agent_standing: Option<chrome::Standing>,
     /// gerdr reads what that agent wrote (`feature_agents::Watch::reads`):
     /// it waits on gerdr, not on the user.
     agent_read: bool,
@@ -12848,6 +12853,9 @@ struct LineState<'a> {
     /// Where its current agent runs, if on another machine, and whether that
     /// says all there is to say of it.
     machine: Option<(String, bool)>,
+    /// Whose turn it is with its current stage's agent, while its tab is
+    /// there (see `Gerdr::agent_standing_of`).
+    agent: Option<chrome::Standing>,
 }
 
 impl<'a> From<&PanelState<'a>> for LineState<'a> {
@@ -12861,6 +12869,7 @@ impl<'a> From<&PanelState<'a>> for LineState<'a> {
             manual_gate: state.manual_gate,
             code_counts: state.code_counts,
             machine: state.machine_line.clone(),
+            agent: state.agent_standing,
         }
     }
 }
@@ -12927,22 +12936,25 @@ fn card_tone(
     let run = stage.and_then(|stage| feature.runs.get(&stage));
     if stage.is_some_and(|stage| stage_failed(feature, stage, state.probe)) {
         chrome::CardTone::Failed
-    } else if gate {
+    } else if gate || stage.is_some_and(|stage| agent_yours(feature, stage, state)) {
         chrome::CardTone::Waits
-    } else if busy || run.is_some_and(feature::agents::StageRun::live) {
+    } else if busy || state.agent == Some(chrome::Standing::Working) {
+        chrome::CardTone::Working
+    } else if state.agent.is_none() && run.is_some_and(feature::agents::StageRun::live) {
+        // Its agent's state isn't known yet: it was started, so it works.
         chrome::CardTone::Working
     } else {
         chrome::CardTone::Idle
     }
 }
 
-/// Whether `stage` of `feature`, where it is at, failed or is blocked: its
+/// Whether `stage` of `feature`, the one it is at, failed or is blocked: its
 /// setup failed before an agent started, its Build agent said it is
 /// blocked, Verify's checks failed, a fix plan it asked for stalled, Ship
 /// is held up. The rail, the sidebar's card and the page all say so in the
 /// error colour (`Standing::Failed`).
 fn stage_failed(feature: &Feature, stage: Stage, probe: Option<&Probe>) -> bool {
-    if feature.status != Status::Open || feature.current() != Some(stage) {
+    if feature.status != Status::Open {
         return false;
     }
     let run = feature.runs.get(&stage);
@@ -12960,6 +12972,12 @@ fn stage_failed(feature: &Feature, stage: Stage, probe: Option<&Probe>) -> bool 
         }
 }
 
+/// Whether the agent of `stage`, where `feature` is at, waits on the user
+/// (`feature_agents::agent_standing`).
+fn agent_yours(feature: &Feature, stage: Stage, state: &LineState) -> bool {
+    feature.current() == Some(stage) && state.agent == Some(chrome::Standing::Yours)
+}
+
 /// Whether the current `stage` of `feature` waits for the user: a file to
 /// review, a stop to go on from, findings to decide (see
 /// `feature_agents::gate_of`).
@@ -12967,11 +12985,12 @@ fn waits(feature: &Feature, stage: Stage, state: &LineState) -> bool {
     crate::feature_agents::gate_of(feature, |_| state.manual_gate).is_some_and(|g| g.0 == stage)
 }
 
-/// "running 14m": how long an agent started at `started` has run.
+/// "working 14m": how long an agent started at `started` has worked.
 fn running_for(now: u64, started: u64) -> String {
+    let word = chrome::Standing::Working.word();
     match projects::ago(now, started).strip_suffix(" ago") {
-        Some(long) => format!("running {long}"),
-        None => "running".to_owned(),
+        Some(long) => format!("{word} {long}"),
+        None => word.to_owned(),
     }
 }
 
@@ -12988,7 +13007,13 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
     let agent = || match run {
         Some(run) if run.t3 == Some(feature::agents::T3Run::Draft) => "draft in T3 Code".to_owned(),
         Some(run) if run.waits_to_send() => "waiting to send".to_owned(),
-        Some(run) if run.live() => running_for(now, run.started),
+        // Whose turn it is, as the agent's card says it.
+        Some(run) if run.live() => match state.agent {
+            Some(standing @ (chrome::Standing::Yours | chrome::Standing::Done)) => {
+                standing.word().to_owned()
+            }
+            _ => running_for(now, run.started),
+        },
         Some(_) => "agent closed".to_owned(),
         None => String::new(),
     };
@@ -13094,6 +13119,8 @@ fn node_mark(feature: &Feature, stage: Stage, ctx: RowCtx, state: &LineState) ->
         StageMark::Done => NodeMark::Done,
         StageMark::Current if stage_failed(feature, stage, state.probe) => NodeMark::Failed,
         StageMark::Current if waits(feature, stage, state) => NodeMark::Waiting,
+        // Its agent rests with its work not done: the user's turn.
+        StageMark::Current if agent_yours(feature, stage, state) => NodeMark::Waiting,
         StageMark::Current if turned == Some(stage) && at_work.is_some() => NodeMark::Paused,
         StageMark::Current => NodeMark::Current,
         StageMark::Later if left_off(feature) == Some(stage) => NodeMark::Paused,
@@ -13750,15 +13777,18 @@ fn agent_card(
     let dot = match (mark, back) {
         (_, Some(Rework::Runs(dot))) => dot,
         (StageMark::Done, _) => Dot::Done,
-        (StageMark::Current, _) if run.live() => {
-            state.agent_status.map_or(Dot::Unknown, Dot::of_status)
-        }
+        // Whose turn it is, in its colour, as the words beside it say.
+        (StageMark::Current, _) if run.live() => match state.agent_standing {
+            Some(chrome::Standing::Done) => Dot::Done,
+            Some(chrome::Standing::Working) => Dot::Working,
+            _ => state.agent_status.map_or(Dot::Unknown, Dot::of_status),
+        },
         _ => Dot::Unknown,
     };
     // The card's head names the agent already.
     let status = match (current, &state.agent) {
         // On a done Build too, where fixes wait: `started` would hide that.
-        _ if run.waits_to_send() => "waiting for you \u{b7} send the prompt".to_owned(),
+        _ if run.waits_to_send() => "your turn \u{b7} send the prompt".to_owned(),
         (true, Some(line)) => (line.strip_prefix(run.agent.as_str()))
             .map_or(line.as_str(), str::trim_start)
             .to_owned(),
@@ -13778,8 +13808,10 @@ fn agent_card(
         Some((line, false)) => format!("{status} \u{b7} {line}"),
         None => status,
     };
-    // The tail read is the current stage's agent's, while its pane is.
-    let tail = match current && run.pane.is_some() {
+    // The tail read is the current stage's agent's, while its pane is, and
+    // while it says something: once its work is read, it is old news.
+    let done = state.agent_standing == Some(chrome::Standing::Done);
+    let tail = match current && run.pane.is_some() && !done {
         true => state.tail.to_vec(),
         false => Vec::new(),
     };
@@ -13787,7 +13819,10 @@ fn agent_card(
     let waits = match back {
         Some(back) => back.waits_on_you(),
         None if current && state.agent_read => false,
-        None if current => crate::feature_agents::waits_on_you(run, stage, state.agent_status),
+        None if current => {
+            let run = crate::feature_agents::as_read(feature, stage, run);
+            crate::feature_agents::waits_on_you(&run, stage, state.agent_status)
+        }
         None => run.waits_to_send(),
     };
     Some(PageSection::Agent {
@@ -19170,7 +19205,7 @@ pub(crate) mod tests {
         let page = stage_page(&f, Stage::Build, &PanelState::default(), &actions, 2_000);
         assert!(page.sections.iter().any(|s| matches!(
             s,
-            PageSection::Agent { status, waits: true, .. } if status.starts_with("waiting for you")
+            PageSection::Agent { status, waits: true, .. } if status.starts_with("your turn")
         )));
         // Its tab closed: it can still open again from there.
         f.runs.insert(Stage::Build, held_run(None));
@@ -19273,12 +19308,12 @@ pub(crate) mod tests {
         assert_eq!(
             shown,
             Some((
-                "Build agent \u{b7} running again".to_owned(),
+                "Build agent \u{b7} working again".to_owned(),
                 Dot::Working,
                 vec!["Show agent".to_owned()]
             ))
         );
-        assert_eq!(node, (NodeMark::Fixing, "running again".to_owned()));
+        assert_eq!(node, (NodeMark::Fixing, "working again".to_owned()));
         let show = PanelOutcome::ShowAgent(Stage::Build);
         assert_eq!(agent_key(&f, stage, running).map(|k| k.1), Some(show));
         // Enter stays this page's: it only runs.
@@ -19290,7 +19325,7 @@ pub(crate) mod tests {
         f.runs.insert(Stage::Build, held_run(Some("p1")));
         let (shown, node) = card(&f, at_rest);
         let (status, _, buttons) = shown.unwrap();
-        assert!(status.starts_with("Build agent \u{b7} waiting for you"));
+        assert!(status.starts_with("Build agent \u{b7} your turn"));
         assert_eq!(buttons, ["Send prompt", "Show agent"]);
         assert_eq!(node, (NodeMark::Waiting, "waiting to send".to_owned()));
         assert_eq!(
@@ -19322,7 +19357,7 @@ pub(crate) mod tests {
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         assert!(page.sections.iter().any(|s| matches!(
             s,
-            PageSection::Agent { status, dot: Dot::Working, .. } if status == "running again"
+            PageSection::Agent { status, dot: Dot::Working, .. } if status == "working again"
         )));
     }
 
@@ -25003,7 +25038,7 @@ pub(crate) mod tests {
         let node = rail_node(&f, Stage::Build, &state, 2_000);
         assert_eq!(
             (node.mark, node.line.as_str()),
-            (NodeMark::Current, "running 16m")
+            (NodeMark::Current, "working 16m")
         );
         // Stopped after a milestone: Continue first, and how far it got.
         f.runs.get_mut(&Stage::Build).unwrap().stop = Some(feature::agents::Stop {
@@ -26473,7 +26508,7 @@ pub(crate) mod tests {
         let node = rail_node(&f, Stage::Ship, &state, 2_000);
         assert_eq!(
             (node.mark, node.line.as_str()),
-            (NodeMark::Current, "blocked")
+            (NodeMark::Failed, "blocked")
         );
         let ready = probe(check(&[], &["api"], &[]));
         let state = PanelState {
@@ -26523,7 +26558,7 @@ pub(crate) mod tests {
         let status = |back| card_status(&f, &state, false, false, back, 0);
         let runs = status(Some(Rework::Runs(Dot::Working)));
         assert_eq!(runs.0, Some(Stage::Build));
-        assert_eq!(runs.1, "Build \u{b7} running again");
+        assert_eq!(runs.1, "Build \u{b7} working again");
         assert_eq!(runs.2, Working);
         let waits = status(Some(Rework::Waits));
         assert_eq!(waits.1, "Build \u{b7} waiting to send");
@@ -27324,6 +27359,7 @@ pub(crate) mod tests {
                 manual_gate: None,
                 code_counts: None,
                 machine,
+                agent: None,
             };
             card_line(&f, Some(Stage::Plan), &state, 2_000)
         };

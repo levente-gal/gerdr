@@ -368,7 +368,7 @@ fn machine_facts(
 fn status_word(status: Option<AgentStatus>) -> Option<&'static str> {
     Some(match status? {
         AgentStatus::Working => "working",
-        AgentStatus::Blocked => "waiting for you",
+        AgentStatus::Blocked => "your turn",
         AgentStatus::Done => "done",
         AgentStatus::Idle => "idle",
         AgentStatus::Unknown => return None,

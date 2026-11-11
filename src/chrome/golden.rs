@@ -3083,7 +3083,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                 0 => "2h ago".into(),
                 1 => "1h ago".into(),
                 2 => "skipped".into(),
-                3 => "running 14m".into(),
+                3 => "working 14m".into(),
                 _ => String::new(),
             },
             mark: match i {
@@ -3319,7 +3319,7 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
                 icon: AgentIcon::Codex,
                 name: "codex".into(),
                 dot: Dot::Idle,
-                status: "waiting for you \u{b7} tab 2".into(),
+                status: "your turn \u{b7} tab 2".into(),
                 tail: Vec::new(),
                 buttons: vec![1],
                 picks: Vec::new(),
@@ -3423,7 +3423,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
                 icon: AgentIcon::Claude,
                 name: "claude".into(),
                 dot: Dot::Idle,
-                status: "waiting for you \u{b7} tab 2".into(),
+                status: "your turn \u{b7} tab 2".into(),
                 tail: Vec::new(),
                 buttons: vec![1],
                 picks: Vec::new(),
@@ -4358,7 +4358,7 @@ fn feature_tab_start_over() -> super::FeatureTabView {
                 icon: crate::agent_icons::AgentIcon::Claude,
                 name: "claude".into(),
                 dot: super::Dot::Idle,
-                status: "waiting for you \u{b7} tab 2".into(),
+                status: "your turn \u{b7} tab 2".into(),
                 tail: Vec::new(),
                 buttons: vec![1],
                 picks: Vec::new(),
@@ -4816,7 +4816,7 @@ fn feature_tab_held() -> super::FeatureTabView {
             icon: AgentIcon::from_agent("Claude Code"),
             name: "Claude Code".into(),
             dot: Dot::Blocked,
-            status: "waiting for you \u{b7} send the prompt".into(),
+            status: "your turn \u{b7} send the prompt".into(),
             tail: Vec::new(),
             buttons: vec![0, 1],
             picks,
@@ -4945,7 +4945,7 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
 fn feature_tab_fixed_code() -> super::FeatureTabView {
     use super::NodeMark;
     let mut view = feature_tab();
-    at_stage(&mut view, 3, NodeMark::Current, "running 2m");
+    at_stage(&mut view, 3, NodeMark::Current, "working 2m");
     for node in &mut view.rail[4..=5] {
         node.mark = NodeMark::Ran;
         node.line = "1h ago".into();

@@ -28,7 +28,7 @@ use crate::{
     agent_icons::AgentIcon,
     agents,
     ai_work::SendKind,
-    chrome::AgentChip,
+    chrome::{AgentChip, Standing},
     cli_agents::CliAgent,
     feature::{
         self, Feature, PerProject, Stage, Status,
@@ -818,16 +818,23 @@ pub(crate) fn stage_chips(
             .then(|| (a.name.clone(), base.to_owned()))
         })
         .collect();
+    // One chip per program: the project's `claude` is the installed
+    // "Claude Code", not a second chip of its logo.
+    let same = |(n, c): &(String, String), name: &str, command: &str| {
+        n.eq_ignore_ascii_case(name) || program(c) == program(command)
+    };
     if let Pick::Agent(name, command) = default_pick(feature, stage, workflow, installed)
-        && !agents.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name))
+        && !agents.iter().any(|a| same(a, &name, &command))
     {
         agents.push((name, command));
     }
     let picked = feature.stage_agents.get(&stage).cloned();
-    let lit = picked.or(match stage_pick(feature, stage, workflow, installed) {
-        Pick::Agent(name, _) => Some(name),
+    // The chip lit is the one of the agent picked, by its name or program.
+    let lit = match (picked, stage_pick(feature, stage, workflow, installed)) {
+        (Some(name), _) => Some((name, String::new())),
+        (None, Pick::Agent(name, command)) => Some((name, command)),
         _ => None,
-    });
+    };
     let allow_same = workflow.is_some_and(|w| w.allow_same_reviewer);
     let builder = (stage == Stage::AiReview && !allow_same)
         .then(|| builder_of(feature, workflow, installed))
@@ -837,9 +844,9 @@ pub(crate) fn stage_chips(
         .into_iter()
         .map(|(name, command)| AgentChip {
             icon: AgentIcon::from_agent(&name),
-            lit: lit
-                .as_deref()
-                .is_some_and(|l| l.eq_ignore_ascii_case(&name)),
+            lit: lit.as_ref().is_some_and(|(l, c)| {
+                l.eq_ignore_ascii_case(&name) || !c.is_empty() && program(c) == program(&command)
+            }),
             off: same_agent(&name, &command, builder),
             name,
         })
@@ -1074,7 +1081,7 @@ pub(crate) fn agent_line(
         // Its `ready` says Build was marked done: never a review.
         if let Some(stop) = run.stop {
             return format!(
-                "stopped after milestone {} of {} \u{b7} Enter to continue",
+                "your turn \u{b7} stopped after milestone {} of {}: let it go on",
                 stop.done, stop.total
             );
         }
@@ -1083,7 +1090,7 @@ pub(crate) fn agent_line(
         }
     } else if stage == Stage::AiReview {
         if run.ready.is_some() {
-            return "findings read".into();
+            return "done \u{b7} findings read".into();
         }
         if watch.is_some_and(|w| w.checking.is_some()) {
             return "reading the findings".into();
@@ -1102,7 +1109,7 @@ pub(crate) fn agent_line(
         if status == Some(AgentStatus::Working) {
             return "working \u{b7} its prompt wasn't sent".into();
         }
-        return "waiting for you \u{b7} send the prompt".into();
+        return "your turn \u{b7} send the prompt".into();
     }
     if run.held {
         return format!("{} closed \u{b7} its prompt wasn't sent", run.agent);
@@ -1124,17 +1131,60 @@ pub(crate) fn agent_line(
     if watch.is_some_and(Watch::reads) && status != Some(AgentStatus::Working) {
         return format!("{} done \u{b7} reading {file}", run.agent);
     }
+    // Whose turn it is, in `Standing`'s words, and why when it's the user's.
     let doing = match status {
-        Some(AgentStatus::Working) if stage == Stage::AiReview => "reviewing",
-        Some(AgentStatus::Working) => "working",
-        Some(AgentStatus::Blocked) => "needs you",
-        Some(AgentStatus::Idle | AgentStatus::Done) => "waiting for you",
+        Some(AgentStatus::Working) if stage == Stage::AiReview => "working \u{b7} reviewing".into(),
+        Some(AgentStatus::Working) => Standing::Working.word().to_owned(),
+        Some(AgentStatus::Blocked) => "your turn \u{b7} it asks you something".into(),
+        Some(AgentStatus::Idle | AgentStatus::Done) if written => Standing::Done.word().to_owned(),
+        // It rests with its work not done: say what it lacks.
+        Some(AgentStatus::Idle | AgentStatus::Done) => match missing.first() {
+            Some(lack) => format!("your turn \u{b7} it stopped: {lack}"),
+            None if stage == Stage::Build => {
+                "your turn \u{b7} it stopped before Build was done: tell it to go on".into()
+            }
+            None => format!("your turn \u{b7} it stopped before {file} was ready"),
+        },
         // Its tab is there but herdr sees no agent in it, past the time it
         // takes one to start: it exited, its shell left.
-        None if run.t3.is_none() && now >= run.started + GONE_AFTER => "exited",
-        _ => "running",
+        None if run.t3.is_none() && now >= run.started + GONE_AFTER => {
+            "failed \u{b7} it exited".into()
+        }
+        _ => Standing::Working.word().to_owned(),
     };
     format!("{} {doing} \u{b7} {started}", run.agent)
+}
+
+/// `run` of `stage` in `f`, its work counted done once gerdr read it:
+/// Plan review's reviewer is never `ready`, but its suggestions read are
+/// the user's to decide, not the agent's to write.
+pub(crate) fn as_read(f: &Feature, stage: Stage, run: &StageRun) -> StageRun {
+    let mut run = run.clone();
+    if stage == Stage::PlanReview && crate::feature_plan_review::deciding(f).is_some() {
+        run.ready = run.ready.or(Some(run.started));
+    }
+    run
+}
+
+/// How `stage`'s agent in `run` stands at `status`: whose turn it is, in
+/// `Standing`'s words and colours, the same on the rail, the sidebar's card
+/// and the agent's card.
+pub(crate) fn agent_standing(
+    run: &StageRun,
+    stage: Stage,
+    status: Option<AgentStatus>,
+) -> Standing {
+    if waits_on_you(run, stage, status) {
+        return Standing::Yours;
+    }
+    if !run.live() {
+        return Standing::Idle;
+    }
+    match status {
+        // Not waiting on the user: its work is done.
+        Some(AgentStatus::Idle | AgentStatus::Done) => Standing::Done,
+        _ => Standing::Working,
+    }
 }
 
 /// Whether `stage`'s agent in `run`, at `status`, waits on the user, as
@@ -2320,6 +2370,20 @@ impl Gerdr {
         }
     }
 
+    /// Whose turn it is with the agent of the stage `f` is at, while its
+    /// tab is there: what the rail, the sidebar's card and the agent's card
+    /// all say of it. gerdr reading what it wrote is gerdr's work.
+    pub(crate) fn agent_standing_of(&self, f: &Feature) -> Option<Standing> {
+        let stage = f.current().filter(|s| needs(*s).is_some())?;
+        let run = f.runs.get(&stage).filter(|r| r.live())?;
+        let key = (f.project.clone(), f.slug.clone(), stage);
+        if self.features.agents.get(&key).is_some_and(Watch::reads) {
+            return Some(Standing::Working);
+        }
+        let status = self.stage_run_state(run).0;
+        Some(agent_standing(&as_read(f, stage, run), stage, status))
+    }
+
     /// What `run`'s agent does, if known, and whether it is still there. A
     /// draft in T3 Code is, as far as gerdr can tell: it can't see drafts.
     pub(crate) fn stage_run_state(&self, run: &StageRun) -> (Option<AgentStatus>, bool) {
@@ -3176,7 +3240,7 @@ mod tests {
             ..StageRun::default()
         };
         let line = |run: &StageRun| agent_line(run, Stage::Plan, Some(AgentStatus::Idle), None, 9);
-        assert_eq!(line(&held), "waiting for you \u{b7} send the prompt");
+        assert_eq!(line(&held), "your turn \u{b7} send the prompt");
         assert_eq!(
             agent_line(&held, Stage::Plan, Some(AgentStatus::Working), None, 9),
             "working \u{b7} its prompt wasn't sent"
@@ -3538,8 +3602,11 @@ mod tests {
     fn an_agent_herdr_no_longer_sees_reads_as_exited_once_it_had_time_to_start() {
         let r = run(None);
         let line = |now| agent_line(&r, Stage::Plan, None, None, now);
-        assert_eq!(line(1_010), "Claude Code running \u{b7} started just now");
-        assert_eq!(line(1_120), "Claude Code exited \u{b7} started 2m ago");
+        assert_eq!(line(1_010), "Claude Code working \u{b7} started just now");
+        assert_eq!(
+            line(1_120),
+            "Claude Code failed \u{b7} it exited \u{b7} started 2m ago"
+        );
         assert_eq!(
             agent_tab_label("claude", Stage::PlanReview),
             "claude \u{b7} Plan review"
@@ -3553,7 +3620,7 @@ mod tests {
         r.agent = "Codex".into();
         assert_eq!(
             agent_line(&r, Stage::AiReview, Some(AgentStatus::Working), None, now),
-            "Codex reviewing \u{b7} started 2m ago"
+            "Codex working \u{b7} reviewing \u{b7} started 2m ago"
         );
         let checking = Watch {
             checking: Some((1, 1)),
@@ -3566,7 +3633,7 @@ mod tests {
         r.ready = Some(1_100);
         assert_eq!(
             agent_line(&r, Stage::AiReview, None, None, now),
-            "findings read"
+            "done \u{b7} findings read"
         );
     }
 
@@ -3811,7 +3878,7 @@ mod tests {
                 None,
                 now
             ),
-            "Claude Code waiting for you \u{b7} started 3m ago"
+            "Claude Code done \u{b7} started 3m ago"
         );
         let mut nudged = r.clone();
         nudged.nudged = true;
@@ -4356,7 +4423,7 @@ mod tests {
         r.ready = Some(1_100);
         assert_eq!(
             agent_line(&r, Stage::Build, Some(AgentStatus::Idle), None, now),
-            "Claude Code waiting for you \u{b7} started 3m ago"
+            "Claude Code your turn \u{b7} it stopped before Build was done: tell it to go on \u{b7} started 3m ago"
         );
         r.stop = Some(Stop {
             done: 2,
@@ -4365,7 +4432,7 @@ mod tests {
         });
         assert_eq!(
             agent_line(&r, Stage::Build, None, Some(&checking), now),
-            "stopped after milestone 2 of 4 \u{b7} Enter to continue"
+            "your turn \u{b7} stopped after milestone 2 of 4: let it go on"
         );
     }
 

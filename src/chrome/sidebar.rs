@@ -2780,6 +2780,8 @@ impl Painter {
             }
             let end = px(rect.loc.x + rect.size.w - CHILD_PAD) as f32;
             self.card_line(c, &row.card, feature_info_rect(*rect), end, scale, p);
+            // Its workspace closed: muted, apart from the open features'
+            // headers, which are in the text colour.
             self.text(
                 c,
                 &row.title,
@@ -2788,7 +2790,7 @@ impl Painter {
                 px(rect.loc.x + rect.size.w - CHILD_PAD) as f32,
                 band(first, scale),
                 scale,
-                p.text,
+                p.muted,
             );
         }
     }
@@ -3012,12 +3014,9 @@ impl Painter {
             None => {
                 // Under the pointer, or faintly on the active workspace's
                 // header, the "×", the restart button, the AI button and
-                // its strip show, and a name reaching under them stops
-                // short of them.
-                let mut end = row.name.loc.x + row.name.size.w;
-                if buttons > 0.0 {
-                    end = end.min(row.buttons_x() - NAME_GAP);
-                }
+                // its strip show. A name reaching under them stops short of
+                // them at rest too, so it doesn't cut shorter on hover.
+                let end = (row.name.loc.x + row.name.size.w).min(row.buttons_x() - NAME_GAP);
                 self.text(
                     c,
                     &ws.name,
@@ -3592,7 +3591,8 @@ impl Painter {
             );
             x - px(TITLE_GAP) as f32
         } else if blocked {
-            let label = status_label(card.status);
+            // Its turn's word, as the feature tab says it.
+            let label = super::Standing::Yours.word();
             let pill_w =
                 self.text_width(label, TINY_FONT_SIZE, scale) + 2.0 * PILL_PADDING as f32 * s;
             let pill_h = px(PILL_HEIGHT) as f32;

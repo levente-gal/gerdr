@@ -3379,8 +3379,8 @@ impl Gerdr {
     }
 
     /// The agent rows of each workspace, in sidebar order. Those of the
-    /// other workspaces that are blocked or done also show in the "Needs
-    /// you" list, unless the config hides it or the inbox has them
+    /// other workspaces that ask something, or test runs that failed, also
+    /// show in the "Needs you" list, unless the config hides it or the inbox has them
     /// dismissed or snoozed.
     pub fn agent_views(&self) -> Vec<Vec<AgentView>> {
         let now = inbox_store::now_secs();
@@ -3394,10 +3394,10 @@ impl Gerdr {
                 views.extend(self.test_cards(ws));
                 if self.needs_you && w != self.active_workspace {
                     for view in &mut views {
-                        view.inbox = matches!(
-                            view.status,
-                            herdr::AgentStatus::Blocked | herdr::AgentStatus::Done
-                        ) && !self.inbox_hides_agent(view, now);
+                        // Only what is the user's turn, as the inbox counts.
+                        let yours = view.status == herdr::AgentStatus::Blocked
+                            || view.test == Some(crate::ci::CiState::Failed);
+                        view.inbox = yours && !self.inbox_hides_agent(view, now);
                     }
                 }
                 views

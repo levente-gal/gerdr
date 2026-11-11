@@ -566,7 +566,7 @@ pub struct RailBack {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RailNode {
     pub label: String,
-    /// One short line under the label ("2h ago", "running 14m", "ready
+    /// One short line under the label ("2h ago", "working 14m", "ready
     /// for review", "failed"), or empty.
     pub line: String,
     pub mark: NodeMark,
@@ -617,7 +617,7 @@ pub struct PageButton {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentChip {
     pub icon: AgentIcon,
-    /// Only its tooltip says it.
+    /// Beside its logo, where the row has room; else its tooltip says it.
     pub name: String,
     pub lit: bool,
     /// It can't be picked: it built the code this stage reviews.
@@ -2059,6 +2059,8 @@ const PICK_ICON: i32 = 14;
 /// `placeholder`: a logo plainly dimmer than one that can be.
 const PICK_OFF: f32 = 0.5;
 const PICK_LABEL: i32 = 48;
+/// The room after a chip's name.
+const PICK_NAME_PAD: i32 = 8;
 /// The widest the button picking an agent's model gets.
 const AGENT_MODEL_MAX: i32 = 220;
 /// Build's milestone choice: its segments' words.
@@ -3889,9 +3891,15 @@ fn rows_height(placed: &[(i32, i32)]) -> i32 {
 
 /// The page's column: the selected stage's title, about, status, buttons
 /// and sections, then the activity if it has no column.
-/// How wide `n` agent chips' outline is, with the room.
-fn agent_picks_width(n: usize) -> i32 {
-    n as i32 * PICK_CHIP + 2 * PICK_TRACK_PAD
+/// How wide an agent's chip is: its logo, then its name, so two agents of
+/// one logo are told apart without a tooltip.
+fn pick_chip_width(name: &str) -> i32 {
+    PICK_CHIP + width_of(name, SMALL_FONT_SIZE).ceil() as i32 + PICK_NAME_PAD
+}
+
+/// How wide the chips of agents `names` are together, with the room.
+fn agent_picks_width(names: &[&str]) -> i32 {
+    names.iter().map(|n| pick_chip_width(n)).sum::<i32>() + 2 * PICK_TRACK_PAD
 }
 
 /// How wide the button picking an agent's model is, its label ending in an
@@ -3900,23 +3908,29 @@ fn agent_model_width(label: &str) -> i32 {
     button_width(label).min(AGENT_MODEL_MAX)
 }
 
-/// Where `n` agent chips go on a row at `(x, y)`, `room` wide: their
-/// outline and each chip, narrower alike when they don't fit.
-fn agent_pick_rects(n: usize, x: i32, y: i32, room: i32) -> (Rect, Vec<Rect>) {
+/// Where the chips of agents `names` go on a row at `(x, y)`, `room` wide:
+/// their outline and each chip, each with its name; logos alone, narrower
+/// alike, when they don't fit.
+fn agent_pick_rects(names: &[&str], x: i32, y: i32, room: i32) -> (Rect, Vec<Rect>) {
+    let n = names.len();
     let inner = (room - 2 * PICK_TRACK_PAD).max(1);
-    let w = PICK_CHIP.min(inner / n.max(1) as i32);
-    let chips: Vec<Rect> = (0..n as i32)
-        .map(|i| {
-            Rectangle::new(
-                (x + PICK_TRACK_PAD + i * w, y + PICK_TRACK_PAD).into(),
-                (w, PICK_TRACK - 2 * PICK_TRACK_PAD).into(),
-            )
+    let named: Vec<i32> = names.iter().map(|n| pick_chip_width(n)).collect();
+    let widths = match named.iter().sum::<i32>() <= inner {
+        true => named,
+        false => vec![PICK_CHIP.min(inner / n.max(1) as i32); n],
+    };
+    let mut at = x + PICK_TRACK_PAD;
+    let chips: Vec<Rect> = (widths.iter())
+        .map(|w| {
+            let chip = Rectangle::new(
+                (at, y + PICK_TRACK_PAD).into(),
+                (*w, PICK_TRACK - 2 * PICK_TRACK_PAD).into(),
+            );
+            at += w;
+            chip
         })
         .collect();
-    let track = Rectangle::new(
-        (x, y).into(),
-        (n as i32 * w + 2 * PICK_TRACK_PAD, PICK_TRACK).into(),
-    );
+    let track = Rectangle::new((x, y).into(), (at - x + PICK_TRACK_PAD, PICK_TRACK).into());
     (track, chips)
 }
 
@@ -4117,7 +4131,8 @@ fn page_stack(
                         // The model after the chips, who give way to it.
                         let taken = model_w.map_or(0, |w| w + QUIT_BUTTON_GAP);
                         let room = (end - from - taken).max(1);
-                        let (track, chips) = agent_pick_rects(picks.len(), from, row, room);
+                        let names: Vec<&str> = picks.iter().map(|c| c.name.as_str()).collect();
+                        let (track, chips) = agent_pick_rects(&names, from, row, room);
                         if let Some(w) = model_w {
                             let x = track.loc.x + track.size.w + QUIT_BUTTON_GAP;
                             let w = w.min((end - x).max(1));
@@ -4131,7 +4146,8 @@ fn page_stack(
                 // A run: buttons, chips, then its model, at the head's end
                 // while its name and some of its status keep room, else in
                 // rows below.
-                let chips = (!picks.is_empty()).then(|| agent_picks_width(picks.len()));
+                let names: Vec<&str> = picks.iter().map(|c| c.name.as_str()).collect();
+                let chips = (!picks.is_empty()).then(|| agent_picks_width(&names));
                 let widths: Vec<i32> = widths.chain(chips).chain(model_w).collect();
                 let name_w = measure_bold(name, FONT_SIZE)
                     .unwrap_or_else(|| width_of(name, FONT_SIZE))
@@ -4154,7 +4170,7 @@ fn page_stack(
                 }
                 if let (Some(w), Some(place)) = (chips, placed.get(held.len())) {
                     let (x, y) = spot(place);
-                    choices.picks = Some(agent_pick_rects(picks.len(), x, y, w));
+                    choices.picks = Some(agent_pick_rects(&names, x, y, w));
                 }
                 if let (Some(w), Some(place)) = (model_w, placed.last()) {
                     choices.model =
@@ -7283,7 +7299,19 @@ impl Painter {
                             true => mix(p.element, p.placeholder, PICK_OFF),
                             false => segment_tint(i, on, &off, p),
                         };
-                        agent_icon(c, *rect, PICK_ICON, chip.icon, tint, scale);
+                        let logo = Rectangle::new(
+                            rect.loc,
+                            (rect.size.w.min(PICK_CHIP), rect.size.h).into(),
+                        );
+                        agent_icon(c, logo, PICK_ICON, chip.icon, tint, scale);
+                        // Its name, where the row has room for it.
+                        if rect.size.w > PICK_CHIP {
+                            let label = Rectangle::new(
+                                (rect.loc.x + PICK_CHIP - 4, rect.loc.y).into(),
+                                (rect.size.w - PICK_CHIP + 4, rect.size.h).into(),
+                            );
+                            line(c, &chip.name, label, SMALL_FONT_SIZE, tint);
+                        }
                     }
                 }
                 let model_spot = l.agent_model.filter(|_| model.is_some()).map(at);
@@ -9777,7 +9805,7 @@ mod tests {
 
     #[test]
     fn agent_chips_too_wide_together_share_the_room() {
-        let (track, chips) = agent_pick_rects(8, 10, 20, 150);
+        let (track, chips) = agent_pick_rects(&["Claude Code"; 8], 10, 20, 150);
         assert!(track.size.w <= 150, "{track:?}");
         assert_eq!(chips[0].size.w, chips[7].size.w);
         assert!(chips[7].loc.x + chips[7].size.w <= 10 + 150, "{chips:?}");
