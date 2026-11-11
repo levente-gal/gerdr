@@ -12385,8 +12385,8 @@ impl Gerdr {
         let agent = run.map(|(stage, run)| {
             let watch_key = (panel.project.clone(), panel.slug.clone(), stage);
             let watch = self.features.agents.get(&watch_key);
-            agent_read = watch.is_some_and(crate::feature_agents::Watch::reads);
             let run = crate::feature_agents::as_read(feature, stage, run);
+            agent_read = crate::feature_agents::gerdr_reads(watch, &run);
             crate::feature_agents::agent_line(&run, stage, agent_status, watch, now)
         });
         let manual_counts = self.manual_counts(feature);
@@ -13492,8 +13492,12 @@ fn card_status(
             (_, true) => chrome::CardTone::Failed,
             _ => chrome::CardTone::Working,
         };
-        let line = format!("{} \u{b7} {}", round.stage.label(), round.line());
-        return (Some(round.stage), line, tone);
+        // Where the rail has it: its commits may have sent the flow back.
+        let stage = (feature.current())
+            .filter(|s| fix_round_on(feature, *s).is_some())
+            .unwrap_or(round.stage);
+        let line = format!("{} \u{b7} {}", stage.label(), round.line());
+        return (Some(stage), line, tone);
     }
     let stage = feature.current();
     let line = card_line(feature, stage, state, now);
@@ -13529,7 +13533,9 @@ fn card_tone(
     busy: bool,
 ) -> chrome::CardTone {
     let run = stage.and_then(|stage| feature.runs.get(&stage));
-    if stage.is_some_and(|stage| stage_failed(feature, stage, state.probe)) {
+    let failed =
+        |stage| stage_failed(feature, stage, state.probe) || agent_failed(feature, stage, state);
+    if stage.is_some_and(failed) {
         chrome::CardTone::Failed
     } else if gate || stage.is_some_and(|stage| agent_yours(feature, stage, state)) {
         chrome::CardTone::Waits
@@ -13573,6 +13579,12 @@ fn agent_yours(feature: &Feature, stage: Stage, state: &LineState) -> bool {
     feature.current() == Some(stage) && state.agent == Some(chrome::Standing::Yours)
 }
 
+/// Whether the agent of `stage`, where `feature` is at, left its tab with its
+/// work not done (`feature_agents::agent_standing`).
+fn agent_failed(feature: &Feature, stage: Stage, state: &LineState) -> bool {
+    feature.current() == Some(stage) && state.agent == Some(chrome::Standing::Failed)
+}
+
 /// Whether the current `stage` of `feature` waits for the user: a file to
 /// review, a stop to go on from, findings to decide (see
 /// `feature_agents::gate_of`).
@@ -13604,9 +13616,11 @@ fn current_line(feature: &Feature, stage: Stage, state: &LineState, now: u64) ->
         Some(run) if run.waits_to_send() => "waiting to send".to_owned(),
         // Whose turn it is, as the agent's card says it.
         Some(run) if run.live() => match state.agent {
-            Some(standing @ (chrome::Standing::Yours | chrome::Standing::Done)) => {
-                standing.word().to_owned()
-            }
+            Some(
+                standing @ (chrome::Standing::Yours
+                | chrome::Standing::Done
+                | chrome::Standing::Failed),
+            ) => standing.word().to_owned(),
             _ => running_for(now, run.started),
         },
         Some(_) => "agent closed".to_owned(),
@@ -13715,6 +13729,7 @@ fn node_mark(feature: &Feature, stage: Stage, ctx: RowCtx, state: &LineState) ->
         StageMark::Done if is_stale(feature, stage, state.probe) => NodeMark::Stale,
         StageMark::Done => NodeMark::Done,
         StageMark::Current if stage_failed(feature, stage, state.probe) => NodeMark::Failed,
+        StageMark::Current if agent_failed(feature, stage, state) => NodeMark::Failed,
         StageMark::Current if waits(feature, stage, state) => NodeMark::Waiting,
         // Its agent rests with its work not done: the user's turn.
         StageMark::Current if agent_yours(feature, stage, state) => NodeMark::Waiting,
@@ -14380,6 +14395,8 @@ fn agent_card(
         (StageMark::Current, _) if run.live() => match state.agent_standing {
             Some(chrome::Standing::Done) => Dot::Done,
             Some(chrome::Standing::Working) => Dot::Working,
+            Some(chrome::Standing::Failed) => Dot::Failed,
+            Some(chrome::Standing::Yours) => Dot::Blocked,
             _ => state.agent_status.map_or(Dot::Unknown, Dot::of_status),
         },
         _ => Dot::Unknown,
@@ -27982,6 +27999,52 @@ pub(crate) mod tests {
         assert_eq!(waits.1, "Build \u{b7} waiting to send");
         assert_eq!(waits.2, Waits);
         assert_eq!(status(None).0, f.current());
+    }
+
+    #[test]
+    fn a_fix_round_sent_back_to_build_by_its_commits_reads_the_same_everywhere() {
+        let state = LineState::from(&PanelState::default());
+        let verify = feature("d", vec![repo("api", true)], stage_index(Stage::Verify));
+        let mut f = in_round(verify, Stage::Verify, FixPhase::Fixing);
+        let status = |f: &Feature| card_status(f, &state, false, false, None, 0).1;
+        assert_eq!(status(&f), "Verify \u{b7} making fixes");
+        // Its first commit has Build to do again: the rail's node is Build's.
+        f.untick(Stage::Build, 5);
+        assert_eq!(f.current(), Some(Stage::Build));
+        assert_eq!(status(&f), "Build \u{b7} making fixes");
+        // Its agent resting is the round's to end, not a Build stopped short.
+        let run = feature::agents::StageRun {
+            pane: Some("p".into()),
+            started: 1,
+            ..Default::default()
+        };
+        let idle = Some(AgentStatus::Idle);
+        let read = crate::feature_agents::as_read(&f, Stage::Build, &run);
+        assert_eq!(
+            crate::feature_agents::agent_standing(&read, Stage::Build, idle, 9),
+            chrome::Standing::Done
+        );
+        let waits = crate::feature_agents::waits_on_you(&read, Stage::Build, idle);
+        assert!(!waits);
+    }
+
+    #[test]
+    fn an_agent_gone_from_its_tab_reads_failed_on_the_rail_and_the_card() {
+        let mut f = feature("d", vec![repo("api", true)], stage_index(Stage::Plan));
+        let run = feature::agents::StageRun {
+            pane: Some("p".into()),
+            ..Default::default()
+        };
+        f.runs.insert(Stage::Plan, run);
+        let state = LineState {
+            agent: Some(chrome::Standing::Failed),
+            ..LineState::from(&PanelState::default())
+        };
+        assert_eq!(current_line(&f, Stage::Plan, &state, 0), "failed");
+        let tone = card_tone(&f, Some(Stage::Plan), &state, false, false);
+        assert_eq!(tone, chrome::CardTone::Failed);
+        let ctx = RowCtx::default();
+        assert_eq!(node_mark(&f, Stage::Plan, ctx, &state), NodeMark::Failed);
     }
 
     #[test]

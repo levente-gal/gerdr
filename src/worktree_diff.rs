@@ -1140,11 +1140,12 @@ impl WorktreeDiff {
     }
 
     /// Over the diff, before its counts: what it is against.
-    fn lead(&self) -> String {
+    pub(crate) fn lead(&self) -> String {
         if let Some(fe) = &self.feature {
-            return match fe.span {
-                Some(_) => "What its fixes changed".into(),
-                None => "Since its base".into(),
+            return match (&fe.span, fe.since) {
+                (Some(_), _) => "What its fixes changed".into(),
+                (None, true) => "Since last review".into(),
+                (None, false) => "Since its base".into(),
             };
         }
         if self.commit.is_some() {

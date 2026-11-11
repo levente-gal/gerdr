@@ -167,6 +167,8 @@ pub(crate) struct Watch {
     told_bad: Option<Stamp>,
     /// Since when it has rested, done and its file not right.
     rested: Option<Instant>,
+    /// Since when herdr sees no agent in its tab, past its start.
+    left: Option<Instant>,
 }
 
 impl Watch {
@@ -1128,15 +1130,19 @@ pub(crate) fn agent_line(
             None => format!("nudged to write {file}"),
         };
     }
-    if watch.is_some_and(Watch::reads) && status != Some(AgentStatus::Working) {
-        return format!("{} done \u{b7} reading {file}", run.agent);
+    if gerdr_reads(watch, run) && status != Some(AgentStatus::Working) {
+        // gerdr's work, not the agent's: `Standing::Working`, as its dot.
+        return format!("reading {file}");
     }
     // Whose turn it is, in `Standing`'s words, and why when it's the user's.
     let doing = match status {
         Some(AgentStatus::Working) if stage == Stage::AiReview => "working \u{b7} reviewing".into(),
         Some(AgentStatus::Working) => Standing::Working.word().to_owned(),
         Some(AgentStatus::Blocked) => "your turn \u{b7} it asks you something".into(),
-        Some(AgentStatus::Idle | AgentStatus::Done) if written => Standing::Done.word().to_owned(),
+        // Build's `ready` is Build marked done, or a fix round's to say.
+        Some(AgentStatus::Idle | AgentStatus::Done) if run.ready.is_some() => {
+            Standing::Done.word().to_owned()
+        }
         // It rests with its work not done: say what it lacks.
         Some(AgentStatus::Idle | AgentStatus::Done) => match missing.first() {
             Some(lack) => format!("your turn \u{b7} it stopped: {lack}"),
@@ -1147,8 +1153,9 @@ pub(crate) fn agent_line(
         },
         // Its tab is there but herdr sees no agent in it, past the time it
         // takes one to start: it exited, its shell left.
-        None if run.t3.is_none() && now >= run.started + GONE_AFTER => {
-            "failed \u{b7} it exited".into()
+        None if exited(run, now) => {
+            let word = agent_standing(run, stage, status, now).word();
+            format!("{word} \u{b7} it exited")
         }
         _ => Standing::Working.word().to_owned(),
     };
@@ -1160,10 +1167,27 @@ pub(crate) fn agent_line(
 /// the user's to decide, not the agent's to write.
 pub(crate) fn as_read(f: &Feature, stage: Stage, run: &StageRun) -> StageRun {
     let mut run = run.clone();
-    if stage == Stage::PlanReview && crate::feature_plan_review::deciding(f).is_some() {
+    // A fix round's agent, its commits sending the flow back to Build, is
+    // through when the round says so (`fixes_tick`), not by its build log.
+    let round = (f.fix_round.as_ref()).is_some_and(|r| !r.before_fixing() && !r.fixes_stopped());
+    if (stage == Stage::PlanReview && crate::feature_plan_review::deciding(f).is_some())
+        || (stage == Stage::Build && round)
+    {
         run.ready = run.ready.or(Some(run.started));
     }
     run
+}
+
+/// Whether gerdr, not the agent, is what `run`'s work waits on (see
+/// `Watch::reads`). Once read in, its file is the user's.
+pub(crate) fn gerdr_reads(watch: Option<&Watch>, run: &StageRun) -> bool {
+    run.ready.is_none() && watch.is_some_and(Watch::reads)
+}
+
+/// Whether `run`'s agent left its tab: herdr sees no agent in it, past the
+/// time it takes one to start (see `GONE_AFTER`).
+fn exited(run: &StageRun, now: u64) -> bool {
+    run.t3.is_none() && now >= run.started + GONE_AFTER
 }
 
 /// How `stage`'s agent in `run` stands at `status`: whose turn it is, in
@@ -1173,6 +1197,7 @@ pub(crate) fn agent_standing(
     run: &StageRun,
     stage: Stage,
     status: Option<AgentStatus>,
+    now: u64,
 ) -> Standing {
     if waits_on_you(run, stage, status) {
         return Standing::Yours;
@@ -1183,6 +1208,9 @@ pub(crate) fn agent_standing(
     match status {
         // Not waiting on the user: its work is done.
         Some(AgentStatus::Idle | AgentStatus::Done) => Standing::Done,
+        // Gone with its work done is done; gone without, it failed.
+        None if exited(run, now) && run.ready.is_some() => Standing::Done,
+        None if exited(run, now) => Standing::Failed,
         _ => Standing::Working,
     }
 }
@@ -1279,6 +1307,21 @@ fn doc_word(stage: Stage) -> &'static str {
 }
 
 impl Gerdr {
+    /// Note in feature `slug`'s history, once, that run `n` of `stage`'s agent
+    /// left its tab: where AI work's stats end the run, not when the next
+    /// thing happens.
+    fn log_exited(&mut self, project: &str, slug: &str, stage: Stage, n: u32) {
+        let line = crate::ai_work::exited_line(stage, n);
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if f.history.iter().rev().any(|e| e.what == line) {
+            return;
+        }
+        f.log(feature::now(), line);
+        self.save_feature(project, slug);
+    }
+
     /// Note in feature `slug`'s history that `stage`'s agent couldn't
     /// start, `why`: the toast goes, the activity keeps it.
     fn log_not_started(&mut self, project: &str, slug: &str, stage: Stage, why: &str) {
@@ -2145,6 +2188,19 @@ impl Gerdr {
                 continue;
             }
             let (status, alive) = self.stage_run_state(&run);
+            // Its agent left its tab, herdr not just missing it for a moment.
+            let left = status.is_none() && alive && exited(&run, feature::now());
+            let watch = self.features.agents.entry(key.clone()).or_default();
+            let since = match left {
+                true => *watch.left.get_or_insert(now),
+                false => {
+                    watch.left = None;
+                    now
+                }
+            };
+            if left && now.duration_since(since) >= STABLE {
+                self.log_exited(&project, &slug, stage, run.n);
+            }
             let Some(feature) = self.feature(&project, &slug) else {
                 continue;
             };
@@ -2409,13 +2465,20 @@ impl Gerdr {
     /// all say of it. gerdr reading what it wrote is gerdr's work.
     pub(crate) fn agent_standing_of(&self, f: &Feature) -> Option<Standing> {
         let stage = f.current().filter(|s| needs(*s).is_some())?;
+        self.stage_standing(f, stage)
+    }
+
+    /// Whose turn it is with `stage`'s agent of `f`, while its tab is there,
+    /// as its card says (see `agent_standing_of`).
+    pub(crate) fn stage_standing(&self, f: &Feature, stage: Stage) -> Option<Standing> {
         let run = f.runs.get(&stage).filter(|r| r.live())?;
+        let run = as_read(f, stage, run);
         let key = (f.project.clone(), f.slug.clone(), stage);
-        if self.features.agents.get(&key).is_some_and(Watch::reads) {
+        if gerdr_reads(self.features.agents.get(&key), &run) {
             return Some(Standing::Working);
         }
-        let status = self.stage_run_state(run).0;
-        Some(agent_standing(&as_read(f, stage, run), stage, status))
+        let status = self.stage_run_state(&run).0;
+        Some(agent_standing(&run, stage, status, feature::now()))
     }
 
     /// What `run`'s agent does, if known, and whether it is still there. A
@@ -3838,7 +3901,9 @@ mod tests {
         // Meanwhile gerdr, not the user, is what it waits on.
         assert!(w.reads() && !w.worked);
         let line = agent_line(&run(None), Stage::Plan, idle, Some(&w), 5_000);
-        assert_eq!(line, "Claude Code done \u{b7} reading plan.md");
+        assert_eq!(line, "reading plan.md");
+        // Read in, its file is the user's: gerdr reads no more.
+        assert!(!gerdr_reads(Some(&w), &run(Some(4_000))));
         assert_eq!(
             judge(&mut w, idle, true, &good, false, false, t + STABLE),
             Verdict::Ready((5, 9))
@@ -3903,20 +3968,35 @@ mod tests {
     fn an_agent_stands_as_whose_turn_it_is() {
         let idle = Some(AgentStatus::Idle);
         let stage = Stage::Discover;
-        assert_eq!(agent_standing(&run(None), stage, idle), Standing::Yours);
+        let now = 1_010;
+        let standing = |run: &StageRun, status, now| agent_standing(run, stage, status, now);
+        assert_eq!(standing(&run(None), idle, now), Standing::Yours);
         assert_eq!(
-            agent_standing(&run(Some(1_100)), stage, idle),
+            agent_standing(&run(Some(1_100)), stage, idle, now),
             Standing::Done
         );
         let working = Some(AgentStatus::Working);
         assert_eq!(
-            agent_standing(&run(None), stage, working),
+            agent_standing(&run(None), stage, working, now),
             Standing::Working
         );
         let asks = Some(AgentStatus::Blocked);
         assert_eq!(
-            agent_standing(&run(Some(1_100)), stage, asks),
+            agent_standing(&run(Some(1_100)), stage, asks, now),
             Standing::Yours
+        );
+        // herdr sees no agent: at work just after its start, then gone, its
+        // word and its dot the same.
+        assert_eq!(standing(&run(None), None, now), Standing::Working);
+        let later = 1_000 + GONE_AFTER;
+        assert_eq!(standing(&run(None), None, later), Standing::Failed);
+        assert_eq!(
+            agent_standing(&run(Some(1_005)), stage, None, later),
+            Standing::Done
+        );
+        assert_eq!(
+            agent_line(&run(Some(1_005)), stage, None, None, later),
+            "Claude Code done \u{b7} it exited \u{b7} started just now"
         );
     }
 
@@ -4477,11 +4557,19 @@ mod tests {
             agent_line(&r, Stage::Build, None, Some(&refused), now),
             "not ready: uncommitted changes in api"
         );
-        // Ready from before its code changed isn't a review.
-        r.ready = Some(1_100);
         assert_eq!(
             agent_line(&r, Stage::Build, Some(AgentStatus::Idle), None, now),
             "Claude Code your turn \u{b7} it stopped before Build was done: tell it to go on \u{b7} started 3m ago"
+        );
+        // Marked done, or a fix round's to end (`as_read`): as it stands.
+        r.ready = Some(1_100);
+        assert_eq!(
+            agent_line(&r, Stage::Build, Some(AgentStatus::Idle), None, now),
+            "Claude Code done \u{b7} started 3m ago"
+        );
+        assert_eq!(
+            agent_standing(&r, Stage::Build, Some(AgentStatus::Idle), now),
+            Standing::Done
         );
         r.stop = Some(Stop {
             done: 2,

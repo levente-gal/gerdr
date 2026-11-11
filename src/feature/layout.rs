@@ -1161,13 +1161,31 @@ pub(super) fn base_ref(repo: &Repo) -> String {
     // counts from what it took in: origin's commits aren't its change, and
     // pulling the local base after changes nothing.
     if let Some(branch) = repo.branch.as_deref().filter(|_| repo.touched) {
+        // A base its branch merged into (its pull request, fast-forwarded or
+        // by a merge commit) would leave it no change: what it shipped counts
+        // from where it met the others, else from where it started.
+        let start = repo.base_commit.as_str();
+        let range = format!("{start}..{branch}");
+        let count = || git(&repo.main, &["rev-list", "--count", &range]);
+        let shipped = !start.is_empty() && count().is_ok_and(|n| n.trim() != "0");
+        let met: Vec<&str> = (names.iter().map(String::as_str))
+            .filter(|name| !(shipped && has_branch(repo, name, branch)))
+            .collect();
         let mut args = vec!["merge-base", branch];
-        args.extend(names.iter().map(String::as_str));
+        match met.is_empty() {
+            true => args.push(start),
+            false => args.extend(met),
+        }
         if let Ok(fork) = git(&repo.main, &args) {
             return fork.trim().to_owned();
         }
     }
     first
+}
+
+/// Whether commit `base` of `repo` has all of `branch`: it is in its history.
+fn has_branch(repo: &Repo, base: &str, branch: &str) -> bool {
+    git(&repo.main, &["merge-base", "--is-ancestor", branch, base]).is_ok()
 }
 
 /// `repo`'s base itself, not where its branch met it: the ref shown from
@@ -1620,7 +1638,14 @@ fn merged_on_origin(repo: &Repo, branch: &str) -> bool {
     let Ok(base) = git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]) else {
         return false;
     };
-    crate::git::merged(&repo.main, branch, &[base.trim()])
+    in_base(repo, base.trim(), branch)
+}
+
+/// Whether `branch` of `repo` is in commit `base`, squashed or not. One
+/// fast-forwarded there is too: `git::merged` takes a branch at its target
+/// for one with nothing to merge.
+fn in_base(repo: &Repo, base: &str, branch: &str) -> bool {
+    has_branch(repo, base, branch) || crate::git::merged(&repo.main, branch, &[base])
 }
 
 /// Whether `branch` of `repo` is merged into its base, squashed or not.
@@ -1630,7 +1655,7 @@ pub(super) fn merged_into_base(repo: &Repo, branch: &str) -> bool {
     let Ok(base) = git(&repo.main, &["rev-parse", "--verify", "--quiet", &spec]) else {
         return false;
     };
-    crate::git::merged(&repo.main, branch, &[base.trim()])
+    in_base(repo, base.trim(), branch)
 }
 
 fn plural(n: usize, word: &str) -> String {

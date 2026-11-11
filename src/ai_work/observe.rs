@@ -199,6 +199,10 @@ pub fn diff_with(
             started_over.insert(stage);
             out.tell(at, Event::StartedOver { stage: Some(stage) });
         }
+        if let Some((stage, n)) = exited_in(&event.what) {
+            let change = RunChange::Exited;
+            out.tell(at, Event::RunChanged { stage, n, change });
+        }
     }
 
     // Where the feature stands.
@@ -564,6 +568,15 @@ fn started_over_in(what: &str) -> Option<Stage> {
     })
 }
 
+/// The run a history line says its agent left (see `super::exited_line`).
+fn exited_in(what: &str) -> Option<(Stage, u32)> {
+    Stage::ALL.into_iter().find_map(|stage| {
+        let rest = what.strip_prefix(stage.label())?;
+        let rest = rest.strip_prefix(" agent exited (run ")?;
+        Some((stage, rest.strip_suffix(')')?.parse().ok()?))
+    })
+}
+
 /// A piece of the record as JSON. Its types always serialize.
 fn value(of: &impl Serialize) -> Value {
     serde_json::to_value(of).unwrap_or(Value::Null)
@@ -694,6 +707,23 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn an_agent_leaving_its_tab_ends_its_run_at_once() {
+        let mut f = feature("a", 1);
+        f.runs.insert(Stage::PlanReview, run(1));
+        let before = f.clone();
+        f.log(7, super::super::exited_line(Stage::PlanReview, 1));
+        let diffed = step(&before, &f);
+        let change = RunChange::Exited;
+        let ended = Event::RunChanged {
+            stage: Stage::PlanReview,
+            n: 1,
+            change,
+        };
+        assert_eq!(diffed.events[1], (Some(7000), ended));
+        assert_eq!(exited_in("Plan agent exited (run x)"), None);
     }
 
     #[test]

@@ -240,11 +240,11 @@ struct Run {
 
 impl Run {
     /// When its work ended, as far as can be told: the last time its file
-    /// was ready or its agent stopped or blocked, unless it went back to
-    /// work after that; else when it was told to end, else its chat's last
-    /// message. Told to end often comes much later (the feature closed, a
-    /// new run took its place), its agent idle meanwhile. `None` for one
-    /// nothing tells the end of.
+    /// was ready or its agent stopped, blocked or left, unless it went back
+    /// to work after that; else when it was told to end or its chat's last
+    /// message, whichever came first. Told to end often comes much later
+    /// (the feature closed, a new run took its place), its agent idle
+    /// meanwhile. `None` for one nothing tells the end of.
     fn end(&self) -> Option<i64> {
         let rested = (self.marks.iter())
             .filter(|(_, work)| *work == Some(false))
@@ -255,7 +255,16 @@ impl Run {
             .any(|(at, work)| *work == Some(true) && worked.is_some_and(|w| *at > w));
         match worked {
             Some(at) if !back_at_work => Some(at),
-            _ => self.ended.or(worked).or(self.last_message),
+            // Told to end only later, idle since: its chat's last word, or
+            // what came after it, ends it.
+            _ => {
+                let marks = self.marks.iter().map(|(at, _)| *at);
+                let last = (self.last_message).map(|said| marks.fold(said, i64::max));
+                match (self.ended.or(worked), last) {
+                    (Some(told), Some(last)) => Some(told.min(last)),
+                    (told, last) => told.or(last),
+                }
+            }
         }
     }
 
@@ -428,7 +437,7 @@ fn load_runs(
             }
             let work = match change.as_str() {
                 "prompt_sent" | "nudged" | "sent_back" | "unblocked" => Some(true),
-                "ready" | "stop" | "blocked" | "pane_lost" => Some(false),
+                "ready" | "stop" | "blocked" | "pane_lost" | "exited" => Some(false),
                 _ => None,
             };
             run.marks.push((at, work));
@@ -1197,6 +1206,15 @@ mod tests {
             ..Run::default()
         };
         assert_eq!(told.end(), Some(300));
+        // Idle long before it was told to end: its chat's last word ends it.
+        let mut idle = again.clone();
+        idle.last_message = Some(900);
+        assert_eq!(idle.end(), Some(900));
+        // Its agent left its tab: that ends it.
+        let mut left = run.clone();
+        left.ready = None;
+        left.marks = vec![(200, Some(true)), (400, Some(false))];
+        assert_eq!(left.end(), Some(400));
     }
 
     #[test]

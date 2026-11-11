@@ -1440,8 +1440,11 @@ impl Gerdr {
             return false;
         };
         let live = run.pane.as_deref().is_some_and(|p| self.pane_there(p));
-        // Only one at work is lost by it: an idle chat's tab just goes.
-        if !live || !self.run_at_work(run) {
+        // Only one at work is lost by it: an idle chat's tab just goes. At
+        // work as its card says, herdr not seeing it yet just after its start.
+        let card = (self.feature(project, slug)).and_then(|f| self.stage_standing(f, stage));
+        let asks = self.stage_run_state(run).0 == Some(AgentStatus::Blocked);
+        if !live || !(asks || card == Some(crate::chrome::Standing::Working)) {
             return false;
         }
         let body = match run.machine.as_deref() {

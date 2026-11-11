@@ -2561,6 +2561,32 @@ esac
     }
 
     #[test]
+    fn a_branch_fast_forwarded_on_origin_loses_nothing_and_still_counts() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "a", "change");
+        mark_all(&mut f);
+        let main = f.repos[0].main.clone();
+        // Merged on GitHub as a fast-forward, from elsewhere: origin's main
+        // is its tip, and here origin's main is as it was.
+        let other = t.0.join("other");
+        let origin = t.0.join("api.git");
+        let (origin, other_dir) = (origin.to_str().unwrap(), other.to_str().unwrap());
+        run(&t.0, &["clone", "-q", origin, other_dir]);
+        run(&main, &["push", "-q", "origin", "feature/f"]);
+        run(&other, &["fetch", "-q", "origin", "feature/f"]);
+        let to_main = ["push", "-q", "origin", "FETCH_HEAD:refs/heads/main"];
+        run(&other, &to_main);
+        assert!(crate::feature::layout::losses(&f).is_empty());
+        // Fetched now, origin's main has its tip: what it shipped still
+        // counts, for the recap, not an empty change.
+        let reading = super::patch::read(&f).unwrap();
+        assert_eq!(reading.commits[&f.repos[0].key()], 1);
+        assert_eq!(super::page::stat(&f.repos[0]).unwrap().added, 1);
+    }
+
+    #[test]
     fn removing_goes_only_with_every_repository_merging() {
         let t = Temp::new();
         let mut f = feature_over(&t, &["api", "web"], &[]);

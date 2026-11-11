@@ -301,7 +301,14 @@ pub enum RunChange {
     Blocked,
     Unblocked,
     PaneLost,
+    /// Its agent left its tab, the tab still there (see `exited_line`).
+    Exited,
     T3Thread,
+}
+
+/// The history line saying run `n` of `stage`'s agent left its tab.
+pub fn exited_line(stage: crate::feature::Stage, n: u32) -> String {
+    format!("{} agent exited (run {n})", stage.label())
 }
 
 /// Why a run is over.

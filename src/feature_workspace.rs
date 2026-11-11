@@ -167,10 +167,17 @@ impl Gerdr {
         let Some(ws) = self.workspaces.get(w) else {
             return Vec::new();
         };
-        let panes = ws.tabs.iter().flat_map(|tab| &tab.panes);
-        let left =
-            panes.filter(|p| but.is_none() || p.herdr.as_ref().map(|h| h.pane_id.as_str()) != but);
-        left.filter_map(|p| self.running_in(p)).collect()
+        let panes = (ws.tabs.iter()).flat_map(|tab| tab.panes.iter().map(move |p| (tab, p)));
+        let left = panes
+            .filter(|(_, p)| but.is_none() || p.herdr.as_ref().map(|h| h.pane_id.as_str()) != but);
+        // By its tab's name where it has one: an agent's launch command is
+        // long and says nothing ("claude · Build" does).
+        let named = |(tab, p): (&crate::Tab, _)| {
+            let runs = self.running_in(p)?;
+            let name = (tab.label.clone()).filter(|l| !l.trim().is_empty());
+            Some(name.unwrap_or(runs))
+        };
+        left.filter_map(named).collect()
     }
 
     /// Feature `slug` of `project`'s workspace, opened on the feature's
@@ -485,11 +492,15 @@ impl Gerdr {
         }
         let until = Instant::now() + GONE_WAIT;
         let mut then = Some(then);
+        let key = (project.to_owned(), slug.to_owned());
         let wait = move |_, _: &mut (), gerdr: &mut Gerdr| {
             let user = gerdr.folder_in_use(&dir);
             if user.is_some() && Instant::now() < until {
                 return TimeoutAction::ToDuration(GONE_POLL);
             }
+            // Its own workspace may linger on a window that never came or
+            // won't go (an app still starting): that was closing anyway.
+            let user = user.and_then(|_| gerdr.feature_folder_in_use(&key.0, &key.1));
             match user {
                 Some(user) => {
                     tracing::warn!("{} still in use after closing its workspace", dir.display());

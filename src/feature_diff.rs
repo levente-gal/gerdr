@@ -1096,6 +1096,9 @@ impl WorktreeDiff {
         let (Some(fe), Some(tree)) = (self.feature.as_mut(), self.tree.as_mut()) else {
             return;
         };
+        // Whether the last read had changes since the last review to show.
+        let had =
+            !since_review(fe).is_empty() || fe.repos.iter().any(|r| !r.since_viewed.is_empty());
         let mut files = Vec::new();
         for (name, root, read) in repos {
             let Some(repo) = fe.repos.iter_mut().find(|r| r.root == root) else {
@@ -1126,10 +1129,11 @@ impl WorktreeDiff {
         // Back after fixes changed files viewed before: what changed since
         // the last review shows, of those files only what changed since
         // they were viewed, the files viewed and unchanged folded (All
-        // changes brings back all changes).
-        if first {
-            let fold = since_review(fe);
-            let some = !fold.is_empty() || fe.repos.iter().any(|r| !r.since_viewed.is_empty());
+        // changes brings back all changes). So too when the review stayed
+        // open, read before through a fix round, and fixes came in since.
+        let fold = since_review(fe);
+        let some = !fold.is_empty() || fe.repos.iter().any(|r| !r.since_viewed.is_empty());
+        if first || (some && !had) {
             fe.since = some && fe.role() == Role::Review;
             self.diff.folded.extend(fold);
         }
@@ -2678,6 +2682,33 @@ mod tests {
         };
         wd.set_feature(vec![("api".into(), "/w/api".into(), Ok(read))], POPUP_ENV);
         wd
+    }
+
+    #[test]
+    fn a_review_read_before_a_fix_round_opens_on_what_the_fixes_changed() {
+        let mut wd = popup(Stage::CodeReview, Vec::new(), Review::default());
+        let fe = wd.feature.as_ref().unwrap();
+        assert!(!fe.since);
+        assert_eq!(wd.lead(), "Since its base");
+        // The fix round's commit changed a.rs, viewed before: read again,
+        // the review that stayed open goes to what changed since.
+        let api = wd.feature.as_ref().unwrap().repos[0].clone();
+        let file = crate::doc_review::added_file("a.rs", "let x = 2;\n");
+        let read = viewed::Read {
+            since: api.since.clone(),
+            files: vec![file.clone()],
+            blobs: api.blobs.clone(),
+            dirty: Default::default(),
+            since_viewed: BTreeMap::from([("a.rs".to_owned(), file)]),
+        };
+        let api = || vec![("api".into(), "/w/api".into(), Ok(read.clone()))];
+        wd.set_feature(api(), POPUP_ENV);
+        assert!(wd.feature.as_ref().unwrap().since);
+        assert_eq!(wd.lead(), "Since last review");
+        // Switched back to all changes, a read with nothing new keeps that.
+        wd.feature.as_mut().unwrap().since = false;
+        wd.set_feature(api(), POPUP_ENV);
+        assert!(!wd.feature.as_ref().unwrap().since);
     }
 
     #[test]
