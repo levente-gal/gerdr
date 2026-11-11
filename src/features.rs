@@ -11014,7 +11014,7 @@ impl Gerdr {
         // Abandoned, what they have is kept to come back with it.
         let mut lines = match abandon {
             true => vec![format!("Its {what} go; commits and changes are kept")],
-            false => vec![removal_body(&what, &losses)],
+            false => vec![removal_body(what, &losses)],
         };
         if let Some(w) = self.feature_workspace(&project, &slug) {
             let running = self.workspace_running(w);
