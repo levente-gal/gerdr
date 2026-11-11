@@ -293,11 +293,6 @@ impl TextField {
         self.line.scroll = at.min(self.line.text.len());
     }
 
-    /// Whether it holds lines.
-    pub fn is_multiline(&self) -> bool {
-        self.multiline
-    }
-
     /// Edit it with a key: `sym` is the key's own symbol, `typed` the one
     /// with Shift and the layout applied.
     pub fn key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym) -> Edit {

@@ -494,15 +494,6 @@ fn claude_model(projects: &Path, id: &str) -> Option<String> {
     })
 }
 
-/// `hex` as the text it spells.
-fn from_hex(hex: &str) -> Option<String> {
-    let bytes = hex.as_bytes().chunks(2).map(|pair| {
-        let pair = std::str::from_utf8(pair).ok()?;
-        u8::from_str_radix(pair, 16).ok()
-    });
-    String::from_utf8(bytes.collect::<Option<Vec<u8>>>()?).ok()
-}
-
 /// The model of Cursor CLI chat `id`, from its store under `chats` (one
 /// folder per working directory). None for a chat that never answered.
 fn cursor_model(chats: &Path, id: &str) -> Option<String> {
@@ -521,7 +512,8 @@ fn cursor_model(chats: &Path, id: &str) -> Option<String> {
     let meta = read()
         .inspect_err(|err| tracing::debug!("reading {}: {err}", db.display()))
         .ok()?;
-    let meta: serde_json::Value = serde_json::from_str(&from_hex(&meta)?).ok()?;
+    let meta: serde_json::Value =
+        serde_json::from_slice(&crate::ai_work::usage::from_hex(&meta)?).ok()?;
     let model = meta["lastUsedModel"].as_str()?;
     (!model.is_empty()).then(|| model.to_owned())
 }

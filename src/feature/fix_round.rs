@@ -209,12 +209,8 @@ pub struct Asked {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
     /// How many screenshots went with it.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "super::is_zero")]
     pub shots: usize,
-}
-
-fn is_zero(n: &usize) -> bool {
-    *n == 0
 }
 
 /// How many rounds over a feature keeps (`Feature::past_rounds`): the oldest

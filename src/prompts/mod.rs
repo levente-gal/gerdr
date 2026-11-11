@@ -3,8 +3,6 @@
 //! from `assets/prompts/` (see `builtin`); a library of the user's own
 //! comes later.
 
-#![allow(dead_code)]
-
 pub mod render;
 
 /// The built-in template or partial `name` ("plan", "rules"), and its
@@ -19,7 +17,6 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "build" => (include_str!("../../assets/prompts/build.md"), 7),
         "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 3),
         "pr-review" => (include_str!("../../assets/prompts/pr-review.md"), 2),
-        "send-fixes" => (include_str!("../../assets/prompts/send-fixes.md"), 2),
         "fix-plan" => (include_str!("../../assets/prompts/fix-plan.md"), 2),
         "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 3),
         "fix-on" => (include_str!("../../assets/prompts/fix-on.md"), 2),
@@ -145,7 +142,6 @@ mod tests {
             "repos",
             "ai-review",
             "pr-review",
-            "send-fixes",
             "summary",
             "conflicts",
             "conflicts-plan",
@@ -309,12 +305,6 @@ mod tests {
             assert!(!line.trim_end().contains('\n'), "{line}");
             assert!(line.contains("`Criteria: AC-1, AC-3, C1`"), "{line}");
         }
-        v.insert("fixes.criteria".into(), String::new());
-        let line = render_builtin("send-fixes", &v).unwrap();
-        assert!(!line.trim_end().contains('\n'), "{line}");
-        assert!(line.contains("2 findings") && line.contains("build-1-findings-1.md"));
-        // Typed into a pane: a shell there must not take it for a command.
-        assert!(line.starts_with("Please "), "{line}");
     }
 
     #[test]

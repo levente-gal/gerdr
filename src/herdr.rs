@@ -899,11 +899,6 @@ impl Herdr {
             .map(drop)
     }
 
-    pub fn workspace_close(&mut self, workspace_id: &str) -> Result<(), String> {
-        self.call("workspace.close", json!({"workspace_id": workspace_id}))
-            .map(drop)
-    }
-
     pub fn workspace_list(&mut self) -> Result<Vec<WorkspaceInfo>, String> {
         self.get("workspace.list", json!({}), "workspaces")
     }

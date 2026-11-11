@@ -19,12 +19,8 @@ pub fn put(dir: &Path, bytes: &[u8]) -> io::Result<BlobRef> {
     Ok(blob)
 }
 
-/// Keep the file at `path` in feature folder `dir`.
-pub fn put_file(dir: &Path, path: &Path) -> io::Result<BlobRef> {
-    put(dir, &std::fs::read(path)?)
-}
-
 /// The content of `blob` in feature folder `dir`.
+#[cfg(test)]
 pub fn get(dir: &Path, blob: &BlobRef) -> io::Result<Vec<u8>> {
     let raw = zst::read(&blob.path(dir))?;
     if raw.len() as u64 != blob.len {

@@ -26,8 +26,6 @@
 //! (see `hook`) refuses to push a feature's branch that gerdr didn't clear.
 //! With no step ticked, it finishes unshipped once the user says so.
 
-#![allow(dead_code)]
-
 pub mod agents;
 pub mod artifacts;
 pub mod drafts;
@@ -910,8 +908,8 @@ pub struct Feature {
 }
 
 /// What serde needs to leave out a number that says nothing.
-fn is_zero(n: &u64) -> bool {
-    *n == 0
+fn is_zero<T: Default + PartialEq>(n: &T) -> bool {
+    *n == T::default()
 }
 
 /// How a stage stands once it comes to changing it.
@@ -1677,10 +1675,7 @@ impl PerProject<String> {
     }
 }
 
-/// Unix seconds now.
-pub fn now() -> u64 {
-    crate::review::now()
-}
+pub use crate::projects::now;
 
 #[cfg(test)]
 pub(crate) mod tests {

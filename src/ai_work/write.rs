@@ -72,7 +72,8 @@ pub fn open_append(path: &Path) -> io::Result<File> {
 }
 
 /// Write `bytes` to `path` whole or not at all: to a file beside it, then
-/// renamed over it. Made 0600, its folders 0700.
+/// renamed over it. A new file is made 0600, its folders 0700; one replaced
+/// keeps its mode (a config the user made readable, say).
 pub fn atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     static N: AtomicU64 = AtomicU64::new(0);
     let parent = path.parent().unwrap_or(Path::new("."));
@@ -90,6 +91,9 @@ pub fn atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
             .mode(0o600)
             .open(&tmp)?;
         file.write_all(bytes)?;
+        if let Ok(old) = std::fs::metadata(path) {
+            file.set_permissions(old.permissions())?;
+        }
         std::fs::rename(&tmp, path)
     })();
     if written.is_err() {
@@ -207,6 +211,19 @@ pub(super) mod tests {
                 change: RunChange::Ready,
             },
         }
+    }
+
+    #[test]
+    fn a_replaced_file_keeps_its_mode() {
+        let path = scratch("keep-mode").join("config.toml");
+        atomic(&path, b"a").unwrap();
+        assert_eq!(mode(&path), 0o600);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        atomic(&path, b"b").unwrap();
+        assert_eq!(
+            (std::fs::read(&path).unwrap(), mode(&path)),
+            (b"b".to_vec(), 0o644)
+        );
     }
 
     #[test]

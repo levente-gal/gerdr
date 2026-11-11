@@ -255,12 +255,8 @@ pub struct PlanReview {
     pub runs: Vec<RunRecord>,
     /// The highest `u<k>` given to a suggestion of the user's own: a deleted
     /// one's id is never given again.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "super::is_zero")]
     pub own_made: u32,
-}
-
-fn is_zero(n: &u32) -> bool {
-    *n == 0
 }
 
 /// One run of the reviewer as read in: who ran it, when, and what it raised,
@@ -291,6 +287,7 @@ pub struct RunRecord {
 
 /// The runs of `review`, newest first: as recorded, and those read before
 /// records were kept by their number, with what they raised last.
+#[cfg(test)]
 pub fn runs(review: &PlanReview) -> Vec<RunRecord> {
     let mut out: Vec<RunRecord> = review.runs.clone();
     for n in 1..=review.n {

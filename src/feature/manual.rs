@@ -420,12 +420,8 @@ pub struct ManualTest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comments: Vec<Comment>,
     /// How many comments were given ids: the next is one more.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "super::is_zero")]
     pub comments_given: u32,
-}
-
-fn is_zero(n: &u32) -> bool {
-    *n == 0
 }
 
 impl ManualTest {
@@ -653,6 +649,7 @@ pub fn unsent<'a>(
 }
 
 /// How many failures haven't gone to Build yet.
+#[cfg(test)]
 pub fn unsent_count(test: Option<&ManualTest>, criteria: &[Criterion]) -> usize {
     unsent(test, criteria).len()
 }

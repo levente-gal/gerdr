@@ -1098,7 +1098,7 @@ fn pairing_link(home: &Path, server: &Server) -> Result<String, String> {
     let link = text
         .lines()
         .find_map(|line| line.trim().strip_prefix(PAIRING_URL))
-        .map(|link| strip_escapes(link.trim()))
+        .map(|link| crate::feature::verify::strip_escapes(link.trim()))
         .filter(|link| link.starts_with("http"));
     match link {
         Some(link) => Ok(link),
@@ -1169,59 +1169,17 @@ const ADD_PROJECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn add_project(home: &Path, server: &Server, dir: &Path) -> Result<(), String> {
     let binary = t3_binary(home, server).ok_or_else(|| "no t3 command found".to_owned())?;
-    use std::process::Stdio;
-    let mut child = std::process::Command::new(&binary)
-        .args(["project", "add", "--base-dir"])
+    let mut cmd = std::process::Command::new(&binary);
+    cmd.args(["project", "add", "--base-dir"])
         .arg(home)
-        .arg(dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| format!("{}: {err}", binary.display()))?;
+        .arg(dir);
     // It only talks to the server on this machine: one stuck is stopped.
-    let until = Instant::now() + ADD_PROJECT_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(100)),
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("no answer in {}s", ADD_PROJECT_TIMEOUT.as_secs()));
-            }
-            Err(err) => return Err(err.to_string()),
-        }
-    };
-    if status.success() {
+    let out = crate::t3_update::output_within(cmd, ADD_PROJECT_TIMEOUT)?;
+    if out.status.success() {
         return Ok(());
     }
-    let mut err = String::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        let _ = std::io::Read::read_to_string(&mut stderr, &mut err);
-    }
+    let err = String::from_utf8_lossy(&out.stderr);
     Err(err.lines().last().unwrap_or("failed").trim().to_owned())
-}
-
-/// `text` without terminal escape sequences.
-fn strip_escapes(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            // CSI: up to its final letter.
-            if chars.next() == Some('[') {
-                for c in chars.by_ref() {
-                    if c.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 /// What gerdr follows of T3 Code.
@@ -2972,7 +2930,9 @@ mod tests {
     #[test]
     fn the_pairing_link_comes_without_colours() {
         assert_eq!(
-            strip_escapes("\u{1b}[1mhttp://127.0.0.1:3773/pair#token=ab\u{1b}[0m"),
+            crate::feature::verify::strip_escapes(
+                "\u{1b}[1mhttp://127.0.0.1:3773/pair#token=ab\u{1b}[0m"
+            ),
             "http://127.0.0.1:3773/pair#token=ab"
         );
     }

@@ -21,8 +21,6 @@
 //! and the transcripts. The heavy work runs on its own thread (see
 //! `thread`).
 
-#![allow(dead_code)]
-
 pub mod backfill;
 pub mod blobs;
 pub mod index;

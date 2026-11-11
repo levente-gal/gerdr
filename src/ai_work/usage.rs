@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::Value;
 
 use super::AgentKind;
+#[cfg(test)]
 use crate::feature::Stage;
 
 /// What one message, or many, cost.
@@ -318,7 +319,8 @@ fn cursor_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Message>> {
     Ok(out)
 }
 
-fn from_hex(hex: &str) -> Option<Vec<u8>> {
+/// The bytes `hex` spells.
+pub(crate) fn from_hex(hex: &str) -> Option<Vec<u8>> {
     (hex.as_bytes().chunks(2))
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
         .collect()
@@ -363,6 +365,7 @@ pub fn iso_ms(text: &str) -> Option<u64> {
 
 /// `messages` by run and model: each goes to the latest of `runs` (stage,
 /// n, when it began in ms) that began before it.
+#[cfg(test)]
 pub fn split(
     messages: &[Message],
     runs: &[(Stage, u32, u64)],

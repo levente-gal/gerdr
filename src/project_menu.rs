@@ -598,12 +598,6 @@ impl ProjectMenu {
         self.hover.over()
     }
 
-    /// Close the settings form, back to the list.
-    pub fn close_settings(&mut self) {
-        self.settings = None;
-        self.hover = Hover::default();
-    }
-
     /// A key while the settings form is shown.
     fn settings_key(
         &mut self,

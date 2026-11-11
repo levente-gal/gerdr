@@ -35,7 +35,7 @@ use std::{
     os::unix::{fs::DirBuilderExt, process::CommandExt},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -155,13 +155,6 @@ pub fn migration(manual: bool, settings: &str) -> Migration {
     } else {
         Migration::TurnOff
     }
-}
-
-/// Seconds since 1970.
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
 }
 
 /// A version of T3 Code as npm has it.
@@ -508,7 +501,7 @@ pub fn look(home: &Path, now_reading: &Reading) -> Result<Found, String> {
     let mut updates = Updates::load();
     let current = now_reading.version.clone().or_else(|| updates.pin.clone());
     let newest = release(channel(current.as_deref().unwrap_or_default()))?;
-    updates.checked_at = now();
+    updates.checked_at = crate::projects::now();
     let version = newest.version.clone();
     if current
         .as_deref()
@@ -580,7 +573,7 @@ impl crate::Gerdr {
         self.move_t3_switch();
         let tick = |_, _: &mut (), state: &mut crate::Gerdr| {
             state.t3.updates = Updates::load();
-            if state.t3.auto_update && state.t3.updates.due(now()) {
+            if state.t3.auto_update && state.t3.updates.due(crate::projects::now()) {
                 state.check_t3(false);
             }
             TimeoutAction::ToDuration(LOOK_EVERY)

@@ -406,11 +406,6 @@ fn filter(
     kept.into_iter().map(|(_, i)| i).collect()
 }
 
-/// `text` quoted for a POSIX shell.
-fn quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
-}
-
 impl Popup {
     /// Stop the list flung; whether it was.
     pub fn stop_fling(&mut self) -> bool {
@@ -1154,7 +1149,8 @@ impl Gerdr {
                 };
                 self.close_worktrees();
                 self.worktrees.merging.insert(item.wt.path.clone());
-                let command = format!("git merge --squash {} && git commit", quote(&branch));
+                let branch = crate::desktop::shell_quote(&branch);
+                let command = format!("git merge --squash {branch} && git commit");
                 self.new_tab_running(item.workspace, &item.main, command);
             }
             Outcome::Delete { path, force } => {

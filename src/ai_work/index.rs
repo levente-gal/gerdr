@@ -1264,6 +1264,7 @@ fn session(tx: &Transaction, f: &Feature, folder: &Path) -> rusqlite::Result<()>
 }
 
 /// How many lines of the events files under `conn` couldn't be read.
+#[cfg(test)]
 pub fn bad_lines(conn: &Connection) -> Result<i64, String> {
     conn.query_row("SELECT coalesce(sum(bad_lines), 0) FROM ingest", [], |r| {
         r.get(0)

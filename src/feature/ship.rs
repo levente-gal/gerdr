@@ -6,7 +6,7 @@
 //! `plan_actions` says what shipping does from the two, with no new probe.
 //! Each repository with commits goes its own way (`Route`):
 //!
-//! - through origin (`open_prs`), in the feature's order (home project
+//! - through origin (`run_steps`), in the feature's order (home project
 //!   first, then each link): allow the push (`hook::allow`), push
 //!   `feature/<slug>` with its upstream, guard it again, and open a pull
 //!   request into its base with `gh pr create`, or keep the one open for the
@@ -26,10 +26,9 @@
 
 use std::{
     collections::BTreeMap,
-    io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    time::{Duration, Instant},
+    process::Command,
+    time::Duration,
 };
 
 use super::{
@@ -716,6 +715,7 @@ fn squash_blocker(repo: &Repo, branch: &str) -> Option<String> {
 ///
 /// Every push is allowed right before it (`hook::allow`) and guarded again
 /// after, whether it went or not.
+#[cfg(test)]
 pub fn open_prs(
     feature: &Feature,
     actions: &[Action],
@@ -1432,60 +1432,22 @@ pub(crate) fn run_gh(gh: &str, dir: &Path, args: &[&str]) -> Result<String, Stri
     if gh == "gh" {
         crate::ci::signed_in(&mut command)?;
     }
-    let mut child = command
+    command
         .args(args)
         .current_dir(dir)
         .env("GH_PROMPT_DISABLED", "1")
         .env("GH_NO_UPDATE_NOTIFIER", "1")
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => "gh is not installed".to_owned(),
-            _ => format!("couldn't run gh: {err}"),
-        })?;
-    let read = |pipe: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut text = String::new();
-            if let Some(mut pipe) = pipe {
-                // Cut short when gh dies: what came is what there is.
-                let _ = pipe.read_to_string(&mut text);
-            }
-            text
-        })
-    };
-    let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
-    let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
-    let start = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if start.elapsed() < GH_TIMEOUT => {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Ok(None) | Err(_) => {
-                // Killed: a gh gone already is fine.
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-        }
-    };
-    let stdout = stdout.join().unwrap_or_default();
-    let stderr = stderr.join().unwrap_or_default();
-    match status {
-        None => Err(format!(
-            "gh {what} took longer than {} s",
-            GH_TIMEOUT.as_secs()
-        )),
-        Some(status) if status.success() => Ok(stdout),
-        Some(_) => {
-            let why = stderr.lines().map(str::trim).find(|l| !l.is_empty());
-            Err(why.map_or_else(|| format!("gh {what} failed"), str::to_owned))
-        }
+        .env("NO_COLOR", "1");
+    let out = crate::t3_update::output_within(command, GH_TIMEOUT).map_err(|err| match err {
+        missing if missing.starts_with("gh ") => missing,
+        err => format!("gh {what}: {err}"),
+    })?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
     }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let why = stderr.lines().map(str::trim).find(|l| !l.is_empty());
+    Err(why.map_or_else(|| format!("gh {what} failed"), str::to_owned))
 }
 
 /// Push the base of `repo` to origin from its main worktree, which a squash
@@ -1525,6 +1487,7 @@ pub fn squash_command(feature: &Feature, actions: &[Action]) -> (PathBuf, String
         return (feature.root.clone(), String::new());
     };
     // The summary, if written, is the message's body, to edit with the rest.
+    let quote = crate::desktop::shell_quote;
     let body = summary_text(feature).map_or(String::new(), |text| format!(" -m {}", quote(&text)));
     let command = mains
         .iter()
@@ -1539,11 +1502,6 @@ pub fn squash_command(feature: &Feature, actions: &[Action]) -> (PathBuf, String
         .collect::<Vec<_>>()
         .join(" && ");
     (first.to_path_buf(), command)
-}
-
-/// `text` quoted for a POSIX shell.
-fn quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
 }
 
 #[cfg(test)]
@@ -1895,8 +1853,8 @@ esac
         assert_eq!(
             command,
             format!(
-                "cd '{}' && git merge --squash 'feature/f' && git commit -e -m 'Don'\\''t break'",
-                main.display()
+                "cd {} && git merge --squash feature/f && git commit -e -m 'Don'\\''t break'",
+                crate::desktop::shell_quote(&main.to_string_lossy())
             )
         );
         assert_eq!(squash_command(&f, &[]), (f.root.clone(), String::new()));

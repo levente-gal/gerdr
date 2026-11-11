@@ -543,13 +543,6 @@ pub fn save_worktrees(root: Option<&Path>, reviews: &Worktrees) -> std::io::Resu
     crate::projects::write_atomic(&path, &bytes)
 }
 
-/// The time now, in seconds since the Unix epoch.
-pub fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
 #[cfg(test)]
 mod numbered_tests {
     use super::*;

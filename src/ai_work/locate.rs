@@ -104,16 +104,6 @@ impl Homes {
     }
 }
 
-/// `chat` on this machine, if it is still there; ids in `claimed` belong
-/// to other runs.
-pub fn here(chat: &Chat, claimed: &HashSet<String>) -> Option<Found> {
-    let homes = Homes::here()?;
-    find(&homes, chat, claimed)
-        .inspect_err(|err| tracing::warn!("finding the chat of {:?} {}: {err}", chat.stage, chat.n))
-        .ok()
-        .flatten()
-}
-
 /// `chat` among `homes`, if it is there; ids in `claimed` belong to other
 /// runs. An error: a database that couldn't be read.
 pub fn find(

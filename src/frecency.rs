@@ -73,13 +73,8 @@ impl Frecency {
     /// leaves the last file whole rather than a cut one.
     fn to_file(&self, path: &std::path::Path) {
         let write = || -> std::io::Result<()> {
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
             let text = serde_json::to_string_pretty(self)?;
-            let tmp = path.with_extension("json.tmp");
-            std::fs::write(&tmp, text)?;
-            std::fs::rename(&tmp, path)
+            crate::projects::write_atomic(path, text.as_bytes())
         };
         if let Err(err) = write() {
             tracing::warn!("saving frecency: {err}");

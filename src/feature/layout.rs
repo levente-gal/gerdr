@@ -664,6 +664,7 @@ fn add_worktree(
 /// repository gets its own branch: the one already here if there is one,
 /// else a new one from origin's, and no guard, as the user pushes it.
 /// Its `Repo::base` is origin's base branch, as GitHub diffs against it.
+#[cfg(test)]
 pub fn create_pr(root: &Root, repo: &str, pull: &PullRef, slug: &str) -> Result<Created, String> {
     create_pr_in(root, &[(repo.to_owned(), pull.clone())], slug, None)
 }

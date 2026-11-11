@@ -178,20 +178,6 @@ pub const FIXED: &str = "That finding is fixed";
 /// Why a finding posted to GitHub isn't decided again.
 pub const POSTED: &str = "That finding is on GitHub, in the review you submitted";
 
-/// What `f` does to a finding in `state`: to fix (from undecided or
-/// dismissed), or back to undecided (from to fix); else why it does
-/// nothing.
-pub fn fix_key(state: FindingState) -> Result<Decision, &'static str> {
-    super::review_items::want_key(super::review_items::ItemOf::Finding, state)
-}
-
-/// What Del does to a finding in `state`: `None` to ask why and dismiss it
-/// (from undecided or to fix), `Some` back to undecided (from dismissed);
-/// else why it does nothing.
-pub fn dismiss_key(state: FindingState) -> Result<Option<Decision>, &'static str> {
-    super::review_items::refuse_key(super::review_items::ItemOf::Finding, state)
-}
-
 /// A review as the user last saw it, kept when the next one is read: the
 /// findings of the record change as later runs raise them again.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,17 +212,13 @@ pub struct AiReview {
     /// The highest `u<k>` given to an item of the user's own: a deleted
     /// item's id is never given again, as `rounds` and the build log go by
     /// ids.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default, skip_serializing_if = "super::is_zero")]
     pub own_made: u32,
     /// Its findings go to GitHub as a review's comments, someone else's
     /// pull request's (`Feature::posts_review`): one wanted waits for the
     /// review to be submitted, not for AI review.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub posts: bool,
-}
-
-fn is_zero(n: &u32) -> bool {
-    *n == 0
 }
 
 /// Where `f` goes in a review's list, the findings of a run being stable
@@ -1690,21 +1672,6 @@ mod tests {
         }
         assert!(!md.contains("Suggested fix: Use ..="), "{md}");
         assert!(!md.contains("Severity: medium\n- Where: \n"), "{md}");
-    }
-
-    #[test]
-    fn f_and_del_on_a_finding_go_by_where_it_stands() {
-        use FindingState as S;
-        assert_eq!(fix_key(S::Open), Ok(Decision::Fix));
-        assert_eq!(fix_key(S::Dismissed), Ok(Decision::Fix));
-        assert_eq!(fix_key(S::Fix), Ok(Decision::Reopen));
-        assert_eq!(fix_key(S::Sent), Err(SENT));
-        assert_eq!(fix_key(S::Fixed), Err(FIXED));
-        assert_eq!(dismiss_key(S::Open), Ok(None));
-        assert_eq!(dismiss_key(S::Fix), Ok(None));
-        assert_eq!(dismiss_key(S::Dismissed), Ok(Some(Decision::Reopen)));
-        assert_eq!(dismiss_key(S::Sent), Err(SENT));
-        assert_eq!(dismiss_key(S::Fixed), Err(FIXED));
     }
 
     #[test]

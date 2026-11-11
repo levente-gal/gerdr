@@ -803,16 +803,6 @@ pub(crate) enum Done {
     AiWork(crate::ai_work::Report),
 }
 
-/// An open feature of another project spanning the one shown.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LinkedFeature {
-    /// Its home project's id and name.
-    pub home: String,
-    pub home_name: String,
-    pub slug: String,
-    pub title: String,
-}
-
 /// Where a feature would go, as the dialog knows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Finding {
@@ -9294,22 +9284,6 @@ impl Gerdr {
             None if self.open_feature_picker() => {}
             None => self.open_new_feature(None),
         }
-    }
-
-    /// The open features of other projects that span project `project`
-    /// too: what its sidebar lists as "in <home name>" (see
-    /// `open_linked_feature`).
-    pub fn linked_features(&self, project: &str) -> Vec<LinkedFeature> {
-        linked_in(&self.features.all, project)
-            .into_iter()
-            .map(|(home, f)| LinkedFeature {
-                home: home.to_owned(),
-                home_name: (self.projects.project(home))
-                    .map_or_else(|| home.to_owned(), |p| p.name.clone()),
-                slug: f.slug.clone(),
-                title: f.title.clone(),
-            })
-            .collect()
     }
 
     /// Show feature `slug` of project `home` in the panel, entering that

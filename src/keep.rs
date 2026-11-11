@@ -21,7 +21,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Gerdr, cursor_agents, home_dir, launch, toast::Level};
+use crate::{Gerdr, cursor_agents, herdr::runtime_dir, home_dir, launch, toast::Level};
 
 /// The wprs server, which outlives gerdr.
 const SERVER: &str = "wprsd";
@@ -109,12 +109,6 @@ fn slug(id: &str) -> String {
             }
         })
         .collect()
-}
-
-pub fn runtime_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
 }
 
 /// Where the servers' sockets and records go.

@@ -21,6 +21,7 @@ pub fn decompress(packed: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 /// The content of the file at `path`: one frame or several.
+#[cfg(test)]
 pub fn read(path: &Path) -> io::Result<Vec<u8>> {
     decompress(&std::fs::read(path)?)
 }

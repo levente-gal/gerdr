@@ -21,13 +21,13 @@ use std::{
     os::unix::net::UnixDatagram,
     path::{Path, PathBuf},
     sync::mpsc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::herdr::AgentStatus;
+use crate::herdr::{AgentStatus, runtime_dir};
 
 /// How often the database is read.
 pub const DB_INTERVAL: Duration = Duration::from_secs(1);
@@ -76,9 +76,7 @@ const MAX_INPUT: u64 = 4 << 20;
 
 /// The time now, in milliseconds since the epoch, as Cursor keeps it.
 pub fn now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis() as i64)
+    crate::ai_work::now_ms() as i64
 }
 
 /// A chat as the database has it.
@@ -961,12 +959,6 @@ pub fn hook_socket(socket_name: &std::ffi::OsStr) -> Option<PathBuf> {
     Some(runtime_dir()?.join(name))
 }
 
-fn runtime_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
-}
-
 /// Listen for hooks at `path`, made anew, without blocking. The sockets
 /// gerdrs that are gone left next to it go.
 pub fn bind_hook_socket(path: &Path) -> std::io::Result<UnixDatagram> {
@@ -1144,15 +1136,8 @@ pub fn install_hooks(home: &Path) -> Result<(), String> {
     if existing.as_deref() == Some(merged.as_str()) {
         return Ok(());
     }
-    let write = || -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("json.gerdr-tmp");
-        std::fs::write(&tmp, &merged)?;
-        std::fs::rename(&tmp, &path)
-    };
-    write().map_err(|err| format!("{}: {err}", path.display()))
+    crate::projects::write_atomic(&path, merged.as_bytes())
+        .map_err(|err| format!("{}: {err}", path.display()))
 }
 
 impl crate::Gerdr {
