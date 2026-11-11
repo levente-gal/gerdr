@@ -6445,7 +6445,10 @@ fn manual_order(
 /// Why Manual test's Mark passed (Mark done, on someone else's pull request)
 /// is greyed: what must happen first.
 fn mark_tip(page: &chrome::StagePage, i: usize) -> Option<String> {
-    let button = page.buttons.get(i).filter(|b| b.style == ButtonStyle::Off)?;
+    let button = page
+        .buttons
+        .get(i)
+        .filter(|b| b.style == ButtonStyle::Off)?;
     let why = match button.label.as_str() {
         "Mark passed" => "Every criterion passes first: pressed, it says which are left",
         "Mark done" => "Every criterion is tried first: pressed, it says which are left",

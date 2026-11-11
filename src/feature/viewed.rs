@@ -133,11 +133,14 @@ pub struct Read {
     pub blobs: BTreeMap<String, String>,
     /// Paths with changes not committed, or untracked.
     pub dirty: BTreeSet<String>,
+    /// By path, for each file viewed on another committed blob than its
+    /// own now: what changed since, from the blob viewed to this one.
+    pub since_viewed: BTreeMap<String, FileDiff>,
 }
 
-/// Read `repo`'s worktree against its base (see `Read`); slow, run it off
-/// the UI thread.
-pub fn read(repo: &Repo) -> Result<Read, String> {
+/// Read `repo`'s worktree against its base (see `Read`), `kept` the blobs
+/// its files were viewed on, by path; slow, run it off the UI thread.
+pub fn read(repo: &Repo, kept: &BTreeMap<String, String>) -> Result<Read, String> {
     let dir = &repo.worktree;
     let target = base_ref(repo);
     let since = crate::git_ops::changes_since(dir, Some(&target))?;
@@ -154,12 +157,39 @@ pub fn read(repo: &Repo) -> Result<Read, String> {
     let blobs = parse_raw(&git_bytes(dir, &args, None)?);
     let status = ["status", "--porcelain", "-z", "--untracked-files=all"];
     let dirty = parse_status(&git_bytes(dir, &status, None)?);
+    let since_viewed = (since_viewed_files(kept, &blobs, &dirty).into_iter())
+        .filter_map(|(path, from, to)| {
+            let file = crate::git_ops::blob_diff(dir, &from, &to, &path)?;
+            Some((path, file))
+        })
+        .collect();
     Ok(Read {
         since,
         files,
         blobs,
         dirty,
+        since_viewed,
     })
+}
+
+/// The files of `kept` (viewed, by path, on a blob) whose committed blob in
+/// `blobs` is another now, with no changes in `dirty` on top: each with the
+/// blob viewed and the one now. Not one added or deleted since: that has
+/// no blob on one side.
+pub fn since_viewed_files(
+    kept: &BTreeMap<String, String>,
+    blobs: &BTreeMap<String, String>,
+    dirty: &BTreeSet<String>,
+) -> Vec<(String, String, String)> {
+    let none = |blob: &str| blob.bytes().all(|b| b == b'0');
+    (kept.iter())
+        .filter(|(path, _)| !dirty.contains(*path))
+        .filter_map(|(path, from)| {
+            let to = blobs.get(path)?;
+            (to != from && !none(to) && !none(from))
+                .then(|| (path.clone(), from.clone(), to.clone()))
+        })
+        .collect()
 }
 
 /// What the commits of the repository at `dir` from `from` to `to` (HEAD for
@@ -276,6 +306,34 @@ mod tests {
         assert_eq!(v.tick("a", Some("b1"), false), Tick::Yes);
         // None can be.
         assert_eq!(v.set_many(&files[2..]), Err(NOT_COMMITTED));
+    }
+
+    #[test]
+    fn only_files_committed_again_since_viewed_get_a_diff_since() {
+        let map = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(a, b)| ((*a).into(), (*b).into()))
+                .collect()
+        };
+        let z = "0000000000000000000000000000000000000000";
+        let kept = map(&[
+            ("same", "b1"),
+            ("moved", "b2"),
+            ("dirty", "b3"),
+            ("gone", "b4"),
+        ]);
+        let blobs = map(&[
+            ("same", "b1"),
+            ("moved", "b9"),
+            ("dirty", "b8"),
+            ("gone", z),
+        ]);
+        let dirty = BTreeSet::from(["dirty".to_owned()]);
+        assert_eq!(
+            since_viewed_files(&kept, &blobs, &dirty),
+            [("moved".to_owned(), "b2".to_owned(), "b9".to_owned())]
+        );
     }
 
     #[test]

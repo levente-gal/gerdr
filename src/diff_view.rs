@@ -3017,7 +3017,10 @@ impl DiffView {
         // the user says of it, then refusing it.
         let (refuse, want): (Vec<Hint>, Vec<Hint>) =
             choices.into_iter().partition(|h| h.key == "Del");
-        want.into_iter().chain(say.into_iter().flatten()).chain(refuse).collect()
+        want.into_iter()
+            .chain(say.into_iter().flatten())
+            .chain(refuse)
+            .collect()
     }
 
     /// The buttons on the diff rows in view, `shown` (by index among

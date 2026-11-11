@@ -1466,6 +1466,31 @@ pub fn repo_diff_from(dir: &Path, changes: &[Change], from: Option<&str>) -> Vec
         .collect()
 }
 
+/// What file `path` changed from blob `from` to blob `to` of the repository
+/// at `dir`: what a review shows of it since it was viewed on `from`. None
+/// when git can't say.
+pub fn blob_diff(dir: &Path, from: &str, to: &str, path: &str) -> Option<FileDiff> {
+    let args = [
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        from,
+        to,
+    ];
+    let out = exec(&top(dir), &args, Reach::Read);
+    if out.code != Some(0) {
+        return None;
+    }
+    let mut file = diff::parse(&cap(out.stdout, REPO_DIFF_LINES))
+        .into_iter()
+        .next()?;
+    file.path = path.to_owned();
+    file.code = 'M';
+    Some(file)
+}
+
 /// The diff of each of `changes` out of the files one `git diff` printed,
 /// in their order; a change it hasn't says why (`failed`, else that
 /// there is nothing to show).

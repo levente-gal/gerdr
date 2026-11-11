@@ -911,6 +911,10 @@ pub enum ReposButton {
     /// before.
     NextComment,
     PrevComment,
+    /// A feature's code review after fixes: all the changes since its base,
+    /// or back to only those since the last review.
+    AllChanges,
+    SinceReview,
 }
 
 impl ReposButton {
@@ -985,6 +989,8 @@ impl ReposButton {
             ReposButton::ReviewFixPlan => "Review fix plan",
             ReposButton::NextComment => "Next comment",
             ReposButton::PrevComment => "Previous comment",
+            ReposButton::AllChanges => "All changes",
+            ReposButton::SinceReview => "Since last review",
         }
     }
 }

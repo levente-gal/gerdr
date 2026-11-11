@@ -1287,7 +1287,13 @@ mod tests {
         s.state = State::Rejected;
         assert_eq!(
             labels(Item::Suggestion(&s)),
-            ["Reopen", "Edit comment", "Delete", "Open code", "Show in plan"]
+            [
+                "Reopen",
+                "Edit comment",
+                "Delete",
+                "Open code",
+                "Show in plan"
+            ]
         );
         // An unanswered question: Accept opens its answer.
         let q = question("r1-2", "");
@@ -1390,7 +1396,10 @@ mod tests {
             held.iter().map(|i| actions[*i].0.label.as_str()).collect()
         };
         // The first button is the folded card's.
-        assert_eq!(on(&card.buttons), ["Reopen", "Edit comment", "Show in plan"]);
+        assert_eq!(
+            on(&card.buttons),
+            ["Reopen", "Edit comment", "Show in plan"]
+        );
         assert_eq!(on(&card.comment_buttons), ["Delete"]);
         // A question: its answer.
         let q = question("r1-2", "");

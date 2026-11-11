@@ -68,6 +68,8 @@ pub const REVIEW_DONE: &str = "Code review is done: reopen it first";
 pub const FEATURE_CLOSED: &str = "The feature is closed";
 /// Why a fix round's diff takes no comments or viewed ticks.
 pub const ROUND_ONLY_READ: &str = "This shows what a fix round changed, only to read";
+/// Under a file's diff since the last review: what it shows.
+pub const SINCE_VIEWED: &str = "Only what changed since you viewed it: All changes shows the rest";
 
 /// What Plan fixes waits for at AI review.
 pub fn decide_first(undecided: usize) -> String {
@@ -152,6 +154,10 @@ pub struct RepoOf {
     pub blobs: std::collections::BTreeMap<String, String>,
     /// Paths with changes not committed.
     pub dirty: std::collections::BTreeSet<String>,
+    /// Its files' diffs since its base, in the file list's order.
+    pub files: Vec<FileDiff>,
+    /// By path: what a file viewed before changed since (`viewed::Read`).
+    pub since_viewed: BTreeMap<String, FileDiff>,
     /// Why its last read failed.
     pub error: Option<String>,
 }
@@ -207,6 +213,10 @@ pub struct FeatureOf {
     /// Only what this fix round changed, to read: no ticks, findings or
     /// comments.
     pub span: Option<SpanOf>,
+    /// The review shows what changed since the user's last review: of a
+    /// file viewed before and changed since, only that (`RepoOf::since_viewed`),
+    /// the files viewed and unchanged folded. Else all the changes.
+    pub since: bool,
     /// What its reviews want goes to GitHub with the review the user
     /// submits, not to a Build agent (`Feature::posts_review`).
     pub posts: bool,
@@ -326,11 +336,16 @@ impl FeatureOf {
                 }
                 buttons
             }
-            Role::Review => vec![
-                (B::AddComment, None),
-                (B::PlanFixes, self.plan_refusal(own)),
-                (B::Approve, None),
-            ],
+            Role::Review => {
+                let scope = self.scope_button().map(|b| (b, None));
+                (scope.into_iter())
+                    .chain([
+                        (B::AddComment, None),
+                        (B::PlanFixes, self.plan_refusal(own)),
+                        (B::Approve, None),
+                    ])
+                    .collect()
+            }
             Role::Round(FixPhase::Ready) => vec![(B::ReviewFixPlan, None)],
             // Done with, it only reads: going on, or back to it.
             Role::Done if !self.closed => {
@@ -343,6 +358,39 @@ impl FeatureOf {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// The button switching what the review shows: All changes while it
+    /// shows those since the last review, back to them while there are
+    /// some to show; none with none.
+    pub fn scope_button(&self) -> Option<ReposButton> {
+        let some = (self.repos.iter()).any(|r| !r.since_viewed.is_empty());
+        match (self.since, some && self.span.is_none()) {
+            (true, _) => Some(ReposButton::AllChanges),
+            (false, true) => Some(ReposButton::SinceReview),
+            (false, false) => None,
+        }
+    }
+
+    /// The diffs of `repo` the review shows: since the last review, a file
+    /// viewed before and changed since as what changed since, unless
+    /// `comments` has one of the user's own on it (`own`) on lines that diff
+    /// hasn't, which the whole diff then shows rather than taking it for
+    /// outdated.
+    pub fn shown_files(&self, repo: &RepoOf, comments: &[Comment]) -> Vec<FileDiff> {
+        let since = |file: &FileDiff| {
+            let part = repo.since_viewed.get(&file.path).filter(|_| self.since)?;
+            let lost = (comments.iter())
+                .filter(|c| c.flag.is_none() && c.root == repo.root && c.path == file.path)
+                .filter(|c| !c.lines.is_empty())
+                .any(|c| crate::review::locate(part, c).is_none());
+            let mut part = part.clone();
+            part.notes.push(SINCE_VIEWED.to_owned());
+            (!lost).then_some(part)
+        };
+        (repo.files.iter())
+            .map(|file| since(file).unwrap_or_else(|| file.clone()))
+            .collect()
     }
 
     /// Why its code takes no comments or viewed ticks, if it doesn't: another
@@ -423,6 +471,7 @@ impl FeatureOf {
         match button {
             B::AddComment => "Shift+C",
             B::FixAllFindings => "Shift+F",
+            B::AllChanges | B::SinceReview => "Shift+A",
             B::PlanFixes => crate::worktree_diff::SEND_BACK_KEY,
             B::MakeFixes | B::ReviewFixPlan | B::Approve | B::GoOn => {
                 crate::worktree_diff::APPROVE_KEY
@@ -454,11 +503,16 @@ impl FeatureOf {
                 ("Shift+E", "on a finding, edit its fix"),
                 ("Del", "dismiss the finding, saying why, or reopen it"),
             ]),
-            Role::Review => keys.extend([
-                ("Ctrl+Enter", "approve Code review"),
-                ("Ctrl+Shift+Enter", "plan fixes for the comments"),
-                ("Shift+C", "add a comment on no line or file"),
-            ]),
+            Role::Review => {
+                keys.extend([
+                    ("Ctrl+Enter", "approve Code review"),
+                    ("Ctrl+Shift+Enter", "plan fixes for the comments"),
+                    ("Shift+C", "add a comment on no line or file"),
+                ]);
+                if self.scope_button().is_some() {
+                    keys.push(("Shift+A", "all changes, or only those since your last review"));
+                }
+            }
             Role::Round(FixPhase::Ready) => keys.push(("Ctrl+Enter", "review the fix plan")),
             Role::Done if !self.closed => {
                 if self.stage.is_some() {
@@ -719,7 +773,7 @@ impl FeatureOf {
 /// user's last review: those viewed and unchanged, once some file viewed
 /// before changed since (a fix round's work); none otherwise, or on a fix
 /// round's own diff.
-fn since_review(fe: &FeatureOf) -> Vec<(PathBuf, String)> {
+pub(crate) fn since_review(fe: &FeatureOf) -> Vec<(PathBuf, String)> {
     if fe.span.is_some() {
         return Vec::new();
     }
@@ -1053,12 +1107,14 @@ impl WorktreeDiff {
                     repo.since = read.since;
                     repo.blobs = read.blobs;
                     repo.dirty = read.dirty;
+                    repo.since_viewed = read.since_viewed;
                     // In the file list's order.
                     let mut read_files = read.files;
                     let rank = tree.rank(&repo.since.changes);
                     read_files
                         .sort_by_key(|f| rank.get(f.path.as_str()).copied().unwrap_or(usize::MAX));
-                    files.push((root, read_files));
+                    repo.files = read_files;
+                    files.push(root);
                 }
                 Err(why) => repo.error = Some(format!("{}: {why}", repo.shown())),
             }
@@ -1067,16 +1123,25 @@ impl WorktreeDiff {
         self.read = true;
         self.error = fe.repos.iter().find_map(|r| r.error.clone());
         // Back after fixes changed files viewed before: what changed since
-        // the last review shows, the files viewed and unchanged folded
-        // (unfold all brings back all changes).
+        // the last review shows, of those files only what changed since
+        // they were viewed, the files viewed and unchanged folded (All
+        // changes brings back all changes).
         if first {
             let fold = since_review(fe);
+            let some = !fold.is_empty() || fe.repos.iter().any(|r| !r.since_viewed.is_empty());
+            fe.since = some && fe.role() == Role::Review;
             self.diff.folded.extend(fold);
         }
+        let shown: Vec<(PathBuf, Vec<FileDiff>)> = (files.into_iter())
+            .filter_map(|root| {
+                let repo = fe.repos.iter().find(|r| r.root == root)?;
+                Some((root, fe.shown_files(repo, &self.diff.review.comments)))
+            })
+            .collect();
         self.with_diff(env, |diff, ctx| {
             diff.refresh(ctx);
             let reads = diff.reads;
-            for (root, files) in files {
+            for (root, files) in shown {
                 diff.set_diffs(root, reads, files, ctx);
             }
         });
@@ -1308,6 +1373,7 @@ impl Gerdr {
             focus_note: None,
             sent_notes: Vec::new(),
             span: None,
+            since: false,
             posts: feature.posts_review(),
         };
         let root = feature.root.clone();
@@ -1494,6 +1560,15 @@ impl Gerdr {
         if span.is_some() {
             (viewed, findings) = (Viewed::default(), Vec::new());
         }
+        // The blobs each repository's files were viewed on, by path.
+        let kept = |key: &str| -> BTreeMap<String, String> {
+            let prefix = format!("{key}/");
+            (viewed.0.iter())
+                .filter_map(|(k, blob)| Some((k.strip_prefix(&prefix)?.to_owned(), blob.clone())))
+                .collect()
+        };
+        let kept: BTreeMap<String, BTreeMap<String, String>> =
+            (repos.iter()).map(|r| (r.key(), kept(&r.key()))).collect();
         let Some(tx) = self.repos_sender() else {
             return;
         };
@@ -1513,7 +1588,7 @@ impl Gerdr {
         std::thread::spawn(move || {
             let read = |r: &Repo| match span.as_ref().and_then(|ends| ends.get(&r.key())) {
                 Some((from, to)) => viewed::read_span(&r.worktree, from, to.as_deref()),
-                None => viewed::read(r),
+                None => viewed::read(r, kept.get(&r.key()).unwrap_or(&BTreeMap::new())),
             };
             let repos = (repos.iter())
                 .map(|r| (r.key(), r.worktree.clone(), read(r)))
@@ -2065,6 +2140,47 @@ mod tests {
     }
 
     #[test]
+    fn since_the_last_review_a_changed_file_shows_only_what_changed_since() {
+        use crate::{doc_review::added_file, review::Quoted};
+        let mut api = repo("api", &["a.rs"]);
+        api.files = vec![added_file("a.rs", "one\ntwo\nthree\n")];
+        api.since_viewed = BTreeMap::from([("a.rs".to_owned(), added_file("a.rs", "three\n"))]);
+        let mut fe = FeatureOf {
+            stage: Some(Stage::CodeReview),
+            repos: vec![api],
+            ..FeatureOf::default()
+        };
+        let lines = |files: Vec<FileDiff>| files[0].hunks[0].lines.len();
+        // All changes until it is asked for; one click away either way.
+        assert_eq!(fe.scope_button(), Some(ReposButton::SinceReview));
+        assert_eq!(lines(fe.shown_files(&fe.repos[0], &[])), 3);
+        fe.since = true;
+        assert_eq!(fe.scope_button(), Some(ReposButton::AllChanges));
+        assert_eq!(fe.buttons(0)[0], (ReposButton::AllChanges, None));
+        let shown = fe.shown_files(&fe.repos[0], &[]);
+        assert_eq!(lines(shown.clone()), 1);
+        assert_eq!(shown[0].notes, [SINCE_VIEWED]);
+        // A comment of the user's on a line it hasn't: the whole diff, so
+        // the comment isn't taken for outdated.
+        let comment = Comment {
+            root: PathBuf::from("/w/api"),
+            path: "a.rs".into(),
+            lines: vec![Quoted {
+                kind: LineKind::Added,
+                number: 1,
+                text: "one".into(),
+            }],
+            text: "Why?".into(),
+            flag: None,
+        };
+        assert_eq!(lines(fe.shown_files(&fe.repos[0], &[comment])), 3);
+        // Nothing viewed changed since: no scope to switch.
+        fe.since = false;
+        fe.repos[0].since_viewed.clear();
+        assert_eq!(fe.scope_button(), None);
+    }
+
+    #[test]
     fn a_review_after_fixes_opens_on_what_changed_since_viewed() {
         let mut fe = FeatureOf {
             repos: vec![repo("api", &["a.rs", "b.rs", "c.rs"])],
@@ -2077,7 +2193,10 @@ mod tests {
         fe.viewed.0.insert("api/c.rs".into(), "b-c.rs".into());
         fe.repos[0].dirty.insert("c.rs".into());
         assert!(since_review(&fe).is_empty());
-        assert_eq!(fe.note(Path::new("/w/api"), "c.rs").as_deref(), Some("not committed"));
+        assert_eq!(
+            fe.note(Path::new("/w/api"), "c.rs").as_deref(),
+            Some("not committed")
+        );
         // A fix changed b.rs, viewed before: a.rs, viewed and the same, folds.
         fe.viewed.0.insert("api/b.rs".into(), "old".into());
         assert_eq!(since_review(&fe), [(PathBuf::from("/w/api"), "a.rs".to_owned())]);
@@ -2554,6 +2673,7 @@ mod tests {
             files: vec![crate::doc_review::added_file("a.rs", "let x = 1;\n")],
             blobs: api.blobs.clone(),
             dirty: Default::default(),
+            since_viewed: Default::default(),
         };
         wd.set_feature(vec![("api".into(), "/w/api".into(), Ok(read))], POPUP_ENV);
         wd
@@ -2595,6 +2715,7 @@ mod tests {
             files: files.collect(),
             blobs: api.blobs.clone(),
             dirty: Default::default(),
+            since_viewed: Default::default(),
         };
         wd.set_feature(vec![("api".into(), "/w/api".into(), Ok(read))], POPUP_ENV);
         wd
@@ -3523,6 +3644,7 @@ mod tests {
             files: vec![crate::doc_review::added_file("a.rs", "let x = 1;\n")],
             blobs: api.blobs.clone(),
             dirty: Default::default(),
+            since_viewed: Default::default(),
         };
         wd.set_feature(vec![("api".into(), "/w/api".into(), Ok(read))], ENV);
         // The finding sits on its line, as a card of its own.

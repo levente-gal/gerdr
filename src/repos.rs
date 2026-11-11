@@ -3456,7 +3456,9 @@ impl Panel {
             | B::FixAllFindings
             | B::PlanFixes
             | B::MakeFixes
-            | B::ReviewFixPlan => Err(Why::other("Nothing to review here")),
+            | B::ReviewFixPlan
+            | B::AllChanges
+            | B::SinceReview => Err(Why::other("Nothing to review here")),
             B::All
             | B::CleanOnly
             | B::Cancel
