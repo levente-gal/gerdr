@@ -1626,6 +1626,10 @@ impl WorktreeDiff {
     /// last review and all its changes (`FeatureOf::since`): the files viewed
     /// and unchanged fold with the first and open with the second.
     fn toggle_scope(&mut self, env: Env) -> Option<Done> {
+        if !self.read {
+            let still = crate::feature_diff::STILL_READING;
+            return Some(Done::Diff(Outcome::Notice(still)));
+        }
         let fe = self.feature.as_mut()?;
         if fe.scope_button().is_none() {
             return Some(Done::Diff(Outcome::Notice(NOTHING_SINCE)));

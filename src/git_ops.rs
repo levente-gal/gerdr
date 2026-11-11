@@ -1480,7 +1480,9 @@ pub fn blob_diff(dir: &Path, from: &str, to: &str, path: &str) -> Option<FileDif
         to,
     ];
     let out = exec(&top(dir), &args, Reach::Read);
+    // The review then shows the file's whole diff: nothing is lost.
     if out.code != Some(0) {
+        tracing::warn!("diff of {path} since viewed: {}", why(&out.stderr, &out.stdout));
         return None;
     }
     let mut file = diff::parse(&cap(out.stdout, REPO_DIFF_LINES))
