@@ -2993,10 +2993,13 @@ impl DiffView {
         };
         // What the user can say of a reviewer's finding.
         let say = (!flag.yours && self.note_refused(flag).is_none()).then(|| {
-            let comment = (!self.has_note(c)).then(|| Hint {
-                label: match flag.unanswered {
-                    true => "Answer".into(),
-                    false => B::Comment.label().into(),
+            // With a comment it edits that, in the same place.
+            let comment = Some(Hint {
+                label: match (self.has_note(c), flag.unanswered) {
+                    (false, true) => "Answer".into(),
+                    (false, false) => B::Comment.label().into(),
+                    (true, true) => "Edit answer".into(),
+                    (true, false) => "Edit comment".into(),
                 },
                 ..keyed(B::Comment, "c")
             });

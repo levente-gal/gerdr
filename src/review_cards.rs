@@ -352,7 +352,9 @@ pub(crate) fn item_buttons(
             let label = match (note.is_empty(), question) {
                 (true, true) => "Answer",
                 (true, false) => "Comment",
-                (false, _) => "Edit",
+                // Its place kept, so its neighbours stay put.
+                (false, true) => "Edit answer",
+                (false, false) => "Edit comment",
             };
             out.push((plain(label), act(ItemAct::Comment)));
             if !note.is_empty() {
@@ -421,7 +423,13 @@ pub(crate) fn item_hints(
             hint("Ctrl+E", lower(if yours { w.edit_own } else { w.edit }));
         }
         if !yours && says {
-            hint("c", if question { "answer" } else { "comment" }.into());
+            let c = match (item.note().is_empty(), question) {
+                (true, true) => "answer",
+                (true, false) => "comment",
+                (false, true) => "edit answer",
+                (false, false) => "edit comment",
+            };
+            hint("c", c.into());
             if !item.note().is_empty() {
                 let what = if question {
                     "delete answer"
@@ -469,17 +477,14 @@ pub(crate) fn outcome_item(outcome: &PanelOutcome) -> Option<(ItemOf, &str)> {
     }
 }
 
-/// Whether a card's button acts on the user's comment on its item: it sits
-/// on the comment's own card then.
+/// Whether a card's button deletes the user's comment on its item: it sits
+/// on the comment's own card then. Edit comment keeps Comment's place on
+/// the item's card, so the buttons there never shift.
 fn on_comment(outcome: &PanelOutcome) -> bool {
     matches!(
         outcome,
-        PanelOutcome::CommentFinding(_)
-            | PanelOutcome::DeleteFindingComment(_)
-            | PanelOutcome::OnSuggestion(
-                _,
-                ItemAct::Comment | ItemAct::Answer | ItemAct::DeleteComment
-            )
+        PanelOutcome::DeleteFindingComment(_)
+            | PanelOutcome::OnSuggestion(_, ItemAct::DeleteComment)
     )
 }
 
@@ -1271,7 +1276,7 @@ mod tests {
             labels(Item::Suggestion(&s)),
             [
                 "Reopen",
-                "Edit",
+                "Edit comment",
                 "Delete",
                 "Edit change\u{2026}",
                 "Reject\u{2026}",
@@ -1282,7 +1287,7 @@ mod tests {
         s.state = State::Rejected;
         assert_eq!(
             labels(Item::Suggestion(&s)),
-            ["Reopen", "Edit", "Delete", "Open code", "Show in plan"]
+            ["Reopen", "Edit comment", "Delete", "Open code", "Show in plan"]
         );
         // An unanswered question: Accept opens its answer.
         let q = question("r1-2", "");
@@ -1385,8 +1390,8 @@ mod tests {
             held.iter().map(|i| actions[*i].0.label.as_str()).collect()
         };
         // The first button is the folded card's.
-        assert_eq!(on(&card.buttons), ["Reopen", "Show in plan"]);
-        assert_eq!(on(&card.comment_buttons), ["Edit", "Delete"]);
+        assert_eq!(on(&card.buttons), ["Reopen", "Edit comment", "Show in plan"]);
+        assert_eq!(on(&card.comment_buttons), ["Delete"]);
         // A question: its answer.
         let q = question("r1-2", "");
         let card = item_card(Item::Suggestion(&q), false, &[], false);

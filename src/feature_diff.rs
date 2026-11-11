@@ -2306,7 +2306,7 @@ mod tests {
         let on = wd.diff.cursor.as_ref().map(|c| c.row);
         wd.key(&none, right, right, POPUP_ENV);
         assert_eq!(wd.diff.cursor.as_ref().map(|c| c.row), on);
-        // On the finding, no second Comment: the one there is on its card.
+        // On the finding, Comment's place says Edit comment.
         let labels = |wd: &WorktreeDiff| -> Vec<String> {
             let view = wd.view(POPUP_ENV);
             view.row_buttons
@@ -2314,7 +2314,7 @@ mod tests {
                 .map(|(_, h)| h.label.clone())
                 .collect()
         };
-        assert!(!labels(&wd).iter().any(|l| l == "Comment"));
+        assert!(labels(&wd).iter().any(|l| l == "Edit comment"));
         // Off the finding, on its comment.
         let down = Keysym::Down;
         wd.key(&none, down, down, POPUP_ENV);

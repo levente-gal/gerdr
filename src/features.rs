@@ -23058,7 +23058,7 @@ pub(crate) mod tests {
         assert_eq!(cards[2].fix, "Your fix: Mine\nThe reviewer's: Reviewer's");
         assert_eq!(cards[2].comment, "Careful");
         assert_eq!(cards[2].note, "");
-        assert_eq!(comment_labels(&view.page, cards[2]), ["Edit", "Delete"]);
+        assert_eq!(comment_labels(&view.page, cards[2]), ["Delete"]);
         // The user's own comes first.
         let yours = cards[0];
         assert_eq!(yours.tag, FindingTag::Yours);
