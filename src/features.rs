@@ -9421,7 +9421,20 @@ impl Gerdr {
     /// review's diff. Manual test with criteria has the keyboard on them,
     /// Plan review's suggestions to decide on the first of them open.
     pub fn open_feature_at(&mut self, project: &str, slug: &str, stage: Stage) {
+        // Asked for what shows already: it says so, not to look like a
+        // click that did nothing.
+        let here = (self.tab()).is_some_and(crate::Tab::is_feature)
+            && (self.features.panel.as_ref()).is_some_and(|p| {
+                p.project == project
+                    && p.slug == slug
+                    && self
+                        .feature(project, slug)
+                        .is_some_and(|f| p.page_stage(f) == stage)
+            });
         self.open_feature(project, slug);
+        if here {
+            self.show_notice(format!("{}'s page is the one open", stage.label()));
+        }
         let first_open = (stage == Stage::PlanReview)
             .then(|| self.feature(project, slug))
             .flatten()
@@ -16174,7 +16187,20 @@ fn event_tone(what: &str) -> CheckTone {
 
 /// `feature`'s history, newest first.
 fn activity(feature: &Feature, now: u64) -> Vec<ActivityRow> {
-    (feature.history.iter().rev())
+    let history = &feature.history;
+    // "Plan ticked" right with "Plan approved" (or "Verify run 2 passed")
+    // says the same twice: the one that says why stays.
+    let ticked = |i: usize| history[i].what.ends_with(" ticked");
+    let doubled = |i: usize| {
+        let near = |j: usize| {
+            j < history.len() && !ticked(j) && history[j].at.abs_diff(history[i].at) <= 2
+        };
+        ticked(i) && ((i > 0 && near(i - 1)) || near(i + 1))
+    };
+    (0..history.len())
+        .rev()
+        .filter(|&i| !doubled(i))
+        .map(|i| &history[i])
         .map(|e| ActivityRow {
             what: e.what.clone(),
             ago: projects::ago(now, e.at),
@@ -26864,6 +26890,28 @@ pub(crate) mod tests {
         assert_eq!(
             page_enter(&f, Stage::Ship, RowCtx::default()),
             Some(PanelOutcome::NotYet(Stage::Verify))
+        );
+    }
+
+    #[test]
+    fn a_tick_said_with_its_reason_shows_once() {
+        let mut f = feature("a", vec![repo("api", true)], 0);
+        for (at, what) in [
+            (1_000, "Plan approved"),
+            (1_000, "Plan ticked"),
+            (1_200, "Code review ticked"),
+            (1_300, "Verify run 2 passed"),
+            (1_301, "Verify ticked"),
+        ] {
+            f.history.push(Event {
+                at,
+                what: what.into(),
+            });
+        }
+        let rows: Vec<String> = activity(&f, 1_400).into_iter().map(|r| r.what).collect();
+        assert_eq!(
+            rows,
+            ["Verify run 2 passed", "Code review ticked", "Plan approved"]
         );
     }
 

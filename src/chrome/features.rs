@@ -1861,6 +1861,9 @@ impl FeatureTabLayout {
 
 /// The room between the tab's edges and what is on it.
 const TAB_PAD: i32 = 16;
+/// How wide the feature tab's contents are at most: past it, the rest is
+/// margin either side.
+const TAB_MAX: i32 = 1760;
 /// The feature's title, in the header.
 const TAB_TITLE_FONT: f32 = 20.0;
 /// How high the header's title and sub lines are.
@@ -2123,7 +2126,9 @@ impl Ink {
     fn color(self, p: &Palette) -> Rgb {
         match self {
             Self::Text => p.text,
-            Self::Muted => p.muted,
+            // The page's secondary text, a step nearer the text than the
+            // chrome's: it is read, not only glanced at.
+            Self::Muted => mix(p.muted, p.text, 0.3),
             Self::Error => p.error,
             Self::Accent => p.accent,
             Self::Tone(tone) => tone.color(p),
@@ -4470,8 +4475,10 @@ pub fn has_menu(view: &FeatureTabView) -> bool {
 
 fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let width = frame.size.w;
-    let x = frame.loc.x + TAB_PAD;
-    let inner = (width - 2 * TAB_PAD).max(1);
+    // On a wide output the tab's contents keep to `TAB_MAX`, centred: a
+    // card's buttons and a line's actions stay near its text.
+    let inner = (width - 2 * TAB_PAD).clamp(1, TAB_MAX);
+    let x = frame.loc.x + ((width - inner) / 2).max(TAB_PAD);
     let right = x + inner;
     let top = frame.loc.y + TAB_PAD;
     let header_h = TAB_TITLE + TAB_SUB;
