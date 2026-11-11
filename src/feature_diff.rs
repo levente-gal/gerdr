@@ -2059,7 +2059,7 @@ mod tests {
         );
         // Not committed: can't be viewed.
         fe.repos[0].dirty.insert("a.rs".into());
-        assert_eq!(fe.check(api, "a.rs"), Check::Partial);
+        assert_eq!(fe.check(api, "a.rs"), Check::Off);
         assert_eq!(fe.note(api, "a.rs").as_deref(), Some("not committed"));
         assert_eq!(line(&Counts::default()), None);
     }
@@ -2073,6 +2073,11 @@ mod tests {
         // Nothing viewed changed yet: all of it shows.
         fe.viewed.0.insert("api/a.rs".into(), "b-a.rs".into());
         assert!(since_review(&fe).is_empty());
+        // Edits not committed to a viewed file aren't a change since viewed.
+        fe.viewed.0.insert("api/c.rs".into(), "b-c.rs".into());
+        fe.repos[0].dirty.insert("c.rs".into());
+        assert!(since_review(&fe).is_empty());
+        assert_eq!(fe.note(Path::new("/w/api"), "c.rs").as_deref(), Some("not committed"));
         // A fix changed b.rs, viewed before: a.rs, viewed and the same, folds.
         fe.viewed.0.insert("api/b.rs".into(), "old".into());
         assert_eq!(since_review(&fe), [(PathBuf::from("/w/api"), "a.rs".to_owned())]);

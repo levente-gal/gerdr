@@ -10,10 +10,11 @@
 //!
 //! Files with changes not committed: the diff shows them as they are on
 //! disk, which no committed blob is. Such a file can't be ticked (commit
-//! it first), and one ticked before reads as changed until its changes
-//! are committed and it is viewed again, or they are undone and its
-//! committed blob is still the one ticked. An untracked file has no
-//! committed blob at all: it can't be ticked either.
+//! it first), and one ticked before reads as not viewed ("not committed"),
+//! not as changed, while its committed blob is still the one ticked: its
+//! tick comes back once those changes are undone, and once committed the
+//! new blob makes it changed. An untracked file has no committed blob at
+//! all: it can't be ticked either.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -61,11 +62,14 @@ impl Viewed {
 
     /// The tick of file `key`, whose committed blob is `blob` (none for
     /// one not committed), `dirty` when it has changes not committed.
+    /// Changed only when another blob was committed: changes on disk alone
+    /// leave it unticked, as not committed, not changed since viewed.
     pub fn tick(&self, key: &str, blob: Option<&str>, dirty: bool) -> Tick {
-        match self.0.get(key) {
-            None => Tick::No,
-            Some(kept) if !dirty && Some(kept.as_str()) == blob => Tick::Yes,
-            Some(_) => Tick::Changed,
+        match (self.0.get(key), blob) {
+            (None, _) => Tick::No,
+            (Some(kept), Some(blob)) if kept != blob => Tick::Changed,
+            (Some(_), Some(_)) if !dirty => Tick::Yes,
+            (Some(_), _) => Tick::No,
         }
     }
 
@@ -234,8 +238,11 @@ mod tests {
         assert_eq!(v.tick(&k, Some("b1"), false), Tick::Yes);
         // Committed again: changed since viewed.
         assert_eq!(v.tick(&k, Some("b2"), false), Tick::Changed);
-        // Changes not committed: changed too, and can't be ticked.
-        assert_eq!(v.tick(&k, Some("b1"), true), Tick::Changed);
+        // Changes not committed alone: not viewed, not changed; can't be
+        // ticked. Committed over them, changed.
+        assert_eq!(v.tick(&k, Some("b1"), true), Tick::No);
+        assert_eq!(v.tick(&k, Some("b2"), true), Tick::Changed);
+        assert_eq!(v.tick(&k, None, true), Tick::No);
         assert_eq!(v.toggle(&k, Some("b1"), true), Err(NOT_COMMITTED));
         assert_eq!(v.toggle(&k, None, false), Err(NOT_COMMITTED));
         // A changed one ticks again on its new blob; a ticked one unticks.
