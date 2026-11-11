@@ -210,7 +210,14 @@ impl TakeJob {
             TakeEnd::Failed(format!("Couldn't save the record here: {err}"))
         })?;
         // From when it left here last.
-        for file in [lease::HANDED_TO, lease::REQUEST, lease::ANSWER, lease::LEFT, lease::TOLD] {
+        for file in [
+            lease::HANDED_TO,
+            lease::REQUEST,
+            lease::ANSWER,
+            lease::LEFT,
+            lease::TOLD,
+            lease::TAKEN,
+        ] {
             if let Err(err) = std::fs::remove_file(dir.join(file))
                 && err.kind() != std::io::ErrorKind::NotFound
             {
@@ -291,24 +298,25 @@ impl TakeJob {
             self.settle(&feature, cancel)?;
             Ok((record, feature))
         })();
-        match &finished {
-            // It would be back there in a while anyway: sooner, if it can.
+        // Claimed (`lease::TAKEN`), the record there never goes back by itself:
+        // what doesn't get there now is owed, and runs when that machine is back.
+        let script = match &finished {
             Err(end) => {
                 tracing::info!("{}/{}: taking it over ended: {end:?}", self.project, self.slug);
-                let quiet = AtomicBool::new(false);
-                if let Err(trouble) = reach.script(&lease::undo_script(&dir), &quiet) {
-                    tracing::warn!("giving {} back: {}", self.slug, trouble.text());
-                }
+                lease::undo_script(&dir)
             }
-            // Should this not get there, the record comes back there, at the
-            // lower epoch, and goes when the two are seen together.
-            Ok(_) => {
-                let quiet = AtomicBool::new(false);
-                if let Err(trouble) = reach.script(&lease::done_script(&dir), &quiet) {
-                    tracing::warn!("clearing up on {}: {}", self.from_name, trouble.text());
-                }
+            Ok(_) => lease::done_script(&dir),
+        };
+        let quiet = AtomicBool::new(false);
+        let owed = match reach.script(&script, &quiet) {
+            Ok(_) => None,
+            Err(trouble) => {
+                let why = trouble.text();
+                tracing::warn!("clearing up {} on {}: {why}", self.slug, self.from_name);
+                Some(lease::guarded(&dir, &self.me, &script))
             }
-        }
+        };
+        owe(&owed_file(&self.root, &self.project, &self.slug), owed.as_deref());
         let (record, feature) = finished?;
         step("bringing its ignored files".to_owned());
         let missed = self.bring_ignored(reach, &feature, cancel);
@@ -1389,6 +1397,43 @@ impl Gerdr {
         }
     }
 
+    /// Machine `id` is back: what take-overs from it couldn't clear up there
+    /// runs now, off the thread. A note goes once its script ran as it still says.
+    pub(crate) fn pay_lease_owed(&self, id: &str) {
+        let Some(work) = self.work_of(id) else {
+            return;
+        };
+        let dir = view::root(&crate::projects::data_dir(), id).join(OWED);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        let owed: Vec<(PathBuf, String)> = (entries.filter_map(Result::ok))
+            .filter_map(|entry| Some((entry.path(), std::fs::read_to_string(entry.path()).ok()?)))
+            .collect();
+        if owed.is_empty() {
+            return;
+        }
+        let reach = work.reach();
+        let spawned = std::thread::Builder::new()
+            .name("clear up take-overs".into())
+            .spawn(move || {
+                let quiet = AtomicBool::new(false);
+                for (file, script) in owed {
+                    if let Err(trouble) = reach.script(&script, &quiet) {
+                        tracing::warn!("clearing up {}: {}", file.display(), trouble.text());
+                        continue;
+                    }
+                    // A take-over since may have noted another.
+                    if std::fs::read_to_string(&file).is_ok_and(|now| now == script) {
+                        owe(&file, None);
+                    }
+                }
+            });
+        if let Err(err) = spawned {
+            tracing::warn!("clearing up take-overs: {err}");
+        }
+    }
+
     /// Put back what was handed over and not taken in time, or was given back.
     fn restore_handed(&mut self) {
         let keys: Vec<(String, String)> = self.features.handing.keys().cloned().collect();
@@ -1653,7 +1698,30 @@ pub struct Handing {
     pub to: String,
 }
 
-/// Put a handed record back in its place, where it never moved.
+/// Under what's kept of a machine: what take-overs from it still owe it, a
+/// script a feature, run when it is back (`pay_lease_owed`).
+const OWED: &str = "lease-owed";
+
+/// Where what a take-over of feature `slug` owes the machine kept at `root` waits.
+fn owed_file(root: &Path, project: &str, slug: &str) -> PathBuf {
+    root.join(OWED).join(format!("{project}--{slug}.sh"))
+}
+
+/// Note at `file` (`owed_file`) that `script` still has to run there, or, with
+/// none, that nothing is owed.
+fn owe(file: &Path, script: Option<&str>) {
+    let done = match script {
+        Some(script) => crate::projects::write_atomic(file, script.as_bytes()),
+        None => std::fs::remove_file(file).or_else(|err| match err.kind() {
+            std::io::ErrorKind::NotFound => Ok(()),
+            _ => Err(err),
+        }),
+    };
+    if let Err(err) = done {
+        tracing::warn!("noting what is owed at {}: {err}", file.display());
+    }
+}
+
 /// The folder of a sandbox's files in a feature's folder.
 const SANDBOX: &str = "sandbox";
 
@@ -1825,6 +1893,19 @@ mod tests {
         assert!(!taken.join(store::FILE).exists());
         assert!(taken.join(lease::TAKEN).exists());
         assert!(taken.join(lease::HANDED_TO).exists());
+        std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    #[test]
+    fn what_a_take_over_owes_is_noted_until_it_ran() {
+        let t = std::env::temp_dir().join(format!("gerdr-lease-owed-{}", std::process::id()));
+        let file = owed_file(&t, "p", "a");
+        owe(&file, Some("rm -f x\n"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "rm -f x\n");
+        owe(&file, None);
+        assert!(!file.exists());
+        // Nothing owed, nothing to clear.
+        owe(&file, None);
         std::fs::remove_dir_all(&t).unwrap();
     }
 

@@ -522,6 +522,16 @@ pub fn claim_script(dir: &str) -> String {
     )
 }
 
+/// Script `script` for folder `dir` there, run only while the record there was
+/// last handed to `to`: run late, it leaves a move since alone.
+pub fn guarded(dir: &str, to: &str, script: &str) -> String {
+    format!(
+        "cd {} || exit 0\n[ \"$(cat {HANDED_TO} 2>/dev/null)\" = {} ] || exit 0\n{script}",
+        shell_quote(dir),
+        shell_quote(to)
+    )
+}
+
 /// The script putting the record back there, as this machine won't take it after
 /// all. What's there by now stays.
 pub fn undo_script(dir: &str) -> String {
@@ -1020,6 +1030,19 @@ mod tests {
         sh(&done_script(&dir));
         assert!(!t.0.join(TAKEN).exists());
         assert!(!t.0.join(store::FILE).exists());
+    }
+
+    #[test]
+    fn a_late_undo_leaves_a_move_since_alone() {
+        let t = Temp::new();
+        let dir = t.0.to_string_lossy().into_owned();
+        std::fs::write(t.0.join(store::FILE), "{}").unwrap();
+        sh(&yield_script(&dir, "other"));
+        sh(&claim_script(&dir));
+        sh(&guarded(&dir, "me", &undo_script(&dir)));
+        assert!(t.0.join(TAKEN).exists());
+        sh(&guarded(&dir, "other", &undo_script(&dir)));
+        assert!(t.0.join(store::FILE).exists());
     }
 
     #[test]

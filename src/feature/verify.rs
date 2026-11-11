@@ -613,10 +613,11 @@ pub trait Files {
     fn written(&self, i: usize, ext: &str) -> Option<SystemTime>;
     /// How long ago `at` was, by the clock of where the check runs.
     fn age(&self, at: SystemTime) -> Duration;
-    /// Send `signal` to process group `group`.
-    fn kill_group(&mut self, group: i32, signal: i32);
-    /// Send `signal` to the process group `pid` is in.
-    fn kill_group_of(&mut self, pid: i32, signal: i32);
+    /// Send `signal` to process group `group`, from check `i`'s pid file.
+    fn kill_group(&mut self, i: usize, group: i32, signal: i32);
+    /// Send `signal` to the process group `pid` is in, from check `i`'s pid
+    /// file.
+    fn kill_group_of(&mut self, i: usize, pid: i32, signal: i32);
     /// Whether `pid`, from check `i`'s pid file, may still be its script's,
     /// so its group can be signalled: a file left from before a reboot or a
     /// crash names whatever took the pid since.
@@ -655,11 +656,11 @@ impl Files for LocalFiles<'_> {
         at.elapsed().unwrap_or_default()
     }
 
-    fn kill_group(&mut self, group: i32, signal: i32) {
+    fn kill_group(&mut self, _i: usize, group: i32, signal: i32) {
         kill_group(group, signal);
     }
 
-    fn kill_group_of(&mut self, pid: i32, signal: i32) {
+    fn kill_group_of(&mut self, _i: usize, pid: i32, signal: i32) {
         // SAFETY: getpgid takes no pointers; a pid gone gives -1, which
         // `kill_group` leaves alone.
         kill_group(unsafe { libc::getpgid(pid) }, signal);
@@ -893,14 +894,14 @@ pub fn watch_files(
                 // What it left running in the background goes with it, as
                 // nothing else would stop it: a server would hold its port.
                 if let Some(pid) = pid.filter(|&p| files.still_check(i, p)) {
-                    files.kill_group(pid, libc::SIGTERM);
+                    files.kill_group(i, pid, libc::SIGTERM);
                 }
                 ended(i, o);
                 return false;
             }
             if ask && panes.gone(&w.check.pane) {
                 if let Some(pid) = pid.filter(|&p| files.still_check(i, p)) {
-                    files.kill_group(pid, libc::SIGTERM);
+                    files.kill_group(i, pid, libc::SIGTERM);
                 }
                 ended(i, outcome(None, Some("its terminal was closed"), true, 0));
                 return false;
@@ -936,7 +937,7 @@ pub fn watch_files(
                 Some((at, _)) if !w.killed && at.elapsed() >= STOP_GRACE => {
                     w.killed = true;
                     if files.still_check(i, pid) {
-                        files.kill_group_of(pid, libc::SIGKILL);
+                        files.kill_group_of(i, pid, libc::SIGKILL);
                     }
                 }
                 Some((at, cut))
@@ -1574,11 +1575,11 @@ mod tests {
                 .unwrap_or_default()
         }
 
-        fn kill_group(&mut self, group: i32, signal: i32) {
+        fn kill_group(&mut self, _i: usize, group: i32, signal: i32) {
             self.kills.push((group, signal));
         }
 
-        fn kill_group_of(&mut self, pid: i32, signal: i32) {
+        fn kill_group_of(&mut self, _i: usize, pid: i32, signal: i32) {
             self.kills.push((pid, signal));
         }
 

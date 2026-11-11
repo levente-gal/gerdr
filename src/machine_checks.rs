@@ -119,15 +119,14 @@ impl Files for CheckFiles {
 
     // `still_check` stays `true` here: its rule runs there, in the same
     // shell as the kill (`guarded`), so the pid can't change in between.
-    fn kill_group(&mut self, group: i32, signal: i32) {
-        self.signal(
-            group,
-            &remote::kill_group_script(group, signal_name(signal)),
-        );
+    fn kill_group(&mut self, i: usize, group: i32, signal: i32) {
+        let kill = remote::kill_group_script(group, signal_name(signal));
+        self.signal(i, group, &kill);
     }
 
-    fn kill_group_of(&mut self, pid: i32, signal: i32) {
-        self.signal(pid, &remote::kill_group_of_script(pid, signal_name(signal)));
+    fn kill_group_of(&mut self, i: usize, pid: i32, signal: i32) {
+        let kill = remote::kill_group_of_script(pid, signal_name(signal));
+        self.signal(i, pid, &kill);
     }
 
     fn every(&self) -> Duration {
@@ -143,9 +142,10 @@ impl Files for CheckFiles {
 }
 
 impl CheckFiles {
-    /// Runs `kill` there if `pid` still names one of the run's checks.
-    fn signal(&self, pid: i32, kill: &str) {
-        let script = guarded(&self.dir, pid, kill);
+    /// Runs `kill` there if `pid` still names check `i`'s script.
+    fn signal(&self, i: usize, pid: i32, kill: &str) {
+        let file = format!("{}/{i}.pid", self.dir);
+        let script = guarded(&file, pid, verify::SCRIPT, kill);
         if let Err(trouble) = self.reach.script(&script, &AtomicBool::new(false)) {
             tracing::warn!("signalling a check on {}: {}", self.name, trouble.text());
         }
@@ -153,29 +153,24 @@ impl CheckFiles {
 }
 
 /// `kill`, run only when `pid` passes the rule of `verify`'s `ours` there:
-/// a `*.pid` file in run folder `dir` names it and was written since that
-/// machine booted, and what runs as it is a check's script, or nothing (gone,
-/// or a zombie whose group may still have members).
-fn guarded(dir: &str, pid: i32, kill: &str) -> String {
+/// pid file `file` names it and was written since that machine booted, and
+/// what runs as it is `script` (a name in its command line), or nothing
+/// (gone, or a zombie whose group may still have members).
+fn guarded(file: &str, pid: i32, script: &str, kill: &str) -> String {
     format!(
-        r#"cd {dir} 2>/dev/null || exit 0
+        r#"f={file}
 b=$(sed -n 's/^btime //p' /proc/stat)
-[ -n "$b" ] || exit 0
-ok=
-for f in *.pid; do
-  [ -e "$f" ] || continue
-  [ "$(head -n 1 "$f" | tr -d ' ')" = {pid} ] || continue
-  [ "$(stat -c %Y "$f")" -ge "$b" ] && ok=1
-done
-[ -n "$ok" ] || exit 0
+[ -n "$b" ] && [ -e "$f" ] || exit 0
+[ "$(head -n 1 "$f" | tr -d ' ')" = {pid} ] || exit 0
+[ "$(stat -c %Y "$f")" -ge "$b" ] || exit 0
 c=$(cat /proc/{pid}/cmdline 2>/dev/null | tr '\0' ' ')
 case "$c" in
   ''|*{script}*) ;;
   *) exit 0 ;;
 esac
 {kill}"#,
-        dir = shell_quote(dir),
-        script = shell_quote(verify::SCRIPT),
+        file = shell_quote(file),
+        script = shell_quote(script),
     )
 }
 
@@ -753,6 +748,8 @@ impl Remote {
             if since.is_some_and(|s| s >= setup::TIMEOUT.as_secs()) {
                 if let Some(pid) = pid {
                     let kill = remote::kill_group_of_script(pid, "KILL");
+                    let ran = format!("{}.sh", setup::RUN_THERE);
+                    let kill = guarded(&format!("{dir}/pid"), pid, &ran, &kill);
                     if let Err(trouble) = self.reach.script(&kill, stop) {
                         tracing::warn!("stopping a setup on {name}: {}", trouble.text());
                     }
@@ -865,9 +862,10 @@ mod tests {
     fn only_a_check_of_this_boot_is_signalled_there() {
         // `echo` for the kill: this test signals nothing.
         let t = crate::feature::tests::Temp::new();
-        let dir = t.0.to_string_lossy().into_owned();
-        let run = |pid: i32| {
-            let script = guarded(&dir, pid, "echo go\n");
+        let file = |i: usize| t.0.join(format!("{i}.pid"));
+        let run_as = |i: usize, pid: i32, name: &str| {
+            let file = file(i).to_string_lossy().into_owned();
+            let script = guarded(&file, pid, name, "echo go\n");
             let out = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(&script)
@@ -875,21 +873,22 @@ mod tests {
                 .unwrap();
             String::from_utf8_lossy(&out.stdout).trim() == "go"
         };
+        let run = |i: usize, pid: i32| run_as(i, pid, verify::SCRIPT);
         let gone = 99_999_999;
-        assert!(!run(gone), "no pid file names it");
-        std::fs::write(t.0.join("0.pid"), format!("{gone}\n")).unwrap();
-        assert!(run(gone), "gone, its group may live on");
-        // This test runs as something else than a check's script.
+        assert!(!run(0, gone), "no pid file names it");
+        std::fs::write(file(0), format!("{gone}\n")).unwrap();
+        assert!(run(0, gone), "gone, its group may live on");
+        assert!(!run(1, gone), "another check's file names it");
+        // This test runs as something else than a check's script, but its
+        // binary is named for its crate.
         let me = std::process::id() as i32;
-        std::fs::write(t.0.join("1.pid"), format!("{me}\n")).unwrap();
-        assert!(!run(me));
-        let old = std::fs::File::options()
-            .write(true)
-            .open(t.0.join("0.pid"))
-            .unwrap();
+        std::fs::write(file(1), format!("{me}\n")).unwrap();
+        assert!(!run(1, me));
+        assert!(run_as(1, me, "gerdr"), "a setup's script by its own name");
+        let old = std::fs::File::options().write(true).open(file(0)).unwrap();
         old.set_modified(UNIX_EPOCH + Duration::from_secs(1))
             .unwrap();
-        assert!(!run(gone), "left from before this boot");
+        assert!(!run(0, gone), "left from before this boot");
     }
 
     #[test]

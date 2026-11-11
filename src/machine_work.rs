@@ -877,6 +877,7 @@ impl Gerdr {
                     self.adopt_checks(&project);
                 }
                 self.clean_left_there(&place_id);
+                self.pay_lease_owed(&place_id);
                 self.look_for_sandbox_leftovers_there(&place_id);
             }
             Err(err) => {

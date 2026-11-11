@@ -998,9 +998,26 @@ impl Store {
         {
             let ours = serde_json::to_value(self.state())?;
             let theirs = serde_json::to_value(theirs)?;
-            let merged = merge3(Some(&self.books.state_base), Some(&ours), Some(&theirs));
+            let base = &self.books.state_base;
+            let mut merged = merge3(Some(base), Some(&ours), Some(&theirs));
+            // Not sets: a size is a pair, and nav is one ordered history
+            // listing each tab once; item by item they'd mix, so ours whole.
+            for key in ["window_size", "nav"] {
+                if let Some(Value::Object(m)) = merged.as_mut()
+                    && ours.get(key) != base.get(key)
+                {
+                    match ours.get(key) {
+                        Some(v) => m.insert(key.to_owned(), v.clone()),
+                        None => m.remove(key),
+                    };
+                }
+            }
             match merged.map(serde_json::from_value::<State>) {
-                Some(Ok(state)) => self.set_state(state),
+                Some(Ok(mut state)) => {
+                    newest_once(&mut state.service_errors);
+                    newest_once(&mut state.ignored_errors);
+                    self.set_state(state)
+                }
                 other => tracing::warn!("merging {}: {other:?}; ours wins", path.display()),
             }
             json = serde_json::to_vec_pretty(&self.state())?;
@@ -1312,14 +1329,23 @@ fn on_disk(path: &Path, written: Option<u64>) -> Option<u64> {
 
 /// A three-way merge of `base` changed into `ours` and into `theirs`: a
 /// value only one side changed takes that side's change (an add or a
-/// removal alike), maps both changed merge key by key, anything else both
-/// changed is ours.
+/// removal alike), maps both changed merge key by key, lists both changed
+/// item by item (theirs, less what ours took out, then what ours added;
+/// items alike by value), anything else both changed is ours.
 fn merge3(base: Option<&Value>, ours: Option<&Value>, theirs: Option<&Value>) -> Option<Value> {
     if ours == base {
         return theirs.cloned();
     }
     if theirs == base || theirs == ours {
         return ours.cloned();
+    }
+    if let (Some(Value::Array(o)), Some(Value::Array(t))) = (ours, theirs) {
+        let b = base
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        let kept = t.iter().filter(|v| !b.contains(v) || o.contains(v));
+        let added = o.iter().filter(|v| !b.contains(v) && !t.contains(v));
+        return Some(Value::Array(kept.chain(added).cloned().collect()));
     }
     let (Some(Value::Object(o)), Some(Value::Object(t))) = (ours, theirs) else {
         return ours.cloned();
@@ -1334,6 +1360,14 @@ fn merge3(base: Option<&Value>, ours: Option<&Value>, theirs: Option<&Value>) ->
         merge3(b.and_then(|b| b.get(key)), o.get(key), t.get(key)).map(|v| (key.clone(), v))
     });
     Some(Value::Object(merged.collect()))
+}
+
+/// An error list merged item by item (see `merge3`): newest first again,
+/// and each group once, the newest, should both gerdrs have changed it.
+fn newest_once(groups: &mut Vec<crate::services::ErrorGroup>) {
+    groups.sort_by_key(|g| std::cmp::Reverse(g.last_secs));
+    let mut seen = BTreeSet::new();
+    groups.retain(|g| seen.insert((g.project.clone(), g.pane_id.clone(), g.fingerprint.clone())));
 }
 
 /// Write `bytes` to `path` whole or not at all (see `ai_work::write::atomic`).
@@ -3065,22 +3099,50 @@ mod tests {
     #[test]
     fn two_gerdrs_saving_state_keep_each_others_changes() {
         let root = scratch("state-merge");
+        let error = |pane: &str, count: u32, last: u64| {
+            serde_json::from_value::<crate::services::ErrorGroup>(json!({
+                "project": "api", "pane_id": pane, "fingerprint": "f", "title": "t",
+                "lines": [], "count": count, "first_secs": 1, "last_secs": last,
+            }))
+            .unwrap()
+        };
         let mut first = at(&root, two());
         first.machine_last.insert("old".into(), "1".into());
+        first
+            .machine_ids
+            .insert("m".into(), vec!["x".into(), "y".into()]);
+        first.window_size = Some((800, 600));
+        first.service_errors = vec![error("p1", 1, 10), error("p2", 1, 5)];
         first.save();
         let (mut a, _) = Store::load_from(&root, || None);
         let (mut b, _) = Store::load_from(&root, || None);
         a.machine_last.remove("old");
         a.machine_last.insert("a".into(), "2".into());
+        a.machine_ids
+            .insert("m".into(), vec!["y".into(), "a".into()]);
+        a.window_size = Some((1000, 600));
+        a.service_errors = vec![error("p2", 2, 20), error("p1", 1, 10)];
         a.save();
         b.machine_last.insert("b".into(), "3".into());
         b.sidebar_width = Some(300);
+        b.machine_ids.get_mut("m").unwrap().push("b".into());
+        b.window_size = Some((800, 700));
+        b.service_errors = vec![error("p3", 1, 30), error("p2", 3, 15)];
         b.save();
         let (reread, _) = Store::load_from(&root, || None);
         // A's removal stays removed; both adds and B's width are kept.
         assert_eq!(reread.machine_last.keys().collect::<Vec<_>>(), ["ZenBook", "a", "b"]);
         assert_eq!(reread.sidebar_width, Some(300));
         assert_eq!(b.machine_last, reread.machine_last);
+        // Lists both changed merge item by item, theirs first.
+        assert_eq!(reread.machine_ids["m"], ["y", "a", "b"]);
+        // A size is a pair, not a list: B's whole.
+        assert_eq!(reread.window_size, Some((800, 700)));
+        // B dropped p1; p2 changed on both is kept once, the newest.
+        let errors: Vec<_> = (reread.service_errors.iter())
+            .map(|g| (g.pane_id.as_str(), g.count))
+            .collect();
+        assert_eq!(errors, [("p3", 1), ("p2", 2)]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

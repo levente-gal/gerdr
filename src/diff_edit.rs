@@ -490,10 +490,15 @@ pub fn redo(done: &Done, back: bool) -> Result<Spot, String> {
 /// disk can't cut the user's file short: to a file beside it with its
 /// mode, then renamed over it.
 fn write_whole(full: &Path, text: &str) -> std::io::Result<()> {
-    use std::{io::Write as _, os::unix::fs::OpenOptionsExt as _};
+    use std::{
+        io::Write as _,
+        os::unix::fs::{MetadataExt as _, OpenOptionsExt as _},
+    };
     // Through a link, what it points to changes.
     let full = std::fs::canonicalize(full)?;
-    let mode = std::fs::metadata(&full)?.permissions();
+    let meta = std::fs::metadata(&full)?;
+    // A rename would part this name from the file's other hard links.
+    let linked = meta.nlink() > 1;
     let name = full.file_name().unwrap_or_default().to_string_lossy();
     let tmp = full.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
     let written = (|| {
@@ -506,14 +511,94 @@ fn write_whole(full: &Path, text: &str) -> std::io::Result<()> {
             .open(&tmp)?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
-        file.set_permissions(mode)?;
+        if linked {
+            return Ok(());
+        }
+        file.set_permissions(meta.permissions())?;
+        // Not root, another's file can't stay theirs: it becomes ours.
+        match std::os::unix::fs::fchown(&file, Some(meta.uid()), Some(meta.gid())) {
+            Err(err) if err.raw_os_error() != Some(libc::EPERM) => {
+                tracing::warn!("keeping the owner of {}: {err}", full.display());
+            }
+            _ => {}
+        }
+        copy_xattrs(&full, &file);
         std::fs::rename(&tmp, &full)
     })();
     if written.is_err() {
         // What is left of it is of no use; the error said is the write's.
         let _ = std::fs::remove_file(&tmp);
+        return written;
     }
-    written
+    if linked {
+        // Into the file itself, once the synced temp showed there is room;
+        // should this fail half way, the temp still holds the text.
+        let into = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&full)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()
+        })();
+        if let Err(err) = into {
+            let kept = format!("{err}; the text is kept in {}", tmp.display());
+            return Err(std::io::Error::new(err.kind(), kept));
+        }
+        let _ = std::fs::remove_file(&tmp);
+    }
+    Ok(())
+}
+
+/// Copy the extended attributes of the file at `from` onto `to`, which
+/// takes its place by a rename. What fails is logged: the text is written.
+fn copy_xattrs(from: &Path, to: &std::fs::File) {
+    use std::{ffi::CString, os::fd::AsRawFd as _, os::unix::ffi::OsStrExt as _};
+    let warn = |what: &str| {
+        let err = std::io::Error::last_os_error();
+        // Unsupported, or refused by policy (an SELinux label not ours to
+        // set): the new file keeps the label it was given, nothing to say.
+        if !matches!(
+            err.raw_os_error(),
+            Some(libc::ENOTSUP | libc::EPERM | libc::EACCES)
+        ) {
+            tracing::warn!("copying {what} of {}: {err}", from.display());
+        }
+    };
+    let Ok(path) = CString::new(from.as_os_str().as_bytes()) else {
+        return;
+    };
+    // SAFETY: a NUL-ended path and buffers of the lengths given, here and below.
+    let len = unsafe { libc::llistxattr(path.as_ptr(), std::ptr::null_mut(), 0) };
+    let mut names = vec![0u8; len.max(0) as usize];
+    let len = unsafe { libc::llistxattr(path.as_ptr(), names.as_mut_ptr().cast(), names.len()) };
+    if len < 0 {
+        return warn("the extended attributes");
+    }
+    for name in names[..len as usize]
+        .split(|b| *b == 0)
+        .filter(|n| !n.is_empty())
+    {
+        let name = CString::new(name).unwrap_or_default();
+        let at = |buf: &mut [u8]| unsafe {
+            libc::lgetxattr(
+                path.as_ptr(),
+                name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        let mut value = vec![0u8; at(&mut []).max(0) as usize];
+        let size = at(&mut value);
+        let fd = to.as_raw_fd();
+        if size < 0
+            || unsafe {
+                libc::fsetxattr(fd, name.as_ptr(), value.as_ptr().cast(), size as usize, 0)
+            } < 0
+        {
+            warn(&name.to_string_lossy());
+        }
+    }
 }
 
 /// The text of the file at `path`.
@@ -712,6 +797,46 @@ mod tests {
         std::fs::write(dir.join("f"), "other\n").unwrap();
         assert!(redo(&done, true).is_err());
         assert_eq!(std::fs::read_to_string(dir.join("f")).unwrap(), "other\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_whole_write_keeps_hard_links_and_extended_attributes() {
+        let dir = std::env::temp_dir().join(format!("gerdr-write-whole-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (f, other) = (dir.join("f"), dir.join("other"));
+        std::fs::write(&f, "old\n").unwrap();
+        std::fs::hard_link(&f, &other).unwrap();
+        write_whole(&f, "new\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "new\n");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "temp left");
+        std::fs::remove_file(&other).unwrap();
+        // One name: written by a rename, its attributes copied over (where
+        // the temp folder takes user attributes).
+        let path = std::ffi::CString::new(f.to_str().unwrap()).unwrap();
+        let set = unsafe {
+            libc::setxattr(
+                path.as_ptr(),
+                c"user.gerdr".as_ptr(),
+                b"1".as_ptr().cast(),
+                1,
+                0,
+            )
+        };
+        if set == 0 {
+            write_whole(&f, "newer\n").unwrap();
+            let mut value = [0u8; 4];
+            let size = unsafe {
+                libc::getxattr(
+                    path.as_ptr(),
+                    c"user.gerdr".as_ptr(),
+                    value.as_mut_ptr().cast(),
+                    4,
+                )
+            };
+            assert_eq!(&value[..size.max(0) as usize], b"1");
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), "newer\n");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
