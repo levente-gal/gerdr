@@ -5777,7 +5777,8 @@ impl FeaturePanel {
             }
             Keysym::a | Keysym::A
                 if mods.alt
-                    && !(mods.ctrl || mods.shift || mods.logo)
+                    && mods.shift
+                    && !(mods.ctrl || mods.logo)
                     && needs(stage).is_some() =>
             {
                 return Some(PanelOutcome::PickModel(stage));
@@ -5901,7 +5902,7 @@ impl FeaturePanel {
             }
             // Never a bare Del: one slip of the focus would abandon it.
             Keysym::Delete | Keysym::KP_Delete
-                if mods.alt && !(mods.ctrl || mods.shift || mods.logo) =>
+                if mods.alt && mods.shift && !(mods.ctrl || mods.logo) =>
             {
                 return Some(PanelOutcome::Remove);
             }
@@ -5962,12 +5963,14 @@ fn plan_review_open(feature: &Feature, stage: Stage) -> bool {
 const REOPEN_KEY: &str = "Ctrl+Shift+Enter";
 /// The key of the current stage's Start over.
 const START_OVER_KEY: &str = "Ctrl+Shift+Del";
-/// The key picking the selected stage's agent's model: its own, as
-/// Ctrl+Shift+I shows the setup log on the same pages.
-const MODEL_KEY: &str = "Alt+A";
+/// The key picking the selected stage's agent's model, beside Ctrl+Shift+A
+/// picking the agent: its own, as Ctrl+Shift+I shows the setup log on the
+/// same pages (and Alt+A amends in the repositories panel).
+const MODEL_KEY: &str = "Alt+Shift+A";
 /// The key abandoning the feature (or removing a done one's worktrees),
-/// asking first. Del alone never does: it is the focused card's or row's.
-pub const REMOVE_KEY: &str = "Alt+Del";
+/// asking first. Del alone never does: it is the focused card's or row's
+/// (and Alt+Del deletes a branch in the repositories panel).
+pub const REMOVE_KEY: &str = "Alt+Shift+Del";
 /// Why Ctrl+Enter makes no fixes while what the user wrote needs a plan.
 const PLAN_FIRST: &str = crate::worktree_diff::PLAN_FIRST;
 /// Why `f` does nothing on a comment left in the diff.
@@ -16085,7 +16088,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
                 "Ctrl+Shift+E",
                 "make a feature another machine writes this machine's, or hand one back to the machine it came from",
             ),
-            ("Alt+A", "pick the model of the stage's agent"),
+            ("Alt+Shift+A", "pick the model of the stage's agent"),
             (
                 "Ctrl+Shift+B",
                 "Build: one agent, or a fresh agent per milestone",
@@ -16282,7 +16285,7 @@ const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
                  twice); on a card, what the card says; never the feature",
             ),
             (
-                "Alt+Del",
+                "Alt+Shift+Del",
                 "abandon the feature, or remove its worktrees once done, after asking",
             ),
             (
@@ -17512,6 +17515,15 @@ pub(crate) mod tests {
         (mods, sym)
     }
 
+    fn alt_shift(sym: Keysym) -> (ModifiersState, Keysym) {
+        let mods = ModifiersState {
+            alt: true,
+            shift: true,
+            ..Default::default()
+        };
+        (mods, sym)
+    }
+
     fn base_of(d: &NewFeatureDialog, name: &str) -> String {
         let key = (None, name.to_owned());
         d.repo_found(&key).unwrap().base.clone()
@@ -18348,11 +18360,11 @@ pub(crate) mod tests {
         press(&mut panel, &old, key(Keysym::Delete));
         press(&mut panel, &old, key(Keysym::End));
         assert_eq!(panel.armed, None);
-        // On the stages Del does nothing: Alt+Del abandons, asking.
+        // On the stages Del does nothing: Alt+Shift+Del abandons, asking.
         panel.focus = TabArea::Stages;
         assert_eq!(press(&mut panel, &f, key(Keysym::Delete)), None);
         assert_eq!(
-            press(&mut panel, &f, alt(Keysym::Delete)),
+            press(&mut panel, &f, alt_shift(Keysym::Delete)),
             Some(PanelOutcome::Remove)
         );
         // Nor on a feature's only repository.
@@ -18481,7 +18493,7 @@ pub(crate) mod tests {
         );
         let focus = std::mem::replace(&mut panel.focus, TabArea::Stages);
         assert_eq!(
-            press(&mut panel, &f, alt(Keysym::Delete)),
+            press(&mut panel, &f, alt_shift(Keysym::Delete)),
             Some(PanelOutcome::Remove)
         );
         panel.focus = focus;
@@ -18875,8 +18887,8 @@ pub(crate) mod tests {
         let mut last = two.clone();
         last.repos.pop();
         assert_eq!(del(&last, 0), None);
-        // The only one a feature has: Del never abandons it (Alt+Del does,
-        // asking), so it offers nothing there.
+        // The only one a feature has: Del never abandons it (Alt+Shift+Del
+        // does, asking), so it offers nothing there.
         let one = feature("b", vec![repo("api", true)], 3);
         assert_eq!(del(&one, 0), None);
         let mut panel = FeaturePanel {
@@ -18891,11 +18903,12 @@ pub(crate) mod tests {
         assert_eq!(delete(&mut panel, &bare), None);
         panel.focus = TabArea::Stages;
         assert_eq!(delete(&mut panel, &bare), None);
-        let alt = ModifiersState {
+        let alt_shift = ModifiersState {
             alt: true,
+            shift: true,
             ..ModifiersState::default()
         };
-        assert_eq!(delete(&mut panel, &alt), Some(PanelOutcome::Remove));
+        assert_eq!(delete(&mut panel, &alt_shift), Some(PanelOutcome::Remove));
     }
 
     #[test]
@@ -27310,15 +27323,17 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn alt_a_asks_for_the_model_on_an_agent_stage_only() {
+    fn alt_shift_a_asks_for_the_model_on_an_agent_stage_only() {
         let f = feature("a", vec![repo("r", true)], 0);
         let mut panel = FeaturePanel {
             slug: "a".into(),
             ..FeaturePanel::default()
         };
-        // Alt+A: its own key, off the setup log's Ctrl+Shift+I.
+        // Alt+Shift+A: its own key, off the setup log's Ctrl+Shift+I. Shift
+        // comes with the unshifted sym (K8).
         let mods = ModifiersState {
             alt: true,
+            shift: true,
             ..ModifiersState::default()
         };
         let ctx = RowCtx::default();
