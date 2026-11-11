@@ -483,7 +483,8 @@ impl Gerdr {
                 started: now,
                 ..SandboxRun::default()
             });
-            f.log(now, "Sandbox started");
+            // Started for real only once it runs: a failure says so after.
+            f.log(now, "Sandbox starting");
             self.save_feature(project, slug);
         }
         let busy = Busy {
@@ -655,6 +656,9 @@ impl Gerdr {
             }
             if let Some(f) = self.feature_mut(project, slug) {
                 f.sandbox = Some(run);
+                if !stopped {
+                    f.log(feature::now(), format!("Sandbox failed to start: {why}"));
+                }
             }
             self.save_feature(project, slug);
             if stopped {
@@ -687,6 +691,7 @@ impl Gerdr {
         self.note_sandbox_there(project, slug, &run);
         if let Some(f) = self.feature_mut(project, slug) {
             f.sandbox = Some(run);
+            f.log(feature::now(), "Sandbox started");
         }
         self.save_feature(project, slug);
         if let Some(missing) = opened {

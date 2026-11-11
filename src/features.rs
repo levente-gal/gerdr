@@ -2650,8 +2650,9 @@ fn turned_back(feature: &Feature, ctx: RowCtx) -> Option<Stage> {
 }
 
 /// The line back on `feature`'s rail: into Build while the flow is turned
-/// back there (`turned_back`), else into Verify while it is back there for
-/// fixes Manual test asked for (`Feature::back_from`).
+/// back there (`turned_back`), else into the stage the flow is at on its way
+/// back from Verify, for fixes Manual test asked for or a base update
+/// (`Feature::back_from`).
 fn rail_back(feature: &Feature, ctx: RowCtx) -> Option<RailBack> {
     let line = |from: Stage, to: Stage| RailBack {
         from: stage_index(from),
@@ -2660,12 +2661,74 @@ fn rail_back(feature: &Feature, ctx: RowCtx) -> Option<RailBack> {
     if let Some(from) = turned_back(feature, ctx) {
         return Some(line(from, Stage::Build));
     }
+    // From the stage that turned it to where the flow is on its way back.
+    let current = feature.current()?;
     let from = feature.back_from.filter(|from| {
-        feature.status == Status::Open
-            && feature.current() == Some(Stage::Verify)
-            && *from > Stage::Verify
+        feature.status == Status::Open && current >= Stage::Verify && *from > current
     })?;
-    Some(line(from, Stage::Verify))
+    Some(line(from, current))
+}
+
+/// What took `feature` round again from Verify, in a few words: "fix round
+/// 4" for the fixes Manual test asked for, or its base update.
+fn loop_cause(feature: &Feature) -> Option<String> {
+    match feature.back_from? {
+        Stage::Ship => Some("the base update".to_owned()),
+        from => {
+            let n = (feature.fix_asked.iter().rev())
+                .find(|(_, s)| **s == from)
+                .map(|(n, _)| *n);
+            Some(
+                n.map_or_else(|| "its fixes".to_owned(), feature::fix_round::label)
+                    .to_lowercase(),
+            )
+        }
+    }
+}
+
+/// While `feature` goes round again from Verify (`Feature::back_from`), what
+/// `stage`'s page says of it, the same line on each stage of the loop: why,
+/// and where it ends. Back where it started, that the marks there are kept
+/// and the stage is to be marked again.
+fn loop_line(feature: &Feature, stage: Stage) -> Option<CheckLine> {
+    let from = feature.back_from?;
+    let current = feature.current()?;
+    if feature.status != Status::Open || stage != current || current > from {
+        return None;
+    }
+    let cause = loop_cause(feature)?;
+    let between: Vec<&str> = (Stage::ALL.iter())
+        .filter(|s| **s >= Stage::Verify && **s < from)
+        .map(|s| s.label())
+        .collect();
+    let between = match between.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        Some((last, _)) => (*last).to_owned(),
+        None => String::new(),
+    };
+    let text = match current == from {
+        true => format!(
+            "Back after {cause}: {between} passed on the update. Your marks are kept: {} again to go on",
+            match from {
+                Stage::ManualTest => "mark it passed",
+                _ => "mark it done",
+            }
+        ),
+        false => format!(
+            "{} changed the code: {between} run again on the update, then {}",
+            capitalized(&cause),
+            from.label()
+        ),
+    };
+    Some(line(text, CheckTone::Ready))
+}
+
+/// `text` with its first letter capital.
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
 }
 
 /// `rework`, on the page of `stage` when `stage` is where the feature is at.
@@ -3014,27 +3077,39 @@ fn stage_actions(
 /// them to their steps: all, those passed, those read.
 fn fold_actions() -> Vec<(PageButton, PanelOutcome)> {
     use crate::feature::manual::FoldScope;
-    let scopes = [
-        ("All", FoldScope::All),
-        ("Done", FoldScope::Done),
-        ("Seen", FoldScope::Seen),
-    ];
-    [false, true]
-        .into_iter()
-        .flat_map(|open| {
-            scopes.into_iter().map(move |(label, scope)| {
-                let button = PageButton {
-                    label: label.to_owned(),
-                    style: ButtonStyle::Plain,
-                };
-                (button, PanelOutcome::FoldCriteria(scope, open))
-            })
-        })
-        .collect()
+    // Folding goes by scope; opening only all at once: opening those passed
+    // or read is rare, and has its keys (Alt+Shift+D, Alt+Shift+S).
+    let button = |label: &str| PageButton {
+        label: label.to_owned(),
+        style: ButtonStyle::Plain,
+    };
+    vec![
+        (
+            button("All"),
+            PanelOutcome::FoldCriteria(FoldScope::All, false),
+        ),
+        (
+            button(FOLD_PASSED),
+            PanelOutcome::FoldCriteria(FoldScope::Done, false),
+        ),
+        (
+            button(FOLD_READ),
+            PanelOutcome::FoldCriteria(FoldScope::Seen, false),
+        ),
+        (
+            button("Open all"),
+            PanelOutcome::FoldCriteria(FoldScope::All, true),
+        ),
+    ]
 }
 
-/// The row over Manual test's criteria: "Collapse" and "Expand", each with
-/// its buttons of `actions` (see `fold_actions`).
+/// The fold buttons' words for the criteria passed, and those read (opened
+/// or marked).
+const FOLD_PASSED: &str = "Passed";
+const FOLD_READ: &str = "Read";
+
+/// The row over Manual test's criteria: "Fold" with its buttons of `actions`
+/// (see `fold_actions`), and opening them all.
 fn fold_toolbar(actions: &[(PageButton, PanelOutcome)]) -> PageSection {
     let of = |open: bool| -> Vec<usize> {
         (actions.iter().enumerate())
@@ -3043,10 +3118,7 @@ fn fold_toolbar(actions: &[(PageButton, PanelOutcome)]) -> PageSection {
             .collect()
     };
     PageSection::Toolbar {
-        groups: vec![
-            ("Collapse".to_owned(), of(false)),
-            ("Expand".to_owned(), of(true)),
-        ],
+        groups: vec![("Fold".to_owned(), of(false)), (String::new(), of(true))],
     }
 }
 
@@ -3306,6 +3378,13 @@ fn check_buttons(
 
 /// Whether Manual test's page of `feature` has failures or comments to send
 /// to Build now: none waits for a round to end.
+/// Why Manual test's fixes go through a plan, if they do: its comments are
+/// the user's own instructions (a failure's note only says what went wrong).
+fn manual_own_words(ctx: RowCtx) -> Option<String> {
+    (ctx.manual.comments_open > 0)
+        .then(|| review_import::own_words(&plural(ctx.manual.comments_open, "comment")))
+}
+
 fn manual_sends(feature: &Feature, ctx: RowCtx) -> bool {
     // Someone else's pull request's go to GitHub with the review.
     ctx.manual.failed > ctx.manual.sent && feature.fix_round.is_none() && !feature.posts_review()
@@ -5422,6 +5501,10 @@ impl FeaturePanel {
             {
                 return Some(PanelOutcome::Manual(match mods.shift {
                     true => Outcome::SendFailures,
+                    // The user's comments go through a plan.
+                    false if manual_sends(feature, ctx) && manual_own_words(ctx).is_some() => {
+                        Outcome::SendFailures
+                    }
                     false if manual_sends(feature, ctx) => Outcome::MakeFixes,
                     false => Outcome::MarkPassed,
                 }));
@@ -6300,14 +6383,18 @@ fn writers_page_actions(
             true => ButtonStyle::Primary,
             false => ButtonStyle::Plain,
         };
-        // Found while a round is open, they wait for the next one.
+        // Found while a round is open, they wait for the next one. As on
+        // every page: what the user wrote goes through a plan.
         if manual_sends(feature, ctx) {
+            let own = manual_own_words(ctx).is_some();
+            if !own {
+                out.push((
+                    button("Make fixes", style(true)),
+                    PanelOutcome::Manual(Outcome::MakeFixes),
+                ));
+            }
             out.push((
-                button("Make fixes", style(true)),
-                PanelOutcome::Manual(Outcome::MakeFixes),
-            ));
-            out.push((
-                button("Plan fixes", ButtonStyle::Plain),
+                button("Plan fixes", style(own)),
                 PanelOutcome::Manual(Outcome::SendFailures),
             ));
         }
@@ -6318,8 +6405,13 @@ fn writers_page_actions(
             true => ("Mark passed", ctx.manual.untested == 0),
             false => ("Mark passed", ctx.manual.passed == ctx.criteria),
         };
+        // Not what comes next while criteria are left: it stays quiet.
+        let mark = match ready {
+            true => style(true),
+            false => ButtonStyle::Quiet,
+        };
         out.push((
-            button(label, style(ready)),
+            button(label, mark),
             PanelOutcome::Manual(Outcome::MarkPassed),
         ));
     }
@@ -12836,7 +12928,13 @@ fn is_stale(feature: &Feature, stage: Stage, probe: Option<&Probe>) -> bool {
 /// `feature_agents::gate_of`).
 fn manual_gate(n: crate::feature::manual::Counts) -> (u32, u32) {
     let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-    (count(n.passed), count(n.total()))
+    // The user's comments aren't criteria: "3 of 4 passed" counts the
+    // brief's, as the bar over the page does, unless there are only comments.
+    let criteria = n.total() - n.comments();
+    match criteria {
+        0 => (count(n.passed), count(n.total())),
+        _ => (count(n.passed - n.comments_done), count(criteria)),
+    }
 }
 
 /// What a current stage's short line reads besides its feature (see
@@ -15442,6 +15540,8 @@ fn stage_page(
         sections.push(lines("Another machine", vec![line(text.clone(), tone)]));
     }
     sections.extend((feature.pulls().iter()).map(|pull| pull_card(feature, pull, actions, now)));
+    // Going round again shows on the page, not only in a toast.
+    sections.extend(loop_line(feature, stage).map(|l| lines("Round", vec![l])));
     let status = match mark {
         StageMark::Later => {
             let before = Stage::ALL[stage_index(stage).saturating_sub(1)];
@@ -15629,9 +15729,21 @@ fn stage_page(
                     if feature.posts_review() {
                         said.extend(failures_waiting(state, "for the review on GitHub"));
                     }
+                    if manual_sends(feature, state.ctx) {
+                        let why = manual_own_words(state.ctx);
+                        said.extend(why.map(|why| line(why, CheckTone::Note)));
+                    }
                     if fixes_unverified(feature, stage) {
-                        let text = "fixes changed the code: marking it passed goes back to Verify";
-                        said.push(line(text, CheckTone::Note));
+                        let cause = (feature.fix_asked.iter().rev())
+                            .find(|(_, s)| **s == Stage::ManualTest)
+                            .map_or_else(
+                                || "Fixes".to_owned(),
+                                |(n, _)| feature::fix_round::label(*n),
+                            );
+                        let text = format!(
+                            "{cause} changed the code: Mark passed first takes it through Verify, AI review and Code review again, then back here"
+                        );
+                        said.push(line(text, CheckTone::Ready));
                     }
                     sections.push(lines("Criteria", said));
                     sections.extend(criterion_sections(state, actions, true));
@@ -15729,8 +15841,13 @@ fn stage_page(
         }
         _ => b.clone(),
     };
+    // A loop names its round on each stage it goes through.
+    let title = match loop_line(feature, stage).and_then(|_| loop_cause(feature)) {
+        Some(cause) => format!("{} \u{b7} after {cause}", stage.label()),
+        None => stage.label().to_owned(),
+    };
     StagePage {
-        title: stage.label().to_owned(),
+        title,
         about: stage.about().to_owned(),
         status,
         buttons: actions.iter().map(label).collect(),
@@ -15909,6 +16026,7 @@ fn event_tone(what: &str) -> CheckTone {
         "not done",
         "not read",
         "stopped",
+        "stalled",
         "to do again",
         "abandoned",
     ];
@@ -16330,25 +16448,20 @@ fn fold_tip(page: &chrome::StagePage, i: usize) -> Option<String> {
             .map(|(word, _)| word.as_str()),
         _ => None,
     })?;
-    // Other toolbars' buttons (the setup's, Ship's) fold nothing.
-    if word != "Collapse" && word != "Expand" {
-        return None;
-    }
-    let open = word == "Expand";
     let label = &page.buttons.get(i)?.label;
+    // Other toolbars' buttons (the setup's, Ship's) fold nothing.
+    let open = match (word, label.as_str()) {
+        ("Fold", _) => false,
+        ("", "Open all") => true,
+        _ => return None,
+    };
     let (what, key) = match label.as_str() {
-        "All" => (
+        "All" | "Open all" => (
             "every criterion",
             if open { "Alt+Right" } else { "Alt+Left" },
         ),
-        "Done" => (
-            "the criteria passed",
-            if open { "Alt+Shift+D" } else { "Alt+D" },
-        ),
-        _ => (
-            "the criteria seen: opened or marked",
-            if open { "Alt+Shift+S" } else { "Alt+S" },
-        ),
+        FOLD_PASSED => ("the criteria passed", "Alt+D"),
+        _ => ("the criteria read: opened or marked", "Alt+S"),
     };
     let verb = if open { "Open" } else { "Fold" };
     Some(format!("{verb} {what} ({key})"))
@@ -16533,6 +16646,7 @@ fn writers_tab_hints(
             hints.extend(search_hints(panel));
             if tries_criteria(feature, stage) && fix_round_on(feature, stage).is_none() {
                 match manual_sends(feature, ctx) {
+                    true if manual_own_words(ctx).is_some() => {}
                     true => hints.push(hint("Ctrl+Enter", "make fixes")),
                     false => hints.push(hint("Ctrl+Enter", "mark passed")),
                 }
@@ -20877,10 +20991,21 @@ pub(crate) mod tests {
             rail_back(&round, at_rest).map(|b| b.to),
             Some(stage_index(Stage::Build))
         );
-        // Verify passes: the flow goes on, and the line goes.
+        // Verify passes: the line follows the flow on its way back.
         f.tick(3_100, "you", Some("p1"));
-        assert_eq!(f.back_from, None);
+        assert_eq!(f.back_from, Some(Stage::ManualTest));
+        assert_eq!(
+            rail_back(&f, at_rest).map(|b| b.to),
+            Some(stage_index(Stage::AiReview))
+        );
+        // Back at Manual test: no line, and it is marked done once more.
+        f.tick(3_200, "you", Some("p1"));
+        f.tick(3_300, "you", Some("p1"));
+        assert_eq!(f.current(), Some(Stage::ManualTest));
         assert_eq!(rail_back(&f, at_rest), None);
+        assert_eq!(f.back_from, Some(Stage::ManualTest));
+        f.tick(3_400, "you", Some("p1"));
+        assert_eq!(f.back_from, None);
     }
 
     #[test]
@@ -22101,7 +22226,7 @@ pub(crate) mod tests {
             );
             let why = summary_line(&sections).and_then(|(_, lines)| {
                 (lines.iter())
-                    .find(|l| l.text.starts_with("A plan comes first"))
+                    .find(|l| l.text.starts_with(review_import::OWN_WORDS))
                     .map(|l| l.text.clone())
             });
             assert!(why.is_some(), "{sections:?}");
@@ -22118,7 +22243,7 @@ pub(crate) mod tests {
         );
         let says = |s: &PageSection| {
             matches!(s, PageSection::Lines { lines, .. }
-                if lines.iter().any(|l| l.text.starts_with("A plan comes first")))
+                if lines.iter().any(|l| l.text.starts_with(review_import::OWN_WORDS)))
         };
         assert!(!sections.iter().any(says));
         assert_eq!(review_line(&fix, None).as_deref(), Some("1 finding to fix"));
@@ -23166,7 +23291,8 @@ pub(crate) mod tests {
         );
         let actions = page_actions(&f, Stage::ManualTest, some);
         assert_eq!(actions[0].0.label, "Mark passed");
-        assert_eq!(actions[0].0.style, ButtonStyle::Plain);
+        // Not next while one is left: quiet, not a framed button.
+        assert_eq!(actions[0].0.style, ButtonStyle::Quiet);
     }
 
     #[test]
@@ -23433,7 +23559,7 @@ pub(crate) mod tests {
                 .iter()
                 .all(|c| c.sheet.as_ref().is_some_and(|s| !s.hidden))
         );
-        // The row over them: Collapse and Expand, each all, done and seen.
+        // The row over them: Fold all, passed and read; Open all.
         let groups = (page.sections.iter())
             .find_map(|s| match s {
                 PageSection::Toolbar { groups } => Some(groups.clone()),
@@ -23441,7 +23567,7 @@ pub(crate) mod tests {
             })
             .unwrap();
         let words: Vec<&str> = groups.iter().map(|(w, _)| w.as_str()).collect();
-        assert_eq!(words, ["Collapse", "Expand"]);
+        assert_eq!(words, ["Fold", ""]);
         let of = |g: usize| -> Vec<PanelOutcome> {
             groups[g].1.iter().map(|b| actions[*b].1.clone()).collect()
         };
@@ -23454,7 +23580,7 @@ pub(crate) mod tests {
                 fold(FoldScope::Seen, false)
             ]
         );
-        assert_eq!(of(1)[1], fold(FoldScope::Done, true));
+        assert_eq!(of(1), [fold(FoldScope::All, true)]);
         // Folding only shows them otherwise: it changes no feature.
         assert!(fold(FoldScope::All, true).reads_only());
         assert!(PanelOutcome::FoldCriterion(0, false).reads_only());
@@ -23466,7 +23592,7 @@ pub(crate) mod tests {
         let folds = actions
             .iter()
             .filter(|(_, o)| matches!(o, PanelOutcome::FoldCriteria(..)));
-        assert_eq!(folds.count(), 6);
+        assert_eq!(folds.count(), 4);
     }
 
     #[test]

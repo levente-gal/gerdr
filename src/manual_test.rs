@@ -1055,6 +1055,9 @@ impl Gerdr {
             (0, _) => "manual test comments",
             _ => "manual test failures and comments",
         };
+        // The user's comments go through a plan, even if one came since the
+        // button was shown: as findings with their words do.
+        let unplanned = unplanned && comments == 0;
         let started = match unplanned {
             false => self.send_to_build(project, slug, Stage::ManualTest, what, text),
             true => {

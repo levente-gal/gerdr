@@ -3997,9 +3997,11 @@ fn page_stack(
             _ => Vec::new(),
         })
         .collect();
-    let free: Vec<usize> = (0..page.buttons.len())
+    let mut free: Vec<usize> = (0..page.buttons.len())
         .filter(|i| !held.contains(i))
         .collect();
+    // The primary goes rightmost, as in dialogs.
+    free.sort_by_key(|&i| page.buttons[i].style == ButtonStyle::Primary);
     let widths: Vec<i32> = (free.iter())
         .map(|i| button_width(&page.buttons[*i].label))
         .collect();

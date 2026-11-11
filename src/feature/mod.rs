@@ -872,8 +872,9 @@ pub struct Feature {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unverified: Option<String>,
     /// The stage whose fixes took the flow back to Verify (Manual test's,
-    /// see `back_to_verify`): the rail draws the line back from it until
-    /// Verify is marked done again, or the marks clear some other way.
+    /// see `back_to_verify`): the rail draws the line back from it until the
+    /// flow is there again, and its page says it came back, until it is
+    /// marked done again or the marks clear some other way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub back_from: Option<Stage>,
     /// The machine that writes it, when that isn't this one: it is only shown
@@ -988,7 +989,9 @@ impl Feature {
     pub fn tick(&mut self, now: u64, by: &str, patch: Option<&str>) -> Option<Stage> {
         let stage = self.current()?;
         self.ran_once.remove(&stage);
-        if stage >= Stage::Verify {
+        // The loop back is over once the stage that turned it is passed
+        // again: until then the rail and its page say it is a round.
+        if self.back_from.is_some_and(|from| stage >= from) {
             self.back_from = None;
         }
         self.marks.insert(
