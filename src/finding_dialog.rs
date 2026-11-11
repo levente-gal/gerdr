@@ -844,9 +844,9 @@ mod tests {
         let view = suggestion(Ask::Edit, &["c"]).view();
         assert_eq!(view.action, "Save and accept");
         assert_eq!(view.fields[0].label, "Change");
-        assert_eq!(view.title, "Edit the change of r1-1");
+        assert_eq!(view.title, "Edit change of r1-1");
         let mut own = suggestion(Ask::Add, &[""]);
-        assert_eq!(own.view().title, "Add a suggestion");
+        assert_eq!(own.view().title, "Add suggestion");
         assert_eq!(press(&mut own, &none(), Keysym::Return), None);
         assert_eq!(own.error.as_deref(), Some(w.say_what));
         // Nothing a suggestion's dialog says speaks of fixing.

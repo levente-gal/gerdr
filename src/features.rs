@@ -11705,10 +11705,10 @@ impl Gerdr {
             FeatureTabHit::AgentModel => {
                 let mut spot = layout.agent_model?;
                 spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
-                Some(Tooltip::new(
-                    "The model its next start uses; an agent already open keeps its own",
-                    spot,
-                ))
+                let text = format!(
+                    "The model its next start uses; an agent already open keeps its own ({MODEL_KEY})"
+                );
+                Some(Tooltip::new(&text, spot))
             }
             FeatureTabHit::ReviewView(i) => {
                 let spots = layout.review_switch.as_ref()?;
@@ -27280,19 +27280,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn ctrl_shift_i_asks_for_the_model_on_an_agent_stage_only() {
+    fn alt_a_asks_for_the_model_on_an_agent_stage_only() {
         let f = feature("a", vec![repo("r", true)], 0);
         let mut panel = FeaturePanel {
             slug: "a".into(),
             ..FeaturePanel::default()
         };
+        // Alt+A: its own key, off the setup log's Ctrl+Shift+I.
         let mods = ModifiersState {
-            ctrl: true,
-            shift: true,
+            alt: true,
             ..ModifiersState::default()
         };
         let ctx = RowCtx::default();
-        let press = |p: &mut FeaturePanel| p.key(&mods, Keysym::I, &f, &[], ctx, &[], &[], &[]);
+        let press = |p: &mut FeaturePanel| p.key(&mods, Keysym::a, &f, &[], ctx, &[], &[], &[]);
         assert_eq!(
             press(&mut panel),
             Some(PanelOutcome::PickModel(Stage::Discover))
@@ -27352,7 +27352,7 @@ pub(crate) mod tests {
                 &[],
             )
         };
-        let shown = |hints: &[(String, String)]| hints.iter().any(|(k, _)| k == "Ctrl+Shift+I");
+        let shown = |hints: &[(String, String)]| hints.iter().any(|(k, _)| k == MODEL_KEY);
         assert!(shown(&hints(true)));
         assert!(!shown(&hints(false)));
     }

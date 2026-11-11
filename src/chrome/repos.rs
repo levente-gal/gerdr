@@ -2243,14 +2243,18 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         result_buttons.reverse();
     }
 
-    // The footer's actions, row by row from the left; the "more" button
-    // after the last row's.
+    // The footer's actions, row by row, centred as every footer's are; the
+    // "more" button after the last row's.
     let mut hints = Vec::new();
     let mut more = None;
     for (r, row) in rows.iter().enumerate() {
         let ry = footer_y + REPOS_FOOTER_PAD + r as i32 * REPOS_HINT_ROW;
         let by = ry + (REPOS_HINT_ROW - ROW_BUTTON) / 2;
-        let mut hx = inner_x;
+        let mut used: i32 = row.iter().map(|(_, hw)| hw + HINT_GAP).sum::<i32>() - HINT_GAP;
+        if r + 1 == rows.len() && !overflow.is_empty() {
+            used += HINT_GAP + more_width(overflow.len());
+        }
+        let mut hx = inner_x + (inner_w - used).max(0) / 2;
         for &(i, hw) in row {
             hints.push((i, Rectangle::new((hx, by).into(), (hw, ROW_BUTTON).into())));
             hx += hw + HINT_GAP;

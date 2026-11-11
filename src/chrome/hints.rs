@@ -153,8 +153,8 @@ pub fn hint_at(
 
 impl Painter {
     /// `hints` at their `spots` (see `hint_spots`): keycaps, then what
-    /// each does; the one at `hover` on a lighter ground, what it does
-    /// brighter.
+    /// each does, in the text colour (muted read too faint at the footer's
+    /// small size); the one at `hover` on a lighter ground.
     pub(super) fn hints(
         &self,
         c: &mut Canvas,
@@ -180,7 +180,7 @@ impl Painter {
             let hint_band = band(spot, scale);
             let pen = (x + HINT_GAP as f32 * s / 2.0).round();
             let end = self.keycaps(c, keys, pen, hint_band, scale, p);
-            let color = if hovered { p.text } else { p.muted };
+            let color = p.text;
             self.text(
                 c,
                 action,
