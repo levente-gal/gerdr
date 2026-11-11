@@ -1200,6 +1200,11 @@ pub fn from_diff(outcome: diff_view::Outcome) -> Outcome {
         D::Paste(put) => Outcome::Paste(put),
         D::UndoCut(file) => Outcome::UndoCut(file),
         D::RedoCut(file) => Outcome::RedoCut(file),
+        D::ShowCommit { root, oid } => Outcome::OpenCommit {
+            root,
+            line: oid.clone(),
+            oid,
+        },
         D::Toggle { .. } | D::Clear | D::ClearOutdated => Outcome::Notice("Done in the panel"),
     }
 }
@@ -3456,7 +3461,9 @@ impl Panel {
             | B::FixAllFindings
             | B::PlanFixes
             | B::MakeFixes
-            | B::ReviewFixPlan => Err(Why::other("Nothing to review here")),
+            | B::ReviewFixPlan
+            | B::AllChanges
+            | B::SinceReview => Err(Why::other("Nothing to review here")),
             B::All
             | B::CleanOnly
             | B::Cancel
@@ -4944,6 +4951,7 @@ impl Panel {
                     Err(Why::Other(why)) => Some(why),
                     _ => None,
                 },
+                style: Default::default(),
             })
             .collect()
     }
@@ -5302,6 +5310,7 @@ impl Panel {
                         label: button.label().into(),
                         key: key_name(button).into(),
                         disabled: None,
+                        style: Default::default(),
                     })
                     .collect(),
             }

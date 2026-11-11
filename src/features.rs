@@ -3340,7 +3340,9 @@ fn criterion_card(
     };
     let state = match (row.made, row.sent, row.retest) {
         (true, _, _) => format!("fix made: {again}"),
-        (false, true, _) => "sent to Build".to_owned(),
+        (false, true, _) => {
+            crate::feature::review_import::sent_word(false, row.planning).to_owned()
+        }
         (false, false, Some(n)) => format!("changed by fix round {n}: {again}"),
         (false, false, None) if row.comment && row.found == Some(Verdict::Fail) => {
             "open".to_owned()
@@ -6425,7 +6427,51 @@ pub fn page_actions(
         let style = ButtonStyle::Plain;
         out.push((PageButton { label, style }, PanelOutcome::HandBack));
     }
+    manual_order(feature, stage, ctx, &mut out);
     out
+}
+
+/// Manual test's buttons in the order of every page: its gate, Mark passed,
+/// last before the primary, which the layout puts rightmost. With nothing
+/// else to press, the primary is starting the sandbox the criteria are tried
+/// in, while none runs and some are left to try.
+fn manual_order(
+    feature: &Feature,
+    stage: Stage,
+    ctx: RowCtx,
+    out: &mut Vec<(PageButton, PanelOutcome)>,
+) {
+    use crate::manual_test::Outcome;
+    if !tries_criteria(feature, stage) {
+        return;
+    }
+    let mark = PanelOutcome::Manual(Outcome::MarkPassed);
+    if let Some(at) = out.iter().position(|(_, o)| *o == mark) {
+        let entry = out.remove(at);
+        out.push(entry);
+    }
+    let primary = out.iter().any(|(b, _)| b.style == ButtonStyle::Primary);
+    if !primary && ctx.manual.untested > 0 {
+        let start = (out.iter_mut()).find(|(_, o)| *o == PanelOutcome::StartSandbox);
+        if let Some((button, _)) = start {
+            button.style = ButtonStyle::Primary;
+        }
+    }
+}
+
+/// Why Manual test's Mark passed (Mark done, on someone else's pull request)
+/// is greyed: what must happen first.
+fn mark_tip(page: &chrome::StagePage, i: usize) -> Option<String> {
+    let button = page
+        .buttons
+        .get(i)
+        .filter(|b| b.style == ButtonStyle::Off)?;
+    let why = match button.label.as_str() {
+        "Mark passed" => "Every criterion passes first: pressed, it says which are left",
+        "Mark done" => "Every criterion is tried first: pressed, it says which are left",
+        _ => return None,
+    };
+    Some(why.to_owned())
 }
 
 /// Whether `feature`, written here, can go back to the machine it was taken
@@ -6666,10 +6712,11 @@ fn writers_page_actions(
             true => ("Mark passed", ctx.manual.untested == 0),
             false => ("Mark passed", ctx.manual.passed == ctx.criteria),
         };
-        // Not what comes next while criteria are left: it stays quiet.
+        // Greyed while criteria are left, saying why (`mark_tip`); it
+        // keeps its place, last before the primary (`page_actions`).
         let mark = match ready {
             true => style(true),
-            false => ButtonStyle::Quiet,
+            false => ButtonStyle::Off,
         };
         out.push((
             button(label, mark),
@@ -12100,6 +12147,7 @@ impl Gerdr {
             // The fold buttons over the criteria: what they fold, and the key.
             FeatureTabHit::PageButton(i) => {
                 let text = fold_tip(&view.page, i)
+                    .or_else(|| mark_tip(&view.page, i))
                     .or_else(|| self.ship_button_tip(i))
                     .or_else(|| {
                         let feature = self.panel_feature()?;
@@ -23422,7 +23470,7 @@ pub(crate) mod tests {
         assert_eq!(cards[2].fix, "Your fix: Mine\nThe reviewer's: Reviewer's");
         assert_eq!(cards[2].comment, "Careful");
         assert_eq!(cards[2].note, "");
-        assert_eq!(comment_labels(&view.page, cards[2]), ["Edit", "Delete"]);
+        assert_eq!(comment_labels(&view.page, cards[2]), ["Delete"]);
         // The user's own comes first.
         let yours = cards[0];
         assert_eq!(yours.tag, FindingTag::Yours);
@@ -23617,7 +23665,7 @@ pub(crate) mod tests {
             _ => None,
         });
         let (name, said, buttons) = card.expect("the round's card");
-        assert_eq!(name, "Review 1");
+        assert_eq!(name, "AI review run 1");
         assert_eq!(said.text, "1 fixed \u{b7} 1 raised again");
         assert_eq!(view.page.buttons[buttons[0]].label, "Show");
 
@@ -24290,9 +24338,9 @@ pub(crate) mod tests {
             (NodeMark::Waiting, "2 of 3 passed")
         );
         let actions = page_actions(&f, Stage::ManualTest, some);
-        assert_eq!(actions[0].0.label, "Mark passed");
-        // Not next while one is left: quiet, not a framed button.
-        assert_eq!(actions[0].0.style, ButtonStyle::Quiet);
+        // Not next while one is left: greyed, last, where the gate goes.
+        let last = actions.last().map(|(b, _)| (b.label.as_str(), b.style));
+        assert_eq!(last, Some(("Mark passed", ButtonStyle::Off)));
     }
 
     #[test]
@@ -24325,10 +24373,9 @@ pub(crate) mod tests {
                 .map(|(b, _)| b.label)
                 .collect()
         };
-        assert_eq!(
-            labels(ctx(2, 1, 0, 0))[..3],
-            ["Make fixes", "Plan fixes", "Mark passed"]
-        );
+        let sends = labels(ctx(2, 1, 0, 0));
+        assert_eq!(sends[..2], ["Make fixes", "Plan fixes"]);
+        assert_eq!(sends.last().map(String::as_str), Some("Mark passed"));
         // All sent: nothing to send, back to the criteria.
         assert!(!labels(ctx(2, 1, 1, 0)).contains(&"Plan fixes".to_owned()));
         assert_eq!(enter(ctx(2, 1, 1, 0)), Some(PanelOutcome::ManualTest));
@@ -24357,6 +24404,7 @@ pub(crate) mod tests {
             seen: false,
             shots: Vec::new(),
             comment: true,
+            planning: false,
         };
         let buttons = |row: &Row| -> Vec<(String, ButtonStyle, PanelOutcome)> {
             (criterion_buttons(2, row).into_iter())
@@ -24494,6 +24542,7 @@ pub(crate) mod tests {
             seen: false,
             shots: Vec::new(),
             comment: false,
+            planning: false,
         };
         let rows = vec![
             row(
@@ -24687,6 +24736,7 @@ pub(crate) mod tests {
             retest: None,
             shots: Vec::new(),
             comment: false,
+            planning: false,
         };
         let rows = vec![
             row(None, ""),
@@ -24846,6 +24896,7 @@ pub(crate) mod tests {
             retest: None,
             shots: Vec::new(),
             comment: false,
+            planning: false,
         };
         let rows = vec![
             row(Some(Verdict::Fail), true, true),
@@ -24981,6 +25032,7 @@ pub(crate) mod tests {
             retest: None,
             shots: Vec::new(),
             comment: false,
+            planning: false,
         };
         let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Pass))];
         let ctx = RowCtx {
@@ -25135,6 +25187,7 @@ pub(crate) mod tests {
             retest: None,
             shots: Vec::new(),
             comment: false,
+            planning: false,
         };
         let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Fail))];
         let ctx = RowCtx {

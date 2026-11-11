@@ -10,10 +10,11 @@
 //!
 //! Files with changes not committed: the diff shows them as they are on
 //! disk, which no committed blob is. Such a file can't be ticked (commit
-//! it first), and one ticked before reads as changed until its changes
-//! are committed and it is viewed again, or they are undone and its
-//! committed blob is still the one ticked. An untracked file has no
-//! committed blob at all: it can't be ticked either.
+//! it first), and one ticked before reads as not viewed ("not committed"),
+//! not as changed, while its committed blob is still the one ticked: its
+//! tick comes back once those changes are undone, and once committed the
+//! new blob makes it changed. An untracked file has no committed blob at
+//! all: it can't be ticked either.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -61,11 +62,14 @@ impl Viewed {
 
     /// The tick of file `key`, whose committed blob is `blob` (none for
     /// one not committed), `dirty` when it has changes not committed.
+    /// Changed only when another blob was committed: changes on disk alone
+    /// leave it unticked, as not committed, not changed since viewed.
     pub fn tick(&self, key: &str, blob: Option<&str>, dirty: bool) -> Tick {
-        match self.0.get(key) {
-            None => Tick::No,
-            Some(kept) if !dirty && Some(kept.as_str()) == blob => Tick::Yes,
-            Some(_) => Tick::Changed,
+        match (self.0.get(key), blob) {
+            (None, _) => Tick::No,
+            (Some(kept), Some(blob)) if kept != blob => Tick::Changed,
+            (Some(_), Some(_)) if !dirty => Tick::Yes,
+            (Some(_), _) => Tick::No,
         }
     }
 
@@ -129,11 +133,14 @@ pub struct Read {
     pub blobs: BTreeMap<String, String>,
     /// Paths with changes not committed, or untracked.
     pub dirty: BTreeSet<String>,
+    /// By path, for each file viewed on another committed blob than its
+    /// own now: what changed since, from the blob viewed to this one.
+    pub since_viewed: BTreeMap<String, FileDiff>,
 }
 
-/// Read `repo`'s worktree against its base (see `Read`); slow, run it off
-/// the UI thread.
-pub fn read(repo: &Repo) -> Result<Read, String> {
+/// Read `repo`'s worktree against its base (see `Read`), `kept` the blobs
+/// its files were viewed on, by path; slow, run it off the UI thread.
+pub fn read(repo: &Repo, kept: &BTreeMap<String, String>) -> Result<Read, String> {
     let dir = &repo.worktree;
     let target = base_ref(repo);
     let since = crate::git_ops::changes_since(dir, Some(&target))?;
@@ -150,12 +157,39 @@ pub fn read(repo: &Repo) -> Result<Read, String> {
     let blobs = parse_raw(&git_bytes(dir, &args, None)?);
     let status = ["status", "--porcelain", "-z", "--untracked-files=all"];
     let dirty = parse_status(&git_bytes(dir, &status, None)?);
+    let since_viewed = (since_viewed_files(kept, &blobs, &dirty).into_iter())
+        .filter_map(|(path, from, to)| {
+            let file = crate::git_ops::blob_diff(dir, &from, &to, &path)?;
+            Some((path, file))
+        })
+        .collect();
     Ok(Read {
         since,
         files,
         blobs,
         dirty,
+        since_viewed,
     })
+}
+
+/// The files of `kept` (viewed, by path, on a blob) whose committed blob in
+/// `blobs` is another now, with no changes in `dirty` on top: each with the
+/// blob viewed and the one now. Not one added or deleted since: that has
+/// no blob on one side.
+pub fn since_viewed_files(
+    kept: &BTreeMap<String, String>,
+    blobs: &BTreeMap<String, String>,
+    dirty: &BTreeSet<String>,
+) -> Vec<(String, String, String)> {
+    let none = |blob: &str| blob.bytes().all(|b| b == b'0');
+    (kept.iter())
+        .filter(|(path, _)| !dirty.contains(*path))
+        .filter_map(|(path, from)| {
+            let to = blobs.get(path)?;
+            (to != from && !none(to) && !none(from))
+                .then(|| (path.clone(), from.clone(), to.clone()))
+        })
+        .collect()
 }
 
 /// What the commits of the repository at `dir` from `from` to `to` (HEAD for
@@ -234,8 +268,11 @@ mod tests {
         assert_eq!(v.tick(&k, Some("b1"), false), Tick::Yes);
         // Committed again: changed since viewed.
         assert_eq!(v.tick(&k, Some("b2"), false), Tick::Changed);
-        // Changes not committed: changed too, and can't be ticked.
-        assert_eq!(v.tick(&k, Some("b1"), true), Tick::Changed);
+        // Changes not committed alone: not viewed, not changed; can't be
+        // ticked. Committed over them, changed.
+        assert_eq!(v.tick(&k, Some("b1"), true), Tick::No);
+        assert_eq!(v.tick(&k, Some("b2"), true), Tick::Changed);
+        assert_eq!(v.tick(&k, None, true), Tick::No);
         assert_eq!(v.toggle(&k, Some("b1"), true), Err(NOT_COMMITTED));
         assert_eq!(v.toggle(&k, None, false), Err(NOT_COMMITTED));
         // A changed one ticks again on its new blob; a ticked one unticks.
@@ -269,6 +306,34 @@ mod tests {
         assert_eq!(v.tick("a", Some("b1"), false), Tick::Yes);
         // None can be.
         assert_eq!(v.set_many(&files[2..]), Err(NOT_COMMITTED));
+    }
+
+    #[test]
+    fn only_files_committed_again_since_viewed_get_a_diff_since() {
+        let map = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+            pairs
+                .iter()
+                .map(|(a, b)| ((*a).into(), (*b).into()))
+                .collect()
+        };
+        let z = "0000000000000000000000000000000000000000";
+        let kept = map(&[
+            ("same", "b1"),
+            ("moved", "b2"),
+            ("dirty", "b3"),
+            ("gone", "b4"),
+        ]);
+        let blobs = map(&[
+            ("same", "b1"),
+            ("moved", "b9"),
+            ("dirty", "b8"),
+            ("gone", z),
+        ]);
+        let dirty = BTreeSet::from(["dirty".to_owned()]);
+        assert_eq!(
+            since_viewed_files(&kept, &blobs, &dirty),
+            [("moved".to_owned(), "b2".to_owned(), "b9".to_owned())]
+        );
     }
 
     #[test]

@@ -259,7 +259,7 @@ pub fn editable(of: ItemOf, id: &str, standing: Standing) -> Result<(), String> 
             Err(format!("{id} is dismissed: reopen it first"))
         }
         (ItemOf::Finding, Standing::Sent) => {
-            Err(format!("{id} was sent to Build: the next review checks it"))
+            Err(format!("{id} is being fixed: the next review checks it"))
         }
         (ItemOf::Finding, Standing::Fixed) => Err(format!("{id} is fixed already")),
         (_, Standing::Posted) => Err(format!("{id} is on GitHub already")),

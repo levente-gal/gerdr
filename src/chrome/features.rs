@@ -2092,6 +2092,8 @@ const PICK_OFF: f32 = 0.5;
 const PICK_LABEL: i32 = 48;
 /// The room after a chip's name.
 const PICK_NAME_PAD: i32 = 8;
+/// How far a chip's name starts back inside its logo's room, close to it.
+const PICK_NAME_IN: i32 = 4;
 /// The widest the button picking an agent's model gets.
 const AGENT_MODEL_MAX: i32 = 220;
 /// Build's milestone choice: its segments' words.
@@ -7492,8 +7494,8 @@ impl Painter {
                         // Its name, where the row has room for it.
                         if rect.size.w > PICK_CHIP {
                             let label = Rectangle::new(
-                                (rect.loc.x + PICK_CHIP - 4, rect.loc.y).into(),
-                                (rect.size.w - PICK_CHIP + 4, rect.size.h).into(),
+                                (rect.loc.x + PICK_CHIP - PICK_NAME_IN, rect.loc.y).into(),
+                                (rect.size.w - PICK_CHIP + PICK_NAME_IN, rect.size.h).into(),
                             );
                             line(c, &chip.name, label, SMALL_FONT_SIZE, tint);
                         }

@@ -204,6 +204,8 @@ pub const EVIDENCE_READ_ONLY: &str = "The evidence is only read";
 pub const ALL_DONE: &str = "Every stage is done";
 /// Why Alt+Shift+Down or Up did nothing.
 pub const ALL_VIEWED: &str = "Every file is viewed";
+/// Why Shift+A does nothing: no file viewed before changed since.
+pub const NOTHING_SINCE: &str = "No file you viewed changed since: all its changes show";
 /// Why Send back does nothing yet.
 pub const NO_COMMENT: &str = "Add a comment first";
 /// Why Approve or Send back wait.
@@ -1209,6 +1211,7 @@ impl WorktreeDiff {
         if self.doc.is_some() || self.feature.is_some() {
             self.doc_view(&mut view);
         }
+        crate::chrome::mark_primary(&mut view.title_buttons);
         view
     }
 
@@ -1233,6 +1236,7 @@ impl WorktreeDiff {
             label: button.label().into(),
             key: key.into(),
             disabled: None,
+            style: Default::default(),
         };
         if self.evidence() {
             return;
@@ -1339,6 +1343,7 @@ impl WorktreeDiff {
                         .and_then(|gate| crate::feature_diff::approve_refusal(&gate)),
                     _ => disabled,
                 },
+                style: Default::default(),
             })
             .collect()
     }
@@ -1427,6 +1432,9 @@ impl WorktreeDiff {
                 }),
                 Keysym::c | Keysym::C if mods.shift && !mods.ctrl => Some(B::AddComment),
                 Keysym::f | Keysym::F if mods.shift && !mods.ctrl => Some(B::FixAllFindings),
+                Keysym::a | Keysym::A if mods.shift && !mods.ctrl => {
+                    return self.toggle_scope(env);
+                }
                 _ => None,
             };
             if let Some(button) = button {
@@ -1534,7 +1542,7 @@ impl WorktreeDiff {
             buttons.extend([B::CopyReview, B::ClearReview]);
         }
         buttons.extend([B::Help, B::Close]);
-        buttons
+        let mut hints: Vec<Hint> = buttons
             .into_iter()
             .map(|button| Hint {
                 button,
@@ -1598,8 +1606,64 @@ impl WorktreeDiff {
                 disabled: (feature_hints.iter())
                     .find(|hint| hint.button == button)
                     .and_then(|hint| hint.disabled.clone()),
+                style: Default::default(),
             })
-            .collect()
+            .collect();
+        // On a finding or suggestion, what its buttons decide, by their
+        // words ("f accept", "Del reject…"), after the comment's hint.
+        let decide = (self.diff.finding_buttons().into_iter())
+            .filter(|h| h.button != B::Comment)
+            .map(|h| Hint {
+                label: h.label.to_lowercase(),
+                ..h
+            });
+        let at = hints
+            .iter()
+            .position(|h| h.button == B::Comment)
+            .map_or(0, |i| i + 1);
+        hints.splice(at..at, decide);
+        hints
+    }
+
+    /// A feature's code review switched between what changed since the
+    /// last review and all its changes (`FeatureOf::since`): the files viewed
+    /// and unchanged fold with the first and open with the second.
+    fn toggle_scope(&mut self, env: Env) -> Option<Done> {
+        if !self.read {
+            let still = crate::feature_diff::STILL_READING;
+            return Some(Done::Diff(Outcome::Notice(still)));
+        }
+        let fe = self.feature.as_mut()?;
+        if fe.scope_button().is_none() {
+            return Some(Done::Diff(Outcome::Notice(NOTHING_SINCE)));
+        }
+        fe.since = !fe.since;
+        let fold = crate::feature_diff::since_review(fe);
+        let shown: Vec<(PathBuf, Vec<FileDiff>)> = (fe.repos.iter())
+            .filter(|r| r.error.is_none())
+            .map(|r| {
+                (
+                    r.root.clone(),
+                    fe.shown_files(r, &self.diff.review.comments),
+                )
+            })
+            .collect();
+        match fe.since {
+            true => self.diff.folded.extend(fold),
+            false => {
+                for file in &fold {
+                    self.diff.folded.remove(file);
+                }
+            }
+        }
+        self.with_diff(env, |diff, ctx| {
+            let reads = diff.reads;
+            for (root, files) in shown {
+                diff.set_diffs(root, reads, files, ctx);
+            }
+        });
+        self.place_findings(env);
+        None
     }
 
     /// A click on `hit`, in the panel; the sheet takes them while open.
@@ -1621,6 +1685,9 @@ impl WorktreeDiff {
         }
         if self.feature.is_some() {
             match hit {
+                ReposHit::Button(ReposButton::AllChanges | ReposButton::SinceReview) => {
+                    return self.toggle_scope(env);
+                }
                 ReposHit::Button(
                     button @ (ReposButton::Approve
                     | ReposButton::PlanFixes
@@ -1997,6 +2064,26 @@ impl crate::Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// Show commit `oid` of a feature's repository at `root`, where a comment's
+    /// fix was made, read-only over the feature's review: closing it goes
+    /// back to the feature's page.
+    fn open_fix_commit(&mut self, root: PathBuf, oid: String) {
+        let label = (self.wd().and_then(|wd| wd.feature.as_ref()))
+            .and_then(|fe| fe.repos.iter().find(|r| r.root == root))
+            .map_or_else(|| root.display().to_string(), |r| r.name.clone());
+        if self.repos.worktree.is_some() {
+            self.close_worktree_diff();
+        }
+        self.tooltip.hide();
+        self.chrome.drop_tooltip();
+        let line = format!("{oid} \u{b7} where the fix was made");
+        let commit = CommitOf { oid, line };
+        let wd = WorktreeDiff::of_commit(root, label, commit, self.active_workspace);
+        self.repos.worktree = Some(wd);
+        self.worktree_diff_read();
+        self.refresh_pointer_focus();
+    }
+
     /// The reviews of worktrees' diffs: read when first wanted, those of
     /// worktrees gone, on another branch or too old dropped.
     fn worktree_reviews(&mut self) -> &mut crate::review::Worktrees {
@@ -2254,6 +2341,10 @@ impl crate::Gerdr {
             }
             Done::Diff(Outcome::Toggle { root, path }) if feature => {
                 self.feature_toggle(&root, &path);
+                None
+            }
+            Done::Diff(Outcome::ShowCommit { root, oid }) if feature => {
+                self.open_fix_commit(root, oid);
                 None
             }
             Done::TickFiles { root, paths } => {

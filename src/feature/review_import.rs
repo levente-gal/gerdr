@@ -685,7 +685,7 @@ pub fn decide(review: &mut AiReview, id: &str, decision: &Decision) -> Result<St
         }
         (Decision::Fix, S::Fix) => Err(format!("{id} is to be fixed already")),
         (Decision::Fix | Decision::Reopen, S::Sent) => {
-            Err(format!("{id} was sent to Build: the next review checks it"))
+            Err(format!("{id} is being fixed: the next review checks it"))
         }
         (Decision::Dismiss(why), S::Open | S::Fix | S::Sent) => {
             f.state = S::Dismissed;

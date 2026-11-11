@@ -2424,7 +2424,7 @@ esac
         assert_eq!(reading.commits["api"], 2, "a1 and the merge");
         let stat = super::super::page::stat(&f.repos[0]).unwrap();
         assert_eq!((stat.files, stat.added), (1, 1));
-        let read = super::super::viewed::read(&f.repos[0]).unwrap();
+        let read = super::super::viewed::read(&f.repos[0], &Default::default()).unwrap();
         let paths: Vec<_> = read.blobs.keys().collect();
         assert_eq!(paths, ["a1"]);
 

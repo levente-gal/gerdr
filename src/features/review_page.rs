@@ -169,10 +169,16 @@ fn review_empty(feature: &Feature, stage: Stage) -> Vec<CheckLine> {
     let Some(review) = review.filter(|r| !r.findings.is_empty()) else {
         return vec![line(format!("no {}", w.items), CheckTone::Ready)];
     };
+    let planning = feature::fix_round::planning(feature.fix_round.as_ref(), Stage::AiReview);
+    let sent_word = crate::feature::review_import::sent_word;
     let states = [
         (FindingState::Open, "to decide", CheckTone::Blocker),
         (FindingState::Fix, "to fix", CheckTone::Blocker),
-        (FindingState::Sent, "sent to Build", CheckTone::Note),
+        (
+            FindingState::Sent,
+            sent_word(false, planning),
+            CheckTone::Note,
+        ),
         (FindingState::Fixed, "fixed", CheckTone::Ready),
         (FindingState::Dismissed, "dismissed", CheckTone::Note),
     ];
@@ -248,7 +254,7 @@ fn archive(
     let mut sections = Vec::new();
     for round in earlier_reviews(feature, stage) {
         sections.push(PageSection::File {
-            name: format!("Review {}", round.n),
+            name: format!("AI review run {}", round.n),
             state: line(round_count(round), CheckTone::Note),
             buttons: (actions.iter().enumerate())
                 .filter(|(_, (_, o))| *o == PanelOutcome::FoldRound(round.n))

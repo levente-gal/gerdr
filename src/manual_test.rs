@@ -96,6 +96,9 @@ pub struct Row {
     pub note: String,
     /// The failure went to the Build agent.
     pub sent: bool,
+    /// Sent, its fix plan is still made or waits for the user: it says "in
+    /// fix plan", not "being fixed" (`review_import::sent_word`).
+    pub planning: bool,
     /// The Build agent made the fix of the failure: to try again.
     pub made: bool,
     /// It was tried on other code than the feature's now.
@@ -235,6 +238,7 @@ fn rows(
                     .filter(|k| k.state == Verdict::Fail)
                     .map_or_else(Vec::new, |k| k.shots.clone()),
                 comment: c.comment,
+                planning: false,
             }
         })
         .collect()
@@ -242,7 +246,8 @@ fn rows(
 
 /// How far the manual test of `criteria` went, in words: "2 of 3
 /// criteria passed · 1 failed", "1 of 3 criteria passed · 1 failure
-/// sent to Build", "… · 1 fix made: try again", "… · 1 comment open".
+/// being fixed" (or "in fix plan"), "… · 1 fix made: try again", "… · 1
+/// comment open".
 pub(crate) fn counts_text(n: manual::Counts) -> String {
     let total = n.total() - n.comments();
     let what = if total == 1 { "criterion" } else { "criteria" };
@@ -263,9 +268,10 @@ pub(crate) fn counts_text(n: manual::Counts) -> String {
     if n.made > 0 {
         parts.push(format!("{} made: try again", fixes(n.made)));
     } else if n.failed > 0 && n.sent == n.failed {
+        let word = crate::feature::review_import::sent_word(false, n.planning);
         parts.push(match sent_what {
-            "" => format!("{} sent to Build", n.sent),
-            what => format!("{} sent to Build", plural(n.sent, what)),
+            "" => format!("{} {word}", n.sent),
+            what => format!("{} {word}", plural(n.sent, what)),
         });
     } else {
         if failed > 0 {
@@ -393,7 +399,9 @@ impl Gerdr {
         if criteria.is_empty() {
             return None;
         }
-        Some(manual::counts(f.manual.as_ref(), criteria))
+        let mut n = manual::counts(f.manual.as_ref(), criteria);
+        n.planning = feature::fix_round::planning(f.fix_round.as_ref(), Stage::ManualTest);
+        Some(n)
     }
 
     /// The cards of feature `f`'s criteria, telling the ones tried on other
@@ -404,12 +412,17 @@ impl Gerdr {
             true => None,
             false => self.manual_patch(&f.project, &f.slug),
         };
-        rows(
+        let planning = feature::fix_round::planning(f.fix_round.as_ref(), Stage::ManualTest);
+        let mut rows = rows(
             f.manual.as_ref(),
             self.criteria(&f.project, &f.slug),
             patch.as_deref(),
             self.projects.criteria_folds.get(&folds_key(&f.project, &f.slug)),
-        )
+        );
+        for row in rows.iter_mut().filter(|r| r.sent) {
+            row.planning = planning;
+        }
+        rows
     }
 
     /// Change the folds of feature `slug`'s criteria by `change`, which
@@ -1299,6 +1312,7 @@ mod tests {
             seen: false,
             shots: Vec::new(),
             comment: false,
+            planning: false,
         }
     }
 
@@ -1319,7 +1333,7 @@ mod tests {
         assert_eq!(counts_text(n(0, 0, 0, 1)), "0 of 1 criterion passed");
         assert_eq!(
             counts_text(n(1, 1, 1, 1)),
-            "1 of 3 criteria passed \u{b7} 1 failure sent to Build"
+            "1 of 3 criteria passed \u{b7} 1 failure being fixed"
         );
         let made = manual::Counts {
             made: 1,
@@ -1369,11 +1383,11 @@ mod tests {
         );
         assert_eq!(
             counts_text(n(2, 1, 1, 0, 0, 1)),
-            "2 of 2 criteria passed \u{b7} 1 comment sent to Build"
+            "2 of 2 criteria passed \u{b7} 1 comment being fixed"
         );
         assert_eq!(
             counts_text(n(1, 2, 2, 0, 0, 1)),
-            "1 of 2 criteria passed \u{b7} 2 sent to Build"
+            "1 of 2 criteria passed \u{b7} 2 being fixed"
         );
         // Only comments, all done.
         assert_eq!(counts_text(n(2, 0, 0, 0, 2, 0)), "2 comments done");
