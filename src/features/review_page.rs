@@ -13,7 +13,11 @@
 
 use crate::feature::review_items::words_in;
 use super::*;
-use crate::{chrome::ReviewSummary, feature::review_items::Standing, review_cards::card_tag};
+use crate::{
+    chrome::ReviewSummary,
+    feature::review_items::Standing,
+    review_cards::{card_tag, page_card},
+};
 
 /// Whether `stage` is a review stage whose page this lays out.
 pub(super) fn is_review_stage(stage: Stage) -> bool {
@@ -97,19 +101,41 @@ fn item_sections(
     let decided = (w_items.iter())
         .filter(|i| i.standing() != Standing::Open)
         .count();
+    let refused = (w_items.iter())
+        .filter(|i| i.standing() == Standing::Dismissed)
+        .count();
     let tags: Vec<FindingTag> = cards.iter().map(|c| card_tag(*c)).collect();
     let mut counts: Vec<(FindingTag, usize)> = Vec::new();
-    for tag in &tags {
+    let mut open: Vec<usize> = Vec::new();
+    for (card, tag) in cards.iter().zip(&tags) {
+        let undecided = card.item().is_some_and(|i| i.standing() == Standing::Open);
         match counts.last_mut() {
             Some((last, n)) if last == tag => *n += 1,
-            _ => counts.push((*tag, 1)),
+            _ => {
+                counts.push((*tag, 1));
+                open.push(0);
+            }
+        }
+        if let Some(n) = open.last_mut() {
+            *n += usize::from(undecided);
         }
     }
     let want_all = want_all_outcome(stage);
+    // Past the first run, which one this is: cards say what it changed.
+    let run = match stage {
+        Stage::PlanReview => feature.plan_review.as_ref().map(|r| r.n),
+        _ => feature.review.as_ref().map(|r| r.n),
+    };
+    let label = match run {
+        Some(n) if n > 1 => format!("{} \u{b7} run {n}", w.heading),
+        _ => w.heading.to_owned(),
+    };
     let summary = ReviewSummary {
-        label: w.heading.to_owned(),
-        counts: counts.clone(),
+        label,
+        counts,
+        open,
         decided,
+        refused,
         total: w_items.len(),
         words: items_count(feature, stage),
         notes: review_notes(feature, stage, mark, state),
@@ -119,20 +145,11 @@ fn item_sections(
     };
     let mut sections = vec![PageSection::Review(summary)];
     let multi = feature.many_repos();
-    // A heading over each tag's cards, as the summary counts them.
-    let mut last = None;
-    for (card, tag) in cards.into_iter().zip(tags) {
-        if last != Some(tag) {
-            let n = counts
-                .iter()
-                .find(|(t, _)| *t == tag)
-                .map_or(0, |(_, n)| *n);
-            let word = tag.word().unwrap_or_default();
-            sections.push(PageSection::Heading(format!("{word} \u{b7} {n}")));
-            last = Some(tag);
-        }
+    // No heading per severity: the summary's pills and each card's pill say
+    // it, and a pill goes to its first card.
+    for card in cards {
         let mut card = match card {
-            ReviewCard::Item(item) => item_card(item, multi, actions, feature.posts_review()),
+            ReviewCard::Item(item) => page_card(feature, item, actions),
             ReviewCard::DiffNote(c) => note_card(c, multi, actions),
         };
         card.folds = true;
@@ -188,9 +205,22 @@ fn review_notes(
         )),
         _ => {}
     }
-    let writing = (feature.plan_review.as_ref()).is_some_and(|r| r.writing);
-    if stage == Stage::PlanReview && writing && plan_review_open(feature, stage) {
-        notes.push(line(SUGGESTIONS_WRITING, CheckTone::Note));
+    let review = feature.plan_review.as_ref().filter(|_| stage == Stage::PlanReview);
+    let writing = review.is_some_and(|r| r.writing);
+    if writing && plan_review_open(feature, stage) {
+        // Once written it is no longer being written: it waits for review.
+        let note = match state.ctx.wrote(stage) {
+            true => FINAL_WRITTEN,
+            false => SUGGESTIONS_WRITING,
+        };
+        notes.push(line(note, CheckTone::Note));
+    }
+    if review.is_some_and(|r| r.asked) && plan_review_open(feature, stage) {
+        let who = (feature.runs.get(&stage)).map_or("the reviewer", |r| r.agent.as_str());
+        notes.push(line(
+            format!("Asked {who} about your notes: waiting for its answer, the next run"),
+            CheckTone::Note,
+        ));
     }
     // Make fixes is gone: not with no word of why.
     if sends_findings(feature, stage, state.ctx) == Some(PanelOutcome::SendFixes) {
@@ -200,6 +230,11 @@ fn review_notes(
     }
     notes
 }
+
+/// What the suggestions' line says once the final plan was written from
+/// them: it waits for the user's review above.
+const FINAL_WRITTEN: &str =
+    "The final plan above was written from these: Change decisions\u{2026} to change them";
 
 /// What came before the latest review: each of AI review's earlier ones, a
 /// file card folded unless `state` shows it.
@@ -241,29 +276,57 @@ pub(super) fn review_page_actions(
         return Vec::new();
     }
     let w = words_in(stage_items(stage), feature.posts_review());
-    let button = |label: &str| PageButton {
+    let button = |label: &str, on: bool| PageButton {
         label: label.to_owned(),
-        style: ButtonStyle::Plain,
+        style: match on {
+            true => ButtonStyle::Plain,
+            false => ButtonStyle::Off,
+        },
     };
     let mut out = Vec::new();
-    if offers_fix_all(feature, stage) {
-        out.push((button(w.want_all), want_all_outcome(stage)));
+    // The buttons stay while their items can be decided, greyed once there
+    // is nothing for them to do: pressed, they say why, and none shifts.
+    if can_decide(feature, stage) {
+        out.push((
+            button(w.want_all, offers_fix_all(feature, stage)),
+            want_all_outcome(stage),
+        ));
+    }
+    // Once the findings are decided the page's next step takes its place:
+    // the diff is still there to read them in.
+    let in_diff = stage == Stage::AiReview
+        && review_read(feature, stage)
+        && (feature.review.as_ref()).is_some_and(|r| {
+            r.count(FindingState::Open) == 0 && r.findings.iter().any(|f| !f.file.is_empty())
+        });
+    if in_diff {
+        out.push((button("Review in diff", true), PanelOutcome::Findings));
     }
     if can_add_comment(feature, stage) {
-        out.push((button(w.add_own), PanelOutcome::AddComment));
+        out.push((button(w.add_own, true), PanelOutcome::AddComment));
     }
     if plan_review_open(feature, stage) {
         let deciding = crate::feature_plan_review::deciding(feature);
-        if deciding.is_some_and(|r| !feature::plan_review::notes(r).is_empty()) {
-            out.push((button("Ask reviewer"), PanelOutcome::AskReviewer));
+        let review = feature.plan_review.as_ref();
+        if let Some(r) = deciding {
+            // Asked already, it waits for the answer.
+            let asks = !feature::plan_review::notes(r).is_empty() && !r.asked;
+            out.push((button("Ask reviewer", asks), PanelOutcome::AskReviewer));
         }
-        if feature.plan_review.as_ref().is_some_and(|r| r.writing) {
+        let writing = review.is_some_and(|r| r.writing);
+        if writing {
             out.push((
-                button("Change decisions\u{2026}"),
+                button("Change decisions\u{2026}", true),
                 PanelOutcome::ChangeDecisions,
             ));
         }
-        out.push((button("Skip review"), PanelOutcome::SkipPlanReview));
+        // Skipping is for a review not worth deciding: not once all is
+        // decided, nor while the final plan is written or waits.
+        let all_decided =
+            deciding.is_some_and(|r| r.open() == 0 && !r.suggestions.is_empty());
+        if !writing && !all_decided {
+            out.push((button("Skip review", true), PanelOutcome::SkipPlanReview));
+        }
     }
     out
 }

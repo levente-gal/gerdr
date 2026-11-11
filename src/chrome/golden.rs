@@ -4871,26 +4871,26 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
             PageSection::Review(super::ReviewSummary {
                 label: "Findings".into(),
                 counts: vec![(FindingTag::High, 1), (FindingTag::Medium, 1)],
+                open: vec![0, 0],
                 decided: 2,
+                refused: 0,
                 total: 2,
-                words: "1 sent to Build \u{b7} 1 fix made".into(),
+                words: "1 being fixed \u{b7} 1 fix made".into(),
                 notes: vec![tab_line(
                     "From the last review. The code has changed since.",
                     CheckTone::Note,
                 )],
                 buttons: Vec::new(),
             }),
-            PageSection::Heading("high \u{b7} 1".into()),
             card(
                 FindingTag::High,
                 "Retry stops one short",
-                "sent to Build",
+                "being fixed",
                 "r2-1 \u{b7} login.py:6",
                 "Fix: Stop at n.",
                 false,
                 vec![0],
             ),
-            PageSection::Heading("medium \u{b7} 1".into()),
             card(
                 FindingTag::Medium,
                 "Empty name logs in",
@@ -6242,7 +6242,7 @@ fn dump_feature_tab() {
 /// The feature tab on AI review with a card of each kind, in the page's order:
 /// the user's own, a finding to decide, one dismissed and closed, and one to
 /// fix with the keyboard.
-/// A review page's summary, then `cards` under a heading per tag, as
+/// A review page's summary, then `cards`, as
 /// `features::review_page` lays them out; `want_all` its button.
 fn review_sections(
     page: &mut super::StagePage,
@@ -6277,25 +6277,18 @@ fn review_sections(
         .collect();
     page.sections.push(PageSection::Review(ReviewSummary {
         label: label.into(),
-        counts: counts.clone(),
+        counts,
+        open: Vec::new(),
         decided,
+        refused: 0,
         total,
         words: words.into(),
         notes,
         buttons,
     }));
-    let mut last = None;
     for mut card in cards {
-        // As `features::review_page` has them: each folds.
+        // As `features::review_page` has them: each folds, with no heading.
         card.folds = true;
-        if last != Some(card.tag) {
-            let n = counts.iter().find(|(t, _)| *t == card.tag).map_or(0, |c| c.1);
-            page.sections.push(PageSection::Heading(format!(
-                "{} \u{b7} {n}",
-                card.tag.word().unwrap_or_default()
-            )));
-            last = Some(card.tag);
-        }
         page.sections.push(PageSection::Finding(card));
     }
 }
@@ -6343,7 +6336,7 @@ fn tab_findings() -> super::FeatureTabView {
         ),
         (
             &[
-                "Don't fix",
+                "Reopen",
                 "Edit fix\u{2026}",
                 "Dismiss\u{2026}",
                 "Show in diff",
@@ -6844,7 +6837,7 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
     );
     let risk = offers(
         &[
-            "Don't accept",
+            "Reopen",
             "Edit change\u{2026}",
             "Reject\u{2026}",
             "Show in plan",
@@ -7064,7 +7057,7 @@ fn doc_suggestions() -> super::ReposView {
         tone,
         within: None,
     };
-    view.title = "Plan review \u{b7} plan.md".into();
+    view.title = "Review in plan \u{b7} plan.md".into();
     view.summary =
         "\u{201c}Log in with a password\u{201d} \u{b7} 1 to decide \u{b7} 2 accepted \u{b7} 1 rejected"
             .into();

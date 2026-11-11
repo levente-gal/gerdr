@@ -249,6 +249,19 @@ pub fn span(round: &FixRound) -> Vec<(String, String, Option<String>)> {
         .collect()
 }
 
+/// Whether `round`, the feature's open fix round, still has its plan to
+/// make for what `stage` asked: what went to it waits on the plan, not on
+/// the agent's fixes ("in fix plan", not "being fixed").
+pub fn planning(round: Option<&FixRound>, stage: Stage) -> bool {
+    round.is_some_and(|r| {
+        r.stage == stage
+            && matches!(
+                r.phase,
+                FixPhase::Compacting | FixPhase::Planning | FixPhase::Ready
+            )
+    })
+}
+
 impl FixRound {
     /// Unix seconds it was over: its fixes made, or dropped.
     pub fn over_at(&self) -> Option<u64> {

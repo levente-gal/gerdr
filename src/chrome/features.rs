@@ -932,8 +932,13 @@ pub struct ReviewSummary {
     pub label: String,
     /// How many cards of each tag, those with any, in the cards' order.
     pub counts: Vec<(FindingTag, usize)>,
-    /// How many items are decided, of how many.
+    /// How many of `counts`' cards are still to decide, tag by tag: its
+    /// pill says that many, and fades once none is.
+    pub open: Vec<usize>,
+    /// How many items are decided, of how many; `refused` of the decided
+    /// were refused (dismissed, rejected), which the bar shows apart.
     pub decided: usize,
+    pub refused: usize,
     pub total: usize,
     /// "4 to decide · 1 to fix".
     pub words: String,
@@ -2144,6 +2149,13 @@ pub(super) enum Piece {
     },
     /// The milestones' progress.
     Bar { done: usize, total: usize },
+    /// How many of a review's items are decided: those wanted, then those
+    /// refused, each its own colour.
+    ReviewBar {
+        wanted: usize,
+        refused: usize,
+        total: usize,
+    },
     /// A milestone: done, the next one, or one still to come. One `running`
     /// blinks (see `feature_tab_blinkers`).
     Milestone {
@@ -2704,11 +2716,16 @@ impl Stack {
         // The pills in rows, as wide as their words.
         let (left, right) = (self.x, self.x + self.w);
         let mut x = left;
-        for (tag, n) in &summary.counts {
+        for (i, (tag, n)) in summary.counts.iter().enumerate() {
             let Some(word) = tag.word() else {
                 continue;
             };
-            let text = format!("{n} {word}");
+            // What is left to decide of it; all decided, its pill fades.
+            let open = summary.open.get(i).copied().unwrap_or(*n);
+            let text = match open {
+                0 => format!("{word} \u{2713}"),
+                open => format!("{open} {word}"),
+            };
             let w = pill_width(*tag, &text);
             if x > left && x + w > right {
                 (x, self.y) = (left, self.y + TAIL_LINE + FINDING_GAP);
@@ -2717,7 +2734,7 @@ impl Stack {
                 Rectangle::new((x, self.y).into(), (w, TAIL_LINE).into()),
                 Piece::TagPill {
                     tag: *tag,
-                    faded: false,
+                    faded: open == 0,
                     text,
                     jump: true,
                 },
@@ -2730,8 +2747,9 @@ impl Stack {
         if summary.total > 0 {
             self.put(
                 PROGRESS,
-                Piece::Bar {
-                    done: summary.decided,
+                Piece::ReviewBar {
+                    wanted: summary.decided.saturating_sub(summary.refused),
+                    refused: summary.refused,
                     total: summary.total,
                 },
             );
@@ -7090,6 +7108,32 @@ impl Painter {
                     c.rounded(x, y, (w * f).max(h), h, h / 2.0, p.accent);
                 }
             }
+            Piece::ReviewBar {
+                wanted,
+                refused,
+                total,
+            } => {
+                // Wanted in the done colour, refused after it muted: both
+                // decided, neither in the selection's blue.
+                let (x, y, w, h) = rect_px(rect, scale);
+                c.rounded(x, y, w, h, h / 2.0, p.element);
+                let done = (*wanted + *refused).min(*total);
+                if *total > 0 && done > 0 {
+                    let f = done as f32 / *total as f32;
+                    c.rounded(
+                        x,
+                        y,
+                        (w * f).max(h),
+                        h,
+                        h / 2.0,
+                        mix(p.element, p.muted, 0.6),
+                    );
+                }
+                if *total > 0 && *wanted > 0 {
+                    let f = (*wanted).min(*total) as f32 / *total as f32;
+                    c.rounded(x, y, (w * f).max(h), h, h / 2.0, p.success);
+                }
+            }
             Piece::ItemMark(mark) => {
                 let spot = Rectangle::new((rect.loc.x, rect.loc.y + 4).into(), (14, 14).into());
                 match mark {
@@ -10164,7 +10208,9 @@ mod tests {
             PageSection::Review(ReviewSummary {
                 label: "Findings".into(),
                 counts: vec![(FindingTag::High, 1), (FindingTag::Low, 1)],
+                open: vec![1, 0],
                 decided: 1,
+                refused: 0,
                 total: 2,
                 words: "1 to decide \u{b7} 1 to fix".into(),
                 notes: Vec::new(),

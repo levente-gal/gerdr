@@ -364,6 +364,39 @@ press and drag pick whole rows and a double click opens the line in Zed.
   at, reviews asked for. A finished agent is listed in the inbox, not counted.
 - AI review's and Plan review's pages share one layout
   (`features/review_page.rs`): the agent's card, what the stage made (Plan
-  review's final plan), a summary (a pill per severity that goes to its first
-  card, a bar of how many are decided, the "all open" button), then the cards
-  under a heading per severity, the user's own first, then earlier reviews.
+  review's final plan), a summary (its run past the first, a pill per
+  severity saying how many are still to decide, faded once none is, that
+  goes to its first card; a bar of how many are decided, wanted in the done
+  colour and refused muted after it; the "all open" button), then the cards,
+  the user's own first, then earlier reviews. No heading per severity: the
+  pills and each card's pill say it.
+- A review card says where it stands in a word on every card ("to decide"
+  too), and folds to its line once decided, whatever the decision, so what
+  is left to decide stands out; selected, it opens. Its first button is the
+  decision (Fix, Accept; Reopen once decided, the one word for taking any
+  decision back), filled on the selected card, the page's one primary while
+  the keyboard is on the cards. The same order holds on a flag in the plan
+  or the diff: decision, comment, edit, refuse. Pressing a card's button
+  selects the card. A card the latest run raised, past the first, says so:
+  "new in run 2", "changed in run 2", "raised again in run 2". The user's
+  wording of a change shows over the reviewer's, which stays to read.
+- A page's buttons for its items stay while they can be decided, greyed
+  with why once there is nothing for them to do, so none shifts: Fix all
+  open / Accept all open, Review in diff, Ask reviewer. Ask reviewer waits,
+  greyed, for the reviewer's answer once asked, and the page says so. Skip
+  review is offered only while suggestions are still to decide. The plan's
+  "Review in plan" tab (one name for its button, tab and heading) greys its
+  final plan button by the same rule as the page.
+- The words for where a finding (or a comment sent to Build) stands, on
+  every surface: "to decide", "to fix", "in fix plan" (its plan is written
+  or waits), "being fixed" (the fixes went), "fix made", "fixed" (the next
+  review didn't raise it), "dismissed". A question answered says
+  "answered", and answering it accepts it.
+- A file's toolbar under review has its one filled button rightmost: Send
+  back once a comment is written, else Approve. Code review's line over the
+  page does the same: Plan fixes past a greyed Approve while comments wait.
+- A diff's line actions sit right after the line's text, and over several
+  lines say how many ("Copy 17 lines"). A decided finding or suggestion in a
+  diff shows its first line. Back on Code review after fixes changed files
+  already viewed, the files viewed and unchanged open folded, and a file's
+  line in the list says "changed" when it changed since viewed.

@@ -2022,12 +2022,17 @@ impl Gerdr {
             return false;
         };
         feature.runs.insert(stage, run);
+        // Plan review's agent writing the final plan is named for that work,
+        // not as the reviewer.
+        let who = match stage {
+            Stage::PlanReview if feature.plan_review.as_ref().is_some_and(|r| r.writing) => {
+                "Final plan".to_owned()
+            }
+            stage => stage.label().to_owned(),
+        };
         let what = match told {
-            true => format!(
-                "{} agent waiting got new work: {agent} (run {n})",
-                stage.label()
-            ),
-            false => format!("{} agent started: {agent} (run {n})", stage.label()),
+            true => format!("{who} agent waiting got new work: {agent} (run {n})"),
+            false => format!("{who} agent started: {agent} (run {n})"),
         };
         feature.log(now, what);
         let title = feature.title.clone();

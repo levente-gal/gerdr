@@ -188,6 +188,10 @@ pub struct Suggestion {
     /// clears it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub yours_earlier: bool,
+    /// The run that raised it last (`run`) raised it again in other words:
+    /// its card says it changed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub changed: bool,
 }
 
 /// Where a suggestion goes in the plan (`place`).
@@ -257,6 +261,10 @@ pub struct PlanReview {
     /// one's id is never given again.
     #[serde(default, skip_serializing_if = "super::is_zero")]
     pub own_made: u32,
+    /// The user asked the reviewer about their notes, and its answer, the
+    /// next run, isn't read yet: the page says it waits.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asked: bool,
 }
 
 /// One run of the reviewer as read in: who ran it, when, and what it raised,
@@ -537,12 +545,26 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
     let mut raised: BTreeSet<String> = BTreeSet::new();
     let mut k = 0;
     for raw in raws {
+        let norm = |t: &str| {
+            t.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        };
         let earlier = (raw.id.as_ref())
             .filter(|id| !raised.contains(*id))
             .and_then(|id| {
                 review.suggestions[..before]
                     .iter()
                     .position(|s| s.id == *id && s.source == Source::Reviewer)
+            })
+            // A repeat with no id, by its title: it keeps the earlier decision.
+            .or_else(|| {
+                review.suggestions[..before].iter().position(|s| {
+                    s.source == Source::Reviewer
+                        && !raised.contains(&s.id)
+                        && norm(&s.title) == norm(&raw.title)
+                })
             });
         if let Some(i) = earlier {
             let s = &mut review.suggestions[i];
@@ -551,6 +573,8 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
             if yours && raw.title.trim() != s.title.trim() {
                 s.yours_earlier = true;
             }
+            s.changed = (s.title.trim(), s.why.trim(), s.change.trim())
+                != (raw.title.trim(), raw.why.trim(), raw.change.trim());
             (s.severity, s.kind) = (raw.severity, raw.kind);
             (s.plan, s.title) = (raw.plan, raw.title);
             (s.why, s.change) = (raw.why, raw.change);
@@ -595,6 +619,7 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
         }
     }
     review.n = run;
+    review.asked = false;
     out
 }
 
@@ -774,17 +799,19 @@ pub fn delete_own(review: &mut PlanReview, id: &str) -> Result<(usize, Suggestio
 }
 
 /// Accept every open suggestion but the questions still to answer (see
-/// `PlanReview::waiting_answer`). How many it accepted.
-pub fn accept_all(review: &mut PlanReview) -> usize {
-    let mut n = 0;
+/// `PlanReview::waiting_answer`) and those a later run left out. The ids it
+/// accepted, for its Undo.
+pub fn accept_all(review: &mut PlanReview) -> Vec<String> {
+    let mut ids = Vec::new();
     for s in &mut review.suggestions {
-        if s.state == State::Open && !s.unanswered() {
+        // One a later run left out isn't the reviewer's word any more.
+        if s.state == State::Open && !s.unanswered() && !s.dropped {
             s.state = State::Accepted;
             s.reason.clear();
-            n += 1;
+            ids.push(s.id.clone());
         }
     }
-    n
+    ids
 }
 
 /// A plan line as a quote of it compares: cleaned and spaces collapsed as
@@ -1198,6 +1225,8 @@ mod tests {
         assert_eq!(again.ids[0], "r1-1");
         let kept = review.suggestion("r1-1").unwrap();
         assert_eq!(kept.title, "Reworded");
+        // Its card says it changed under the decision.
+        assert!(kept.changed);
         assert_eq!(kept.state, State::Accepted);
         assert_eq!(kept.note, "keep it short");
         assert!(!kept.dropped);
@@ -1444,15 +1473,20 @@ mod tests {
         decide(&mut review, "r1-1", Decision::Clear).unwrap();
         assert_eq!(
             accept_all(&mut review),
-            1,
+            ["r1-1"],
             "the question waits for its answer"
         );
         assert_eq!(review.suggestion("r1-1").unwrap().state, State::Accepted);
         assert_eq!(review.suggestion("r1-2").unwrap().state, State::Open);
         set_note(&mut review, "r1-2", "The new one").unwrap();
         assert_eq!(review.waiting_answer(), 0);
-        assert_eq!(accept_all(&mut review), 1);
-        assert_eq!(accept_all(&mut review), 0);
+        assert_eq!(accept_all(&mut review), ["r1-2"]);
+        assert!(accept_all(&mut review).is_empty());
+        // One a later run left out stays open: it isn't the reviewer's word.
+        decide(&mut review, "r1-1", Decision::Clear).unwrap();
+        review.suggestions[0].dropped = true;
+        assert!(accept_all(&mut review).is_empty());
+        assert_eq!(review.suggestion("r1-1").unwrap().state, State::Open);
     }
 
     #[test]

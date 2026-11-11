@@ -143,6 +143,10 @@ pub struct DocOf {
     pub suggestions: Option<crate::plan_doc::SuggestionsOf>,
 }
 
+/// What Plan review's suggestions flagged on the plan are called: the
+/// stage page's button, the tab and its heading.
+pub const REVIEW_IN_PLAN: &str = "Review in plan";
+
 impl DocOf {
     /// What its tab is called.
     pub fn tab_title(&self) -> &'static str {
@@ -151,7 +155,8 @@ impl DocOf {
             DocFile::FixPlan => "Fix plan",
             DocFile::PlanChanges => "Plan changes",
             DocFile::DraftChanges(..) => "Draft changes",
-            DocFile::Suggestions => "Suggestions",
+            // One name for the view: its button's, tab's and heading's.
+            DocFile::Suggestions => REVIEW_IN_PLAN,
             DocFile::ConflictPlan(_) => "Conflicts plan",
             DocFile::Stage(Stage::Plan) => "Plan",
             DocFile::Stage(Stage::PlanReview) => "Final plan",
@@ -394,7 +399,8 @@ impl WorktreeDiff {
             view.diff_tree = true;
             view.tree_share = env.tree_share;
             view.empty = fe.empty(self.read).into();
-            view.tree_note = fe.tree_note(self.read);
+            // Laid into its page, the line over it counts the files.
+            view.tree_note = fe.tree_note(self.read).filter(|_| !fe.inline);
             let counts = fe.counts(0);
             // A fix round's files are only read: no ticks to go by.
             view.unchecked = fe.span.is_some();
@@ -1138,6 +1144,9 @@ impl WorktreeDiff {
             if doc.evidence() {
                 return format!("Evidence of \u{201c}{}\u{201d}", doc.title);
             }
+            if doc.file == DocFile::Suggestions {
+                return format!("{REVIEW_IN_PLAN} \u{b7} {}", doc.name());
+            }
             if doc.file == DocFile::PlanChanges {
                 return format!("Plan review \u{b7} what {} changed", doc.name());
             }
@@ -1261,15 +1270,18 @@ impl WorktreeDiff {
             return;
         }
         // The suggestions come to the final plan, or go back to the reviewer.
+        // Both stay, greyed with why while they can't be pressed: as on the
+        // stage's page, the final plan waits until nothing is to decide.
         if let Some(of) = self.suggestions() {
-            if of.asks() {
-                view.title_buttons.push(Hint {
-                    label: crate::plan_doc::ASK_REVIEWER.into(),
-                    ..hint(ReposButton::SendBack, SEND_BACK_KEY)
-                });
-            }
+            view.title_buttons.push(Hint {
+                label: crate::plan_doc::ASK_REVIEWER.into(),
+                disabled: (!of.asks())
+                    .then(|| "Comment on a suggestion or reject one first".to_owned()),
+                ..hint(ReposButton::SendBack, SEND_BACK_KEY)
+            });
             view.title_buttons.push(Hint {
                 label: of.approve_label().into(),
+                disabled: of.to_decide(),
                 ..hint(ReposButton::Approve, APPROVE_KEY)
             });
             return;
@@ -1296,11 +1308,13 @@ impl WorktreeDiff {
         };
         view.title_buttons
             .push(hint(ReposButton::CommentFile, "Shift+C"));
-        if !stopped {
-            view.title_buttons
-                .push(hint(ReposButton::SendBack, SEND_BACK_KEY));
+        // The one to press goes rightmost, filled: Send back once a comment
+        // is written, else Approve.
+        let back = (!stopped).then(|| hint(ReposButton::SendBack, SEND_BACK_KEY));
+        match back {
+            Some(back) if self.diff.review.own() > 0 => view.title_buttons.extend([go, back]),
+            back => view.title_buttons.extend(back.into_iter().chain([go])),
         }
-        view.title_buttons.push(go);
     }
 
     /// A feature's buttons as it stands, with their keys; Approve with what

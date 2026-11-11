@@ -491,9 +491,18 @@ impl FeatureOf {
         }
         parts.push(format!("{} to decide", self.count(FindingState::Open)));
         let made = self.findings.iter().filter(|f| f.fix_made()).count();
+        let planning = (self.round.as_ref()).is_some_and(|(phase, _)| {
+            matches!(
+                phase,
+                FixPhase::Compacting | FixPhase::Planning | FixPhase::Ready
+            )
+        });
         match self.count(FindingState::Sent) - made {
             0 => {}
-            n => parts.push(format!("{n} sent to Build")),
+            n => parts.push(format!(
+                "{n} {}",
+                crate::feature::review_import::sent_word(false, planning)
+            )),
         }
         if made > 0 {
             parts.push(crate::feature::review_import::fixes_made_words(made));
@@ -596,10 +605,17 @@ impl FeatureOf {
             Role::Deciding => self.decisions(),
             _ => self.state.clone(),
         };
-        match line(&self.counts(own)) {
-            Some(line) => format!("{head} \u{b7} {line}"),
-            None => head,
+        // The files viewed are counted over the file list (`tree_note`) or
+        // on the page's line: not again here.
+        let counts = self.counts(own);
+        let mut parts = vec![head];
+        if counts.comments > 0 {
+            parts.push(plural(counts.comments, "comment"));
         }
+        if counts.changed > 0 {
+            parts.push(format!("{} changed since viewed", counts.changed));
+        }
+        parts.join(" \u{b7} ")
     }
 
     /// The header's summary of a fix round's diff: how the round stands,
@@ -681,14 +697,46 @@ impl FeatureOf {
                     .and_then(|(_, files)| files.iter().find(|d| d.path == f.file));
                 let mut comment = finding_comment(f, root, file);
                 let mut note = finding_note(f, &comment);
+                let planning = (self.round.as_ref()).is_some_and(|(phase, _)| {
+                    matches!(
+                        phase,
+                        FixPhase::Compacting | FixPhase::Planning | FixPhase::Ready
+                    )
+                });
                 for c in std::iter::once(&mut comment).chain(note.as_mut()) {
                     if let Some(flag) = c.flag.as_mut() {
                         flag.pr = self.posts;
+                        flag.planning = planning;
                     }
                 }
                 std::iter::once(comment).chain(note)
             })
             .collect()
+    }
+}
+
+/// The files of `fe` to fold so its review opens on what changed since the
+/// user's last review: those viewed and unchanged, once some file viewed
+/// before changed since (a fix round's work); none otherwise, or on a fix
+/// round's own diff.
+fn since_review(fe: &FeatureOf) -> Vec<(PathBuf, String)> {
+    if fe.span.is_some() {
+        return Vec::new();
+    }
+    let files = (fe.repos.iter())
+        .flat_map(|r| r.since.changes.iter().map(move |c| (r.root.clone(), c.path.clone())));
+    let mut viewed = Vec::new();
+    let mut changed = false;
+    for (root, path) in files {
+        match fe.tick(&root, &path) {
+            Tick::Yes => viewed.push((root, path)),
+            Tick::Changed => changed = true,
+            Tick::No => {}
+        }
+    }
+    match changed {
+        true => viewed,
+        false => Vec::new(),
     }
 }
 
@@ -738,6 +786,8 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
             unanswered: false,
             question: false,
             pr: false,
+            planning: false,
+            fixed_in: None,
         }),
     }
 }
@@ -762,6 +812,8 @@ fn finding_note(f: &Finding, comment: &Comment) -> Option<Comment> {
             unanswered: false,
             question: false,
             pr: false,
+            planning: false,
+            fixed_in: None,
         }),
     })
 }
@@ -1011,8 +1063,16 @@ impl WorktreeDiff {
                 Err(why) => repo.error = Some(format!("{}: {why}", repo.shown())),
             }
         }
+        let first = !self.read;
         self.read = true;
         self.error = fe.repos.iter().find_map(|r| r.error.clone());
+        // Back after fixes changed files viewed before: what changed since
+        // the last review shows, the files viewed and unchanged folded
+        // (unfold all brings back all changes).
+        if first {
+            let fold = since_review(fe);
+            self.diff.folded.extend(fold);
+        }
         self.with_diff(env, |diff, ctx| {
             diff.refresh(ctx);
             let reads = diff.reads;
@@ -2002,6 +2062,23 @@ mod tests {
         assert_eq!(fe.check(api, "a.rs"), Check::Partial);
         assert_eq!(fe.note(api, "a.rs").as_deref(), Some("not committed"));
         assert_eq!(line(&Counts::default()), None);
+    }
+
+    #[test]
+    fn a_review_after_fixes_opens_on_what_changed_since_viewed() {
+        let mut fe = FeatureOf {
+            repos: vec![repo("api", &["a.rs", "b.rs", "c.rs"])],
+            ..FeatureOf::default()
+        };
+        // Nothing viewed changed yet: all of it shows.
+        fe.viewed.0.insert("api/a.rs".into(), "b-a.rs".into());
+        assert!(since_review(&fe).is_empty());
+        // A fix changed b.rs, viewed before: a.rs, viewed and the same, folds.
+        fe.viewed.0.insert("api/b.rs".into(), "old".into());
+        assert_eq!(since_review(&fe), [(PathBuf::from("/w/api"), "a.rs".to_owned())]);
+        // A fix round's own diff is only read: nothing folds.
+        fe.span = Some(SpanOf::default());
+        assert!(since_review(&fe).is_empty());
     }
 
     #[test]

@@ -50,7 +50,8 @@ pub struct Words {
     pub own_head: &'static str,
     /// The button wanting it: "Fix".
     pub want: &'static str,
-    /// The button taking that back, on one of the reviewer's: "Don't fix".
+    /// The button taking that back, on one of the reviewer's: "Reopen", the
+    /// word that puts any decided one back to undecided.
     pub unwant: &'static str,
     /// The button refusing it, asking why: "Dismiss…".
     pub refuse: &'static str,
@@ -117,7 +118,7 @@ const FINDING: Words = Words {
     by: "AI review",
     own_head: "Your comment",
     want: "Fix",
-    unwant: "Don't fix",
+    unwant: "Reopen",
     refuse: "Dismiss\u{2026}",
     refuse_verb: "Dismiss",
     reopen: "Reopen",
@@ -154,7 +155,7 @@ const SUGGESTION: Words = Words {
     by: "Plan review",
     own_head: "Your suggestion",
     want: "Accept",
-    unwant: "Don't accept",
+    unwant: "Reopen",
     refuse: "Reject\u{2026}",
     refuse_verb: "Reject",
     reopen: "Reopen",
@@ -189,7 +190,6 @@ const SUGGESTION: Words = Words {
 /// one goes to GitHub as a comment of the review, not to an agent to fix.
 const PR_FINDING: Words = Words {
     want: "Comment",
-    unwant: "Don't comment",
     wanted: "to comment",
     save_want: "Save and comment",
     say_what: "Say what to comment.",
@@ -291,7 +291,7 @@ mod tests {
         let f = words(ItemOf::Finding);
         assert_eq!(
             (f.want, f.unwant, f.refuse),
-            ("Fix", "Don't fix", "Dismiss\u{2026}")
+            ("Fix", "Reopen", "Dismiss\u{2026}")
         );
         assert_eq!(
             (f.show, f.wanted, f.refused),
@@ -301,7 +301,7 @@ mod tests {
         let s = words(ItemOf::Suggestion);
         assert_eq!(
             (s.want, s.unwant, s.refuse),
-            ("Accept", "Don't accept", "Reject\u{2026}")
+            ("Accept", "Reopen", "Reject\u{2026}")
         );
         assert_eq!(
             (s.show, s.wanted, s.refused),
