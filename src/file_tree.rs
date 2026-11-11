@@ -14,7 +14,6 @@ use smithay::input::keyboard::{Keysym, ModifiersState};
 use crate::{
     chrome::{Check, Density, DirLine, FileLine, LineState, RepoLine, ReposView, TreeLine},
     diff_view::{CheckOf, DiffView, Moved, Place, Section, bounds, in_dir, move_to, showing},
-    feature::review_import::FindingState::Dismissed,
     git::Change,
     repos::{Grouping, Selected, standing},
     scroll::{Bounds, Scroll},
@@ -740,13 +739,11 @@ impl FileTree {
                     added: diff_of.map_or(0, |f| f.added),
                     removed: diff_of.map_or(0, |f| f.removed),
                     edited: false,
-                    // A finding dismissed asks nothing more of the file, nor a
-                    // comment gone to Build.
+                    // The user's own comments, as the header counts them
+                    // (`Review::own`): findings are counted as findings.
                     comments: (diff.review.comments.iter())
                         .filter(|c| c.root == section.root && c.path == change.path)
-                        .filter(|c| {
-                            !c.flag.as_ref().is_some_and(|f| f.state == Dismissed || f.sent)
-                        })
+                        .filter(|c| c.flag.is_none())
                         .count(),
                     viewed: check(section.root, &change.path) == Check::On,
                 })

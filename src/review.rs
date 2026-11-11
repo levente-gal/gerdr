@@ -99,6 +99,9 @@ pub struct Flag {
     /// Its review posts to GitHub (`Feature::posts_review`): wanting it
     /// comments, in those words (`review_items::words_in`).
     pub pr: bool,
+    /// Sent, its fix plan is still made or waits for the user: it says "in
+    /// fix plan", not "being fixed" (`review_import::sent_word`).
+    pub planning: bool,
 }
 
 /// A project's review.

@@ -3535,17 +3535,14 @@ fn note_card(c: &Comment, multi: bool, actions: &[(PageButton, PanelOutcome)]) -
 fn sent_note_card(
     c: &Comment,
     multi: bool,
-    made: bool,
+    (made, planning): (bool, bool),
     actions: &[(PageButton, PanelOutcome)],
 ) -> FindingCard {
     let mut card = note_card(c, multi, actions);
     if let Some(flag) = &c.flag {
         card.place = format!("{} \u{b7} {}", flag.id, card.place);
     }
-    card.state = match made {
-        true => "fix made".to_owned(),
-        false => "sent to Build".to_owned(),
-    };
+    card.state = review_import::sent_word(made, planning).to_owned();
     card.made = made;
     card.stripe = Some(CardStripe::Sent);
     card
@@ -3669,7 +3666,9 @@ fn review_line(feature: &Feature, agent: Option<&str>) -> Option<String> {
     } else if fix > 0 {
         format!("{} {wanted}", plural(fix, "finding"))
     } else if sent > 0 {
-        let sent = format!("{} sent to Build", plural(sent, "finding"));
+        let planning = feature::fix_round::planning(feature.fix_round.as_ref(), Stage::AiReview);
+        let word = review_import::sent_word(false, planning);
+        let sent = format!("{} {word}", plural(sent, "finding"));
         match review.fixes_made() {
             0 => sent,
             made => format!("{sent} \u{b7} {made} made"),
@@ -11372,6 +11371,12 @@ impl Gerdr {
                 if let (Some(flag), Some(fix)) = (c.flag.as_mut(), made) {
                     flag.made = fix.made.contains(&flag.id);
                 }
+                if let Some(flag) = c.flag.as_mut() {
+                    flag.planning = feature::fix_round::planning(
+                        (self.feature(project, slug)).and_then(|f| f.fix_round.as_ref()),
+                        Stage::CodeReview,
+                    );
+                }
                 c
             })
             .collect()
@@ -14755,6 +14760,7 @@ fn latest_comment_round(feature: &Feature) -> Option<u32> {
 /// now, by the stage that asked: a criterion tried again, a finding the next
 /// review saw, a comment whose fix was made.
 fn asked_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> Option<CheckLine> {
+    let planning = |round: &FixRound| feature::fix_round::planning(Some(round), round.stage);
     match feature
         .fix_asked
         .get(&round.n)
@@ -14769,8 +14775,11 @@ fn asked_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> Optio
                 FindingState::Fixed => line("fixed", CheckTone::Ready),
                 FindingState::Dismissed => line("dismissed", CheckTone::Note),
                 FindingState::Sent if found.fix_made() => line("fix made", CheckTone::Ready),
-                FindingState::Sent if open => line("being fixed", CheckTone::Note),
-                FindingState::Sent => line("sent to Build", CheckTone::Note),
+                FindingState::Sent if open => line(
+                    review_import::sent_word(false, planning(round)),
+                    CheckTone::Note,
+                ),
+                FindingState::Sent => line("not marked made", CheckTone::Note),
                 FindingState::Open | FindingState::Fix => line("raised again", CheckTone::Blocker),
                 FindingState::Posted => line("on GitHub", CheckTone::Note),
             })
@@ -14783,7 +14792,10 @@ fn asked_now(feature: &Feature, round: &FixRound, id: &str, open: bool) -> Optio
             Some(
                 match fix.is_some_and(|fix| fix.made.iter().any(|m| m == id)) {
                     true => line("fix made", CheckTone::Ready),
-                    false if open => line("being fixed", CheckTone::Note),
+                    false if open => line(
+                        review_import::sent_word(false, planning(round)),
+                        CheckTone::Note,
+                    ),
                     false => line("not marked made", CheckTone::Note),
                 },
             )
@@ -15742,6 +15754,7 @@ fn comment_sections(
     let multi = feature.many_repos();
     let notes = shown_notes(feature, Stage::CodeReview, notes_of(state.probe));
     let made: &[String] = (feature.comment_fixes.last()).map_or(&[], |fix| &fix.made);
+    let planning = feature::fix_round::planning(feature.fix_round.as_ref(), Stage::CodeReview);
     let sent = notes.iter().filter(|c| c.flag.is_some());
     let done = sent.clone().filter(|c| note_made(c, made)).count();
     let mut sections = Vec::new();
@@ -15758,7 +15771,7 @@ fn comment_sections(
     }
     sections.extend(notes.iter().map(|c| {
         PageSection::Finding(match c.flag.is_some() {
-            true => sent_note_card(c, multi, note_made(c, made), actions),
+            true => sent_note_card(c, multi, (note_made(c, made), planning), actions),
             false => note_card(c, multi, actions),
         })
     }));
@@ -15857,8 +15870,9 @@ fn fixes_word(feature: &Feature, notes: &[Comment]) -> String {
         0 if feature.is_done(Stage::CodeReview) => "none".to_owned(),
         0 => "none yet".to_owned(),
         total => {
+            // What it counts, as the Comments heading under it does.
             let done = sent.filter(|c| note_made(c, made)).count();
-            format!("{done} of {total} made")
+            format!("{done} of {} made", plural(total, "comment"))
         }
     }
 }
@@ -17007,6 +17021,30 @@ fn tab_view(
             // only shows which it is.
             if card.sheet.is_none() {
                 card.collapsed = false;
+            }
+            // A review card's decision is what the selected one asks for:
+            // its first button, Fix or Accept, is the page's one primary
+            // while the keyboard is on the cards.
+            let posts = feature.posts_review();
+            let wants = |label: &str| {
+                [ItemOf::Finding, ItemOf::Suggestion]
+                    .iter()
+                    .any(|of| label == crate::feature::review_items::words_in(*of, posts).want)
+            };
+            let first = card.buttons.first().copied();
+            if card.folds
+                && let Some(b) = first
+                && page
+                    .buttons
+                    .get(b)
+                    .is_some_and(|button| wants(&button.label))
+            {
+                for button in &mut page.buttons {
+                    if button.style == ButtonStyle::Primary {
+                        button.style = ButtonStyle::Plain;
+                    }
+                }
+                page.buttons[b].style = ButtonStyle::Primary;
             }
             if panel.armed.is_some() {
                 "Press Del again".clone_into(&mut card.state);
@@ -19034,7 +19072,11 @@ pub(crate) mod tests {
             let (_, said) = recap.stages.iter().find(|(l, _)| l == label).unwrap();
             said.clone()
         };
-        assert!(said("Discover").starts_with("claude \u{b7} "), "{}", said("Discover"));
+        assert!(
+            said("Discover").starts_with("claude \u{b7} "),
+            "{}",
+            said("Discover")
+        );
         assert!(said("AI review").starts_with("claude \u{b7} 4 runs"));
         assert!(said("Manual test").contains("4 of 4 criteria passed \u{b7} took"));
     }
@@ -19525,7 +19567,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn review_cards_go_under_a_heading_per_tag_the_summary_counts() {
+    fn review_cards_go_under_the_summary_that_counts_them_open() {
         let f = suggesting();
         let panel = on_plan_review(&f);
         let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
@@ -19543,8 +19585,10 @@ pub(crate) mod tests {
                 (FindingTag::Low, 1)
             ]
         );
-        assert_eq!((summary.decided, summary.total), (1, 3));
-        // Under it: a heading, then its cards, for each tag in turn.
+        // Each pill says how many are left to decide: the user's own is.
+        assert_eq!(summary.open, [0, 1, 1]);
+        assert_eq!((summary.decided, summary.refused, summary.total), (1, 0, 3));
+        // Under it: its cards, with no heading per tag (the pills say it).
         let shape: Vec<String> = (view.page.sections[at + 1..].iter())
             .map(|s| match s {
                 PageSection::Heading(label) => label.clone(),
@@ -19552,17 +19596,7 @@ pub(crate) mod tests {
                 _ => "other".into(),
             })
             .collect();
-        assert_eq!(
-            shape,
-            [
-                "yours \u{b7} 1",
-                "card Yours",
-                "high \u{b7} 1",
-                "card High",
-                "low \u{b7} 1",
-                "card Low"
-            ]
-        );
+        assert_eq!(shape, ["card Yours", "card High", "card Low"]);
         // Accept all open goes with the summary, not the title.
         let want = (view.page.buttons.iter())
             .position(|b| b.label == "Accept all open")
@@ -20399,7 +20433,8 @@ pub(crate) mod tests {
         assert_eq!(cards.len(), 3);
         assert_eq!(cards[0].state, "goes with the fixes");
         assert_eq!(cards[0].stripe, None);
-        assert_eq!(cards[1].state, "sent to Build");
+        // Its plan waits for the user: not fixed yet.
+        assert_eq!(cards[1].state, "in fix plan");
         assert_eq!(cards[1].stripe, Some(CardStripe::Sent));
         assert!(
             cards[1].place.starts_with("C1 \u{b7} "),
@@ -22112,7 +22147,7 @@ pub(crate) mod tests {
         let sent = reviewing(&[S::Sent, S::Sent], true);
         assert_eq!(
             review_line(&sent, None).as_deref(),
-            Some("2 findings sent to Build")
+            Some("2 findings being fixed")
         );
         let decided = reviewing(&[S::Fixed, S::Dismissed], true);
         assert_eq!(
@@ -22217,7 +22252,7 @@ pub(crate) mod tests {
         assert_eq!(
             labels[1],
             [
-                "Don't fix",
+                "Reopen",
                 "Comment",
                 "Edit fix\u{2026}",
                 "Dismiss\u{2026}",
@@ -22231,10 +22266,10 @@ pub(crate) mod tests {
         assert_eq!(cards[0].state, "dismissed: by design");
         assert!(cards[0].faded && !cards[2].faded);
         assert!(cards[2].place.contains("src/2.rs"));
-        // Dismissed and fixed close to a line; to fix and sent stay open and
-        // say so down their edge.
+        // Every decided card closes to a line, so what is left to decide
+        // stands out; to fix and sent say so down their edge.
         let closed: Vec<bool> = cards.iter().map(|c| c.collapsed).collect();
-        assert_eq!(closed, [true, false, false, false, true]);
+        assert_eq!(closed, [true, true, false, true, true]);
         let stripes: Vec<Option<CardStripe>> = cards.iter().map(|c| c.stripe).collect();
         assert_eq!(
             stripes,
@@ -22261,7 +22296,7 @@ pub(crate) mod tests {
                 .map(|(label, _)| label)
                 .as_deref(),
             Some(
-                "Findings \u{b7} 1 to decide \u{b7} 1 to fix \u{b7} 1 sent to Build \u{b7} 1 fixed \u{b7} 1 dismissed"
+                "Findings \u{b7} 1 to decide \u{b7} 1 to fix \u{b7} 1 being fixed \u{b7} 1 fixed \u{b7} 1 dismissed"
             )
         );
     }
@@ -22281,7 +22316,8 @@ pub(crate) mod tests {
         let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
         let cards = cards_of(&view);
         assert_eq!(cards[1].fix, "Fix: Reviewer's");
-        assert_eq!(cards[2].fix, "Your fix: Mine");
+        // The reviewer's stays under the user's wording.
+        assert_eq!(cards[2].fix, "Your fix: Mine\nThe reviewer's: Reviewer's");
         assert_eq!(cards[2].comment, "Careful");
         assert_eq!(cards[2].note, "");
         assert_eq!(comment_labels(&view.page, cards[2]), ["Edit", "Delete"]);
@@ -22405,7 +22441,7 @@ pub(crate) mod tests {
         let view = view_of(&f, &PanelState::default());
         let cards = cards_of(&view);
         assert_eq!(cards.len(), 2);
-        assert_eq!(cards[0].state, "sent to Build");
+        assert_eq!(cards[0].state, "being fixed");
         // Only to look at, and it says why.
         assert_eq!(labels_of(&view, cards[0]), ["Show in diff"]);
         assert_eq!(labels_of(&view, cards[1]), ["Show in diff"]);
@@ -22521,7 +22557,7 @@ pub(crate) mod tests {
         assert_eq!(
             said,
             [
-                ("sent to Build", false),
+                ("being fixed", false),
                 ("fix made", true),
                 ("fixed", false),
                 ("raised again", false),
@@ -22529,7 +22565,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             items_count(&f, Stage::AiReview),
-            "1 sent to Build \u{b7} 1 fix made"
+            "1 being fixed \u{b7} 1 fix made"
         );
         f.review.as_mut().unwrap().findings[0].made = true;
         assert_eq!(items_count(&f, Stage::AiReview), "2 fixes made");
@@ -23049,7 +23085,7 @@ pub(crate) mod tests {
         assert_eq!(selected, [false, true]);
         for hint in [
             ("Up / Down", "finding"),
-            ("f", "don't fix"),
+            ("f", "reopen"),
             ("Ctrl+E", "edit fix\u{2026}"),
             ("c", "comment"),
             ("Del", "dismiss\u{2026}"),
@@ -25011,9 +25047,11 @@ pub(crate) mod tests {
         });
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         let n = page.sections.len();
-        assert!(matches!(&page.sections[n - 1], PageSection::Toolbar { groups }
+        assert!(
+            matches!(&page.sections[n - 1], PageSection::Toolbar { groups }
             if groups[0].1.iter().all(|&b| matches!(actions[b].1,
-                PanelOutcome::SetUp | PanelOutcome::SetupLog))));
+                PanelOutcome::SetUp | PanelOutcome::SetupLog)))
+        );
         assert_eq!(
             page.sections.get(n - 2),
             Some(&lines(
@@ -25441,16 +25479,8 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         let slugs = [f.slug.clone()];
-        let got = FeaturePanel::default().key(
-            &ctrl,
-            Keysym::Return,
-            &f,
-            &slugs,
-            written,
-            &[],
-            &[],
-            &[],
-        );
+        let got =
+            FeaturePanel::default().key(&ctrl, Keysym::Return, &f, &slugs, written, &[], &[], &[]);
         assert_eq!(got, Some(PanelOutcome::FindingRefused(DOC_UNREAD)));
         // Nothing there yet: it is being written, as before.
         assert_eq!(
@@ -26066,9 +26096,11 @@ pub(crate) mod tests {
             let actions = page_actions(f, Stage::Ship, RowCtx::default());
             let page = stage_page(f, Stage::Ship, &PanelState::default(), &actions, 2_000);
             let row = page.sections.iter().find_map(|s| match s {
-                PageSection::ShipGroup(g) if g.head == "Afterwards" => {
-                    g.steps.iter().find(|r| r.label == "Close the workspace").cloned()
-                }
+                PageSection::ShipGroup(g) if g.head == "Afterwards" => g
+                    .steps
+                    .iter()
+                    .find(|r| r.label == "Close the workspace")
+                    .cloned(),
                 _ => None,
             });
             row.map(|row| actions[row.button.expect("its button")].1.clone())

@@ -497,9 +497,18 @@ impl FeatureOf {
         }
         parts.push(format!("{} to decide", self.count(FindingState::Open)));
         let made = self.findings.iter().filter(|f| f.fix_made()).count();
+        let planning = (self.round.as_ref()).is_some_and(|(phase, _)| {
+            matches!(
+                phase,
+                FixPhase::Compacting | FixPhase::Planning | FixPhase::Ready
+            )
+        });
         match self.count(FindingState::Sent) - made {
             0 => {}
-            n => parts.push(format!("{n} sent to Build")),
+            n => parts.push(format!(
+                "{n} {}",
+                crate::feature::review_import::sent_word(false, planning)
+            )),
         }
         if made > 0 {
             parts.push(crate::feature::review_import::fixes_made_words(made));
@@ -687,9 +696,16 @@ impl FeatureOf {
                     .and_then(|(_, files)| files.iter().find(|d| d.path == f.file));
                 let mut comment = finding_comment(f, root, file);
                 let mut note = finding_note(f, &comment);
+                let planning = (self.round.as_ref()).is_some_and(|(phase, _)| {
+                    matches!(
+                        phase,
+                        FixPhase::Compacting | FixPhase::Planning | FixPhase::Ready
+                    )
+                });
                 for c in std::iter::once(&mut comment).chain(note.as_mut()) {
                     if let Some(flag) = c.flag.as_mut() {
                         flag.pr = self.posts;
+                        flag.planning = planning;
                     }
                 }
                 std::iter::once(comment).chain(note)
@@ -744,6 +760,7 @@ pub fn finding_comment(f: &Finding, root: PathBuf, file: Option<&FileDiff>) -> C
             unanswered: false,
             question: false,
             pr: false,
+            planning: false,
         }),
     }
 }
@@ -768,6 +785,7 @@ fn finding_note(f: &Finding, comment: &Comment) -> Option<Comment> {
             unanswered: false,
             question: false,
             pr: false,
+            planning: false,
         }),
     })
 }

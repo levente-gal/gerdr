@@ -104,9 +104,10 @@ fn finding_state_word(flag: &review::Flag) -> Option<&'static str> {
         (_, FindingState::Fix) => Some(words.wanted),
         (_, FindingState::Dismissed) => Some(words.refused),
         (ItemOf::Suggestion, FindingState::Sent | FindingState::Fixed) => None,
-        (ItemOf::Finding, FindingState::Sent) if flag.made => Some("fix made"),
-        (ItemOf::Finding, FindingState::Sent) if flag.sent => Some("sent to Build"),
-        (ItemOf::Finding, FindingState::Sent) => Some("sent to fix"),
+        (ItemOf::Finding, FindingState::Sent) => Some(crate::feature::review_import::sent_word(
+            flag.made,
+            flag.planning,
+        )),
         (ItemOf::Finding, FindingState::Fixed) => Some("fixed"),
         (_, FindingState::Posted) => Some("on GitHub"),
     }
@@ -1850,7 +1851,8 @@ impl DiffView {
 
     /// Whether the cursor is on a comment of the user's kept as a finding.
     pub fn on_yours(&self) -> bool {
-        self.finding_here().is_some_and(|(_, flag)| flag.yours && !flag.sent)
+        self.finding_here()
+            .is_some_and(|(_, flag)| flag.yours && !flag.sent)
     }
 
     /// The next undecided finding after `id` in the diff's order, coming

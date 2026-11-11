@@ -189,6 +189,7 @@ pub fn suggestion_comments(
             unanswered: s.unanswered(),
             question: s.kind == crate::feature::plan_review::Kind::Question,
             pr: false,
+            planning: false,
             ..Flag::default()
         };
         let comment = Comment {

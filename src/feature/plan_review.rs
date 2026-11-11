@@ -188,6 +188,10 @@ pub struct Suggestion {
     /// clears it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub yours_earlier: bool,
+    /// The run that raised it last (`run`) raised it again in other words:
+    /// its card says it changed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub changed: bool,
 }
 
 /// Where a suggestion goes in the plan (`place`).
@@ -537,12 +541,26 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
     let mut raised: BTreeSet<String> = BTreeSet::new();
     let mut k = 0;
     for raw in raws {
+        let norm = |t: &str| {
+            t.split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_lowercase()
+        };
         let earlier = (raw.id.as_ref())
             .filter(|id| !raised.contains(*id))
             .and_then(|id| {
                 review.suggestions[..before]
                     .iter()
                     .position(|s| s.id == *id && s.source == Source::Reviewer)
+            })
+            // A repeat with no id, by its title: it keeps the earlier decision.
+            .or_else(|| {
+                review.suggestions[..before].iter().position(|s| {
+                    s.source == Source::Reviewer
+                        && !raised.contains(&s.id)
+                        && norm(&s.title) == norm(&raw.title)
+                })
             });
         if let Some(i) = earlier {
             let s = &mut review.suggestions[i];
@@ -551,6 +569,8 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
             if yours && raw.title.trim() != s.title.trim() {
                 s.yours_earlier = true;
             }
+            s.changed = (s.title.trim(), s.why.trim(), s.change.trim())
+                != (raw.title.trim(), raw.why.trim(), raw.change.trim());
             (s.severity, s.kind) = (raw.severity, raw.kind);
             (s.plan, s.title) = (raw.plan, raw.title);
             (s.why, s.change) = (raw.why, raw.change);
@@ -774,11 +794,13 @@ pub fn delete_own(review: &mut PlanReview, id: &str) -> Result<(usize, Suggestio
 }
 
 /// Accept every open suggestion but the questions still to answer (see
-/// `PlanReview::waiting_answer`). How many it accepted.
+/// `PlanReview::waiting_answer`) and those a later run left out. How many it
+/// accepted.
 pub fn accept_all(review: &mut PlanReview) -> usize {
     let mut n = 0;
     for s in &mut review.suggestions {
-        if s.state == State::Open && !s.unanswered() {
+        // One a later run left out isn't the reviewer's word any more.
+        if s.state == State::Open && !s.unanswered() && !s.dropped {
             s.state = State::Accepted;
             s.reason.clear();
             n += 1;

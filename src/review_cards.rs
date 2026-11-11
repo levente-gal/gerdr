@@ -525,11 +525,11 @@ pub(crate) fn item_card(
 /// The card of finding `f`, its tag and buttons left to `item_card`; of a
 /// review that `posts` to GitHub, one wanted is to comment.
 fn finding_card(f: &ReviewFinding, multi: bool, posts: bool) -> FindingCard {
+    // The plan's phase is the feature's: `page_card` says "in fix plan".
     let state = match f.state {
-        FindingState::Open => String::new(),
+        FindingState::Open => "to decide".to_owned(),
         FindingState::Fix => words_in(ItemOf::Finding, posts).wanted.to_owned(),
-        FindingState::Sent if f.made => "fix made".to_owned(),
-        FindingState::Sent => "sent to Build".to_owned(),
+        FindingState::Sent => review_import::sent_word(f.made, false).to_owned(),
         FindingState::Fixed => "fixed".to_owned(),
         FindingState::Dismissed => format!("dismissed: {}", f.reason),
         FindingState::Posted => "on GitHub".to_owned(),
@@ -541,13 +541,9 @@ fn finding_card(f: &ReviewFinding, multi: bool, posts: bool) -> FindingCard {
             place.push("not in the diff".to_owned());
         }
     }
-    let fix = match &f.my_fix {
-        Some(fix) => format!("Your fix: {fix}"),
-        None if f.fix.is_empty() => String::new(),
-        None => format!("Fix: {}", f.fix),
-    };
+    let fix = changed_by_you("Your fix", f.my_fix.as_deref(), "Fix", &f.fix);
     // Its card shows this much while closed: the comment is behind it.
-    let state = match f.state == FindingState::Dismissed && !f.note.is_empty() {
+    let state = match f.state != FindingState::Open && !f.note.is_empty() {
         true => format!("{state} \u{b7} commented"),
         false => state,
     };
@@ -564,7 +560,8 @@ fn finding_card(f: &ReviewFinding, multi: bool, posts: bool) -> FindingCard {
         comment_buttons: Vec::new(),
         made: f.fix_made(),
         faded: matches!(f.state, FindingState::Fixed | FindingState::Dismissed),
-        collapsed: matches!(f.state, FindingState::Fixed | FindingState::Dismissed),
+        // Decided, it folds to its line: what is left to decide stands out.
+        collapsed: f.state != FindingState::Open,
         folds: false,
         stripe: match f.state {
             FindingState::Fix => Some(CardStripe::ToFix),
@@ -585,13 +582,20 @@ fn suggestion_card(s: &Suggestion) -> FindingCard {
     let question = s.kind == Kind::Question;
     let state = match s.state {
         State::Open if s.unanswered() => "not answered yet".to_owned(),
-        State::Open => String::new(),
+        State::Open if question => "answered".to_owned(),
+        State::Open => "to decide".to_owned(),
+        // A question goes into the final plan as answered.
+        State::Accepted if question && !s.note.is_empty() => "answered".to_owned(),
         State::Accepted => w.wanted.to_owned(),
         State::Rejected => format!("{}: {}", w.refused, s.reason),
     };
     // Its card shows this much while closed: the comment is behind it.
     let rejected = s.state == State::Rejected;
-    let state = match (rejected && !s.note.is_empty(), question) {
+    let decided = s.state != State::Open;
+    let state = match (
+        decided && !s.note.is_empty() && state != "answered",
+        question,
+    ) {
         (true, true) => format!("{state} \u{b7} answered"),
         (true, false) => format!("{state} \u{b7} commented"),
         (false, _) => state,
@@ -618,11 +622,7 @@ fn suggestion_card(s: &Suggestion) -> FindingCard {
         .into_iter()
         .collect();
     body.extend(s.evidence.iter().map(cited));
-    let change = match &s.my_change {
-        Some(change) => format!("{}: {change}", w.my_change),
-        None if s.change.is_empty() => String::new(),
-        None => format!("{}: {}", w.change, s.change),
-    };
+    let change = changed_by_you(w.my_change, s.my_change.as_deref(), w.change, &s.change);
     FindingCard {
         tag: FindingTag::Medium,
         title: s.title.clone(),
@@ -636,7 +636,8 @@ fn suggestion_card(s: &Suggestion) -> FindingCard {
         comment_buttons: Vec::new(),
         made: false,
         faded: rejected,
-        collapsed: rejected,
+        // Decided, it folds to its line: what is left to decide stands out.
+        collapsed: decided,
         folds: false,
         stripe: (s.state == State::Accepted).then_some(CardStripe::ToFix),
         field: None,
@@ -645,6 +646,71 @@ fn suggestion_card(s: &Suggestion) -> FindingCard {
         sheet: None,
         buttons: Vec::new(),
     }
+}
+
+/// The change a card asks for, labelled: the user's wording `mine` over
+/// what the reviewer said, which stays to read ("Your fix: …", then "The
+/// reviewer's: …"), else the reviewer's alone.
+fn changed_by_you(mine_label: &str, mine: Option<&str>, label: &str, theirs: &str) -> String {
+    match mine {
+        Some(mine) if theirs.trim().is_empty() || theirs.trim() == mine.trim() => {
+            format!("{mine_label}: {mine}")
+        }
+        Some(mine) => format!("{mine_label}: {mine}\nThe reviewer's: {theirs}"),
+        None if theirs.is_empty() => String::new(),
+        None => format!("{label}: {theirs}"),
+    }
+}
+
+/// `item`'s card on `stage`'s page of `feature`, as `item_card` makes it,
+/// with what only the feature knows: a finding sent while its fix plan is
+/// still made says "in fix plan", and an item the latest run raised (past
+/// the first) says so, "new in run 2", "changed in run 2" or "raised again
+/// in run 2", so a card that changed under a decision never does silently.
+pub(crate) fn page_card(
+    feature: &Feature,
+    item: Item,
+    actions: &[(PageButton, PanelOutcome)],
+) -> FindingCard {
+    let mut card = item_card(item, feature.many_repos(), actions, feature.posts_review());
+    let planning = crate::feature::fix_round::planning(feature.fix_round.as_ref(), Stage::AiReview);
+    if let Item::Finding(f) = item
+        && f.state == FindingState::Sent
+        && planning
+        && !f.made
+    {
+        card.state = card.state.replacen(
+            review_import::sent_word(false, false),
+            review_import::sent_word(false, true),
+            1,
+        );
+    }
+    // After the id, which finds the card again (`CardNote::Item`).
+    if let Some(tag) = run_tag(feature, item) {
+        card.place = match card.place.split_once(" \u{b7} ") {
+            Some((id, rest)) => format!("{id} \u{b7} {tag} \u{b7} {rest}"),
+            None => format!("{} \u{b7} {tag}", card.place),
+        };
+    }
+    card
+}
+
+/// What the latest run did to `item`, past the first: "new in run 2",
+/// "changed in run 2", "raised again in run 2"; none for one it didn't
+/// raise, or the user's own.
+pub(crate) fn run_tag(feature: &Feature, item: Item) -> Option<String> {
+    let (n, run, changed) = match item {
+        Item::Finding(f) => (feature.review.as_ref()?.n, f.run, f.changed),
+        Item::Suggestion(s) => (feature.plan_review.as_ref()?.n, s.run, s.changed),
+    };
+    if n < 2 || run != n || item.yours() {
+        return None;
+    }
+    Some(match (item.id().starts_with(&format!("r{n}-")), changed) {
+        (true, _) => format!("new in run {n}"),
+        (false, true) => format!("changed in run {n}"),
+        (false, false) => format!("raised again in run {n}"),
+    })
 }
 
 /// A suggestion's citation as its card lists it: "Cited: api/src/a.rs:12",
@@ -680,7 +746,13 @@ pub(crate) fn items_count(feature: &Feature, stage: Stage) -> String {
     [
         said(state(FindingState::Open), "to decide"),
         said(state(FindingState::Fix), words_in(ItemOf::Finding, review.posts).wanted),
-        said(state(FindingState::Sent) - made, "sent to Build"),
+        said(
+            state(FindingState::Sent) - made,
+            review_import::sent_word(
+                false,
+                crate::feature::fix_round::planning(feature.fix_round.as_ref(), Stage::AiReview),
+            ),
+        ),
         (made > 0).then(|| review_import::fixes_made_words(made)),
         said(state(FindingState::Fixed), "fixed"),
         said(state(FindingState::Dismissed), "dismissed"),
@@ -937,7 +1009,7 @@ mod tests {
             ]
         );
         let s = suggestion("r1-1", State::Accepted, Source::Reviewer);
-        assert_eq!(labels(Item::Suggestion(&s))[0], "Don't accept");
+        assert_eq!(labels(Item::Suggestion(&s))[0], "Reopen");
         let s = suggestion("r1-1", State::Rejected, Source::Reviewer);
         assert_eq!(labels(Item::Suggestion(&s))[0], "Reopen");
         let own = suggestion("u1", State::Accepted, Source::You);
@@ -1195,7 +1267,7 @@ mod tests {
         assert_eq!(
             labels(Item::Suggestion(&s)),
             [
-                "Don't accept",
+                "Reopen",
                 "Edit",
                 "Delete",
                 "Edit change\u{2026}",
@@ -1256,7 +1328,7 @@ mod tests {
         s.placed = Some(Placed::Nowhere);
         let card = item_card(Item::Suggestion(&s), false, &[], false);
         assert_eq!(card.tag, FindingTag::High);
-        assert_eq!(card.state, "");
+        assert_eq!(card.state, "to decide");
         assert_eq!(
             card.place,
             "r1-1 \u{b7} gap \u{b7} M2 \u{b7} not placed in the plan"
@@ -1277,8 +1349,12 @@ mod tests {
             card.place,
             "r1-1 \u{b7} gap \u{b7} M2 \u{b7} plan quote not found \u{b7} left out by a later run"
         );
-        assert_eq!(card.fix, "Your change: Keep it in SQLite");
+        assert_eq!(
+            card.fix,
+            "Your change: Keep it in SQLite\nThe reviewer's: Keep it on disk"
+        );
         assert_eq!(card.state, "accepted");
+        assert!(card.collapsed);
         assert_eq!(card.stripe, Some(CardStripe::ToFix));
         // Placed on its quote: nothing to say.
         s.placed = Some(Placed::Quote(3));
@@ -1506,7 +1582,7 @@ mod tests {
         assert_eq!(
             hints(Item::Suggestion(&s), true, false),
             [
-                "f don't accept",
+                "f reopen",
                 "Ctrl+E edit change\u{2026}",
                 "c comment",
                 "Shift+Del delete comment",

@@ -147,6 +147,10 @@ pub struct Finding {
     /// Its file (and line) is in the diff it was read against.
     #[serde(default)]
     pub placed: bool,
+    /// The run that raised it last (`run`) raised it again in other words:
+    /// its card says it changed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub changed: bool,
 }
 
 impl Finding {
@@ -283,6 +287,33 @@ impl AiReview {
     pub fn first_open(&self) -> Option<&Finding> {
         (self.in_order().into_iter()).find(|f| f.state == FindingState::Open)
     }
+}
+
+/// What a finding, or a comment of the user's, that went to Build is, in
+/// the one set of words every surface uses: "in fix plan" while the plan is
+/// written or waits for the user (`planning`, `fix_round::planning`),
+/// "being fixed" once the fixes went, "fix made" once its agent ticked it.
+/// Before it went: "to decide", "to fix"; after the next review: "fixed",
+/// or raised again; refused: "dismissed".
+pub fn sent_word(made: bool, planning: bool) -> &'static str {
+    match (made, planning) {
+        (true, _) => "fix made",
+        (false, true) => "in fix plan",
+        (false, false) => "being fixed",
+    }
+}
+
+/// Whether `raw` says the same as `f`, an earlier finding, without its id:
+/// the same file and title. A reviewer that leaves the id out of a repeat
+/// still gets the earlier decision.
+fn same_finding(f: &Finding, repo: &str, file: &str, title: &str) -> bool {
+    let norm = |t: &str| {
+        t.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    !f.yours && f.repo == repo && f.file == file && norm(&f.title) == norm(title)
 }
 
 /// `n` fixes made, in words: "1 fix made", "3 fixes made".
@@ -558,7 +589,12 @@ pub fn import(
             .id
             .as_ref()
             .filter(|id| !raised.contains(*id))
-            .and_then(|id| review.findings[..before].iter().position(|f| f.id == *id));
+            .and_then(|id| review.findings[..before].iter().position(|f| f.id == *id))
+            .or_else(|| {
+                (review.findings[..before].iter()).position(|f| {
+                    !raised.contains(&f.id) && same_finding(f, &repo, &file, &raw.title)
+                })
+            });
         if let Some(i) = earlier {
             let f = &mut review.findings[i];
             raised.insert(f.id.clone());
@@ -575,6 +611,8 @@ pub fn import(
         });
         if let Some(i) = earlier {
             let f = &mut review.findings[i];
+            f.changed = (f.title.trim(), f.body.trim(), f.fix.trim())
+                != (raw.title.trim(), raw.body.trim(), raw.fix.trim());
             f.severity = raw.severity;
             (f.repo, f.file, f.line) = (repo, file, raw.line);
             (f.title, f.body, f.fix) = (raw.title, raw.body, raw.fix);

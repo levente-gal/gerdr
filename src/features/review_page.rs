@@ -13,7 +13,11 @@
 
 use crate::feature::review_items::words_in;
 use super::*;
-use crate::{chrome::ReviewSummary, feature::review_items::Standing, review_cards::card_tag};
+use crate::{
+    chrome::ReviewSummary,
+    feature::review_items::Standing,
+    review_cards::{card_tag, page_card},
+};
 
 /// Whether `stage` is a review stage whose page this lays out.
 pub(super) fn is_review_stage(stage: Stage) -> bool {
@@ -97,19 +101,41 @@ fn item_sections(
     let decided = (w_items.iter())
         .filter(|i| i.standing() != Standing::Open)
         .count();
+    let refused = (w_items.iter())
+        .filter(|i| i.standing() == Standing::Dismissed)
+        .count();
     let tags: Vec<FindingTag> = cards.iter().map(|c| card_tag(*c)).collect();
     let mut counts: Vec<(FindingTag, usize)> = Vec::new();
-    for tag in &tags {
+    let mut open: Vec<usize> = Vec::new();
+    for (card, tag) in cards.iter().zip(&tags) {
+        let undecided = card.item().is_some_and(|i| i.standing() == Standing::Open);
         match counts.last_mut() {
             Some((last, n)) if last == tag => *n += 1,
-            _ => counts.push((*tag, 1)),
+            _ => {
+                counts.push((*tag, 1));
+                open.push(0);
+            }
+        }
+        if let Some(n) = open.last_mut() {
+            *n += usize::from(undecided);
         }
     }
     let want_all = want_all_outcome(stage);
+    // Past the first run, which one this is: cards say what it changed.
+    let run = match stage {
+        Stage::PlanReview => feature.plan_review.as_ref().map(|r| r.n),
+        _ => feature.review.as_ref().map(|r| r.n),
+    };
+    let label = match run {
+        Some(n) if n > 1 => format!("{} \u{b7} run {n}", w.heading),
+        _ => w.heading.to_owned(),
+    };
     let summary = ReviewSummary {
-        label: w.heading.to_owned(),
-        counts: counts.clone(),
+        label,
+        counts,
+        open,
         decided,
+        refused,
         total: w_items.len(),
         words: items_count(feature, stage),
         notes: review_notes(feature, stage, mark, state),
@@ -119,20 +145,11 @@ fn item_sections(
     };
     let mut sections = vec![PageSection::Review(summary)];
     let multi = feature.many_repos();
-    // A heading over each tag's cards, as the summary counts them.
-    let mut last = None;
-    for (card, tag) in cards.into_iter().zip(tags) {
-        if last != Some(tag) {
-            let n = counts
-                .iter()
-                .find(|(t, _)| *t == tag)
-                .map_or(0, |(_, n)| *n);
-            let word = tag.word().unwrap_or_default();
-            sections.push(PageSection::Heading(format!("{word} \u{b7} {n}")));
-            last = Some(tag);
-        }
+    // No heading per severity: the summary's pills and each card's pill say
+    // it, and a pill goes to its first card.
+    for card in cards {
         let mut card = match card {
-            ReviewCard::Item(item) => item_card(item, multi, actions, feature.posts_review()),
+            ReviewCard::Item(item) => page_card(feature, item, actions),
             ReviewCard::DiffNote(c) => note_card(c, multi, actions),
         };
         card.folds = true;
