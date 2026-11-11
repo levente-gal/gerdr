@@ -6788,8 +6788,16 @@ impl Gerdr {
         self.tooltip.tick(now);
         self.expire_toasts(now);
         self.t3_seen();
-        let doc_tab = self.sync_doc_tab();
+        let mut doc_tab = self.sync_doc_tab();
         let flat = doc_tab.is_some();
+        // Under a dialog or a panel (a fix's commit over the review) the
+        // file's tab takes no keys: its footer offers none, as the page's.
+        if let Some(view) = doc_tab
+            .as_mut()
+            .filter(|_| self.grabbing_overlay().is_some())
+        {
+            view.hints.clear();
+        }
         // Worked out once for the strip, the sidebar and the inbox.
         let (workspaces, tabs) = self.workspace_views_and_tabs();
         let agents = self.agent_views();

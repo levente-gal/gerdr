@@ -994,9 +994,13 @@ impl WorkspaceView {
         }
     }
 
-    /// The other worktrees of its folder's repository.
+    /// The other worktrees of its folder's repository; none on a feature's
+    /// card, as those are the main one's and other features'.
     pub fn worktrees(&self) -> &[Worktree] {
-        self.git.as_ref().map_or(&[], |g| &g.worktrees)
+        match self.feature {
+            Some(_) => &[],
+            None => self.git.as_ref().map_or(&[], |g| &g.worktrees),
+        }
     }
 
     /// Those of them that need a look: unmerged, changed or gone.
@@ -4677,6 +4681,12 @@ mod tests {
         let lines = row.attention.expect("worktree lines");
         assert_eq!(lines.loc.y, ROWS_TOP + BRANCHED);
         assert_eq!(layout.hit(mid(lines)), Some(SidebarHit::Attention(0, 2)));
+        // A feature's card has neither: they are other features' branches.
+        let mut card = ws.clone();
+        card.feature = Some(super::super::FeatureCard::default());
+        let carded = sidebar_layout_at(&[card], &[], 240, Density::Comfortable);
+        assert_eq!(carded.rows[0].worktrees, None);
+        assert_eq!(carded.rows[0].attention, None);
         // Compact headers count them, and keep their lines.
         let compact = sidebar_layout_at(&[ws.clone()], &[], 240, Density::Compact);
         assert!(compact.rows[0].worktrees.is_some());

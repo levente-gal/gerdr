@@ -341,12 +341,12 @@ fn load_font(path: Option<String>) -> Option<FontVec> {
     FontVec::try_from_vec(data).ok()
 }
 
-/// The fonts that draw what the monospace font lacks (a TUI's `❯`, `⏺`,
-/// `✓`), by character: as fontconfig picks them, each font loaded once
+/// The fonts that draw what the UI or monospace font lacks (a TUI's `❯`,
+/// `⏺`, `✓`), by character: as fontconfig picks them, each font loaded once
 /// and kept; `None` when no font has it.
 type Fallbacks = std::collections::HashMap<char, Option<&'static FontVec>>;
 
-/// The font to draw each of `chars` with, which the monospace font lacks:
+/// The font to draw each of `chars` with, which the drawing font lacks:
 /// looked up the first time (one `fc-match` for all those new, then one
 /// for those its pick lacks, while picks help), then remembered.
 fn fallbacks(chars: &[char]) -> Vec<Option<&'static FontVec>> {
@@ -428,8 +428,22 @@ pub(super) fn measure_mono(text: &str, size: f32) -> Option<f32> {
 /// Width of `text` in `font` at `size` (logical) and `scale`, in physical
 /// pixels.
 fn width_in(font: &FontVec, text: &str, size: f32, scale: f64) -> f32 {
-    let font = font.as_scaled(PxScale::from(size * scale as f32));
-    text.chars().map(|c| font.h_advance(font.glyph_id(c))).sum()
+    let px = PxScale::from(size * scale as f32);
+    (text.chars())
+        .map(|c| {
+            let font = font_for(font, c).as_scaled(px);
+            font.h_advance(font.glyph_id(c))
+        })
+        .sum()
+}
+
+/// The font to draw `ch` in: `font`, unless it lacks it (`✓`, `⋯` in the
+/// UI font) and fontconfig has one that doesn't.
+fn font_for(font: &FontVec, ch: char) -> &FontVec {
+    if ch.is_whitespace() || font.glyph_id(ch).0 != 0 {
+        return font;
+    }
+    fallbacks(&[ch])[0].unwrap_or(font)
 }
 
 /// Draw `text` in `font` as `Painter::text` does.
@@ -459,7 +473,7 @@ fn text_in(
         let mut width = 0.0;
         let mut end = 0;
         for (i, ch) in text.char_indices() {
-            width += scaled.h_advance(scaled.glyph_id(ch));
+            width += width_in(font, &text[i..i + ch.len_utf8()], size, scale);
             if x + width + ellipsis > max_x {
                 break;
             }
@@ -470,6 +484,8 @@ fn text_in(
 
     let mut pen = x;
     for ch in shown.chars().chain(cut.then_some('…')) {
+        let font = font_for(font, ch);
+        let scaled = font.as_scaled(scaled.scale());
         let id = scaled.glyph_id(ch);
         let glyph = id.with_scale_and_position(scaled.scale(), ab_glyph::point(pen, baseline));
         pen += scaled.h_advance(id);
@@ -484,54 +500,6 @@ fn text_in(
                 );
             });
         }
-    }
-    pen
-}
-
-/// Draw `text` in the monospace `font` as `text_in` does, the characters
-/// it lacks each in the font fontconfig picks for it. Returns where it
-/// ends.
-#[allow(clippy::too_many_arguments)]
-fn mono_in(
-    font: &FontVec,
-    c: &mut Canvas,
-    text: &str,
-    size: f32,
-    x: f32,
-    max_x: f32,
-    band: (i32, i32),
-    scale: f64,
-    color: Rgb,
-) -> f32 {
-    let lacks = |ch: char| !ch.is_whitespace() && font.glyph_id(ch).0 == 0;
-    let missing: Vec<char> = text.chars().filter(|&ch| lacks(ch)).collect();
-    if missing.is_empty() {
-        return text_in(font, c, text, size, x, max_x, band, scale, color);
-    }
-    // Runs the monospace font has, and the characters it lacks each in
-    // the font fontconfig picks for it.
-    let other: std::collections::HashMap<char, &FontVec> = missing
-        .iter()
-        .zip(fallbacks(&missing))
-        .filter_map(|(ch, f)| Some((*ch, f?)))
-        .collect();
-    let font_of = |ch: char| other.get(&ch).copied().unwrap_or(font);
-    let mut pen = x;
-    let mut rest = text;
-    while let Some(first) = rest.chars().next() {
-        let run_font = font_of(first);
-        let end = rest
-            .char_indices()
-            .find(|&(_, ch)| !std::ptr::eq(font_of(ch), run_font))
-            .map_or(rest.len(), |(i, _)| i);
-        let (run, after) = rest.split_at(end);
-        let width = width_in(run_font, run, size, scale);
-        if pen + width > max_x {
-            // What fits of it, with "…": the end.
-            return text_in(run_font, c, run, size, pen, max_x, band, scale, color);
-        }
-        pen = text_in(run_font, c, run, size, pen, f32::MAX, band, scale, color);
-        rest = after;
     }
     pen
 }
@@ -640,7 +608,7 @@ impl Painter {
         let Some(font) = self.mono_font() else {
             return x;
         };
-        mono_in(font, c, text, size, x, max_x, band, scale, color)
+        text_in(font, c, text, size, x, max_x, band, scale, color)
     }
 
     /// Whether the monospace font has a bold face of its own, which
@@ -664,7 +632,7 @@ impl Painter {
         color: Rgb,
     ) -> f32 {
         match &self.mono_bold {
-            Some(font) => mono_in(font, c, text, size, x, max_x, band, scale, color),
+            Some(font) => text_in(font, c, text, size, x, max_x, band, scale, color),
             None => self.mono_text(c, text, size, x, max_x, band, scale, color),
         }
     }
@@ -1532,6 +1500,22 @@ mod tests {
         };
         assert!(end(&conflicted) > end(&dirty));
         assert_eq!(end(&merging), end(&conflicted));
+    }
+
+    /// A mark the UI font lacks (`✓` in a severity pill, `⋯` in the keys
+    /// sheet) is drawn from a font that has it, not as a box.
+    #[test]
+    fn marks_the_ui_font_lacks_come_from_a_font_that_has_them() {
+        let painter = Painter::new();
+        let Some(font) = painter.font.as_ref() else {
+            return;
+        };
+        for ch in ['\u{2713}', '\u{22ef}'] {
+            let from = super::font_for(font, ch);
+            let found = super::fallbacks(&[ch])[0].is_some();
+            assert!(from.glyph_id(ch).0 != 0 || !found, "{ch} drawn as a box");
+        }
+        assert!(std::ptr::eq(super::font_for(font, 'a'), font));
     }
 
     #[test]

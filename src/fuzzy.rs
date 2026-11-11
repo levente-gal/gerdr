@@ -104,7 +104,7 @@ pub fn score(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
     let loose = (0..m)
         .filter(|&i| (i == 0 || hits[i - 1] + 1 != hits[i]) && bonus[hits[i]] == 0)
         .count();
-    if m >= LOOSE_FROM && loose > (m / 3).max(1) {
+    if m >= LOOSE_FROM && loose > (m / 4).max(1) {
         return None;
     }
     Some((score, hits))
@@ -175,6 +175,17 @@ mod tests {
         assert!(score("nfeat", "New feature").is_some());
         assert!(score("gerdr", "the gerdr log").is_some());
         assert!(score("gdr", "gxdxr").is_some());
+        // Nor over a path's many words (Find and switch's workspace rows).
+        for (label, name) in [
+            ("Dark theme for reports", "dark-theme-for-reports"),
+            ("Export invoices to JSON", "export-invoices-to-json"),
+        ] {
+            let row = format!(
+                "{label} /home/u/.cache/fwshots/s/root/shop/.features/{name} \u{b7} feature/{name}"
+            );
+            assert_eq!(hits("restore", &row), None, "{row}");
+        }
+        assert!(score("restore", "Restore \u{201c}Abandon probe\u{201d} history").is_some());
     }
 
     #[test]
