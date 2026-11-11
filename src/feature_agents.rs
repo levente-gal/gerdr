@@ -3863,6 +3863,27 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_stands_as_whose_turn_it_is() {
+        let idle = Some(AgentStatus::Idle);
+        let stage = Stage::Discover;
+        assert_eq!(agent_standing(&run(None), stage, idle), Standing::Yours);
+        assert_eq!(
+            agent_standing(&run(Some(1_100)), stage, idle),
+            Standing::Done
+        );
+        let working = Some(AgentStatus::Working);
+        assert_eq!(
+            agent_standing(&run(None), stage, working),
+            Standing::Working
+        );
+        let asks = Some(AgentStatus::Blocked);
+        assert_eq!(
+            agent_standing(&run(Some(1_100)), stage, asks),
+            Standing::Yours
+        );
+    }
+
+    #[test]
     fn the_agent_line_says_where_it_stands() {
         let now = 1_000 + 180;
         let r = run(None);
@@ -4608,6 +4629,17 @@ mod tests {
         let chips = stage_chips(&f, Stage::Plan, Some(&set), &installed);
         assert_eq!(chips.len(), 3);
         assert_eq!(lit(&chips), ["opencode"]);
+    }
+
+    #[test]
+    fn the_project_files_claude_is_the_installed_claude_codes_chip() {
+        let installed = claude_and_cursor();
+        let f = feature("a", vec![repo("r", true)], 0);
+        let set = with_agents(&[(Stage::Plan, "/usr/bin/claude")]);
+        let chips = stage_chips(&f, Stage::Plan, Some(&set), &installed);
+        let names: Vec<&str> = chips.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Claude Code", "Cursor"]);
+        assert_eq!(lit(&chips), ["Claude Code"]);
     }
 
     #[test]

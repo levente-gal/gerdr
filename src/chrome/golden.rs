@@ -3330,7 +3330,7 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
             },
             PageSection::File {
                 name: "plan.md".into(),
-                state: tab_line("ready for review", CheckTone::Ready),
+                state: tab_line("ready for review", CheckTone::Blocker),
                 buttons: vec![0, 2],
             },
         ],
@@ -3434,7 +3434,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
             },
             PageSection::File {
                 name: "brief.md".into(),
-                state: tab_line("ready for review", CheckTone::Ready),
+                state: tab_line("ready for review", CheckTone::Blocker),
                 buttons: vec![0, 2],
             },
             PageSection::Doc {
@@ -3629,7 +3629,7 @@ fn feature_tab_fix_plan() -> super::FeatureTabView {
         0,
         PageSection::File {
             name: "Fix plan".into(),
-            state: tab_line("Verify failures \u{b7} fix plan ready", CheckTone::Ready),
+            state: tab_line("Verify failures \u{b7} fix plan ready", CheckTone::Blocker),
             buttons: vec![0, 1, 2],
         },
     );
@@ -3738,7 +3738,7 @@ fn feature_tab_open_round() -> super::FeatureTabView {
         round_card(
             "Code review 2",
             Dot::Idle,
-            ("review comments \u{b7} fix plan ready", CheckTone::Ready),
+            ("review comments \u{b7} fix plan ready", CheckTone::Blocker),
             "asked 20m ago \u{b7} plan written 5m ago",
             &[
                 (false, "api/src/export/csv.rs:32-38"),
@@ -4369,7 +4369,7 @@ fn feature_tab_start_over() -> super::FeatureTabView {
             },
             PageSection::File {
                 name: "plan.md".into(),
-                state: tab_line("ready for review", CheckTone::Ready),
+                state: tab_line("ready for review", CheckTone::Blocker),
                 buttons: vec![0],
             },
             PageSection::Doc {
@@ -4604,7 +4604,7 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
             PageSection::Round(super::RoundCard {
                 label: "Code review 2".into(),
                 dot: super::Dot::Idle,
-                state: tab_line("review comments \u{b7} fix plan ready", CheckTone::Ready),
+                state: tab_line("review comments \u{b7} fix plan ready", CheckTone::Blocker),
                 meta: "asked 6m ago \u{b7} plan written 2m ago".into(),
                 asked: vec![
                     super::RoundAsked {
@@ -6996,7 +6996,7 @@ fn tab_plan_review_final() -> super::FeatureTabView {
     let plan = [
         PageSection::File {
             name: "plan-final.md".into(),
-            state: tab_line("ready for review", CheckTone::Ready),
+            state: tab_line("ready for review", CheckTone::Blocker),
             buttons: Vec::new(),
         },
         PageSection::Doc {

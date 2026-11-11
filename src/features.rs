@@ -10983,6 +10983,7 @@ impl Gerdr {
             ));
         }
         let now = feature::now();
+        forget_problems_of(&title);
         if abandon {
             feature.status = Status::Abandoned;
             feature.log(now, "abandoned");
@@ -15986,6 +15987,18 @@ fn event_tone(what: &str) -> CheckTone {
     }
 }
 
+/// Let go of what the problems list says of the setup and the sandbox of
+/// feature `title`, once it closed: nothing of it is left to fix there.
+/// What a removed feature's sandbox left on a machine stays.
+fn forget_problems_of(title: &str) {
+    let of = |what: &str| format!("{what} \u{201c}{title}\u{201d} ");
+    let (setup, sandbox) = (of("Setup of"), of("The sandbox of"));
+    crate::problems::forget_matching("features", |t| t.starts_with(&setup));
+    crate::problems::forget_matching(crate::feature_sandbox::PROBLEMS, |t| {
+        t.starts_with(&sandbox) && !t.ends_with("until that can be reached")
+    });
+}
+
 /// What a toast says of `stage` of `feature` just marked done, one shape
 /// for every approval: the activity's line for it, then what comes next
 /// ("Plan approved · Plan review is next"), or that the feature is done.
@@ -17040,9 +17053,18 @@ fn tab_view(
     let stage = panel.page_stage(feature);
     let rail = Stage::ALL
         .iter()
-        .map(|s| RailNode {
-            selected: *s == stage,
-            ..rail_node(feature, *s, state, now)
+        .map(|s| {
+            let mut node = rail_node(feature, *s, state, now);
+            node.selected = *s == stage;
+            // Another stage's page shows: the stage the feature is at says
+            // so, apart from the one ringed as viewed.
+            if feature.current() == Some(*s) && *s != stage {
+                node.line = match node.line.is_empty() {
+                    true => "current".to_owned(),
+                    false => format!("current \u{b7} {}", node.line),
+                };
+            }
+            node
         })
         .collect();
     let back = rail_back(feature, state.ctx);
@@ -26588,6 +26610,29 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_approval_logs_one_line_and_its_toast_says_it_and_what_is_next() {
+        let mut f = feature("d", vec![repo("api", true)], 1);
+        assert_eq!(f.current(), Some(Stage::Plan));
+        let before = f.history.len();
+        f.tick(5, "you", None);
+        assert_eq!(f.history.len(), before + 1);
+        assert_eq!(
+            done_toast(&f, Stage::Plan),
+            "Plan approved \u{b7} Plan review is next"
+        );
+        f.tick_said(
+            6,
+            "gerdr",
+            None,
+            "done: every milestone ticked and committed",
+        );
+        assert_eq!(
+            done_toast(&f, Stage::PlanReview),
+            "Plan review done: every milestone ticked and committed \u{b7} Build is next"
+        );
+    }
+
+    #[test]
     fn a_cards_tone_puts_a_failure_over_a_gate_over_work() {
         use chrome::CardTone::{Failed, Idle, Waits, Working};
         let state = LineState::from(&PanelState::default());
@@ -27150,11 +27195,14 @@ pub(crate) mod tests {
             page.sections.first(),
             Some(&lines(
                 "Blocked",
-                vec![line("the plan names no such table", CheckTone::Blocker)]
+                vec![line("the plan names no such table", CheckTone::Failed)]
             ))
         );
         let node = rail_node(&f, Stage::Build, &state, 2_000);
-        assert_eq!(node.line, "blocked");
+        assert_eq!(
+            (node.mark, node.line.as_str()),
+            (NodeMark::Failed, "blocked")
+        );
     }
 
     #[test]
