@@ -633,7 +633,7 @@ pub enum BatchKind {
     /// Bring stash `n` (0 the newest) back, and drop it.
     StashPop(usize),
     /// Drop stash `n` (0 the newest).
-    StashDrop(usize, Option<String>),
+    StashDrop(usize, crate::git_ops::StashSeen),
     /// Throw away the uncommitted changes to the job's files.
     Discard,
 }
@@ -2377,17 +2377,16 @@ impl Panel {
         }
     }
 
-    /// The commit of `item`'s stash `n`, as its Stashes list was read, or
-    /// as git has it now when that list isn't read.
-    fn stash_oid(&self, item: &RepoItem, n: usize) -> Option<String> {
+    /// What a drop of `item`'s stash `n` checks before it goes: the
+    /// stash's commit as its Stashes list was read, else how many stashes
+    /// the last status read counted (no git runs here, on the UI thread).
+    fn stash_seen(&self, item: &RepoItem, n: usize) -> crate::git_ops::StashSeen {
         let listed = self.detail.as_ref().filter(|(key, _)| {
             key.tab == DetailTab::Stashes && key.root == item.root
         });
-        match listed {
-            Some(_) => self.log_oids.get(n).cloned().flatten(),
-            // No list read: take the id now, before the confirm dialog, so
-            // a stash pushed while it is open can't shift the drop.
-            None => crate::git_ops::stash_oid(&item.root, n),
+        match listed.and_then(|_| self.log_oids.get(n).cloned().flatten()) {
+            Some(oid) => crate::git_ops::StashSeen::Oid(oid),
+            None => crate::git_ops::StashSeen::Count(item.status.stashes),
         }
     }
 
@@ -3347,7 +3346,7 @@ impl Panel {
                 let n = self.stash_at(item);
                 let kind = match button {
                     B::StashPop => BatchKind::StashPop(n),
-                    _ => BatchKind::StashDrop(n, self.stash_oid(item, n)),
+                    _ => BatchKind::StashDrop(n, self.stash_seen(item, n)),
                 };
                 let k = items.iter().position(|i| i.root == item.root);
                 run(kind, k.into_iter().collect())
@@ -6532,7 +6531,7 @@ mod tests {
         assert_eq!(
             press(&mut panel, none(), Keysym::Return, &ctx),
             Some(Outcome::Batch {
-                kind: BatchKind::StashDrop(0, None),
+                kind: BatchKind::StashDrop(0, crate::git_ops::StashSeen::Count(2)),
                 jobs: jobs(&["gerdr"])
             })
         );
