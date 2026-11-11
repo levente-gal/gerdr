@@ -1012,6 +1012,7 @@ impl Gerdr {
     /// with nothing accepted, the plan stands as it is. The reviewer's run
     /// is kept, for going back.
     pub(crate) fn write_final_plan(&mut self, project: &str, slug: &str) {
+        self.drop_fix_toasts(project, slug);
         let Some(feature) = self.feature(project, slug) else {
             return;
         };

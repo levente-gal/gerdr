@@ -1708,6 +1708,7 @@ fn new_feature() -> super::NewFeatureView {
             ("Esc", "clear"),
         ],
         create: super::NEW_FEATURE_BUTTONS[super::CREATE],
+        choosing: false,
     }
 }
 
@@ -1726,7 +1727,9 @@ fn new_feature_bases() -> super::NewFeatureView {
         hint: "Filter branches",
         focus: Some(0),
         slots: 4,
-        root: "assettag-mobile starts from".into(),
+        heading: "Base branch of \u{201c}assettag-mobile\u{201d}".into(),
+        root: "Pick the branch assettag-mobile starts from".into(),
+        choosing: true,
         repos: vec![
             row("dev", "default", true),
             row("feature/decode", "", false),
@@ -1788,6 +1791,7 @@ fn new_review_pulls() -> super::NewFeatureView {
         title: Line::default(),
         hint: "Filter pull requests",
         focus: Some(0),
+        choosing: true,
         root: "Open pull requests of web".into(),
         repos: vec![
             row(
@@ -2280,7 +2284,9 @@ fn machine(case: usize) -> super::MachineView {
         _ => (
             "Agents and checks can run there. It uses your SSH keys.",
             Some("It didn't accept any of your SSH keys.".to_owned()),
-            Some("Add a key with ssh-copy-id ana@build-box. A locked key needs ssh-add.".to_owned()),
+            Some(
+                "Add a key with ssh-copy-id ana@build-box. A locked key needs ssh-add.".to_owned(),
+            ),
             &["Cancel", "Copy command", "Try again"],
             vec![("Tab", "next"), ("Alt+X", "fix"), ("Esc", "close")],
         ),
@@ -2289,7 +2295,11 @@ fn machine(case: usize) -> super::MachineView {
         body: body.into(),
         target: target.line(),
         name: TextField::default().line(),
-        name_hint: if case > 0 { "build-box".into() } else { String::new() },
+        name_hint: if case > 0 {
+            "build-box".into()
+        } else {
+            String::new()
+        },
         focus: super::MachineFocus::Target,
         error,
         how,
@@ -2525,7 +2535,10 @@ fn machines_panel(case: usize) -> super::MachinesPanelView {
             zenbook.runs.truncate(1);
             zenbook.edit = Some(edit);
             let (focus, hover) = match case {
-                4 => (MachinesFocus::EditAddress(0), Some(MachinesHit::EditButton(0))),
+                4 => (
+                    MachinesFocus::EditAddress(0),
+                    Some(MachinesHit::EditButton(0)),
+                ),
                 5 => (MachinesFocus::EditAddress(0), None),
                 7 => (
                     MachinesFocus::EditAddress(1),
@@ -2573,8 +2586,8 @@ const MACHINES_PANEL: [&str; 10] = [
 /// The Placement page: the open project's stages, the second focused, the
 /// pointer over the first's button.
 fn machines_placement() -> super::MachinesPanelView {
-    use super::{Dot, MachineDetailView, MachineRunView, MachinesFocus, MachinesHit};
     use super::MachinesPanelView;
+    use super::{Dot, MachineDetailView, MachineRunView, MachinesFocus, MachinesHit};
     let stage = |title: &str, detail: &str, dot, button: &str| MachineRunView {
         title: title.into(),
         detail: detail.into(),
@@ -3188,6 +3201,8 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
         picked: None,
         repo_notes: Vec::new(),
         page: StagePage {
+            primary: None,
+            menu: Vec::new(),
             title: "Build".into(),
             about: Stage::Build.about().into(),
             status: Some(tab_line("claude is working in tab 2", CheckTone::Note)),
@@ -3304,6 +3319,8 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
         style,
     };
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Plan".into(),
         about: Stage::Plan.about().into(),
         status: Some(tab_line("plan.md is ready for review", CheckTone::Blocker)),
@@ -3399,6 +3416,8 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
     let mut view = feature_tab();
     at_stage(&mut view, 0, NodeMark::Waiting, "ready for review");
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Discover".into(),
         about: Stage::Discover.about().into(),
         status: Some(tab_line("brief.md is ready for review", CheckTone::Blocker)),
@@ -3467,6 +3486,8 @@ fn feature_tab_resume() -> super::FeatureTabView {
     select_node(&mut view, 1);
     view.rail[1].mark = NodeMark::Done;
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Plan".into(),
         about: Stage::Plan.about().into(),
         status: Some(tab_line("Done 2h ago by you", CheckTone::Ready)),
@@ -3502,6 +3523,8 @@ fn feature_tab_verify_failed() -> super::FeatureTabView {
     let mut view = feature_tab();
     at_stage(&mut view, 4, NodeMark::Current, "failed");
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Verify".into(),
         about: Stage::Verify.about().into(),
         status: Some(tab_line("2 of 5 checks failed", CheckTone::Blocker)),
@@ -3552,6 +3575,8 @@ fn feature_tab_verify_running() -> super::FeatureTabView {
         style,
     };
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Verify".into(),
         about: Stage::Verify.about().into(),
         status: Some(tab_line(
@@ -3569,7 +3594,7 @@ fn feature_tab_verify_running() -> super::FeatureTabView {
             lines: Vec::new(),
         }],
     };
-    // The checks and the code graph run, shown under the header.
+    // The checks and the code graph run, shown under the rail.
     let row = |word, what: &str, steps, took: &str, buttons, node| super::RunningRow {
         word,
         what: what.into(),
@@ -3754,6 +3779,8 @@ fn feature_tab_ship_blocked() -> super::FeatureTabView {
     at_stage(&mut view, 8, NodeMark::Current, "blocked");
     view.repos[1].line = "feature/bulk-export \u{b7} push not guarded: hooks path is set".into();
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Ship".into(),
         about: Stage::Ship.about().into(),
         status: None,
@@ -3935,6 +3962,8 @@ fn feature_tab_ship_routes() -> super::FeatureTabView {
     );
     docs.selected = Some(3);
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Ship".into(),
         about: Stage::Ship.about().into(),
         status: None,
@@ -3973,6 +4002,8 @@ fn feature_tab_ship_finish() -> super::FeatureTabView {
     let mut view = feature_tab();
     at_stage(&mut view, 8, NodeMark::Current, "nothing ticked");
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Ship".into(),
         about: Stage::Ship.about().into(),
         status: None,
@@ -4098,6 +4129,8 @@ fn feature_tab_ship_live() -> super::FeatureTabView {
     web.card.as_mut().unwrap().state = tab_line("merged into dev: push it", CheckTone::Note);
     web.selected = Some(1);
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Ship".into(),
         about: Stage::Ship.about().into(),
         status: Some(tab_line("Done 2h ago by gerdr", CheckTone::Ready)),
@@ -4293,6 +4326,8 @@ fn feature_tab_brief(locked: bool) -> super::FeatureTabView {
         false => ("Done 1h ago by you", "approved"),
     };
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Discover".into(),
         about: Stage::Discover.about().into(),
         status: Some(tab_line(status, CheckTone::Ready)),
@@ -4335,6 +4370,8 @@ fn feature_tab_start_over() -> super::FeatureTabView {
         style,
     };
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Plan".into(),
         about: Stage::Plan.about().into(),
         status: Some(tab_line("plan.md is ready for review", CheckTone::Blocker)),
@@ -4398,6 +4435,8 @@ fn feature_tab_done() -> super::FeatureTabView {
     view.sub = format!("done \u{b7} {}", view.sub);
     view.remove = "Remove worktree and branch";
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Ship".into(),
         about: Stage::Ship.about().into(),
         status: Some(tab_line("Done 2h ago by you", CheckTone::Ready)),
@@ -4472,7 +4511,10 @@ fn feature_tab_review_code() -> super::FeatureTabView {
     use super::ButtonStyle;
     let mut view = feature_tab_review_page();
     let mut switch = review_switch(super::ReviewView::Code);
-    switch.next = Some(("5 of 8 files left \u{b7} 1 changed since viewed".into(), false));
+    switch.next = Some((
+        "5 of 8 files left \u{b7} 1 changed since viewed".into(),
+        false,
+    ));
     let why = Some("5 files not viewed: api/src/a.rs, api/src/b.rs, web/c.ts, …");
     switch.buttons = review_buttons(ButtonStyle::Off, ButtonStyle::Off, why);
     view.review_switch = Some(switch);
@@ -4521,7 +4563,12 @@ fn feature_tab_review_done() -> super::FeatureTabView {
         disabled: None,
     };
     switch.buttons = vec![
-        button(B::GoOn, "Go to Manual test", ButtonStyle::Primary, "Ctrl+Enter"),
+        button(
+            B::GoOn,
+            "Go to Manual test",
+            ButtonStyle::Primary,
+            "Ctrl+Enter",
+        ),
         button(B::Reopen, "Reopen", ButtonStyle::Plain, "Ctrl+Shift+Enter"),
     ];
     view.review_switch = Some(switch);
@@ -4568,6 +4615,8 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
         })
     };
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Code review".into(),
         about: "Read the change and comment on it".into(),
         status: None,
@@ -4675,6 +4724,8 @@ fn feature_tab_later() -> super::FeatureTabView {
     select_node(&mut view, 6);
     view.hover = Some(super::FeatureTabHit::Node(7));
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Code review".into(),
         about: Stage::CodeReview.about().into(),
         status: None,
@@ -4709,6 +4760,8 @@ fn feature_tab_picks_later() -> super::FeatureTabView {
     let mut view = feature_tab();
     select_node(&mut view, 5);
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "AI review".into(),
         about: Stage::AiReview.about().into(),
         status: Some(tab_line("Comes after Verify", CheckTone::Note)),
@@ -4793,6 +4846,8 @@ fn feature_tab_held() -> super::FeatureTabView {
         style,
     };
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Plan".into(),
         about: Stage::Plan.about().into(),
         status: Some(tab_line("not written yet", CheckTone::Note)),
@@ -4859,6 +4914,8 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
         buttons: vec![button],
     };
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "AI review".into(),
         about: Stage::AiReview.about().into(),
         status: Some(tab_line("Comes after Verify", CheckTone::Note)),
@@ -4952,6 +5009,8 @@ fn feature_tab_fixing() -> super::FeatureTabView {
     view.rail[3].line = "running again".into();
     turned_back(&mut view, 5);
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "AI review".into(),
         about: Stage::AiReview.about().into(),
         status: None,
@@ -4996,6 +5055,8 @@ fn feature_tab_t3_draft() -> super::FeatureTabView {
         })
         .collect();
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Plan".into(),
         about: Stage::Plan.about().into(),
         status: Some(tab_line("not written yet", CheckTone::Note)),
@@ -5235,7 +5296,10 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             ],
         ),
         (
-            &[("Pass", plain), ("Fail\u{2026}", if note { fail } else { plain })],
+            &[
+                ("Pass", plain),
+                ("Fail\u{2026}", if note { fail } else { plain }),
+            ],
             FindingTag::NotRun,
             [
                 "Export takes a second",
@@ -5305,6 +5369,8 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
         }));
     }
     view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: Stage::ManualTest.label().into(),
         about: Stage::ManualTest.about().into(),
         status: None,
@@ -5474,10 +5540,14 @@ fn feature_tab_manual_select() -> super::FeatureTabView {
         cursor,
         said: [said(anchor), said(cursor)],
     });
-    view.hints = [("Ctrl+C / y", "copy"), ("* / #", "search it"), ("Esc", "unselect")]
-        .iter()
-        .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
-        .collect();
+    view.hints = [
+        ("Ctrl+C / y", "copy"),
+        ("* / #", "search it"),
+        ("Esc", "unselect"),
+    ]
+    .iter()
+    .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+    .collect();
     view
 }
 
@@ -5510,10 +5580,19 @@ fn the_page_text_under_the_pointer_selects_and_copies_as_it_reads() {
         cursor,
         said: [text(anchor.line), text(cursor.line)],
     };
-    let (from, to) = (TextSpot { line, ch: 7 }, TextSpot { line: line + 3, ch: 2 });
+    let (from, to) = (
+        TextSpot { line, ch: 7 },
+        TextSpot {
+            line: line + 3,
+            ch: 2,
+        },
+    );
     view.marks.pick = Some(pick(to, from));
     let copied = layout.picked_text(&view).expect("text selected");
-    assert_eq!(copied, format!("off with no invoices\n{}\nGiven no", text(line + 1)));
+    assert_eq!(
+        copied,
+        format!("off with no invoices\n{}\nGiven no", text(line + 1))
+    );
     // Painted: a ground under each line it takes.
     let laid = super::feature_tab_layout(&view, frame);
     let grounds = laid.pieces[TabColumn::Page as usize]
@@ -5528,7 +5607,11 @@ fn the_page_text_under_the_pointer_selects_and_copies_as_it_reads() {
     assert_eq!(layout.picked_text(&view), None);
     let laid = super::feature_tab_layout(&view, frame);
     let pieces = &laid.pieces[TabColumn::Page as usize];
-    assert!(!pieces.iter().any(|(_, p)| matches!(p, Piece::Picked { .. })));
+    assert!(
+        !pieces
+            .iter()
+            .any(|(_, p)| matches!(p, Piece::Picked { .. }))
+    );
 }
 
 #[test]
@@ -6263,16 +6346,18 @@ fn review_sections(
     }
     // The page's own button, held by the summary: one already there moves.
     let buttons = want_all
-        .map(|label| match page.buttons.iter().position(|b| b.label == label) {
-            Some(i) => i,
-            None => {
-                page.buttons.push(PageButton {
-                    label: label.into(),
-                    style: ButtonStyle::Plain,
-                });
-                page.buttons.len() - 1
-            }
-        })
+        .map(
+            |label| match page.buttons.iter().position(|b| b.label == label) {
+                Some(i) => i,
+                None => {
+                    page.buttons.push(PageButton {
+                        label: label.into(),
+                        style: ButtonStyle::Plain,
+                    });
+                    page.buttons.len() - 1
+                }
+            },
+        )
         .into_iter()
         .collect();
     page.sections.push(PageSection::Review(ReviewSummary {
@@ -6751,6 +6836,8 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
         style,
     };
     let mut page = StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Plan review".into(),
         about: Stage::PlanReview.about().into(),
         status: None,
@@ -6939,7 +7026,15 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
         answering.selected = true;
     }
     let want_all = (!writing).then_some("Accept all open");
-    review_sections(&mut page, "Suggestions", (decided, 5), words, lines, want_all, cards);
+    review_sections(
+        &mut page,
+        "Suggestions",
+        (decided, 5),
+        words,
+        lines,
+        want_all,
+        cards,
+    );
     view.page = page;
     view.hints = match writing {
         true => vec![
@@ -8010,7 +8105,12 @@ fn dump_review_views() {
             let width = (*w as f64 * scale).round() as usize;
             let buffer =
                 super::feature_tab_composed(&painter, view, (*w, TAB_HEIGHT).into(), theme, scale);
-            dump(&dir, &format!("{name}_{}_{}", theme.name(), scale), buffer, width);
+            dump(
+                &dir,
+                &format!("{name}_{}_{}", theme.name(), scale),
+                buffer,
+                width,
+            );
         }
     }
 }

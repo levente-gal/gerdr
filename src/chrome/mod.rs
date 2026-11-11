@@ -19,8 +19,8 @@ mod badge;
 mod canvas;
 mod checkout;
 mod confirm;
-mod criteria_strip;
 mod consts;
+mod criteria_strip;
 mod drop;
 mod features;
 mod finding_dialog;
@@ -30,10 +30,10 @@ mod golden;
 mod help;
 mod hints;
 mod identity;
-mod machines;
-mod machines_panel;
 mod inbox;
 mod layers;
+mod machines;
+mod machines_panel;
 mod menu;
 mod painter;
 mod pane_bar;
@@ -75,8 +75,8 @@ pub use badge::*;
 use canvas::*;
 pub use checkout::*;
 pub use confirm::*;
-pub use criteria_strip::*;
 pub use consts::*;
+pub use criteria_strip::*;
 pub use drop::*;
 pub use features::*;
 pub use finding_dialog::*;
@@ -84,11 +84,11 @@ pub use footer::*;
 pub use help::*;
 pub use hints::*;
 pub use identity::*;
-pub use machines::*;
-pub use machines_panel::*;
 pub use inbox::*;
 pub use layers::ChromeElement;
 use layers::*;
+pub use machines::*;
+pub use machines_panel::*;
 pub use menu::*;
 pub use painter::*;
 pub use pane_bar::*;
@@ -416,6 +416,8 @@ impl Chrome {
             (sidebar_w, strip_h).into(),
             (strip_size.w, (view.size.h - strip_h - footer_h).max(1)).into(),
         );
+        // Taken from the view before the feature tab is painted.
+        let toast_floor = toast_floor(&view, area);
         let pointer = view.pointer;
         let painter = &self.painter;
         let spinner_step = self.spinner_step(now);
@@ -475,8 +477,9 @@ impl Chrome {
                 // The other dialogs cover all but the quit dialog.
                 Kind::Restart => {
                     let restart = view.restart.take().map(|restart| {
-                        let (loc, size) =
-                            shadowed(restart_layout(output, restart.rows.len(), restart.action).panel);
+                        let (loc, size) = shadowed(
+                            restart_layout(output, restart.rows.len(), restart.action).panel,
+                        );
                         ((restart, output, theme, scale), loc, size)
                     });
                     let part = self
@@ -583,7 +586,7 @@ impl Chrome {
                 // the dialogs (the plan review's sheet is under them). One leaving fades where the stack has it,
                 // which holds its place until it is gone.
                 Kind::Toasts => {
-                    let layouts = toast_layout(&view.toasts, toast_area(area, view.unzoom));
+                    let layouts = toast_layout(&view.toasts, toast_area(area, toast_floor));
                     for toast in view.toasts.iter().filter(|toast| !toast.leaving) {
                         if !self.toasts.iter().any(|(id, _)| *id == toast.id) {
                             self.toasts.push((toast.id, Overlay::default()));
@@ -743,9 +746,12 @@ impl Chrome {
                         let (loc, size) = shadowed(machines_layout(&view, output).panel);
                         ((view, output, theme, scale), loc, size)
                     });
-                    parts.extend(self.machines.part(machines, now, true, |(view, output, ..)| {
-                        painter.machines_panel(view, *output, scale, theme.palette())
-                    }));
+                    parts.extend(
+                        self.machines
+                            .part(machines, now, true, |(view, output, ..)| {
+                                painter.machines_panel(view, *output, scale, theme.palette())
+                            }),
+                    );
                 }
                 // The stats panel on the AI work, centred on the output.
                 Kind::AiStats => {
@@ -1153,6 +1159,14 @@ impl<K: PartialEq> Overlay<K> {
 }
 
 /// Every rect the chrome hit-tests, in window coordinates, for `view`.
+/// What the toasts stack up above in the app area `area`: the button
+/// unzooming a zoomed pane, else the feature tab's footer, so they cover
+/// neither.
+pub fn toast_floor(view: &ChromeView, area: Rect) -> Option<Rect> {
+    let footer = || (view.features.as_ref()).map(|f| feature_tab_layout(f, area).hints);
+    view.unzoom.or_else(footer)
+}
+
 fn hit_rects(
     view: &ChromeView,
     output: Size<i32, Logical>,
@@ -1190,11 +1204,7 @@ fn hit_rects(
         view.sidebar_width,
         view.density,
     )
-    .with_features(
-        &view.sidebar.features,
-        view.sidebar_width,
-        view.density,
-    )
+    .with_features(&view.sidebar.features, view.sidebar_width, view.density)
     .with_feature_head(
         !view.sidebar.workspaces.is_empty(),
         features_waiting(&view.sidebar.workspaces, &view.sidebar.features),
@@ -1269,7 +1279,7 @@ fn hit_rects(
     if let Some(menu) = &view.context_menu {
         rects.extend(menu_layout(menu.anchor, &menu.rows, output).1);
     }
-    let toasts = toast_layout(&view.toasts, toast_area(area, view.unzoom));
+    let toasts = toast_layout(&view.toasts, toast_area(area, toast_floor(view, area)));
     for (layout, _) in toasts.iter().zip(&view.toasts).filter(|(_, t)| !t.leaving) {
         rects.push(layout.panel);
         rects.extend(layout.button);

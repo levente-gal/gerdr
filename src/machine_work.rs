@@ -431,9 +431,8 @@ impl Work {
             shell_quote(terminal),
             rows.unwrap_or(OBSERVE_ROWS),
         );
-        let said = format!(
-            "This view ended. It only looked: what runs there keeps running on {name}."
-        );
+        let said =
+            format!("This view ended. It only looked: what runs there keeps running on {name}.");
         format!(
             r#"printf '\033[?7l'; sleep 1; ssh -n -S {} -o BatchMode=yes -o ControlMaster=no {} {} | sed -u -n 's/.*"bytes":"\([^"]*\)".*/\1/p' | while IFS= read -r l; do printf %s "$l" | base64 -d; done; printf '\033[?7h\033[?25h\033[0m\n'; echo {}"#,
             shell_quote(&self.info.control.to_string_lossy()),
@@ -456,7 +455,12 @@ impl Work {
             shell_quote(terminal),
         );
         let views = format!("{}/gerdr/{VIEWS}", site.data);
-        let there = viewed_by(&views, terminal, &crate::machine_lease::this_machines_name(), &attach);
+        let there = viewed_by(
+            &views,
+            terminal,
+            &crate::machine_lease::this_machines_name(),
+            &attach,
+        );
         let said = format!("This view ended. What runs there keeps running on {name}.");
         format!(
             "ssh -t -S {} -o BatchMode=yes -o ControlMaster=no {} {}; echo {}",
@@ -562,7 +566,11 @@ fn list_panes(socket: PathBuf, stop: &AtomicBool, shared: &Shared, tell: impl Fn
 /// one script, in a thread of its own, as the jobs can take minutes.
 fn look_there(reach: &Reach, stop: &AtomicBool, shared: &Shared, tell: impl Fn(WorkEvent)) {
     while !stop.load(Ordering::Relaxed) {
-        let asked = shared.sandboxes.lock().map(|s| s.clone()).unwrap_or_default();
+        let asked = shared
+            .sandboxes
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
         let names: Vec<(String, &SandboxRun)> = (asked.iter())
             .map(|(project, slug, run)| (format!("{project}/{slug}"), run))
             .collect();
@@ -575,7 +583,11 @@ fn look_there(reach: &Reach, stop: &AtomicBool, shared: &Shared, tell: impl Fn(W
         if let Ok(said) = reach.script(&script, stop) {
             let sandboxes = (names.iter().zip(&asked))
                 .map(|((name, run), (project, slug, _))| {
-                    (project.clone(), slug.clone(), sandbox_run::read_there(&said, name, run))
+                    (
+                        project.clone(),
+                        slug.clone(),
+                        sandbox_run::read_there(&said, name, run),
+                    )
                 })
                 .collect();
             tell(WorkEvent::Looked {
@@ -1110,7 +1122,9 @@ impl Gerdr {
         ids.sort();
         ids.dedup();
         for id in ids {
-            let job = self.forget_script(&id, feature).map(|script| Job::Forget { script });
+            let job = self
+                .forget_script(&id, feature)
+                .map(|script| Job::Forget { script });
             let sent =
                 (job.zip(self.work_of(&id))).is_some_and(|(job, w)| w.jobs.send(job).is_ok());
             // What's kept for a sandbox there takes this along once that's back.
@@ -1417,9 +1431,9 @@ impl Gerdr {
         self.forget_pane(project, slug, stage);
     }
 
-    /// Whether a fresh start of `stage`'s agent would end an agent at work on
-    /// another machine: nothing here shows that one, or could. Then it asks,
-    /// and it starts if told to (`Then::FreshOnMachine`).
+    /// Whether a fresh start of `stage`'s agent would end an agent at work,
+    /// here or on another machine (nothing here shows that one, or could).
+    /// Then it asks, and it starts if told to (`Then::FreshOnMachine`).
     pub(crate) fn asks_before_fresh(&mut self, project: &str, slug: &str, stage: Stage) -> bool {
         let Some(run) = self.feature(project, slug).and_then(|f| f.runs.get(&stage)) else {
             return false;
@@ -2037,8 +2051,14 @@ mod tests {
         let views = views.to_string_lossy().into_owned();
         let run = |attach: &str| {
             let script = viewed_by(&views, "w1/t1", "my box", attach);
-            let out = std::process::Command::new("sh").args(["-c", &script]).output().unwrap();
-            (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned())
+            let out = std::process::Command::new("sh")
+                .args(["-c", &script])
+                .output()
+                .unwrap();
+            (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+            )
         };
         // Ended here, by closing: nothing to say, nor left there.
         assert_eq!(run("true"), (Some(0), String::new()));

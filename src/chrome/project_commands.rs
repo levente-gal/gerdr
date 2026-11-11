@@ -54,6 +54,10 @@ const LIMIT_FIELD: i32 = 100;
 const TAG_GAP: f32 = 8.0;
 /// How high the shortest list of fields is on a low output.
 const LIST_MIN: i32 = 2 * (ROW_LABEL + QUIT_BUTTON);
+/// How high the list of fields is where the output has room: the same on
+/// every tab and as fields grow, so the dialog doesn't change height; more
+/// scrolls.
+const LIST_TALL: i32 = 6 * (ROW_LABEL + QUIT_BUTTON);
 /// How far a turn of the wheel moves the list.
 pub const COMMANDS_NOTCH: i32 = 40;
 
@@ -237,17 +241,19 @@ pub fn commands_buttons(stale: bool) -> [&'static str; 2] {
 
 /// Where the dialog's parts go, centred on an output of `size`.
 pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> CommandsLayout {
-    let line = |shown: bool, h: i32| if shown { h + QUIT_LINE_GAP } else { 0 };
+    // The note's and the error's lines have room kept, whether they show or
+    // not, and the list is as high on every tab: the dialog stays put.
+    let line = |h: i32| h + QUIT_LINE_GAP;
     let fixed = 2 * QUIT_PADDING
         + (QUIT_BUTTON + QUIT_LINE_GAP)
         + (QUIT_BODY + QUIT_LINE_GAP)
-        + line(view.note.is_some(), QUIT_BODY)
+        + line(QUIT_BODY)
         + QUIT_LINE_GAP
-        + line(view.error.is_some(), QUIT_BODY)
+        + line(QUIT_BODY)
         + QUIT_BUTTON;
     let total = list_height(view);
     let room = (size.h - 2 * MARGIN - fixed).max(LIST_MIN);
-    let list_h = total.min(room);
+    let list_h = LIST_TALL.min(room);
     let height = fixed + list_h;
     let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
@@ -267,9 +273,11 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
     };
     let header = next(QUIT_BUTTON);
     let body = next(QUIT_BODY);
-    let note = view.note.as_ref().map(|_| next(QUIT_BODY));
+    let note_line = next(QUIT_BODY);
+    let note = view.note.as_ref().map(|_| note_line);
     let list = next(list_h);
-    let error = view.error.as_ref().map(|_| next(QUIT_BODY));
+    let error_line = next(QUIT_BODY);
+    let error = view.error.as_ref().map(|_| error_line);
 
     let track_w = view.tabs.len() as i32 * TAB_W + 2 * TRACK_PAD;
     let track = Rectangle::new(
@@ -606,6 +614,7 @@ impl Painter {
         self.dialog_keys(
             &mut c,
             &view.keys,
+            Some(commands_buttons(view.stale)[1]),
             row,
             first.loc.x - QUIT_BUTTON_GAP,
             scale,
@@ -774,7 +783,8 @@ mod tests {
         let one = commands_layout(&view(vec![row("api", "a")]), BIG.into());
         let two = commands_layout(&view(vec![row("api", "a\nb")]), BIG.into());
         assert_eq!(two.rows[0].field.size.h - one.rows[0].field.size.h, LINE_H);
-        assert_eq!(two.panel.size.h - one.panel.size.h, LINE_H);
+        // The dialog stays as high: its list has the room.
+        assert_eq!(two.panel.size.h, one.panel.size.h);
     }
 
     #[test]

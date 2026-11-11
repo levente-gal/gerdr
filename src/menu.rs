@@ -66,7 +66,10 @@ pub enum MenuAction {
     /// The dialog connecting another machine (see `machines`).
     AddMachine,
     /// The connect dialog, filled in for a gerdr that reached this machine.
-    AddMachineFrom { target: String, name: String },
+    AddMachineFrom {
+        target: String,
+        name: String,
+    },
     /// The machines panel, on the machine of this name.
     OpenMachines(String),
     /// Connect, disconnect or forget the machine of this name.
@@ -305,6 +308,12 @@ pub enum MenuAction {
     /// Go back (`true`) or forward to tab `id`, as the back or forward
     /// button's menu lists it (see `nav_history`).
     GoToVisited(crate::nav_history::Visit, bool),
+    /// Open the file stage `.2` of feature `.1` of project `.0` wrote, in its
+    /// tab, to review it: a toast's button once it is ready.
+    ReviewDoc(String, String, crate::feature::Stage),
+    /// Do what a button of the feature tab does, from its `⋯` menu (see
+    /// `Gerdr::apply_feature_panel`).
+    FeatureOutcome(Box<crate::features::PanelOutcome>),
     /// Fold every workspace in the sidebar (`Some(true)`), unfold every
     /// one (`Some(false)`), or leave each to fold while quiet (`None`).
     FoldAll(Option<bool>),
@@ -527,6 +536,14 @@ impl Gerdr {
     pub fn menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::NewTerminal => self.run_action(Action::NewTerminal),
+            MenuAction::ReviewDoc(project, slug, stage) => {
+                let file = crate::doc_review::DocFile::Stage(stage);
+                self.open_doc_tab(&project, &slug, file);
+            }
+            MenuAction::FeatureOutcome(outcome) => {
+                self.apply_feature_panel(*outcome);
+                self.sync_feature_page();
+            }
             MenuAction::ChangeProjectId(id, new) => self.change_project_id(&id, &new),
             MenuAction::UndoAfterShip(project, slug, step) => {
                 self.undo_after_ship(&project, &slug, step);

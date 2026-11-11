@@ -1001,7 +1001,10 @@ impl WorktreeDiff {
             false => &[],
         };
         let on_page: &[(&str, &str)] = match self.feature.as_ref().is_some_and(|fe| fe.inline) {
-            true => &[("Alt+1 / Alt+2", "show the code, or the fixes the comments asked for")],
+            true => &[(
+                "Alt+1 / Alt+2",
+                "show the code, or the fixes the comments asked for",
+            )],
             false => &[],
         };
         let list = list.iter().chain(on_page);
@@ -2291,11 +2294,18 @@ impl crate::Gerdr {
                 self.close_worktree_diff();
                 None
             }
-            // Back to the feature's tab; this one stays, for the next look.
+            // Back to the feature's tab, and this one closes: its comments
+            // are kept with the file, and the page opens it again. One with a
+            // comment being written stays, not to lose it.
             Done::Close if doc => {
                 let of = self.wd().and_then(|wd| wd.doc.clone());
+                let writing = self.wd().is_some_and(|wd| wd.diff.editing.is_some());
+                let id = self.tab().map(|tab| tab.id).filter(|_| !writing);
                 if let Some(of) = of {
                     self.show_feature_tab(&of.project, &of.slug);
+                }
+                if let Some((w, t)) = id.and_then(|id| self.tab_place(id)) {
+                    self.close_tab_in(w, t);
                 }
                 None
             }
@@ -2385,10 +2395,7 @@ impl crate::Gerdr {
         // On Code review's page, Alt+1 and Alt+2 go between its code and its
         // fixes; text being written takes them as any key.
         let only_alt = mods.alt && !(mods.ctrl || mods.shift || mods.logo);
-        let views = matches!(
-            sym,
-            Keysym::_1 | Keysym::KP_1 | Keysym::_2 | Keysym::KP_2
-        );
+        let views = matches!(sym, Keysym::_1 | Keysym::KP_1 | Keysym::_2 | Keysym::KP_2);
         if only_alt
             && views
             && self.on_inline_review()
@@ -3474,7 +3481,9 @@ pub(crate) mod tests {
             let last = at(&|r| matches!(r, DetailRow::Editor { last: true, .. }));
             let caret = rows.iter().find_map(|r| match r {
                 DetailRow::Editor {
-                    text, caret: Some(c), ..
+                    text,
+                    caret: Some(c),
+                    ..
                 } => Some((text.clone(), *c)),
                 _ => None,
             });
@@ -3510,7 +3519,11 @@ pub(crate) mod tests {
         let (_, _, five) = shown(&wd);
         wd.drag_editor_past(-1000, 0, ENV);
         assert_eq!(shown(&wd).2, Some(("l00".into(), 0)));
-        assert_ne!(five, Some(("l00".into(), 0)), "five rows up is not the start");
+        assert_ne!(
+            five,
+            Some(("l00".into(), 0)),
+            "five rows up is not the start"
+        );
     }
 
     #[test]

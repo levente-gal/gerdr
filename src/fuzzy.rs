@@ -98,8 +98,21 @@ pub fn score(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
         hits[i] = j;
         j = from[i][j];
     }
+    // A longer query strewn over the text in bits that start no word
+    // ("restore" over "Turn off terminal config reload") is no match:
+    // it would list rows that have nothing to do with it.
+    let loose = (0..m)
+        .filter(|&i| (i == 0 || hits[i - 1] + 1 != hits[i]) && bonus[hits[i]] == 0)
+        .count();
+    if m >= LOOSE_FROM && loose > (m / 3).max(1) {
+        return None;
+    }
     Some((score, hits))
 }
+
+/// How long a query is before its bits must mostly start words (see
+/// `score`).
+const LOOSE_FROM: usize = 4;
 
 /// An item `rank` kept: how well the query matched it and where (see
 /// `score`).
@@ -152,6 +165,16 @@ mod tests {
         assert_eq!(hits("rg", "gerdr"), None);
         assert_eq!(hits("gerdrs", "gerdr"), None);
         assert_eq!(hits("g r", "gerdr"), hits("gr", "gerdr"));
+    }
+
+    #[test]
+    fn a_long_query_strewn_over_the_text_is_no_match() {
+        assert_eq!(hits("restore", "xrxexsxtxoxrxe"), None);
+        assert!(score("restore", "Restore the worktrees of Bulk").is_some());
+        // Words and their starts still are, and short queries as before.
+        assert!(score("nfeat", "New feature").is_some());
+        assert!(score("gerdr", "the gerdr log").is_some());
+        assert!(score("gdr", "gxdxr").is_some());
     }
 
     #[test]

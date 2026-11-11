@@ -20,8 +20,8 @@
 //! at. Without gerdr's extension the review still works:
 //! the switch's other choices are off, with a tooltip saying why. The tab
 //! is saved and comes back on its file and mode; one whose feature is gone
-//! doesn't. Esc goes back to the feature's tab; the file's tab stays, for
-//! the next look.
+//! doesn't. Esc goes back to the feature's tab and closes the file's, but
+//! for one with a comment being written: the page opens it again.
 
 use std::path::Path;
 
@@ -519,8 +519,9 @@ impl Gerdr {
         })
     }
 
-    /// Make `doc`, read as `text`, a tab of workspace `w` in `mode`, right
-    /// after the feature's tab, what is shown kept shown. Where it went.
+    /// Make `doc`, read as `text`, a tab of workspace `w` in `mode`, after
+    /// the others, so none is numbered again; what is shown kept shown.
+    /// Where it went.
     fn insert_doc_tab(&mut self, w: usize, doc: DocOf, text: String, mode: DocMode) -> usize {
         let review = match doc.file {
             DocFile::Stage(_) | DocFile::FixPlan | DocFile::ConflictPlan(_) => {
@@ -534,11 +535,7 @@ impl Gerdr {
         let mut wd = WorktreeDiff::of_doc(doc, w, review);
         wd.set_doc(Ok(text), self.doc_env(mode));
         let ws = &mut self.workspaces[w];
-        let t = usize::from(ws.tabs.first().is_some_and(Tab::is_feature));
-        let t = t.min(ws.tabs.len());
-        if ws.active_tab >= t && !ws.tabs.is_empty() {
-            ws.active_tab += 1;
-        }
+        let t = ws.tabs.len();
         ws.tabs.insert(
             t,
             Tab {
@@ -815,7 +812,10 @@ mod tests {
             assert_eq!(DocMode::opens_on(file, false), DocMode::Review);
         }
         assert_eq!(DocMode::opens_on(DocFile::Evidence, true), DocMode::Preview);
-        assert_eq!(DocMode::opens_on(DocFile::Evidence, false), DocMode::Preview);
+        assert_eq!(
+            DocMode::opens_on(DocFile::Evidence, false),
+            DocMode::Preview
+        );
     }
 
     #[test]

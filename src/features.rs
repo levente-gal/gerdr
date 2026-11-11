@@ -1089,10 +1089,20 @@ impl NewFeatureDialog {
     /// The row slots it makes room for: a filter narrowing the branches
     /// doesn't resize it, or the field being typed in would move.
     fn slots(&self) -> usize {
+        // A picker over the form is no shorter than the form: the dialog
+        // doesn't jump as it opens and closes.
         match (&self.choosing, &self.review) {
-            (Some(_), Some(_)) => self.pulls_offered().len(),
-            (Some(_), None) => self.branches_offered().len(),
+            (Some(_), Some(_)) => self.pulls_offered().len().max(self.form_rows()),
+            (Some(_), None) => self.branches_offered().len().max(self.form_rows()),
             (None, _) => self.repos(),
+        }
+    }
+
+    /// How many rows the form has, its repositories, under the picker.
+    fn form_rows(&self) -> usize {
+        match &self.root {
+            Finding::Found(root) => root.repos.len(),
+            _ => 0,
         }
     }
 
@@ -2595,7 +2605,7 @@ impl Rework {
     fn status(self) -> &'static str {
         match self {
             Rework::Waits => "your turn \u{b7} send the prompt",
-            Rework::Closed => "its tab closed \u{b7} Start agent opens it again",
+            Rework::Closed => "its tab closed \u{b7} Start Build agent opens it again",
             Rework::Draft => "draft in T3 Code \u{b7} pick a model and send it",
             Rework::Runs(Dot::Blocked) => "your turn \u{b7} it asks you something",
             Rework::Runs(_) => "working again",
@@ -3098,9 +3108,11 @@ fn stage_actions(
 /// Where `editing_actions` put Save and Discard among the page's `buttons`.
 fn note_buttons(buttons: &[PageButton]) -> Vec<usize> {
     let n = buttons.len();
-    (n >= 2 && buttons[n - 1].label == "Save" && buttons[n - 2].label == "Discard")
-        .then(|| vec![n - 2, n - 1])
-        .unwrap_or_default()
+    if n >= 2 && buttons[n - 1].label == "Save" && buttons[n - 2].label == "Discard" {
+        vec![n - 2, n - 1]
+    } else {
+        Vec::new()
+    }
 }
 
 fn editing_actions(writing: bool) -> Vec<(PageButton, PanelOutcome)> {
@@ -4121,9 +4133,12 @@ fn blocked_text(blockers: &[String]) -> String {
 }
 
 /// The warning when the code of `title` changed, its marks from `stage`
-/// on gone.
+/// on gone: it names the cause, as the page it shows over may say otherwise.
 fn changed_text(title: &str, stage: Stage) -> String {
-    format!("\u{201c}{title}\u{201d} changed: back to {}", stage.label())
+    format!(
+        "The code of \u{201c}{title}\u{201d} changed since it was checked: back to {}",
+        stage.label()
+    )
 }
 
 /// The success toast once the pull requests of `title` are open:
@@ -6371,7 +6386,7 @@ fn fix_round_buttons(
     }
     if round.can_drop() {
         out.push((
-            button(round.drop_label(), ButtonStyle::Quiet),
+            button(round.drop_label(), ButtonStyle::Plain),
             PanelOutcome::DropFixPlan,
         ));
     }
@@ -6668,11 +6683,13 @@ fn writers_page_actions(
     {
         out.push((button(label, ButtonStyle::Plain), outcome));
     }
+    // Named apart from this stage's own agent's button on the same page.
     if back.is_some()
         && let Some((label, outcome)) =
             agent_button(feature, Stage::Build, ctx).filter(|(_, o)| !has(&out, o))
     {
-        out.push((button(label, ButtonStyle::Plain), outcome));
+        let label = label.replace("agent", "Build agent");
+        out.push((button(&label, ButtonStyle::Plain), outcome));
     }
     // The brief's or the plan's file, once there: the page shows it, its tab
     // works on it. What opens that tab already is that button.
@@ -6909,22 +6926,13 @@ fn offers_setup_log(feature: &Feature, stage: Stage) -> bool {
     offers_setup(feature, stage) && feature.setup.is_some()
 }
 
-/// The name of the feature tab's header button `i`: `FEATURE_BUTTONS`,
-/// then `remove`.
-/// The key of header button `i` (see `header_label`).
+/// The key of the `⋯` menu's feature row `i`: `FEATURE_BUTTONS`, then the
+/// one removing it, shown at the row's right.
 fn header_key(i: usize) -> Option<&'static str> {
     ["Ctrl+O", "Ctrl+C", "Prefix, then U", "Ctrl+N", REMOVE_KEY]
         .get(i)
         .copied()
 }
-
-fn header_label(remove: &'static str, i: usize) -> Option<&'static str> {
-    chrome::FEATURE_BUTTONS
-        .get(i)
-        .copied()
-        .or((i == chrome::FEATURE_BUTTONS.len()).then_some(remove))
-}
-
 /// The repository `rows` on from `at`, of `len`: it stops at the ends.
 fn strip_step(at: usize, rows: isize, len: usize) -> usize {
     let last = len.saturating_sub(1);
@@ -9531,6 +9539,10 @@ impl Gerdr {
         let layout = chrome::new_feature_layout(size, dialog.slots(), dialog.error.is_some());
         let mut picked = false;
         let outcome = match dialog.hit(&layout, pos) {
+            // The picker over the form leaves its buttons off.
+            Some(NewFeatureHit::Button(_) | NewFeatureHit::Link) if dialog.choosing.is_some() => {
+                None
+            }
             Some(NewFeatureHit::Button(chrome::CREATE)) => match dialog.create() {
                 Ok(outcome) => Some(outcome),
                 Err(why) => {
@@ -9769,7 +9781,20 @@ impl Gerdr {
     /// review's diff. Manual test with criteria has the keyboard on them,
     /// Plan review's suggestions to decide on the first of them open.
     pub fn open_feature_at(&mut self, project: &str, slug: &str, stage: Stage) {
+        // Asked for what shows already: it says so, not to look like a
+        // click that did nothing.
+        let here = (self.tab()).is_some_and(crate::Tab::is_feature)
+            && (self.features.panel.as_ref()).is_some_and(|p| {
+                p.project == project
+                    && p.slug == slug
+                    && self
+                        .feature(project, slug)
+                        .is_some_and(|f| p.page_stage(f) == stage)
+            });
         self.open_feature(project, slug);
+        if here {
+            self.show_notice(format!("{}'s page is the one open", stage.label()));
+        }
         let first_open = (stage == Stage::PlanReview)
             .then(|| self.feature(project, slug))
             .flatten()
@@ -11669,11 +11694,10 @@ impl Gerdr {
                     (i < actions.len()).then(|| actions.swap_remove(i).1)
                 })
             }
-            FeatureTabHit::Button(0) => Some(PanelOutcome::Open(feature.dir.clone())),
-            FeatureTabHit::Button(1) => Some(PanelOutcome::CopyPath),
-            FeatureTabHit::Button(2) => Some(PanelOutcome::Stats),
-            FeatureTabHit::Button(3) => Some(PanelOutcome::New),
-            FeatureTabHit::Button(_) => Some(PanelOutcome::Remove),
+            FeatureTabHit::Button(_) => {
+                self.open_feature_menu(&feature, ctx);
+                return;
+            }
         };
         self.sync_feature_page();
         // A note being written: a click in it goes on writing, as does its own
@@ -11887,6 +11911,52 @@ impl Gerdr {
         scroll.jump(to);
     }
 
+    /// The header's `⋯` menu: the page's rare buttons (`StagePage::menu`), then
+    /// what acts on the feature as a whole, removing it last.
+    fn open_feature_menu(&mut self, feature: &Feature, ctx: RowCtx) {
+        use crate::menu::{MenuAction, MenuItem, MenuSpec};
+        let Some((view, layout)) = self.feature_tab_parts() else {
+            return;
+        };
+        let Some(anchor) = layout.buttons.first().copied() else {
+            return;
+        };
+        let item = |label: &str, outcome: PanelOutcome| {
+            MenuItem::new(label, MenuAction::FeatureOutcome(Box::new(outcome)))
+        };
+        let mut items = Vec::new();
+        let stage = (self.features.panel.as_ref()).map(|p| p.page_stage(feature));
+        let actions = stage.map_or_else(Vec::new, |stage| {
+            self.page_button_actions(feature, stage, ctx)
+        });
+        for i in &view.page.menu {
+            if let (Some(b), Some((_, outcome))) = (view.page.buttons.get(*i), actions.get(*i)) {
+                let on = b.style != ButtonStyle::Off;
+                items.push(item(&b.label, outcome.clone()).enabled(on));
+            }
+        }
+        if !view.remove.is_empty() {
+            let outcomes = [
+                PanelOutcome::Open(feature.dir.clone()),
+                PanelOutcome::CopyPath,
+                PanelOutcome::Stats,
+                PanelOutcome::New,
+                PanelOutcome::Remove,
+            ];
+            let labels = chrome::FEATURE_BUTTONS.iter().copied().chain([view.remove]);
+            items.extend((labels.zip(outcomes).enumerate()).map(|(i, (label, o))| {
+                let row = item(label, o);
+                match header_key(i) {
+                    Some(key) => row.hint(key),
+                    None => row,
+                }
+            }));
+        }
+        if !items.is_empty() {
+            self.open_menu(MenuSpec { anchor, items });
+        }
+    }
+
     /// The pointer moved while the feature tab shows: what is under it
     /// lights up, and a stage's node tells what is done in it.
     /// The buttons of `stage`'s page of `feature`, in the order the page
@@ -11957,15 +12027,9 @@ impl Gerdr {
                 };
                 Some(Tooltip::new(&text, *layout.nodes.get(i)?))
             }
-            // The header's buttons: their keys, which the footer leaves to
-            // F1; icons alone on a narrow tab, their names too.
+            // An icon alone: what it opens.
             FeatureTabHit::Button(i) => {
-                let label = header_label(view.remove, i)?;
-                let text = match header_key(i) {
-                    Some(key) => format!("{label} ({key})"),
-                    None => label.to_owned(),
-                };
-                Some(Tooltip::new(&text, *layout.buttons.get(i)?))
+                Some(Tooltip::new(chrome::MORE_ACTIONS, *layout.buttons.get(i)?))
             }
             FeatureTabHit::Jump(tag) => {
                 let stage = self
@@ -12019,8 +12083,14 @@ impl Gerdr {
                         let panel = self.features.panel.as_ref()?;
                         pull_tip(feature, panel.page_stage(feature), &view.page, i)
                     })?;
-                let mut spot = (*layout.page_buttons.get(i)?)?;
-                spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                let spot = match layout.page_buttons.get(i).copied().flatten() {
+                    Some(mut spot) => {
+                        spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                        spot
+                    }
+                    // The primary, in the header: not scrolled.
+                    None => layout.primary?,
+                };
                 Some(Tooltip::new(&text, spot))
             }
             FeatureTabHit::ToggleRepos => {
@@ -12818,10 +12888,14 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
                 true,
             ),
             Some(Ok(_)) if dialog.repos() == 0 => ("No branch matches that".to_owned(), true),
-            Some(Ok(_)) => (format!("{chosen_name} starts from"), false),
+            Some(Ok(_)) => (format!("Pick the branch {chosen_name} starts from"), false),
         }
     } else if dialog.picking && dialog.others.is_empty() {
-        ("The store has no other project to link".to_owned(), true)
+        // Nothing went wrong: there is just nothing to link.
+        (
+            "No other project to link: add one with the project menu first".to_owned(),
+            false,
+        )
     } else {
         match &dialog.root {
             Finding::Looking => ("finding repositories\u{2026}".to_owned(), false),
@@ -12962,6 +13036,8 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         (true, _) if review.is_some() => vec![("Tab", "next"), ("Enter", "pick")],
         (true, _) => vec![("Tab", "next"), ("Enter", "use branch")],
         (false, true) if reviewing => vec![("Tab", "next"), ("Space", "pick or leave out")],
+        // Nothing to tick with no project to link.
+        (false, true) if dialog.picking && dialog.others.is_empty() => Vec::new(),
         (false, true) => vec![("Tab", "next"), ("Space", "tick")],
         (false, false) => Vec::new(),
     };
@@ -12993,6 +13069,11 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
             into: Some((_, title)),
             ..
         }) => format!("Pull requests of \u{201c}{title}\u{201d}"),
+        // A picker of its own over the form.
+        _ if chosen.is_some() && review.is_some() => {
+            format!("Pull request of \u{201c}{chosen_name}\u{201d}")
+        }
+        _ if chosen.is_some() => format!("Base branch of \u{201c}{chosen_name}\u{201d}"),
         Some(_) => format!("Review pull requests in \u{201c}{project}\u{201d}"),
         None => format!("New feature in \u{201c}{project}\u{201d}"),
     };
@@ -13027,6 +13108,7 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         hover: dialog.hover,
         keys,
         create,
+        choosing: chosen.is_some(),
     }
 }
 
@@ -14250,13 +14332,8 @@ fn agent_card(
         Some((line, false)) => format!("{status} \u{b7} {line}"),
         None => status,
     };
-    // The tail read is the current stage's agent's, while its pane is, and
-    // while it says something: once its work is read, it is old news.
+    // Once its work is read, what it said is old news.
     let done = state.agent_standing == Some(chrome::Standing::Done);
-    let tail = match current && run.pane.is_some() && !done {
-        true => state.tail.to_vec(),
-        false => Vec::new(),
-    };
     // Asked something, held for its prompt, or idle with its work undone.
     let waits = match back {
         Some(back) => back.waits_on_you(),
@@ -14266,6 +14343,12 @@ fn agent_card(
             crate::feature_agents::waits_on_you(&run, stage, state.agent_status)
         }
         None => run.waits_to_send(),
+    };
+    // The tail read is the current stage's agent's, while its pane is: what
+    // it said, not how gerdr launched it.
+    let tail = match current && run.pane.is_some() && !done {
+        true => plain_tail(state.tail, waits),
+        false => Vec::new(),
     };
     Some(PageSection::Agent {
         icon: AgentIcon::from_agent(&run.agent),
@@ -14278,6 +14361,35 @@ fn agent_card(
         model: state.model.clone(),
         waits,
     })
+}
+
+/// What an agent card shows of its pane's last lines: none of the shell's
+/// prompt or the command gerdr launched it with (a path and flags, cut off),
+/// and while it doesn't wait on the user only its last line, a plain status;
+/// waiting, the lines that hold what it asks.
+fn plain_tail(lines: &[String], waits: bool) -> Vec<String> {
+    let launch = |l: &str| {
+        let l = l.trim();
+        [
+            "--add-dir",
+            "--session-id",
+            "$(tee ",
+            "/prompts/",
+            "random/uuid",
+            "% cd ",
+            "$ cd ",
+        ]
+        .iter()
+        .any(|bit| l.contains(bit))
+            || l.ends_with('%')
+            || l.ends_with('$')
+    };
+    let kept: Vec<String> = (lines.iter())
+        .filter(|l| !l.trim().is_empty() && !launch(l))
+        .cloned()
+        .collect();
+    let keep = if waits { kept.len() } else { 1 };
+    kept[kept.len().saturating_sub(keep)..].to_vec()
 }
 
 /// The Build agent's card on the page of the stage `feature` is at, while
@@ -16222,6 +16334,18 @@ fn stage_page(
             }
         }
     }
+    // A stage with nothing run yet says what happens on it: under its
+    // agent's card, where the page is otherwise empty.
+    // A stage no agent runs has it last, under what its page already holds.
+    if let Some(next) = next_section(feature, stage, mark) {
+        let agent = (sections.iter()).position(|s| matches!(s, PageSection::Agent { .. }));
+        let at = match (agent, needs(stage)) {
+            (Some(i), _) => i + 1,
+            (None, Some(_)) => 0,
+            (None, None) => sections.len(),
+        };
+        sections.insert(at, next);
+    }
     // The agent's card says what it does: the status line needn't again.
     let carded = |l: &CheckLine| {
         (sections.iter()).any(|s| {
@@ -16263,12 +16387,182 @@ fn stage_page(
         Some(cause) => format!("{} \u{b7} after {cause}", stage.label()),
         None => stage.label().to_owned(),
     };
-    StagePage {
+    let mut page = StagePage {
+        primary: None,
+        menu: (actions.iter().enumerate())
+            .filter(|(_, (b, o))| in_menu(b, o))
+            .map(|(i, _)| i)
+            .collect(),
         title,
         about: stage.about().to_owned(),
         status,
         buttons: actions.iter().map(label).collect(),
         sections,
+    };
+    place_buttons(&mut page);
+    page
+}
+
+/// "What happens next" on `stage`'s page of `feature`, while it is the
+/// current one and nothing ran on it yet: what its agent or the user does
+/// there, and what follows. One place for every stage's page to say it; a
+/// stage with more to say adds its lines here.
+fn next_section(feature: &Feature, stage: Stage, mark: StageMark) -> Option<PageSection> {
+    if mark != StageMark::Current || feature.status != Status::Open {
+        return None;
+    }
+    let fresh = !feature.runs.contains_key(&stage);
+    let says: &[&str] = match stage {
+        Stage::Discover if fresh => &[
+            "Start agent opens a chat with an agent: it asks what the feature is for, then writes brief.md",
+            "You then read the brief here, and approve it or send it back with comments",
+        ],
+        // It doesn't start by itself: the agent and its model are picked first.
+        Stage::Plan if fresh => &[
+            "Plan doesn't start by itself: pick its agent above, then Start agent",
+            "Its agent writes plan.md from the approved brief; you review it here and approve it",
+        ],
+        Stage::PlanReview if fresh && feature.plan_review.is_none() => &[
+            "Start agent has another agent check the plan",
+            "Its suggestions come here: accept or reject each, then write the final plan",
+        ],
+        Stage::Build if fresh && feature.fix_round.is_none() => &[
+            "Start agent has an agent build the plan's milestones, committing as it goes",
+            "They tick off here as they land; Verify runs the checks after",
+        ],
+        Stage::Verify if feature.verify.is_none() => &[
+            "Run checks runs the project's checks on the feature's worktrees",
+            "Failures can go back to Build as fixes; once they pass, AI review is next",
+        ],
+        Stage::AiReview if fresh && feature.review.is_none() => &[
+            "Start agent has another model review the feature's diff",
+            "You decide on each finding here: fix it, or dismiss it with a reason",
+        ],
+        Stage::CodeReview if feature.comment_fixes.is_empty() => &[
+            "You read every changed file and mark it viewed; comments go back to Build as fixes",
+            "Approve once every file is viewed: Manual test is next",
+        ],
+        Stage::ManualTest if feature.manual.is_none() => &[
+            "You try each acceptance criterion, in a sandbox if you start one, and mark it passed or failed",
+            "Failures go back to Build as fixes; once all pass, Ship is next",
+        ],
+        Stage::Ship if feature.ship_log().is_empty() => &[
+            "Pick how each repository ships, then Ship… runs the steps ticked",
+            "What follows shipping is ticked under Afterwards: each can be undone",
+        ],
+        _ => return None,
+    };
+    let lines = says
+        .iter()
+        .map(|text| line(*text, CheckTone::Note))
+        .collect();
+    Some(PageSection::Lines {
+        label: "What happens next".to_owned(),
+        lines,
+    })
+}
+
+/// Whether a page's button is a rare one, a row of the tab's `⋯` menu rather
+/// than a button on the page: starting over, setting up again, the project's
+/// commands (unless the page wants them), a sandbox's reset and removal.
+fn in_menu(button: &PageButton, outcome: &PanelOutcome) -> bool {
+    match outcome {
+        PanelOutcome::StartOver(_)
+        | PanelOutcome::SetUp
+        | PanelOutcome::ResetSandbox
+        | PanelOutcome::RemoveSandbox => true,
+        PanelOutcome::EditCommands(_) => button.style == ButtonStyle::Quiet,
+        _ => false,
+    }
+}
+
+/// Where `page`'s buttons go: its one primary to the tab's header, unless a
+/// card of its own holds it (a finding's, a round's, a repository's on Ship),
+/// the rare ones (`StagePage::menu`) off the page; and each row of buttons
+/// in one style: a quiet one beside outlined ones is outlined too.
+fn place_buttons(page: &mut StagePage) {
+    let menu = page.menu.clone();
+    let local: Vec<usize> = (page.sections.iter())
+        .flat_map(|s| match s {
+            PageSection::Finding(card) => (card.buttons.iter().chain(&card.comment_buttons))
+                .copied()
+                .collect(),
+            PageSection::Round(card) => card.buttons.clone(),
+            PageSection::ShipGroup(group) => group.buttons(),
+            _ => Vec::new(),
+        })
+        .collect();
+    // A card holding the one primary keeps it: then no other is filled.
+    let carded = (local.iter())
+        .any(|i| (page.buttons.get(*i)).is_some_and(|b| b.style == ButtonStyle::Primary));
+    if carded {
+        for (i, b) in page.buttons.iter_mut().enumerate() {
+            if b.style == ButtonStyle::Primary && !local.contains(&i) {
+                b.style = ButtonStyle::Plain;
+            }
+        }
+    }
+    page.primary = (page.buttons.iter().enumerate())
+        .find(|(i, b)| b.style == ButtonStyle::Primary && !menu.contains(i) && !local.contains(i))
+        .map(|(i, _)| i);
+    let gone = |i: &usize| menu.contains(i) || page.primary == Some(*i);
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    for section in &mut page.sections {
+        match section {
+            PageSection::Agent { buttons, .. }
+            | PageSection::File { buttons, .. }
+            | PageSection::Milestones { buttons, .. } => {
+                buttons.retain(|i| !gone(i));
+                rows.push(buttons.clone());
+            }
+            PageSection::Review(summary) => {
+                summary.buttons.retain(|i| !gone(i));
+                rows.push(summary.buttons.clone());
+            }
+            PageSection::Recap(card) => {
+                card.buttons.retain(|i| !gone(i));
+                rows.push(card.buttons.clone());
+            }
+            PageSection::Toolbar { groups } => {
+                for (_, held) in groups.iter_mut() {
+                    held.retain(|i| !gone(i));
+                }
+                groups.retain(|(word, held)| !word.is_empty() || !held.is_empty());
+                rows.push(groups.iter().flat_map(|(_, h)| h.clone()).collect());
+            }
+            PageSection::Finding(card) => {
+                rows.push(card.buttons.clone());
+                rows.push(card.comment_buttons.clone());
+            }
+            PageSection::Round(card) => rows.push(card.buttons.clone()),
+            _ => {}
+        }
+    }
+    page.sections
+        .retain(|s| !matches!(s, PageSection::Toolbar { groups } if groups.is_empty()));
+    let held: Vec<usize> = rows.iter().flatten().copied().collect();
+    let held_ship: Vec<usize> = (page.sections.iter())
+        .flat_map(|s| match s {
+            PageSection::ShipGroup(group) => group.buttons(),
+            _ => Vec::new(),
+        })
+        .collect();
+    // What no card holds goes at the title's right: a row of its own.
+    rows.push(
+        (0..page.buttons.len())
+            .filter(|i| !gone(i) && !held.contains(i) && !held_ship.contains(i))
+            .collect(),
+    );
+    for row in rows {
+        let outlined = (row.iter())
+            .any(|i| (page.buttons.get(*i)).is_some_and(|b| b.style != ButtonStyle::Quiet));
+        for i in row.iter().filter(|_| outlined) {
+            if let Some(b) = page.buttons.get_mut(*i)
+                && b.style == ButtonStyle::Quiet
+            {
+                b.style = ButtonStyle::Plain;
+            }
+        }
     }
 }
 
@@ -16511,7 +16805,20 @@ fn capitalised(what: &str) -> String {
 
 /// `feature`'s history, newest first.
 fn activity(feature: &Feature, now: u64) -> Vec<ActivityRow> {
-    (feature.history.iter().rev())
+    let history = &feature.history;
+    // "Plan ticked" right with "Plan approved" (or "Verify run 2 passed")
+    // says the same twice: the one that says why stays.
+    let ticked = |i: usize| history[i].what.ends_with(" ticked");
+    let doubled = |i: usize| {
+        let near = |j: usize| {
+            j < history.len() && !ticked(j) && history[j].at.abs_diff(history[i].at) <= 2
+        };
+        ticked(i) && ((i > 0 && near(i - 1)) || near(i + 1))
+    };
+    (0..history.len())
+        .rev()
+        .filter(|&i| !doubled(i))
+        .map(|i| &history[i])
         .map(|e| ActivityRow {
             // Capitalised as every line is, older records' "created" too.
             what: capitalised(&e.what),
@@ -16841,6 +17148,8 @@ fn keys_page() -> StagePage {
         })
         .collect();
     StagePage {
+        primary: None,
+        menu: Vec::new(),
         title: "Keys".to_owned(),
         about: "Every key of the feature tab. Esc goes back to the page.".to_owned(),
         status: None,
@@ -17723,6 +18032,9 @@ fn tab_view(
                     }
                 }
                 page.buttons[b].style = ButtonStyle::Primary;
+                // The card holds it: the header has none, and what it had
+                // goes back to the title's row.
+                page.primary = None;
             }
             if panel.armed.is_some() {
                 "Press Del again".clone_into(&mut card.state);
@@ -19552,12 +19864,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn an_agent_card_shows_what_it_said_not_how_it_was_launched() {
+        let lines: Vec<String> = [
+            "[ana@box]/work/shop% cd /work/shop && claude --add-dir /run/x --session-id \"$(tee /run/x/prompts/discover-1.session",
+            "fake claude ready",
+            "",
+            "Which totals should it keep?",
+            "[ana@box]/work/shop%",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        assert_eq!(plain_tail(&lines, false), ["Which totals should it keep?"]);
+        assert_eq!(
+            plain_tail(&lines, true),
+            ["fake claude ready", "Which totals should it keep?"]
+        );
+        assert!(plain_tail(&[], false).is_empty());
+    }
+
+    #[test]
     fn header_buttons_and_the_strip_wheel() {
-        assert_eq!(header_label("Abandon", 0), Some("Open tab"));
-        assert_eq!(header_label("Abandon", 2), Some("Stats"));
-        assert_eq!(header_label("Abandon", 3), Some("New feature\u{2026}"));
-        assert_eq!(header_label("Abandon", 4), Some("Abandon"));
-        assert_eq!(header_label("Abandon", 5), None);
         // The wheel over the chips steps the repositories, stopping at
         // the ends.
         assert_eq!(strip_step(0, 1, 3), 1);
@@ -19773,7 +20099,11 @@ pub(crate) mod tests {
             let (_, said) = recap.stages.iter().find(|(l, _)| l == label).unwrap();
             said.clone()
         };
-        assert!(said("Discover").starts_with("claude \u{b7} "), "{}", said("Discover"));
+        assert!(
+            said("Discover").starts_with("claude \u{b7} "),
+            "{}",
+            said("Discover")
+        );
         assert!(said("AI review").starts_with("claude \u{b7} 4 runs"));
         assert!(said("Manual test").contains("4 of 4 criteria passed \u{b7} took"));
     }
@@ -19979,7 +20309,7 @@ pub(crate) mod tests {
             Some((
                 "Build agent \u{b7} working again".to_owned(),
                 Dot::Working,
-                vec!["Show agent".to_owned()]
+                vec!["Show Build agent".to_owned()]
             ))
         );
         assert_eq!(node, (NodeMark::Fixing, "working again".to_owned()));
@@ -19995,7 +20325,8 @@ pub(crate) mod tests {
         let (shown, node) = card(&f, at_rest);
         let (status, _, buttons) = shown.unwrap();
         assert!(status.starts_with("Build agent \u{b7} your turn"));
-        assert_eq!(buttons, ["Send prompt", "Show agent"]);
+        // Send prompt, the primary, is in the header.
+        assert_eq!(buttons, ["Show Build agent"]);
         assert_eq!(node, (NodeMark::Waiting, "waiting to send".to_owned()));
         assert_eq!(
             page_enter(&f, stage, at_rest),
@@ -20009,7 +20340,7 @@ pub(crate) mod tests {
         // Its tab closed: it can open again, and Enter is this page's again.
         f.runs.insert(Stage::Build, held_run(None));
         let (shown, node) = card(&f, at_rest);
-        assert_eq!(shown.unwrap().2, ["Start agent"]);
+        assert_eq!(shown.unwrap().2, ["Start Build agent"]);
         assert_eq!(node, (NodeMark::Waiting, "agent closed".to_owned()));
         assert_ne!(
             page_enter(&f, stage, at_rest),
@@ -24376,7 +24707,8 @@ pub(crate) mod tests {
         assert_eq!(styles(cards[1]), [ButtonStyle::Passed, ButtonStyle::Plain]);
         assert_eq!(
             styles(cards[2]),
-            [ButtonStyle::Quiet, ButtonStyle::Plain, ButtonStyle::Failed]
+            // One style to a row: the quiet Edit note… outlined like Pass.
+            [ButtonStyle::Plain, ButtonStyle::Plain, ButtonStyle::Failed]
         );
         let outcomes = |card: &FindingCard| -> Vec<PanelOutcome> {
             card.buttons.iter().map(|b| actions[*b].1.clone()).collect()
@@ -25301,7 +25633,7 @@ pub(crate) mod tests {
     fn the_toasts_name_the_feature_and_what_happened() {
         assert_eq!(
             changed_text("Bulk", Stage::Build),
-            "\u{201c}Bulk\u{201d} changed: back to Build"
+            "The code of \u{201c}Bulk\u{201d} changed since it was checked: back to Build"
         );
         assert_eq!(
             opened_text("Bulk", 1, 0),
@@ -25793,13 +26125,18 @@ pub(crate) mod tests {
                     dot: Dot::Working,
                     status: "working \u{b7} started 16m ago".into(),
                     tail: Vec::new(),
-                    buttons: vec![0, 1],
+                    buttons: vec![1],
                     picks: Vec::new(),
                     model: None,
                     waits: false,
                 },
                 PageSection::MilestoneMode { fresh: false }
             ]
+        );
+        // Show agent, the primary, is in the header; the rare ones in `⋯`.
+        assert_eq!(
+            (page.primary, page.menu.as_slice()),
+            (Some(0), &[2, 3, 4][..])
         );
         let node = rail_node(&f, Stage::Build, &state, 2_000);
         assert_eq!(
@@ -25831,7 +26168,9 @@ pub(crate) mod tests {
         let PageSection::Agent { buttons, .. } = &page.sections[0] else {
             panic!("the agent's card first");
         };
-        assert_eq!(buttons[..2], [0, 1], "Continue, then Show agent");
+        // Continue, the primary, is in the header; Show agent on the card.
+        assert_eq!(page.primary, Some(0));
+        assert_eq!(buttons[..1], [1], "Show agent");
         let node = rail_node(&f, Stage::Build, &state, 2_000);
         assert_eq!(
             (node.mark, node.line.as_str()),
@@ -25847,9 +26186,11 @@ pub(crate) mod tests {
         });
         let page = stage_page(&f, Stage::Build, &state, &actions, 2_000);
         let n = page.sections.len();
-        assert!(matches!(&page.sections[n - 1], PageSection::Toolbar { groups }
+        assert!(
+            matches!(&page.sections[n - 1], PageSection::Toolbar { groups }
             if groups[0].1.iter().all(|&b| matches!(actions[b].1,
-                PanelOutcome::SetUp | PanelOutcome::SetupLog))));
+                PanelOutcome::SetUp | PanelOutcome::SetupLog)))
+        );
         assert_eq!(
             page.sections.get(n - 2),
             Some(&lines(
@@ -25980,8 +26321,14 @@ pub(crate) mod tests {
         let node = rail_node(&f, Stage::Plan, &PanelState::default(), 2_000);
         assert_eq!((node.mark, node.line.as_str()), (NodeMark::Current, ""));
         let page = stage_page(&f, Stage::Plan, &PanelState::default(), &[], 2_000);
+        // Nothing ran: it says what happens, and that it doesn't start itself.
+        let PageSection::Lines { label, lines: next } = &page.sections[0] else {
+            panic!("what happens next first");
+        };
+        assert_eq!(label, "What happens next");
+        assert!(next[0].text.starts_with("Plan doesn't start by itself"));
         assert_eq!(
-            page.sections,
+            page.sections[1..],
             [file(
                 "plan.md",
                 line("not written yet", CheckTone::Note),
@@ -26018,18 +26365,16 @@ pub(crate) mod tests {
                 ..
             }
         ));
-        // Show agent and Restart are its card's, Start over the stage's.
+        // Show agent and Restart are its card's, Start over the `⋯` menu's,
+        // Review, the primary, the header's.
         let PageSection::Agent { buttons, .. } = &page.sections[0] else {
             panic!("the agent's card first");
         };
         assert_eq!(*buttons, [1, 2]);
+        assert_eq!((page.primary, page.menu.as_slice()), (Some(0), &[3][..]));
         assert_eq!(
             page.sections[1],
-            file(
-                "plan.md",
-                line("ready for review", CheckTone::Blocker),
-                &[0]
-            )
+            file("plan.md", line("ready for review", CheckTone::Blocker), &[])
         );
         let node = rail_node(&f, Stage::Plan, &state, 2_000);
         assert_eq!(
@@ -26210,7 +26555,12 @@ pub(crate) mod tests {
         let on_card: Vec<&str> = (held.unwrap().iter())
             .map(|i| actions[*i].0.label.as_str())
             .collect();
-        assert_eq!(on_card, ["Review", "Approve"]);
+        // Review, the primary, is in the header.
+        assert_eq!(on_card, ["Approve"]);
+        assert_eq!(
+            page.primary.map(|i| actions[i].0.label.as_str()),
+            Some("Review")
+        );
         assert_eq!(
             page_enter(&f, stage, ctx),
             Some(PanelOutcome::OpenDoc(stage))
@@ -26281,16 +26631,8 @@ pub(crate) mod tests {
             ..ModifiersState::default()
         };
         let slugs = [f.slug.clone()];
-        let got = FeaturePanel::default().key(
-            &ctrl,
-            Keysym::Return,
-            &f,
-            &slugs,
-            written,
-            &[],
-            &[],
-            &[],
-        );
+        let got =
+            FeaturePanel::default().key(&ctrl, Keysym::Return, &f, &slugs, written, &[], &[], &[]);
         assert_eq!(got, Some(PanelOutcome::FindingRefused(DOC_UNREAD)));
         // Nothing there yet: it is being written, as before.
         assert_eq!(
@@ -26897,9 +27239,11 @@ pub(crate) mod tests {
             let actions = page_actions(f, Stage::Ship, RowCtx::default());
             let page = stage_page(f, Stage::Ship, &PanelState::default(), &actions, 2_000);
             let row = page.sections.iter().find_map(|s| match s {
-                PageSection::ShipGroup(g) if g.head == "Afterwards" => {
-                    g.steps.iter().find(|r| r.label == "Close the workspace").cloned()
-                }
+                PageSection::ShipGroup(g) if g.head == "Afterwards" => g
+                    .steps
+                    .iter()
+                    .find(|r| r.label == "Close the workspace")
+                    .cloned(),
                 _ => None,
             });
             row.map(|row| actions[row.button.expect("its button")].1.clone())
@@ -27442,6 +27786,28 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_tick_said_with_its_reason_shows_once() {
+        let mut f = feature("a", vec![repo("api", true)], 0);
+        for (at, what) in [
+            (1_000, "Plan approved"),
+            (1_000, "Plan ticked"),
+            (1_200, "Code review ticked"),
+            (1_300, "Verify run 2 passed"),
+            (1_301, "Verify ticked"),
+        ] {
+            f.history.push(Event {
+                at,
+                what: what.into(),
+            });
+        }
+        let rows: Vec<String> = activity(&f, 1_400).into_iter().map(|r| r.what).collect();
+        assert_eq!(
+            rows,
+            ["Verify run 2 passed", "Code review ticked", "Plan approved"]
+        );
+    }
+
+    #[test]
     fn the_activity_is_newest_first_in_its_tones() {
         let mut f = feature("a", vec![repo("api", true)], 0);
         for (at, what) in [
@@ -27573,7 +27939,7 @@ pub(crate) mod tests {
             .filter(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Plan))
             .count();
         assert_eq!(reviews, 1);
-        // The primary Review stays on the file's card, as the plain one does.
+        // The primary Review goes to the header, Approve stays on the card.
         let held = actions
             .iter()
             .position(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Plan))
@@ -27593,9 +27959,10 @@ pub(crate) mod tests {
             Some(&file(
                 "plan.md",
                 line("ready for review", CheckTone::Blocker),
-                &[held, approve]
+                &[approve]
             ))
         );
+        assert_eq!(page.primary, Some(held));
     }
 
     /// A file reads on its stage's page, under all else, once there is one
@@ -27712,7 +28079,8 @@ pub(crate) mod tests {
         let PageSection::Agent { tail: shown, .. } = &page.sections[0] else {
             panic!("the agent's card first");
         };
-        assert_eq!(shown, &tail);
+        // Its last lines, all of them while it waits on the user.
+        assert!(!shown.is_empty() && tail.ends_with(shown), "{shown:?}");
         // Another stage's card has no tail: it is the current agent's.
         let plan = stage_page(&f, Stage::Plan, &state, &[], 2_000);
         assert!(!plan.sections.iter().any(|s| matches!(

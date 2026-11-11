@@ -428,6 +428,11 @@ impl Expected {
                 .or(self.window_of.as_ref().map(|(command, _)| command.as_str()))
                 .and_then(program)
                 .unwrap_or_else(|| "app".into()),
+            // A browser's app window is named by its id, not for people.
+            other if other.contains(web_control::EXTENSION_ID) => "the preview".into(),
+            other if other.starts_with("chrome-") || other.starts_with("chromium-") => {
+                "the browser".into()
+            }
             other => other.to_owned(),
         }
     }
@@ -2667,8 +2672,14 @@ impl Gerdr {
             if let channel::Event::Msg(round) = event
                 && state.herdr.is_some()
             {
+                let rooms = state.pill_rooms();
                 state.herdr_tabs = round.tabs;
                 state.capture_commands();
+                // A command started or ended: its terminal's pill comes or
+                // goes, and with it the room kept for it.
+                if state.pill_rooms() != rooms {
+                    state.arrange();
+                }
                 state.feed_services();
                 state.track_tests();
                 for id in state.projects.take_conflicts() {
@@ -4017,8 +4028,13 @@ impl Gerdr {
         }
     }
 
-    /// Say `label`, for pane `pane`, didn't start, with a Retry.
+    /// Say `label`, for pane `pane`, didn't start, with a Retry: in a toast
+    /// unless its pane shows, whose placeholder says it with the same buttons.
     fn toast_not_started(&mut self, pane: u32, label: &str) {
+        let shown = (self.tab()).is_some_and(|tab| tab.expected.iter().any(|e| e.pane == pane));
+        if shown {
+            return;
+        }
         self.toast_with(
             format!("{label} didn't start"),
             Level::Error,
@@ -5500,9 +5516,15 @@ impl Gerdr {
         let mut panes = Vec::new();
         for (w, ws) in self.workspaces.iter().enumerate() {
             for (t, tab) in ws.tabs.iter().enumerate() {
-                for (id, rect) in tab.shown_rects(area) {
+                for (id, mut rect) in tab.shown_rects(area) {
                     // The window takes its whole place; its bar floats
-                    // over its top.
+                    // over its top. A terminal's pill kept out over what
+                    // runs gets its room, not to cover the first line.
+                    if tab.panes.iter().any(|p| p.id == id && self.pill_room(p)) {
+                        let room = chrome::TERMINAL_PILL_ROOM.min(rect.size.h / 2);
+                        rect.loc.y += room;
+                        rect.size.h -= room;
+                    }
                     let window = tab.window(id).unwrap().clone();
                     panes.push((w, t, window, rect));
                 }

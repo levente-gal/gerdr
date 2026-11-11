@@ -721,6 +721,42 @@ impl Painter {
         bx + side
     }
 
+    /// A radio button at the left of `rect`, its height's middle: one choice
+    /// of several, `on` when it is the one. Its right edge, as `checkbox`'s.
+    pub(super) fn radio(
+        &self,
+        c: &mut Canvas,
+        rect: Rect,
+        on: bool,
+        scale: f64,
+        p: &Palette,
+    ) -> f32 {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let side = px(CHECKBOX_SIZE) as f32;
+        let (bx, by) = (
+            px(rect.loc.x) as f32,
+            (px(rect.loc.y) as f32 + (px(rect.size.h) as f32 - side) / 2.0).round(),
+        );
+        let (b, r) = (px(1).max(1) as f32, side / 2.0);
+        if !on {
+            c.rounded(bx, by, side, side, r, p.border);
+            c.rounded(
+                bx + b,
+                by + b,
+                side - 2.0 * b,
+                side - 2.0 * b,
+                r - b,
+                p.elevated,
+            );
+            return bx + side;
+        }
+        c.rounded(bx, by, side, side, r, p.accent);
+        let dot = (side * 0.4).round();
+        let at = ((side - dot) / 2.0).round();
+        c.rounded(bx + at, by + at, dot, dot, dot / 2.0, p.on_accent);
+        bx + side
+    }
+
     /// A text field in `rect`, like the switcher's query: `line` (or
     /// `placeholder` without any) and, when `focused`, its caret and
     /// selection.

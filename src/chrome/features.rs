@@ -18,13 +18,13 @@ use super::{
     Check, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT, Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE,
     ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP,
     QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, agent_icon,
-    band, button_width, check, chevron_down, chevron_side, copy, coverage, cross, dialog_buttons,
+    band, button_width, check, chevron_down, chevron_side, coverage, cross, dialog_buttons,
     field_lines_height, field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs,
-    icon_sdf, measure, measure_bold, measured_footer_height, mix, phys, physical, plus, rect_px,
-    segment, segment_tint, status_dot, tab, trash,
+    icon_sdf, measure, measure_bold, measured_footer_height, mix, phys, physical, rect_px, segment,
+    segment_tint, status_dot,
 };
 use super::{
-    Standing, bars, code_mark, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle,
+    Standing, code_mark, ellipsis, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle,
     text_lines,
 };
 use crate::text_field::Line;
@@ -73,8 +73,11 @@ const SWITCH_W: i32 = 28;
 /// How many lines a list on a stage's page shows at most (the Ship
 /// check, Verify's failures): past it, the last says how many more.
 pub const MAX_CHECK_LINES: usize = 4;
-/// The feature tab's header buttons, before the one removing worktrees.
+/// The rows of the feature tab's `⋯` menu that act on the feature as a whole,
+/// before the one removing worktrees.
 pub const FEATURE_BUTTONS: [&str; 4] = ["Open tab", "Copy path", "Stats", "New feature\u{2026}"];
+/// The tooltip of the feature tab's `⋯` button: the menu of rare actions.
+pub const MORE_ACTIONS: &str = "More actions";
 
 /// Where a stage stands in a feature, for its mark.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -148,6 +151,9 @@ pub struct NewFeatureView {
     pub keys: Vec<(&'static str, &'static str)>,
     /// Its Create button's label (`NEW_FEATURE_BUTTONS`, `SAVE_PULLS`).
     pub create: &'static str,
+    /// A picker over the form: a repository's base branch or pull request,
+    /// one of the rows (radio, not tick boxes), the form's buttons off.
+    pub choosing: bool,
 }
 
 /// What the pointer is over in the new feature dialog.
@@ -188,7 +194,8 @@ pub struct NewFeatureLayout {
 /// error line if `error`, centred on an output of `size`: as many
 /// repositories as fit.
 pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -> NewFeatureLayout {
-    let error_h = if error { QUIT_BODY + QUIT_LINE_GAP } else { 0 };
+    // Its line has room kept, so the dialog doesn't grow when one shows.
+    let error_h = QUIT_BODY + QUIT_LINE_GAP;
     let fixed = 2 * QUIT_PADDING
         + QUIT_TITLE
         + QUIT_LINE_GAP
@@ -223,7 +230,8 @@ pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -
     };
     let title = next(QUIT_TITLE);
     let field = next(QUIT_BUTTON);
-    let error = error.then(|| next(QUIT_BODY));
+    let error_line = next(QUIT_BODY);
+    let error = error.then_some(error_line);
     let root = next(QUIT_BODY);
     let projects = next(QUIT_BUTTON);
     let link_w = button_width(LINK_BUTTON[0]).max(button_width(LINK_BUTTON[1]));
@@ -706,7 +714,10 @@ impl ReviewSwitch {
     /// What each segment says.
     fn labels(&self) -> [String; 2] {
         let code = match self.files {
-            Some(files) => format!("Code review \u{b7} {} of {} files", files.viewed, files.total),
+            Some(files) => format!(
+                "Code review \u{b7} {} of {} files",
+                files.viewed, files.total
+            ),
             None => "Code review".to_owned(),
         };
         [code, format!("Fixes \u{b7} {}", self.fixes)]
@@ -875,9 +886,7 @@ pub enum PageSection {
     /// Words, each with the indices in `StagePage::buttons` of the buttons
     /// after it, in a row at the right of the caption before it if they fit,
     /// else on a line of their own: Manual test's "Collapse" and "Expand".
-    Toolbar {
-        groups: Vec<(String, Vec<usize>)>,
-    },
+    Toolbar { groups: Vec<(String, Vec<usize>)> },
     /// A labelled list of lines in their tones: the checks, findings,
     /// criteria, the Ship check, a done stage's note.
     Lines {
@@ -1218,7 +1227,7 @@ pub struct PageMatch {
 }
 
 /// The selected stage's page, in the feature tab's middle column.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StagePage {
     pub title: String,
     /// What the stage is for.
@@ -1227,6 +1236,13 @@ pub struct StagePage {
     pub status: Option<CheckLine>,
     pub buttons: Vec<PageButton>,
     pub sections: Vec<PageSection>,
+    /// The page's one primary button, by its index in `buttons`: drawn in the
+    /// tab's header at its right end, whatever card it acts on, so the next
+    /// step is always in one place.
+    pub primary: Option<usize>,
+    /// The indices in `buttons` of the rare ones ("Start over…", "Set up
+    /// again", "Commands…"): rows of the header's `⋯` menu, not on the page.
+    pub menu: Vec<usize>,
 }
 
 /// A line of the feature tab's activity: one of the feature's history,
@@ -1269,9 +1285,9 @@ pub struct FeatureTabView {
     pub sub: String,
     /// Which of how many features it is, when there are several.
     pub which: Option<(usize, usize)>,
-    /// The label of the header's last button, removing its worktrees
-    /// (Abandon…, Remove worktrees…), after `FEATURE_BUTTONS`. Empty: the header
-    /// has no buttons, as on a feature another machine writes.
+    /// The label of the `⋯` menu's last row, removing its worktrees
+    /// (Abandon…, Remove worktrees…), after `FEATURE_BUTTONS`. Empty: the menu
+    /// has neither, as on a feature another machine writes.
     pub remove: &'static str,
     /// The nine stages, in order.
     pub rail: Vec<RailNode>,
@@ -1335,7 +1351,7 @@ pub enum FeatureTabHit {
     Column(TabColumn),
     Prev,
     Next,
-    /// `FEATURE_BUTTONS`, then the one removing worktrees.
+    /// The header's `⋯` button, opening the menu of rare actions.
     Button(usize),
     /// A stage's node or label on the rail, by index into `rail`.
     Node(usize),
@@ -1404,8 +1420,11 @@ pub struct FeatureTabLayout {
     pub sub: Rect,
     /// "2 of 3", and the buttons to the previous and next feature.
     pub switch: Option<(Rect, Rect, Rect)>,
-    /// `FEATURE_BUTTONS`, then the one removing worktrees.
+    /// The header's `⋯` button, when it has a menu to open.
     pub buttons: Vec<Rect>,
+    /// The page's primary button (`StagePage::primary`), at the header's
+    /// right end: not scrolled.
+    pub primary: Option<Rect>,
     /// The header's buttons show only their icons: the tab is narrow.
     pub compact: bool,
     /// Each stage's node, with its label and line under it: what a click
@@ -1532,6 +1551,9 @@ impl FeatureTabLayout {
         }
         if let Some(b) = self.buttons.iter().position(on) {
             return Some(FeatureTabHit::Button(b));
+        }
+        if self.primary.as_ref().is_some_and(on) {
+            return header_primary(view).map(FeatureTabHit::PageButton);
         }
         for (i, spots) in self.running.iter().enumerate() {
             if let Some(b) = spots.buttons.iter().position(on) {
@@ -1732,7 +1754,8 @@ impl FeatureTabLayout {
         let apart = |t: &PageText| {
             let r = rect(t);
             let dy = (r.loc.y - at.y).max(at.y - (r.loc.y + r.size.h - 1)).max(0);
-            let (text, font, bold) = piece_text(&pieces[t.piece].1).unwrap_or(("", Font::Body, false));
+            let (text, font, bold) =
+                piece_text(&pieces[t.piece].1).unwrap_or(("", Font::Body, false));
             let end = r.loc.x + text_width_of(text, font, bold).ceil() as i32;
             let dx = (r.loc.x - at.x).max(at.x - end).max(0);
             (dy, dx)
@@ -1853,6 +1876,9 @@ impl FeatureTabLayout {
 
 /// The room between the tab's edges and what is on it.
 const TAB_PAD: i32 = 16;
+/// How wide the feature tab's contents are at most: past it, the rest is
+/// margin either side.
+const TAB_MAX: i32 = 1760;
 /// The feature's title, in the header.
 const TAB_TITLE_FONT: f32 = 20.0;
 /// How high the header's title and sub lines are.
@@ -2116,7 +2142,9 @@ impl Ink {
     fn color(self, p: &Palette) -> Rgb {
         match self {
             Self::Text => p.text,
-            Self::Muted => p.muted,
+            // The page's secondary text, a step nearer the text than the
+            // chrome's: it is read, not only glanced at.
+            Self::Muted => mix(p.muted, p.text, 0.3),
             Self::Error => p.error,
             Self::Tone(tone) => tone.color(p),
         }
@@ -2803,7 +2831,10 @@ impl Stack {
         self.y += AGENT_PAD;
         // A review card's chevron, lined up with its first line.
         if card.folds {
-            let first = card.buttons.first().is_some_and(|b| *b < page.buttons.len());
+            let first = card
+                .buttons
+                .first()
+                .is_some_and(|b| *b < page.buttons.len());
             let h = match card.collapsed && first {
                 true => ROW_BUTTON,
                 false => BODY_LINE,
@@ -3396,7 +3427,15 @@ impl Stack {
     /// `text` wrapped to the column as `all_text` does, the places saying
     /// what `sheet` looks for tinted; none while it looks for nothing.
     #[allow(clippy::too_many_arguments)]
-    fn found_text(&mut self, text: &str, font: Font, ink: Ink, bold: bool, h: i32, sheet: &SheetRow) {
+    fn found_text(
+        &mut self,
+        text: &str,
+        font: Font,
+        ink: Ink,
+        bold: bool,
+        h: i32,
+        sheet: &SheetRow,
+    ) {
         if sheet.needle.is_empty() {
             return self.all_text(text, font, ink, bold, h);
         }
@@ -3469,8 +3508,8 @@ impl Stack {
             let tail_w = (width_of(&tail, Font::Small.size()).ceil() as i32 + 1).min(room / 2);
             let title_room = (room - tail_w - QUIT_BUTTON_GAP).max(1);
             let title = cut_to_width(&card.title, Font::Body.size(), title_room * 8 / 9);
-            let title_w = (width_of(&title, Font::Body.size()).ceil() as i32 * 9 / 8 + 1)
-                .min(title_room);
+            let title_w =
+                (width_of(&title, Font::Body.size()).ceil() as i32 * 9 / 8 + 1).min(title_room);
             let piece = |text, font, ink, bold| found_piece(text, font, ink, bold, sheet);
             self.pieces.push((
                 Rectangle::new((text_x, line_y).into(), (title_w, BODY_LINE).into()),
@@ -4076,8 +4115,9 @@ fn page_stack(
             _ => Vec::new(),
         })
         .collect();
+    // The primary is in the header, the rare ones in its `⋯` menu.
     let mut free: Vec<usize> = (0..page.buttons.len())
-        .filter(|i| !held.contains(i))
+        .filter(|i| !held.contains(i) && page.primary != Some(*i) && !page.menu.contains(i))
         .collect();
     // The primary goes rightmost, as in dialogs.
     free.sort_by_key(|&i| page.buttons[i].style == ButtonStyle::Primary);
@@ -4126,9 +4166,7 @@ fn page_stack(
     }
     // The toolbar went at the right of the caption before it.
     let mut beside = None;
-    let sheet = |k: usize| {
-        matches!(page.sections.get(k), Some(PageSection::Finding(c)) if c.sheet.is_some())
-    };
+    let sheet = |k: usize| matches!(page.sections.get(k), Some(PageSection::Finding(c)) if c.sheet.is_some());
     for (k, section) in page.sections.iter().enumerate() {
         if matches!(section, PageSection::Doc { here: false, .. }) || beside == Some(k) {
             continue;
@@ -4450,7 +4488,8 @@ fn review_switch_spots(switch: &ReviewSwitch, x: i32, y: i32, width: i32) -> Rev
     let track_w = widths[0] + widths[1] + 2 * PICK_TRACK_PAD;
     let track = Rectangle::new((x, y).into(), (track_w, h).into());
     let from = x + track_w + COLUMN_GAP;
-    let has_bar = switch.files.is_some() && end - from >= REVIEW_BAR_W + 2 * COLUMN_GAP + REVIEW_LEFT_MIN;
+    let has_bar =
+        switch.files.is_some() && end - from >= REVIEW_BAR_W + 2 * COLUMN_GAP + REVIEW_LEFT_MIN;
     let bar = has_bar.then(|| {
         Rectangle::new(
             (from, y + (h - REVIEW_BAR_H) / 2).into(),
@@ -4501,34 +4540,47 @@ thread_local! {
 }
 
 /// `feature_tab_layout`, laying out.
+/// The page's primary button the header shows, if any: not on Code review's
+/// page under the rail, whose line has its own.
+fn header_primary(view: &FeatureTabView) -> Option<usize> {
+    view.page
+        .primary
+        .filter(|i| *i < view.page.buttons.len() && !view.review_page)
+}
+
+/// Whether the header has a `⋯` menu: the feature's own rows, or the page's
+/// rare buttons.
+pub fn has_menu(view: &FeatureTabView) -> bool {
+    !view.remove.is_empty() || !view.page.menu.is_empty()
+}
+
 fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let width = frame.size.w;
-    let x = frame.loc.x + TAB_PAD;
-    let inner = (width - 2 * TAB_PAD).max(1);
+    // On a wide output the tab's contents keep to `TAB_MAX`, centred: a
+    // card's buttons and a line's actions stay near its text.
+    let inner = (width - 2 * TAB_PAD).clamp(1, TAB_MAX);
+    let x = frame.loc.x + ((width - inner) / 2).max(TAB_PAD);
     let right = x + inner;
     let top = frame.loc.y + TAB_PAD;
     let header_h = TAB_TITLE + TAB_SUB;
 
-    // The header's buttons from the right: the one removing worktrees
-    // last, then the switch left of them.
+    // The header's buttons from the right: the page's primary last, as in
+    // a dialog, the `⋯` menu left of it, then the switch left of them.
     let compact = width < COMPACT_BUTTONS_BELOW;
-    let labels: Vec<&str> = FEATURE_BUTTONS
-        .iter()
-        .copied()
-        .chain([view.remove])
-        .filter(|_| !view.remove.is_empty())
-        .collect();
     let by = top + (header_h - TAB_BUTTON) / 2;
     let mut bx = right;
-    let mut buttons = vec![Rect::default(); labels.len()];
-    for (i, label) in labels.iter().enumerate().rev() {
-        let w = if compact {
-            TAB_BUTTON
-        } else {
-            button_width(label)
-        };
-        bx -= w;
-        buttons[i] = Rectangle::new((bx, by).into(), (w, TAB_BUTTON).into());
+    let primary = header_primary(view).map(|i| {
+        let w = button_width(&view.page.buttons[i].label);
+        bx -= w + QUIT_BUTTON_GAP;
+        Rectangle::new((bx + QUIT_BUTTON_GAP, by).into(), (w, TAB_BUTTON).into())
+    });
+    let mut buttons = Vec::new();
+    if has_menu(view) {
+        bx -= TAB_BUTTON;
+        buttons.push(Rectangle::new(
+            (bx, by).into(),
+            (TAB_BUTTON, TAB_BUTTON).into(),
+        ));
         bx -= QUIT_BUTTON_GAP;
     }
     let switch = view.which.filter(|(_, n)| *n > 1).map(|(i, n)| {
@@ -4552,12 +4604,10 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let title = Rectangle::new((x, top).into(), (text_w, TAB_TITLE).into());
     let sub = Rectangle::new((x, top + TAB_TITLE).into(), (text_w, TAB_SUB).into());
 
-    // The work running, under the header; then the rail: a slot per
-    // stage, its node at the slot's top middle.
-    let (running_card, running, running_more) =
-        running_spots(view, x, top + header_h + RAIL_GAP, inner);
-    let run_h = running_card.map_or(0, |c| c.size.h + RUN_BELOW);
-    let rail_top = top + header_h + run_h + RAIL_GAP + RAIL_BACK;
+    // The rail under the header: a slot per stage, its node at the slot's
+    // top middle. It stays put whatever runs: the card of work running goes
+    // under it.
+    let rail_top = top + header_h + RAIL_GAP + RAIL_BACK;
     let n = view.rail.len().max(1) as i32;
     let slot = |i: i32| (x + inner * i / n, x + inner * (i + 1) / n);
     // A label on two lines puts its node's short line under them: the
@@ -4568,25 +4618,29 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
             let (left, next) = slot(i);
             rail_label(&node.label, next - left - 4).len() > 1
         });
-    // So is one that says what ran a done stage.
-    let ran = view.rail.iter().any(|node| node.agent.is_some());
+    // The line saying what ran a done stage has its room from the start, so
+    // the page doesn't drop once the first stage is done.
     let rail_h = NODE
         + NODE_GAP
         + NODE_LABEL
         + NODE_LINE
         + if wraps { RAIL_LABEL_STEP } else { 0 }
-        + if ran { NODE_LINE } else { 0 };
+        + NODE_LINE;
     let nodes = (0..view.rail.len() as i32)
         .map(|i| {
             let (left, next) = slot(i);
             Rectangle::new((left, rail_top).into(), (next - left, rail_h).into())
         })
         .collect();
-    // Under the rail's rule, the columns; or across it all, the review.
+    // Under the rail's rule, the work running, then the columns; or across
+    // it all, the review.
     let rule_end = rail_top + rail_h + RAIL_GAP + 1;
-    let review_switch = view.review_switch.as_ref().map(|switch| {
-        review_switch_spots(switch, x, rule_end + REVIEW_SWITCH_GAP, inner)
-    });
+    let (running_card, running, running_more) = running_spots(view, x, rule_end + RUN_BELOW, inner);
+    let rule_end = rule_end + running_card.map_or(0, |c| c.size.h + 2 * RUN_BELOW);
+    let review_switch = view
+        .review_switch
+        .as_ref()
+        .map(|switch| review_switch_spots(switch, x, rule_end + REVIEW_SWITCH_GAP, inner));
     let test_strip = (view.test_strip.as_ref())
         .filter(|_| review_switch.is_none())
         .map(|strip| {
@@ -4796,6 +4850,7 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
         sub,
         switch,
         buttons,
+        primary,
         compact,
         nodes,
         columns,
@@ -4977,10 +5032,22 @@ fn mark_page(
         let in_card = card.filter(|(_, r)| r.contains(rect.loc)).map(|(n, _)| n);
         if let Some((from, to)) = pick.filter(|(from, to)| (from.line..=to.line).contains(&line)) {
             let start = if line == from.line { from.ch } else { 0 };
-            let end = if line == to.line { to.ch } else { text.chars().count() };
+            let end = if line == to.line {
+                to.ch
+            } else {
+                text.chars().count()
+            };
             if start < end {
                 let (text, range) = (text.to_owned(), start..end);
-                out.push((rect, Piece::Picked { text, font, bold, range }));
+                out.push((
+                    rect,
+                    Piece::Picked {
+                        text,
+                        font,
+                        bold,
+                        range,
+                    },
+                ));
             }
         }
         if let Piece::Found {
@@ -4991,7 +5058,10 @@ fn mark_page(
             ..
         } = &mut piece
         {
-            for (n, range) in crate::find::find(text, needle, *whole).into_iter().enumerate() {
+            for (n, range) in crate::find::find(text, needle, *whole)
+                .into_iter()
+                .enumerate()
+            {
                 if view.marks.found_at == Some(matches.len()) {
                     *current = Some(n);
                 }
@@ -5106,7 +5176,12 @@ fn comment_stripe(p: &Palette) -> Rgb {
 }
 
 fn card_frame(c: &mut Canvas, rect: Rect, scale: f64, p: &Palette) -> Rect {
-    framed(c, rect, scale, (CARD_BORDER, p.border_variant, p.background))
+    framed(
+        c,
+        rect,
+        scale,
+        (CARD_BORDER, p.border_variant, p.background),
+    )
 }
 
 /// The ground of the card of an agent that waits on the user.
@@ -5396,6 +5471,8 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         picked: None,
         repo_notes: Vec::new(),
         page: StagePage {
+            primary: None,
+            menu: Vec::new(),
             title: String::new(),
             about: String::new(),
             status: None,
@@ -6086,13 +6163,18 @@ impl Painter {
         line(&mut c, &view.root, layout.root, FONT_SIZE, root_color);
         let mut projects = layout.projects;
         projects.size.w = layout.link.loc.x - projects.loc.x - QUIT_BUTTON_GAP;
-        let hovered = view.hover == Some(NewFeatureHit::Link);
+        // The picker over the form leaves the form's buttons off.
+        let form = |style| match view.choosing {
+            true => ButtonStyle::Off,
+            false => style,
+        };
+        let hovered = view.hover == Some(NewFeatureHit::Link) && !view.choosing;
         self.button(
             &mut c,
             view.link,
             shift(layout.link),
             (hovered, false),
-            ButtonStyle::Plain,
+            form(ButtonStyle::Plain),
             scale,
             p,
         );
@@ -6114,8 +6196,14 @@ impl Painter {
                 (rect.loc.x + ROW_INSET, rect.loc.y).into(),
                 (rect.size.w - ROW_INSET, rect.size.h).into(),
             );
-            let state = if repo.touched { Check::On } else { Check::Off };
-            let box_end = self.checkbox(&mut c, check, state, false, scale, p);
+            let box_end = match view.choosing {
+                // One of them: a radio.
+                true => self.radio(&mut c, check, repo.touched, scale, p),
+                false => {
+                    let state = if repo.touched { Check::On } else { Check::Off };
+                    self.checkbox(&mut c, check, state, false, scale, p)
+                }
+            };
             let mut end = phys(rect, scale).1 - (ROW_INSET as f32 * s).round();
             if let Some(label) = &repo.base {
                 let base = shift(*base);
@@ -6192,18 +6280,18 @@ impl Painter {
             }
             None => {
                 let row = Rectangle::new((left, first.loc.y).into(), (0, first.size.h).into());
-                self.dialog_keys(&mut c, &view.keys, row, end, scale, p);
+                self.dialog_keys(&mut c, &view.keys, Some(view.create), row, end, scale, p);
             }
         }
         // Labels as short as Create's take its width (`BUTTON_MIN_WIDTH`).
         let labels = [NEW_FEATURE_BUTTONS[0], view.create];
         for (i, (rect, label)) in layout.buttons.iter().zip(labels).enumerate() {
-            let style = if i == CREATE {
+            let style = form(if i == CREATE {
                 ButtonStyle::Primary
             } else {
                 ButtonStyle::Plain
-            };
-            let hovered = view.hover == Some(NewFeatureHit::Button(i));
+            });
+            let hovered = view.hover == Some(NewFeatureHit::Button(i)) && !view.choosing;
             self.button(
                 &mut c,
                 label,
@@ -6468,28 +6556,13 @@ impl Painter {
                 icon_sdf(c, rect, scale, color, |x, y| chevron_side(left, x, y, s));
             }
         }
-        let labels = FEATURE_BUTTONS.iter().copied().chain([view.remove]);
-        for (i, (rect, label)) in l.buttons.iter().zip(labels).enumerate() {
-            // Abandon is offered, never the loudest; removing a shipped
-            // feature's worktrees loses nothing, so it is a plain one.
-            let style = match i == FEATURE_BUTTONS.len() && label == "Abandon" {
-                true => ButtonStyle::Danger,
-                false => ButtonStyle::Plain,
-            };
+        for (i, rect) in l.buttons.iter().enumerate() {
             let hovered = view.hover == Some(FeatureTabHit::Button(i));
-            if !l.compact {
-                self.button(c, label, *rect, (hovered, false), style, scale, p);
-                continue;
-            }
-            self.button(c, "", *rect, (hovered, false), style, scale, p);
-            let color = p.text;
-            icon_sdf(c, *rect, scale, color, |x, y| match i {
-                0 => tab(x, y, s * 0.8),
-                1 => copy(x, y, s * 1.2),
-                2 => bars(x, y, s),
-                3 => plus(x, y, 0.0, 0.0, 4.5 * s, s),
-                _ => trash(x, y, s),
-            });
+            self.button(c, "", *rect, (hovered, false), ButtonStyle::Plain, scale, p);
+            icon_sdf(c, *rect, scale, p.text, |x, y| ellipsis(x, y, s));
+        }
+        if let (Some(rect), Some(i)) = (l.primary, header_primary(view)) {
+            self.page_button(c, view, i, rect, scale, p);
         }
 
         self.running_card(c, view, l, scale, p);
@@ -6830,7 +6903,10 @@ impl Painter {
             _ => None,
         };
         let on = usize::from(switch.view == ReviewView::Fixes);
-        let labelled = [(labels[0], spots.segments[0]), (labels[1], spots.segments[1])];
+        let labelled = [
+            (labels[0], spots.segments[0]),
+            (labels[1], spots.segments[1]),
+        ];
         self.segmented(c, spots.track, &labelled, on, hover, scale, p);
         for (i, (b, rect)) in switch.buttons.iter().zip(&spots.buttons).enumerate() {
             let Some(rect) = rect else {
@@ -8194,6 +8270,9 @@ mod tests {
             l.error
                 .is_some_and(|e| e.loc.y > l.field.loc.y && e.loc.y < l.root.loc.y)
         );
+        // An error showing doesn't grow it.
+        let calm = new_feature_layout((1920, 1080).into(), 3, false);
+        assert_eq!((calm.panel, calm.root), (l.panel, l.root));
         let short = new_feature_layout((800, 360).into(), 30, false);
         assert!(!short.rows.is_empty() && short.rows.len() < 30);
         assert!(short.panel.size.h <= 360);
@@ -8853,11 +8932,24 @@ mod tests {
         for (i, b) in l.buttons.iter().enumerate() {
             assert_eq!(hit(&l, &view, *b), Some(FeatureTabHit::Button(i)));
         }
-        assert_eq!(l.buttons.len(), FEATURE_BUTTONS.len() + 1);
-        // A feature another machine writes has none of them.
+        // One `⋯` button, opening the menu of rare actions.
+        assert_eq!(l.buttons.len(), 1);
+        // A feature another machine writes has no menu, its page nothing rare.
         let mut seen = view.clone();
         seen.remove = "";
+        seen.page.menu.clear();
         assert!(tab_at(&seen, 1920).buttons.is_empty());
+        // The page's primary sits in the header, right of the menu.
+        let mut lead = view.clone();
+        lead.page.primary = Some(0);
+        let led = tab_at(&lead, 1920);
+        let primary = led.primary.expect("in the header");
+        assert!(primary.loc.x > led.buttons[0].loc.x);
+        assert!(led.page_buttons[0].is_none(), "not on the page too");
+        assert_eq!(
+            hit(&led, &lead, primary),
+            Some(FeatureTabHit::PageButton(0))
+        );
         for (i, n) in l.nodes.iter().enumerate() {
             assert_eq!(hit(&l, &view, *n), Some(FeatureTabHit::Node(i)));
         }
@@ -9092,11 +9184,11 @@ mod tests {
         view
     }
 
-    /// Work running gets a card under the header that moves the rail down;
+    /// Work running gets a card under the rail, which stays put;
     /// a row goes to its stage's page and its buttons press; ticking time
     /// draws only the head again.
     #[test]
-    fn work_running_shows_under_the_header() {
+    fn work_running_shows_under_the_rail() {
         use crate::chrome::Theme;
         use std::time::{Duration, Instant};
         let view = running_view();
@@ -9109,13 +9201,10 @@ mod tests {
             "two rows and the count"
         );
         assert!(
-            l.nodes[0].loc.y >= card.loc.y + card.size.h,
-            "the rail goes under it"
+            card.loc.y >= l.nodes[0].loc.y + l.nodes[0].size.h,
+            "it goes under the rail"
         );
-        assert_eq!(
-            l.nodes[0].loc.y - plain.nodes[0].loc.y,
-            card.size.h + RUN_BELOW
-        );
+        assert_eq!(l.nodes[0].loc.y, plain.nodes[0].loc.y, "the rail stays");
         assert!(l.running_more.is_some());
         let first = &l.running[0];
         assert!(first.bar.is_some() && l.running[1].bar.is_none());
@@ -9983,7 +10072,10 @@ mod tests {
         assert_eq!(three.size.h - one.size.h, 2 * FIELD_LINE);
         assert_eq!(grown.size.h - card.size.h, 2 * FIELD_LINE);
         assert!(three.loc.y + three.size.h <= grown.loc.y + grown.size.h);
-        assert!(grown.loc.y + grown.size.h <= next.loc.y, "the next card moves down");
+        assert!(
+            grown.loc.y + grown.size.h <= next.loc.y,
+            "the next card moves down"
+        );
         let whole = Line {
             text: "first\nsecond\nthird".into(),
             caret: 0,
@@ -10144,7 +10236,10 @@ mod tests {
             })
             .collect();
         assert!(texts.contains(&("dismissed", true)), "{texts:?}");
-        assert!(texts.iter().any(|(t, _)| t.ends_with("\u{b7} why")), "{texts:?}");
+        assert!(
+            texts.iter().any(|(t, _)| t.ends_with("\u{b7} why")),
+            "{texts:?}"
+        );
         let button = closed.page_buttons[0].unwrap();
         assert!(button.loc.x + button.size.w <= frame.loc.x + frame.size.w);
         // Its text stays clear of the button.

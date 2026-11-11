@@ -905,11 +905,31 @@ impl Gerdr {
         self.running_in(pane)
     }
 
+    /// Whether `pane` is a terminal whose pill stays out over what runs in
+    /// it, so its window starts under the pill (see `TERMINAL_PILL_ROOM`).
+    pub fn pill_room(&self, pane: &Pane) -> bool {
+        pane.herdr.is_some() && self.running_in(pane).is_some()
+    }
+
+    /// The panes of every tab that have that room, to arrange them again
+    /// when it changes.
+    pub fn pill_rooms(&self) -> Vec<u32> {
+        (self.workspaces.iter().flat_map(|ws| &ws.tabs))
+            .flat_map(|tab| &tab.panes)
+            .filter(|pane| self.pill_room(pane))
+            .map(|pane| pane.id)
+            .collect()
+    }
+
     /// What runs in `pane`, as its bar says it, if a command runs there
     /// or is being stopped.
     pub fn running_in(&self, pane: &Pane) -> Option<String> {
         // Only a view: what runs is on the other machine, and stays there.
-        if pane.herdr.as_ref().is_some_and(|h| self.is_machine_view(&h.pane_id)) {
+        if pane
+            .herdr
+            .as_ref()
+            .is_some_and(|h| self.is_machine_view(&h.pane_id))
+        {
             return None;
         }
         let content = self.pane_bar_of(pane);

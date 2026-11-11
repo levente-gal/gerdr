@@ -24,7 +24,7 @@ rules, for reviewing a branch before it merges.
 | Shift+C / Shift+F | In a feature's diff: add a comment on no line or file, listed first as General comments / mark every undecided finding to fix (Shift+F also on AI review's page; on Plan review's page it accepts every open suggestion, a question with no answer staying open). On a file under review, Shift+C comments on the whole file. |
 | Ctrl+Shift+R | On the feature tab: show the selected stage's agent, done stage or not, or go back to its chat in a new tab once its tab is closed (Claude Code and Cursor; Ctrl+R starts afresh). On a later stage's page, while work sent back to the Build agent is under way, it shows that agent. |
 | Ctrl+Enter / Ctrl+Shift+Enter | The panel's finishing action: commit / commit and push (repos), create (branch menu), approve / send back (a file under review; Verify's evidence is only read, so there it says so and does nothing); approve, also from the feature tab's stage page while its brief or plan is ready for review (its "Approve" button on the file card; comments left on the file ask first); approve / plan fixes for the comments (a feature's diff at Code review; on its page, also the buttons at the right of the line under the rail, which says what comes next. Approve is greyed, saying what holds it up, until nothing does, then it is the one to press); make the fixes with no plan / plan them first (a feature's diff and AI review page, when the user added no comment, edited no fix and added no item of their own: greyed in the diff until every finding is decided); once the user wrote anything of their own a plan is required: Ctrl+Shift+Enter plans the fixes and Ctrl+Enter says a plan comes first (Plan fixes is Ctrl+Shift+Enter on every page and in every diff, Make fixes Ctrl+Enter); make the fixes with no plan / plan them first (a feature's Verify page once its checks failed, also off its check cards); make the fixes with no plan / plan them first (a feature's Manual test page, while failures wait to be sent; with comments of the user's own among them a plan is required, so Ctrl+Shift+Enter plans them and Ctrl+Enter says a plan comes first; with none, Ctrl+Enter marks passed, which comments still open refuse; once fixes it asked for changed the code, mark passed takes the feature back to Verify, then AI review and Code review of the changes, then Manual test again with what it found kept, but for passes of criteria the fixes' agent said they changed, which are untested again and say so); make the fixes / send back (a fix plan, in its review; Ctrl+Enter also on the page of the stage it came from, and again once its agent stopped with fixes left, when Send back is gone. A fix plan already made is only read, and no key sends it again: its card's quiet "Send … again" button does, only while the stage has nothing new to send); write the final plan, or use the plan as it is / ask the reviewer about the user's comments (Plan review's page and its Suggestions tab: while suggestions are still to decide, Ctrl+Enter stays and says how many). On the file of a done stage, which is only read: go to the current stage / reopen the stage, as on its page in the feature tab (Ctrl+Shift+Enter there), until the stage after it has made something. On someone else's pull request's review nothing goes to an agent: findings marked to comment, Code review's comments and Manual test's failures wait for the review on GitHub, so Code review's Ctrl+Enter approves with comments left, and Manual test's marks it done once every criterion is tried, failures and all (Mark done); Ctrl+Shift+Enter says where they go instead. On a pull request's review's Ship page, Ctrl+Enter approves it and Ctrl+Shift+Enter requests changes, each asking first and posting one review to GitHub (someone else's only: GitHub takes neither of one's own); Enter pushes the user's own fixes, comments while something waits to be posted, finishes once a review went, else approves; Ctrl+E edits the review's own text (`review.md`). A submitted review leaves it open for the author's next commits. |
-| Ctrl+Shift+V | In a feature's file's tab: go between Review and Split (its brief or plan, read on the stage's page), or to the next of Preview, Review and Split (Verify's evidence). Split, the two side by side, following its edits and caret and scrolling together, is there only on an output 1400 px wide or more. A new tab of a brief or plan opens on Split there, on Review on a narrower one; pressing its button again only switches to the open tab, keeping what it shows. Esc goes back to the feature tab. |
+| Ctrl+Shift+V | In a feature's file's tab: go between Review and Split (its brief or plan, read on the stage's page), or to the next of Preview, Review and Split (Verify's evidence). Split, the two side by side, following its edits and caret and scrolling together, is there only on an output 1400 px wide or more. A new tab of a brief or plan opens on Split there, on Review on a narrower one; pressing its button again only switches to the open tab, keeping what it shows. Esc goes back to the feature tab and closes the file's tab, unless a comment is being written in it. |
 | F2 | Rename. |
 | Shift+F2 | In the project menu: change the selected project's id in place (also its row's "#" button; not the shown project's). Its folders and the records naming it move with it, all or none, and an Undo toast changes it back. One still running asks to be stopped first. Refused while it has a sandbox, work running on another machine, a program on its folders, or a project file changed outside gerdr. Other machines show its features again once they use the same id. |
 | Ctrl+S | Switch to / check out a branch (repos, worktrees). |
@@ -104,9 +104,9 @@ The footer says what the buttons say:
   A gate's key isn't hinted twice: where Enter does the same as `Ctrl+Enter`,
   the footer shows `Ctrl+Enter`.
 - The feature tab's footer keeps to the page and what has the keys: the
-  header's and the repository strip's buttons (Open tab, Copy path, New
-  feature..., the other features, all repositories, Abandon) show their keys
-  in their tooltips and F1.
+  header's `⋯` menu rows (Open tab, Copy path, Stats, New feature…, Abandon)
+  show their keys at their right, the other features' and the repository
+  strip's buttons in their tooltips, and all of them in F1.
 - Every footer centres its rows, in the text colour.
 
 ## Text fields and the pointer
@@ -161,6 +161,11 @@ press and drag pick whole rows and a double click opens the line in Zed.
 
 - Toast levels: Success / Info for what happened, Warning for what needs a
   look, Error for what failed. Never report a failure with Info.
+- The same toast text again replaces the one showing, not a stack of it; a
+  toast whose button was done another way (the page's) goes. A toast names
+  its cause, not gerdr's files. Toasts stack above the feature tab's footer.
+- A dialog's keys at the left of its buttons start with Enter and the button
+  it presses (Cancel first on a destructive one).
 - Errors and warnings stay longer than info and pause while hovered; every
   toast can be dismissed. Toasts are painted above every non-modal popup.
 - What the user must fix (config, missing tool, unreachable source) goes to
@@ -309,7 +314,7 @@ press and drag pick whole rows and a double click opens the line in Zed.
   its top.
 - Work running on a feature off the thread (setup, checks, code graph,
   sandbox, ship…) shows on every page of its feature tab, in a card under the
-  header: a row each, with a spinner, a lowercase word, what it does now, a
+  rail, which stays put: a row each, with a spinner, a lowercase word, what it does now, a
   bar when it counts steps, how long it has run, and the buttons its stage's
   page has for it (Log, Stop). A row goes to that stage's page. Work shows
   there only once it ran 300 ms; past three rows the card counts the rest.
@@ -334,6 +339,16 @@ press and drag pick whole rows and a double click opens the line in Zed.
   `element`.
 - One scrollbar (`chrome/thumb.rs`), one button painter
   (`Painter::button`), one query field with the magnifier.
+- A feature page has one filled primary button, in the tab's header at its
+  right end, whatever card it acts on (`StagePage::primary`); a card's own
+  (a finding's, a round's, a repository's on Ship) stays on it. The rare
+  ones (Start over…, Set up again, Commands…, a sandbox's Reset data… and
+  Remove sandbox…, and the feature's Open tab, Copy path, Stats, New
+  feature…, Abandon) are rows of the header's `⋯` menu (`StagePage::menu`,
+  `in_menu` in `features.rs`). A row of buttons has one style: a quiet one
+  beside outlined ones is outlined too. A page with nothing run yet says
+  what happens next (`next_section`). The tab's contents keep to 1760 px,
+  centred.
 - `[ui] motion = "full" | "reduced" | "off"`: blinking dots and pulses only
   with "full"; fades only with "full" or "reduced" (see `anim::motion`).
 - Text meets 4.5:1 contrast, marks and dots 3:1, in both themes.

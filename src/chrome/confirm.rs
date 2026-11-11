@@ -111,16 +111,28 @@ pub fn confirm_lines_layout(size: Size<i32, Logical>, go: &str, lines: usize) ->
 impl Painter {
     /// The keys a dialog takes besides its buttons (`hints`, keycaps then
     /// what each does) from the left of `row` (buffer coordinates), the
-    /// band its buttons sit in, up to `end`: as many as fit.
+    /// band its buttons sit in, up to `end`: as many as fit. `enter`, the
+    /// label of the button Enter presses, goes first, unless `hints` says
+    /// Enter already.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn dialog_keys(
         &self,
         c: &mut Canvas,
         hints: &[(&str, &str)],
+        enter: Option<&str>,
         row: Rect,
         end: i32,
         scale: f64,
         p: &Palette,
     ) {
+        let word = enter.map(|label| label.trim_end_matches('\u{2026}').to_lowercase());
+        let said = hints.iter().any(|(k, _)| *k == "Enter");
+        let hints: Vec<(&str, &str)> = (word.as_deref().filter(|_| !said))
+            .map(|w| ("Enter", w))
+            .into_iter()
+            .chain(hints.iter().copied())
+            .collect();
+        let hints = hints.as_slice();
         let room = Rectangle::new(row.loc, ((end - row.loc.x).max(0), row.size.h).into());
         let mut spots = hint_spots(hints, room);
         // Centred by `hint_spots`; moved to the left edge, as the
@@ -156,7 +168,16 @@ impl Painter {
         let (x, end) = phys(title, scale);
         let title_band = band(title, scale);
         let text = &view.title;
-        self.text(&mut c, text, LABEL_FONT_SIZE, x, end, title_band, scale, p.text);
+        self.text(
+            &mut c,
+            text,
+            LABEL_FONT_SIZE,
+            x,
+            end,
+            title_band,
+            scale,
+            p.text,
+        );
         // The body, a line per `QUIT_BODY`.
         let body = shift(layout.body);
         for (i, line) in view.body.lines().enumerate() {
@@ -165,9 +186,30 @@ impl Painter {
                 (body.size.w, QUIT_BODY).into(),
             );
             let (x, end) = phys(rect, scale);
-            self.text(&mut c, line, FONT_SIZE, x, end, band(rect, scale), scale, p.muted);
+            self.text(
+                &mut c,
+                line,
+                FONT_SIZE,
+                x,
+                end,
+                band(rect, scale),
+                scale,
+                p.muted,
+            );
         }
 
+        // Its keys at the left of its buttons, as every dialog has them:
+        // Enter presses the one selected, which is Cancel at first.
+        let enter = match view.selected {
+            1 => view.go,
+            _ => "Cancel",
+        };
+        let hints = [("Tab", "switch"), ("Esc", "cancel")];
+        let first = shift(layout.buttons[0]);
+        let left = shift(layout.title).loc.x;
+        let row = Rectangle::new((left, first.loc.y).into(), (0, first.size.h).into());
+        let end = first.loc.x - QUIT_BUTTON_GAP;
+        self.dialog_keys(&mut c, &hints, Some(enter), row, end, scale, p);
         for (i, rect) in layout.buttons.iter().enumerate() {
             let (label, style) = if i == 1 && view.loses {
                 (view.go, ButtonStyle::Destructive)
