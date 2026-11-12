@@ -1548,8 +1548,16 @@ impl Gerdr {
             None => "The one working now stops and its tab closes: the new one takes its place"
                 .to_owned(),
         };
+        // Another agent picked takes its place: say which.
+        let next = (self.feature(project, slug)).and_then(|f| self.next_stage_agent(f, stage));
+        let title = match next {
+            Some(next) if !next.eq_ignore_ascii_case(&run.agent) => {
+                format!("Start {next} in {}'s place?", run.agent)
+            }
+            _ => format!("Start {} afresh?", run.agent),
+        };
         self.ask(
-            format!("Start {} afresh?", run.agent),
+            title,
             body,
             "Start fresh",
             Then::FreshOnMachine(project.to_owned(), slug.to_owned(), stage),

@@ -1581,6 +1581,15 @@ impl Gerdr {
         }
     }
 
+    /// The name of the agent `stage`'s next start runs, if one can.
+    pub(crate) fn next_stage_agent(&self, feature: &Feature, stage: Stage) -> Option<String> {
+        let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
+        match stage_pick(feature, stage, workflow, &self.launcher.cli_agents) {
+            Pick::Agent(name, _) => Some(name),
+            _ => None,
+        }
+    }
+
     /// Whether `stage`'s next agent can run on another machine: T3 Code's
     /// threads are this machine's.
     pub(crate) fn takes_a_machine(&self, feature: &Feature, stage: Stage) -> bool {
