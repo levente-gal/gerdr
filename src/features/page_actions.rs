@@ -716,7 +716,7 @@ fn writers_page_actions(
             }
         }
     }
-    if stage == Stage::Ship && feature.status != Status::Open {
+    if stage == after_stage(feature) && feature.status != Status::Open {
         for step in [feature::AfterStep::Close, feature::AfterStep::Remove] {
             let Some(done) = feature.after_done(step) else {
                 continue;
@@ -732,7 +732,7 @@ fn writers_page_actions(
     }
     undos.sort_by_key(|(at, ..)| std::cmp::Reverse(*at));
     out.extend(undos.into_iter().map(|(_, b, o)| (b, o)));
-    if stage == Stage::Ship && close_left(feature) {
+    if stage == after_stage(feature) && close_left(feature) {
         out.push((
             button("Close", ButtonStyle::Plain),
             PanelOutcome::CloseShipped,

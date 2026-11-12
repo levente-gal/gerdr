@@ -740,6 +740,14 @@ pub(super) fn close_left(feature: &Feature) -> bool {
         && feature.shipping.after.is_empty()
 }
 
+/// The page holding what follows `feature`'s end (Close, Undo): Ship, or
+/// the stage it was at when it ended there, as a review can.
+pub(super) fn after_stage(feature: &Feature) -> Stage {
+    (feature.current())
+        .filter(|_| feature.status != Status::Open)
+        .unwrap_or(Stage::Ship)
+}
+
 /// What followed shipping `feature`, once it is done: when its workspace
 /// closed and its worktrees went, and when that was undone; each with its
 /// Undo while it can be.

@@ -263,6 +263,7 @@ pub(super) fn stage_page(
             Stage::Ship if feature.pull().is_some() => {
                 sections.extend(card());
                 sections.extend(submit_sections(feature, state, actions, now));
+                sections.extend(shipped_after_group(feature, actions, now));
             }
             Stage::Ship => {
                 sections.extend(card());
@@ -302,6 +303,10 @@ pub(super) fn stage_page(
                     sections.extend(sandbox_sections(feature, state));
                 }
             }
+        }
+        // Ended before Ship, as a review can: what follows shows where.
+        if stage != Stage::Ship && stage == after_stage(feature) {
+            sections.extend(shipped_after_group(feature, actions, now));
         }
     }
     // Fixes sent back the feature: the rounds that sent them stay.

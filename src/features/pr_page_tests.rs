@@ -550,3 +550,30 @@ fn someone_elses_can_be_fixed_here_and_pushed() {
 fn feature_agents_gate(f: &Feature) -> Option<(Stage, u64, crate::feature_agents::GateKind)> {
     crate::feature_agents::gate_of(f, |_| None)
 }
+
+#[test]
+fn a_review_ended_before_ship_closes_from_where_it_ended() {
+    let mut f = review();
+    f.status = Status::Done;
+    f.dir = std::env::temp_dir().join(format!("gerdr-ended-close-{}", std::process::id()));
+    std::fs::create_dir_all(&f.dir).unwrap();
+    let at = f.current().expect("an unticked stage");
+    assert_ne!(at, Stage::Ship);
+    let close = |stage: Stage| {
+        let page = page_of(&f, stage);
+        let mut actions = page_actions(&f, stage, RowCtx::default());
+        with_pull_actions(&mut actions, &f, stage, RowCtx::default());
+        let row = page.sections.iter().find_map(|s| match s {
+            PageSection::ShipGroup(g) if g.head == "Afterwards" => g
+                .steps
+                .iter()
+                .find(|r| r.label == "Close the workspace")
+                .cloned(),
+            _ => None,
+        });
+        row.map(|row| actions[row.button.expect("its button")].1.clone())
+    };
+    assert_eq!(close(at), Some(PanelOutcome::CloseShipped));
+    assert_eq!(close(Stage::Ship), None);
+    std::fs::remove_dir_all(&f.dir).unwrap();
+}
