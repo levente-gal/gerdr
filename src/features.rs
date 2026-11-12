@@ -431,14 +431,6 @@ pub(crate) enum Done {
         repo: RepoKey,
         result: Result<Vec<feature::pr::OpenPull>, String>,
     },
-    /// A pull request to review is of a project of several repositories:
-    /// the dialog picks the others with it.
-    ReviewPick {
-        project: String,
-        slug: String,
-        from: PathBuf,
-        wanted: (String, String, u64),
-    },
     /// A pull request's review was made, or not (see `pr_review`).
     PrReview {
         project: String,

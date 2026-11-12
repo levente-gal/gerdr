@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use crate::{
     Gerdr, ci,
     feature::{self, Feature, Status, layout, pr, store},
-    features::{Busy, Done, Job, root_search},
+    features::{Busy, Done, Job},
 };
 
 impl crate::features::Features {
@@ -48,68 +48,21 @@ impl Gerdr {
     }
 
     /// Review the pull request whose page is `url` in the open project:
-    /// open its review if it has one, else make it off the thread, the
-    /// project's repositories found from workspace `at`'s folder (else the
-    /// focused one's, else its first workspace's). A project of several
-    /// repositories opens the review dialog with it picked instead.
+    /// open its review if it has one, else the review dialog from
+    /// workspace `at`'s folder (else the focused one's, else the project's
+    /// first workspace's), it picked once listed, to pick the reviewer and
+    /// any pull requests going with it.
     pub(crate) fn start_pr_review(&mut self, at: Option<usize>, url: &str) {
         let Some((host, slug, number)) = ci::pull_request_of(url) else {
             return self.show_warning(format!("{url} isn't a pull request"));
         };
-        let Some(id) = self.project.clone() else {
-            return self.show_warning("Open a project to review a pull request in".into());
-        };
-        if let Some(open) = self.features.pr_review_of(&id, &host, &slug, number) {
+        if let Some(id) = self.project.clone()
+            && let Some(open) = self.features.pr_review_of(&id, &host, &slug, number)
+        {
             return self.open_feature(&id, &open);
         }
-        let Some(project) = self.projects.project(&id) else {
-            return self.show_warning("Open a project to review a pull request in".into());
-        };
-        let from = at
-            .and_then(|i| self.workspaces.get(i))
-            .or_else(|| self.workspace())
-            .map(|ws| ws.dir.clone())
-            .or_else(|| project.workspaces.first().map(|w| w.dir.clone()));
-        let Some(from) = from else {
-            return self
-                .show_warning("Add a workspace with a folder to review a pull request".into());
-        };
-        let (workspace_dirs, ignore, bases) = root_search(project);
-        let others = self.other_projects_dirs(&id);
-        let taken: Vec<String> = (self.features.all.get(&id).into_iter().flatten())
-            .chain(self.viewed_of(&id))
-            .map(|f| f.slug.clone())
-            .collect();
-        let feature_slug = free_slug(&pr::slug_of(number), &taken);
-        let busy = Busy {
-            project: id.clone(),
-            slug: feature_slug.clone(),
-            job: Job::Create,
-            repo: None,
-            what: format!("Starting the review of #{number}"),
-        };
-        self.feature_work(Some(busy), move |_| {
-            let found = layout::find_project_root(&from, &workspace_dirs, &others, &ignore, &bases);
-            // Of several repositories, the others' pull requests may go
-            // with it: the dialog picks them.
-            if let Ok(root) = &found
-                && root.multi
-            {
-                return Done::ReviewPick {
-                    project: id,
-                    slug: feature_slug,
-                    from,
-                    wanted: (host, slug, number),
-                };
-            }
-            let made = found.and_then(|root| make(&id, &root, &host, &slug, number, &feature_slug));
-            Done::PrReview {
-                project: id,
-                slug: feature_slug,
-                numbers: format!("#{number}"),
-                result: made.map(Box::new),
-            }
-        });
+        let from = self.dialog_from(at);
+        self.open_dialog(from, Some((host, slug, number)));
     }
 
     /// Review the pull requests `picks` of project `project` as one, off
@@ -523,37 +476,6 @@ fn numbers_of(picks: &[Pick]) -> String {
         Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
         _ => all.join(""),
     }
-}
-
-/// Make the review of pull request `number` of repository `slug` of `host`
-/// in project `project`, as `feature_slug`, in `root` (see `make_review`).
-fn make(
-    project: &str,
-    root: &layout::Root,
-    host: &str,
-    slug: &str,
-    number: u64,
-    feature_slug: &str,
-) -> Result<(Feature, Vec<PathBuf>), String> {
-    let Some(repo) = pr::repo_of(root, host, slug) else {
-        return Err(format!(
-            "no repository of this project has {slug} as its origin"
-        ));
-    };
-    let main = (root.repos.iter())
-        .find(|r| r.name == repo)
-        .map(|r| r.main.clone())
-        .unwrap_or_else(|| root.path.clone());
-    let pick = Pick {
-        project: None,
-        repo,
-        main,
-        host: host.to_owned(),
-        slug: slug.to_owned(),
-        number,
-        head_ref: String::new(),
-    };
-    make_review(project, root, &[], &[pick], "", feature_slug)
 }
 
 /// Make the review of pull requests `picks` in project `project`, as

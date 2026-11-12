@@ -535,17 +535,6 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Link);
                 self.review_added(&project, &slug, drops, result);
             }
-            Done::ReviewPick {
-                project,
-                slug,
-                from,
-                wanted,
-            } => {
-                self.unbusy(&project, &slug, Job::Create);
-                if self.project.as_deref() == Some(project.as_str()) {
-                    self.open_dialog(Some(from), Some(wanted));
-                }
-            }
             Done::RemoteBase {
                 serial,
                 repo,

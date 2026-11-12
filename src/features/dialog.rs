@@ -312,6 +312,17 @@ impl NewFeatureDialog {
             review.wanted = None;
             return self.pick_pull_of(key, number);
         }
+        if let Some((_, slug, number)) = review
+            .wanted
+            .take_if(|_| (review.pulls.values()).all(|e| e.list.is_some()))
+        {
+            review.note = Some(format!(
+                "#{number} of {slug} isn't open in this project's repositories"
+            ));
+        }
+        let Some(entry) = review.pulls.get(key) else {
+            return;
+        };
         // Changing a review, a repository it doesn't hold stays out unless
         // picked: it may have just been left out.
         if entry.chosen || entry.picked.is_some() || review.into.is_some() {

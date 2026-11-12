@@ -45,7 +45,7 @@ impl Gerdr {
 
     /// The folder the dialog opens from: workspace `at`'s, else the active
     /// one's, else the project's first workspace's.
-    fn dialog_from(&self, at: Option<usize>) -> Option<PathBuf> {
+    pub(crate) fn dialog_from(&self, at: Option<usize>) -> Option<PathBuf> {
         let project = self.projects.project(self.project.as_deref()?)?;
         at.and_then(|i| self.workspaces.get(i))
             .or_else(|| self.workspace())

@@ -83,6 +83,28 @@ fn a_review_picks_a_pull_request_per_repository() {
 }
 
 #[test]
+fn a_wanted_pull_request_no_repository_lists_is_said() {
+    let mut d = NewFeatureDialog::new("acme".into(), 1, "/work/api".into());
+    d.review = Some(Reviewing {
+        wanted: Some(("github.com".into(), "o/r".into(), 12)),
+        ..Reviewing::default()
+    });
+    d.found(Ok(root(&["api", "web"])));
+    d.unlisted();
+    // Still to come from web: nothing said yet.
+    d.pulls_listed(&(None, "api".into()), Ok(Vec::new()));
+    assert_eq!(
+        new_feature_view(&d, "Acme".into()).root,
+        "In /work · 2 repositories"
+    );
+    d.pulls_listed(&(None, "web".into()), Err("offline".into()));
+    assert_eq!(
+        new_feature_view(&d, "Acme".into()).root,
+        "#12 of o/r isn't open in this project's repositories"
+    );
+}
+
+#[test]
 fn a_review_changes_its_pull_requests_in_the_dialog() {
     let mut f = feature("pr-12", vec![repo("api", true)], 4);
     f.title = "#12 Fix".into();

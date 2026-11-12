@@ -663,19 +663,6 @@ fn viewer(dir: &Path, host: &str) -> Result<String, String> {
     Ok(user.login)
 }
 
-/// The repository of `root` whose origin is repository `slug` of `host`,
-/// by name.
-pub fn repo_of(root: &Root, host: &str, slug: &str) -> Option<String> {
-    (root.repos.iter())
-        .find(|found| {
-            crate::git::web_url(&found.main)
-                .as_deref()
-                .and_then(crate::ci::github_repository)
-                .is_some_and(|(h, s)| h.eq_ignore_ascii_case(host) && s.eq_ignore_ascii_case(slug))
-        })
-        .map(|found| found.name.clone())
-}
-
 /// The brief of its review: the pull request's title and description.
 pub fn brief(details: &Details) -> String {
     let pull = &details.pull;
