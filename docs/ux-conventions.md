@@ -92,6 +92,11 @@ A key is written in one place, not on the button that does the same thing:
 - F1 lists every key, including those the footer can't fit, in a column of
   keys beside what each does. Its footer hint reads "keys" on every panel.
 - A menu row may show its key at its right end, since a menu has no footer.
+- A panel's keys are one table (`key_table::Binding`): the handler, the
+  footer, a click on a hint and F1 read the same rows, so a key can't be
+  hinted without doing what the hint says, or work without an F1 row. A row
+  matches the key's own symbol and its modifiers, as `keys::hint_key` reads
+  the chord, never what Shift typed.
 
 The footer says what the buttons say:
 

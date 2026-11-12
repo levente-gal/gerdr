@@ -264,7 +264,7 @@ added | grep 'show_notice'                              # E1 failure as Info?
 added | grep -E 'let _ = |\.ok\(\);|debug!\('           # E2 dropped errors
 added | grep -E 'Command::new|spawn\('                  # E2 new tool calls
 added | grep -E 'kill|stop_|close_|remove_dir|delete'   # C1 direct destructive calls
-added | grep -E 'Keysym::|KEY_[A-Z]'                    # K1 new chords
+added | grep -E 'Keysym::|KEY_[A-Z]|chord: "'           # K1 new chords
 added | grep -E 'keycaps\(|KEY_FONT_SIZE|hint_button\('  # K7 key on a button
 added | grep -E 'radius|[0-9]+\.0 *[,)]|width: [0-9]+'  # L1 literal sizes
 added | grep -E 'show_[a-z]+\(|toast' | grep '\."'      # W2 full stop in toasts

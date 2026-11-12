@@ -69,6 +69,7 @@ mod input;
 mod issues;
 mod keep;
 mod keyring;
+mod key_table;
 mod keys;
 mod launch;
 mod layout;
