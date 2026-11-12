@@ -241,6 +241,9 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
                 PanelOutcome::GoToCurrent
             }
             StageMark::Done => PanelOutcome::Untick(stage),
+            // Finished at its current stage, as a pull request's review is:
+            // nothing is left to do there.
+            StageMark::Current if feature.status != Status::Open => return None,
             // A pull request's review goes by its pull request first.
             StageMark::Current if feature.pr_ended().is_some() => PanelOutcome::FinishReview,
             StageMark::Current if feature.pr_moved().is_some() => PanelOutcome::UpdatePrHead,

@@ -460,6 +460,10 @@ fn ship_submits_the_review() {
             .any(|s| matches!(s, PageSection::Lines { label, lines }
         if label == "Submitted" && lines[0].text.starts_with("requested changes")))
     );
+    // Finished, Ship left unticked: Finish is gone, not a dead button.
+    f.status = Status::Done;
+    assert_eq!(page_enter(&f, Stage::Ship, head), None);
+    assert_eq!(stage_button(&f, Stage::Ship, head), None);
 }
 
 #[test]
