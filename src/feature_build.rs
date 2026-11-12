@@ -79,6 +79,9 @@ pub(crate) struct BuildState {
     setting_up: BTreeSet<Key>,
     /// Features whose Verify checks run now.
     pub(crate) verifying: BTreeSet<Key>,
+    /// Pull request reviews whose code changed: their checks run once no
+    /// agent is fixing them (see `pr_code_changed`).
+    pr_checks_due: BTreeSet<Key>,
     /// Which checks the next run of a feature's runs, while its code is read.
     pub(crate) scopes: BTreeMap<Key, Scope>,
     /// What stops the running checks of a feature, by their index.
@@ -320,6 +323,29 @@ fn verify_refusal(feature: &Feature, running: bool, checks: usize) -> Result<(),
         ));
     }
     Ok(())
+}
+
+/// What pull request review `feature`, whose code changed, does with
+/// Verify's checks now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrChecks {
+    /// An agent still fixes it, or its project isn't shown.
+    Wait,
+    Run,
+    /// Not at Verify any more, run already, or no checks to run.
+    Drop,
+}
+
+/// What review `feature` does with its checks (`checks` set, `running`
+/// now); `fixing`: an agent fixes it, `here`: its project is shown.
+fn pr_checks(feature: &Feature, fixing: bool, here: bool, running: bool, checks: usize) -> PrChecks {
+    if feature.fix_round.is_some() || fixing || !here {
+        PrChecks::Wait
+    } else if feature.writer.is_none() && verify_refusal(feature, running, checks).is_ok() {
+        PrChecks::Run
+    } else {
+        PrChecks::Drop
+    }
 }
 
 /// Whether `evidence` marks Verify of `feature` done: it passed, Verify is
@@ -1038,6 +1064,39 @@ impl Gerdr {
         self.run_checks(project, slug, scope);
     }
 
+    /// The code of pull request review `slug` was read, `changed` since
+    /// Verify last ran (its author pushed, or fixes landed): Verify's checks
+    /// run on it once no agent is fixing it, as `build_done` starts them for
+    /// a feature gerdr built.
+    pub(crate) fn pr_code_changed(&mut self, project: &str, slug: &str, changed: bool) {
+        let key = (project.to_owned(), slug.to_owned());
+        if changed {
+            self.features.build.pr_checks_due.insert(key.clone());
+        }
+        if !self.features.build.pr_checks_due.contains(&key) {
+            return;
+        }
+        let Some(feature) = self.feature(project, slug) else {
+            self.features.build.pr_checks_due.remove(&key);
+            return;
+        };
+        let config = self.projects.workflows(feature, |w| w.verify.clone());
+        let now = pr_checks(
+            feature,
+            self.features.build.fixing.contains_key(&key),
+            self.project.as_deref() == Some(project),
+            self.features.build.verifying.contains(&key),
+            verify::checks(feature, &config).len(),
+        );
+        if now == PrChecks::Wait {
+            return;
+        }
+        self.features.build.pr_checks_due.remove(&key);
+        if now == PrChecks::Run {
+            self.recheck(project, slug);
+        }
+    }
+
     /// Run `scope`'s checks of Verify on feature `slug`, in terminals.
     pub(crate) fn run_checks(&mut self, project: &str, slug: &str, scope: Scope) {
         let Some(feature) = self.feature(project, slug).cloned() else {
@@ -1513,6 +1572,21 @@ mod tests {
             verify_refusal(&verified, false, 2),
             Err("Verify of \u{201c}Feature a\u{201d} is done".into())
         );
+    }
+
+    #[test]
+    fn a_reviews_changed_code_is_checked_once_nothing_fixes_it() {
+        let f = feature("a", vec![repo("api", true)], 4);
+        assert_eq!(pr_checks(&f, false, true, false, 2), PrChecks::Run);
+        assert_eq!(pr_checks(&f, true, true, false, 2), PrChecks::Wait);
+        assert_eq!(pr_checks(&f, false, false, false, 2), PrChecks::Wait);
+        let fixing = crate::feature::fix_round::FixPhase::Fixing;
+        let round = crate::features::tests::in_round(f.clone(), Stage::Verify, fixing);
+        assert_eq!(pr_checks(&round, false, true, false, 2), PrChecks::Wait);
+        assert_eq!(pr_checks(&f, false, true, true, 2), PrChecks::Drop);
+        assert_eq!(pr_checks(&f, false, true, false, 0), PrChecks::Drop);
+        let reviewing = feature("a", vec![repo("api", true)], 5);
+        assert_eq!(pr_checks(&reviewing, false, true, false, 2), PrChecks::Drop);
     }
 
     #[test]

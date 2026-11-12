@@ -286,7 +286,7 @@ fn sent(id: &str, path: &str, text: &str) -> Comment {
     }
 }
 
-fn in_round(mut f: Feature, stage: Stage, phase: FixPhase) -> Feature {
+pub(crate) fn in_round(mut f: Feature, stage: Stage, phase: FixPhase) -> Feature {
     f.fix_round = Some(FixRound {
         n: 1,
         what: "Verify failures".into(),

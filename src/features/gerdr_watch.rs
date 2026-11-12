@@ -431,12 +431,16 @@ impl Gerdr {
             return;
         };
         let Some(stage) = feature.invalidate(patch, feature::now()) else {
-            return;
+            // Checks held while an agent fixed a review run once it is done.
+            return self.pr_code_changed(project, slug, false);
         };
+        let pr = feature.pull().is_some();
         let title = feature.title.clone();
         self.save_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
         self.show_warning(changed_text(&title, stage));
+        // No Build agent marks a review's Build done, which starts the checks.
+        self.pr_code_changed(project, slug, pr && stage == Stage::Verify);
     }
 
     /// The squash of feature `slug` is merged: Ship is done.
