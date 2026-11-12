@@ -1111,7 +1111,7 @@ impl Gerdr {
         self.save_feature(project, slug);
         (self.features.build.fix_watches).remove(&fix_key(project, slug));
         if let Some(agent) = agent {
-            self.watch_fixing(project, slug, agent);
+            self.features.build.watch_fixing(project, slug, agent);
         }
         // Build's page lists them from now on.
         self.probe_feature(project, slug);

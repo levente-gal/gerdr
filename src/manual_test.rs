@@ -646,6 +646,31 @@ pub(crate) fn note_hints(on: &CardNote, empty: bool) -> Vec<(String, String)> {
         .collect()
 }
 
+impl crate::features::Features {
+    /// The criteria of feature `slug` of `project`, as last read.
+    pub(crate) fn criteria(&self, project: &str, slug: &str) -> &[Criterion] {
+        self.criteria
+            .get(&(project.to_owned(), slug.to_owned()))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// The project and slug of the feature on the tab.
+    pub(crate) fn tab_feature_names(&self) -> Option<(String, String)> {
+        let panel = self.panel.as_ref()?;
+        Some((panel.project.clone(), panel.slug.clone()))
+    }
+
+    /// Whether the note of a criterion is being written.
+    pub(crate) fn writing_criterion_note(&self) -> bool {
+        (self.panel.as_ref()).is_some_and(|p| p.note.is_some())
+    }
+
+    /// Whether the feature tab shows feature `slug` of `project`.
+    pub(crate) fn panel_on(&self, project: &str, slug: &str) -> bool {
+        (self.panel.as_ref()).is_some_and(|p| p.project == project && p.slug == slug)
+    }
+}
+
 impl Gerdr {
     /// Read the criteria of feature `slug` of `project` from its brief
     /// again, its comments after them: the page and the inbox show them.
@@ -661,12 +686,9 @@ impl Gerdr {
         }
     }
 
-    /// The criteria of feature `slug` of `project`, as last read.
+    /// See `Features::criteria`.
     pub(crate) fn criteria(&self, project: &str, slug: &str) -> &[Criterion] {
-        self.features
-            .criteria
-            .get(&(project.to_owned(), slug.to_owned()))
-            .map_or(&[], Vec::as_slice)
+        self.features.criteria(project, slug)
     }
 
     /// The patch-id of feature `slug`'s code as last read, if it was.
@@ -677,7 +699,7 @@ impl Gerdr {
     /// How far feature `f`'s manual test went; `None` when its brief has no
     /// criteria.
     pub(crate) fn manual_counts(&self, f: &Feature) -> Option<manual::Counts> {
-        let criteria = self.criteria(&f.project, &f.slug);
+        let criteria = self.features.criteria(&f.project, &f.slug);
         if criteria.is_empty() {
             return None;
         }
@@ -697,9 +719,11 @@ impl Gerdr {
         let planning = feature::fix_round::planning(f.fix_round.as_ref(), Stage::ManualTest);
         let mut rows = rows(
             f.manual.as_ref(),
-            self.criteria(&f.project, &f.slug),
+            self.features.criteria(&f.project, &f.slug),
             patch.as_deref(),
-            self.projects.criteria_folds.get(&folds_key(&f.project, &f.slug)),
+            self.projects
+                .criteria_folds
+                .get(&folds_key(&f.project, &f.slug)),
         );
         for row in rows.iter_mut().filter(|r| r.sent) {
             row.planning = planning;
@@ -715,7 +739,7 @@ impl Gerdr {
         slug: &str,
         change: impl FnOnce(&mut manual::Folds, &[Criterion]) -> bool,
     ) {
-        let criteria = self.criteria(project, slug).to_vec();
+        let criteria = self.features.criteria(project, slug).to_vec();
         if criteria.is_empty() {
             return;
         }
@@ -735,7 +759,7 @@ impl Gerdr {
     /// Open criterion `i` of the feature on the tab to show its steps, or
     /// fold it to its line.
     pub(crate) fn fold_criterion(&mut self, i: usize, open: bool) {
-        let Some((project, slug)) = self.tab_feature_names() else {
+        let Some((project, slug)) = self.features.tab_feature_names() else {
             return;
         };
         self.change_folds(&project, &slug, |folds, criteria| {
@@ -746,7 +770,7 @@ impl Gerdr {
 
     /// Open or fold the criteria `scope` names of the feature on the tab.
     pub(crate) fn fold_criteria(&mut self, scope: manual::FoldScope, open: bool) {
-        let Some((project, slug)) = self.tab_feature_names() else {
+        let Some((project, slug)) = self.features.tab_feature_names() else {
             return;
         };
         let rows = match self.feature(&project, &slug) {
@@ -799,12 +823,6 @@ impl Gerdr {
         self.change_folds(&project, &slug, |folds, _| folds.see(&text));
     }
 
-    /// The project and slug of the feature on the tab.
-    fn tab_feature_names(&self) -> Option<(String, String)> {
-        let panel = self.features.panel.as_ref()?;
-        Some((panel.project.clone(), panel.slug.clone()))
-    }
-
     /// Whether the page with the criteria shows, so their search can.
     pub(crate) fn criteria_search_shows(&self) -> bool {
         let Some(panel) = &self.features.panel else {
@@ -816,7 +834,10 @@ impl Gerdr {
         !panel.keys
             && !panel.expanded
             && crate::features::shows_criteria(feature, panel.page_stage(feature))
-            && !self.criteria(&panel.project, &panel.slug).is_empty()
+            && !self
+                .features
+                .criteria(&panel.project, &panel.slug)
+                .is_empty()
     }
 
     /// Open the criteria's search, the keys in its field.
@@ -1020,7 +1041,7 @@ impl Gerdr {
             return self.show_warning("That feature is gone".into());
         };
         let title = feature.title.clone();
-        if self.criteria(project, slug).is_empty() {
+        if self.features.criteria(project, slug).is_empty() {
             return self.show_warning(format!(
                 "The brief of \u{201c}{title}\u{201d} has no acceptance criteria to try"
             ));
@@ -1082,7 +1103,7 @@ impl Gerdr {
         sym: Keysym,
         typed: Keysym,
     ) -> bool {
-        if !self.writing_criterion_note() {
+        if !self.features.writing_criterion_note() {
             return false;
         }
         if !self.criterion_note_shows() {
@@ -1138,9 +1159,9 @@ impl Gerdr {
         true
     }
 
-    /// Whether the note of a criterion is being written.
+    /// See `Features::writing_criterion_note`.
     pub(crate) fn writing_criterion_note(&self) -> bool {
-        (self.features.panel.as_ref()).is_some_and(|p| p.note.is_some())
+        self.features.writing_criterion_note()
     }
 
     /// Stop writing a note, saving it if one was written: a note written is
@@ -1171,7 +1192,7 @@ impl Gerdr {
                 }
             }
         }
-        !self.writing_criterion_note()
+        !self.features.writing_criterion_note()
     }
 
     /// Do what the criteria of the feature on the tab asked.
@@ -1184,22 +1205,17 @@ impl Gerdr {
         self.apply_manual_test_on(&project, &slug, outcome);
     }
 
-    /// Whether the feature tab shows feature `slug` of `project`.
-    fn panel_on(&self, project: &str, slug: &str) -> bool {
-        (self.features.panel.as_ref()).is_some_and(|p| p.project == project && p.slug == slug)
-    }
-
     /// Do what the criteria of feature `slug` of `project` asked, from its
     /// page or from the criteria strip over its sandbox's app.
     pub(crate) fn apply_manual_test_on(&mut self, project: &str, slug: &str, outcome: Outcome) {
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        let on_page = self.panel_on(&project, &slug);
+        let on_page = self.features.panel_on(&project, &slug);
         let Some(feature) = self.feature(&project, &slug) else {
             return self.show_warning("That feature is gone".into());
         };
         let title = feature.title.clone();
         let marks = crate::features::marks_criteria(feature, Stage::ManualTest);
-        let criteria = self.criteria(&project, &slug).to_vec();
+        let criteria = self.features.criteria(&project, &slug).to_vec();
         let reading = self.feature_reading(&project, &slug).cloned();
         let patch = reading.as_ref().map(|r| r.patch.clone());
         let reading_text =
@@ -1357,7 +1373,7 @@ impl Gerdr {
             );
         }
         let title = feature.title.clone();
-        let criteria = self.criteria(project, slug).to_vec();
+        let criteria = self.features.criteria(project, slug).to_vec();
         let test = feature.manual.as_ref();
         let (n, text) = manual::failures_markdown(test, &criteria, &title);
         let asked = manual::asked(test, &criteria);
@@ -1457,8 +1473,8 @@ impl Gerdr {
         let id = manual::add_comment(&mut f.manual, text.trim(), &patch, feature::now());
         self.comments_changed(project, slug);
         // It lands at the end of the sheet, selected.
-        let at = (self.criteria(project, slug).iter()).position(|c| c.id == id);
-        if let Some(at) = at.filter(|_| self.panel_on(project, slug)) {
+        let at = (self.features.criteria(project, slug).iter()).position(|c| c.id == id);
+        if let Some(at) = at.filter(|_| self.features.panel_on(project, slug)) {
             self.select_criterion(at);
         }
         self.show_success(format!(
@@ -1557,8 +1573,8 @@ impl Gerdr {
             return self.show_warning(format!("Comment {id} is there already"));
         }
         self.comments_changed(project, slug);
-        let at = (self.criteria(project, slug).iter()).position(|c| c.id == id);
-        if let Some(at) = at.filter(|_| self.panel_on(project, slug)) {
+        let at = (self.features.criteria(project, slug).iter()).position(|c| c.id == id);
+        if let Some(at) = at.filter(|_| self.features.panel_on(project, slug)) {
             self.select_criterion(at);
         }
         self.show_success(format!("Comment {id} is back"));
@@ -1866,5 +1882,38 @@ mod tests {
             key_table::press(NOTE_KEYS, &ctxs[0], &mods, sym),
             Some(NoteKey::Discard)
         );
+    }
+
+    #[test]
+    fn features_say_the_tab_and_its_criteria() {
+        let mut features = crate::features::Features::default();
+        assert!(features.criteria("p", "s").is_empty());
+        assert_eq!(features.tab_feature_names(), None);
+        assert!(!features.panel_on("p", "s") && !features.writing_criterion_note());
+        let criterion = Criterion {
+            id: "AC-1".into(),
+            title: "C".into(),
+            text: "Given a, when b, then c".into(),
+            comment: false,
+        };
+        features
+            .criteria
+            .insert(("p".into(), "s".into()), vec![criterion.clone()]);
+        assert_eq!(features.criteria("p", "s"), [criterion]);
+        assert!(features.criteria("p", "t").is_empty());
+        features.panel = Some(crate::features::FeaturePanel {
+            project: "p".into(),
+            slug: "s".into(),
+            ..Default::default()
+        });
+        assert_eq!(features.tab_feature_names(), Some(("p".into(), "s".into())));
+        assert!(features.panel_on("p", "s") && !features.panel_on("p", "t"));
+        assert!(!features.writing_criterion_note());
+        let note = (
+            crate::features::CardNote::Criterion(0),
+            TextField::default(),
+        );
+        features.panel.as_mut().unwrap().note = Some(note);
+        assert!(features.writing_criterion_note());
     }
 }

@@ -98,6 +98,37 @@ pub(crate) struct BuildState {
     pub(crate) fix_watches: BTreeMap<Key, crate::feature_fix::FixWatch>,
 }
 
+impl BuildState {
+    /// Whether feature `slug` is being set up.
+    pub(crate) fn setting_up(&self, project: &str, slug: &str) -> bool {
+        let key = (project.to_owned(), slug.to_owned());
+        self.setting_up.contains(&key)
+    }
+
+    /// Watch the Build agent in `pane` of feature `slug`, sent findings or
+    /// comments to fix: once it worked and rests, its code is probed (see
+    /// `fixing_tick`).
+    pub(crate) fn watch_fixing(&mut self, project: &str, slug: &str, agent: AgentKey) {
+        self.fixing.insert(
+            (project.to_owned(), slug.to_owned()),
+            Fixing {
+                agent,
+                worked: false,
+                since: Instant::now(),
+            },
+        );
+    }
+
+    /// The Build agent watched as fixing feature `slug`, if any, is now
+    /// `agent`.
+    pub(crate) fn fixing_moved(&mut self, project: &str, slug: &str, agent: AgentKey) {
+        let key = (project.to_owned(), slug.to_owned());
+        if let Some(fixing) = self.fixing.get_mut(&key) {
+            fixing.agent = agent;
+        }
+    }
+}
+
 /// A Build agent fixing Verify's failures.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fixing {
@@ -399,8 +430,7 @@ impl Gerdr {
 
     /// Whether feature `slug` is being set up.
     pub(crate) fn setting_up(&self, project: &str, slug: &str) -> bool {
-        let key = (project.to_owned(), slug.to_owned());
-        self.features.build.setting_up.contains(&key)
+        self.features.build.setting_up(project, slug)
     }
 
     /// Set up feature `slug`'s worktrees off the thread, unless it is being
@@ -1217,20 +1247,6 @@ impl Gerdr {
         self.show_success(format!("\u{201c}{title}\u{201d} passed Verify; {what}"));
     }
 
-    /// Watch the Build agent in `pane` of feature `slug`, sent findings or
-    /// comments to fix: once it worked and rests, its code is probed (see
-    /// `fixing_tick`).
-    pub(crate) fn watch_fixing(&mut self, project: &str, slug: &str, agent: AgentKey) {
-        self.features.build.fixing.insert(
-            (project.to_owned(), slug.to_owned()),
-            Fixing {
-                agent,
-                worked: false,
-                since: Instant::now(),
-            },
-        );
-    }
-
     /// The dot of `feature`'s Build agent while it runs again with Build
     /// done: just sent work, or seen at work (what was sent isn't known
     /// after a restart). A line it never acted on stops counting.
@@ -1253,10 +1269,7 @@ impl Gerdr {
     /// The Build agent watched as fixing feature `slug`, if any, is now
     /// `agent`.
     pub(crate) fn fixing_moved(&mut self, project: &str, slug: &str, agent: AgentKey) {
-        let key = (project.to_owned(), slug.to_owned());
-        if let Some(fixing) = self.features.build.fixing.get_mut(&key) {
-            fixing.agent = agent;
-        }
+        self.features.build.fixing_moved(project, slug, agent);
     }
 
     /// Look at the Build agents of `project` fixing what Verify or a review
@@ -1538,5 +1551,27 @@ mod tests {
             setup_failed_text("Bulk", "api: `npm ci` exited with 1"),
             "Setup of \u{201c}Bulk\u{201d} failed: api: `npm ci` exited with 1 (see setup.log)"
         );
+    }
+
+    #[test]
+    fn build_state_watches_a_fixing_agent_until_it_moves() {
+        let mut build = BuildState::default();
+        let key = ("p".to_owned(), "s".to_owned());
+        assert!(!build.setting_up("p", "s"));
+        build.setting_up.insert(key.clone());
+        assert!(build.setting_up("p", "s") && !build.setting_up("p", "t"));
+
+        // Moving an agent nobody watches watches nothing.
+        build.fixing_moved("p", "s", AgentKey::Herdr("2".into()));
+        assert!(build.fixing.is_empty());
+        build.watch_fixing("p", "s", AgentKey::Herdr("1".into()));
+        assert!(!build.fixing[&key].worked);
+        build.fixing.get_mut(&key).unwrap().worked = true;
+        build.fixing_moved("p", "s", AgentKey::Herdr("2".into()));
+        assert_eq!(build.fixing[&key].agent, AgentKey::Herdr("2".into()));
+        assert!(build.fixing[&key].worked, "a move keeps what was seen");
+        // Watched again, it starts over.
+        build.watch_fixing("p", "s", AgentKey::Herdr("3".into()));
+        assert!(!build.fixing[&key].worked);
     }
 }

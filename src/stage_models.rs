@@ -86,6 +86,28 @@ pub struct CursorModels {
     tx: Option<channel::Sender<Result<Vec<Offer>, String>>>,
 }
 
+impl CursorModels {
+    /// Read the models of the Cursor CLI `base` runs, off the event loop,
+    /// unless a read is under way.
+    pub(crate) fn read(&mut self, base: &str) {
+        let Some(tx) = self.tx.clone() else {
+            return;
+        };
+        if self.reading == Reading::Busy {
+            return;
+        }
+        self.reading = Reading::Busy;
+        let mut cmd = Command::new(program(base));
+        cmd.arg("--list-models");
+        std::thread::spawn(move || {
+            let read = output_within(cmd, READ_LIMIT)
+                .and_then(|out| cursor_models_from(out.status.success(), &out.stdout, &out.stderr));
+            // The loop is gone only as gerdr quits.
+            let _ = tx.send(read);
+        });
+    }
+}
+
 impl Gerdr {
     /// Get ready for reads of Cursor's models.
     pub fn watch_cursor_models(&mut self) {
@@ -104,22 +126,7 @@ impl Gerdr {
     /// Read the models of the Cursor CLI `base` runs, off the event loop,
     /// unless a read is under way.
     pub(crate) fn read_cursor_models(&mut self, base: &str) {
-        let models = &mut self.features.cursor_models;
-        let Some(tx) = models.tx.clone() else {
-            return;
-        };
-        if models.reading == Reading::Busy {
-            return;
-        }
-        models.reading = Reading::Busy;
-        let mut cmd = Command::new(program(base));
-        cmd.arg("--list-models");
-        std::thread::spawn(move || {
-            let read = output_within(cmd, READ_LIMIT)
-                .and_then(|out| cursor_models_from(out.status.success(), &out.stdout, &out.stderr));
-            // The loop is gone only as gerdr quits.
-            let _ = tx.send(read);
-        });
+        self.features.cursor_models.read(base);
     }
 
     fn cursor_models_read(&mut self, read: Result<Vec<Offer>, String>) {
@@ -181,5 +188,18 @@ mod tests {
         assert!(cursor_models_from(true, b"a - A\n", b"noise").is_ok());
         // A failed run isn't trusted for what it did print.
         assert!(cursor_models_from(false, b"a - A\n", b"").is_err());
+    }
+
+    #[test]
+    fn cursor_models_read_once_set_up_and_one_at_a_time() {
+        let mut models = CursorModels::default();
+        models.read("cursor-agent");
+        assert_eq!(models.reading, Reading::Idle, "not set up: no read");
+        let (tx, rx) = channel::channel();
+        models.tx = Some(tx);
+        models.reading = Reading::Busy;
+        models.read("cursor-agent");
+        drop(models);
+        assert!(rx.recv().is_err(), "a read under way: no second one");
     }
 }

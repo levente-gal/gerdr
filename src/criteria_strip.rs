@@ -415,7 +415,7 @@ impl Gerdr {
         let project = self.project.clone()?;
         let feature = self.workspace_feature(self.active_workspace)?;
         if !marks_criteria(feature, Stage::ManualTest)
-            || self.criteria(&project, &feature.slug).is_empty()
+            || self.features.criteria(&project, &feature.slug).is_empty()
         {
             return None;
         }
@@ -722,7 +722,12 @@ impl Gerdr {
         let key = target.key();
         match outcome {
             Outcome::Write(i) => {
-                let Some(c) = self.criteria(&target.project, &target.slug).get(i).cloned() else {
+                let Some(c) = self
+                    .features
+                    .criteria(&target.project, &target.slug)
+                    .get(i)
+                    .cloned()
+                else {
                     return;
                 };
                 if !self.strip_writes(target) {
@@ -843,7 +848,7 @@ impl Gerdr {
         if note.is_empty() {
             return true;
         }
-        let i = (self.criteria(&target.project, &target.slug).iter())
+        let i = (self.features.criteria(&target.project, &target.slug).iter())
             .position(|c| *c == draft.criterion);
         let Some(i) = i else {
             // The brief changed under it: the note isn't lost.
@@ -878,7 +883,12 @@ impl Gerdr {
         let Some((_, i)) = self.strip_rows(target) else {
             return;
         };
-        let Some(c) = self.criteria(&target.project, &target.slug).get(i).cloned() else {
+        let Some(c) = self
+            .features
+            .criteria(&target.project, &target.slug)
+            .get(i)
+            .cloned()
+        else {
             return;
         };
         if !self.strip_writes(target) {

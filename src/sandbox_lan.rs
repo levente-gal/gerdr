@@ -164,11 +164,18 @@ fn relay_into(ip: Ipv4Addr, holder: i32, port: u16, missing: Missing) -> io::Res
     start_relay_on(vec![listener], port, command, missing)
 }
 
+impl crate::feature_build::BuildState {
+    /// The sandbox of feature `slug` is open on the network: how it stands.
+    pub(crate) fn lan_seen(&self, project: &str, slug: &str) -> Option<LanSeen> {
+        let key = (project.to_owned(), slug.to_owned());
+        self.sandbox_lan.get(&key).map(LanOpen::seen)
+    }
+}
+
 impl Gerdr {
     /// The sandbox of feature `slug` is open on the network: how it stands.
     pub(crate) fn sandbox_lan(&self, project: &str, slug: &str) -> Option<LanSeen> {
-        let key = (project.to_owned(), slug.to_owned());
-        self.features.build.sandbox_lan.get(&key).map(LanOpen::seen)
+        self.features.build.lan_seen(project, slug)
     }
 
     /// Open feature `slug`'s sandbox to the network, asking first, as anything
@@ -238,7 +245,7 @@ impl Gerdr {
         };
         self.features.build.sandbox_lan.insert(key, open);
         self.follow_sandbox_lan(project, slug);
-        if let Some(seen) = self.sandbox_lan(project, slug)
+        if let Some(seen) = self.features.build.lan_seen(project, slug)
             && !seen.open.is_empty()
         {
             let ports: Vec<String> = seen.open.iter().map(u16::to_string).collect();
@@ -401,5 +408,24 @@ mod tests {
         assert!(open.seen().taken.is_empty());
         assert!(open.seen().open.is_empty());
         drop(held);
+    }
+
+    #[test]
+    fn build_state_says_how_an_open_sandbox_stands() {
+        let mut build = crate::feature_build::BuildState::default();
+        assert_eq!(build.lan_seen("p", "s"), None);
+        let open = LanOpen {
+            title: "T".into(),
+            holder: 1,
+            ip: Ipv4Addr::new(192, 168, 1, 5),
+            relays: BTreeMap::new(),
+            taken: BTreeMap::new(),
+            missing: Missing::default(),
+            said_missing: false,
+        };
+        build.sandbox_lan.insert(("p".into(), "s".into()), open);
+        let seen = build.lan_seen("p", "s").unwrap();
+        assert_eq!((seen.ip.as_str(), seen.open.len()), ("192.168.1.5", 0));
+        assert_eq!(build.lan_seen("p", "t"), None);
     }
 }

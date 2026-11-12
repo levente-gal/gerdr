@@ -40,24 +40,11 @@ pub const PROBLEMS: &str = "pull requests";
 /// folder of its repository to run gh in, and the pull request.
 type Asked = (String, String, PathBuf, pr::PullRef);
 
-impl Gerdr {
-    /// Read the pull requests under review now, then every `INTERVAL`.
-    pub fn watch_pr_reviews(&mut self) {
-        let timer = self
-            .loop_handle
-            .insert_source(Timer::immediate(), |_, _, state| {
-                state.refresh_pr_reviews();
-                TimeoutAction::ToDuration(state.pr_interval())
-            });
-        if let Err(err) = timer {
-            tracing::warn!("watching pull requests: {err}");
-        }
-    }
-
+impl crate::features::Features {
     /// How long until the pull requests under review are read again: soon
     /// while one at Verify waits for its checks.
-    fn pr_interval(&self) -> Duration {
-        let waits = (self.features.all.values().flatten()).any(|f| {
+    pub(crate) fn pr_interval(&self) -> Duration {
+        let waits = (self.all.values().flatten()).any(|f| {
             f.status == Status::Open
                 && f.current() == Some(feature::Stage::Verify)
                 && (f.pulls().iter())
@@ -65,6 +52,21 @@ impl Gerdr {
                     .any(|ci| ci.verdict() == pr::Verdict::Running)
         });
         if waits { BUSY } else { INTERVAL }
+    }
+}
+
+impl Gerdr {
+    /// Read the pull requests under review now, then every `INTERVAL`.
+    pub fn watch_pr_reviews(&mut self) {
+        let timer = self
+            .loop_handle
+            .insert_source(Timer::immediate(), |_, _, state| {
+                state.refresh_pr_reviews();
+                TimeoutAction::ToDuration(state.features.pr_interval())
+            });
+        if let Err(err) = timer {
+            tracing::warn!("watching pull requests: {err}");
+        }
     }
 
     /// Read how the pull request of each open review written here stands on

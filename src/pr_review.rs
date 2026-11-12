@@ -11,7 +11,7 @@ use crate::{
     features::{Busy, Done, Job, root_search},
 };
 
-impl Gerdr {
+impl crate::features::Features {
     /// The open review of pull request `slug#number` of `host` in project
     /// `project`, by its slug.
     pub(crate) fn pr_review_of(
@@ -21,7 +21,7 @@ impl Gerdr {
         slug: &str,
         number: u64,
     ) -> Option<String> {
-        let all = self.features.all.get(project)?;
+        let all = self.all.get(project)?;
         (all.iter())
             .filter(|f| f.status == Status::Open)
             .find(|f| {
@@ -32,6 +32,19 @@ impl Gerdr {
                 })
             })
             .map(|f| f.slug.clone())
+    }
+}
+
+impl Gerdr {
+    /// See `Features::pr_review_of`.
+    pub(crate) fn pr_review_of(
+        &self,
+        project: &str,
+        host: &str,
+        slug: &str,
+        number: u64,
+    ) -> Option<String> {
+        self.features.pr_review_of(project, host, slug, number)
     }
 
     /// Review the pull request whose page is `url` in the open project:
@@ -46,7 +59,7 @@ impl Gerdr {
         let Some(id) = self.project.clone() else {
             return self.show_warning("Open a project to review a pull request in".into());
         };
-        if let Some(open) = self.pr_review_of(&id, &host, &slug, number) {
+        if let Some(open) = self.features.pr_review_of(&id, &host, &slug, number) {
             return self.open_feature(&id, &open);
         }
         let Some(project) = self.projects.project(&id) else {
@@ -693,5 +706,29 @@ mod tests {
             "pr-fix-login"
         );
         assert_eq!(pr::slug_for(&[(12, "a"), (14, "b")]), "pr-12-14");
+    }
+
+    #[test]
+    fn features_find_the_open_review_of_a_pull_request() {
+        let mut features = crate::features::Features::default();
+        assert_eq!(features.pr_review_of("p", "github.com", "o/r", 12), None);
+        let pull = pr::PullRef {
+            host: "github.com".into(),
+            slug: "O/R".into(),
+            number: 12,
+            ..Default::default()
+        };
+        let review = Feature {
+            slug: "review-12".into(),
+            kind: feature::Kind::PrReview(vec![pull]),
+            ..Feature::default()
+        };
+        features.all.insert("p".into(), vec![review]);
+        let found = features.pr_review_of("p", "GitHub.com", "o/r", 12);
+        assert_eq!(found.as_deref(), Some("review-12"));
+        assert_eq!(features.pr_review_of("p", "github.com", "o/r", 13), None);
+        assert_eq!(features.pr_review_of("q", "github.com", "o/r", 12), None);
+        features.all.get_mut("p").unwrap()[0].status = Status::Done;
+        assert_eq!(features.pr_review_of("p", "github.com", "o/r", 12), None);
     }
 }

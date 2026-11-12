@@ -301,6 +301,18 @@ impl FindingDialog {
     }
 }
 
+impl crate::features::Features {
+    /// The dialog's focused field, for pastes.
+    pub(crate) fn finding_dialog_field_mut(&mut self) -> Option<&mut TextField> {
+        let dialog = self.finding_dialog.as_mut()?;
+        dialog.fields.get_mut(dialog.focus)
+    }
+
+    pub fn finding_dialog_view(&self) -> Option<FindingDialogView> {
+        self.finding_dialog.as_ref().map(FindingDialog::view)
+    }
+}
+
 impl Gerdr {
     /// Open the dialog asking `ask` of item `id` of kind `of` with fields
     /// holding `from`, or what was last left typed there.
@@ -639,7 +651,7 @@ impl Gerdr {
     /// A left click while the dialog is open.
     pub fn finding_dialog_click(&mut self, pos: Point<f64, Logical>) {
         let size = self.output_size();
-        let Some(view) = self.finding_dialog_view() else {
+        let Some(view) = self.features.finding_dialog_view() else {
             return;
         };
         let layout = chrome::finding_dialog_layout(&view, size);
@@ -677,13 +689,13 @@ impl Gerdr {
     /// shown (held past them, `finding_dialog_past` scrolls).
     pub fn finding_dialog_drag(&mut self, pos: Point<f64, Logical>) {
         let size = self.output_size();
-        let Some(view) = self.finding_dialog_view() else {
+        let Some(view) = self.features.finding_dialog_view() else {
             self.mouse.field_drag = false;
             return;
         };
         let i = view.focus;
         if let Some(at) = chrome::finding_field_at(&view, i, size, pos)
-            && let Some(field) = self.finding_dialog_field_mut()
+            && let Some(field) = self.features.finding_dialog_field_mut()
         {
             field.drag_to(at);
         }
@@ -692,7 +704,7 @@ impl Gerdr {
     /// How far the pointer at `pos` is past the shown rows of the field
     /// with the keyboard, in logical pixels: above them negative.
     pub fn finding_dialog_edge(&self, pos: Point<f64, Logical>) -> f64 {
-        self.finding_dialog_view().map_or(0.0, |view| {
+        self.features.finding_dialog_view().map_or(0.0, |view| {
             chrome::finding_field_edge(&view, view.focus, self.output_size(), pos)
         })
     }
@@ -700,12 +712,12 @@ impl Gerdr {
     /// A press in the field with the keyboard held past its shown rows:
     /// the selection goes `by` rows on (up negative), at the pointer's x.
     pub fn finding_dialog_past(&mut self, by: i64) {
-        let Some(view) = self.finding_dialog_view() else {
+        let Some(view) = self.features.finding_dialog_view() else {
             return;
         };
         let size = self.output_size();
         let at = chrome::finding_field_past(&view, view.focus, size, by, self.mouse.pos.x);
-        if let (Some(at), Some(field)) = (at, self.finding_dialog_field_mut()) {
+        if let (Some(at), Some(field)) = (at, self.features.finding_dialog_field_mut()) {
             field.drag_to(at);
         }
     }
@@ -713,7 +725,7 @@ impl Gerdr {
     /// Keep where each field's view starts as drawn, for the next frame
     /// (see `Line::scroll`).
     pub fn finding_dialog_keep_scroll(&mut self) {
-        let Some(view) = self.finding_dialog_view() else {
+        let Some(view) = self.features.finding_dialog_view() else {
             return;
         };
         let size = self.output_size();
@@ -730,7 +742,7 @@ impl Gerdr {
     /// The pointer moved while the dialog is open.
     pub fn finding_dialog_hover(&mut self, pos: Point<f64, Logical>) {
         let size = self.output_size();
-        let Some(view) = self.finding_dialog_view() else {
+        let Some(view) = self.features.finding_dialog_view() else {
             return;
         };
         let hit = chrome::finding_dialog_layout(&view, size).hit(pos);
@@ -741,22 +753,21 @@ impl Gerdr {
 
     /// What the pointer can press in the dialog.
     pub fn finding_dialog_controls(&self) -> Vec<chrome::Rect> {
-        self.finding_dialog_view().map_or(Vec::new(), |view| {
-            chrome::finding_dialog_layout(&view, self.output_size()).controls()
-        })
-    }
-
-    /// The dialog's focused field, for pastes.
-    pub(crate) fn finding_dialog_field_mut(&mut self) -> Option<&mut TextField> {
-        let dialog = self.features.finding_dialog.as_mut()?;
-        dialog.fields.get_mut(dialog.focus)
-    }
-
-    pub fn finding_dialog_view(&self) -> Option<FindingDialogView> {
         self.features
-            .finding_dialog
-            .as_ref()
-            .map(FindingDialog::view)
+            .finding_dialog_view()
+            .map_or(Vec::new(), |view| {
+                chrome::finding_dialog_layout(&view, self.output_size()).controls()
+            })
+    }
+
+    /// See `Features::finding_dialog_field_mut`.
+    pub(crate) fn finding_dialog_field_mut(&mut self) -> Option<&mut TextField> {
+        self.features.finding_dialog_field_mut()
+    }
+
+    /// See `Features::finding_dialog_view`.
+    pub fn finding_dialog_view(&self) -> Option<FindingDialogView> {
+        self.features.finding_dialog_view()
     }
 }
 
@@ -918,5 +929,18 @@ mod tests {
         assert_eq!((add.cancel, add.action), ("Discard", "Save"));
         assert_eq!(dialog(Ask::Dismiss, &[""]).view().cancel, "Cancel");
         assert_eq!(dialog(Ask::Edit, &["a"]).view().fields.len(), 1);
+    }
+
+    #[test]
+    fn features_show_the_finding_dialog_and_its_focused_field() {
+        let mut features = crate::features::Features::default();
+        assert!(features.finding_dialog_view().is_none());
+        assert!(features.finding_dialog_field_mut().is_none());
+        let mut open = dialog(Ask::Edit, &["one", "two"]);
+        open.focus = 1;
+        features.finding_dialog = Some(open);
+        assert!(features.finding_dialog_view().is_some());
+        let field = features.finding_dialog_field_mut().unwrap();
+        assert_eq!(field.line().as_str(), "two");
     }
 }
