@@ -933,15 +933,20 @@ fn shown_path(path: &Path, main: &Path) -> String {
     }
 }
 
-impl Gerdr {
-    /// The worktrees of the repositories the workspaces are in, the main
+impl crate::state::GitWatch {
+    /// The worktrees of the repositories `workspaces` are in, the main
     /// worktree first, then those needing a look; the repository of
     /// `focus` (a main worktree) first. With the repositories' names. Their
-    /// tabs open in the active workspace, else the repository's first.
-    fn worktree_items(&self, focus: Option<&Path>) -> (Vec<String>, Vec<Item>) {
+    /// tabs open in workspace `active`, else the repository's first.
+    fn worktree_items(
+        &self,
+        workspaces: &[crate::Workspace],
+        active: usize,
+        focus: Option<&Path>,
+    ) -> (Vec<String>, Vec<Item>) {
         let mut repos: Vec<(PathBuf, PathBuf, usize, Vec<Worktree>)> = Vec::new();
-        for (w, ws) in self.workspaces.iter().enumerate() {
-            let Some(status) = self.git.status.get(&ws.dir) else {
+        for (w, ws) in workspaces.iter().enumerate() {
+            let Some(status) = self.status.get(&ws.dir) else {
                 continue;
             };
             let Some(main) = status.main_path() else {
@@ -950,7 +955,7 @@ impl Gerdr {
             if let Some(repo) = repos.iter_mut().find(|(m, ..)| m == main) {
                 // The active workspace is where its tabs open, when it is in
                 // the repository.
-                if w == self.active_workspace {
+                if w == active {
                     repo.2 = w;
                 }
                 continue;
@@ -986,15 +991,90 @@ impl Gerdr {
         }
         (names, items)
     }
+}
 
+impl Worktrees {
+    /// A worktree's branch was checked out in the main worktree, or failed
+    /// to be: told in a toast.
+    fn checked_out(
+        &mut self,
+        ui: &mut crate::toast::Ui,
+        path: &Path,
+        said: String,
+        result: Result<(), String>,
+        brought: Result<usize, String>,
+    ) {
+        self.busy.remove(path);
+        match (result, brought) {
+            (Err(why), _) => ui.toast(format!("Couldn't check it out: {why}"), Level::Error),
+            (Ok(()), Ok(0)) => ui.toast(said, Level::Success),
+            (Ok(()), Ok(n)) => {
+                let files = if n == 1 { "file" } else { "files" };
+                ui.toast(
+                    format!("{said}; brought {n} untracked {files} along"),
+                    Level::Success,
+                );
+            }
+            (Ok(()), Err(why)) => ui.toast(
+                format!("{said}, but not all its untracked files: {why}"),
+                Level::Warning,
+            ),
+        }
+    }
+
+    /// Worktrees were deleted, or failed to be: told in toasts. Gives the
+    /// paths of those gone.
+    fn deleted(&mut self, ui: &mut crate::toast::Ui, deleted: Deleted) -> Vec<PathBuf> {
+        let (mut gone, mut paths) = (Vec::new(), Vec::new());
+        for (name, path, result) in deleted {
+            self.busy.remove(&path);
+            match result {
+                Ok(()) => {
+                    gone.push(name);
+                    paths.push(path);
+                }
+                Err(why) => ui.toast(format!("Couldn't delete {name}: {why}"), Level::Error),
+            }
+        }
+        match gone.as_slice() {
+            [] => {}
+            [name] => ui.toast(format!("Deleted {name}"), Level::Success),
+            names => ui.toast(format!("Deleted {} worktrees", names.len()), Level::Success),
+        }
+        paths
+    }
+
+    /// The worktrees squashed in a tab that read as merged among `items`
+    /// now, by name and path: no longer waited for. Those still unmerged
+    /// are waited for on; those gone are not.
+    fn squashed(&mut self, items: &[Item]) -> Vec<(String, PathBuf)> {
+        let mut squashed = Vec::new();
+        for path in std::mem::take(&mut self.merging) {
+            match items.iter().find(|i| i.wt.path == path) {
+                Some(item) if item.wt.merged => squashed.push((item.wt.name(), path)),
+                Some(_) => {
+                    self.merging.insert(path);
+                }
+                None => {}
+            }
+        }
+        squashed
+    }
+}
+
+impl Gerdr {
     /// What the open popup lists, as filtered; with no popup, every
     /// worktree.
     fn popup_items(&self) -> (Vec<String>, Vec<Item>) {
         let Some(popup) = self.worktrees.popup.as_ref() else {
-            return self.worktree_items(None);
+            return self
+                .git
+                .worktree_items(&self.workspaces, self.active_workspace, None);
         };
         let focus = popup.focus.as_deref();
-        let (names, items) = self.worktree_items(focus);
+        let (names, items) =
+            self.git
+                .worktree_items(&self.workspaces, self.active_workspace, focus);
         let items = filter(items, &names, focus, popup.all, &popup.query);
         (names, items)
     }
@@ -1056,7 +1136,9 @@ impl Gerdr {
             all: focus.is_none(),
             ..Popup::default()
         };
-        let (names, items) = self.worktree_items(focus.as_deref());
+        let (names, items) =
+            self.git
+                .worktree_items(&self.workspaces, self.active_workspace, focus.as_deref());
         let items = filter(items, &names, focus.as_deref(), popup.all, "");
         let page = self.worktrees_page();
         // The worktree asked for, else the first needing a look.
@@ -1242,11 +1324,9 @@ impl Gerdr {
             }
             Outcome::Checkout(path) => {
                 let Some(item) = find(&path) else { return };
-                let main = self
-                    .worktree_items(None)
-                    .1
-                    .into_iter()
-                    .find(|i| i.wt.path == item.main);
+                let (_, all) =
+                    (self.git).worktree_items(&self.workspaces, self.active_workspace, None);
+                let main = all.into_iter().find(|i| i.wt.path == item.main);
                 let Some(main) = main else { return };
                 if let Err(why) = git::checkout_check(&main.wt, &item.wt) {
                     return self.toast(why, Level::Warning);
@@ -1304,7 +1384,9 @@ impl Gerdr {
     /// The toast's "Delete worktree", after a squash: delete the worktree
     /// at `path` if that still loses nothing.
     pub fn delete_merged_worktree(&mut self, path: &Path) {
-        let (_, items) = self.worktree_items(None);
+        let (_, items) = self
+            .git
+            .worktree_items(&self.workspaces, self.active_workspace, None);
         if let Some(item) = items.into_iter().find(|i| i.wt.path == path) {
             if safe_to_delete(&item.wt) {
                 self.delete_worktrees(vec![item], false);
@@ -1347,7 +1429,9 @@ impl Gerdr {
     /// worktree, called `main_name`, bringing untracked `files` of it
     /// along, as the checkout dialog asked.
     pub fn checkout_worktree_at(&mut self, path: &Path, main_name: String, files: Vec<Untracked>) {
-        let (_, items) = self.worktree_items(None);
+        let (_, items) = self
+            .git
+            .worktree_items(&self.workspaces, self.active_workspace, None);
         if let Some(item) = items.into_iter().find(|i| i.wt.path == path) {
             self.checkout_worktree(item, main_name, files);
         }
@@ -1512,45 +1596,16 @@ impl Gerdr {
         result: Result<(), String>,
         brought: Result<usize, String>,
     ) {
-        self.worktrees.busy.remove(path);
-        match (result, brought) {
-            (Err(why), _) => self.toast(format!("Couldn't check it out: {why}"), Level::Error),
-            (Ok(()), Ok(0)) => self.toast(said, Level::Success),
-            (Ok(()), Ok(n)) => {
-                let files = if n == 1 { "file" } else { "files" };
-                self.toast(
-                    format!("{said}; brought {n} untracked {files} along"),
-                    Level::Success,
-                );
-            }
-            (Ok(()), Err(why)) => self.toast(
-                format!("{said}, but not all its untracked files: {why}"),
-                Level::Warning,
-            ),
-        }
+        (self.worktrees).checked_out(&mut ui!(self), path, said, result, brought);
         self.refresh_git();
     }
 
     /// Worktrees were deleted, or failed to be.
     fn worktrees_deleted(&mut self, deleted: Deleted) {
-        let (mut gone, mut paths) = (Vec::new(), Vec::new());
-        for (name, path, result) in deleted {
-            self.worktrees.busy.remove(&path);
-            match result {
-                Ok(()) => {
-                    gone.push(name);
-                    paths.push(path);
-                }
-                Err(why) => self.toast(format!("Couldn't delete {name}: {why}"), Level::Error),
-            }
-        }
-        match gone.as_slice() {
-            [] => {}
-            [name] => self.toast(format!("Deleted {name}"), Level::Success),
-            names => self.toast(format!("Deleted {} worktrees", names.len()), Level::Success),
-        }
+        let mut ui = ui!(self);
+        let paths = self.worktrees.deleted(&mut ui, deleted);
         // Their review comments go with them.
-        self.forget_worktree_reviews(&paths);
+        self.repos.forget_worktree_reviews(&mut ui, &paths);
         self.refresh_git();
     }
 
@@ -1563,24 +1618,16 @@ impl Gerdr {
             popup.keep_selection(&items, page);
         }
         // All of them: the filter can't hide a squash coming through.
-        let (_, items) = self.worktree_items(None);
-        let merging = std::mem::take(&mut self.worktrees.merging);
-        for path in merging {
-            match items.iter().find(|i| i.wt.path == path) {
-                Some(item) if item.wt.merged => {
-                    let name = item.wt.name();
-                    let delete = MenuAction::DeleteWorktree(path);
-                    self.toast_with(
-                        format!("Squashed {name} in"),
-                        Level::Success,
-                        Some(("Delete worktree".into(), delete)),
-                    );
-                }
-                Some(_) => {
-                    self.worktrees.merging.insert(path);
-                }
-                None => {}
-            }
+        let (_, items) = self
+            .git
+            .worktree_items(&self.workspaces, self.active_workspace, None);
+        for (name, path) in self.worktrees.squashed(&items) {
+            let delete = MenuAction::DeleteWorktree(path);
+            self.toast_with(
+                format!("Squashed {name} in"),
+                Level::Success,
+                Some(("Delete worktree".into(), delete)),
+            );
         }
     }
 }
@@ -1595,6 +1642,65 @@ mod tests {
         key_table::check(KEYS, &ctxs.map(|(scope, query)| KeyCtx { scope, query }));
     }
 
+    #[test]
+    fn the_worktrees_list_each_repository_once_the_focused_first() {
+        let wt = |path: &str, main: bool, dirty: bool| Worktree {
+            path: path.into(),
+            branch: Some(path.rsplit('/').next().unwrap().into()),
+            main,
+            dirty,
+            ..Worktree::default()
+        };
+        let status = |here: Worktree, others: Vec<Worktree>| crate::git::GitStatus {
+            here: Some(here),
+            worktrees: others,
+            ..Default::default()
+        };
+        let mut git = crate::state::GitWatch::default();
+        let merged = || Worktree {
+            merged: true,
+            ..wt("/a/.wt/clean", false, false)
+        };
+        let a_trees = || vec![merged(), wt("/a/.wt/dirty", false, true)];
+        git.status
+            .insert("/a".into(), status(wt("/a", true, false), a_trees()));
+        let b = status(wt("/b", true, false), Vec::new());
+        git.status.insert("/b".into(), b);
+        let ws = |dir: &str| crate::Workspace::new(dir.into(), crate::WorkspaceKind::Terminal);
+        let workspaces = [ws("/a"), ws("/b"), ws("/a")];
+        let (names, items) = git.worktree_items(&workspaces, 2, Some(Path::new("/b")));
+        assert_eq!(names, ["b", "a"]);
+        let got: Vec<_> = (items.iter())
+            .map(|i| (i.repo, i.wt.path.to_str().unwrap(), i.workspace))
+            .collect();
+        // The main worktree first, then those needing a look; tabs open in
+        // the active workspace when it is in the repository.
+        assert_eq!(
+            got,
+            [
+                (0, "/b", 1),
+                (1, "/a", 2),
+                (1, "/a/.wt/dirty", 2),
+                (1, "/a/.wt/clean", 2)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_squashed_worktree_is_told_once_merged_and_waited_for_till_then() {
+        let mut worktrees = Worktrees::default();
+        let mut merged = item(0, "done", false, true, false);
+        merged.wt.path = "/wt/done".into();
+        let mut open = item(0, "open", false, false, false);
+        open.wt.path = "/wt/open".into();
+        for path in ["/wt/done", "/wt/open", "/wt/gone"] {
+            worktrees.merging.insert(path.into());
+        }
+        let told = worktrees.squashed(&[merged, open]);
+        assert_eq!(told, [("done".to_owned(), PathBuf::from("/wt/done"))]);
+        let waiting: Vec<_> = worktrees.merging.iter().collect();
+        assert_eq!(waiting, [Path::new("/wt/open")]);
+    }
     fn item(repo: usize, name: &str, main: bool, merged: bool, dirty: bool) -> Item {
         Item {
             repo,

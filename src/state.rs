@@ -176,6 +176,7 @@ pub struct Overlays {
 }
 
 /// GitHub CI of the repos: what was read, and the read under way.
+#[derive(Default)]
 pub struct CiWatch {
     /// The CI of the shown project's repositories, by root (see
     /// `ci_watch`).
@@ -193,6 +194,7 @@ pub struct CiWatch {
 }
 
 /// Git status of the repos: what was read, and the read under way.
+#[derive(Default)]
 pub struct GitWatch {
     /// The Git status of the workspace folders in a repository, by folder.
     pub status: HashMap<PathBuf, git::GitStatus>,
