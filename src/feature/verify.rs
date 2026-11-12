@@ -64,9 +64,10 @@ use super::{
     Feature, PerProject,
     layout::git,
     now, patch,
-    setup::{kill_group, minutes},
+    setup::minutes,
 };
 use crate::desktop::shell_quote;
+use crate::process::kill_group;
 
 /// The checks' key for the feature folder as a whole.
 pub const FEATURE_KEY: &str = "_feature";
@@ -1108,11 +1109,9 @@ pub fn preview(text: &str, began: bool) -> Vec<String> {
 
 /// The last `PREVIEW_LINES` lines of `text` with something on them.
 pub fn last_lines(text: &str) -> Vec<String> {
-    let lines: Vec<&str> = (text.lines())
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    let from = lines.len().saturating_sub(PREVIEW_LINES);
-    lines[from..].iter().map(|line| untabbed(line)).collect()
+    (crate::text::last_lines(text, PREVIEW_LINES).into_iter())
+        .map(untabbed)
+        .collect()
 }
 
 /// `line` with spaces for its tabs: a card draws them as nothing.
@@ -1540,10 +1539,12 @@ impl CheckRun {
 /// goes with them, so no plan is asked for, and each failure is one thing to
 /// tick (`fix_round::items`).
 pub fn fixes_plan(failures: &[String], title: &str, evidence: &Path) -> String {
-    let mut md = format!(
-        "# Fix plan of \u{201c}{title}\u{201d}\n\ngerdr wrote this from Verify's failures: the user wrote nothing of their own, so no plan was asked for. Find each one's cause in the checks' output, in {}, before you change code.\n\n## {}\n",
-        evidence.display(),
-        super::fix_round::FIXES
+    let mut md = super::fix_round::header(
+        title,
+        &format!(
+            "Verify's failures: the user wrote nothing of their own, so no plan was asked for. Find each one's cause in the checks' output, in {}, before you change code.",
+            evidence.display()
+        ),
     );
     for failure in failures {
         // A line of its own: the heading is what is ticked.

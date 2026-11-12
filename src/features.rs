@@ -76,8 +76,8 @@ use crate::feature::manual::Verdict;
 use crate::machine_work::takes_a_place;
 use crate::manual_test::Row;
 pub(crate) use crate::review_cards::{
-    CardId, CardKey, Item, ItemAct, ReviewCard, SUGGESTIONS_WRITING, can_decide, card_key,
-    card_tag, item_buttons, item_card, item_hints, items, items_count, next_open_card,
+    CardId, CardKey, CardPage, Item, ItemAct, ReviewCard, SUGGESTIONS_WRITING, can_decide,
+    card_key, card_tag, item_buttons, item_card, item_hints, items, items_count, next_open_card,
     note_actions, offers_fix_all, outcome_note, review_cards, why_not_decide,
 };
 use crate::{
@@ -2915,7 +2915,7 @@ fn review_actions(feature: &Feature, stage: Stage) -> Vec<(PageButton, PanelOutc
         )
     });
     let posts = feature.posts_review();
-    (cards.flat_map(|item| item_buttons(item, decides, posts)))
+    (cards.flat_map(|item| item_buttons(item, CardPage { decides, posts })))
         .chain(shows)
         .collect()
 }
@@ -3100,6 +3100,20 @@ fn stage_actions(
         out.extend(fold_actions());
     }
     out
+}
+
+/// Makes button `i` of a page's `buttons` its one `primary`: the only filled
+/// one, on the page's bar.
+pub(crate) fn fill_only(buttons: &mut [PageButton], primary: &mut Option<usize>, i: usize) {
+    for button in buttons.iter_mut() {
+        if button.style == ButtonStyle::Primary {
+            button.style = ButtonStyle::Plain;
+        }
+    }
+    if let Some(button) = buttons.get_mut(i) {
+        button.style = ButtonStyle::Primary;
+        *primary = Some(i);
+    }
 }
 
 /// The buttons of the note or comment being written on a card, last of the
@@ -3513,7 +3527,7 @@ fn check_card(
         None if running => (FindingTag::Running, None),
         None => (FindingTag::NotRun, None),
     };
-    let took = |secs: u64| crate::test_runs::took(std::time::Duration::from_secs(secs));
+    let took = |secs: u64| crate::clock::took(std::time::Duration::from_secs(secs));
     let mut said = Vec::new();
     match (tag, outcome) {
         (FindingTag::Running | FindingTag::Queued, _) if row.is_some_and(|row| row.stopping) => {
@@ -4200,7 +4214,7 @@ fn check_lines(
         .squash_at
         .filter(|_| feature.squash_going())
     {
-        let when = projects::ago(now, at);
+        let when = crate::clock::ago(now, at);
         let text = format!("Squash started {when}: done once it is merged");
         return vec![line(text, CheckTone::Note)];
     }
@@ -4454,7 +4468,7 @@ fn ship_repo_meta(repo: &ship::RepoCheck, stat: Option<feature::page::Stat>) -> 
 
 /// When a step ran and what it sent, for its row: "2h ago \u{b7} a1b2c3d".
 fn ran_when(done: &feature::ShipDone, now: u64) -> String {
-    let when = (done.at > 0).then(|| projects::ago(now, done.at));
+    let when = (done.at > 0).then(|| crate::clock::ago(now, done.at));
     let sha = (done.sha.as_deref()).map(|sha| sha.chars().take(7).collect::<String>());
     let url = done.url.as_deref().map(pr_tail);
     let parts: Vec<String> = when.into_iter().chain(sha).chain(url).collect();
@@ -4612,7 +4626,7 @@ fn ship_step_row(
             Some(pr) => format!("Keep its pull request open: {}", pr_tail(&pr.url)),
             None => format!("Open a pull request into {base}"),
         },
-        ShipStep::Merge => format!("Merge into {base} in {}", tilde(&repo.main)),
+        ShipStep::Merge => format!("Merge into {base} in {}", short_folder(&repo.main)),
         ShipStep::PushBase => format!("Push {base} to origin"),
     };
     let why = repo.why_not(step);
@@ -4826,13 +4840,13 @@ fn shipped_after_group(
                 }
                 AfterStep::Remove => "Removed the worktree and branch",
             };
-            let mut when = projects::ago(now, done.at);
+            let mut when = crate::clock::ago(now, done.at);
             if let Some(at) = done.undone {
                 let word = match step {
                     AfterStep::Close => "reopened",
                     AfterStep::Remove => "restored",
                 };
-                when = format!("{when} \u{b7} {word} {}", projects::ago(now, at));
+                when = format!("{when} \u{b7} {word} {}", crate::clock::ago(now, at));
             }
             let button = (actions.iter()).position(|(_, o)| *o == PanelOutcome::UndoAfter(step));
             Some(chrome::ShipStepRow {
@@ -4915,10 +4929,10 @@ fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
             .repo(&done.repo)
             .map_or("its base", |r| r.base.as_str());
         let said = format!("{}: {}", done.repo, done.said(&branch, base));
-        let when = (done.at > 0).then(|| projects::ago(now, done.at));
+        let when = (done.at > 0).then(|| crate::clock::ago(now, done.at));
         let sha = done.sha.as_deref().map(short);
         let url = done.url.as_deref().map(pr_tail);
-        let undone = (done.undone).map(|at| format!("undone {}", projects::ago(now, at)));
+        let undone = (done.undone).map(|at| format!("undone {}", crate::clock::ago(now, at)));
         let parts: Vec<String> = (when.into_iter())
             .chain(std::iter::once(said))
             .chain(sha)
@@ -4931,7 +4945,7 @@ fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
     let updates = feature.shipping.updates.iter().map(|update| {
         let text = format!(
             "{} \u{b7} {}: {} {} \u{b7} {}",
-            projects::ago(now, update.at),
+            crate::clock::ago(now, update.at),
             update.repo,
             update.way.done_word(),
             update.onto,
@@ -4945,10 +4959,10 @@ fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
             feature::AfterStep::Close => "closed the workspace",
             feature::AfterStep::Remove => "removed the worktrees",
         };
-        let undone = (done.undone).map(|at| format!(" \u{b7} undone {}", projects::ago(now, at)));
+        let undone = (done.undone).map(|at| format!(" \u{b7} undone {}", crate::clock::ago(now, at)));
         let text = format!(
             "{} \u{b7} {said}{}",
-            projects::ago(now, done.at),
+            crate::clock::ago(now, done.at),
             undone.unwrap_or_default()
         );
         (done.at, text)
@@ -7030,14 +7044,16 @@ fn pick_feature(slugs: &[String], open: Option<&str>, last: Option<&str>) -> Opt
         .or_else(|| slugs.last().cloned())
 }
 
-/// A folder as the chrome shows it, from the home folder as `~`.
-pub(crate) fn tilde(path: &Path) -> String {
+/// A folder as the chrome shows it, from the home folder as `~` and cut to
+/// 60 characters in the middle (not `paths::tilde`, which never cuts).
+pub(crate) fn short_folder(path: &Path) -> String {
     paths::display(path, home_dir().as_deref(), 60)
 }
 
+
 /// What a done stage's row says of its mark.
 fn mark_detail(mark: &feature::Mark, now: u64) -> String {
-    let when = projects::ago(now, mark.at);
+    let when = crate::clock::ago(now, mark.at);
     if mark.note.is_empty() {
         format!("done {when} by {}", mark.by)
     } else {
@@ -7060,6 +7076,24 @@ fn keep_prompt(dir: &Path, feature: &Feature, stage: Stage, n: u32) -> Option<ai
 fn snapshot(dir: &Path, feature: &Feature) -> std::io::Result<ai_work::BlobRef> {
     let record = serde_json::to_vec_pretty(feature).map_err(std::io::Error::other)?;
     ai_work::blobs::put(dir, &record)
+}
+
+/// How `Gerdr::remove_feature` takes a feature's worktrees away.
+#[derive(Clone, Copy, Debug)]
+pub struct FeatureRemoval {
+    /// Mark the feature abandoned after.
+    pub abandon: bool,
+    /// Remove them with what they lose.
+    pub force: bool,
+}
+
+/// How `Gerdr::remove_repos` takes repositories out of a feature.
+#[derive(Clone, Copy, Debug)]
+pub struct RepoRemoval {
+    /// Remove their worktrees and branches with what they lose.
+    pub force: bool,
+    /// Agents go on reading their main checkouts.
+    pub to_context: bool,
 }
 
 impl Gerdr {
@@ -7702,7 +7736,7 @@ impl Gerdr {
                 Ok(Some(exclude)) => self.show_success(format!(
                     "Added /{} to {}",
                     layout::DOCS_LINK,
-                    tilde(&exclude)
+                    short_folder(&exclude)
                 )),
                 Err(why) => {
                     tracing::warn!("linking the stage files of {title}: {why}");
@@ -7959,7 +7993,13 @@ impl Gerdr {
             } => {
                 self.unbusy(&project, &slug, Job::Losses);
                 match losses.is_empty() {
-                    true => self.remove_feature(&project, &slug, false, false),
+                    true => {
+                        let how = FeatureRemoval {
+                            abandon: false,
+                            force: false,
+                        };
+                        self.remove_feature(&project, &slug, how)
+                    }
                     false => self.ask_remove_feature(project, slug, losses),
                 }
             }
@@ -10351,14 +10391,14 @@ impl Gerdr {
             PanelOutcome::DropContext(key) => self.drop_context_repo(&project, &slug, &key),
             PanelOutcome::Open(dir) => {
                 if !dir.exists() {
-                    return self.show_error(format!("{} is gone", tilde(&dir)));
+                    return self.show_error(format!("{} is gone", short_folder(&dir)));
                 }
                 self.open_feature_project_tab(&project, &slug, &dir);
             }
             PanelOutcome::CopyPath => {
                 if let Some(dir) = self.feature(&project, &slug).map(|f| f.dir.clone()) {
                     self.copy_text(dir.display().to_string());
-                    self.show_success(format!("Copied {}", tilde(&dir)));
+                    self.show_success(format!("Copied {}", short_folder(&dir)));
                 }
             }
             PanelOutcome::Remove => self.check_remove_feature(&project, &slug),
@@ -10565,7 +10605,10 @@ impl Gerdr {
                 .map(|r| r.worktree.as_path());
             folders.chain(worktrees).find_map(|dir| {
                 let user = self.folder_in_use(dir)?;
-                Some(format!("{} has {user} in it; close it first", tilde(dir)))
+                Some(format!(
+                    "{} has {user} in it; close it first",
+                    short_folder(dir)
+                ))
             })
         };
         match why {
@@ -10629,7 +10672,11 @@ impl Gerdr {
             return;
         };
         if !removal_asks(feature, &keys, &losses) {
-            return self.remove_repos(&project, &slug, &keys, false, to_context);
+            let how = RepoRemoval {
+                force: false,
+                to_context,
+            };
+            return self.remove_repos(&project, &slug, &keys, how);
         }
         let named: Vec<String> = (keys.iter()).map(|k| self.repo_label(feature, k)).collect();
         let named = named.join(", ");
@@ -10656,17 +10703,11 @@ impl Gerdr {
         );
     }
 
-    /// Take repositories `keys` out of feature `slug` off the thread: their
-    /// worktrees and branches go (`force`: with what they lose), and with
-    /// `to_context` agents go on reading their main checkouts.
-    pub fn remove_repos(
-        &mut self,
-        project: &str,
-        slug: &str,
-        keys: &[String],
-        force: bool,
-        to_context: bool,
-    ) {
+    /// Take repositories `keys` out of feature `slug` off the thread, as
+    /// `how` says: their worktrees and branches go, and agents may go on
+    /// reading their main checkouts.
+    pub fn remove_repos(&mut self, project: &str, slug: &str, keys: &[String], how: RepoRemoval) {
+        let RepoRemoval { force, to_context } = how;
         if !self.may_remove_repos(project, slug, keys, to_context) {
             return;
         }
@@ -10929,7 +10970,7 @@ impl Gerdr {
         if !dir.exists() {
             return self.show_error(format!(
                 "Couldn't ship \u{201c}{title}\u{201d}: {} is gone",
-                tilde(&dir)
+                short_folder(&dir)
             ));
         }
         // In its own workspace; another project's feature can't open one.
@@ -11377,9 +11418,10 @@ impl Gerdr {
         self.ask_remove_worktrees(question, body, go, then);
     }
 
-    /// Remove feature `slug`'s worktrees off the thread (`force`: with
-    /// what they lose), then mark it abandoned if `abandon`.
-    pub fn remove_feature(&mut self, project: &str, slug: &str, abandon: bool, force: bool) {
+    /// Remove feature `slug`'s worktrees off the thread as `how` says: with
+    /// what they lose or not, then marking it abandoned or not.
+    pub fn remove_feature(&mut self, project: &str, slug: &str, how: FeatureRemoval) {
+        let FeatureRemoval { abandon, force } = how;
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
@@ -11571,7 +11613,8 @@ impl Gerdr {
                 match part {
                     chrome::SearchPart::Close => self.close_criteria_search(),
                     chrome::SearchPart::Prev | chrome::SearchPart::Next => {
-                        self.go_to_match(part == chrome::SearchPart::Prev, false);
+                        let back = part == chrome::SearchPart::Prev;
+                        self.go_to_match(back, crate::manual_test::MatchFrom::Here);
                     }
                     _ => self.open_criteria_search(),
                 }
@@ -11583,7 +11626,7 @@ impl Gerdr {
                     .and_then(|(view, _)| Some(view.review_switch?.buttons.get(i)?.button));
                 if let Some(button) = button {
                     let hit = chrome::ReposHit::Button(button);
-                    self.worktree_diff_hit(hit, false, false, false);
+                    self.worktree_diff_hit(hit, crate::worktree_diff::DiffClick::default());
                 }
                 return;
             }
@@ -12178,13 +12221,17 @@ impl Gerdr {
                         let panel = self.features.panel.as_ref()?;
                         pull_tip(feature, panel.page_stage(feature), &view.page, i)
                     })?;
-                let spot = match layout.page_buttons.get(i).copied().flatten() {
-                    Some(mut spot) => {
+                // On the page's bar, not scrolled; a card may show it too,
+                // so the one under the pointer.
+                let at = pos.to_i32_round();
+                let bar = (layout.bar_buttons.iter()).find(|(b, r)| *b == i && r.contains(at));
+                let spot = match (bar, layout.page_buttons.get(i).copied().flatten()) {
+                    (Some((_, spot)), _) => *spot,
+                    (None, Some(mut spot)) => {
                         spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
                         spot
                     }
-                    // The primary, in the header: not scrolled.
-                    None => layout.primary?,
+                    (None, None) => (layout.bar_buttons.iter().find(|(b, _)| *b == i))?.1,
                 };
                 Some(Tooltip::new(&text, spot))
             }
@@ -12533,8 +12580,9 @@ impl Gerdr {
         };
         let gate = crate::feature_agents::gate_of(f, |_| manual).is_some();
         let busy = mine().next().is_some();
+        let hold = CardHold { gate, busy };
         let back = rework(f, ctx);
-        let (stage, text, tone) = card_status(f, &line, gate, busy, back, feature::now());
+        let (stage, text, tone) = card_status(f, &line, hold, back, feature::now());
         // What another machine writes says which, first as the end may not fit.
         let text = match f.writer.as_deref() {
             Some(id) => format!("{}: {text}", self.machine_name(id)),
@@ -12761,7 +12809,7 @@ pub(crate) fn created_text(title: &str, root: &Path, ignores: &[PathBuf]) -> Str
         .iter()
         .map(|p| {
             p.strip_prefix(root)
-                .map_or_else(|_| tilde(p), |r| r.display().to_string())
+                .map_or_else(|_| short_folder(p), |r| r.display().to_string())
         })
         .collect();
     format!(
@@ -12779,7 +12827,7 @@ fn cursor_freed_text(root: &Path) -> String {
         layout::FEATURES_DIR,
         layout::CURSOR_DENY,
         layout::CURSOR_INDEX,
-        tilde(root)
+        short_folder(root)
     )
 }
 
@@ -12794,7 +12842,7 @@ fn linked_text(title: &str, names: &[String], root: &Path, ignores: &[PathBuf]) 
         .iter()
         .map(|p| {
             p.strip_prefix(root)
-                .map_or_else(|_| tilde(p), |r| r.display().to_string())
+                .map_or_else(|_| short_folder(p), |r| r.display().to_string())
         })
         .collect();
     format!(
@@ -12942,9 +12990,9 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
     let found = |root: &Root| {
         let n = root.repos.len();
         if root.multi {
-            format!("In {} \u{b7} {n} repositories", tilde(&root.path))
+            format!("In {} \u{b7} {n} repositories", short_folder(&root.path))
         } else {
-            format!("In {}", tilde(&root.path))
+            format!("In {}", short_folder(&root.path))
         }
     };
     let chosen = dialog.choosing.as_ref().map(|c| &c.repo);
@@ -13497,8 +13545,7 @@ impl<'a> From<&PanelState<'a>> for LineState<'a> {
 fn card_status(
     feature: &Feature,
     state: &LineState,
-    gate: bool,
-    busy: bool,
+    hold: CardHold,
     back: Option<Rework>,
     now: u64,
 ) -> (Option<Stage>, String, chrome::CardTone) {
@@ -13524,7 +13571,7 @@ fn card_status(
     }
     let stage = feature.current();
     let line = card_line(feature, stage, state, now);
-    (stage, line, card_tone(feature, stage, state, gate, busy))
+    (stage, line, card_tone(feature, stage, state, hold))
 }
 
 /// A card's line for `feature` at `stage`: the stage and how it stands,
@@ -13536,7 +13583,7 @@ fn card_line(feature: &Feature, stage: Option<Stage>, state: &LineState, now: u6
     let mut what = current_line(feature, stage, state, now);
     if what.is_empty() {
         let last = feature.history.iter().map(|e| e.at).max();
-        what = projects::ago(now, last.unwrap_or(feature.created));
+        what = crate::clock::ago(now, last.unwrap_or(feature.created));
     }
     match &state.machine {
         Some((line, true)) => what.clone_from(line),
@@ -13546,15 +13593,23 @@ fn card_line(feature: &Feature, stage: Option<Stage>, state: &LineState, now: u6
     format!("{} \u{b7} {what}", stage.label())
 }
 
-/// How `feature` at `stage` stands, for its card; `gate`: a gate holds it,
-/// `busy`: a job of it runs.
+/// What holds `feature` or keeps it busy, for its card's tone.
+#[derive(Clone, Copy, Debug, Default)]
+struct CardHold {
+    /// A gate holds it.
+    gate: bool,
+    /// A job of it runs.
+    busy: bool,
+}
+
+/// How `feature` at `stage` stands, for its card, as `hold` says.
 fn card_tone(
     feature: &Feature,
     stage: Option<Stage>,
     state: &LineState,
-    gate: bool,
-    busy: bool,
+    hold: CardHold,
 ) -> chrome::CardTone {
+    let CardHold { gate, busy } = hold;
     let run = stage.and_then(|stage| feature.runs.get(&stage));
     let failed =
         |stage| stage_failed(feature, stage, state.probe) || agent_failed(feature, stage, state);
@@ -13618,7 +13673,7 @@ fn waits(feature: &Feature, stage: Stage, state: &LineState) -> bool {
 /// "working 14m": how long an agent started at `started` has worked.
 fn running_for(now: u64, started: u64) -> String {
     let word = chrome::Standing::Working.word();
-    match projects::ago(now, started).strip_suffix(" ago") {
+    match crate::clock::ago(now, started).strip_suffix(" ago") {
         Some(long) => format!("{word} {long}"),
         None => word.to_owned(),
     }
@@ -13781,11 +13836,11 @@ fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> R
         (StageMark::Done, _) if mark == NodeMark::Stale => "code changed".to_owned(),
         (StageMark::Done, _) => {
             let at = feature.marks.get(&stage).map_or(0, |m| m.at);
-            projects::ago(now, at)
+            crate::clock::ago(now, at)
         }
         (StageMark::Current, _) => current_line(feature, stage, &lines, now),
         (StageMark::Later, _) => {
-            (feature.ran_once.get(&stage)).map_or_else(String::new, |at| projects::ago(now, *at))
+            (feature.ran_once.get(&stage)).map_or_else(String::new, |at| crate::clock::ago(now, *at))
         }
     };
     RailNode {
@@ -13963,7 +14018,7 @@ fn submit_sections(
     let done: Vec<CheckLine> = (feature.shipping.reviews.iter().rev())
         .map(|r| {
             let short = r.commit.get(..7).unwrap_or(&r.commit);
-            let mut text = format!("{} {} at {short}", r.event.done(), projects::ago(now, r.at));
+            let mut text = format!("{} {} at {short}", r.event.done(), crate::clock::ago(now, r.at));
             if r.inline + r.in_body > 0 {
                 text.push_str(&format!(
                     " \u{b7} {}",
@@ -14214,7 +14269,7 @@ fn pull_tip(feature: &Feature, stage: Stage, page: &chrome::StagePage, i: usize)
             if name.starts_with("Pull request #") && buttons.contains(&i))
     });
     let label = page.buttons.get(i)?.label.as_str();
-    // The card's primary (moving to the new head, finishing) is the header's.
+    // The card's primary (moving to the new head, finishing) is the page bar's.
     let primary = page.primary == Some(i) && matches!(label, UPDATE_HEAD | "Finish\u{2026}");
     if !held && !primary {
         return None;
@@ -14258,14 +14313,14 @@ fn pull_card(
     let state = if let Some(end) = pull.ended() {
         let how = if end.merged() { "merged" } else { "closed" };
         line(
-            format!("{how} on GitHub {}", projects::ago(now, end.at)),
+            format!("{how} on GitHub {}", crate::clock::ago(now, end.at)),
             CheckTone::Note,
         )
     } else if let Some(moved) = pull.moved() {
         let text = match moved.base_ref == pull.base_ref {
             true => format!(
                 "new commits on GitHub {}: at {}, reviewed at {}",
-                projects::ago(now, moved.at),
+                crate::clock::ago(now, moved.at),
                 moved.head_sha.get(..7).unwrap_or(&moved.head_sha),
                 pull.short_head()
             ),
@@ -14432,7 +14487,7 @@ fn agent_card(
             .map_or(line.as_str(), str::trim_start)
             .to_owned(),
         _ => {
-            let started = format!("started {}", projects::ago(now, run.started));
+            let started = format!("started {}", crate::clock::ago(now, run.started));
             match &run.model {
                 Some(model) => format!("{model} \u{b7} {started}"),
                 None => started,
@@ -14576,7 +14631,7 @@ fn fix_round_card(
 ) -> PageSection {
     let mut state = fix_round_state(feature, round);
     if let Some(at) = round.ready.filter(|_| round.phase == FixPhase::Ready) {
-        let written = format!(" \u{b7} written {}", projects::ago(now, at));
+        let written = format!(" \u{b7} written {}", crate::clock::ago(now, at));
         state.text.push_str(&written);
     }
     PageSection::File {
@@ -14624,7 +14679,7 @@ fn last_round_card(
     now: u64,
 ) -> PageSection {
     let mut said = vec![round.what.clone(), round.made()];
-    let ago = |at| projects::ago(now, at);
+    let ago = |at| crate::clock::ago(now, at);
     said.extend(round.ready.map(|at| format!("written {}", ago(at))));
     said.extend(round.ended.map(|at| format!("finished {}", ago(at))));
     PageSection::File {
@@ -15210,13 +15265,14 @@ fn fix_round_open(newest: Option<u32>, n: u32, flipped: &BTreeSet<u32>) -> bool 
 /// ago", "making fixes · 1 of 3 made".
 pub(crate) fn round_state_words(round: &FixRound, now: u64) -> String {
     match (round.trail.dropped, round.ended) {
-        (Some(at), _) => format!("dropped {}", projects::ago(now, at)),
-        (None, Some(at)) => format!("{} {}", round.made(), projects::ago(now, at)),
+        (Some(at), _) => format!("dropped {}", crate::clock::ago(now, at)),
+        (None, Some(at)) => format!("{} {}", round.made(), crate::clock::ago(now, at)),
         (None, None) => round.stalled.clone().unwrap_or_else(|| round.line()),
     }
 }
 
 /// How long from `from` to `to`, in a few words: "12 min", "1 h 5 min".
+/// Not `clock::took` ("2m 5s") on purpose: a feature's times read in minutes.
 fn took(from: u64, to: u64) -> String {
     let mins = to.saturating_sub(from).div_ceil(60);
     match (mins / 60, mins % 60) {
@@ -15405,25 +15461,25 @@ fn fix_card(
         meta.push(format!(
             "run {} failed {}",
             fix.run,
-            projects::ago(now, fix.at)
+            crate::clock::ago(now, fix.at)
         ));
     }
     // A round kept only by its number has no times.
     match (asked_by, round.asked > 0) {
-        (Some(by), true) => meta.insert(0, format!("{by} {}", projects::ago(now, round.asked))),
+        (Some(by), true) => meta.insert(0, format!("{by} {}", crate::clock::ago(now, round.asked))),
         (Some(by), false) => meta.insert(0, by),
-        (None, true) => meta.push(format!("asked {}", projects::ago(now, round.asked))),
+        (None, true) => meta.push(format!("asked {}", crate::clock::ago(now, round.asked))),
         (None, false) => {}
     }
     if let Some(at) = round.ready.filter(|_| round.trail.went.is_none()) {
-        meta.push(format!("plan written {}", projects::ago(now, at)));
+        meta.push(format!("plan written {}", crate::clock::ago(now, at)));
     }
     if let Some(went) = round.trail.went {
-        meta.push(format!("fixes went {}", projects::ago(now, went)));
+        meta.push(format!("fixes went {}", crate::clock::ago(now, went)));
     }
     if let Some(over) = round.over_at() {
         if round.trail.dropped.is_none() {
-            meta.push(format!("finished {}", projects::ago(now, over)));
+            meta.push(format!("finished {}", crate::clock::ago(now, over)));
         }
         if let Some(went) = round.trail.went {
             meta.push(format!("took {}", took(went, over)));
@@ -16175,12 +16231,12 @@ fn draft_cards(
                 false => format!("{} ({})", draft.agent, draft.model),
             });
         }
-        meta.push(format!("written {}", projects::ago(now, draft.written)));
+        meta.push(format!("written {}", crate::clock::ago(now, draft.written)));
         if let Some(at) = draft.sent_back {
-            meta.push(format!("sent back {}", projects::ago(now, at)));
+            meta.push(format!("sent back {}", crate::clock::ago(now, at)));
         }
         if let Some(at) = draft.approved {
-            meta.push(format!("approved {}", projects::ago(now, at)));
+            meta.push(format!("approved {}", crate::clock::ago(now, at)));
         }
         let held = |o: &PanelOutcome| match o {
             PanelOutcome::DraftChanges(s, k) => *s == stage && *k == draft.k,
@@ -16291,12 +16347,12 @@ fn stage_page(
         StageMark::Done if stage == Stage::Ship && pr_wait(feature, state.probe).is_some() => {
             feature.marks.get(&stage).map(|m| {
                 let wait = pr_wait(feature, state.probe).unwrap_or_default();
-                let when = projects::ago(now, m.at);
+                let when = crate::clock::ago(now, m.at);
                 line(format!("Shipped {when} by {}: {wait}", m.by), CheckTone::Note)
             })
         }
         StageMark::Done => feature.marks.get(&stage).map(|m| {
-            let mut text = format!("Done {} by {}", projects::ago(now, m.at), m.by);
+            let mut text = format!("Done {} by {}", crate::clock::ago(now, m.at), m.by);
             if let Some(by) = state.ctx.locked_by(feature, stage) {
                 text.push_str(&format!(" \u{b7} locked: {}", lock_why(feature, by)));
             }
@@ -16696,10 +16752,11 @@ fn in_menu(button: &PageButton, outcome: &PanelOutcome) -> bool {
     }
 }
 
-/// Where `page`'s buttons go: its one primary to the tab's header, unless a
-/// card of its own holds it (a finding's, a round's, a repository's on Ship),
-/// the rare ones (`StagePage::menu`) off the page; and each row of buttons
-/// in one style: a quiet one beside outlined ones is outlined too.
+/// Where `page`'s buttons go: its one primary to the page's bar (a card of
+/// its own holding it, a finding's, a round's, a repository's on Ship, keeps
+/// it too, drawn plain), the rare ones (`StagePage::menu`) off the page; and
+/// each row of buttons in one style: a quiet one beside outlined ones is
+/// outlined too.
 pub(crate) fn place_buttons(page: &mut StagePage) {
     let menu = page.menu.clone();
     let local: Vec<usize> = (page.sections.iter())
@@ -16712,19 +16769,17 @@ pub(crate) fn place_buttons(page: &mut StagePage) {
             _ => Vec::new(),
         })
         .collect();
-    // A card holding the one primary keeps it: then no other is filled.
-    let carded = (local.iter())
-        .any(|i| (page.buttons.get(*i)).is_some_and(|b| b.style == ButtonStyle::Primary));
-    if carded {
-        for (i, b) in page.buttons.iter_mut().enumerate() {
-            if b.style == ButtonStyle::Primary && !local.contains(&i) {
-                b.style = ButtonStyle::Plain;
-            }
+    // A card's own comes before the stage's; and one only is filled.
+    let filled = |i: &usize| {
+        !menu.contains(i) && (page.buttons.get(*i)).is_some_and(|b| b.style == ButtonStyle::Primary)
+    };
+    page.primary = (local.iter().copied().find(|i| filled(i)))
+        .or_else(|| (0..page.buttons.len()).find(|i| filled(i)));
+    for (i, b) in page.buttons.iter_mut().enumerate() {
+        if b.style == ButtonStyle::Primary && page.primary != Some(i) {
+            b.style = ButtonStyle::Plain;
         }
     }
-    page.primary = (page.buttons.iter().enumerate())
-        .find(|(i, b)| b.style == ButtonStyle::Primary && !menu.contains(i) && !local.contains(i))
-        .map(|(i, _)| i);
     let gone = |i: &usize| menu.contains(i) || page.primary == Some(*i);
     let mut rows: Vec<Vec<usize>> = Vec::new();
     for section in &mut page.sections {
@@ -16767,7 +16822,7 @@ pub(crate) fn place_buttons(page: &mut StagePage) {
             _ => Vec::new(),
         })
         .collect();
-    // What no card holds goes at the title's right: a row of its own.
+    // What no card holds goes at the title's right, on the page's bar: a row of its own.
     rows.push(
         (0..page.buttons.len())
             .filter(|i| !gone(i) && !held.contains(i) && !held_ship.contains(i))
@@ -17042,7 +17097,7 @@ fn activity(feature: &Feature, now: u64) -> Vec<ActivityRow> {
         .map(|e| ActivityRow {
             // Capitalised as every line is, older records' "created" too.
             what: capitalised(&e.what),
-            ago: projects::ago(now, e.at),
+            ago: crate::clock::ago(now, e.at),
             tone: event_tone(&e.what),
         })
         .collect()
@@ -17746,12 +17801,11 @@ fn writers_tab_hints(
                 }
             }
             if let Some(i) = item {
-                hints.extend(item_hints(
-                    i,
+                let page = CardPage {
                     decides,
-                    panel.armed.is_some(),
-                    feature.posts_review(),
-                ));
+                    posts: feature.posts_review(),
+                };
+                hints.extend(item_hints(i, page, panel.armed.is_some()));
             }
             // Off a reviewer's card, `c` adds a comment of the user's own.
             if decides && diff_note.is_none() && item.is_none_or(Item::yours) {
@@ -18093,7 +18147,7 @@ fn repo_row(
         RepoEntry::Context(i) => {
             if let Some(repo) = feature.context.get(i) {
                 row.name = state.names.label_of(repo.project.as_deref(), &repo.name);
-                row.line = tilde(&repo.main);
+                row.line = short_folder(&repo.main);
                 row.kind = RepoKind::Context;
                 row.remove = linkable(feature);
             }
@@ -18101,7 +18155,7 @@ fn repo_row(
         RepoEntry::Removed(i) => {
             if let Some(gone) = feature.removed.get(i) {
                 row.name = state.names.label_of(gone.project.as_deref(), &gone.name);
-                row.line = format!("removed {}", projects::ago(now, gone.at));
+                row.line = format!("removed {}", crate::clock::ago(now, gone.at));
             }
         }
         RepoEntry::Offered { source, repo } => {
@@ -18259,15 +18313,9 @@ fn tab_view(
                     .get(b)
                     .is_some_and(|button| wants(&button.label))
             {
-                for button in &mut page.buttons {
-                    if button.style == ButtonStyle::Primary {
-                        button.style = ButtonStyle::Plain;
-                    }
-                }
-                page.buttons[b].style = ButtonStyle::Primary;
-                // The card holds it: the header has none, and what it had
-                // goes back to the title's row.
-                page.primary = None;
+                // The page's bar shows it, and what it had goes back among
+                // the bar's plain ones.
+                fill_only(&mut page.buttons, &mut page.primary, b);
             }
             if panel.armed.is_some() {
                 "Press Del again".clone_into(&mut card.state);
@@ -18340,6 +18388,10 @@ fn tab_view(
             }
         }
     }
+    // Save is what to press next while a note is written.
+    if let Some(save) = note_buttons(&page.buttons).last().copied() {
+        fill_only(&mut page.buttons, &mut page.primary, save);
+    }
     // A finished feature's code isn't read (`ship::probe_finished`).
     let read = state.probe.filter(|_| feature.status == Status::Open);
     let repos_error = match read.map(|p| &p.reading) {
@@ -18352,8 +18404,8 @@ fn tab_view(
     let mut sub = format!(
         "{} \u{b7} {} \u{b7} started {}",
         feature.slug,
-        tilde(&feature.dir),
-        projects::ago(now, feature.created)
+        short_folder(&feature.dir),
+        crate::clock::ago(now, feature.created)
     );
     if feature.status == Status::Done {
         sub = format!("done \u{b7} {sub}");
@@ -19326,7 +19378,10 @@ pub(crate) mod tests {
         let view = new_feature_view(&d, "Acme".into());
         assert_eq!(view.link, chrome::LINK_BUTTON[1]);
         let places: Vec<&str> = view.repos.iter().map(|r| r.place.as_str()).collect();
-        let found = format!("In {} \u{b7} 2 repositories", tilde(Path::new("/work")));
+        let found = format!(
+            "In {} \u{b7} 2 repositories",
+            short_folder(Path::new("/work"))
+        );
         assert_eq!(places, [found.as_str(), "can't link: no git repository"]);
         assert!(view.repos[1].fixed, "a project not found can't be picked");
         d.toggle(1);
@@ -20560,7 +20615,7 @@ pub(crate) mod tests {
         let (shown, node) = card(&f, at_rest);
         let (status, _, buttons) = shown.unwrap();
         assert!(status.starts_with("Build agent \u{b7} your turn"));
-        // Send prompt, the primary, is in the header.
+        // Send prompt, the primary, is on the page's bar.
         assert_eq!(buttons, ["Show Build agent"]);
         assert_eq!(node, (NodeMark::Waiting, "waiting to send".to_owned()));
         assert_eq!(
@@ -22608,6 +22663,13 @@ pub(crate) mod tests {
             .map(|i| actions[*i].0.label.as_str())
             .collect();
         assert_eq!(held, ["Review", "Make fixes", "Drop plan\u{2026}"]);
+        // Review, the round's primary, is the page's one: on its bar, filled,
+        // and still on its card.
+        let primary = page.primary.expect("the round's");
+        assert_eq!(actions[primary].0.label, "Review");
+        assert!(card.buttons.contains(&primary));
+        let filled = |b: &&PageButton| b.style == ButtonStyle::Primary;
+        assert_eq!(page.buttons.iter().filter(filled).count(), 1);
 
         let planning = in_round(f.clone(), Stage::Verify, FixPhase::Planning);
         let shown = labels_of(&planning);
@@ -26494,7 +26556,7 @@ pub(crate) mod tests {
                 PageSection::MilestoneMode { fresh: false }
             ]
         );
-        // Show agent, the primary, is in the header; the rare ones in `⋯`.
+        // Show agent, the primary, is on the page's bar; the rare ones in `⋯`.
         assert_eq!(
             (page.primary, page.menu.as_slice()),
             (Some(0), &[2, 3, 4][..])
@@ -26529,7 +26591,7 @@ pub(crate) mod tests {
         let PageSection::Agent { buttons, .. } = &page.sections[0] else {
             panic!("the agent's card first");
         };
-        // Continue, the primary, is in the header; Show agent on the card.
+        // Continue, the primary, is on the page's bar; Show agent on the card.
         assert_eq!(page.primary, Some(0));
         assert_eq!(buttons[..1], [1], "Show agent");
         let node = rail_node(&f, Stage::Build, &state, 2_000);
@@ -26728,7 +26790,7 @@ pub(crate) mod tests {
             }
         ));
         // Show agent and Restart are its card's, Start over the `⋯` menu's,
-        // Review, the primary, the header's.
+        // Review, the primary, the bar's.
         let PageSection::Agent { buttons, .. } = &page.sections[0] else {
             panic!("the agent's card first");
         };
@@ -26917,7 +26979,7 @@ pub(crate) mod tests {
         let on_card: Vec<&str> = (held.unwrap().iter())
             .map(|i| actions[*i].0.label.as_str())
             .collect();
-        // Review, the primary, is in the header.
+        // Review, the primary, is on the page's bar.
         assert_eq!(on_card, ["Approve"]);
         assert_eq!(
             page.primary.map(|i| actions[i].0.label.as_str()),
@@ -28030,7 +28092,7 @@ pub(crate) mod tests {
         }];
         assert_eq!(
             card_line(&f, Some(Stage::Build), &state, now),
-            format!("Build \u{b7} {}", projects::ago(now, now - 3 * 86_400)),
+            format!("Build \u{b7} {}", crate::clock::ago(now, now - 3 * 86_400)),
         );
         let setting_up = LineState {
             setup: Some("npm ci"),
@@ -28052,7 +28114,7 @@ pub(crate) mod tests {
             passed: Some(false),
             ..Default::default()
         });
-        let status = |back| card_status(&f, &state, false, false, back, 0);
+        let status = |back| card_status(&f, &state, CardHold::default(), back, 0);
         let runs = status(Some(Rework::Runs(Dot::Working)));
         assert_eq!(runs.0, Some(Stage::Build));
         assert_eq!(runs.1, "Build \u{b7} working again");
@@ -28068,7 +28130,7 @@ pub(crate) mod tests {
         let state = LineState::from(&PanelState::default());
         let verify = feature("d", vec![repo("api", true)], stage_index(Stage::Verify));
         let mut f = in_round(verify, Stage::Verify, FixPhase::Fixing);
-        let status = |f: &Feature| card_status(f, &state, false, false, None, 0).1;
+        let status = |f: &Feature| card_status(f, &state, CardHold::default(), None, 0).1;
         assert_eq!(status(&f), "Verify \u{b7} making fixes");
         // Its first commit has Build to do again: the rail's node is Build's.
         f.untick(Stage::Build, 5);
@@ -28103,7 +28165,7 @@ pub(crate) mod tests {
             ..LineState::from(&PanelState::default())
         };
         assert_eq!(current_line(&f, Stage::Plan, &state, 0), "failed");
-        let tone = card_tone(&f, Some(Stage::Plan), &state, false, false);
+        let tone = card_tone(&f, Some(Stage::Plan), &state, CardHold::default());
         assert_eq!(tone, chrome::CardTone::Failed);
         let ctx = RowCtx::default();
         assert_eq!(node_mark(&f, Stage::Plan, ctx, &state), NodeMark::Failed);
@@ -28137,7 +28199,7 @@ pub(crate) mod tests {
         use chrome::CardTone::{Failed, Idle, Waits, Working};
         let state = LineState::from(&PanelState::default());
         let f = feature("d", vec![repo("api", true)], 2);
-        let tone = |gate, busy| card_tone(&f, Some(Stage::Build), &state, gate, busy);
+        let tone = |gate, busy| card_tone(&f, Some(Stage::Build), &state, CardHold { gate, busy });
         assert_eq!(tone(false, false), Idle);
         assert_eq!(tone(false, true), Working);
         assert_eq!(tone(true, true), Waits);
@@ -28146,8 +28208,12 @@ pub(crate) mod tests {
             passed: Some(false),
             ..Default::default()
         });
+        let hold = CardHold {
+            gate: true,
+            busy: true,
+        };
         assert_eq!(
-            card_tone(&verify, Some(Stage::Verify), &state, true, true),
+            card_tone(&verify, Some(Stage::Verify), &state, hold),
             Failed
         );
     }
@@ -28371,7 +28437,7 @@ pub(crate) mod tests {
             .filter(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Plan))
             .count();
         assert_eq!(reviews, 1);
-        // The primary Review goes to the header, Approve stays on the card.
+        // The primary Review goes to the page's bar, Approve stays on the card.
         let held = actions
             .iter()
             .position(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Plan))
@@ -29739,7 +29805,7 @@ mod pr_page_tests {
             "{}",
             state.text
         );
-        // Update to new head, the primary, is in the header.
+        // Update to new head, the primary, is on the page's bar.
         assert_eq!(buttons, vec![FIX_HERE, EDIT_PULLS, OPEN_PULL]);
         assert_eq!(page.primary, Some(0));
         assert_eq!(page.buttons[0].label, UPDATE_HEAD);
@@ -29772,7 +29838,7 @@ mod pr_page_tests {
         let page = page_of(&f, Stage::Verify);
         let (state, buttons) = card(&page);
         assert!(state.text.starts_with("merged on GitHub"), "{}", state.text);
-        // Finish, the primary, is in the header.
+        // Finish, the primary, is on the page's bar.
         assert_eq!(buttons, vec![OPEN_PULL]);
         let primary = page.primary.map(|i| page.buttons[i].label.as_str());
         assert_eq!(primary, Some("Finish\u{2026}"));
@@ -29911,7 +29977,11 @@ mod pr_page_tests {
         assert_eq!(f.review.as_ref().unwrap().open(), 1);
         let items = items(&f, Stage::AiReview);
         let open = items.iter().find(|i| i.id() == "r1-1").copied().unwrap();
-        let labels: Vec<String> = (item_buttons(open, true, true).into_iter())
+        let page = CardPage {
+            decides: true,
+            posts: true,
+        };
+        let labels: Vec<String> = (item_buttons(open, page).into_iter())
             .map(|(b, _)| b.label)
             .collect();
         assert!(labels.contains(&"Comment".to_owned()), "{labels:?}");

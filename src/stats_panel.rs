@@ -10,10 +10,7 @@
 //! Gerdr holds the panel (`Gerdr::ai_stats`); the chrome paints what it
 //! shows from `ChromeView::stats` (see `chrome::stats`).
 
-use std::{
-    path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use smithay::{
@@ -33,7 +30,7 @@ use crate::{
     chrome::{self, StatsColumn, StatsFocus, StatsHit, StatsRow, StatsView},
     features::Done,
     input::Overlay,
-    projects::ago,
+    clock::ago,
     scrollback::{Scrollback, Source},
     text_field::{Edit, PASTE, TextField},
     toast::ToastHit,
@@ -822,7 +819,8 @@ fn filtered(lines: Vec<Line>, query: &str) -> Vec<Line> {
     out
 }
 
-/// How long `secs` is, for people: "45s", "12m", "1h 05m", "2d 3h".
+/// How long `secs` is, for people: "45s", "12m", "1h 05m", "2d 3h". Not
+/// `clock::took`: stats columns want minutes alone, padded hours and days.
 pub(crate) fn span(secs: u64) -> String {
     match secs {
         s if s < 60 => format!("{s}s"),
@@ -1300,13 +1298,6 @@ fn first_line(text: &str) -> Option<String> {
     Some(short(line, 160))
 }
 
-/// Now, in seconds since the epoch.
-pub(crate) fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
 impl Gerdr {
     /// Open the stats panel, or close it again.
     pub(crate) fn toggle_ai_stats(&mut self) {
@@ -1415,10 +1406,10 @@ impl Gerdr {
             building: view.building || filling,
             ..view
         }));
-        panel.settle(panel.selected, true, page, now_secs());
+        panel.settle(panel.selected, true, page, crate::clock::now_secs());
         // Enter pressed while they were to come acts on them now.
         if std::mem::take(&mut panel.enter_queued)
-            && let Some(outcome) = panel.drill(now_secs())
+            && let Some(outcome) = panel.drill(crate::clock::now_secs())
         {
             self.apply_ai_stats(outcome);
         }
@@ -1431,7 +1422,7 @@ impl Gerdr {
 
     /// What the panel shows, while it is open.
     pub(crate) fn ai_stats_view(&self) -> Option<StatsView> {
-        Some(self.ai_stats.as_ref()?.view(now_secs()))
+        Some(self.ai_stats.as_ref()?.view(crate::clock::now_secs()))
     }
 
     /// A key while the panel has the keyboard. `sym` is the key's own
@@ -1444,7 +1435,7 @@ impl Gerdr {
     ) -> Option<Outcome> {
         let page = self.ai_stats_page();
         let panel = self.ai_stats.as_mut()?;
-        panel.key(mods, sym, typed, page, now_secs())
+        panel.key(mods, sym, typed, page, crate::clock::now_secs())
     }
 
     /// Do what the panel asked.
@@ -1618,7 +1609,7 @@ impl Gerdr {
             Some(hit) => {
                 let page = self.ai_stats_page();
                 let panel = self.ai_stats.as_mut();
-                panel.and_then(|panel| panel.click(hit, page, now_secs()))
+                panel.and_then(|panel| panel.click(hit, page, crate::clock::now_secs()))
             }
             None => match self.toast_press(pos) {
                 Some(ToastHit::Action(action)) => {
@@ -1671,7 +1662,7 @@ impl Gerdr {
         let rows = self.motion_rows(motion, chrome::STATS_ROW as f64);
         let page = self.ai_stats_page();
         if let Some(panel) = self.ai_stats.as_mut() {
-            panel.scroll_by(rows, page, now_secs());
+            panel.scroll_by(rows, page, crate::clock::now_secs());
         }
     }
 
@@ -1682,7 +1673,7 @@ impl Gerdr {
         if let Some(panel) = self.ai_stats.as_mut() {
             let row = (pos / chrome::STATS_ROW as f64).round() as isize;
             let by = row - panel.first as isize;
-            panel.scroll_by(by, page, now_secs());
+            panel.scroll_by(by, page, crate::clock::now_secs());
         }
     }
 

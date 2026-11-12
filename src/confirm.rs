@@ -837,14 +837,20 @@ impl Gerdr {
                 slug,
                 abandon,
                 force,
-            } => self.remove_feature(&project, &slug, abandon, force),
+            } => {
+                let how = crate::features::FeatureRemoval { abandon, force };
+                self.remove_feature(&project, &slug, how)
+            }
             Then::RemoveRepos {
                 project,
                 slug,
                 keys,
                 force,
                 to_context,
-            } => self.remove_repos(&project, &slug, &keys, force, to_context),
+            } => {
+                let how = crate::features::RepoRemoval { force, to_context };
+                self.remove_repos(&project, &slug, &keys, how)
+            }
             Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug),
             Then::SubmitReview {
                 project,

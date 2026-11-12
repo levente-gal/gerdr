@@ -50,6 +50,14 @@ pub const FILE: &str = "fix-plan.md";
 pub const COMMENTS: &str = "fix-plan-comments.json";
 /// The section a plan must have, and not leave empty.
 pub const FIXES: &str = "Fixes";
+
+/// The head of a fix plan gerdr writes itself for feature `title`, up to its
+/// empty `FIXES` section: `from` says what it was written from and where to
+/// look ("gerdr wrote this from …").
+pub fn header(title: &str, from: &str) -> String {
+    format!("# Fix plan of \u{201c}{title}\u{201d}\n\ngerdr wrote this from {from}\n\n## {FIXES}\n")
+}
+
 /// How a round stands once every fix of it is ticked in the build log.
 pub const SENT: &str = "fixes made";
 /// How long an agent told to compact may show no work: a chat too short to
@@ -763,14 +771,14 @@ pub enum Fixes {
 
 /// The next step of an agent making a round's fixes: `status` and `alive`
 /// as it is now, `rested` since it last worked or touched the build log,
-/// `left` fixes not ticked, `blocked` the log says so, `told` times to go
-/// on with no more ticked since.
+/// `left` fixes not ticked, `blocked` why the log says it is, `told` times
+/// to go on with no more ticked since.
 pub fn fixes_next(
     status: Option<AgentStatus>,
     alive: bool,
     rested: Duration,
     left: usize,
-    blocked: bool,
+    blocked: Option<&str>,
     told: u32,
 ) -> Fixes {
     let rest = match status {
@@ -783,7 +791,7 @@ pub fn fixes_next(
         () if rested < rest => Fixes::Wait,
         () if left == 0 => Fixes::Done,
         () if !alive => Fixes::Gone,
-        () if blocked => Fixes::Blocked,
+        () if blocked.is_some() => Fixes::Blocked,
         () if told >= GO_ONS => Fixes::Stopped,
         () => Fixes::GoOn,
     }
@@ -868,14 +876,24 @@ pub enum Compact {
     Go,
 }
 
-/// The next step of an agent told to compact: `worked` was seen working
-/// since, `status` and `alive` as it is now, told `since` ago.
-pub fn compact_next(
-    worked: bool,
-    status: Option<AgentStatus>,
-    alive: bool,
-    since: Duration,
-) -> Compact {
+/// An agent told something, as its watch sees it now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Seen {
+    /// It was seen working since it was told.
+    pub worked: bool,
+    /// herdr's status for its pane (`None`: herdr doesn't list it).
+    pub status: Option<AgentStatus>,
+    /// Its pane is still there.
+    pub alive: bool,
+}
+
+/// The next step of an agent told to compact, as `seen`, told `since` ago.
+pub fn compact_next(seen: Seen, since: Duration) -> Compact {
+    let Seen {
+        worked,
+        status,
+        alive,
+    } = seen;
     match status {
         _ if !alive => Compact::Go,
         Some(AgentStatus::Working | AgentStatus::Blocked) => Compact::Worked,
@@ -898,16 +916,14 @@ pub enum Plan {
     Gone,
 }
 
-/// The next step of an agent told to write the plan: `worked` was seen
-/// working since, `status` and `alive` as it is now, told `since` ago,
-/// `written` a file newer than that is there.
-pub fn plan_next(
-    worked: bool,
-    status: Option<AgentStatus>,
-    alive: bool,
-    since: Duration,
-    written: bool,
-) -> Plan {
+/// The next step of an agent told to write the plan, as `seen`, told
+/// `since` ago, `written` a file newer than that is there.
+pub fn plan_next(seen: Seen, since: Duration, written: bool) -> Plan {
+    let Seen {
+        worked,
+        status,
+        alive,
+    } = seen;
     match status {
         Some(AgentStatus::Working | AgentStatus::Blocked) if alive => Plan::Worked,
         _ if written && (worked || !alive || since >= PLAN_STARTS) => Plan::Read,
@@ -1103,17 +1119,31 @@ mod tests {
     const SOON: Duration = Duration::from_secs(1);
     const LATE: Duration = Duration::from_secs(60);
 
+    fn seen(worked: bool, status: Option<AgentStatus>, alive: bool) -> Seen {
+        Seen {
+            worked,
+            status,
+            alive,
+        }
+    }
+
     #[test]
     fn a_compact_goes_on_once_done_or_if_nothing_comes_of_it() {
         let idle = Some(AgentStatus::Idle);
         let working = Some(AgentStatus::Working);
-        assert_eq!(compact_next(false, idle, true, SOON), Compact::Wait);
-        assert_eq!(compact_next(false, working, true, SOON), Compact::Worked);
-        assert_eq!(compact_next(true, working, true, LATE), Compact::Worked);
-        assert_eq!(compact_next(true, idle, true, SOON), Compact::Go);
+        assert_eq!(compact_next(seen(false, idle, true), SOON), Compact::Wait);
+        assert_eq!(
+            compact_next(seen(false, working, true), SOON),
+            Compact::Worked
+        );
+        assert_eq!(
+            compact_next(seen(true, working, true), LATE),
+            Compact::Worked
+        );
+        assert_eq!(compact_next(seen(true, idle, true), SOON), Compact::Go);
         // "Not enough messages to compact": it never works, and goes on.
-        assert_eq!(compact_next(false, idle, true, LATE), Compact::Go);
-        assert_eq!(compact_next(false, None, false, SOON), Compact::Go);
+        assert_eq!(compact_next(seen(false, idle, true), LATE), Compact::Go);
+        assert_eq!(compact_next(seen(false, None, false), SOON), Compact::Go);
     }
 
     #[test]
@@ -1121,18 +1151,30 @@ mod tests {
         let idle = Some(AgentStatus::Idle);
         let working = Some(AgentStatus::Working);
         let blocked = Some(AgentStatus::Blocked);
-        assert_eq!(plan_next(false, idle, true, SOON, false), Plan::Wait);
-        assert_eq!(plan_next(false, working, true, SOON, false), Plan::Worked);
+        assert_eq!(plan_next(seen(false, idle, true), SOON, false), Plan::Wait);
+        assert_eq!(
+            plan_next(seen(false, working, true), SOON, false),
+            Plan::Worked
+        );
         // Still writing it, or asking something.
-        assert_eq!(plan_next(true, working, true, SOON, true), Plan::Worked);
-        assert_eq!(plan_next(true, blocked, true, SOON, true), Plan::Worked);
-        assert_eq!(plan_next(true, idle, true, SOON, true), Plan::Read);
-        assert_eq!(plan_next(true, idle, true, SOON, false), Plan::Stopped);
+        assert_eq!(
+            plan_next(seen(true, working, true), SOON, true),
+            Plan::Worked
+        );
+        assert_eq!(
+            plan_next(seen(true, blocked, true), SOON, true),
+            Plan::Worked
+        );
+        assert_eq!(plan_next(seen(true, idle, true), SOON, true), Plan::Read);
+        assert_eq!(
+            plan_next(seen(true, idle, true), SOON, false),
+            Plan::Stopped
+        );
         // A file just written, the agent not seen working yet: not at once.
-        assert_eq!(plan_next(false, idle, true, SOON, true), Plan::Wait);
-        assert_eq!(plan_next(false, idle, true, LATE, true), Plan::Read);
-        assert_eq!(plan_next(true, None, false, SOON, false), Plan::Gone);
-        assert_eq!(plan_next(false, None, false, SOON, true), Plan::Read);
+        assert_eq!(plan_next(seen(false, idle, true), SOON, true), Plan::Wait);
+        assert_eq!(plan_next(seen(false, idle, true), LATE, true), Plan::Read);
+        assert_eq!(plan_next(seen(true, None, false), SOON, false), Plan::Gone);
+        assert_eq!(plan_next(seen(false, None, false), SOON, true), Plan::Read);
     }
 
     #[test]
@@ -1389,8 +1431,8 @@ mod tests {
     fn a_fixing_agent_is_told_to_go_on_until_all_is_ticked() {
         use AgentStatus::{Idle, Working};
         let long = REST + Duration::from_secs(1);
-        let next = |status, alive, rested, left, blocked, told| {
-            fixes_next(status, alive, rested, left, blocked, told)
+        let next = |status, alive, rested, left, blocked: bool, told| {
+            fixes_next(status, alive, rested, left, blocked.then_some("why"), told)
         };
         assert_eq!(next(Some(Working), true, long, 3, false, 0), Fixes::Worked);
         // Idle for a moment between two steps is no rest.

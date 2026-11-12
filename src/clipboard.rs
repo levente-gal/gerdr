@@ -254,7 +254,8 @@ impl Gerdr {
             }
             let mimes = offer
                 .as_ref()
-                .map(|o| o.data::<OfferMimes>().unwrap().lock().unwrap().clone());
+                .and_then(|o| o.data::<OfferMimes>())
+                .map(|m| m.lock().expect("offer mimes lock poisoned").clone());
             if let Some(old) = std::mem::replace(clip.offer_slot(target), offer) {
                 old.destroy();
             }
@@ -332,7 +333,10 @@ impl Dispatch<ZwlrDataControlOfferV1, OfferMimes> for Gerdr {
         _: &QueueHandle<Self>,
     ) {
         if let zwlr_data_control_offer_v1::Event::Offer { mime_type } = event {
-            mimes.lock().unwrap().push(mime_type);
+            mimes
+                .lock()
+                .expect("offer mimes lock poisoned")
+                .push(mime_type);
         }
     }
 }

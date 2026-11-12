@@ -136,14 +136,48 @@ pub struct Read {
     /// By path, for each file viewed on another committed blob than its
     /// own now: what changed since, from the blob viewed to this one.
     pub since_viewed: BTreeMap<String, FileDiff>,
+    /// What it was read from, to tell the next read nothing changed; none
+    /// when that can't be told.
+    pub seen: Option<Seen>,
 }
 
+/// What a `Read` came from: the worktree's changes and its files' sizes and
+/// times, the commit checked out, and the blobs its files were viewed on.
+pub type Seen = (
+    crate::worktree_diff::Stamp,
+    Option<String>,
+    BTreeMap<String, String>,
+);
+
 /// Read `repo`'s worktree against its base (see `Read`), `kept` the blobs
-/// its files were viewed on, by path; slow, run it off the UI thread.
-pub fn read(repo: &Repo, kept: &BTreeMap<String, String>) -> Result<Read, String> {
+/// its files were viewed on, by path; slow, run it off the UI thread. None
+/// when it stands as `seen`, the last read's, had it: only its changed
+/// files are listed then, no diff read.
+pub fn read(
+    repo: &Repo,
+    kept: &BTreeMap<String, String>,
+    seen: Option<&Seen>,
+) -> Option<Result<Read, String>> {
     let dir = &repo.worktree;
-    let target = base_ref(repo);
-    let since = crate::git_ops::changes_since(dir, Some(&target))?;
+    let since = match crate::git_ops::changes_since(dir, Some(&base_ref(repo))) {
+        Ok(since) => since,
+        Err(why) => return Some(Err(why)),
+    };
+    // Taken before the diff is read: a change during it reads again next.
+    let stamp = crate::worktree_diff::stamp(dir, &since);
+    let now = (stamp, crate::git_ops::head_oid(dir), kept.clone());
+    if now.0.is_some() && seen == Some(&now) {
+        return None;
+    }
+    Some(read_since(repo, kept, since).map(|read| Read {
+        seen: now.0.is_some().then_some(now),
+        ..read
+    }))
+}
+
+/// `read`, of the changes `since` its base.
+fn read_since(repo: &Repo, kept: &BTreeMap<String, String>, since: Since) -> Result<Read, String> {
+    let dir = &repo.worktree;
     let files = crate::git_ops::repo_diff_from(dir, &since.changes, Some(&since.base));
     let args = [
         "diff",
@@ -169,6 +203,7 @@ pub fn read(repo: &Repo, kept: &BTreeMap<String, String>) -> Result<Read, String
         blobs,
         dirty,
         since_viewed,
+        seen: None,
     })
 }
 

@@ -160,6 +160,9 @@ pub struct RepoOf {
     pub since_viewed: BTreeMap<String, FileDiff>,
     /// Why its last read failed.
     pub error: Option<String>,
+    /// What its last read came from (`viewed::Read::seen`): the same again
+    /// isn't read again.
+    pub seen: Option<viewed::Seen>,
 }
 
 impl RepoOf {
@@ -1057,7 +1060,8 @@ impl WorktreeDiff {
         Some(Gate {
             stage,
             draft: self.diff.editing.is_some(),
-            read: self.read && !self.reading,
+            // Read once: a later read goes on behind what shows.
+            read: self.read,
             errors: fe.repos.iter().filter_map(|r| r.error.clone()).collect(),
             dirty: (fe.repos.iter())
                 .filter(|r| !r.dirty.is_empty())
@@ -1112,6 +1116,7 @@ impl WorktreeDiff {
                     repo.blobs = read.blobs;
                     repo.dirty = read.dirty;
                     repo.since_viewed = read.since_viewed;
+                    repo.seen = read.seen;
                     // In the file list's order.
                     let mut read_files = read.files;
                     let rank = tree.rank(&repo.since.changes);
@@ -1120,7 +1125,10 @@ impl WorktreeDiff {
                     repo.files = read_files;
                     files.push(root);
                 }
-                Err(why) => repo.error = Some(format!("{}: {why}", repo.shown())),
+                Err(why) => {
+                    repo.error = Some(format!("{}: {why}", repo.shown()));
+                    repo.seen = None;
+                }
             }
         }
         let first = !self.read;
@@ -1578,9 +1586,14 @@ impl Gerdr {
             return;
         };
         let env = self.worktree_env();
+        // What each repository's last read came from, by `Repo::key`.
+        let mut seen: BTreeMap<String, viewed::Seen> = BTreeMap::new();
         if let Some(wd) = self.wd_mut() {
             wd.reading = true;
             if let Some(fe) = wd.feature.as_mut() {
+                seen = (fe.repos.iter())
+                    .filter_map(|r| Some((r.name.clone(), r.seen.clone()?)))
+                    .collect();
                 let changed = fe.findings != findings;
                 fe.stands(standing);
                 (fe.viewed, fe.findings) = (viewed, findings);
@@ -1592,11 +1605,16 @@ impl Gerdr {
         }
         std::thread::spawn(move || {
             let read = |r: &Repo| match span.as_ref().and_then(|ends| ends.get(&r.key())) {
-                Some((from, to)) => viewed::read_span(&r.worktree, from, to.as_deref()),
-                None => viewed::read(r, kept.get(&r.key()).unwrap_or(&BTreeMap::new())),
+                Some((from, to)) => Some(viewed::read_span(&r.worktree, from, to.as_deref())),
+                None => viewed::read(
+                    r,
+                    kept.get(&r.key()).unwrap_or(&BTreeMap::new()),
+                    seen.get(&r.key()),
+                ),
             };
+            // A repository standing as last read is left as it shows.
             let repos = (repos.iter())
-                .map(|r| (r.key(), r.worktree.clone(), read(r)))
+                .filter_map(|r| Some((r.key(), r.worktree.clone(), read(r)?)))
                 .collect();
             let read = Read {
                 project,
@@ -1923,9 +1941,11 @@ impl Gerdr {
         let stage = self
             .feature(&fe.project, &fe.slug)
             .and_then(Feature::current);
-        let Some(gate) = wd.approve_gate(stage) else {
+        let Some(mut gate) = wd.approve_gate(stage) else {
             return;
         };
+        // A press waits out a read under way: its files may have changed.
+        gate.read &= !wd.reading;
         if let Some(why) = approve_refusal(&gate) {
             return self.show_warning(why);
         }
@@ -2679,6 +2699,7 @@ mod tests {
             blobs: api.blobs.clone(),
             dirty: Default::default(),
             since_viewed: Default::default(),
+            seen: None,
         };
         wd.set_feature(vec![("api".into(), "/w/api".into(), Ok(read))], POPUP_ENV);
         wd
@@ -2700,6 +2721,7 @@ mod tests {
             blobs: api.blobs.clone(),
             dirty: Default::default(),
             since_viewed: BTreeMap::from([("a.rs".to_owned(), file)]),
+            seen: None,
         };
         let api = || vec![("api".into(), "/w/api".into(), Ok(read.clone()))];
         wd.set_feature(api(), POPUP_ENV);
@@ -2748,6 +2770,7 @@ mod tests {
             blobs: api.blobs.clone(),
             dirty: Default::default(),
             since_viewed: Default::default(),
+            seen: None,
         };
         wd.set_feature(vec![("api".into(), "/w/api".into(), Ok(read))], POPUP_ENV);
         wd
@@ -3314,6 +3337,10 @@ mod tests {
         let approve = |hints: Vec<Hint>| hints.into_iter().find(|h| h.button == B::Approve);
         assert_eq!(approve(wd.view(POPUP_ENV).title_buttons).unwrap().disabled, why);
         assert_eq!(approve(wd.hints()).unwrap().disabled, why);
+        // A read again behind it changes nothing of what shows.
+        wd.reading = true;
+        assert_eq!(approve(wd.hints()).unwrap().disabled, why);
+        wd.reading = false;
         // Laid into its page, they leave the title row for the page's line;
         // the footer keeps their keys.
         wd.feature.as_mut().unwrap().inline = true;
@@ -3715,6 +3742,7 @@ mod tests {
             blobs: api.blobs.clone(),
             dirty: Default::default(),
             since_viewed: Default::default(),
+            seen: None,
         };
         wd.set_feature(vec![("api".into(), "/w/api".into(), Ok(read))], ENV);
         // The finding sits on its line, as a card of its own.

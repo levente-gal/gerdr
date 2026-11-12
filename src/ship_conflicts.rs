@@ -15,7 +15,7 @@ use crate::{
         ship::{self, MergeBegun, Resolution},
         store,
     },
-    feature_agents::vars,
+    feature_agents::{vars, write_prompt},
     features::{Busy, Done, Job},
     prompts,
 };
@@ -198,19 +198,19 @@ impl Gerdr {
         } else {
             "conflicts"
         };
-        let prompt = data.join("prompts").join(format!("{template}-{n}.md"));
         let text = match prompts::render_builtin(template, &values) {
             Ok(text) => text,
             Err(err) => {
                 return self.show_error(format!("Couldn't write the conflicts prompt: {err}"));
             }
         };
-        let written = std::fs::create_dir_all(data.join("prompts"))
-            .and_then(|()| std::fs::write(&prompt, text));
-        if let Err(err) = written {
-            tracing::warn!("writing {}: {err}", prompt.display());
-            return self.show_error(format!("Couldn't write {}: {err}", prompt.display()));
-        }
+        let prompt = match write_prompt(&data, &format!("{template}-{n}.md"), &text) {
+            Ok(prompt) => prompt,
+            Err(why) => {
+                tracing::warn!("{why}");
+                return self.show_error(why);
+            }
+        };
         let line = command_line(&base, &prompt, &feature.agent_dirs_for(&base, &data));
         let command = with_prompt(&line, &format!("Read {} and follow it.", prompt.display()));
         let Some(pane) = self.open_feature_tab_behind(project, slug, &dir, command) else {
@@ -423,7 +423,7 @@ impl Gerdr {
         };
         let data = store::dir(None, project, slug);
         let sent = data.join(format!("conflicts-{}-comments.md", r.n));
-        if let Err(err) = std::fs::write(&sent, &comments) {
+        if let Err(err) = crate::projects::write_atomic(&sent, comments.as_bytes()) {
             tracing::warn!("writing {}: {err}", sent.display());
             return self.show_error(format!("Couldn't keep the comments: {err}"));
         }

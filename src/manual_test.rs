@@ -364,6 +364,15 @@ pub(crate) fn criteria_in(data: &std::path::Path) -> Vec<Criterion> {
     }
 }
 
+/// Where `Gerdr::go_to_match` looks from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MatchFrom {
+    /// The place the search is at.
+    Here,
+    /// What was just typed: the first in or after the criterion selected.
+    Fresh,
+}
+
 impl Gerdr {
     /// Read the criteria of feature `slug` of `project` from its brief
     /// again, its comments after them: the page and the inbox show them.
@@ -645,7 +654,7 @@ impl Gerdr {
             let shift = mods.shift && !(mods.ctrl || mods.alt || mods.logo);
             let next = (bare || shift) && matches!(sym, Keysym::n | Keysym::N);
             if next && !search.needle().is_empty() {
-                self.go_to_match(shift, false);
+                self.go_to_match(shift, MatchFrom::Here);
                 return true;
             }
             return false;
@@ -675,7 +684,7 @@ impl Gerdr {
             self.sync_feature_page();
             self.reveal_feature_finding();
             if edit == Edit::Changed {
-                self.go_to_match(false, true);
+                self.go_to_match(false, MatchFrom::Fresh);
             }
         }
         true
@@ -683,9 +692,8 @@ impl Gerdr {
 
     /// Go to the next place the criteria's search found (`back`: the one
     /// before), as `n` and `N` do, its criterion selected and the page
-    /// scrolled to it; `fresh` for what was just typed: the first in or
-    /// after the criterion selected.
-    pub(crate) fn go_to_match(&mut self, back: bool, fresh: bool) {
+    /// scrolled to it, looking `from` where it is or afresh.
+    pub(crate) fn go_to_match(&mut self, back: bool, from: MatchFrom) {
         self.sync_feature_page();
         let Some((_, layout)) = self.feature_tab_parts() else {
             return;
@@ -698,7 +706,10 @@ impl Gerdr {
         let Some(search) = panel.search.as_mut() else {
             return;
         };
-        let from = if fresh { None } else { search.at };
+        let from = match from {
+            MatchFrom::Here => search.at,
+            MatchFrom::Fresh => None,
+        };
         search.at = next_match(&cards, from, selected, back);
         let Some(at) = search.at else {
             return;

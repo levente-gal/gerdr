@@ -2424,9 +2424,19 @@ esac
         assert_eq!(reading.commits["api"], 2, "a1 and the merge");
         let stat = super::super::page::stat(&f.repos[0]).unwrap();
         assert_eq!((stat.files, stat.added), (1, 1));
-        let read = super::super::viewed::read(&f.repos[0], &Default::default()).unwrap();
+        let read = super::super::viewed::read(&f.repos[0], &Default::default(), None)
+            .unwrap()
+            .unwrap();
         let paths: Vec<_> = read.blobs.keys().collect();
         assert_eq!(paths, ["a1"]);
+        // Standing as that read had it, it isn't read again; a commit is.
+        let again = |seen| super::super::viewed::read(&f.repos[0], &Default::default(), seen);
+        assert!(read.seen.is_some());
+        assert!(again(read.seen.as_ref()).is_none());
+        commit(&wt(&f, "api"), "a2", "more api");
+        let next = again(read.seen.as_ref()).unwrap().unwrap();
+        assert_eq!(next.blobs.keys().collect::<Vec<_>>(), ["a1", "a2"]);
+        run(&wt(&f, "api"), &["reset", "-q", "--hard", "HEAD~1"]);
 
         // Pulling the local main changes nothing of the feature's.
         run(&main, &["merge", "-q", "--ff-only", "origin/main"]);

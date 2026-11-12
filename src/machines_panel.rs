@@ -375,9 +375,10 @@ fn status_word(status: Option<AgentStatus>) -> Option<&'static str> {
     })
 }
 
-/// How long ago Unix second `then` was, shortly.
+/// How long ago Unix second `then` was, shortly. Two units ("2h 5m"), not
+/// `clock::age`'s one: a machine's last sighting wants the minutes too.
 fn age(then: u64) -> String {
-    uptime(crate::feature::now().saturating_sub(then))
+    uptime(crate::clock::now_secs().saturating_sub(then))
 }
 
 /// The edit form `form` as it shows, and what its buttons press; `trying`:

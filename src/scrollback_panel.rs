@@ -704,7 +704,7 @@ impl Gerdr {
             Some(ScrollbackHit::Text) => {
                 let (row, col) = chrome::scrollback_point(&view, &layout, pos);
                 let (_, under) = chrome::scrollback_char(&view, &layout, pos);
-                let extend = self.seat.get_keyboard().unwrap().modifier_state().shift;
+                let extend = self.keyboard().modifier_state().shift;
                 let Some(viewer) = self.scrollback.as_mut() else {
                     return;
                 };

@@ -970,16 +970,19 @@ impl Gerdr {
         }
         let data = store::dir(None, project, slug);
         let back = run.sent_back + 1;
-        let file = (data.join("prompts")).join(format!("plan-review-{}-back-{back}.md", run.n));
+        let name = format!("plan-review-{}-back-{back}.md", run.n);
+        let file = match crate::feature_agents::write_prompt(&data, &name, &notes) {
+            Ok(file) => file,
+            Err(why) => {
+                tracing::warn!("asking the reviewer of {project}/{slug}: {why}");
+                return self.show_error(why);
+            }
+        };
         let names = self.projects.names(&feature);
         let mut values = crate::feature_agents::vars(&feature, &names, &data, STAGE);
         values.insert("comments.path".into(), file.display().to_string());
-        let sent = std::fs::create_dir_all(data.join("prompts"))
-            .and_then(|()| std::fs::write(&file, &notes))
-            .map_err(|e| format!("writing {}: {e}", file.display()))
-            .and_then(|()| {
-                prompts::render_builtin("plan-review-back", &values).map_err(|e| e.to_string())
-            })
+        let sent = prompts::render_builtin("plan-review-back", &values)
+            .map_err(|e| e.to_string())
             .and_then(|line| {
                 self.tell_stage_agent(project, slug, STAGE, SendKind::PlanReviewBack, line.trim())
             });

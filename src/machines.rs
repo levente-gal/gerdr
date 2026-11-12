@@ -383,12 +383,6 @@ pub enum LinkEvent {
     },
 }
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
-}
-
 /// A folder of this gerdr's sockets to machines; each gerdr has its own
 /// masters, so one quitting doesn't take the others' links.
 fn links_dir() -> Option<PathBuf> {
@@ -702,7 +696,7 @@ fn connect(
     // From here it cleans up after itself, however it ends.
     let mut link = Connection { master, info };
     step("SSH reached, looking around\u{2026}".into());
-    let before = now_secs();
+    let before = crate::clock::now_secs() as i64;
     let new_id = format!(
         "{:x}{:x}",
         SystemTime::now()
@@ -722,7 +716,7 @@ fn connect(
         return Err(classify(&String::from_utf8_lossy(&out.stderr)));
     }
     let site = parse_site(&String::from_utf8_lossy(&out.stdout));
-    let clock_off = site.now - (before + now_secs()) / 2;
+    let clock_off = site.now - (before + crate::clock::now_secs() as i64) / 2;
     if let Some(failure) = site.problem(clock_off) {
         return Err(failure);
     }

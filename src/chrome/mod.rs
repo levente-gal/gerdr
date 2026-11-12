@@ -966,11 +966,12 @@ impl<K> Default for Cached<K> {
 
 impl<K: PartialEq> Cached<K> {
     fn get(&mut self, key: K, draw: impl FnOnce(&K) -> MemoryRenderBuffer) -> &MemoryRenderBuffer {
-        if self.key.as_ref() != Some(&key) || self.buffer.is_none() {
-            self.buffer = Some(draw(&key));
-            self.key = Some(key);
+        if self.key.as_ref() != Some(&key) {
+            self.buffer = None;
         }
-        self.buffer.as_ref().unwrap()
+        let buffer = self.buffer.get_or_insert_with(|| draw(&key));
+        self.key = Some(key);
+        buffer
     }
 }
 

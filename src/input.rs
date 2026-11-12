@@ -310,6 +310,16 @@ fn drag_cursor(drag: &Drag) -> CursorIcon {
 }
 
 impl Gerdr {
+    /// The seat's keyboard: added at startup, never taken away.
+    pub(crate) fn keyboard(&self) -> smithay::input::keyboard::KeyboardHandle<Gerdr> {
+        (self.seat.get_keyboard()).expect("the seat gets its keyboard at startup")
+    }
+
+    /// The seat's pointer: added at startup, never taken away.
+    pub(crate) fn pointer(&self) -> smithay::input::pointer::PointerHandle<Gerdr> {
+        (self.seat.get_pointer()).expect("the seat gets its pointer at startup")
+    }
+
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
         match event {
             InputEvent::Keyboard { event, .. } => {
@@ -319,7 +329,7 @@ impl Gerdr {
                 let time = Event::time_msec(&event);
                 let code = event.key_code();
                 let key_state = event.state();
-                let action = self.seat.get_keyboard().unwrap().input(
+                let action = self.keyboard().input(
                     self,
                     code,
                     key_state,
@@ -495,12 +505,13 @@ impl Gerdr {
                 self.copy_from_field();
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
-                let output_geo = self.space.output_geometry(&self.output).unwrap();
+                let output_geo = (self.space.output_geometry(&self.output))
+                    .expect("the output is mapped at startup");
                 let pos = event.position_transformed(output_geo.size) + output_geo.loc.to_f64();
                 self.pointer_moved(pos, event.time_msec());
             }
             InputEvent::PointerButton { event, .. } => {
-                let pointer = self.seat.get_pointer().unwrap();
+                let pointer = self.pointer();
                 let serial = SERIAL_COUNTER.next_serial();
                 let state = event.state();
                 let location = pointer.current_location();
@@ -657,7 +668,7 @@ impl Gerdr {
                         frame = frame.stop(axis);
                     }
                 }
-                let pointer = self.seat.get_pointer().unwrap();
+                let pointer = self.pointer();
                 pointer.axis(self, frame);
                 pointer.frame(self);
             }
@@ -1132,7 +1143,7 @@ impl Gerdr {
     /// Start holding the active workspace's row, the active tab or a pane,
     /// where the pointer is.
     pub(crate) fn hold(&mut self, what: Reorderable) {
-        let from = self.seat.get_pointer().unwrap().current_location();
+        let from = self.pointer().current_location();
         self.reorder = Some(Reorder {
             what,
             from,
@@ -1147,7 +1158,7 @@ impl Gerdr {
     pub fn pointer_moved(&mut self, pos: Point<f64, Logical>, time: u32) {
         self.pointer = pos;
         let serial = SERIAL_COUNTER.next_serial();
-        let pointer = self.seat.get_pointer().unwrap();
+        let pointer = self.pointer();
         if let Some(drag) = self.drag.clone() {
             self.drag_to(&drag, pos);
         }
@@ -1283,7 +1294,7 @@ impl Gerdr {
 
     /// Re-run pointer focus after the windows under the cursor changed.
     pub fn refresh_pointer_focus(&mut self) {
-        let pointer = self.seat.get_pointer().unwrap();
+        let pointer = self.pointer();
         let location = pointer.current_location();
         let under = self.pointer_client(location);
         let time = self.start_time.elapsed().as_millis() as u32;
@@ -1589,7 +1600,7 @@ impl Gerdr {
         };
         let at = base + self.chrome.caret_at(&field, pos.x, self.scale());
         let count = self.press_count;
-        let extend = self.seat.get_keyboard().unwrap().modifier_state().shift;
+        let extend = self.keyboard().modifier_state().shift;
         if let Some(field) = self.field_mut() {
             field.click(at, extend, count);
         }
@@ -1838,7 +1849,7 @@ impl Gerdr {
     /// Super makes Backspace Super+Backspace, which clears Claude's input,
     /// and keeps the prefix from matching.
     pub fn release_held_keys(&mut self) {
-        let keyboard = self.seat.get_keyboard().unwrap();
+        let keyboard = self.keyboard();
         let time = self.start_time.elapsed().as_millis() as u32;
         for code in keyboard.pressed_keys() {
             keyboard.input::<(), _>(

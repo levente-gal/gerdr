@@ -204,13 +204,6 @@ pub fn prune(inbox: &mut InboxFile, now: u64) {
     inbox.todos.retain(|todo| todo.done.is_none_or(fresh));
 }
 
-/// The current time, in seconds since the epoch.
-pub fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

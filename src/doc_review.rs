@@ -40,7 +40,6 @@ use crate::{
         verify::EVIDENCE,
     },
     features::{Job, lock_why},
-    projects,
     review::{self, Review},
     toast::Level,
     worktree_diff::{DocOf, EVIDENCE_READ_ONLY},
@@ -420,7 +419,7 @@ pub fn state(feature: Option<&Feature>, stage: Stage, docs: &Docs, now: u64) -> 
         };
         let mut state = match feature.locked_by(stage, |s| docs.written.contains(&s)) {
             Some(by) => format!("{word} \u{b7} locked: {}", lock_why(feature, by)),
-            None => format!("{word} {} by {}", projects::ago(now, mark.at), mark.by),
+            None => format!("{word} {} by {}", crate::clock::ago(now, mark.at), mark.by),
         };
         if docs.changed.contains(&stage) {
             let name = artifacts::name(stage).unwrap_or("its file");
@@ -485,7 +484,7 @@ pub fn fix_plan_state(feature: Option<&Feature>, now: u64) -> String {
         return match &feature.last_fix_round {
             Some(round) => {
                 let mut said = vec![label(round), round.made()];
-                let ago = |at| crate::projects::ago(now, at);
+                let ago = |at| crate::clock::ago(now, at);
                 said.extend(round.ended.map(|at| format!("finished {}", ago(at))));
                 said.join(" \u{b7} ")
             }
@@ -507,7 +506,7 @@ pub fn fix_plan_state(feature: Option<&Feature>, now: u64) -> String {
         n => said.push(format!("sent back {n} times")),
     }
     if let Some(at) = round.ready.filter(|_| round.phase == FixPhase::Ready) {
-        said.push(format!("written {}", crate::projects::ago(now, at)));
+        said.push(format!("written {}", crate::clock::ago(now, at)));
     }
     said.join(" \u{b7} ")
 }

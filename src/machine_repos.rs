@@ -250,12 +250,8 @@ impl Look {
 
 /// `path` with `home` as `~`.
 fn tilde(path: &str, home: &str) -> String {
-    match path.strip_prefix(home) {
-        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
-            format!("~{rest}")
-        }
-        _ => path.to_owned(),
-    }
+    // An empty home is one not known: every path would be under it.
+    crate::paths::tilde(Path::new(path), (!home.is_empty()).then(|| Path::new(home)))
 }
 
 impl Gerdr {
@@ -500,7 +496,7 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+        let out = crate::git::command(dir, args).output().unwrap();
         assert!(out.status.success(), "{out:?}");
     }
 

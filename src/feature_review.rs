@@ -1025,22 +1025,23 @@ impl Gerdr {
         let dir = data.join("prompts");
         let n = feature.runs.get(&Stage::Build).map_or(0, |r| r.n);
         let key = file_key(what);
-        let path = (1..)
-            .map(|k| dir.join(format!("build-{n}-{key}-{k}.md")))
-            .find(|p| !p.exists())
+        let name = (1..)
+            .map(|k| format!("build-{n}-{key}-{k}.md"))
+            .find(|name| !dir.join(name).exists())
             .unwrap_or_default();
         // Its agent names the criteria its fixes change, from these.
         let mut criteria = crate::manual_test::criteria_in(&data);
         criteria.extend(feature::manual::comment_criteria(feature.manual.as_ref()));
         let criteria = feature::manual::criteria_block(&criteria);
         let text = format!("{text}{criteria}");
-        let written = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, text));
-        if let Err(err) = written {
-            tracing::warn!("writing {}: {err}", path.display());
-            self.show_error(format!("Couldn't write {}: {err}", path.display()));
-            return None;
+        match crate::feature_agents::write_prompt(&data, &name, &text) {
+            Ok(path) => Some(path),
+            Err(why) => {
+                tracing::warn!("{why}");
+                self.show_error(why);
+                None
+            }
         }
-        Some(path)
     }
 
     /// Start a fresh Build agent with `extra` on feature `slug`, whose Build

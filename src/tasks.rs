@@ -219,7 +219,7 @@ impl Gerdr {
             match &started {
                 Some(started) => detail.push(format!(
                     "up {}",
-                    uptime(t3_server::now_secs().saturating_sub(started.at))
+                    uptime(crate::clock::now_secs().saturating_sub(started.at))
                 )),
                 None => detail.push("started outside gerdr".to_owned()),
             }

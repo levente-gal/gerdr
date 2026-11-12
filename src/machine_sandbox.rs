@@ -428,10 +428,7 @@ fn left_records(id: &str) -> Vec<(std::path::PathBuf, Feature)> {
 /// Keep `feature` at `file`, for what it left to go later.
 fn keep_left(file: &std::path::Path, feature: &Feature) -> Result<(), String> {
     let text = serde_json::to_vec(feature).map_err(|err| err.to_string())?;
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-    std::fs::write(file, text).map_err(|err| err.to_string())
+    crate::projects::write_atomic(file, &text).map_err(|err| err.to_string())
 }
 
 /// Taking down the sandbox of a feature that is removed, off the UI thread.
@@ -833,9 +830,12 @@ impl Gerdr {
     pub(crate) fn set_up_there_first(&mut self, feature: &Feature, id: &str) -> bool {
         let (project, slug) = (feature.project.as_str(), feature.slug.as_str());
         let key = (project.to_owned(), slug.to_owned());
-        let running = self.setting_up(project, slug);
-        let has = crate::feature::setup::has_work(feature);
-        let first = crate::feature_build::setup_first(has, crate::feature::setup::standing(feature, Some(id)), running, false);
+        let now = crate::feature_build::SetupNow {
+            has_commands: crate::feature::setup::has_work(feature),
+            run: crate::feature::setup::standing(feature, Some(id)),
+            running: self.setting_up(project, slug),
+        };
+        let first = crate::feature_build::setup_first(now, false);
         let waits = match first {
             crate::feature_build::SetupFirst::No => false,
             crate::feature_build::SetupFirst::Wait => true,

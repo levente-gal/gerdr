@@ -1703,7 +1703,8 @@ impl PerProject<String> {
     }
 }
 
-pub use crate::projects::now;
+/// The Unix second now, as the feature code reads it (`clock::now_secs`).
+pub use crate::clock::now_secs as now;
 
 #[cfg(test)]
 pub(crate) mod tests {

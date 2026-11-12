@@ -118,7 +118,7 @@ impl Gerdr {
             branch: wt.name(),
             worktree: wt.path,
             main_name,
-            main_folder: folder_name(main),
+            main_folder: crate::paths::folder_name(main),
             files,
             clashes: git::clashes(main, &paths),
             selected: BRING,
@@ -210,7 +210,7 @@ impl Gerdr {
         Some(CheckoutView {
             branch: dialog.branch.clone(),
             main: dialog.main_folder.clone(),
-            worktree: folder_name(&dialog.worktree),
+            worktree: crate::paths::folder_name(&dialog.worktree),
             rows,
             can_bring: dialog.can_bring(),
             selected: dialog.selected,
@@ -220,13 +220,6 @@ impl Gerdr {
 }
 
 /// The last part of folder `dir`.
-fn folder_name(dir: &Path) -> String {
-    dir.file_name()
-        .unwrap_or(dir.as_os_str())
-        .to_string_lossy()
-        .into_owned()
-}
-
 /// The button `pos` (output coordinates) is over in the checkout dialog.
 fn checkout_hit(layout: &chrome::CheckoutLayout, pos: Point<f64, Logical>) -> Option<usize> {
     layout.buttons.iter().position(|b| b.to_f64().contains(pos))

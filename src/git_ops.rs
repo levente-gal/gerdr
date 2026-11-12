@@ -14,7 +14,7 @@ use std::{
     io::Read,
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering as AtomicOrdering},
@@ -27,6 +27,7 @@ use crate::{
     desktop::shell_quote,
     diff::{self, FileDiff},
     git::{self, Change, InProgress},
+    process,
 };
 
 /// How long a command that talks to a remote may take before it is killed.
@@ -271,16 +272,10 @@ fn batch_ssh(dir: &Path) -> Option<String> {
 /// Run `git -C dir args`: never prompting, its output read as it comes,
 /// killed (and what it started) when it takes too long.
 fn exec(dir: &Path, args: &[&str], reach: Reach) -> Output {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(Stdio::null())
+    let mut cmd = git::command(dir, args);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("LC_ALL", "C")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_EDITOR", "true")
         .env("GIT_MERGE_AUTOEDIT", "no")
         // Its own group, so that a kill takes its hooks and ssh too.
         .process_group(0);
@@ -289,20 +284,12 @@ fn exec(dir: &Path, args: &[&str], reach: Reach) -> Output {
     {
         cmd.env("GIT_SSH_COMMAND", ssh);
     }
-    if reach == Reach::Read {
-        cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    // Only a read leaves index.lock alone; the rest commit, stash, merge.
+    if reach != Reach::Read {
+        cmd.env_remove("GIT_OPTIONAL_LOCKS");
     }
     #[cfg(test)]
-    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .env_remove("GIT_SSH")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE");
+    cmd.env_remove("GIT_SSH");
     let finish = |stdout: String,
                   stderr: String,
                   code: Option<i32>,
@@ -342,24 +329,12 @@ fn exec(dir: &Path, args: &[&str], reach: Reach) -> Output {
     let deadline = Instant::now() + timeout;
     let mut pause = Duration::from_millis(1);
     let kill = |child: &mut std::process::Child| {
-        // Safety: signals the process group it leads.
-        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        process::kill_group(process::group_of(child), libc::SIGKILL);
         let _ = child.wait();
     };
     // Stopped by the user: asked to end first, so that git lets go of its
     // locks, then killed after a while.
-    let stop = |child: &mut std::process::Child| {
-        // Safety: signals the process group it leads.
-        unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
-        let until = Instant::now() + STOP_GRACE;
-        while Instant::now() < until {
-            if let Ok(Some(_)) = child.try_wait() {
-                return;
-            }
-            std::thread::sleep(POLL);
-        }
-        kill(child);
-    };
+    let stop = |child: &mut std::process::Child| process::stop_group(child, STOP_GRACE);
     let (code, timed_out, stopped) = loop {
         match child.try_wait() {
             Ok(Some(status)) => break (status.code(), None, false),
@@ -404,7 +379,10 @@ impl Drain {
                     loop {
                         match pipe.read(&mut chunk) {
                             Ok(0) => break,
-                            Ok(n) => read.lock().unwrap().extend_from_slice(&chunk[..n]),
+                            Ok(n) => read
+                                .lock()
+                                .expect("read lock poisoned")
+                                .extend_from_slice(&chunk[..n]),
                             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
                             Err(_) => break,
                         }
@@ -418,7 +396,7 @@ impl Drain {
     /// What was read, once the pipe is closed or after `GRACE`.
     fn finish(self) -> String {
         let _ = self.done.recv_timeout(GRACE);
-        String::from_utf8_lossy(&self.read.lock().unwrap()).into_owned()
+        String::from_utf8_lossy(&self.read.lock().expect("read lock poisoned")).into_owned()
     }
 }
 
@@ -834,7 +812,7 @@ fn branch(dir: &Path) -> Option<String> {
 }
 
 /// The commit checked out; `None` before the first.
-fn head_oid(dir: &Path) -> Option<String> {
+pub(crate) fn head_oid(dir: &Path) -> Option<String> {
     query(dir, &["rev-parse", "-q", "--verify", "HEAD^{commit}"]).map(|o| o.trim().to_owned())
 }
 
