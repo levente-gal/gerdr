@@ -6166,21 +6166,21 @@ const GOLDEN_FEATURE_TAB: [[u64; 64]; 4] = [
         0x3f77911973f85c94, // tab_discover_brief_1180
         0x55e7529dadcda5ec, // tab_discover_brief_860
         0x94664f46f7727d5d, // tab_plan_long_1180
-        0x63810441db4f302b, // tab_manual_test_1180
-        0xcaeff60dbeafb32b, // tab_manual_note_860
+        0x828dca7b4aef3cbf, // tab_manual_test_1180
+        0x38eefbce9a3eb92f, // tab_manual_note_860
         0x1ce8024e5011c12c, // tab_review_rounds_1180
         0xbb31db5a866ed93f, // tab_verify_fixes_1180
         0x32019da3a89bc7b5, // tab_verify_fixes_860
-        0xc9186a925cbb4421, // tab_review_page_1180
+        0xe129bc56c6fa9fd0, // tab_review_page_1180
         0x1a31cf8b893d2b5d, // tab_open_round_1180
         0x67a2ecc2615c41e7, // tab_open_round_860
-        0xe0828e86f0ca5f95, // tab_manual_pages_860
-        0x41e5ef528b86bdc8, // tab_manual_search_860
-        0x217746fc414d602a, // tab_manual_select_860
-        0x99f081ba32e2758a, // tab_manual_rounds_1180
-        0xf9992059227aee15, // tab_manual_rounds_860
-        0xd6e2c9b4cad41a67, // tab_manual_comment_860
-        0x88a14bdfd21de748, // tab_manual_hand_back_1180
+        0x66fec166914319c9, // tab_manual_pages_860
+        0x6b55bdb44b4d3ddc, // tab_manual_search_860
+        0x0c7f88af5e3be46e, // tab_manual_select_860
+        0x3534b6bb7df59306, // tab_manual_rounds_1180
+        0x5c172bdf495b9981, // tab_manual_rounds_860
+        0xcb1355fea1973cfb, // tab_manual_comment_860
+        0x6ed0e5a54cf691c4, // tab_manual_hand_back_1180
         0x3c00f0f293e13bed, // tab_ship_live_1180
         0x84c5e772a6e07522, // tab_ship_live_860
         0x470def6975091142, // tab_ship_cards_1180
@@ -6233,21 +6233,21 @@ const GOLDEN_FEATURE_TAB: [[u64; 64]; 4] = [
         0xf2c02321cef0dc80, // tab_discover_brief_1180
         0x4c01dea7b96abbd2, // tab_discover_brief_860
         0x72a69fd9c7901533, // tab_plan_long_1180
-        0xc15a3bbf53c55179, // tab_manual_test_1180
-        0x9c55271a3468f279, // tab_manual_note_860
+        0xbd2dd1c6340dd3e9, // tab_manual_test_1180
+        0x14b076dddc2d4e81, // tab_manual_note_860
         0x0f9b84d0d1d98b41, // tab_review_rounds_1180
         0xdc71a782cda558e4, // tab_verify_fixes_1180
         0x0774e11aceba2265, // tab_verify_fixes_860
-        0x7994e93c7ed9834e, // tab_review_page_1180
+        0xbe07126fef3de974, // tab_review_page_1180
         0x22326408bd63ac69, // tab_open_round_1180
         0x66721fab2851c39e, // tab_open_round_860
-        0x0f4858907da9aff8, // tab_manual_pages_860
-        0xcbf85e22373fb490, // tab_manual_search_860
-        0xe6456c93a53b317e, // tab_manual_select_860
-        0xa0db3a4481b6acb7, // tab_manual_rounds_1180
-        0x0552cb79396c3b73, // tab_manual_rounds_860
-        0xf0e8a843e2ac0688, // tab_manual_comment_860
-        0x817a896cd8dba973, // tab_manual_hand_back_1180
+        0x74e50a6836be3ed0, // tab_manual_pages_860
+        0xca8673b0f194dd28, // tab_manual_search_860
+        0x70dd2852ac3327a6, // tab_manual_select_860
+        0xeb025273c814c247, // tab_manual_rounds_1180
+        0xbc43a1bed8fe031b, // tab_manual_rounds_860
+        0xd053d354a12075a8, // tab_manual_comment_860
+        0xc4db353623cc9ce3, // tab_manual_hand_back_1180
         0xa8dd18c6152a3eb4, // tab_ship_live_1180
         0x7e9786f472f4b08f, // tab_ship_live_860
         0x2c1601c6e5dbb55c, // tab_ship_cards_1180
@@ -6300,21 +6300,21 @@ const GOLDEN_FEATURE_TAB: [[u64; 64]; 4] = [
         0x8732f3c8e06fec8b, // tab_discover_brief_1180
         0x98eaa3e0de965a5a, // tab_discover_brief_860
         0xe321dd2e16218ccd, // tab_plan_long_1180
-        0xc1ed180ed603ceac, // tab_manual_test_1180
-        0x07f97a07f4e00368, // tab_manual_note_860
+        0x745b4f1b4989fbd4, // tab_manual_test_1180
+        0x412595edea30edd0, // tab_manual_note_860
         0xa2b4b8874a641138, // tab_review_rounds_1180
         0x923eeef7c7449a5b, // tab_verify_fixes_1180
         0x11adcee532b5f561, // tab_verify_fixes_860
-        0x9db9ce587079c33b, // tab_review_page_1180
+        0xf66783d528f2aae2, // tab_review_page_1180
         0xa0a65a902a90b68f, // tab_open_round_1180
         0x915423272277d9f6, // tab_open_round_860
-        0x88cbae1b384f957e, // tab_manual_pages_860
-        0x19de2892f515765e, // tab_manual_search_860
-        0xbb01b9aae63c653b, // tab_manual_select_860
-        0x5cf4ae3c8f3bbfa5, // tab_manual_rounds_1180
-        0x6a3e59b0fff2f526, // tab_manual_rounds_860
-        0x3746e2bc1fbb62eb, // tab_manual_comment_860
-        0xb01a1d751f4f4923, // tab_manual_hand_back_1180
+        0x28a05ee8eb1ccf06, // tab_manual_pages_860
+        0xdb8c906bcbe53cd6, // tab_manual_search_860
+        0xd6558fab28223313, // tab_manual_select_860
+        0xf09266e7a8993f7d, // tab_manual_rounds_1180
+        0xc717bedb2ee4778e, // tab_manual_rounds_860
+        0x93aaf7bbe320efeb, // tab_manual_comment_860
+        0x6dab8def82d1789b, // tab_manual_hand_back_1180
         0xfec52c27283ca419, // tab_ship_live_1180
         0x6c43d154be418d32, // tab_ship_live_860
         0xc4a892f1de89db19, // tab_ship_cards_1180
@@ -6367,21 +6367,21 @@ const GOLDEN_FEATURE_TAB: [[u64; 64]; 4] = [
         0x879946254d64f68e, // tab_discover_brief_1180
         0x58117ef1fd06cd93, // tab_discover_brief_860
         0xae847127e4d722c6, // tab_plan_long_1180
-        0x98d03a1b600a630f, // tab_manual_test_1180
-        0x587aab38af10beb9, // tab_manual_note_860
+        0x6ca3664d4eb1d62f, // tab_manual_test_1180
+        0x32913c22f9916651, // tab_manual_note_860
         0x640176aa3c978657, // tab_review_rounds_1180
         0xcb29634426bdd5ab, // tab_verify_fixes_1180
         0x5964e6d88c5d5133, // tab_verify_fixes_860
-        0xfc95628f07ae88dd, // tab_review_page_1180
+        0x243426599397bf03, // tab_review_page_1180
         0xb78a657e03634234, // tab_open_round_1180
         0x3e020527413f244b, // tab_open_round_860
-        0x84a4cb0a33f3797a, // tab_manual_pages_860
-        0x7cde1a4b8057176c, // tab_manual_search_860
-        0x232d512d606bc89a, // tab_manual_select_860
-        0xc2a1064f359f089c, // tab_manual_rounds_1180
-        0x6e2b1c372a5973d9, // tab_manual_rounds_860
-        0xdd9f2ef7e24780cf, // tab_manual_comment_860
-        0x4f65d4135df066db, // tab_manual_hand_back_1180
+        0xfa808ddf60282f72, // tab_manual_pages_860
+        0xa02bbd3aae8f8ad4, // tab_manual_search_860
+        0xca950363fcc8c8c2, // tab_manual_select_860
+        0xb9232baa4f892d3c, // tab_manual_rounds_1180
+        0xa6d7f964d34db941, // tab_manual_rounds_860
+        0x023b8c2449876dcb, // tab_manual_comment_860
+        0x34dc7e5676e7483b, // tab_manual_hand_back_1180
         0x1348f903f91769a5, // tab_ship_live_1180
         0x09bcc015a6813509, // tab_ship_live_860
         0x7c46646771084cd2, // tab_ship_cards_1180
@@ -7969,6 +7969,7 @@ fn listed_review(flat: bool) -> super::ReposView {
         tree_nav: Some(true),
         tree_note: Some(("12 of 31 files left".into(), super::Tone::Warning)),
         flat,
+        no_header: flat,
         tree_share: super::REVIEW_TREE_SHARE,
         grouping: crate::repos::Grouping::Folders,
         lines,
@@ -8034,7 +8035,7 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x6d685c02515d43f0, // popup_no_comments_1180
         0x0b0737987fdde98c, // popup_no_comments_850
         0x657e8f85bed3c689, // popup_listed_1180
-        0x9194dd887fc48731, // inline_listed_1180
+        0x5aa9a81a6390ad62, // inline_listed_1180
     ],
     // Dark at 2
     [
@@ -8053,7 +8054,7 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0xf1a468043c5318c9, // popup_no_comments_1180
         0x1d2f421bf94ab574, // popup_no_comments_850
         0x54807e75c602168d, // popup_listed_1180
-        0x982c48687e8278b1, // inline_listed_1180
+        0xc30e9055875b1480, // inline_listed_1180
     ],
     // Light at 1
     [
@@ -8072,7 +8073,7 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x515d1c0cad51c048, // popup_no_comments_1180
         0xa8dade21e0ce5f8c, // popup_no_comments_850
         0xbe65ba0bb90a7e79, // popup_listed_1180
-        0x0377a1efdec60699, // inline_listed_1180
+        0xea0a5c5cfc91221a, // inline_listed_1180
     ],
     // Light at 2
     [
@@ -8091,7 +8092,7 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x32ce2ad1b9798180, // popup_no_comments_1180
         0xce9db1c39c7af1f3, // popup_no_comments_850
         0x80b1dfb328209225, // popup_listed_1180
-        0x5ddf86739c6faafd, // inline_listed_1180
+        0x1b435063d4d5d1a2, // inline_listed_1180
     ],
 ];
 
@@ -8137,39 +8138,39 @@ const REVIEW_VIEWS: [&str; 6] = [
 const GOLDEN_REVIEW_VIEWS: [[u64; 6]; 4] = [
     // Dark at 1
     [
-        0xbaa092913ab18229, // tab_review_code_1180
-        0x2488b540bbafd2d0, // tab_review_fixes_1180
-        0x0c0b9fbfb75997d3, // tab_review_fixes_860
-        0x6c957a9486e72252, // tab_review_ready_1180
-        0xe199080ac66a9165, // tab_review_code_860
-        0x1a56523a33361f40, // tab_review_done_1180
+        0xba59dd8cbfab5890, // tab_review_code_1180
+        0x795d004b54bc9490, // tab_review_fixes_1180
+        0x5496e8a5b3e3b293, // tab_review_fixes_860
+        0x5ed58a7ba18caeaf, // tab_review_ready_1180
+        0xd0a01c2c52bad37d, // tab_review_code_860
+        0x893e925fe84c46c1, // tab_review_done_1180
     ],
     // Dark at 2
     [
-        0x794aef8ddc7ac211, // tab_review_code_1180
-        0xe5d6f1a6602ca6c7, // tab_review_fixes_1180
-        0x6510889e6249246e, // tab_review_fixes_860
-        0x96ec467320294bb3, // tab_review_ready_1180
-        0x2272095c83e22ff6, // tab_review_code_860
-        0x001acde7baa44970, // tab_review_done_1180
+        0xb8d61211300cbfff, // tab_review_code_1180
+        0xbf1e5135cf5ab523, // tab_review_fixes_1180
+        0x962c444d5ea96f02, // tab_review_fixes_860
+        0xd475051687f82429, // tab_review_ready_1180
+        0x935009bd10190ccc, // tab_review_code_860
+        0xd4dd47652d903066, // tab_review_done_1180
     ],
     // Light at 1
     [
-        0x3b13d617d6131549, // tab_review_code_1180
-        0x1a11c1999713cd59, // tab_review_fixes_1180
-        0x565f530c7ca85999, // tab_review_fixes_860
-        0x144dd5afa964cdf4, // tab_review_ready_1180
-        0xbb9c0b2bc97fa6c7, // tab_review_code_860
-        0xd9ae177f08da648f, // tab_review_done_1180
+        0x471ec7c1890e1b00, // tab_review_code_1180
+        0x546128c37ce3ca39, // tab_review_fixes_1180
+        0xf7b772f01c719eb5, // tab_review_fixes_860
+        0xf0427d38941dfdfd, // tab_review_ready_1180
+        0xbf6f190b8695034c, // tab_review_code_860
+        0x821cb33370946e06, // tab_review_done_1180
     ],
     // Light at 2
     [
-        0xec5243dd94dffc43, // tab_review_code_1180
-        0x8936b499118f85cf, // tab_review_fixes_1180
-        0x29b200fc5814525b, // tab_review_fixes_860
-        0x9351193ece6ea347, // tab_review_ready_1180
-        0x80981943a2fd08b8, // tab_review_code_860
-        0x7c985366e678ba65, // tab_review_done_1180
+        0xf91393fda7d4c9f9, // tab_review_code_1180
+        0x751bff939f28396b, // tab_review_fixes_1180
+        0xa8965d25c926c903, // tab_review_fixes_860
+        0x90bbc2d6710d5129, // tab_review_ready_1180
+        0x8ba88b1751805e3c, // tab_review_code_860
+        0x6d6602bad127abdb, // tab_review_done_1180
     ],
 ];
 

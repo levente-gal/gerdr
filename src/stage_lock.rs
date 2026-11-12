@@ -33,6 +33,18 @@ pub(crate) fn authors_stage(feature: &Feature, stage: Stage) -> Option<String> {
     })
 }
 
+/// `authors_stage`, for starting `stage`'s agent with what `extra` tells
+/// it: the fixes a review asks for are a Build agent's work, though Build
+/// was its author's.
+pub(crate) fn authors_agent(
+    feature: &Feature,
+    stage: Stage,
+    extra: &[(&str, String)],
+) -> Option<String> {
+    let fixes = stage == Stage::Build && extra.iter().any(|(key, _)| *key == "fixes");
+    authors_stage(feature, stage).filter(|_| !fixes)
+}
+
 pub(crate) fn locked_warning(feature: &Feature, stage: Stage, by: Stage) -> String {
     let what = match feature.is_done(by) {
         true => "reopen",
@@ -351,6 +363,23 @@ mod tests {
             locked_warning(&f, Stage::Discover, Stage::Plan),
             "Discover is locked: Plan is done; reopen Plan first"
         );
+    }
+
+    #[test]
+    fn a_reviews_fixes_start_a_build_agent_though_build_was_its_authors() {
+        let mut f = crate::features::tests::feature("pr-12", Vec::new(), 4);
+        f.kind = feature::Kind::PrReview(vec![feature::pr::PullRef {
+            number: 12,
+            ..Default::default()
+        }]);
+        let why = "Build is done in #12 itself: its review starts at Verify";
+        assert_eq!(authors_agent(&f, Stage::Build, &[]).as_deref(), Some(why));
+        let fixes = [("fixes", "C1".to_owned())];
+        assert_eq!(authors_agent(&f, Stage::Build, &fixes), None);
+        assert!(authors_agent(&f, Stage::Plan, &fixes).is_some());
+        // A feature of the user's own has no author's stage.
+        let own = crate::features::tests::feature("login", Vec::new(), 4);
+        assert_eq!(authors_agent(&own, Stage::Build, &[]), None);
     }
 
     #[test]

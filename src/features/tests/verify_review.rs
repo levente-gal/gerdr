@@ -1085,6 +1085,22 @@ fn a_failed_verify_waits_for_its_fixes_on_enter() {
 }
 
 #[test]
+fn a_double_click_on_the_bar_presses_no_other_button() {
+    let t = Instant::now();
+    let at: Point<f64, Logical> = (900.0, 200.0).into();
+    let last = (t, at, "Fix".to_owned());
+    let soon = t + Duration::from_millis(150);
+    // The button changed under the pointer: the second press is not it.
+    assert!(other_button_again(&last, soon, at, "Review in diff"));
+    // The same button again, a late press, a press elsewhere: all taken.
+    assert!(!other_button_again(&last, soon, at, "Fix"));
+    let late = t + crate::input::MULTI_CLICK;
+    assert!(!other_button_again(&last, late, at, "Review in diff"));
+    let off: Point<f64, Logical> = (800.0, 200.0).into();
+    assert!(!other_button_again(&last, soon, off, "Add comment\u{2026}"));
+}
+
+#[test]
 fn a_fix_round_shows_on_the_page_that_asked_and_takes_enter() {
     let mut f = verified(false);
     f.verify.as_mut().unwrap().finished = Some(1_100);

@@ -18,6 +18,35 @@ impl Gerdr {
         layout.hit(&view, pos.to_i32_round())
     }
 
+    /// Whether a press of `hit` at `pos` is the second of a double click on
+    /// the page's bar, there on another button than the first press took:
+    /// the bar's buttons change under the pointer as the page does, and
+    /// that one was not aimed at. Any other press of the bar is kept as the
+    /// last one.
+    fn bar_press_again(&mut self, hit: FeatureTabHit, pos: Point<f64, Logical>) -> bool {
+        let label = self.feature_tab_parts().and_then(|(view, layout)| {
+            let at = pos.to_i32_round();
+            match hit {
+                FeatureTabHit::PageButton(i) => (layout.bar_buttons.iter())
+                    .any(|(b, r)| *b == i && r.contains(at))
+                    .then(|| view.page.buttons.get(i).map(|b| b.label.clone()))?,
+                FeatureTabHit::ReviewButton(i) => {
+                    Some(view.review_switch?.buttons.get(i)?.label.clone())
+                }
+                _ => None,
+            }
+        });
+        let (Some(label), Some(panel)) = (label, self.features.panel.as_mut()) else {
+            return false;
+        };
+        let again = (panel.bar_press.as_ref())
+            .is_some_and(|last| other_button_again(last, Instant::now(), pos, &label));
+        if !again {
+            panel.bar_press = Some((Instant::now(), pos, label));
+        }
+        again
+    }
+
     /// A left click in the feature tab: a stage's node shows its page, a
     /// repository takes the keyboard, a button does what it says.
     pub fn feature_panel_click(&mut self, pos: Point<f64, Logical>) {
@@ -34,6 +63,9 @@ impl Gerdr {
         let Some(hit) = self.feature_tab_hit(pos) else {
             return;
         };
+        if self.bar_press_again(hit, pos) {
+            return;
+        }
         // A press off the search gives the keys back to the page.
         if !matches!(hit, FeatureTabHit::Search(_))
             && let Some(search) = (self.features.panel.as_mut()).and_then(|p| p.search.as_mut())

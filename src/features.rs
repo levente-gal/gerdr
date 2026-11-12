@@ -1015,6 +1015,22 @@ pub enum DialogOutcome {
     },
 }
 
+/// Whether a press at `pos` on a bar button named `label` at `now` is the
+/// second of a double click whose first, `last`, was on another button.
+fn other_button_again(
+    last: &(Instant, Point<f64, Logical>, String),
+    now: Instant,
+    pos: Point<f64, Logical>,
+    label: &str,
+) -> bool {
+    let (when, from, was) = last;
+    let slop = crate::input::MULTI_CLICK_SLOP;
+    now.duration_since(*when) < crate::input::MULTI_CLICK
+        && (from.x - pos.x).abs() < slop
+        && (from.y - pos.y).abs() < slop
+        && was != label
+}
+
 /// The feature panel's state, while it is open.
 #[derive(Debug, Default)]
 pub struct FeaturePanel {
@@ -1055,6 +1071,9 @@ pub struct FeaturePanel {
     pub review_area: Option<chrome::Rect>,
     /// On that page, the rail has the keys, not the review (Esc there).
     pub rail_keys: bool,
+    /// The last press on the page's bar: when, where, and the button's
+    /// label (see `bar_press_again`).
+    pub bar_press: Option<(Instant, Point<f64, Logical>, String)>,
     /// Each column's scroll, indexed by `TabColumn` (logical pixels).
     pub scroll: [Scroll; 3],
     /// The page the Page column's scroll is for: the stage, and whether
