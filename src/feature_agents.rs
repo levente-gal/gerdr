@@ -902,6 +902,34 @@ pub(crate) fn stage_chips(
         .collect()
 }
 
+/// The chips the review dialog offers for the AI review of a review not
+/// made yet, and the name of the agent it starts unless another is picked:
+/// as its page will have them, with Build marked done as a review's is.
+pub(crate) fn new_review_chips(
+    workflow: Option<&Workflow>,
+    installed: &[CliAgent],
+) -> (Vec<AgentChip>, Option<String>) {
+    let mark = feature::Mark {
+        at: 0,
+        by: feature::pr::BY.to_owned(),
+        note: String::new(),
+        patch: None,
+    };
+    let fresh = Feature {
+        kind: feature::Kind::PrReview(Vec::new()),
+        marks: (Stage::ALL.into_iter())
+            .filter(|s| !feature::pr::STAGES.contains(s))
+            .map(|s| (s, mark.clone()))
+            .collect(),
+        ..Feature::default()
+    };
+    let chips = stage_chips(&fresh, Stage::AiReview, workflow, installed);
+    match default_pick(&fresh, Stage::AiReview, workflow, installed) {
+        Pick::Agent(name, _) => (chips, Some(name)),
+        _ => (chips, None),
+    }
+}
+
 /// The program of the CLI agent T3 Code names `agent` (`ThreadRow::agent`).
 fn t3_agent_program(agent: &str) -> &str {
     match agent {

@@ -1729,6 +1729,8 @@ fn new_feature() -> super::NewFeatureView {
         ],
         create: super::NEW_FEATURE_BUTTONS[super::CREATE],
         choosing: false,
+        reviewers: Vec::new(),
+        reviewer_focus: false,
     }
 }
 
@@ -1766,7 +1768,7 @@ fn new_feature_bases() -> super::NewFeatureView {
 }
 
 /// The new feature dialog picking pull requests to review: two picked, the
-/// same branch's suggested, one repository with none.
+/// same branch's suggested, one repository with none; Claude Code reviews.
 fn new_review() -> super::NewFeatureView {
     let repo = |name: &str, place: &str, button: &str, touched| super::NewFeatureRepo {
         name: name.into(),
@@ -1793,6 +1795,7 @@ fn new_review() -> super::NewFeatureView {
             ("Ctrl+Shift+L", "link project"),
             ("Esc", "close"),
         ],
+        reviewers: agent_chips(0, false),
         ..new_feature()
     }
 }
@@ -2025,8 +2028,8 @@ const GOLDEN_FEATURES: [[u64; 8]; 4] = [
         0xcec44541e82a9fc9, // sidebar_feature_workspace
         0xec1b534e416312d9, // sidebar_needs_you
         0x38dbadad2308760e, // sidebar_no_features
-        0x9b1ad4602d5dfe05, // new_review
-        0xcb449e75ac357c2f, // new_review_pulls
+        0x5e513b54301f370a, // new_review
+        0x96de45011540e1d4, // new_review_pulls
     ],
     // Dark at 2
     [
@@ -2036,8 +2039,8 @@ const GOLDEN_FEATURES: [[u64; 8]; 4] = [
         0x8fa4fa3fc01a005e, // sidebar_feature_workspace
         0xf1b7525a91f048f0, // sidebar_needs_you
         0xe6a933a97909111c, // sidebar_no_features
-        0xeed5e65264de763e, // new_review
-        0xe89e33c5b92d9e87, // new_review_pulls
+        0xed7d9a3668c86860, // new_review
+        0xf2228baebe5646c5, // new_review_pulls
     ],
     // Light at 1
     [
@@ -2047,8 +2050,8 @@ const GOLDEN_FEATURES: [[u64; 8]; 4] = [
         0x5d757742533ae5fe, // sidebar_feature_workspace
         0x414d843532499a58, // sidebar_needs_you
         0x474724f31cd435c8, // sidebar_no_features
-        0x0a97b8d759cc4d36, // new_review
-        0x5acb59355ac85e97, // new_review_pulls
+        0x30b6b02b37207523, // new_review
+        0x8dedcae9af5e597e, // new_review_pulls
     ],
     // Light at 2
     [
@@ -2058,8 +2061,8 @@ const GOLDEN_FEATURES: [[u64; 8]; 4] = [
         0x219fe458a0ba299a, // sidebar_feature_workspace
         0x4b9d19393791d2df, // sidebar_needs_you
         0xde76d59c6519cad2, // sidebar_no_features
-        0xb14912585970169a, // new_review
-        0x3df8aaffc0ac4a05, // new_review_pulls
+        0x4e8d8ed160e0e3dd, // new_review
+        0x50cf171083d784a2, // new_review_pulls
     ],
 ];
 
@@ -2084,7 +2087,7 @@ fn dump_features() {
         let p = theme.palette();
         let px = |v: i32| (v as f64 * scale).round() as usize;
         let tag = format!("{}_{}", theme.name(), scale);
-        let dialog = super::new_feature_layout(size, 3, false).panel;
+        let dialog = super::new_feature_layout(size, 3, false, &[]).panel;
         dump(
             &dir,
             &format!("new_feature_{tag}"),

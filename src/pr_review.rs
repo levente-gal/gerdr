@@ -114,7 +114,8 @@ impl Gerdr {
 
     /// Review the pull requests `picks` of project `project` as one, off
     /// the thread: of the repositories of `root` and of the linked projects
-    /// `links`, titled `title` (empty: after the first pull request).
+    /// `links`, titled `title` (empty: after the first pull request), its AI
+    /// review started by `reviewer` if picked.
     pub(crate) fn start_review_of(
         &mut self,
         project: String,
@@ -122,6 +123,7 @@ impl Gerdr {
         links: Vec<layout::LinkSpec>,
         picks: Vec<Pick>,
         title: String,
+        reviewer: Option<String>,
     ) {
         let taken: Vec<String> = (self.features.all.get(&project).into_iter().flatten())
             .chain(self.viewed_of(&project))
@@ -141,7 +143,8 @@ impl Gerdr {
             what: format!("Starting the review of {numbers}"),
         };
         self.feature_work(Some(busy), move |_| {
-            let made = make_review(&project, &root, &links, &picks, &title, &feature_slug);
+            let made = make_review(&project, &root, &links, &picks, &title, &feature_slug)
+                .map(|(feature, ignores)| (reviewed_by(feature, reviewer), ignores));
             Done::PrReview {
                 project,
                 slug: feature_slug,
@@ -628,9 +631,26 @@ fn make_review(
     Ok((feature, ignores))
 }
 
+/// Review `feature`, just made, with its AI review's agent `reviewer` if
+/// one was picked: set before anything can start that review.
+fn reviewed_by(mut feature: Feature, reviewer: Option<String>) -> Feature {
+    (feature.stage_agents).extend(reviewer.map(|name| (feature::Stage::AiReview, name)));
+    feature
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_reviewer_picked_in_the_dialog_starts_the_ai_review() {
+        let made = reviewed_by(Feature::default(), Some("Cursor".into()));
+        let picked = made.stage_agents.get(&feature::Stage::AiReview);
+        assert_eq!(picked.map(String::as_str), Some("Cursor"));
+        // The default needs no pick.
+        let unpicked = reviewed_by(Feature::default(), None);
+        assert!(unpicked.stage_agents.is_empty());
+    }
 
     #[test]
     fn slugs_never_clash() {
