@@ -1057,7 +1057,8 @@ impl WorktreeDiff {
         Some(Gate {
             stage,
             draft: self.diff.editing.is_some(),
-            read: self.read && !self.reading,
+            // Read once: a later read goes on behind what shows.
+            read: self.read,
             errors: fe.repos.iter().filter_map(|r| r.error.clone()).collect(),
             dirty: (fe.repos.iter())
                 .filter(|r| !r.dirty.is_empty())
@@ -1923,9 +1924,11 @@ impl Gerdr {
         let stage = self
             .feature(&fe.project, &fe.slug)
             .and_then(Feature::current);
-        let Some(gate) = wd.approve_gate(stage) else {
+        let Some(mut gate) = wd.approve_gate(stage) else {
             return;
         };
+        // A press waits out a read under way: its files may have changed.
+        gate.read &= !wd.reading;
         if let Some(why) = approve_refusal(&gate) {
             return self.show_warning(why);
         }
@@ -3314,6 +3317,10 @@ mod tests {
         let approve = |hints: Vec<Hint>| hints.into_iter().find(|h| h.button == B::Approve);
         assert_eq!(approve(wd.view(POPUP_ENV).title_buttons).unwrap().disabled, why);
         assert_eq!(approve(wd.hints()).unwrap().disabled, why);
+        // A read again behind it changes nothing of what shows.
+        wd.reading = true;
+        assert_eq!(approve(wd.hints()).unwrap().disabled, why);
+        wd.reading = false;
         // Laid into its page, they leave the title row for the page's line;
         // the footer keeps their keys.
         wd.feature.as_mut().unwrap().inline = true;
