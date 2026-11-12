@@ -539,8 +539,15 @@ impl DiffView {
         let visual = self.visual.take();
         let cursor = self.cursor.as_ref()?;
         let rows = cursor.from.min(cursor.row)..=cursor.from.max(cursor.row);
-        let outcome = match (visual, self.caret()) {
-            (Some(Visual::Chars { row, col, .. }), Some(at)) => self.yank_chars((row, col), at),
+        // The rows of one comment or finding (a double click selects
+        // them): what it says.
+        let one = (rows.clone().map(|r| self.comment_at(r)))
+            .reduce(|a, b| a.filter(|_| a == b))
+            .flatten();
+        let said = one.and_then(|c| self.review.comments.get(c));
+        let outcome = match (said, visual, self.caret()) {
+            (Some(comment), ..) => yank_of(comment.text.clone(), false),
+            (_, Some(Visual::Chars { row, col, .. }), Some(at)) => self.yank_chars((row, col), at),
             _ => self.yank_rows(rows),
         };
         self.collapse_cursor();

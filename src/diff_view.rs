@@ -3612,10 +3612,18 @@ impl DiffView {
         }
     }
 
-    /// Open the file shown as row `i` of the detail pane in Zed, there
-    /// (`open_diff_row`).
+    /// A double click on row `i` of the detail pane: on a comment or a
+    /// finding, all its rows selected, for Ctrl+C or `y` to copy what it
+    /// says; elsewhere the file there opened in Zed (`open_diff_row`).
     pub fn open_detail_row(&mut self, i: usize, ctx: &Ctx) -> Option<Outcome> {
         let r = self.detail_row_at(i, ctx)?;
+        if let Some(c) = self.comment_at(r) {
+            let rows = (0..self.rows.len()).filter(|&r| self.comment_at(r) == Some(c));
+            let (first, last) = rows.fold((r, r), |(a, b), r| (a.min(r), b.max(r)));
+            self.leave_visual();
+            self.set_cursor(last, Some(first));
+            return None;
+        }
         self.open_diff_row(r)
     }
 

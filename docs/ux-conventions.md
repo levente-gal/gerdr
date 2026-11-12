@@ -140,7 +140,9 @@ by chars, a double click a word (or the gap between two) and a triple click
 a line, and a drag on from either goes by whole words or lines, keeping the
 first. Shift+click reaches the selection there by the same. Held past the
 text's top or bottom it scrolls on, moving or not. Diffs differ: their
-press and drag pick whole rows and a double click opens the line in Zed.
+press and drag pick whole rows and a double click opens the line in Zed;
+on a comment or an AI finding, a double click selects all its rows instead,
+and Ctrl+C or `y` copies what it says.
 
 ## Destructive actions
 

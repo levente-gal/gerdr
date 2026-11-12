@@ -3319,6 +3319,24 @@ pub(crate) mod tests {
             .unwrap();
         wd.diff.set_cursor(head, None);
         assert_eq!(yank_of(typed(&mut wd, "yy")), ("hi".into(), false));
+        // A double click on it selects all its rows, opening nothing; Ctrl+C
+        // or `y` takes what it says.
+        let rows: Vec<usize> = (0..wd.diff.rows.len())
+            .filter(|&r| {
+                matches!(
+                    wd.diff.rows[r],
+                    DiffRow::CommentHead { .. } | DiffRow::Comment { .. }
+                )
+            })
+            .collect();
+        assert!(rows.len() > 1);
+        assert_eq!(wd.open_row(rows[1], ENV), None);
+        let cursor = wd.diff.cursor.as_ref().unwrap();
+        assert_eq!((cursor.from, cursor.row), (rows[0], rows[rows.len() - 1]));
+        let copied = wd.key(&ctrl, Keysym::c, Keysym::c, ENV);
+        assert_eq!(yank_of(copied), ("hi".into(), false));
+        wd.open_row(rows[0], ENV);
+        assert_eq!(yank_of(typed(&mut wd, "y")), ("hi".into(), false));
     }
 
     #[test]
