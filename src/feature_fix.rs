@@ -97,8 +97,11 @@ impl Gerdr {
 
     /// The line compacting feature's Build agent's chat: none for a CLI
     /// gerdr knows no such line of, or an agent that isn't there or has no
-    /// chat yet.
+    /// chat yet, or one the fixes no longer go to (`stage_agent_moved`).
     fn compact_line(&self, feature: &Feature) -> Option<&'static str> {
+        if self.stage_agent_moved(feature, Stage::Build) {
+            return None;
+        }
         let run = feature.runs.get(&Stage::Build).filter(|r| !r.held)?;
         let key = run.agent_key()?;
         if !self.agent_key_state(&key).1 {

@@ -716,6 +716,41 @@ fn default_pick(
     resolve_pick(set, feature, stage, workflow, installed)
 }
 
+/// The agent `stage` starts with nothing picked for it: the fixes after
+/// Build go to the agent that built (its last run), Ship's summary and
+/// conflicts to the one fixes go to, the rest to `default_pick`.
+fn unpicked(
+    feature: &Feature,
+    stage: Stage,
+    workflow: Option<&Workflow>,
+    installed: &[CliAgent],
+) -> Pick {
+    match stage {
+        Stage::Build if let Some(run) = feature.runs.get(&Stage::Build) => {
+            resolve_pick(Some(&run.agent), feature, stage, workflow, installed)
+        }
+        Stage::Ship => stage_pick(feature, Stage::Build, workflow, installed),
+        _ => default_pick(feature, stage, workflow, installed),
+    }
+}
+
+/// Whether an agent can still start on `stage` of `feature`, so its pick
+/// can still change: a stage ahead with an agent; Build while fixes can go
+/// to it (not for a review whose fixes are GitHub comments); AI review
+/// while the feature is open, as it reviews again after fixes; Ship's
+/// summary and conflicts agent till Ship is done.
+pub(crate) fn fires(feature: &Feature, stage: Stage) -> bool {
+    if feature.status != Status::Open {
+        return false;
+    }
+    match stage {
+        Stage::Build => !feature.is_done(stage) || !feature.posts_review(),
+        Stage::AiReview => true,
+        Stage::Ship => !feature.is_done(stage) && !feature.posts_review(),
+        _ => needs(stage).is_some() && !feature.is_done(stage),
+    }
+}
+
 /// The agent `configured` (a name or a command, if any) gives `stage`.
 fn resolve_pick(
     configured: Option<&str>,
@@ -752,7 +787,7 @@ fn stage_pick(
     installed: &[CliAgent],
 ) -> Pick {
     let Some(picked) = feature.stage_agents.get(&stage) else {
-        return default_pick(feature, stage, workflow, installed);
+        return unpicked(feature, stage, workflow, installed);
     };
     let there = |a: &CliAgent| a.name.eq_ignore_ascii_case(picked);
     if !installed.iter().any(there) {
@@ -791,7 +826,7 @@ pub(crate) fn stage_model_slot(
     workflow: Option<&Workflow>,
     installed: &[CliAgent],
 ) -> Option<ModelSlot> {
-    if feature.status != Status::Open || needs(stage).is_none() || feature.is_done(stage) {
+    if !fires(feature, stage) {
         return None;
     }
     let Pick::Agent(agent, base) = stage_pick(feature, stage, workflow, installed) else {
@@ -814,17 +849,20 @@ pub(crate) fn stage_chips(
     workflow: Option<&Workflow>,
     installed: &[CliAgent],
 ) -> Vec<AgentChip> {
-    if feature.status != Status::Open || needs(stage).is_none() || feature.is_done(stage) {
+    if !fires(feature, stage) {
         return Vec::new();
     }
+    // T3 Code can't write Ship's summary (`summary_agent`).
+    let t3 = stage != Stage::Ship;
     let mut agents: Vec<(String, String)> = installed
         .iter()
         .filter_map(|a| {
             let base = a.stage_base();
-            matches!(
-                Flavor::of(base),
-                Flavor::Claude | Flavor::Cursor | Flavor::T3
-            )
+            match Flavor::of(base) {
+                Flavor::Claude | Flavor::Cursor => true,
+                Flavor::T3 => t3,
+                _ => false,
+            }
             .then(|| (a.name.clone(), base.to_owned()))
         })
         .collect();
@@ -833,7 +871,8 @@ pub(crate) fn stage_chips(
     let same = |(n, c): &(String, String), name: &str, command: &str| {
         n.eq_ignore_ascii_case(name) || program(c) == program(command)
     };
-    if let Pick::Agent(name, command) = default_pick(feature, stage, workflow, installed)
+    if let Pick::Agent(name, command) = unpicked(feature, stage, workflow, installed)
+        && (t3 || Flavor::of(&command) != Flavor::T3)
         && !agents.iter().any(|a| same(a, &name, &command))
     {
         agents.push((name, command));
@@ -1361,8 +1400,8 @@ impl Gerdr {
     }
 
     /// Run `stage` of feature `slug` with the agent `name`, from its next
-    /// start on: one that runs now goes on. The one the project gives it
-    /// anyway needs no pick, so the project's file stays what it follows.
+    /// start on (`picked_now`). The one it gets anyway (`unpicked`) needs no
+    /// pick, so the project's file and the builder stay what it follows.
     pub(crate) fn pick_stage_agent(&mut self, project: &str, slug: &str, stage: Stage, name: &str) {
         let chips = self.chips_of(project, slug, stage);
         if !chips.iter().any(|c| c.name == name && !c.off && !c.lit) {
@@ -1373,7 +1412,7 @@ impl Gerdr {
             return;
         };
         let by_default = matches!(
-            default_pick(feature, stage, workflow, &self.launcher.cli_agents),
+            unpicked(feature, stage, workflow, &self.launcher.cli_agents),
             Pick::Agent(agent, _) if agent.eq_ignore_ascii_case(name)
         );
         let Some(feature) = self.feature_mut(project, slug) else {
@@ -1385,6 +1424,51 @@ impl Gerdr {
             feature.stage_agents.insert(stage, name.to_owned());
         }
         self.save_feature(project, slug);
+        self.picked_now(project, slug, stage);
+    }
+
+    /// What a new pick of `stage`'s agent or model does to the one open:
+    /// AI review's reviews again with the pick (asked first if at work);
+    /// fixes after Build go to a fresh agent from the next round, the open
+    /// one keeping its tab; any other goes on, and is said to.
+    fn picked_now(&mut self, project: &str, slug: &str, stage: Stage) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        if !self.stage_agent_moved(feature, stage) {
+            return;
+        }
+        match stage {
+            Stage::AiReview if !feature.is_done(stage) => {
+                self.start_stage_agent(project, slug, stage, true);
+            }
+            Stage::AiReview => self.show_notice(
+                "AI review is done: the picked agent reviews when it runs again".to_owned(),
+            ),
+            Stage::Build if feature.is_done(stage) => self.show_notice(
+                "The next fixes start the picked agent: the open one keeps its tab".to_owned(),
+            ),
+            _ => self.show_notice(format!(
+                "The {} agent already open goes on: restart it to use the pick",
+                stage.label()
+            )),
+        }
+    }
+
+    /// Whether `stage`'s agent of `feature` is open, but isn't the one its
+    /// pick starts now: another agent, or another model.
+    pub(crate) fn stage_agent_moved(&self, feature: &Feature, stage: Stage) -> bool {
+        let Some(run) = feature.runs.get(&stage).filter(|r| r.live()) else {
+            return false;
+        };
+        let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
+        match stage_pick(feature, stage, workflow, &self.launcher.cli_agents) {
+            Pick::Agent(_, base) if run.t3.is_some() => Flavor::of(&base) != Flavor::T3,
+            Pick::Agent(agent, base) => {
+                run.base != base || run.asked_model != picked_model(feature, stage, &agent)
+            }
+            _ => false,
+        }
     }
 
     /// `stage`'s `ModelSlot` for feature `slug`.
@@ -1448,16 +1532,8 @@ impl Gerdr {
         if models.is_empty() {
             feature.stage_models.remove(&stage);
         }
-        let stays = (feature.runs.get(&stage)).is_some_and(|r| {
-            r.live() && r.agent.eq_ignore_ascii_case(agent) && r.asked_model != model
-        });
         self.save_feature(project, slug);
-        if stays {
-            let model = model.as_deref().unwrap_or("its default");
-            self.show_warning(format!(
-                "The agent already open keeps its model: restart it to use {model}"
-            ));
-        }
+        self.picked_now(project, slug, stage);
     }
 
     /// Whether Build of feature `slug` starts a fresh agent per milestone.
@@ -1492,20 +1568,25 @@ impl Gerdr {
         }
     }
 
-    /// Start `stage`'s agent for feature `slug` (`fresh`: a new one even
-    /// when its last run's pane is still there).
-    /// The agent that writes `feature`'s summary: the one Build runs, its
-    /// name and command; why none can, if so.
+    /// The agent that writes `feature`'s summary and resolves its conflicts:
+    /// the one picked on Ship (else the one fixes go to), its name and
+    /// command with its model; why none can, if so.
     pub(crate) fn summary_agent(&self, feature: &Feature) -> Result<(String, String), String> {
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
-        match stage_pick(feature, Stage::Build, workflow, &self.launcher.cli_agents) {
-            Pick::Agent(agent, base) if Flavor::of(&base) != Flavor::T3 => Ok((agent, base)),
-            Pick::Agent(..) => Err("T3 Code can't write it: pick a CLI agent for Build".into()),
+        match stage_pick(feature, Stage::Ship, workflow, &self.launcher.cli_agents) {
+            Pick::Agent(agent, base) if Flavor::of(&base) != Flavor::T3 => {
+                let model = picked_model(feature, Stage::Ship, &agent);
+                let base = with_model(&base, model.as_deref());
+                Ok((agent, base))
+            }
+            Pick::Agent(..) => Err("T3 Code can't write it: pick a CLI agent on Ship".into()),
             Pick::NoCli => Err("No coding agent CLI is installed".into()),
             Pick::Refused(why) => Err(why),
         }
     }
 
+    /// Start `stage`'s agent for feature `slug` (`fresh`: a new one even
+    /// when its last run's pane is still there).
     pub fn start_stage_agent(&mut self, project: &str, slug: &str, stage: Stage, fresh: bool) {
         if fresh && self.asks_before_fresh(project, slug, stage) {
             return;
@@ -1605,19 +1686,25 @@ impl Gerdr {
         let Some(run) = feature.runs.get(&stage) else {
             return;
         };
-        if let Some(pane) = (run.pane.clone()).filter(|p| self.pane_there(p)) {
+        // Its agent and model may have been picked since: nothing has run
+        // on the old, which keeps its tab (`picked_now`).
+        let workflow = self.projects.project(project).map(|p| &p.workflow);
+        let (agent, base) = match stage_pick(&feature, stage, workflow, &self.launcher.cli_agents) {
+            Pick::Agent(agent, base) if Flavor::of(&base) != Flavor::T3 => (agent, base),
+            _ => (run.agent.clone(), run.base.clone()),
+        };
+        let model = picked_model(&feature, stage, &agent);
+        let moved = run.base != base || run.asked_model != model;
+        if !moved && let Some(pane) = (run.pane.clone()).filter(|p| self.pane_there(p)) {
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
         }
-        let agent = run.agent.clone();
         if let Some(why) = self.checks_refusal(project, slug) {
             return self.show_warning(why);
         }
-        // Its model may have been picked since: nothing has run on the old.
-        let model = picked_model(&feature, stage, &agent);
         let line = command_line(
-            &with_model(&run.base, model.as_deref()),
+            &with_model(&base, model.as_deref()),
             &run.prompt,
-            &feature.agent_dirs_for(&run.base, &store::dir(None, project, slug)),
+            &feature.agent_dirs_for(&base, &store::dir(None, project, slug)),
         );
         let command = match self.start_line(&feature, project, slug, stage, &run.prompt) {
             Ok(text) => with_prompt(&line, &text),
@@ -1631,7 +1718,7 @@ impl Gerdr {
         };
         if let Some(id) = &run.machine {
             let job = (stage, run.n, StartKind::Sent);
-            let Some(job) = self.machine_start_job(id, &feature, job, &run.base, &command) else {
+            let Some(job) = self.machine_start_job(id, &feature, job, &base, &command) else {
                 let name = self.machine_name(id);
                 return self.show_warning(format!(
                     "{name} can't be reached: try again once it is back"
@@ -1644,6 +1731,8 @@ impl Gerdr {
             {
                 r.pane = None;
                 r.command = stored;
+                r.agent.clone_from(&agent);
+                r.base.clone_from(&base);
                 r.model.clone_from(&model);
                 r.asked_model.clone_from(&model);
                 r.nudged = false;
@@ -1666,6 +1755,8 @@ impl Gerdr {
         r.pane = Some(pane.clone());
         let now = feature::now();
         r.command = command;
+        r.agent.clone_from(&agent);
+        r.base = base;
         r.model.clone_from(&model);
         r.asked_model.clone_from(&model);
         r.held = false;
@@ -4790,6 +4881,80 @@ mod tests {
         assert!(stage_chips(&f, Stage::Verify, None, &installed).is_empty());
         f.status = Status::Abandoned;
         assert!(stage_chips(&f, Stage::Build, None, &installed).is_empty());
+    }
+
+    #[test]
+    fn fixes_and_reviews_after_done_can_still_pick_their_agent() {
+        let installed = claude_and_cursor();
+        // Build, Verify and AI review done: fixes still go to Build, AI
+        // review runs again after them, Ship's agent is ahead.
+        let f = feature("a", vec![repo("r", true)], 6);
+        assert_eq!(stage_chips(&f, Stage::Build, None, &installed).len(), 2);
+        assert!(stage_model_slot(&f, Stage::Build, None, &installed).is_some());
+        assert_eq!(stage_chips(&f, Stage::AiReview, None, &installed).len(), 2);
+        assert_eq!(stage_chips(&f, Stage::Ship, None, &installed).len(), 2);
+        assert!(stage_chips(&f, Stage::Plan, None, &installed).is_empty());
+        assert!(stage_chips(&f, Stage::Verify, None, &installed).is_empty());
+    }
+
+    #[test]
+    fn a_pull_request_review_picks_its_fixer_and_reviewer() {
+        let installed = claude_and_cursor();
+        let pull = |mine| feature::pr::PullRef {
+            number: 12,
+            mine,
+            ..Default::default()
+        };
+        // Someone else's: its fixes are comments, so no fixer to pick.
+        let mut f = feature("pr-12", vec![repo("r", true)], 4);
+        f.kind = feature::Kind::PrReview(vec![pull(false)]);
+        assert!(stage_chips(&f, Stage::Build, None, &installed).is_empty());
+        assert!(stage_chips(&f, Stage::Ship, None, &installed).is_empty());
+        assert_eq!(
+            lit(&stage_chips(&f, Stage::AiReview, None, &installed)).len(),
+            1
+        );
+        // The user's own: Build never ran, its default is lit and can change.
+        f.kind = feature::Kind::PrReview(vec![pull(true)]);
+        let chips = stage_chips(&f, Stage::Build, None, &installed);
+        assert_eq!(lit(&chips), ["Claude Code"]);
+        assert!(chips.iter().all(|c| !c.off), "{chips:?}");
+        f.stage_agents.insert(Stage::Build, "Cursor".into());
+        assert_eq!(
+            who(stage_pick(&f, Stage::Build, None, &installed)),
+            "Cursor"
+        );
+    }
+
+    #[test]
+    fn fixes_go_to_the_agent_that_built_until_another_is_picked() {
+        let installed = claude_and_cursor();
+        let mut f = feature("a", vec![repo("r", true)], 6);
+        let run = StageRun {
+            agent: "Cursor".into(),
+            base: "cursor-agent".into(),
+            command: "cursor-agent -- go".into(),
+            ..StageRun::default()
+        };
+        f.runs.insert(Stage::Build, run);
+        // The project's default is Claude Code, but Cursor built it.
+        assert_eq!(
+            who(stage_pick(&f, Stage::Build, None, &installed)),
+            "Cursor"
+        );
+        let chips = stage_chips(&f, Stage::Build, None, &installed);
+        assert_eq!(lit(&chips), ["Cursor"]);
+        // Ship follows the fixer, never T3 Code.
+        assert_eq!(who(stage_pick(&f, Stage::Ship, None, &installed)), "Cursor");
+        let mut with_t3 = installed.to_vec();
+        with_t3.push(agent("T3 Code", Start::T3));
+        let ship = stage_chips(&f, Stage::Ship, None, &with_t3);
+        assert!(ship.iter().all(|c| c.name != "T3 Code"), "{ship:?}");
+        f.stage_agents.insert(Stage::Ship, "Claude Code".into());
+        assert_eq!(
+            who(stage_pick(&f, Stage::Ship, None, &installed)),
+            "Claude Code"
+        );
     }
 
     #[test]

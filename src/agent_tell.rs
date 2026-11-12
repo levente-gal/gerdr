@@ -55,13 +55,21 @@ impl Gerdr {
     }
 
     /// Send `line` to the Build agent of `feature`, for `kind`, if it is
-    /// there.
+    /// there. New fixes don't go to one that isn't the agent picked for
+    /// them now: a fresh one of the pick starts instead.
     pub(crate) fn tell_build_agent(
         &mut self,
         feature: &Feature,
         kind: SendKind,
         line: &str,
     ) -> Result<(), String> {
+        let new_work = matches!(
+            kind,
+            SendKind::Compact | SendKind::FixPlan | SendKind::FixGo | SendKind::SendBack
+        );
+        if new_work && self.stage_agent_moved(feature, Stage::Build) {
+            return Err("another agent is picked for the fixes".into());
+        }
         self.tell_agent(feature, Stage::Build, kind, line)
     }
 
