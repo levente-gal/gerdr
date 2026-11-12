@@ -1351,7 +1351,7 @@ fn fix_pages_pick_the_agent_fixes_go_to_and_ship_picks_its_own() {
     assert_eq!(f.current(), Some(Stage::Ship));
     assert_eq!(
         cards(&f, Stage::Ship),
-        [(Stage::Ship, String::new(), String::new(), 2)]
+        [(Stage::Ship, String::new(), "Summary and conflicts agent".into(), 2)]
     );
     assert_eq!(keys::keyed_stage(&f, Stage::Ship, false), Some(Stage::Ship));
 }

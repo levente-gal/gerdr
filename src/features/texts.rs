@@ -531,7 +531,7 @@ pub(super) fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> Ne
     let mut keys = match (dialog.choosing.is_some(), dialog.multi()) {
         (true, _) if review.is_some() => vec![("Tab", "next"), ("Enter", "pick")],
         (true, _) => vec![("Tab", "next"), ("Enter", "use branch")],
-        (false, true) if reviewing && dialog.focus == Some(REVIEWER) => {
+        (false, _) if reviewing && dialog.focus == Some(REVIEWER) => {
             vec![("Tab", "next"), ("Left / Right", "reviewer")]
         }
         (false, true) if reviewing => vec![("Tab", "next"), ("Space", "pick or leave out")],

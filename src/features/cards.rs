@@ -19,7 +19,11 @@ pub(super) fn agent_card(
             icon: AgentIcon::Generic,
             name: String::new(),
             dot: Dot::Unknown,
-            status: String::new(),
+            // The card's label: on Ship, what its agent is for.
+            status: match stage {
+                Stage::Ship => "Summary and conflicts agent".to_owned(),
+                _ => String::new(),
+            },
             tail: Vec::new(),
             buttons,
             picks,

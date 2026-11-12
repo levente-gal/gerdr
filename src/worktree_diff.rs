@@ -2757,8 +2757,11 @@ impl crate::Gerdr {
         // fixes; text being written takes them as any key.
         let only_alt = mods.alt && !(mods.ctrl || mods.shift || mods.logo);
         let views = matches!(sym, Keysym::_1 | Keysym::KP_1 | Keysym::_2 | Keysym::KP_2);
-        if only_alt
-            && views
+        // Ctrl+Shift+A and Alt+Shift+A pick the agent its fixes go to, and
+        // its model, as on the page under it.
+        let shifted = mods.shift && !mods.logo && (mods.ctrl != mods.alt);
+        let picks = shifted && matches!(sym, Keysym::a | Keysym::A);
+        if (only_alt && views || picks)
             && self.on_inline_review()
             && self.wd().is_some_and(|wd| wd.diff.editing.is_none())
         {
