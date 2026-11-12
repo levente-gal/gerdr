@@ -15,7 +15,8 @@ use crate::{
     chrome::{Check, Density, DirLine, FileLine, LineState, RepoLine, ReposView, TreeLine},
     diff_view::{CheckOf, DiffView, Moved, Place, Section, bounds, in_dir, move_to, showing},
     git::Change,
-    repos::{Grouping, Selected, standing},
+    key_table::{self, Binding},
+    repos::{Grouping, Selected, key, standing},
     scroll::{Bounds, Scroll},
 };
 
@@ -267,6 +268,29 @@ pub enum Asked {
     /// Tick the line's files, or untick them: of the repository at `root`.
     Tick { root: PathBuf, paths: Vec<String> },
 }
+
+/// A key of the list's own, past its moves (`FileTree::key`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListKey {
+    Tick,
+    /// Fold the line, or go to the file's diff.
+    Open,
+}
+
+/// The list's keys past its moves, which the arrows, the pages, Home and
+/// End make (a match, with the keypad's).
+pub const KEYS: &[Binding<(), ListKey>] = &[
+    key!(
+        "Space",
+        ListKey::Tick,
+        "in the file list, mark the line's files viewed, or not"
+    ),
+    key!(
+        "Enter",
+        ListKey::Open,
+        "in the file list, fold the line, or go to the file's diff"
+    ),
+];
 
 /// A list of the changed files beside a diff that has no panel of its own
 /// around it (a feature's code review): its lines, as the repositories
@@ -572,6 +596,7 @@ impl FileTree {
         };
         let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
         let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
+        // The moves, the keypad's too, not hinted nor on F1.
         let moved = match sym {
             Keysym::Down | Keysym::KP_Down if plain => step(1),
             Keysym::Up | Keysym::KP_Up if plain => step(-1),
@@ -592,11 +617,27 @@ impl FileTree {
         }
         let row = at.map(|k| rows[k]);
         let section = |row: Row| row.item().and_then(|k| sections.get(k));
+        match key_table::press(KEYS, &(), mods, sym) {
+            Some(ListKey::Tick) => {
+                return Some(row.and_then(|row| {
+                    let (root, paths) = Self::files_of(row, sections)?;
+                    Some(Asked::Tick { root, paths })
+                }));
+            }
+            Some(ListKey::Open) => {
+                return match row {
+                    Some(Row::File(..)) => Some(Some(Asked::ToDiff)),
+                    Some(row) => {
+                        self.fold_line(row, sections, page);
+                        Some(None)
+                    }
+                    None => Some(None),
+                };
+            }
+            None => {}
+        }
+        // The arrows fold, or go up.
         match sym {
-            Keysym::space => Some(row.and_then(|row| {
-                let (root, paths) = Self::files_of(row, sections)?;
-                Some(Asked::Tick { root, paths })
-            })),
             Keysym::Right | Keysym::KP_Right => {
                 match row {
                     Some(Row::Repo(k)) => self.set_open(&sections[k], true),
@@ -634,14 +675,6 @@ impl FileTree {
                 }
                 Some(None)
             }
-            Keysym::Return | Keysym::KP_Enter => match row {
-                Some(Row::File(..)) => Some(Some(Asked::ToDiff)),
-                Some(row) => {
-                    self.fold_line(row, sections, page);
-                    Some(None)
-                }
-                None => Some(None),
-            },
             _ => None,
         }
     }
@@ -800,6 +833,11 @@ impl FileTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn its_key_table_holds_together() {
+        key_table::check(KEYS, &[()]);
+    }
 
     fn change(path: &str) -> Change {
         Change {
