@@ -160,7 +160,10 @@ fn install(worktree: &Path) -> Result<(), String> {
 
 /// Write `HOOK` to `path` in `hooks`, executable, all at once.
 fn write_hook(hooks: &Path, path: &Path) -> Result<(), String> {
-    let tmp = hooks.join(format!(".pre-push.gerdr-{}", std::process::id()));
+    // Its own name per write, so two threads writing at once can't mix.
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = hooks.join(format!(".pre-push.gerdr-{}-{n}", std::process::id()));
     let write = || -> std::io::Result<()> {
         std::fs::write(&tmp, HOOK)?;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
@@ -229,7 +232,8 @@ fn write_guard(dir: &Path, branch: &str, text: &str) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("couldn't make {}: {err}", shown(parent)))?;
     }
-    std::fs::write(&file, text).map_err(|err| format!("couldn't write {}: {err}", shown(&file)))
+    crate::projects::write_atomic(&file, text.as_bytes())
+        .map_err(|err| format!("couldn't write {}: {err}", shown(&file)))
 }
 
 /// Guard `branch` of the repository `dir` is in: a push of it is refused
@@ -316,12 +320,7 @@ mod tests {
     /// Push HEAD from `wt` to `to` on origin: everything git and the hooks
     /// said when it fails.
     fn push_to(wt: &Path, to: &str) -> Result<(), String> {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(wt)
-            .args(["push", "-q", "origin", to])
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
+        let out = crate::git::command(wt, &["push", "-q", "origin", to])
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap();

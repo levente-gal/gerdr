@@ -320,7 +320,11 @@ impl Gerdr {
         {
             search.at = here;
         }
-        self.go_to_match(back, here.is_none());
+        let from = match here {
+            Some(_) => crate::manual_test::MatchFrom::Here,
+            None => crate::manual_test::MatchFrom::Fresh,
+        };
+        self.go_to_match(back, from);
         true
     }
 }

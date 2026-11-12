@@ -34,7 +34,7 @@ use std::{
     io::Read,
     os::unix::{fs::DirBuilderExt, process::CommandExt},
     path::{Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
+    process::{Command, Output, Stdio},
     time::{Duration, Instant},
 };
 
@@ -231,7 +231,10 @@ fn release(tag: &str) -> Result<Release, String> {
         .arg(format!("{REGISTRY}/{tag}"));
     let out = output_within(curl, Duration::from_secs(30))?;
     if !out.status.success() {
-        return Err(last_line(&out.stderr, "npm didn't answer"));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(crate::text::last_line(&stderr)
+            .unwrap_or("npm didn't answer")
+            .to_owned());
     }
     serde_json::from_slice(&out.stdout).map_err(|err| format!("npm's answer: {err}"))
 }
@@ -261,23 +264,14 @@ fn install(home: &Path, version: &str) -> Result<PathBuf, String> {
             .env("T3CODE_HOME", home);
         let out = output_within(npx, DOWNLOAD_TIME)?;
         if !installed(home, version) {
+            let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(format!(
                 "downloading {version}: {}",
-                last_line(&out.stderr, "it didn't download")
+                crate::text::last_line(&stderr).unwrap_or("it didn't download")
             ));
         }
     }
     Ok(runtime(home, version))
-}
-
-/// The last line `text` says, else `otherwise`.
-fn last_line(text: &[u8], otherwise: &str) -> String {
-    let text = String::from_utf8_lossy(text);
-    text.lines()
-        .map(str::trim)
-        .rfind(|line| !line.is_empty())
-        .unwrap_or(otherwise)
-        .to_owned()
 }
 
 /// What `cmd` printed, run in a process group of its own, which is stopped
@@ -313,7 +307,7 @@ pub(crate) fn output_within(mut cmd: Command, limit: Duration) -> Result<Output,
             Ok(Some(status)) => break status,
             Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(100)),
             Ok(None) => {
-                stop(&mut child);
+                crate::process::stop_group(&mut child, STOP_TIME);
                 return Err(format!("no answer in {}s", limit.as_secs()));
             }
             Err(err) => return Err(err.to_string()),
@@ -324,26 +318,6 @@ pub(crate) fn output_within(mut cmd: Command, limit: Duration) -> Result<Output,
         stdout: stdout.join().unwrap_or_default(),
         stderr: stderr.join().unwrap_or_default(),
     })
-}
-
-/// Stop `child`'s process group: asked first, killed after `STOP_TIME`.
-fn stop(child: &mut Child) {
-    let Ok(group) = i32::try_from(child.id()) else {
-        return;
-    };
-    // Safety: signals to a process group gerdr started.
-    unsafe { libc::kill(-group, libc::SIGTERM) };
-    let start = Instant::now();
-    while start.elapsed() < STOP_TIME {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            // Its helpers too, should one stay behind.
-            unsafe { libc::kill(-group, libc::SIGKILL) };
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    unsafe { libc::kill(-group, libc::SIGKILL) };
-    let _ = child.wait();
 }
 
 /// Whether gerdr reads what T3 Code's `t3` at `bin`, version `version`,
@@ -420,7 +394,7 @@ fn try_in(
         }
         std::thread::sleep(Duration::from_millis(250));
     };
-    stop(&mut child);
+    crate::process::stop_group(&mut child, STOP_TIME);
     made?;
     let conn = crate::t3_agents::open_read_only(&db).map_err(|err| err.to_string())?;
     let migration = crate::t3_agents::migration(&conn);
@@ -501,7 +475,7 @@ pub fn look(home: &Path, now_reading: &Reading) -> Result<Found, String> {
     let mut updates = Updates::load();
     let current = now_reading.version.clone().or_else(|| updates.pin.clone());
     let newest = release(channel(current.as_deref().unwrap_or_default()))?;
-    updates.checked_at = crate::projects::now();
+    updates.checked_at = crate::clock::now_secs();
     let version = newest.version.clone();
     if current
         .as_deref()
@@ -573,7 +547,7 @@ impl crate::Gerdr {
         self.move_t3_switch();
         let tick = |_, _: &mut (), state: &mut crate::Gerdr| {
             state.t3.updates = Updates::load();
-            if state.t3.auto_update && state.t3.updates.due(crate::projects::now()) {
+            if state.t3.auto_update && state.t3.updates.due(crate::clock::now_secs()) {
                 state.check_t3(false);
             }
             TimeoutAction::ToDuration(LOOK_EVERY)

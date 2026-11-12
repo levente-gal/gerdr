@@ -164,7 +164,7 @@ impl Gerdr {
         let Some((id, file)) = self.inbox.store.as_mut() else {
             return;
         };
-        inbox_store::prune(file, inbox_store::now_secs());
+        inbox_store::prune(file, crate::clock::now_secs());
         if let Err(err) = inbox_store::save(None, id, file) {
             tracing::warn!("inbox of {id}: {err}");
         }
@@ -173,7 +173,7 @@ impl Gerdr {
     /// Mark the triage of the items still there as seen, so they aren't
     /// pruned, and prune the rest; saved when anything changed.
     fn inbox_mark_seen(&mut self) {
-        let now = inbox_store::now_secs();
+        let now = crate::clock::now_secs();
         let ids: HashSet<String> = self
             .inbox_parts()
             .items
@@ -273,7 +273,7 @@ impl Gerdr {
             ignored_errors: &ignored_errors,
             gates: &gates,
             now: Instant::now(),
-            now_secs: inbox_store::now_secs(),
+            now_secs: crate::clock::now_secs(),
         })
     }
 
@@ -282,7 +282,7 @@ impl Gerdr {
     /// `workspaces` and their `agents`.
     pub fn inbox_count(&self, workspaces: &[WorkspaceView], agents: &[Vec<AgentView>]) -> usize {
         let triage = self.inbox_file().map(|file| &file.triage);
-        let now = inbox_store::now_secs();
+        let now = crate::clock::now_secs();
         self.inbox_items(workspaces, agents)
             .iter()
             .filter(|item| {
@@ -327,7 +327,7 @@ impl Gerdr {
             project: project.map(|p| p.name.clone()),
             active: self.workspace().map(|_| self.active_workspace),
             page: chrome::inbox_page(self.output_size()),
-            now: inbox_store::now_secs(),
+            now: crate::clock::now_secs(),
         }
     }
 
@@ -508,7 +508,7 @@ impl Gerdr {
         let Some(item) = self.inbox_item(id) else {
             return;
         };
-        let now = inbox_store::now_secs();
+        let now = crate::clock::now_secs();
         let link = match &item.target {
             Target::Page { url, .. } | Target::Link(url) => Some(url.clone()),
             _ => None,
@@ -691,7 +691,7 @@ impl Gerdr {
         for item in &items {
             unsee.extend(self.see_inbox_service(item));
         }
-        let now = inbox_store::now_secs();
+        let now = crate::clock::now_secs();
         let Some(file) = self.inbox_file_mut() else {
             return;
         };
@@ -772,7 +772,7 @@ impl Gerdr {
         let record = workspace
             .and_then(|w| self.workspaces.get(w))
             .map(|ws| ws.record.clone());
-        let now = inbox_store::now_secs();
+        let now = crate::clock::now_secs();
         let Some(file) = self.inbox_file_mut() else {
             return self.show_notice("Todos are kept per project: open one first".into());
         };

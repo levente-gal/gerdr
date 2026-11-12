@@ -1158,7 +1158,7 @@ pub(super) fn shell_until(
         Ok(child) => child,
         Err(err) => return Exit::Failed(err.to_string()),
     };
-    let group = child.id() as i32;
+    let group = crate::process::group_of(&child);
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -1169,35 +1169,15 @@ pub(super) fn shell_until(
         }
     };
     let Some(status) = status else {
-        kill_group(group, libc::SIGTERM);
-        let grace = Instant::now();
-        while grace.elapsed() < Duration::from_secs(2) {
-            if let Ok(Some(_)) = child.try_wait() {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        kill_group(group, libc::SIGKILL);
-        // Only reaps it after SIGKILL: how it ended is already known.
-        let _ = child.wait();
+        crate::process::stop_group(&mut child, Duration::from_secs(2));
         return Exit::TimedOut(timeout);
     };
     // What it left behind in the background.
-    kill_group(group, libc::SIGKILL);
+    crate::process::kill_group(group, libc::SIGKILL);
     match (status.code(), status.signal()) {
         (Some(code), _) => Exit::Code(code),
         (None, Some(signal)) => Exit::Code(128 + signal),
         (None, None) => Exit::Code(-1),
-    }
-}
-
-/// Send `signal` to every process of process group `group`.
-pub(super) fn kill_group(group: i32, signal: i32) {
-    if group > 0 {
-        // SAFETY: kill takes no pointers; a group already gone is ESRCH.
-        unsafe {
-            libc::kill(-group, signal);
-        }
     }
 }
 

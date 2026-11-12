@@ -11,12 +11,12 @@ use std::{
     os::unix::process::CommandExt,
     path::PathBuf,
     process::{Command, Stdio},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Gerdr, keep, launch, t3_agents::Server, toast::Level};
+use crate::{Gerdr, launch, process, t3_agents::Server, toast::Level};
 
 /// The name its log goes by (see `launch::log_path`).
 pub const LOG: &str = "t3";
@@ -36,7 +36,7 @@ const HOME_LOOK: Duration = Duration::from_secs(3);
 pub struct Started {
     /// Its process, which leads its session and process group.
     #[serde(flatten)]
-    pub process: keep::Process,
+    pub process: process::Process,
     /// Where it writes what it says.
     pub log: PathBuf,
     /// When it started, in seconds since 1970.
@@ -83,12 +83,6 @@ fn forget() {
     }
 }
 
-/// Seconds since 1970, now.
-pub fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
 
 /// The last line of the log at `path` that says something.
 pub fn last_log_line(path: &std::path::Path) -> Option<String> {
@@ -117,7 +111,12 @@ fn kill_later(target: i32) -> String {
 /// (as a negative pid), else its own process when it is a `t3`.
 fn target(server: Option<&Server>) -> Option<i32> {
     if let Some(started) = started() {
-        return i32::try_from(started.process.pid).ok().map(|pid| -pid);
+        // Never init's group, should the record say pid 1: `kill_later`
+        // signals it from a shell, without `kill_group`'s guard.
+        return i32::try_from(started.process.pid)
+            .ok()
+            .filter(|&pid| pid > 1)
+            .map(|pid| -pid);
     }
     let server = server.filter(|s| s.alive())?;
     if !crate::t3_update::is_t3(server.pid) {
@@ -125,6 +124,16 @@ fn target(server: Option<&Server>) -> Option<i32> {
         return None;
     }
     i32::try_from(server.pid).ok()
+}
+
+/// Send `signal` to `target`: the server's session gerdr started (a
+/// negative group id), or the server's process, checked to be t3's.
+fn signal(target: i32, signal: i32) {
+    if target < 0 {
+        process::kill_group(-target, signal);
+    } else {
+        process::kill_pid(target as u32, signal);
+    }
 }
 
 /// Whether what `target` signals still runs.
@@ -176,9 +185,9 @@ impl Gerdr {
                 let pid = child.id();
                 self.children.push(child);
                 write(&Started {
-                    process: keep::Process::new(pid),
+                    process: process::Process::new(pid),
                     log: log_path,
-                    at: now_secs(),
+                    at: crate::clock::now_secs(),
                 });
                 self.t3.started_at = Some(Instant::now());
                 self.look_at_kept();
@@ -261,9 +270,7 @@ impl Gerdr {
             return then(self);
         };
         self.t3.stopping = true;
-        // Safety: a signal to the server's session gerdr started, or to the
-        // server's process, checked to be t3's.
-        unsafe { libc::kill(target, libc::SIGTERM) };
+        signal(target, libc::SIGTERM);
         let asked_at = Instant::now();
         let mut then = Some(then);
         let wait = move |_, _: &mut (), state: &mut Gerdr| {
@@ -271,7 +278,7 @@ impl Gerdr {
                 if asked_at.elapsed() < STOP_TIME {
                     return TimeoutAction::ToDuration(STOP_POLL);
                 }
-                unsafe { libc::kill(target, libc::SIGKILL) };
+                signal(target, libc::SIGKILL);
             }
             state.t3_stopped();
             if let Some(then) = then.take() {
@@ -294,8 +301,7 @@ impl Gerdr {
         let Some(target) = target(server.as_ref()) else {
             return;
         };
-        // Safety: as in `stop_t3`.
-        unsafe { libc::kill(target, libc::SIGTERM) };
+        signal(target, libc::SIGTERM);
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
             .arg(kill_later(target))
@@ -399,7 +405,7 @@ mod tests {
     #[test]
     fn a_record_reads_back() {
         let started = Started {
-            process: keep::Process::new(std::process::id()),
+            process: process::Process::new(std::process::id()),
             log: "/tmp/t3.log".into(),
             at: 5,
         };
@@ -408,7 +414,7 @@ mod tests {
         assert_eq!(back, started);
         assert!(back.runs());
         let gone = Started {
-            process: keep::Process::new(u32::MAX - 1),
+            process: process::Process::new(u32::MAX - 1),
             ..started
         };
         assert!(!gone.runs());

@@ -6542,7 +6542,7 @@ fn review_sections(
 /// fix with the keyboard.
 fn tab_findings() -> super::FeatureTabView {
     use crate::feature::review_import::{Finding, FindingState, Severity};
-    use crate::review_cards::{Item, item_buttons, item_card};
+    use crate::review_cards::{CardPage, Item, item_buttons, item_card};
     let mut view = feature_tab();
     view.focus = super::TabArea::Findings;
     view.page.title = "AI review".into();
@@ -6613,7 +6613,11 @@ fn tab_findings() -> super::FeatureTabView {
     let mut made = Vec::new();
     for (i, f) in findings.iter().enumerate() {
         let item = Item::Finding(f);
-        let actions = item_buttons(item, true, false);
+        let on = CardPage {
+            decides: true,
+            posts: false,
+        };
+        let actions = item_buttons(item, on);
         let mut card = item_card(item, false, &actions, false);
         let at = view.page.buttons.len();
         (card.buttons.iter_mut().chain(&mut card.comment_buttons)).for_each(|b| *b += at);
@@ -6989,7 +6993,7 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
     // look. Opened as the fixture shows them, the rejected one closed.
     use crate::feature::plan_review::{Evidence, Kind, Placed, Source, State, Suggestion};
     use crate::feature::review_import::Severity;
-    use crate::review_cards::{Item, item_buttons, item_card};
+    use crate::review_cards::{CardPage, Item, item_buttons, item_card};
     let standing = |state| if writing { State::Accepted } else { state };
     let suggestion = |id: &str, severity, kind, plan: &str, title: &str, state| Suggestion {
         id: id.into(),
@@ -7084,7 +7088,11 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
     let mut cards = Vec::new();
     for s in &suggestions {
         let item = Item::Suggestion(s);
-        let actions = item_buttons(item, !writing, false);
+        let on = CardPage {
+            decides: !writing,
+            posts: false,
+        };
+        let actions = item_buttons(item, on);
         let mut card = item_card(item, false, &actions, false);
         let at = page.buttons.len();
         (card.buttons.iter_mut().chain(&mut card.comment_buttons)).for_each(|b| *b += at);

@@ -9,7 +9,7 @@
 
 use std::{
     path::{Path, PathBuf},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use crate::{Gerdr, desktop::shell_quote, menu::MenuAction};
@@ -201,11 +201,6 @@ fn to_offer(
         .collect()
 }
 
-/// Seconds since the epoch, now.
-pub(crate) fn now_secs() -> u64 {
-    (SystemTime::now().duration_since(UNIX_EPOCH)).map_or(0, |d| d.as_secs())
-}
-
 /// What the toast offering to add `reached` says.
 fn offer_text(reached: &Reached) -> String {
     let name = if reached.name.is_empty() { "Another machine" } else { &reached.name };
@@ -227,7 +222,7 @@ impl Gerdr {
         }
         let own = crate::machine_views::own_id();
         let known = known_ids(self);
-        for reached in to_offer(found, own.as_deref(), &known, now_secs()) {
+        for reached in to_offer(found, own.as_deref(), &known, crate::clock::now_secs()) {
             mark_told(&dir, &reached.id);
             let action = MenuAction::AddMachineFrom {
                 target: reached.target(),
@@ -313,7 +308,7 @@ mod tests {
         assert_eq!(found.len(), 2);
         assert_eq!((found[0].0.target().as_str(), found[0].1), ("ana@1.2.3.4", false));
         assert_eq!((found[1].0.name.as_str(), found[1].1), ("desk", true));
-        assert!(found[0].0.around(now_secs()));
+        assert!(found[0].0.around(crate::clock::now_secs()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

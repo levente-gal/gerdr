@@ -321,17 +321,8 @@ fn lock_holder(dir: &Path) -> Option<u32> {
 
 /// When process `pid` started, from `/proc`.
 fn started(pid: u32) -> Option<SystemTime> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // Its name, in parentheses, may hold spaces: the fields after it
-    // start at the 3rd, and the start time is the 22nd, in clock ticks
-    // since boot.
-    let ticks: u64 = stat
-        .rsplit_once(')')?
-        .1
-        .split_whitespace()
-        .nth(22 - 3)?
-        .parse()
-        .ok()?;
+    // In clock ticks since boot.
+    let ticks = crate::process::start_time(pid)?;
     let booted: u64 = std::fs::read_to_string("/proc/stat")
         .ok()?
         .lines()
@@ -583,8 +574,13 @@ fn swap(source: &Source, new: &Path) -> std::io::Result<Option<PathBuf>> {
     let aside = suffixed(to, &format!(".before-import-{}", stamp()));
     std::fs::rename(to, &aside)?;
     if let Err(err) = std::fs::rename(new, to) {
-        let _ = std::fs::rename(&aside, to);
-        return Err(err);
+        return Err(match std::fs::rename(&aside, to) {
+            Ok(()) => err,
+            Err(back) => std::io::Error::other(format!(
+                "{err}; the old profile is kept as {}: {back}",
+                aside.display()
+            )),
+        });
     }
     Ok(Some(aside))
 }
@@ -604,7 +600,7 @@ fn stamp() -> String {
         let now = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
         if libc::localtime_r(&now, &mut tm).is_null() {
-            return crate::projects::now().to_string();
+            return crate::clock::now_secs().to_string();
         }
         tm
     };

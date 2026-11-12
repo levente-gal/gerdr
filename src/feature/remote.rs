@@ -616,9 +616,13 @@ impl Look {
 }
 
 /// The script sending `signal` (a name, like `TERM`) to process group `group`
-/// there. One gone is fine: what is wanted of it is that it ended.
+/// there. One gone is fine: what is wanted of it is that it ended. Groups 0
+/// and 1 are never meant: the script then does nothing.
 pub fn kill_group_script(group: i32, signal: &str) -> String {
-    format!("kill -s {signal} -- -{group} 2>/dev/null\nexit 0\n")
+    match group > 1 {
+        true => format!("kill -s {signal} -- -{group} 2>/dev/null\nexit 0\n"),
+        false => "exit 0\n".to_owned(),
+    }
 }
 
 /// `kill_group_script`, for the group process `pid` is in: its shell's job.
@@ -911,13 +915,10 @@ impl Reach {
     }
 
     fn git(&self, dir: &Path) -> Command {
-        let mut git = Command::new("git");
-        for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
-            git.env_remove(var);
-        }
-        git.env("GIT_SSH_COMMAND", self.ssh_line())
-            .arg("-C")
-            .arg(dir);
+        let mut git = crate::git::command(dir, &[]);
+        // Some of them merge: those take index.lock.
+        git.env_remove("GIT_OPTIONAL_LOCKS")
+            .env("GIT_SSH_COMMAND", self.ssh_line());
         git
     }
 
@@ -1340,6 +1341,14 @@ impl Reach {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_kill_script_never_names_group_0_or_1() {
+        for group in [-1, 0, 1] {
+            assert!(!kill_group_script(group, "KILL").contains("kill"));
+        }
+        assert!(kill_group_script(42, "TERM").contains("-- -42"));
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn sh_c(script: &str) -> std::process::Output {

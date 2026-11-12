@@ -223,7 +223,9 @@ fn wait(watches: &mut HashMap<String, Watch>, timeout: Duration) -> Vec<String> 
         if fd.revents == 0 {
             continue;
         }
-        let watch = watches.get_mut(id).unwrap();
+        let Some(watch) = watches.get_mut(id) else {
+            continue;
+        };
         match watch.doorbell.as_mut().map(OutputWatch::read) {
             Some(Ok(0)) | None => {}
             Some(Ok(_)) => rung.push(id.clone()),

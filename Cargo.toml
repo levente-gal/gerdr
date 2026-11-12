@@ -33,3 +33,7 @@ serde_norway = "0.9.42"
 inherits = "release"
 lto = "off"
 incremental = true
+
+[lints.clippy]
+# A panic on the event loop ends the compositor and every app it hosts.
+unwrap_used = "warn"

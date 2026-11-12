@@ -2344,7 +2344,7 @@ impl crate::Gerdr {
                     // At the app's host: `t3 pair` names its own.
                     let pairing = token_in_query(&at_origin(&pairing, &origin));
                     if let Some(marker) = &marker
-                        && let Err(err) = std::fs::write(marker, &origin)
+                        && let Err(err) = crate::projects::write_atomic(marker, origin.as_bytes())
                     {
                         tracing::warn!("{}: {err}", marker.display());
                     }

@@ -1994,6 +1994,15 @@ fn ctx<'a>(
     }
 }
 
+/// How a click on the worktree's diff came.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DiffClick {
+    /// The second of a double click.
+    pub(crate) double: bool,
+    pub(crate) shift: bool,
+    pub(crate) ctrl: bool,
+}
+
 impl crate::Gerdr {
     /// The diff on show: the keys, clicks and views of the panel act on
     /// it.
@@ -2128,7 +2137,7 @@ impl crate::Gerdr {
     fn worktree_reviews(&mut self) -> &mut crate::review::Worktrees {
         if self.repos.worktree_reviews.is_none() {
             let mut reviews = crate::review::load_worktrees(None);
-            if reviews.prune(crate::projects::now(), Path::is_dir) {
+            if reviews.prune(crate::clock::now_secs(), Path::is_dir) {
                 self.save_worktree_reviews(&reviews);
             }
             self.repos.worktree_reviews = Some(reviews);
@@ -2167,7 +2176,7 @@ impl crate::Gerdr {
         };
         wd.diff.review_dirty = false;
         let (root, branch, review) = (wd.root.clone(), wd.branch.clone(), wd.diff.review.clone());
-        let now = crate::projects::now();
+        let now = crate::clock::now_secs();
         let reviews = self.worktree_reviews();
         reviews.put(&root, branch.as_deref(), &review, now);
         reviews.prune(now, Path::is_dir);
@@ -2541,17 +2550,15 @@ impl crate::Gerdr {
         self.worktree_done(done)
     }
 
-    /// A click on `hit` in the worktree's diff, the second of a double
-    /// click when `double`: the press, held, drags the cursor's range.
-    /// With Shift it reaches the range there; with Ctrl it opens the code
-    /// there in Zed.
-    pub(crate) fn worktree_diff_hit(
-        &mut self,
-        hit: ReposHit,
-        double: bool,
-        shift: bool,
-        ctrl: bool,
-    ) {
+    /// A `click` on `hit` in the worktree's diff: the press, held, drags
+    /// the cursor's range. With Shift it reaches the range there; with
+    /// Ctrl it opens the code there in Zed.
+    pub(crate) fn worktree_diff_hit(&mut self, hit: ReposHit, click: DiffClick) {
+        let DiffClick {
+            double,
+            shift,
+            ctrl,
+        } = click;
         let env = self.worktree_env();
         let count = self.press_count.max(1);
         let Some(wd) = self.wd_mut() else {

@@ -1168,11 +1168,8 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
-            .args(args)
+        let out = crate::git::command(dir, args)
+            .env_remove("GIT_OPTIONAL_LOCKS")
             .output()
             .unwrap();
         assert!(out.status.success(), "{args:?}: {out:?}");

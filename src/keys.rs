@@ -1129,7 +1129,10 @@ fn help(prefix: Chord, bindings: &[(Chord, usize)], reach: Reach) -> Help {
                     let label = if names.len() == 1 {
                         label
                     } else {
-                        ACTIONS.iter().find(|(n, ..)| n == name).unwrap().2
+                        ACTIONS
+                            .iter()
+                            .find(|(n, ..)| n == name)
+                            .map_or(label, |a| &a.2)
                     };
                     presses.push(vec![press(name); keys.len()]);
                     rows.push((keys.join(" / "), label.to_string()));

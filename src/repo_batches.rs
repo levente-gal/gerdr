@@ -1085,7 +1085,12 @@ impl Gerdr {
         let shift = mods.is_some_and(|m| m.shift);
         let ctrl = mods.is_some_and(|m| m.ctrl && !m.shift);
         if self.wd().is_some() {
-            return self.worktree_diff_hit(hit, double, shift, ctrl);
+            let click = crate::worktree_diff::DiffClick {
+                double,
+                shift,
+                ctrl,
+            };
+            return self.worktree_diff_hit(hit, click);
         }
         let count = self.press_count.max(1);
         let page = self.repos_page();
@@ -1579,7 +1584,7 @@ impl Gerdr {
             return;
         };
         let layout = chrome::repos_layout(&view, self.repos_rect());
-        let pos = self.seat.get_pointer().unwrap().current_location();
+        let pos = self.pointer().current_location();
         let over_detail = layout.detail.to_f64().contains(pos);
         let over_menu = layout
             .branch_menu

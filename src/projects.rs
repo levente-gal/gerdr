@@ -13,7 +13,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::ErrorKind,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -1207,7 +1206,7 @@ impl Project {
         (1..)
             .map(|n| format!("g{n}"))
             .find(|id| self.workspaces.iter().all(|r| r.id != *id))
-            .unwrap()
+            .expect("only finitely many ids are taken")
     }
 
     /// Its record of herdr workspace `herdr_id`.
@@ -1395,7 +1394,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// What it did goes to the problems list (see `problems`): the user may
 /// want what was in it.
 pub(crate) fn set_aside(path: &Path) -> bool {
-    let bad = bad_name(path, now());
+    let bad = bad_name(path, crate::clock::now_secs());
     match std::fs::rename(path, &bad) {
         Ok(()) => {
             let name = bad.file_name().unwrap_or_default().to_string_lossy();
@@ -1832,24 +1831,6 @@ pub fn environ_whitelist(raw: &[u8]) -> Vec<(String, String)> {
     vars
 }
 
-/// How long ago `then` was, for people: "just now", "5m ago", "3h ago",
-/// "yesterday", "4d ago", …
-pub fn ago(now: u64, then: u64) -> String {
-    const MINUTE: u64 = 60;
-    const HOUR: u64 = 60 * MINUTE;
-    const DAY: u64 = 24 * HOUR;
-    // A clock set back puts `then` in the future.
-    match now.saturating_sub(then) {
-        s if s < MINUTE => "just now".to_owned(),
-        s if s < HOUR => format!("{}m ago", s / MINUTE),
-        s if s < DAY => format!("{}h ago", s / HOUR),
-        s if s < 2 * DAY => "yesterday".to_owned(),
-        s if s < 7 * DAY => format!("{}d ago", s / DAY),
-        s if s < 35 * DAY => format!("{}w ago", s / (7 * DAY)),
-        s => format!("{}mo ago", s / (30 * DAY)),
-    }
-}
-
 /// The notice on switching to project `new` (just made, if `created`)
 /// from project `old`, which keeps running.
 pub fn switch_notice(new: &str, old: &str, created: bool) -> String {
@@ -1899,13 +1880,6 @@ pub fn local_hour() -> u32 {
     }
 }
 
-/// Unix seconds now.
-pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
 /// The project made of the session gerdr used before it had projects
 /// (`gerdr`): its workspaces from the running server's metadata (`live`),
 /// else from its saved `session.json`. `None` if neither has any.
@@ -1919,7 +1893,7 @@ pub fn migrate(
     let workspaces = from_live
         .or_else(|| session_json.map(saved_records))
         .filter(|records| !records.is_empty())?;
-    let now = now();
+    let now = crate::clock::now_secs();
     Some(Project {
         id: LEGACY.to_owned(),
         name: LEGACY.to_owned(),
@@ -3345,9 +3319,9 @@ MISE_VERSION=x\0MISE_PYTHON_VERSION=3.12=rc\0HOME=/home/me\0garbage\0";
             (90 * 86400, "3mo ago"),
         ];
         for (secs, text) in cases {
-            assert_eq!(ago(now, now - secs), text, "{secs}s");
+            assert_eq!(crate::clock::ago(now, now - secs), text, "{secs}s");
         }
-        assert_eq!(ago(now, now + 500), "just now");
+        assert_eq!(crate::clock::ago(now, now + 500), "just now");
     }
 
     #[test]
@@ -3362,7 +3336,6 @@ MISE_VERSION=x\0MISE_PYTHON_VERSION=3.12=rc\0HOME=/home/me\0garbage\0";
         assert_eq!(greeting(23), "Burning the midnight oil");
         assert_eq!(greeting(0), "Burning the midnight oil");
         assert!(local_hour() < 24);
-        assert!(now() > 1_700_000_000);
     }
 
     #[test]

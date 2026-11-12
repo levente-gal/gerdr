@@ -18,6 +18,14 @@ pub fn tilde(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
+/// The last part of folder `path`; all of it when it has none (`/`).
+pub fn folder_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
 /// `path` as the chrome shows it: from the home folder `home` as `~`, and
 /// at most `max_chars` long when that is possible without cutting into a
 /// folder's name: the folders in the middle give way to "…", the start and

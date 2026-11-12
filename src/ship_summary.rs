@@ -13,7 +13,7 @@ use crate::{
         agents::{command_line, with_prompt},
         store,
     },
-    feature_agents::vars,
+    feature_agents::{vars, write_prompt},
     prompts,
 };
 
@@ -65,7 +65,6 @@ impl Gerdr {
         };
         let data = store::dir(None, project, slug);
         let n = feature.shipping.summary.as_ref().map_or(1, |run| run.n + 1);
-        let prompt = data.join("prompts").join(format!("summary-{n}.md"));
         let names = self.projects.names(&feature);
         let mut values = vars(&feature, &names, &data, Stage::Ship);
         values.insert(
@@ -77,11 +76,11 @@ impl Gerdr {
             Ok(text) => text,
             Err(err) => return say(self, format!("its prompt couldn't be written: {err}")),
         };
-        let written = std::fs::create_dir_all(data.join("prompts"))
-            .and_then(|()| std::fs::write(&prompt, text));
-        if let Err(err) = written {
-            return say(self, format!("couldn't write {}: {err}", prompt.display()));
-        }
+        let prompt = match write_prompt(&data, &format!("summary-{n}.md"), &text) {
+            Ok(prompt) => prompt,
+            // It follows "Couldn't write the summary of …: ".
+            Err(why) => return say(self, why.replacen("Couldn't", "couldn't", 1)),
+        };
         let line = command_line(&base, &prompt, &feature.agent_dirs_for(&base, &data));
         let start = format!("Read {} and follow it.", prompt.display());
         let command = with_prompt(&line, &start);

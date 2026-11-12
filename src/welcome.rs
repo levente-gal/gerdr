@@ -482,12 +482,7 @@ impl Gerdr {
         if view.confirm_forget == Some(i) {
             return None;
         }
-        let layout = chrome::welcome_layout(
-            size,
-            view.rows.len(),
-            view.naming.is_some(),
-            view.note.is_some(),
-        );
+        let layout = chrome::welcome_layout(size, chrome::WelcomeParts::of(&view));
         let mark = chrome::welcome_mark(*layout.rows.get(i)?);
         let running = view.rows.get(i)?.running;
         mark.to_f64()
@@ -539,12 +534,7 @@ impl Gerdr {
     /// The welcome screen's scrollbar, while not all its projects show.
     pub(crate) fn welcome_thumb(&self) -> Option<chrome::Thumb> {
         let view = self.welcome_view()?;
-        let layout = chrome::welcome_layout(
-            self.output_size(),
-            view.rows.len(),
-            view.naming.is_some(),
-            view.note.is_some(),
-        );
+        let layout = chrome::welcome_layout(self.output_size(), chrome::WelcomeParts::of(&view));
         chrome::welcome_thumb(&view, &layout)
     }
 
@@ -570,9 +560,12 @@ fn welcome_hit(
     page: usize,
     pos: Point<f64, Logical>,
 ) -> Option<WelcomeHit> {
-    let shown = welcome.shown(page).len();
-    let layout =
-        chrome::welcome_layout(size, shown, welcome.naming.is_some(), welcome.herdr_missing);
+    let parts = chrome::WelcomeParts {
+        rows: welcome.shown(page).len(),
+        naming: welcome.naming.is_some(),
+        note: welcome.herdr_missing,
+    };
+    let layout = chrome::welcome_layout(size, parts);
     if let Some(row) = layout.rows.iter().position(|r| r.to_f64().contains(pos)) {
         return Some(WelcomeHit::Row(row));
     }

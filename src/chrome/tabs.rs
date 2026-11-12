@@ -85,7 +85,7 @@ impl TabView {
         let title = label
             .map(str::to_owned)
             .or_else(|| focused.and_then(|p| foreground_program(p, agents)))
-            .or_else(|| focused.and_then(folder_name))
+            .or_else(|| focused.and_then(pane_folder))
             .or_else(|| window_title(window))
             .unwrap_or_else(|| "terminal".into());
         let status = (tab.agent_status != AgentStatus::Unknown).then_some(tab.agent_status);
@@ -217,7 +217,7 @@ fn program_name(process: &Process) -> String {
 }
 
 /// The name of the folder pane `p` is in: "~" for home.
-fn folder_name(p: &PaneState) -> Option<String> {
+fn pane_folder(p: &PaneState) -> Option<String> {
     let path = p.cwd.as_deref().or(p.foreground_cwd.as_deref())?;
     if crate::home_dir().is_some_and(|home| home == path) {
         return Some("~".into());
@@ -404,17 +404,15 @@ impl TabStripView {
     /// Where everything in it sits on a strip `size` big: the tabs that
     /// fit taking in the active one (see `tab_layout_at`).
     pub fn layout(&self, size: Size<i32, Logical>) -> TabLayout {
-        let mut layout = tab_layout_at(
-            self.tabs.len(),
-            self.active,
-            self.plus,
-            size,
-            self.prefix,
-            self.overflow(),
-            self.watch.is_some(),
-            self.inbox.is_some(),
-            self.problems.is_some(),
-        );
+        let parts = StripParts {
+            plus: self.plus,
+            prefix: self.prefix,
+            overflow: self.overflow(),
+            watch: self.watch.is_some(),
+            inbox: self.inbox.is_some(),
+            problems: self.problems.is_some(),
+        };
+        let mut layout = tab_layout_at(self.tabs.len(), self.active, size, parts);
         // A pinned tab can't close: no "×" to show or press.
         for (close, tab) in layout.closes.iter_mut().zip(&self.tabs) {
             if tab.pinned {
@@ -581,32 +579,56 @@ pub fn tab_layout(
     watch: bool,
     inbox: bool,
 ) -> TabLayout {
-    tab_layout_at(count, 0, true, size, prefix, overflow, watch, inbox, false)
+    let parts = StripParts {
+        plus: true,
+        prefix,
+        overflow,
+        watch,
+        inbox,
+        problems: false,
+    };
+    tab_layout_at(count, 0, size, parts)
+}
+
+/// What a tab strip shows besides its tabs, for `tab_layout_at`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StripParts {
+    /// The "+".
+    pub plus: bool,
+    /// The PREFIX badge.
+    pub prefix: bool,
+    /// The overflow chip.
+    pub overflow: bool,
+    /// The watch button.
+    pub watch: bool,
+    /// The inbox button, by the switch.
+    pub inbox: bool,
+    /// The problems button, left of the inbox button.
+    pub problems: bool,
 }
 
 /// The layout of a strip of `size` holding `count` tabs, `active` among
-/// them, with the "+" when `plus`, the PREFIX badge when `prefix`, the
-/// overflow chip when `overflow`, the watch button when `watch`, the
-/// inbox button, by the switch, when `inbox` and the problems button left
-/// of it when `problems`. The back and forward buttons keep the left
-/// end. The chips, the buttons and
+/// them, with the `parts` it shows. The back and forward buttons keep the
+/// left end. The chips, the buttons and
 /// the switch keep the right end, the PREFIX badge's room kept whether it
 /// shows or not, so it moves nothing; the tabs share what is left of the
 /// "+", at most `TAB_MAX_WIDTH` each. Past `TAB_MIN_WIDTH` each, those
 /// that fit show, taking in `active`, and the rest go behind the "more
 /// tabs" chip between them and the "+".
-#[allow(clippy::too_many_arguments)]
 pub fn tab_layout_at(
     count: usize,
     active: usize,
-    plus: bool,
     size: Size<i32, Logical>,
-    prefix: bool,
-    overflow: bool,
-    watch: bool,
-    inbox: bool,
-    problems: bool,
+    parts: StripParts,
 ) -> TabLayout {
+    let StripParts {
+        plus,
+        prefix,
+        overflow,
+        watch,
+        inbox,
+        problems,
+    } = parts;
     let (width, height) = (size.w, size.h);
     let top = (height - PILL) / 2;
     let toggle = Rectangle::new((width - EDGE - PILL, top).into(), (PILL, PILL).into());
@@ -1004,15 +1026,8 @@ impl Painter {
         }
 
         if let (Some(button), Some(watching)) = (layout.watch, view.watch) {
-            self.watch_button(
-                &mut c,
-                button,
-                watching,
-                lit(TabHit::Watch),
-                alpha,
-                scale,
-                p,
-            );
+            let glow = lit(TabHit::Watch).then_some(alpha);
+            self.watch_button(&mut c, button, watching, glow, scale, p);
         }
 
         if let (Some(button), Some(count)) = (layout.inbox, view.inbox) {
@@ -1043,40 +1058,36 @@ impl Painter {
 
     /// The button watching the CI of the pull request shown, at `rect`: an
     /// outlined pill saying "Watch CI", or while `watching` a filled one
-    /// saying "Watching"; lighter while `lit` (fading in by `alpha`).
-    #[allow(clippy::too_many_arguments)]
+    /// saying "Watching"; lighter while `lit`, fading in by its alpha.
     fn watch_button(
         &self,
         c: &mut Canvas,
         rect: Rect,
         watching: bool,
-        lit: bool,
-        alpha: f32,
+        lit: Option<f32>,
         scale: f64,
         p: &Palette,
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let (label, content) = if watching {
-            let fill = if lit {
-                mix(p.accent, p.text, 0.15 * alpha)
-            } else {
-                p.accent
+            let fill = match lit {
+                Some(alpha) => mix(p.accent, p.text, 0.15 * alpha),
+                None => p.accent,
             };
             self.pill(c, rect, PILL_RADIUS, fill, scale);
             ("Watching", p.on_accent)
         } else {
             let b = px(1).max(1) as f32;
-            let fill = if lit {
-                mix(p.tab_bar, p.element, alpha)
-            } else {
-                p.tab_bar
+            let fill = match lit {
+                Some(alpha) => mix(p.tab_bar, p.element, alpha),
+                None => p.tab_bar,
             };
             let (x, y, w, h) = super::rect_px(rect, scale);
             let r = PILL_RADIUS * s;
             c.rounded(x, y, w, h, r, p.border);
             c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
-            ("Watch CI", if lit { p.text } else { p.muted })
+            ("Watch CI", if lit.is_some() { p.text } else { p.muted })
         };
         // The eye and the label, centred together.
         let text_w = self.text_width(label, SMALL_FONT_SIZE, scale) / s;
@@ -1277,8 +1288,8 @@ pub fn tab_zoom_rect(view: &TabStripView, layout: &TabLayout, i: usize, h: i32) 
 #[cfg(test)]
 mod tests {
     use super::{
-        CHIP_GAP, CLOSE, EDGE, NAV_WIDTH, PILL, PLUS_GAP, TAB_MAX_WIDTH, TAB_MIN_WIDTH, TabHit,
-        TabStripView, TabView, WATCH_WIDTH, tab_blinkers, tab_layout, tab_layout_at,
+        CHIP_GAP, CLOSE, EDGE, NAV_WIDTH, PILL, PLUS_GAP, StripParts, TAB_MAX_WIDTH, TAB_MIN_WIDTH,
+        TabHit, TabStripView, TabView, WATCH_WIDTH, tab_blinkers, tab_layout, tab_layout_at,
         tab_rename_field, tab_slot, tab_strip_hit, tab_zoom_rect,
     };
     use crate::agent_icons::AgentIcon;
@@ -1576,15 +1587,19 @@ mod tests {
         let (x, y) = (none.plus.loc.x + 2, none.plus.loc.y + 2);
         assert_eq!(none.hit(x, y), Some(TabHit::Plus));
         assert_eq!(none.hit(size.w - EDGE - 2, 10), Some(TabHit::Toggle));
-        let bare = tab_layout_at(0, 0, false, size, false, false, false, false, false);
+        let bare = tab_layout_at(0, 0, size, StripParts::default());
         assert_eq!(bare.hit(x, y), None);
     }
 
     #[test]
     fn tabs_that_dont_fit_go_behind_the_more_chip_but_the_active_one() {
         let size = (400, 36).into();
+        let plus = StripParts {
+            plus: true,
+            ..StripParts::default()
+        };
         for active in [0, 1, 7, 19] {
-            let l = tab_layout_at(20, active, true, size, false, false, false, false, false);
+            let l = tab_layout_at(20, active, size, plus);
             let shown: Vec<usize> = (0..20).filter(|&i| l.tabs[i].size.w > 0).collect();
             assert!(!shown.is_empty() && shown.contains(&active), "{active}");
             assert_eq!(l.hidden().len(), 20 - shown.len());

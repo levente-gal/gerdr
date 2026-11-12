@@ -366,14 +366,6 @@ fn check_outcome(o: &crate::feature::verify::Outcome) -> Outcome {
     }
 }
 
-pub(crate) fn took(took: Duration) -> String {
-    let s = took.as_secs();
-    match s {
-        s if s < 60 => format!("{s}s"),
-        s if s < 3600 => format!("{}m {}s", s / 60, s % 60),
-        s => format!("{}h {}m", s / 3600, s / 60 % 60),
-    }
-}
 
 impl TestRun {
     /// Working while it runs; done once finished, until seen, then idle.
@@ -408,7 +400,7 @@ impl TestRun {
                     .clone()
                     .or(self.finished_word().map(str::to_owned))
                     .unwrap_or_default();
-                format!("{how} · {}", took(outcome.took))
+                format!("{how} · {}", crate::clock::took(outcome.took))
             }
         }
     }

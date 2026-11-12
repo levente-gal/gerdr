@@ -32,10 +32,7 @@
 //! a later run leaves out stays, marked `dropped`: what the user accepted
 //! isn't lost to a rewrite. The user's own suggestions are never touched.
 
-use std::{
-    collections::BTreeSet,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,7 +40,7 @@ use serde_json::Value;
 use super::{
     agents::StageRun,
     review_import::{Severity, clean, own_text, quoted},
-    review_items::{self, ItemOf, Standing},
+    review_items::{self, ItemOf, RunItem, Standing, merge_run},
 };
 
 /// The file the reviewer writes, in the feature data dir.
@@ -540,35 +537,33 @@ pub struct Imported {
 /// - an earlier one of the reviewer's not raised again stays, `dropped`;
 /// - the user's own are left alone.
 pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
-    let mut out = Imported::default();
-    let before = review.suggestions.len();
-    let mut raised: BTreeSet<String> = BTreeSet::new();
-    let mut k = 0;
-    for raw in raws {
-        let norm = |t: &str| {
-            t.split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_lowercase()
-        };
-        let earlier = (raw.id.as_ref())
-            .filter(|id| !raised.contains(*id))
-            .and_then(|id| {
-                review.suggestions[..before]
-                    .iter()
-                    .position(|s| s.id == *id && s.source == Source::Reviewer)
-            })
-            // A repeat with no id, by its title: it keeps the earlier decision.
-            .or_else(|| {
-                review.suggestions[..before].iter().position(|s| {
-                    s.source == Source::Reviewer
-                        && !raised.contains(&s.id)
-                        && norm(&s.title) == norm(&raw.title)
+    let norm = |t: &str| {
+        t.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let mut dropped = 0;
+    let merged = merge_run(
+        &mut review.suggestions,
+        run,
+        raws,
+        |earlier, raw, raised| {
+            (raw.id.as_ref())
+                .filter(|id| !raised.contains(*id))
+                .and_then(|id| {
+                    (earlier.iter()).position(|s| s.id == *id && s.source == Source::Reviewer)
                 })
-            });
-        if let Some(i) = earlier {
-            let s = &mut review.suggestions[i];
-            raised.insert(s.id.clone());
+                // A repeat with no id, by its title: it keeps the earlier decision.
+                .or_else(|| {
+                    earlier.iter().position(|s| {
+                        s.source == Source::Reviewer
+                            && !raised.contains(&s.id)
+                            && norm(&s.title) == norm(&raw.title)
+                    })
+                })
+        },
+        |s, raw| {
             let yours = !s.note.is_empty() || s.my_change.is_some();
             if yours && raw.title.trim() != s.title.trim() {
                 s.yours_earlier = true;
@@ -583,19 +578,8 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
             s.placed = None;
             s.run = run;
             s.dropped = false;
-            out.again += 1;
-            out.ids.push(s.id.clone());
-            continue;
-        }
-        let id = loop {
-            k += 1;
-            let id = format!("r{run}-{k}");
-            if review.suggestion(&id).is_none() {
-                break id;
-            }
-        };
-        out.ids.push(id.clone());
-        review.suggestions.push(Suggestion {
+        },
+        |id, raw| Suggestion {
             id,
             severity: raw.severity,
             kind: raw.kind,
@@ -607,20 +591,34 @@ pub fn import(review: &mut PlanReview, run: u32, raws: Vec<Raw>) -> Imported {
             plan_quote: raw.plan_quote,
             run,
             ..Suggestion::default()
-        });
-        out.new += 1;
-    }
-    for s in &mut review.suggestions[..before] {
-        if s.source == Source::Reviewer && !raised.contains(&s.id) {
-            if !s.dropped {
-                out.dropped += 1;
+        },
+        |s, raised| {
+            if s.source == Source::Reviewer && !raised {
+                if !s.dropped {
+                    dropped += 1;
+                }
+                s.dropped = true;
             }
-            s.dropped = true;
-        }
-    }
+        },
+    );
     review.n = run;
     review.asked = false;
-    out
+    Imported {
+        new: merged.new,
+        again: merged.again,
+        dropped,
+        ids: merged.ids,
+    }
+}
+
+impl RunItem for Suggestion {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn own(&self) -> bool {
+        self.source == Source::You
+    }
 }
 
 /// What the user decides of a suggestion.

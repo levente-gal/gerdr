@@ -10,6 +10,8 @@
 //! The decide keys speak `review_import::Decision` for both: Fix is accept,
 //! Dismiss is reject, Reopen is clear.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use super::review_import::{Decision, FIXED, FindingState, POSTED, SENT, Severity};
@@ -280,11 +282,132 @@ pub fn note_editable(of: ItemOf, id: &str, standing: Standing) -> Result<(), Str
     }
 }
 
+/// An item a reviewer run reads into (`merge_run`).
+pub trait RunItem {
+    fn id(&self) -> &str;
+    /// Whether it is the user's: they wrote it, or it went out (posted to
+    /// GitHub). The reviewer never rewords one.
+    fn own(&self) -> bool;
+}
+
+/// What `merge_run` did.
+#[derive(Debug, Default)]
+pub struct Merged {
+    /// Raised for the first time.
+    pub new: usize,
+    /// Earlier ones the reviewer raised again and reworded.
+    pub again: usize,
+    /// The ids it raised, new and reworded, in its order.
+    pub ids: Vec<String>,
+    /// Earlier ones raised again, reworded or the user's.
+    pub raised: BTreeSet<String>,
+}
+
+/// Read run `run`'s `raws` into `items`, which a stage keeps in its own
+/// record:
+///
+/// - `earlier` finds the earlier item a raw raises again, of those there
+///   before the run and given the ones raised so far (it must skip those);
+/// - one of the user's own (`own`) keeps its words and the raw goes in as a
+///   new item; any other is reworded (`reword`);
+/// - every other raw is new (`new`), its id `r<run>-<k>`;
+/// - `settle` then takes each earlier item, with whether the run raised it
+///   again.
+pub fn merge_run<T: RunItem, R>(
+    items: &mut Vec<T>,
+    run: u32,
+    raws: impl IntoIterator<Item = R>,
+    earlier: impl Fn(&[T], &R, &BTreeSet<String>) -> Option<usize>,
+    mut reword: impl FnMut(&mut T, R),
+    mut new: impl FnMut(String, R) -> T,
+    mut settle: impl FnMut(&mut T, bool),
+) -> Merged {
+    let mut out = Merged::default();
+    let before = items.len();
+    let mut k = 0;
+    for raw in raws {
+        let i = earlier(&items[..before], &raw, &out.raised);
+        if let Some(i) = i {
+            out.raised.insert(items[i].id().to_owned());
+        }
+        if let Some(t) = i.map(|i| &mut items[i]).filter(|t| !t.own()) {
+            out.ids.push(t.id().to_owned());
+            reword(t, raw);
+            out.again += 1;
+            continue;
+        }
+        let id = loop {
+            k += 1;
+            let id = format!("r{run}-{k}");
+            if !items.iter().any(|t| t.id() == id) {
+                break id;
+            }
+        };
+        out.ids.push(id.clone());
+        items.push(new(id, raw));
+        out.new += 1;
+    }
+    for t in &mut items[..before] {
+        settle(t, out.raised.contains(t.id()));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const BOTH: [ItemOf; 2] = [ItemOf::Finding, ItemOf::Suggestion];
+
+    /// An item of id, words and whether it is the user's.
+    struct Item(String, String, bool);
+
+    impl RunItem for Item {
+        fn id(&self) -> &str {
+            &self.0
+        }
+
+        fn own(&self) -> bool {
+            self.2
+        }
+    }
+
+    #[test]
+    fn a_run_never_rewords_the_users_own_and_settles_the_rest() {
+        let mut items = vec![
+            Item("u1".into(), "mine".into(), true),
+            Item("r1-1".into(), "old".into(), false),
+            Item("r1-2".into(), "gone".into(), false),
+        ];
+        let raws = [("u1", "theirs"), ("r1-1", "reworded"), ("r1-1", "twice")];
+        let mut settled = Vec::new();
+        let got = merge_run(
+            &mut items,
+            2,
+            raws,
+            |earlier, (id, _), raised| {
+                (earlier.iter()).position(|t| t.0 == *id && !raised.contains(*id))
+            },
+            |t, (_, words)| t.1 = words.into(),
+            |id, (_, words)| Item(id, words.into(), false),
+            |t, raised| settled.push((t.0.clone(), raised)),
+        );
+        let words: Vec<_> = items.iter().map(|t| (&*t.0, &*t.1)).collect();
+        assert_eq!(
+            words,
+            [
+                ("u1", "mine"),
+                ("r1-1", "reworded"),
+                ("r1-2", "gone"),
+                ("r2-1", "theirs"),
+                ("r2-2", "twice")
+            ]
+        );
+        assert_eq!((got.new, got.again), (2, 1));
+        assert_eq!(got.ids, ["r2-1", "r1-1", "r2-2"]);
+        let raised = |id: &str| (id.to_owned(), id != "r1-2");
+        assert_eq!(settled, [raised("u1"), raised("r1-1"), raised("r1-2")]);
+    }
 
     #[test]
     fn each_kind_has_its_own_words() {

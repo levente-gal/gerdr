@@ -738,6 +738,24 @@ pub fn project_menu_field(
     })
 }
 
+/// What the project menu's frame shows of the entries it leaves out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameOf {
+    /// None is listed: "Nothing matches".
+    empty: bool,
+    /// One is being renamed: the query field isn't focused.
+    renaming: bool,
+}
+
+impl FrameOf {
+    fn of(view: &ProjectMenuView) -> Self {
+        Self {
+            empty: view.entries.is_empty(),
+            renaming: renaming(view),
+        }
+    }
+}
+
 /// Whether an entry of `view` is being renamed.
 fn renaming(view: &ProjectMenuView) -> bool {
     view.entries.iter().any(|e| {
@@ -782,8 +800,7 @@ impl Painter {
         p: &Palette,
     ) -> MemoryRenderBuffer {
         let layout = project_menu_layout(view, size);
-        let empty = view.entries.is_empty();
-        let mut c = self.project_menu_frame(view, &layout, empty, renaming(view), scale, p);
+        let mut c = self.project_menu_frame(view, &layout, FrameOf::of(view), scale, p);
         if layout.form.is_some() || layout.settings.is_some() {
             return c.into_buffer(false);
         }
@@ -814,17 +831,18 @@ impl Painter {
 
     /// The project menu laid out as `layout` but its entries, inside a
     /// margin of `SHADOW` holding its drop shadow: the query field of
-    /// `view` (focused unless an entry is `renaming`), "Nothing matches"
-    /// when `empty`, or the form under its title; then the key hints.
+    /// `view` (focused unless an entry is being renamed), "Nothing matches"
+    /// when none is listed, as `of` says, or the form under its title; then
+    /// the key hints.
     fn project_menu_frame(
         &self,
         view: &ProjectMenuView,
         layout: &ProjectMenuLayout,
-        empty: bool,
-        renaming: bool,
+        of: FrameOf,
         scale: f64,
         p: &Palette,
     ) -> Canvas {
+        let FrameOf { empty, renaming } = of;
         let panel = layout.panel;
         let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let px = |v: i32| (v as f64 * scale).round() as i32;
@@ -1416,13 +1434,12 @@ impl Painter {
 }
 
 /// What the project menu's frame is drawn from: its view without the
-/// entries and what only they show, its layout without them, whether there
-/// are none, whether one is renamed, the theme and the scale.
+/// entries and what only they show, its layout without them, what it shows
+/// of them, the theme and the scale.
 type FrameKey = (
     ProjectMenuView,
     ProjectMenuLayout,
-    bool,
-    bool,
+    FrameOf,
     super::Theme,
     f64,
 );
@@ -1482,25 +1499,18 @@ impl ProjectMenuLayers {
                 ..layout.clone()
             };
             let (loc, size) = super::shadowed(layout.panel);
-            let key = (
-                still,
-                frame,
-                view.entries.is_empty(),
-                renaming(view),
-                theme,
-                scale,
-            );
+            let key = (still, frame, FrameOf::of(view), theme, scale);
             (key, loc, size)
         });
         let parts = self.overlay.parts(
             placed,
             now,
             true,
-            |(view, layout, empty, renaming, ..)| {
+            |(view, layout, of, ..)| {
                 #[cfg(test)]
                 self.frames.set(self.frames.get() + 1);
                 painter
-                    .project_menu_frame(view, layout, *empty, *renaming, scale, theme.palette())
+                    .project_menu_frame(view, layout, *of, scale, theme.palette())
                     .into_buffer(false)
             },
             |_| {

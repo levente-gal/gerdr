@@ -643,7 +643,7 @@ impl Gerdr {
             return;
         };
         let layout = chrome::finding_dialog_layout(&view, size);
-        let shift = self.seat.get_keyboard().unwrap().modifier_state().shift;
+        let shift = self.keyboard().modifier_state().shift;
         let Some(dialog) = self.features.finding_dialog.as_mut() else {
             return;
         };

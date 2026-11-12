@@ -188,12 +188,7 @@ pub fn server_log() -> PathBuf {
 
 /// The last line with anything on it in `log`, if any.
 fn last_line(log: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(log).ok()?;
-    text.lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_owned)
+    crate::text::last_line(&std::fs::read_to_string(log).ok()?).map(str::to_owned)
 }
 
 /// The server log, open for appending; started over once too big.
@@ -761,8 +756,8 @@ impl Herdr {
         stream
             .set_write_timeout(Some(self.timeout))
             .map_err(|e| fail(&e))?;
-        let mut line =
-            serde_json::to_vec(&json!({"id": id, "method": method, "params": params})).unwrap();
+        let mut line = serde_json::to_vec(&json!({"id": id, "method": method, "params": params}))
+            .expect("a JSON value always serialises");
         line.push(b'\n');
         stream.write_all(&line).map_err(|e| fail(&e))?;
         let mut reply = String::new();
@@ -804,10 +799,10 @@ impl Herdr {
         let mut tokens = json!({KIND_TOKEN: if project { "project" } else { "terminal" }});
         let mut pieces = vec![String::new()];
         for c in dir.to_string_lossy().chars() {
-            if pieces.last().unwrap().len() + c.len_utf8() > TOKEN_MAX {
-                pieces.push(String::new());
+            match pieces.last_mut() {
+                Some(last) if last.len() + c.len_utf8() <= TOKEN_MAX => last.push(c),
+                _ => pieces.push(c.to_string()),
             }
-            pieces.last_mut().unwrap().push(c);
         }
         for (i, piece) in pieces.into_iter().enumerate() {
             tokens[format!("{DIR_TOKEN}{i}")] = piece.into();

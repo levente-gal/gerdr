@@ -73,9 +73,15 @@ pub fn open_append(path: &Path) -> io::Result<File> {
 
 /// Write `bytes` to `path` whole or not at all: to a file beside it, then
 /// renamed over it. A new file is made 0600, its folders 0700; one replaced
-/// keeps its mode (a config the user made readable, say).
+/// keeps its mode (a config the user made readable, say). A symlink is
+/// written at its target and stays a link; a dangling one is replaced.
 pub fn atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     static N: AtomicU64 = AtomicU64::new(0);
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::canonicalize(path).ok(),
+        _ => None,
+    };
+    let path = target.as_deref().unwrap_or(path);
     let parent = path.parent().unwrap_or(Path::new("."));
     make_dir(parent)?;
     let name = path
@@ -179,6 +185,24 @@ pub fn write_marks(dir: &Path, marks: &Marks) -> io::Result<()> {
 
 #[cfg(test)]
 pub(super) mod tests {
+
+    #[test]
+    fn a_symlink_is_written_at_its_target() {
+        let dir = std::env::temp_dir().join(format!("gerdr-atomic-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("real"), "old").unwrap();
+        std::os::unix::fs::symlink("real", dir.join("link")).unwrap();
+        super::atomic(&dir.join("link"), b"new").unwrap();
+        assert!(
+            std::fs::symlink_metadata(dir.join("link"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(dir.join("real")).unwrap(), "new");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     use std::os::unix::fs::PermissionsExt as _;
 
     use super::*;

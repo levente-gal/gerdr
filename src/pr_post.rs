@@ -6,7 +6,7 @@
 //! goes over the new code from Verify on (`pr_watch`), what was posted kept
 //! as posted, and a later review posts only what is new.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::{
     Gerdr,
@@ -666,9 +666,10 @@ fn refused_lines(why: &str) -> bool {
 }
 
 /// Write `payload` to `file`.
-fn write(file: &PathBuf, payload: &serde_json::Value) -> Result<(), String> {
+fn write(file: &Path, payload: &serde_json::Value) -> Result<(), String> {
     let text = serde_json::to_string_pretty(payload).map_err(|err| err.to_string())?;
-    std::fs::write(file, text).map_err(|err| format!("couldn't write {}: {err}", file.display()))
+    crate::projects::write_atomic(file, text.as_bytes())
+        .map_err(|err| format!("couldn't write {}: {err}", file.display()))
 }
 
 /// Push `dir`'s HEAD to `pull`'s branch, only while GitHub's is at the head
@@ -709,17 +710,8 @@ const GIT_TIME: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// What `git args` in `dir` prints, or why it failed.
 fn run_git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let mut command = std::process::Command::new("git");
-    command
-        .args(args)
-        .current_dir(dir)
-        .env("GIT_TERMINAL_PROMPT", "0");
-    #[cfg(test)]
-    command
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1");
     // A push stuck on the network is stopped, its group with it.
-    let out = crate::t3_update::output_within(command, GIT_TIME)
+    let out = crate::t3_update::output_within(crate::git::command(dir, args), GIT_TIME)
         .map_err(|err| format!("git {}: {err}", args[0]))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
