@@ -122,8 +122,8 @@ impl Bridge {
     /// End the bridge, and with it the X server and its apps.
     pub fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            // Safety: signals the process group gerdr started for the bridge.
-            unsafe { libc::kill(-(child.id() as i32), libc::SIGTERM) };
+            // The process group gerdr started for the bridge.
+            crate::process::kill_group(crate::process::group_of(&child), libc::SIGTERM);
             let _ = child.wait();
         }
         self.display = None;

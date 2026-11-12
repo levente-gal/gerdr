@@ -21,7 +21,13 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Gerdr, cursor_agents, herdr::runtime_dir, home_dir, launch, toast::Level};
+use crate::{
+    Gerdr, cursor_agents,
+    herdr::runtime_dir,
+    home_dir, launch,
+    process::{self, Process},
+    toast::Level,
+};
 
 /// The wprs server, which outlives gerdr.
 const SERVER: &str = "wprsd";
@@ -68,29 +74,6 @@ struct KeptApp {
     command: String,
     #[serde(flatten)]
     process: Process,
-}
-
-/// A process gerdr started, told apart from one that took its pid later.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Process {
-    pub pid: u32,
-    /// When it started, in clock ticks after boot (see `start_time`).
-    pub start: u64,
-}
-
-impl Process {
-    /// `pid`, started a moment ago.
-    pub fn new(pid: u32) -> Self {
-        Self {
-            pid,
-            start: start_time(pid).unwrap_or_default(),
-        }
-    }
-
-    /// Whether it still runs.
-    pub fn runs(&self) -> bool {
-        start_time(self.pid) == Some(self.start)
-    }
 }
 
 /// The server's Wayland display for project `id`.
@@ -156,20 +139,6 @@ fn server_runs(display: &str) -> bool {
     !free
 }
 
-/// When `pid` started, in clock ticks after boot, if it runs. Not by its
-/// environment, which Chromium's apps write their titles over.
-fn start_time(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // The command name, in parentheses, may hold spaces: the start time is
-    // the 20th field after it.
-    stat.rsplit_once(')')?
-        .1
-        .split_whitespace()
-        .nth(19)?
-        .parse()
-        .ok()
-}
-
 /// What project `id` keeps running: the apps that still do.
 fn read(id: &str) -> Record {
     let Some(path) = record_file(id) else {
@@ -212,9 +181,9 @@ pub fn stop(id: &str) {
         .map(|app| app.process.pid)
         .chain(record.server.map(|server| server.pid));
     for pid in groups {
-        // Safety: signals a process group gerdr started on `wayland` (as
-        // `read` checks).
-        unsafe { libc::kill(-(pid as i32), libc::SIGTERM) };
+        // A process group gerdr started on `wayland`: `read` keeps only
+        // those whose pid and start time still match.
+        process::kill_group(pid as i32, libc::SIGTERM);
     }
     for path in [record_file(id), socket(id), control_socket(id)]
         .into_iter()
@@ -289,8 +258,9 @@ impl Gerdr {
         // Now, not with the other children: the next client may connect
         // to the server right away (see `reload_projects`).
         if let Some(client) = keeper.client {
-            // Safety: signals the process group of a client gerdr started.
-            unsafe { libc::kill(-(client as i32), libc::SIGTERM) };
+            // The process group of a client gerdr started and hasn't reaped
+            // yet (`client` is cleared when it ends), so its pid is still its.
+            process::kill_group(client as i32, libc::SIGTERM);
         }
         if let Some((path, token)) = keeper.hooks {
             self.loop_handle.remove(token);
@@ -575,14 +545,6 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_running_process_has_a_start_time() {
-        let me = std::process::id();
-        assert!(start_time(me).is_some());
-        assert_eq!(start_time(me), start_time(me));
-        assert_eq!(start_time(u32::MAX), None);
-    }
 
     #[test]
     fn a_process_is_known_right_after_it_starts_until_it_ends() {

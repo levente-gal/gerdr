@@ -120,6 +120,11 @@ impl Files for CheckFiles {
     // `still_check` stays `true` here: its rule runs there, in the same
     // shell as the kill (`guarded`), so the pid can't change in between.
     fn kill_group(&mut self, i: usize, group: i32, signal: i32) {
+        // Signalled there, by a shell: `process::kill_group` can't, so its
+        // guard against init's group and bad ids is here.
+        if group <= 1 {
+            return;
+        }
         let kill = remote::kill_group_script(group, signal_name(signal));
         self.signal(i, group, &kill);
     }
@@ -906,8 +911,14 @@ mod tests {
         std::fs::write(file(0), format!("{pid}\n")).unwrap();
         assert!(run(0, pid), "its group has its marker");
         assert!(!run(1, pid), "another check's file names it");
-        assert!(!run_as(0, pid, verify::SCRIPT, "GERDR_CHECK=/d/3/1"), "another check's group");
-        assert!(run_as(0, pid, "read x", "GERDR_CHECK=/d/3/1"), "a leader by its script's name");
+        assert!(
+            !run_as(0, pid, verify::SCRIPT, "GERDR_CHECK=/d/3/1"),
+            "another check's group"
+        );
+        assert!(
+            run_as(0, pid, "read x", "GERDR_CHECK=/d/3/1"),
+            "a leader by its script's name"
+        );
         let old = std::fs::File::options().write(true).open(file(0)).unwrap();
         old.set_modified(UNIX_EPOCH + Duration::from_secs(1))
             .unwrap();

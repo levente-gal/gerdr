@@ -871,7 +871,7 @@ fn window_title(window: &Window) -> Option<String> {
             .data_map
             .get::<XdgToplevelSurfaceData>()?
             .lock()
-            .unwrap()
+            .expect("toplevel data lock poisoned")
             .title
             .clone()
     })
@@ -879,9 +879,15 @@ fn window_title(window: &Window) -> Option<String> {
 
 /// The app_id `window` goes by, empty without one.
 fn window_app_id(window: &Window) -> String {
-    with_states(window.toplevel().unwrap().wl_surface(), |states| {
+    let Some(toplevel) = window.toplevel() else {
+        return String::new();
+    };
+    with_states(toplevel.wl_surface(), |states| {
         let data = states.data_map.get::<XdgToplevelSurfaceData>()?;
-        data.lock().unwrap().app_id.clone()
+        data.lock()
+            .expect("toplevel data lock poisoned")
+            .app_id
+            .clone()
     })
     .unwrap_or_default()
 }
@@ -1042,7 +1048,7 @@ fn note_pane(
                 pane_id: pane_id.to_owned(),
                 ..Default::default()
             });
-            records.last_mut().unwrap()
+            records.last_mut().expect("just pushed")
         }
         (None, Note::Keep | Note::Clear) => return false,
     };
@@ -1884,7 +1890,10 @@ impl Gerdr {
     }
 
     pub fn output_size(&self) -> Size<i32, Logical> {
-        let mode = self.output.current_mode().unwrap();
+        let mode = self
+            .output
+            .current_mode()
+            .expect("the output is given a mode before the loop runs");
         mode.size.to_f64().to_logical(self.scale()).to_i32_round()
     }
 
@@ -2602,10 +2611,14 @@ impl Gerdr {
                 // pane where it went.
                 for (window, pid) in self.forget_herdr_pane(&previous_pane_id) {
                     match window {
-                        Some(window) => window.toplevel().unwrap().send_close(),
-                        None => unsafe {
-                            libc::kill(pid as i32, libc::SIGTERM);
-                        },
+                        Some(window) => {
+                            if let Some(toplevel) = window.toplevel() {
+                                toplevel.send_close();
+                            }
+                        }
+                        None => {
+                            process::kill_pid(pid, libc::SIGTERM);
+                        }
                     }
                 }
                 self.sync_herdr_workspace(&pane.workspace_id);
@@ -3559,7 +3572,7 @@ impl Gerdr {
         let w = match existing {
             Some(w) => w,
             None => {
-                let info = info.unwrap();
+                let info = info.expect("asked of herdr when no workspace shows it");
                 let (dir, kind, id) = match &record {
                     Some(record) => (
                         record.dir.clone(),
@@ -3901,7 +3914,7 @@ impl Gerdr {
             let tab = &mut self.workspaces[w].tabs[0];
             tab.layout
                 .as_mut()
-                .unwrap()
+                .expect("a Zed tab starts with its Zed's leaf")
                 .split(zed, term, Dir::Down, TOP_RATIO);
             tab.expected
                 .push(Expected::terminal(pid, term, false, herdr));
@@ -4133,7 +4146,7 @@ impl Gerdr {
         };
         // Already reaped by `try_wait` above.
         #[allow(clippy::zombie_processes)]
-        let (mut picker, kind) = self.picker.take().unwrap();
+        let (mut picker, kind) = self.picker.take().expect("looked at above");
         let mut out = String::new();
         if let Some(stdout) = picker.stdout.as_mut() {
             let _ = stdout.read_to_string(&mut out);
@@ -4244,8 +4257,8 @@ impl Gerdr {
                 _ => false,
             };
             if let Some(window) = window {
-                if !closed {
-                    window.toplevel().unwrap().send_close();
+                if !closed && let Some(toplevel) = window.toplevel() {
+                    toplevel.send_close();
                 }
                 self.closing.push(window);
             }
@@ -4340,7 +4353,7 @@ impl Gerdr {
             let tab = &mut self.workspaces[w].tabs[t];
             tab.layout
                 .as_mut()
-                .unwrap()
+                .expect("a Zed tab starts with its Zed's leaf")
                 .split(zed, term, Dir::Down, TOP_RATIO);
             tab.expected
                 .push(Expected::terminal(pid, term, false, herdr));
@@ -4868,7 +4881,7 @@ impl Gerdr {
     pub fn set_theme_mode(&mut self, mode: ThemeMode) {
         let before = self.theme();
         self.theme_mode = mode;
-        if let Err(err) = std::fs::write(theme_file(), mode.name()) {
+        if let Err(err) = projects::write_atomic(&theme_file(), mode.name().as_bytes()) {
             tracing::warn!("saving theme: {err}");
         }
         self.theme_changed(before);
@@ -5205,14 +5218,12 @@ impl Gerdr {
         // A `zed` that started the editor leads its group, and the
         // editor may show other workspaces' windows by now: then only
         // the `zed` itself is ended, not the windows with it.
-        let target = if self.group_shows_windows(pid as i32) {
-            pid as i32
+        // A process, or a process group, gerdr started (see `spawn`).
+        if self.group_shows_windows(pid as i32) {
+            process::kill_pid(pid, libc::SIGTERM);
         } else {
-            -(pid as i32)
-        };
-        // Safety: signals a process, or a process group, gerdr started
-        // (see `spawn`).
-        unsafe { libc::kill(target, libc::SIGTERM) };
+            process::kill_group(pid as i32, libc::SIGTERM);
+        }
     }
 
     /// Give up on what pane `pane` (of any tab) waits for (see
@@ -5329,7 +5340,9 @@ impl Gerdr {
             })
         };
         if claimed.is_none() && in_groups(&self.retired_groups) {
-            window.toplevel().unwrap().send_close();
+            if let Some(toplevel) = window.toplevel() {
+                toplevel.send_close();
+            }
             return;
         }
         let found = claimed.or_else(|| {
@@ -5530,13 +5543,17 @@ impl Gerdr {
                         rect.loc.y += room;
                         rect.size.h -= room;
                     }
-                    let window = tab.window(id).unwrap().clone();
+                    let Some(window) = tab.window(id).cloned() else {
+                        continue;
+                    };
                     panes.push((w, t, window, rect));
                 }
             }
         }
         for (w, t, window, rect) in panes {
-            let toplevel = window.toplevel().unwrap();
+            let Some(toplevel) = window.toplevel() else {
+                continue;
+            };
             toplevel.with_pending_state(|state| {
                 state.size = Some(rect.size);
                 state.bounds = Some(rect.size);
@@ -5598,8 +5615,9 @@ impl Gerdr {
             }
         }
         for window in hidden {
-            self.pending_place
-                .remove(&window.toplevel().unwrap().wl_surface().id());
+            if let Some(toplevel) = window.toplevel() {
+                self.pending_place.remove(&toplevel.wl_surface().id());
+            }
             self.space.unmap_elem(&window);
         }
     }
@@ -5619,29 +5637,34 @@ impl Gerdr {
                         unzoomed = true;
                     }
                 }
-                if pane.window.set_activated(active) {
-                    pane.window.toplevel().unwrap().send_pending_configure();
+                if pane.window.set_activated(active)
+                    && let Some(toplevel) = pane.window.toplevel()
+                {
+                    toplevel.send_pending_configure();
                 }
             }
         }
         if unzoomed {
             self.arrange();
         }
-        let surface = window.map(|w| w.toplevel().unwrap().wl_surface().clone());
-        let keyboard = self.seat.get_keyboard().unwrap();
+        let surface = window.and_then(|w| Some(w.toplevel()?.wl_surface().clone()));
+        let keyboard = self
+            .seat
+            .get_keyboard()
+            .expect("the seat is given a keyboard at start");
         keyboard.set_focus(self, surface, smithay::utils::SERIAL_COUNTER.next_serial());
     }
 
     pub fn remove_window(&mut self, surface: &WlSurface) {
         self.pending_place.remove(&surface.id());
-        let not_it = |w: &Window| w.toplevel().unwrap().wl_surface() != surface;
+        let not_it = |w: &Window| !w.toplevel().is_some_and(|t| t.wl_surface() == surface);
         self.unplaced.retain(not_it);
         self.booting.retain(|(w, _)| not_it(w));
         for windows in self.held.values_mut() {
             windows.retain(not_it);
         }
         self.held.retain(|_, windows| !windows.is_empty());
-        let is_it = |p: &Pane| p.window.toplevel().unwrap().wl_surface() == surface;
+        let is_it = |p: &Pane| !not_it(&p.window);
         let found = self.workspaces.iter().enumerate().find_map(|(w, ws)| {
             ws.tabs
                 .iter()
@@ -5720,7 +5743,7 @@ impl Gerdr {
                     .flat_map(|ws| &ws.tabs)
                     .flat_map(|t| t.panes.iter().map(|p| &p.window)),
             )
-            .find(|w| w.toplevel().unwrap().wl_surface() == surface)
+            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
             .cloned()
     }
 
@@ -5792,12 +5815,12 @@ impl Gerdr {
                 // A tab is named after its first window's title.
                 let main = tab.shown().first().and_then(|id| tab.window(*id));
                 let title: Option<String> = main.and_then(|window| {
-                    with_states(window.toplevel().unwrap().wl_surface(), |states| {
+                    with_states(window.toplevel()?.wl_surface(), |states| {
                         let data = states
                             .data_map
                             .get::<XdgToplevelSurfaceData>()?
                             .lock()
-                            .unwrap();
+                            .expect("toplevel data lock poisoned");
                         data.title.clone().or_else(|| data.app_id.clone())
                     })
                 });
@@ -6164,8 +6187,10 @@ impl Gerdr {
                     .entry(project.clone())
                     .or_default()
                     .push(pane.window);
-            } else if !self.is_kept_window(&pane.window) {
-                pane.window.toplevel().unwrap().send_close();
+            } else if !self.is_kept_window(&pane.window)
+                && let Some(toplevel) = pane.window.toplevel()
+            {
+                toplevel.send_close();
             }
         }
         // Its apps kept running stay on their server (see `keep`).
@@ -6227,9 +6252,9 @@ impl Gerdr {
         self.old_zed.append(&mut self.zed_groups);
         self.old_zed_until = Some(Instant::now() + CLOSE_GRACE + ZED_EXIT_WAIT);
         let end = move |_, _: &mut (), _: &mut Gerdr| {
-            for group in &groups {
-                // Safety: signals a process group gerdr started.
-                unsafe { libc::kill(-group, libc::SIGTERM) };
+            for &group in &groups {
+                // A process group gerdr started.
+                process::kill_group(group, libc::SIGTERM);
             }
             TimeoutAction::Drop
         };
@@ -6246,9 +6271,9 @@ impl Gerdr {
     fn kill_children(&mut self) {
         let groups = std::mem::take(&mut self.process_groups);
         self.retire_shared();
-        for group in groups.iter().chain(&self.retired_groups) {
-            // Safety: signals a process group gerdr started.
-            unsafe { libc::kill(-group, libc::SIGTERM) };
+        for &group in groups.iter().chain(&self.retired_groups) {
+            // A process group gerdr started.
+            process::kill_group(group, libc::SIGTERM);
         }
         self.retired_groups.extend(groups);
     }
@@ -6266,8 +6291,8 @@ impl Gerdr {
             .filter(|p| !p.stray && !self.is_kept_window(&p.window))
             .map(|p| p.window.clone())
             .collect();
-        for window in &windows {
-            window.toplevel().unwrap().send_close();
+        for toplevel in windows.iter().filter_map(Window::toplevel) {
+            toplevel.send_close();
         }
         let _ = self.display_handle.flush_clients();
         let deadline = Instant::now() + CLOSE_GRACE;
@@ -6487,8 +6512,9 @@ impl Gerdr {
         self.projects.save();
         self.run_hook(id, Hook::AfterStop);
         // They go from `held` once closed (see `remove_window`).
-        for window in self.held.get(id).into_iter().flatten() {
-            window.toplevel().unwrap().send_close();
+        let held = self.held.get(id).into_iter().flatten();
+        for toplevel in held.filter_map(Window::toplevel) {
+            toplevel.send_close();
         }
         if forget {
             self.forget_project_now(id);
