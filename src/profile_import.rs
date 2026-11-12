@@ -574,8 +574,13 @@ fn swap(source: &Source, new: &Path) -> std::io::Result<Option<PathBuf>> {
     let aside = suffixed(to, &format!(".before-import-{}", stamp()));
     std::fs::rename(to, &aside)?;
     if let Err(err) = std::fs::rename(new, to) {
-        let _ = std::fs::rename(&aside, to);
-        return Err(err);
+        return Err(match std::fs::rename(&aside, to) {
+            Ok(()) => err,
+            Err(back) => std::io::Error::other(format!(
+                "{err}; the old profile is kept as {}: {back}",
+                aside.display()
+            )),
+        });
     }
     Ok(Some(aside))
 }

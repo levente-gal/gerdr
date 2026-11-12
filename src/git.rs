@@ -693,8 +693,10 @@ pub fn checkout_in_main(main: &Path, w: &Worktree) -> Result<(), String> {
     };
     git_run(&w.path, &["switch", "--detach"])?;
     if let Err(why) = git_run(main, &["switch", branch]) {
-        let _ = git_run(&w.path, &["switch", branch]);
-        return Err(why);
+        return Err(match git_run(&w.path, &["switch", branch]) {
+            Ok(_) => why,
+            Err(back) => format!("{why}; {} is left detached: {back}", w.name()),
+        });
     }
     Ok(())
 }

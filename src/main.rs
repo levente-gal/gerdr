@@ -7500,6 +7500,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         return;
                     };
                     let chrome = state.chrome.elements(renderer, view);
+                    // A frame that fails is drawn whole at the next redraw.
                     let _ = smithay::desktop::space::render_output::<
                         _,
                         chrome::ChromeElement,
@@ -7517,6 +7518,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         clear_color,
                     );
                 }
+                // As above: the next redraw submits again.
                 let _ = state.backend.submit(Some(&[Rectangle::from_size(size)]));
                 let took = start.elapsed();
                 if took > SLOW_FRAME {
