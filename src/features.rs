@@ -66,7 +66,10 @@ use smithay::{
     utils::{Logical, Point},
 };
 
+mod keys;
 mod review_page;
+
+use keys::{ship_keys, submit_key};
 
 use review_page::{
     is_review_stage, review_kept, review_page_actions, review_page_sections, want_all_outcome,
@@ -10018,9 +10021,9 @@ impl Gerdr {
             }
         } else if !quiet && on.page_stage(&feature) == Stage::Ship {
             let repo = ship_row_repo(on, &ships);
-            let keys = ship_keys(&feature, ctx, probe, repo.as_deref());
-            if let Some(key) = keys.into_iter().find(|k| k.pressed(mods, sym)) {
-                return Some(key.outcome);
+            let ship = keys::ShipCtx::new(&feature, ctx, probe, repo.as_deref());
+            if let Some(outcome) = crate::key_table::press(keys::SHIP_KEYS, &ship, mods, sym) {
+                return Some(outcome);
             }
         }
         let notes = notes_of(probe).to_vec();
@@ -15852,25 +15855,6 @@ struct ShipKey {
     outcome: PanelOutcome,
 }
 
-impl ShipKey {
-    /// Whether the key `mods` and `sym` (its own symbol) is this one.
-    fn pressed(&self, mods: &ModifiersState, sym: Keysym) -> bool {
-        let Some((want, key)) = crate::keys::hint_key(self.chord) else {
-            return false;
-        };
-        let sym = match sym {
-            Keysym::KP_Delete => Keysym::Delete,
-            Keysym::KP_Enter => Keysym::Return,
-            sym => sym,
-        };
-        want.ctrl == mods.ctrl
-            && want.shift == mods.shift
-            && want.alt == mods.alt
-            && !mods.logo
-            && sym == key
-    }
-}
-
 /// The repository of Ship's row the keyboard is on, if it is one's.
 fn ship_row_repo(panel: &FeaturePanel, ships: &[ShipRow]) -> Option<String> {
     if panel.focus != TabArea::Findings {
@@ -15899,112 +15883,6 @@ fn ship_outcome_repo(feature: &Feature, outcome: &PanelOutcome) -> Option<String
     }
 }
 
-/// The keys of Ship's page's buttons, in the footer's order.
-const SHIP_CHORDS: [&str; 8] = [
-    "Ctrl+M",
-    "Ctrl+Shift+M",
-    "Alt+M",
-    "Ctrl+Shift+O",
-    "Ctrl+Shift+Del",
-    "Alt+Z",
-    "Ctrl+R",
-    "Ctrl+E",
-];
-
-/// Whether `chord` of Ship's page presses a button asking `outcome`.
-fn ship_chord_does(chord: &str, outcome: &PanelOutcome) -> bool {
-    use feature::UpdateWay::{Merge, Rebase};
-    match chord {
-        "Ctrl+M" => matches!(
-            outcome,
-            PanelOutcome::UpdateBase(_, Merge) | PanelOutcome::ResolveConflicts(_, false)
-        ),
-        "Ctrl+Shift+M" => matches!(outcome, PanelOutcome::UpdateBase(_, Rebase)),
-        "Alt+M" => matches!(outcome, PanelOutcome::ResolveConflicts(_, true)),
-        "Ctrl+Shift+O" => matches!(
-            outcome,
-            PanelOutcome::ReviewConflictPlan | PanelOutcome::OpenPr(_)
-        ),
-        "Ctrl+Shift+Del" => matches!(outcome, PanelOutcome::StopResolving),
-        "Alt+Z" => matches!(
-            outcome,
-            PanelOutcome::UndoShip(..) | PanelOutcome::UndoAfter(_)
-        ),
-        "Ctrl+R" => matches!(outcome, PanelOutcome::WriteSummary),
-        "Ctrl+E" => matches!(outcome, PanelOutcome::EditSummary),
-        _ => false,
-    }
-}
-
-/// The keys of the buttons Ship's page offers now, as `ctx` and `probe` have
-/// it. One acting on a repository goes by the repository of the row the
-/// keyboard is on, `repo`; with none, by the first that offers it: the
-/// latest step to undo, the card's way to take its base in.
-fn ship_keys(
-    feature: &Feature,
-    ctx: RowCtx,
-    probe: Option<&Probe>,
-    repo: Option<&str>,
-) -> Vec<ShipKey> {
-    let mut offered = page_actions(feature, Stage::Ship, ctx);
-    offered.retain(|(_, o)| !undoes_merged(o, probe));
-    offered.extend(ship_base_actions(feature, probe));
-    let find = |want: &dyn Fn(&PanelOutcome) -> bool| {
-        (offered.iter())
-            .filter(|(_, o)| want(o))
-            .find(|(_, o)| match (repo, ship_outcome_repo(feature, o)) {
-                (Some(on), Some(of)) => on == of,
-                // On a repository, Alt+Z undoes its step, not what followed.
-                (Some(_), None) => !matches!(o, PanelOutcome::UndoAfter(_)),
-                _ => true,
-            })
-            .cloned()
-    };
-    let mut keys = Vec::new();
-    for chord in SHIP_CHORDS {
-        // A plan to review comes before a pull request to open.
-        let found = match chord {
-            "Ctrl+Shift+O" => find(&|o| matches!(o, PanelOutcome::ReviewConflictPlan))
-                .or_else(|| find(&|o| ship_chord_does(chord, o))),
-            _ => find(&|o| ship_chord_does(chord, o)),
-        };
-        let Some((button, outcome)) = found else {
-            continue;
-        };
-        // The hint says what the button says, so the two can't drift.
-        let what = lower_first(&button.label);
-        keys.push(ShipKey {
-            chord,
-            what,
-            outcome,
-        });
-    }
-    keys
-}
-
-/// What a key does on Ship's page of `feature`, a pull request's review:
-/// Ctrl+Enter approves someone else's, Ctrl+Shift+Enter requests changes,
-/// Ctrl+E edits the review's text. Enter is the page's primary, as on any.
-fn submit_key(feature: &Feature, mods: &ModifiersState, sym: Keysym) -> Option<PanelOutcome> {
-    use feature::pr_submit::Event;
-    let pull = feature.pull()?;
-    if feature.status != Status::Open || feature.current() != Some(Stage::Ship) {
-        return None;
-    }
-    match sym {
-        Keysym::Return | Keysym::KP_Enter if mods.ctrl && !mods.alt && !pull.mine => {
-            Some(PanelOutcome::SubmitReview(match mods.shift {
-                true => Event::RequestChanges,
-                false => Event::Approve,
-            }))
-        }
-        Keysym::e | Keysym::E if mods.ctrl && !mods.shift && !mods.alt => {
-            Some(PanelOutcome::EditSummary)
-        }
-        _ => None,
-    }
-}
-
 /// `hints` with the keys of Ship's buttons in, before F1, in place of any
 /// the page had on the same chord.
 fn with_ship_hints(
@@ -16020,24 +15898,13 @@ fn with_ship_hints(
         return hints;
     }
     // A pull request's review submits instead: its own keys.
-    if let Some(pull) = feature.pull() {
-        if feature.status != Status::Open || feature.current() != Some(Stage::Ship) {
-            return hints;
-        }
-        let mut keys = Vec::new();
-        if !pull.mine {
-            keys.push(("Ctrl+Enter".to_owned(), "approve\u{2026}".to_owned()));
-            keys.push((
-                "Ctrl+Shift+Enter".to_owned(),
-                "request changes\u{2026}".to_owned(),
-            ));
-        }
-        keys.push(("Ctrl+E".to_owned(), "edit text".to_owned()));
+    if feature.pull().is_some() {
+        let keys = crate::key_table::hints(keys::SUBMIT_KEYS, feature, keys::submit_said);
         hints.retain(|(chord, _)| !keys.iter().any(|(k, _)| k == chord));
         let at = (hints.iter())
             .position(|(chord, _)| chord == "F1")
             .unwrap_or(hints.len());
-        hints.splice(at..at, keys);
+        hints.splice(at..at, keys.into_iter().map(|(k, w)| (k.to_owned(), w)));
         return hints;
     }
     let repo = ship_row_repo(panel, ships);
@@ -27949,7 +27816,7 @@ pub(crate) mod tests {
                 ..ModifiersState::default()
             };
             (keys.iter())
-                .find(|k| k.pressed(&mods, sym))
+                .find(|k| crate::key_table::is(k.chord, &mods, sym))
                 .map(|k| k.chord)
         };
         assert_eq!(pressed(true, false, false, Keysym::m), Some("Ctrl+M"));
