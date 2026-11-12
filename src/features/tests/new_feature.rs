@@ -155,7 +155,8 @@ fn a_new_review_picks_its_reviewer_in_the_dialog() {
     dkey(&mut d, key(Keysym::Tab));
     let view = new_feature_view(&d, "Acme".into());
     assert!(view.reviewer_focus);
-    assert!(view.keys.contains(&("Left / Right", "reviewer")));
+    // First, so it stays when the key row drops what doesn't fit.
+    assert_eq!(view.keys.first(), Some(&("Left / Right", "reviewer")));
     let reviewer = |d: &mut NewFeatureDialog| match dkey(d, key(Keysym::Return)) {
         Some(DialogOutcome::Review { reviewer, .. }) => reviewer,
         other => panic!("a review, not {other:?}"),

@@ -531,8 +531,10 @@ pub(super) fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> Ne
     let mut keys = match (dialog.choosing.is_some(), dialog.multi()) {
         (true, _) if review.is_some() => vec![("Tab", "next"), ("Enter", "pick")],
         (true, _) => vec![("Tab", "next"), ("Enter", "use branch")],
+        // The row's own keys first: beside Enter and Esc, the dialog's
+        // key row has room for one more.
         (false, _) if reviewing && dialog.focus == Some(REVIEWER) => {
-            vec![("Tab", "next"), ("Left / Right", "reviewer")]
+            vec![("Left / Right", "reviewer"), ("Tab", "next")]
         }
         (false, true) if reviewing => vec![("Tab", "next"), ("Space", "pick or leave out")],
         // Nothing to tick with no project to link.
