@@ -48,6 +48,7 @@ use crate::{
         store,
     },
     features::{PanelOutcome, criterion_buttons, criterion_details, marks_criteria},
+    key_table::{self, Binding},
     manual_test::{Outcome, Row},
     text_field::TextField,
     tooltip::Tooltip,
@@ -169,19 +170,194 @@ fn shots_text(n: usize) -> String {
     }
 }
 
+/// What a key does on the strip with the keys: `STRIP_KEYS`' on a
+/// criterion, `NOTE_KEYS`' while its note is written.
+#[derive(Debug, PartialEq)]
+enum StripKey {
+    /// What the criterion's card does: pass, fail, clear.
+    Do(Outcome),
+    AddComment,
+    /// Give the keys back to the app.
+    Close,
+    /// Show the criterion on Manual test's page.
+    OnPage,
+    /// Fold the strip to a chip.
+    Fold,
+    /// Add a screenshot of the page to the note.
+    Shot,
+    /// Save the note.
+    Save,
+    Newline,
+    /// Put the note away unsaved, as a draft.
+    Park,
+    /// Throw the draft away.
+    Discard,
+}
+
+/// The criterion the strip shows, as its keys read it.
+struct StripCtx {
+    i: usize,
+    /// It is a comment of the user's own.
+    comment: bool,
+    /// It was tried.
+    found: bool,
+}
+
+/// The kinds of row the strip shows, to look a key up on: a criterion
+/// not tried, one tried, and a comment.
+const STRIP_STATES: [StripCtx; 3] = [
+    StripCtx {
+        i: 0,
+        comment: false,
+        found: false,
+    },
+    StripCtx {
+        i: 0,
+        comment: false,
+        found: true,
+    },
+    StripCtx {
+        i: 0,
+        comment: true,
+        found: false,
+    },
+];
+
+/// The strip's keys on a criterion; its tooltips say them. Up / Down and
+/// Ctrl+PgUp / Ctrl+PgDn step through the criteria after it.
+const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
+    Binding {
+        chord: "Space",
+        does: |c| Some(StripKey::Do(Outcome::Toggle(c.i))),
+        footer: true,
+        f1: "pass it and go to the next, or take the pass back; a comment: done",
+    },
+    Binding {
+        chord: "Enter",
+        does: |c| Some(StripKey::Do(Outcome::Toggle(c.i))),
+        footer: false,
+        f1: "the same as Space",
+    },
+    Binding {
+        chord: "F",
+        does: |c| {
+            Some(StripKey::Do(match c.comment {
+                true => Outcome::Fail(c.i, String::new()),
+                false => Outcome::Write(c.i),
+            }))
+        },
+        footer: true,
+        f1: "fail it, saying what went wrong; a comment: not done",
+    },
+    Binding {
+        chord: "Del",
+        does: |c| (c.found && !c.comment).then_some(StripKey::Do(Outcome::Clear(c.i))),
+        footer: true,
+        f1: "take its result back",
+    },
+    Binding {
+        chord: "C",
+        does: |_| Some(StripKey::AddComment),
+        footer: true,
+        f1: "add a comment of your own",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(StripKey::Close),
+        footer: true,
+        f1: "give the keys back to the app",
+    },
+    Binding {
+        chord: "Ctrl+O",
+        does: |_| Some(StripKey::OnPage),
+        footer: true,
+        f1: "show it on Manual test's page",
+    },
+    Binding {
+        chord: "Alt+Down",
+        does: |_| Some(StripKey::Fold),
+        footer: true,
+        f1: "fold the strip to a chip",
+    },
+    Binding {
+        chord: "Alt+C",
+        does: |_| Some(StripKey::Shot),
+        footer: true,
+        f1: "add a screenshot of the page to the note",
+    },
+];
+
+/// The strip's keys while a note is written on it; the rest go to its
+/// field.
+const NOTE_KEYS: &[Binding<(), StripKey>] = &[
+    Binding {
+        chord: "Enter",
+        does: |_| Some(StripKey::Save),
+        footer: true,
+        f1: "save the note",
+    },
+    Binding {
+        chord: "Shift+Enter",
+        does: |_| Some(StripKey::Newline),
+        footer: true,
+        f1: "start a new line",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(StripKey::Park),
+        footer: true,
+        f1: "leave it unsaved, kept as a draft for its next note",
+    },
+    Binding {
+        chord: crate::text_field::DISCARD_KEY,
+        does: |_| Some(StripKey::Discard),
+        footer: true,
+        f1: "discard it",
+    },
+    Binding {
+        chord: "Alt+C",
+        does: |_| Some(StripKey::Shot),
+        footer: true,
+        f1: "add a screenshot of the page to the note",
+    },
+];
+
+/// The chord of `table`'s first key doing what `want` picks, as one of
+/// `ctxs` has it; empty for none. Tooltips say the keys by it.
+fn chord_of<C>(
+    table: &[Binding<C, StripKey>],
+    ctxs: &[C],
+    want: impl Fn(&StripKey) -> bool,
+) -> &'static str {
+    (ctxs.iter())
+        .find_map(|ctx| {
+            (table.iter())
+                .find(|b| (b.does)(ctx).is_some_and(|k| want(&k)))
+                .map(|b| b.chord)
+        })
+        .unwrap_or("")
+}
+
+/// The chord of the strip's key doing `key` on some criterion.
+fn strip_chord(key: &StripKey) -> &'static str {
+    chord_of(STRIP_KEYS, &STRIP_STATES, |k| k == key)
+}
+
 /// What a button of a criterion's strip says it does, and its key.
 fn button_tip(outcome: &Outcome, label: &str) -> (&'static str, &'static str) {
-    match outcome {
-        Outcome::Toggle(_) if label == "Done" => ("Mark the comment done", "Space"),
-        Outcome::Fail(..) => ("Mark the comment not done: it goes to Build", "F"),
-        Outcome::EditComment(_) => ("Edit the comment", ""),
-        Outcome::Toggle(_) if label == "Pass" => ("Mark it passed, and go to the next", "Space"),
-        Outcome::Toggle(_) => ("Take the pass back", "Space"),
-        Outcome::Write(_) if label.starts_with("Edit") => ("Edit what went wrong", "F"),
-        Outcome::Write(_) => ("Mark it failed and say what went wrong", "F"),
-        Outcome::Clear(_) => ("Take the failure back", "Del"),
-        _ => ("", ""),
-    }
+    let text = match outcome {
+        Outcome::Toggle(_) if label == "Done" => "Mark the comment done",
+        Outcome::Fail(..) => "Mark the comment not done: it goes to Build",
+        Outcome::EditComment(_) => "Edit the comment",
+        Outcome::Toggle(_) if label == "Pass" => "Mark it passed, and go to the next",
+        Outcome::Toggle(_) => "Take the pass back",
+        Outcome::Write(_) if label.starts_with("Edit") => "Edit what went wrong",
+        Outcome::Write(_) => "Mark it failed and say what went wrong",
+        Outcome::Clear(_) => "Take the failure back",
+        _ => return ("", ""),
+    };
+    let same = |k: &StripKey| matches!(k, StripKey::Do(o) if std::mem::discriminant(o) == std::mem::discriminant(outcome));
+    (text, chord_of(STRIP_KEYS, &STRIP_STATES, same))
 }
 
 impl Gerdr {
@@ -351,11 +527,23 @@ impl Gerdr {
             StripHit::Prev => ("Previous criterion".into(), "Ctrl+PgUp"),
             StripHit::Next => ("Next criterion".into(), "Ctrl+PgDn"),
             StripHit::Title => ("Show its steps, or hide them".into(), ""),
-            StripHit::Page => ("Show it on Manual test's page".into(), "Ctrl+O"),
-            StripHit::Fold => ("Fold the criteria to a chip".into(), "Alt+Down"),
+            StripHit::Page => (
+                "Show it on Manual test's page".into(),
+                strip_chord(&StripKey::OnPage),
+            ),
+            StripHit::Fold => (
+                "Fold the criteria to a chip".into(),
+                strip_chord(&StripKey::Fold),
+            ),
             StripHit::Chip => ("Unfold the criteria".into(), ""),
-            StripHit::Shot => ("Add a screenshot of the page to the note".into(), "Alt+C"),
-            StripHit::Done => ("Save the note".into(), "Enter"),
+            StripHit::Shot => (
+                "Add a screenshot of the page to the note".into(),
+                strip_chord(&StripKey::Shot),
+            ),
+            StripHit::Done => (
+                "Save the note".into(),
+                chord_of(NOTE_KEYS, &[()], |k| *k == StripKey::Save),
+            ),
             StripHit::Button(b) => {
                 let target = self.criteria_target()?;
                 let (rows, i) = self.strip_rows(&target)?;
@@ -363,7 +551,7 @@ impl Gerdr {
                 let PanelOutcome::Manual(outcome) = outcome else {
                     let mut tip =
                         Tooltip::new("Add a comment of your own: what should change", rect);
-                    tip.key = Some("C".to_owned());
+                    tip.key = Some(strip_chord(&StripKey::AddComment).to_owned());
                     return Some(tip);
                 };
                 let (text, key) = button_tip(&outcome, &button.label);
@@ -736,29 +924,23 @@ impl Gerdr {
         let Some(target) = self.criteria_target() else {
             return self.drop_criteria_keys();
         };
-        let alt_c = mods.alt && !mods.ctrl && !mods.shift && sym == Keysym::c;
         if self.criteria_strip.drafts.contains_key(&target.key()) {
-            let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
-            if enter && mods.shift && !(mods.ctrl || mods.alt || mods.logo) {
-                if let Some(field) = self.criteria_field_mut() {
-                    field.newline();
+            match key_table::press(NOTE_KEYS, &(), mods, sym) {
+                Some(StripKey::Save) => _ = self.keep_strip_note(&target),
+                Some(StripKey::Newline) => {
+                    if let Some(field) = self.criteria_field_mut() {
+                        field.newline();
+                    }
                 }
-                return;
-            }
-            let bare = !(mods.ctrl || mods.alt || mods.shift || mods.logo);
-            match sym {
-                Keysym::Return | Keysym::KP_Enter if bare => {
-                    self.keep_strip_note(&target);
-                }
-                Keysym::Escape if bare => self.park_strip_note(&target),
-                Keysym::Delete | Keysym::KP_Delete if crate::text_field::discard_key(mods) => {
+                Some(StripKey::Park) => self.park_strip_note(&target),
+                Some(StripKey::Discard) => {
                     self.criteria_strip.parked.remove(&target.key());
                     let draft = self.criteria_strip.drafts.remove(&target.key());
                     if draft.is_some_and(|d| !d.had_keys) {
                         self.drop_criteria_keys();
                     }
                 }
-                _ if alt_c => self.criterion_shot(&target),
+                Some(StripKey::Shot) => self.criterion_shot(&target),
                 _ => {
                     if let Some(field) = self.criteria_field_mut() {
                         field.key(mods, sym, typed);
@@ -770,56 +952,32 @@ impl Gerdr {
         let Some((rows, i)) = self.strip_rows(&target) else {
             return;
         };
-        let bare = !mods.ctrl && !mods.alt && !mods.shift && !mods.logo;
-        let outcome = |o: fn(usize) -> Outcome| Some(o(i));
-        let comment = rows[i].comment;
-        let pressed = match sym {
-            Keysym::space | Keysym::Return | Keysym::KP_Enter if bare => outcome(Outcome::Toggle),
-            Keysym::f if bare && comment => Some(Outcome::Fail(i, String::new())),
-            Keysym::f if bare => outcome(Outcome::Write),
-            Keysym::Delete | Keysym::KP_Delete if bare && rows[i].found.is_some() && !comment => {
-                outcome(Outcome::Clear)
-            }
-            Keysym::c if bare => {
-                self.ask_add_comment(&target.project, &target.slug);
-                None
-            }
-            Keysym::Escape => {
-                self.drop_criteria_keys();
-                None
-            }
-            Keysym::Page_Up if mods.ctrl => {
-                self.step_criterion(&target, -1);
-                None
-            }
-            Keysym::Page_Down if mods.ctrl => {
-                self.step_criterion(&target, 1);
-                None
-            }
-            Keysym::Up | Keysym::KP_Up if bare => {
-                self.step_criterion(&target, -1);
-                None
-            }
-            Keysym::Down | Keysym::KP_Down if bare => {
-                self.step_criterion(&target, 1);
-                None
-            }
-            Keysym::Down | Keysym::KP_Down if mods.alt && !mods.ctrl => {
-                self.set_criteria_folded(true);
-                None
-            }
-            Keysym::o if mods.ctrl && !mods.shift && !mods.alt => {
-                self.criterion_on_page(&target);
-                None
-            }
-            _ if alt_c => {
-                self.criterion_shot(&target);
-                None
-            }
-            _ => None,
+        let ctx = StripCtx {
+            i,
+            comment: rows[i].comment,
+            found: rows[i].found.is_some(),
         };
-        if let Some(outcome) = pressed {
-            self.strip_outcome(&target, outcome);
+        match key_table::press(STRIP_KEYS, &ctx, mods, sym) {
+            Some(StripKey::Do(outcome)) => self.strip_outcome(&target, outcome),
+            Some(StripKey::AddComment) => self.ask_add_comment(&target.project, &target.slug),
+            Some(StripKey::Close) => self.drop_criteria_keys(),
+            Some(StripKey::OnPage) => self.criterion_on_page(&target),
+            Some(StripKey::Fold) => self.set_criteria_folded(true),
+            Some(StripKey::Shot) => self.criterion_shot(&target),
+            Some(_) => {}
+            // Stepping through the criteria, as a list's arrows: its
+            // buttons' tooltips name Ctrl+PgUp / Ctrl+PgDn, which
+            // `hint_key` doesn't read.
+            None => {
+                let bare = !(mods.ctrl || mods.alt || mods.shift || mods.logo);
+                match sym {
+                    Keysym::Page_Up if mods.ctrl => self.step_criterion(&target, -1),
+                    Keysym::Page_Down if mods.ctrl => self.step_criterion(&target, 1),
+                    Keysym::Up | Keysym::KP_Up if bare => self.step_criterion(&target, -1),
+                    Keysym::Down | Keysym::KP_Down if bare => self.step_criterion(&target, 1),
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -886,5 +1044,38 @@ mod tests {
         assert_eq!(button_tip(&Outcome::Write(0), "Fail\u{2026}").1, "F");
         assert_eq!(button_tip(&Outcome::Clear(0), "Fail").1, "Del");
         assert_eq!(shots_text(2), "2 screenshots");
+    }
+
+    #[test]
+    fn the_strips_keys_are_one_table_its_tooltips_read() {
+        key_table::check(STRIP_KEYS, &STRIP_STATES);
+        key_table::check(NOTE_KEYS, &[()]);
+        let press = |ctx: &StripCtx, chord: &str| {
+            let (mods, sym) = crate::keys::hint_key(chord).unwrap();
+            key_table::press(STRIP_KEYS, ctx, &mods, sym)
+        };
+        let [untried, tried, comment] = &STRIP_STATES;
+        assert_eq!(
+            press(tried, "Enter"),
+            Some(StripKey::Do(Outcome::Toggle(0)))
+        );
+        assert_eq!(press(untried, "F"), Some(StripKey::Do(Outcome::Write(0))));
+        assert_eq!(
+            press(comment, "F"),
+            Some(StripKey::Do(Outcome::Fail(0, String::new())))
+        );
+        // Del clears a criterion tried, not a comment or one not tried.
+        assert_eq!(press(tried, "Del"), Some(StripKey::Do(Outcome::Clear(0))));
+        assert_eq!(press(untried, "Del"), None);
+        assert_eq!(press(comment, "Del"), None);
+        // A press gives `f` and `c` as their own symbols, no Shift (K8).
+        let bare = ModifiersState::default();
+        assert!(key_table::press(STRIP_KEYS, untried, &bare, Keysym::c).is_some());
+        assert_eq!(strip_chord(&StripKey::AddComment), "C");
+        assert_eq!(strip_chord(&StripKey::Fold), "Alt+Down");
+        assert_eq!(
+            chord_of(NOTE_KEYS, &[()], |k| *k == StripKey::Save),
+            "Enter"
+        );
     }
 }

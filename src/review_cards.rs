@@ -14,8 +14,10 @@ use crate::{
         review_items::{self, ItemOf, Standing, Words, words, words_in},
     },
     features::{PanelOutcome, can_edit_note, shown_notes, stage_mark},
+    key_table::{self, Binding},
     review::Comment,
 };
+use smithay::input::keyboard::{Keysym, ModifiersState};
 
 /// One item a review stage's page shows as a card.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,76 +393,203 @@ pub(crate) fn item_buttons(item: Item, page: CardPage) -> Vec<(PageButton, Panel
     out
 }
 
+/// An item's card with the keyboard, as its keys read it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CardCtx {
+    of: ItemOf,
+    /// Its page decides now, and its review posts to GitHub.
+    page: CardPage,
+    /// A first Del armed it.
+    armed: bool,
+    yours: bool,
+    standing: Standing,
+    /// A question with no answer yet.
+    unanswered: bool,
+    question: bool,
+    /// The user commented on it, or answered it.
+    noted: bool,
+    /// It has a place to show it at.
+    shows: bool,
+    /// A suggestion citing code.
+    cites: bool,
+}
+
+impl CardCtx {
+    pub(crate) fn of(item: Item, page: CardPage, armed: bool) -> Self {
+        let suggestion = item.suggestion();
+        Self {
+            of: item.of(),
+            page,
+            armed,
+            yours: item.yours(),
+            standing: item.standing(),
+            unanswered: suggestion.is_some_and(Suggestion::unanswered),
+            question: suggestion.is_some_and(|s| s.kind == Kind::Question),
+            noted: !item.note().is_empty(),
+            shows: item.shows(),
+            cites: suggestion.is_some_and(|s| !s.evidence.is_empty()),
+        }
+    }
+
+    /// It is open, or wanted: still to decide.
+    fn undecided(&self) -> bool {
+        matches!(self.standing, Standing::Open | Standing::Fix)
+    }
+
+    /// The footer offers `c` on it: a reviewer's, undecided or refused,
+    /// while its page decides.
+    fn comments(&self) -> bool {
+        self.page.decides
+            && !self.yours
+            && (self.undecided() || self.standing == Standing::Dismissed)
+    }
+
+    /// What `key` does on it, in the words of its kind, as the footer says.
+    fn says(&self, key: CardKey) -> String {
+        let w = words_in(self.of, self.page.posts);
+        let lower = |text: &str| text.to_lowercase();
+        match key {
+            CardKey::F if self.standing == Standing::Fix => lower(w.unwant),
+            // It opens the answer first, `c`'s: accepted once answered.
+            CardKey::F if self.unanswered => format!("{}\u{2026}", lower(w.want)),
+            CardKey::F => lower(w.want),
+            CardKey::CtrlE => lower(if self.yours { w.edit_own } else { w.edit }),
+            CardKey::C => match (self.noted, self.question) {
+                (false, true) => "answer",
+                (false, false) => "comment",
+                (true, true) => "edit answer",
+                (true, false) => "edit comment",
+            }
+            .into(),
+            CardKey::ShiftDel if self.question => "delete answer".into(),
+            CardKey::ShiftDel => "delete comment".into(),
+            CardKey::Del if self.yours && self.armed => "again to delete".into(),
+            CardKey::Del if self.yours => "delete".into(),
+            CardKey::Del if self.standing == Standing::Dismissed => lower(w.reopen),
+            CardKey::Del => lower(w.refuse),
+            CardKey::Enter if self.shows => lower(w.show),
+            CardKey::Enter => "edit\u{2026}".into(),
+            CardKey::CtrlO => "open code".into(),
+        }
+    }
+}
+
+/// The keys of an item's card, either kind; `card_key` does them. Each
+/// key the footer hints only while its page decides (`CardCtx::comments`…)
+/// still answers otherwise, from its row after, saying why it can't.
+pub(crate) const CARD_KEYS: &[Binding<CardCtx, CardKey>] = &[
+    Binding {
+        chord: "f",
+        does: |c| {
+            let offered = match c.standing {
+                // One of the user's own suggestions has nothing to take back.
+                Standing::Fix => !(c.yours && c.of == ItemOf::Suggestion),
+                Standing::Open | Standing::Dismissed => true,
+                _ => false,
+            };
+            (c.page.decides && offered).then_some(CardKey::F)
+        },
+        footer: true,
+        f1: "want it (fix, accept), or take that back",
+    },
+    Binding {
+        chord: "f",
+        does: |_| Some(CardKey::F),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+E",
+        does: |c| (c.page.decides && c.undecided()).then_some(CardKey::CtrlE),
+        footer: true,
+        f1: "edit its fix or change, or one of your own",
+    },
+    Binding {
+        chord: "Ctrl+E",
+        does: |_| Some(CardKey::CtrlE),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "c",
+        does: |c| c.comments().then_some(CardKey::C),
+        footer: true,
+        f1: "write or edit your comment on it, a question's answer",
+    },
+    // Off a reviewer's card `c` adds one of the user's own: the page's.
+    Binding {
+        chord: "c",
+        does: |c| (!c.yours).then_some(CardKey::C),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Shift+Del",
+        does: |c| (c.comments() && c.noted).then_some(CardKey::ShiftDel),
+        footer: true,
+        f1: "delete your comment on it",
+    },
+    Binding {
+        chord: "Shift+Del",
+        does: |_| Some(CardKey::ShiftDel),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Del",
+        does: |c| {
+            let standing = matches!(
+                c.standing,
+                Standing::Open | Standing::Fix | Standing::Dismissed
+            );
+            (c.page.decides && standing).then_some(CardKey::Del)
+        },
+        footer: true,
+        f1: "refuse it, saying why, or reopen it; one of your own: press twice to delete",
+    },
+    Binding {
+        chord: "Del",
+        does: |_| Some(CardKey::Del),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Enter",
+        does: |c| (c.shows || c.page.decides).then_some(CardKey::Enter),
+        footer: true,
+        f1: "show it in the diff or the plan; with nowhere to show it, edit it",
+    },
+    Binding {
+        chord: "Enter",
+        does: |_| Some(CardKey::Enter),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+O",
+        does: |c| c.cites.then_some(CardKey::CtrlO),
+        footer: true,
+        f1: "open the code it cites",
+    },
+];
+
+/// The key pressed on the card `ctx` has, as `card_key` takes it; none
+/// for a key not the card's.
+#[allow(dead_code)] // The feature tab's footer (features.rs) is to call it.
+pub(crate) fn card_key_of(ctx: &CardCtx, mods: &ModifiersState, sym: Keysym) -> Option<CardKey> {
+    key_table::press(CARD_KEYS, ctx, mods, sym)
+}
+
 /// The footer's hints for `item`'s card with the keyboard, key and what it
 /// does, in the words of its kind (`card_key` says what each does);
 /// deciding while its `page` decides, `armed` while a first Del armed
 /// it. The page's own keys (Up / Down, `c` off the card, wanting all) are
 /// the page's. A review that posts to GitHub has its words.
 pub(crate) fn item_hints(item: Item, page: CardPage, armed: bool) -> Vec<(String, String)> {
-    let CardPage { decides, posts } = page;
-    let w = words_in(item.of(), posts);
-    let lower = |text: &str| text.to_lowercase();
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut hint = |key: &str, what: String| out.push((key.to_owned(), what));
-    let (yours, standing) = (item.yours(), item.standing());
-    let suggestion = item.suggestion();
-    let unanswered = suggestion.is_some_and(Suggestion::unanswered);
-    let question = suggestion.is_some_and(|s| s.kind == Kind::Question);
-    let undecided = matches!(standing, Standing::Open | Standing::Fix);
-    let says = undecided || standing == Standing::Dismissed;
-    if decides {
-        match standing {
-            // One of the user's own suggestions has nothing to take back.
-            Standing::Fix if yours && suggestion.is_some() => {}
-            // It opens the answer first, `c`'s: accepted once answered.
-            Standing::Open | Standing::Dismissed if unanswered => {
-                hint("f", format!("{}\u{2026}", lower(w.want)))
-            }
-            Standing::Open | Standing::Dismissed => hint("f", lower(w.want)),
-            Standing::Fix => hint("f", lower(w.unwant)),
-            _ => {}
-        }
-        if undecided {
-            hint("Ctrl+E", lower(if yours { w.edit_own } else { w.edit }));
-        }
-        if !yours && says {
-            let c = match (item.note().is_empty(), question) {
-                (true, true) => "answer",
-                (true, false) => "comment",
-                (false, true) => "edit answer",
-                (false, false) => "edit comment",
-            };
-            hint("c", c.into());
-            if !item.note().is_empty() {
-                let what = if question {
-                    "delete answer"
-                } else {
-                    "delete comment"
-                };
-                hint("Shift+Del", what.into());
-            }
-        }
-        match (yours, standing) {
-            (true, Standing::Open | Standing::Fix | Standing::Dismissed) => {
-                hint(
-                    "Del",
-                    if armed { "again to delete" } else { "delete" }.into(),
-                );
-            }
-            (false, Standing::Open | Standing::Fix) => hint("Del", lower(w.refuse)),
-            (false, Standing::Dismissed) => hint("Del", lower(w.reopen)),
-            _ => {}
-        }
-    }
-    if item.shows() {
-        hint("Enter", lower(w.show));
-    } else if decides {
-        hint("Enter", "edit\u{2026}".into());
-    }
-    if suggestion.is_some_and(|s| !s.evidence.is_empty()) {
-        hint("Ctrl+O", "open code".into());
-    }
-    out
+    let ctx = CardCtx::of(item, page, armed);
+    (key_table::hints(CARD_KEYS, &ctx, |k| ctx.says(*k)).into_iter())
+        .map(|(k, what)| (k.to_owned(), what))
+        .collect()
 }
 
 /// The item a card's button acts on.
@@ -1643,6 +1772,58 @@ mod tests {
             hints(Item::Suggestion(&own), false, false),
             ["Enter show in plan"]
         );
+    }
+
+    #[test]
+    fn the_card_keys_are_one_table_the_footer_and_card_key_read() {
+        let mut s = suggestion("r1-1", State::Accepted, Source::Reviewer);
+        s.evidence = vec![cited(None)];
+        s.note = "Yes".into();
+        let own = suggestion("u1", State::Accepted, Source::You);
+        let (q, open) = (
+            question("r1-2", ""),
+            suggestion("r1-3", State::Open, Source::Reviewer),
+        );
+        let fs = [
+            finding("r1-1", FindingState::Open, false),
+            finding("r1-2", FindingState::Fix, false),
+            finding("r1-3", FindingState::Dismissed, false),
+            finding("u1", FindingState::Fix, true),
+            ReviewFinding {
+                file: String::new(),
+                ..finding("r1-4", FindingState::Open, false)
+            },
+        ];
+        let items: Vec<Item> = [&s, &own, &q, &open]
+            .map(Item::Suggestion)
+            .into_iter()
+            .chain(fs.iter().map(Item::Finding))
+            .collect();
+        let mut ctxs = Vec::new();
+        for item in &items {
+            for (decides, posts, armed) in [
+                (true, false, false),
+                (true, true, true),
+                (false, false, false),
+            ] {
+                ctxs.push(CardCtx::of(*item, CardPage { decides, posts }, armed));
+            }
+        }
+        key_table::check(CARD_KEYS, &ctxs);
+        // Off a deciding page each key still reaches `card_key`, which says
+        // why it can't; `c` on one of the user's own is the page's.
+        let key = |item: Item, chord: &str| {
+            let (mods, sym) = crate::keys::hint_key(chord).unwrap();
+            card_key_of(&CardCtx::of(item, page(false), false), &mods, sym)
+        };
+        assert_eq!(key(Item::Suggestion(&s), "f"), Some(CardKey::F));
+        assert_eq!(
+            key(Item::Suggestion(&s), "Shift+Del"),
+            Some(CardKey::ShiftDel)
+        );
+        assert_eq!(key(Item::Suggestion(&own), "c"), None);
+        assert_eq!(key(Item::Suggestion(&own), "Ctrl+O"), None);
+        assert_eq!(key(Item::Suggestion(&s), "Ctrl+O"), Some(CardKey::CtrlO));
     }
 
     #[test]

@@ -37,6 +37,7 @@ use crate::{
         store,
     },
     features::{CardNote, plural},
+    key_table::{self, Binding},
     text_field::{Edit, TextField},
 };
 
@@ -373,6 +374,238 @@ pub(crate) enum MatchFrom {
     Fresh,
 }
 
+/// What a key does to the criteria's search (`SEARCH_KEYS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SearchKey {
+    /// Open it, the keys in its field.
+    Open,
+    /// Give its field the keys again.
+    Type,
+    /// Empty its field.
+    Clear,
+    Close,
+    /// Go to the next place found, or (`true`) the one before.
+    Next(bool),
+    /// Give the keys to the criteria it shows.
+    ToList,
+    /// Take the key and do nothing: Ctrl+F in its field.
+    Hold,
+}
+
+/// The criteria's search as its keys read it.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SearchCtx {
+    /// It is open.
+    open: bool,
+    /// Its field has the keys.
+    typing: bool,
+    /// Its field holds nothing.
+    empty: bool,
+    /// It looks for something (`Search::needle`).
+    finds: bool,
+    /// A card's note is being written.
+    writing: bool,
+}
+
+impl SearchCtx {
+    pub(crate) fn of(search: Option<&Search>, writing: bool) -> Self {
+        Self {
+            open: search.is_some(),
+            typing: search.is_some_and(|s| s.typing),
+            empty: search.is_none_or(|s| s.query.is_empty()),
+            finds: search.is_some_and(|s| !s.needle().is_empty()),
+            writing,
+        }
+    }
+
+    /// `/` and Ctrl+F: open it, or give its field the keys again.
+    fn opens(&self) -> Option<SearchKey> {
+        match (self.open, self.typing) {
+            (false, _) if !self.writing => Some(SearchKey::Open),
+            (true, false) => Some(SearchKey::Type),
+            _ => None,
+        }
+    }
+
+    /// `n` and Shift+N, as vim's: through what it found.
+    fn steps(&self, back: bool) -> Option<SearchKey> {
+        (self.open && !self.typing && self.finds).then_some(SearchKey::Next(back))
+    }
+}
+
+/// The keys of the criteria's search, before the page's. Down and Tab in
+/// its field go to the criteria too (`criteria_search_key`).
+pub(crate) const SEARCH_KEYS: &[Binding<SearchCtx, SearchKey>] = &[
+    Binding {
+        chord: "/",
+        does: |c| c.opens().filter(|k| *k == SearchKey::Open),
+        footer: true,
+        f1: "search them: only those saying it show, open; Enter goes to them",
+    },
+    Binding {
+        chord: "/",
+        does: SearchCtx::opens,
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+F",
+        does: |c| match c.typing {
+            true => Some(SearchKey::Hold),
+            false => c.opens(),
+        },
+        footer: false,
+        f1: "search them, as /",
+    },
+    Binding {
+        chord: "n",
+        does: |c| c.steps(false),
+        footer: true,
+        f1: "go to the next place found",
+    },
+    Binding {
+        chord: "Shift+N",
+        does: |c| c.steps(true),
+        footer: true,
+        f1: "go to the place found before",
+    },
+    Binding {
+        chord: "Enter",
+        does: |c| c.typing.then_some(SearchKey::ToList),
+        footer: true,
+        f1: "searching: to the criteria it shows",
+    },
+    Binding {
+        chord: "Esc",
+        does: |c| {
+            c.open.then_some(match c.empty {
+                true => SearchKey::Close,
+                false => SearchKey::Clear,
+            })
+        },
+        footer: true,
+        f1: "clear the search, then close it",
+    },
+];
+
+/// The footer's hints of the criteria's search `search`, as it stands:
+/// its field's while it has the keys, else the page's.
+#[allow(dead_code)] // The feature tab's footer (features.rs) is to call it.
+pub(crate) fn search_hints(search: Option<&Search>) -> Vec<(String, String)> {
+    let ctx = SearchCtx::of(search, false);
+    let label = |k: &SearchKey| {
+        match k {
+            SearchKey::Open => "search",
+            SearchKey::Next(_) => "next / previous match",
+            SearchKey::ToList => "to the criteria",
+            SearchKey::Close if ctx.typing => "close",
+            SearchKey::Clear if ctx.typing => "clear",
+            SearchKey::Close => "close search",
+            SearchKey::Clear => "clear search",
+            SearchKey::Type | SearchKey::Hold => "",
+        }
+        .to_owned()
+    };
+    crate::page_text::paired(key_table::hints(SEARCH_KEYS, &ctx, label))
+}
+
+/// What a key does while a card's note is written (`NOTE_KEYS`): a
+/// criterion's, or the user's comment on a review's item.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NoteKey {
+    Save,
+    Newline,
+    /// Put it away unsaved, as a draft for the card's next note.
+    Park,
+    /// Throw it away.
+    Discard,
+}
+
+/// A note being written, as its keys read it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct NoteCtx {
+    /// Nothing is written.
+    empty: bool,
+    /// On a review's item: its kind, and whether saving it accepts it.
+    item: Option<(ItemOf, bool)>,
+}
+
+impl NoteCtx {
+    pub(crate) fn of(on: &CardNote, empty: bool) -> Self {
+        let item = match on {
+            CardNote::Item { of, accept, .. } => Some((*of, *accept)),
+            CardNote::Criterion(_) => None,
+        };
+        Self { empty, item }
+    }
+}
+
+/// The keys of a card's note being written; the rest go to its field.
+pub(crate) const NOTE_KEYS: &[Binding<NoteCtx, NoteKey>] = &[
+    Binding {
+        chord: "Enter",
+        does: |_| Some(NoteKey::Save),
+        footer: true,
+        f1: "save it; emptied, a comment goes",
+    },
+    Binding {
+        chord: "Ctrl+Enter",
+        does: |_| Some(NoteKey::Save),
+        footer: false,
+        f1: "save it, as Enter",
+    },
+    Binding {
+        chord: "Shift+Enter",
+        does: |_| Some(NoteKey::Newline),
+        footer: true,
+        f1: "start a new line",
+    },
+    Binding {
+        chord: crate::text_field::DISCARD_KEY,
+        does: |c| (!c.empty).then_some(NoteKey::Discard),
+        footer: true,
+        f1: "discard it",
+    },
+    Binding {
+        chord: crate::text_field::DISCARD_KEY,
+        does: |_| Some(NoteKey::Discard),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(NoteKey::Park),
+        footer: true,
+        f1: "leave it unsaved, kept as a draft for the card's next one",
+    },
+];
+
+/// The footer's hints while the note `on` a card is written, `empty` or
+/// not. Esc never saves: what is written waits as a draft.
+#[allow(dead_code)] // The feature tab's footer (features.rs) is to call it.
+pub(crate) fn note_hints(on: &CardNote, empty: bool) -> Vec<(String, String)> {
+    let ctx = NoteCtx::of(on, empty);
+    let label = |k: &NoteKey| match k {
+        // Emptied, a finding's comment goes; a question's answer can
+        // accept it once saved.
+        NoteKey::Save => match ctx.item {
+            Some(_) if empty => "delete".to_owned(),
+            Some((of, true)) => crate::feature::review_items::words(of)
+                .save_want
+                .to_lowercase(),
+            _ => "save".to_owned(),
+        },
+        NoteKey::Newline => "new line".to_owned(),
+        NoteKey::Discard => "discard".to_owned(),
+        NoteKey::Park if empty => "cancel".to_owned(),
+        NoteKey::Park => "keep draft".to_owned(),
+    };
+    key_table::hints(NOTE_KEYS, &ctx, label)
+        .into_iter()
+        .map(|(k, w)| (k.to_owned(), w))
+        .collect()
+}
+
 impl Gerdr {
     /// Read the criteria of feature `slug` of `project` from its brief
     /// again, its comments after them: the page and the inbox show them.
@@ -612,10 +845,6 @@ impl Gerdr {
         sym: Keysym,
         typed: Keysym,
     ) -> bool {
-        let ctrl = mods.ctrl && !(mods.alt || mods.logo || mods.shift);
-        let bare = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
-        let opens = (ctrl && sym == Keysym::f)
-            || (!mods.ctrl && !mods.alt && (sym == Keysym::slash || typed == Keysym::slash));
         if !self.criteria_search_shows() {
             // Away from the criteria, the keys are the page's.
             if let Some(search) = (self.features.panel.as_mut()).and_then(|p| p.search.as_mut()) {
@@ -626,44 +855,49 @@ impl Gerdr {
         let Some(panel) = self.features.panel.as_mut() else {
             return false;
         };
-        let writing = panel.note.is_some();
+        let ctx = SearchCtx::of(panel.search.as_ref(), panel.note.is_some());
+        let pressed = key_table::press(SEARCH_KEYS, &ctx, mods, sym);
         let Some(search) = panel.search.as_mut() else {
-            if opens && !writing {
+            if pressed == Some(SearchKey::Open) {
                 self.open_criteria_search();
                 return true;
             }
             return false;
         };
-        if sym == Keysym::Escape && bare {
-            if search.query.is_empty() {
+        match pressed {
+            Some(SearchKey::Close) => {
                 self.close_criteria_search();
-            } else {
+                return true;
+            }
+            Some(SearchKey::Clear) => {
                 search.query.clear();
                 (search.typing, search.whole, search.at) = (true, false, None);
                 self.sync_feature_page();
+                return true;
             }
-            return true;
-        }
-        if !search.typing {
-            if opens {
+            Some(SearchKey::Type) => {
                 search.typing = true;
                 self.stop_key_repeat();
                 return true;
             }
-            // n and Shift+N go through what it found, as vim's.
-            let shift = mods.shift && !(mods.ctrl || mods.alt || mods.logo);
-            let next = (bare || shift) && matches!(sym, Keysym::n | Keysym::N);
-            if next && !search.needle().is_empty() {
-                self.go_to_match(shift, MatchFrom::Here);
+            Some(SearchKey::Next(back)) => {
+                self.go_to_match(back, MatchFrom::Here);
                 return true;
             }
+            Some(SearchKey::Hold) => return true,
+            Some(SearchKey::Open | SearchKey::ToList) | None => {}
+        }
+        if !search.typing {
             return false;
         }
-        let to_list = matches!(
-            sym,
-            Keysym::Return | Keysym::KP_Enter | Keysym::Down | Keysym::KP_Down | Keysym::Tab
-        ) && !(mods.ctrl || mods.alt || mods.logo);
-        let edit = match to_list || (ctrl && sym == Keysym::f) {
+        // Down and Tab, and Enter with Shift, go to the criteria too, as
+        // a list's moves: not hinted.
+        let to_list = pressed == Some(SearchKey::ToList)
+            || (matches!(
+                sym,
+                Keysym::Return | Keysym::KP_Enter | Keysym::Down | Keysym::KP_Down | Keysym::Tab
+            ) && !(mods.ctrl || mods.alt || mods.logo));
+        let edit = match to_list {
             true => Edit::Moved,
             false => search.query.key(mods, sym, typed),
         };
@@ -822,14 +1056,10 @@ impl Gerdr {
             CardNote::Item { of, id, .. } => Some((*of, id.clone())),
             CardNote::Criterion(_) => None,
         };
-        let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
-        let only_shift = mods.shift && !(mods.ctrl || mods.alt || mods.logo);
-        if enter && only_shift {
-            field.newline();
-            return true;
-        }
-        match sym {
-            Keysym::Return | Keysym::KP_Enter if field.trim().is_empty() => match finding {
+        let empty = field.trim().is_empty();
+        match key_table::press(NOTE_KEYS, &NoteCtx::of(on, empty), mods, sym) {
+            Some(NoteKey::Newline) => _ = field.newline(),
+            Some(NoteKey::Save) if empty => match finding {
                 // Emptied, it goes; nothing there, there is nothing to do.
                 Some((of, id)) => {
                     let panel = self.features.panel.as_mut();
@@ -846,22 +1076,22 @@ impl Gerdr {
                 }
                 None => self.show_warning(NO_NOTE.into()),
             },
-            Keysym::Return | Keysym::KP_Enter => {
+            Some(NoteKey::Save) => {
                 self.keep_criterion_note();
             }
             // Esc never saves: what is written waits as a draft for the
             // card's next note.
-            Keysym::Escape => {
+            Some(NoteKey::Park) => {
                 if let Some(panel) = self.features.panel.as_mut() {
                     panel.park_note();
                 }
             }
-            Keysym::Delete | Keysym::KP_Delete if crate::text_field::discard_key(mods) => {
+            Some(NoteKey::Discard) => {
                 if let Some(panel) = self.features.panel.as_mut() {
                     panel.discard_note();
                 }
             }
-            _ => {
+            None => {
                 field.key(mods, sym, typed);
             }
         }
@@ -1481,5 +1711,107 @@ mod tests {
         assert_eq!(Outcome::Clear(3).criterion(), Some(3));
         assert_eq!(Outcome::MarkPassed.criterion(), None);
         assert_eq!(Outcome::SendFailures.criterion(), None);
+    }
+
+    /// The search closed, open and typing (empty or not), and open with
+    /// the keys on the criteria (empty, finding or holding only spaces).
+    fn searches() -> Vec<Option<Search>> {
+        let with = |text: &str, typing: bool| {
+            let mut search = Search {
+                typing,
+                ..Search::default()
+            };
+            search.query.set(text);
+            Some(search)
+        };
+        vec![
+            None,
+            with("", true),
+            with("login", true),
+            with("", false),
+            with("login", false),
+            with("  ", false),
+        ]
+    }
+
+    #[test]
+    fn the_searchs_keys_are_one_table_its_footer_reads() {
+        let mut ctxs = Vec::new();
+        for search in searches() {
+            for writing in [false, true] {
+                ctxs.push(SearchCtx::of(search.as_ref(), writing));
+            }
+        }
+        key_table::check(SEARCH_KEYS, &ctxs);
+        let hints = |search: Option<Search>| -> Vec<String> {
+            (search_hints(search.as_ref()).into_iter())
+                .map(|(k, w)| format!("{k} {w}"))
+                .collect()
+        };
+        let [closed, typing, typed, open, found, spaces] = searches().try_into().unwrap();
+        assert_eq!(hints(closed), ["/ search"]);
+        assert_eq!(hints(typing), ["Enter to the criteria", "Esc close"]);
+        assert_eq!(hints(typed), ["Enter to the criteria", "Esc clear"]);
+        assert_eq!(hints(open), ["Esc close search"]);
+        assert_eq!(
+            hints(found),
+            ["n / Shift+N next / previous match", "Esc clear search"]
+        );
+        // Nothing to look for: n and Shift+N would do nothing.
+        assert_eq!(hints(spaces), ["Esc clear search"]);
+        let press = |search: Option<Search>, writing, chord: &str| {
+            let (mods, sym) = crate::keys::hint_key(chord).unwrap();
+            let ctx = SearchCtx::of(search.as_ref(), writing);
+            key_table::press(SEARCH_KEYS, &ctx, &mods, sym)
+        };
+        let [closed, typing, _, open, found, _] = searches().try_into().unwrap();
+        assert_eq!(press(closed, true, "/"), None);
+        assert_eq!(press(typing, false, "/"), None);
+        assert_eq!(press(open, false, "Ctrl+F"), Some(SearchKey::Type));
+        assert_eq!(press(found, false, "Shift+N"), Some(SearchKey::Next(true)));
+    }
+
+    #[test]
+    fn a_notes_keys_are_one_table_its_footer_reads() {
+        let item = |accept| CardNote::Item {
+            of: ItemOf::Suggestion,
+            id: "r1-1".into(),
+            accept,
+        };
+        let notes = [CardNote::Criterion(0), item(false), item(true)];
+        let ctxs: Vec<NoteCtx> = (notes.iter())
+            .flat_map(|on| [NoteCtx::of(on, true), NoteCtx::of(on, false)])
+            .collect();
+        key_table::check(NOTE_KEYS, &ctxs);
+        let hints = |on: &CardNote, empty| -> Vec<String> {
+            (note_hints(on, empty).into_iter())
+                .map(|(k, w)| format!("{k} {w}"))
+                .collect()
+        };
+        assert_eq!(
+            hints(&notes[0], false),
+            [
+                "Enter save",
+                "Shift+Enter new line",
+                "Ctrl+Shift+Del discard",
+                "Esc keep draft"
+            ]
+        );
+        assert_eq!(
+            hints(&notes[1], true),
+            ["Enter delete", "Shift+Enter new line", "Esc cancel"]
+        );
+        assert_eq!(hints(&notes[2], false)[0], "Enter save and accept");
+        // Ctrl+Enter saves too, and an empty draft discards all the same.
+        let (mods, sym) = crate::keys::hint_key("Ctrl+Enter").unwrap();
+        assert_eq!(
+            key_table::press(NOTE_KEYS, &ctxs[0], &mods, sym),
+            Some(NoteKey::Save)
+        );
+        let (mods, sym) = crate::keys::hint_key("Ctrl+Shift+Del").unwrap();
+        assert_eq!(
+            key_table::press(NOTE_KEYS, &ctxs[0], &mods, sym),
+            Some(NoteKey::Discard)
+        );
     }
 }
