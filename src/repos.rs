@@ -5367,6 +5367,7 @@ impl Panel {
             unchecked: false,
             tree_nav: None,
             flat: false,
+            no_header: false,
             detail_share: 1.0,
             modes: None,
         }

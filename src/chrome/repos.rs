@@ -42,7 +42,7 @@ const ROW_BUTTON: i32 = 28;
 const ERROR_HEIGHT: i32 = 22;
 /// The header row with the title and the summary, and the gap between
 /// them.
-const REPOS_HEADER: i32 = 44;
+pub const REPOS_HEADER: i32 = 44;
 const HEADER_GAP: i32 = 12;
 /// The tree's share of the panel's width unless dragged, the least and
 /// most it can be dragged to, the narrowest it gets (unless that is more
@@ -263,6 +263,9 @@ pub struct ReposView {
     /// Laid flat into a tab rather than floating over the app: no shadow,
     /// border or rounded corners.
     pub flat: bool,
+    /// No header row of its own: what it is laid into names it (the page's
+    /// bar over Code review on the feature tab).
+    pub no_header: bool,
     /// The share of the panel's width under the header the detail takes,
     /// a file's page showing in the rest (see `doc_tab`): 1 for none of
     /// the page, 0 for the page alone.
@@ -322,6 +325,7 @@ impl ReposView {
             unchecked: false,
             tree_nav: None,
             flat: false,
+            no_header: false,
             detail_share: 1.0,
             modes: None,
         }
@@ -2029,7 +2033,8 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     let bottom_edge = top + panel.size.h;
     let inner_x = x + HELP_PADDING;
     let inner_w = (w - 2 * HELP_PADDING).max(0);
-    let header = Rectangle::new((x, top).into(), (w, REPOS_HEADER).into());
+    let header_h = if view.no_header { 0 } else { REPOS_HEADER };
+    let header = Rectangle::new((x, top).into(), (w, header_h).into());
     // The diff alone: none of the rest, all of the panel under the header.
     let only = view.diff_only;
     let no_tree = only && !view.diff_tree;
@@ -2068,7 +2073,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         (inner_x, y + (field_row - REPOS_FIELD).max(0) / 2).into(),
         (inner_w, if only { 0 } else { REPOS_FIELD }).into(),
     );
-    let middle_y = top + REPOS_HEADER;
+    let middle_y = top + header_h;
     let middle_h = (y - middle_y).max(0);
 
     // The tree and its lines, short of its scrollbar.
@@ -3145,42 +3150,44 @@ impl Painter {
         } else {
             format!("Repositories · {}", view.title)
         };
-        let header_band = band(header, scale);
-        let after = self.mixed_text(
-            &mut c,
-            &heading,
-            LABEL_FONT_SIZE,
-            hx,
-            hend,
-            header_band,
-            scale,
-            p.text,
-        );
-        self.mixed_text(
-            &mut c,
-            &view.summary,
-            FONT_SIZE,
-            after + (HEADER_GAP as f32 * s).round(),
-            hend,
-            header_band,
-            scale,
-            tone_color(view.summary_tone, p),
-        );
-        if !only {
-            self.branch_button(&mut c, view, picker, scale, p);
+        if !view.no_header {
+            let header_band = band(header, scale);
+            let after = self.mixed_text(
+                &mut c,
+                &heading,
+                LABEL_FONT_SIZE,
+                hx,
+                hend,
+                header_band,
+                scale,
+                p.text,
+            );
+            self.mixed_text(
+                &mut c,
+                &view.summary,
+                FONT_SIZE,
+                after + (HEADER_GAP as f32 * s).round(),
+                hend,
+                header_band,
+                scale,
+                tone_color(view.summary_tone, p),
+            );
+            if !only {
+                self.branch_button(&mut c, view, picker, scale, p);
+            }
+            if let (Some(switch), Some((track, rects))) = (&view.modes, &layout.modes) {
+                let segments: Vec<(&str, Rect)> = (switch.labels.iter().map(String::as_str))
+                    .zip(rects.iter().map(|&r| shift(r)))
+                    .collect();
+                let hover = match view.hover {
+                    Some(ReposHit::Mode(i)) => Some(i),
+                    _ => None,
+                };
+                let state = (switch.on, hover, &switch.off[..]);
+                self.segmented_off(&mut c, shift(*track), &segments, state, scale, p);
+            }
+            across(&mut c, px(header.loc.y + header.size.h) - border);
         }
-        if let (Some(switch), Some((track, rects))) = (&view.modes, &layout.modes) {
-            let segments: Vec<(&str, Rect)> = (switch.labels.iter().map(String::as_str))
-                .zip(rects.iter().map(|&r| shift(r)))
-                .collect();
-            let hover = match view.hover {
-                Some(ReposHit::Mode(i)) => Some(i),
-                _ => None,
-            };
-            let state = (switch.on, hover, &switch.off[..]);
-            self.segmented_off(&mut c, shift(*track), &segments, state, scale, p);
-        }
-        across(&mut c, px(header.loc.y + header.size.h) - border);
         // The line between the detail and a file's page beside it.
         if let Some(gap) = layout.page_gap.map(shift) {
             c.fill(
@@ -5535,6 +5542,7 @@ fn frame_view(view: &ReposView) -> ReposView {
         unchecked: view.unchecked,
         tree_nav: view.tree_nav,
         flat: view.flat,
+        no_header: view.no_header,
         detail_share: view.detail_share,
         modes: view.modes.clone(),
     }
@@ -6171,6 +6179,7 @@ mod tests {
             unchecked: false,
             tree_nav: None,
             flat: false,
+            no_header: false,
         }
     }
 

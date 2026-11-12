@@ -7969,6 +7969,7 @@ fn listed_review(flat: bool) -> super::ReposView {
         tree_nav: Some(true),
         tree_note: Some(("12 of 31 files left".into(), super::Tone::Warning)),
         flat,
+        no_header: flat,
         tree_share: super::REVIEW_TREE_SHARE,
         grouping: crate::repos::Grouping::Folders,
         lines,
@@ -8034,7 +8035,7 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x6d685c02515d43f0, // popup_no_comments_1180
         0x0b0737987fdde98c, // popup_no_comments_850
         0x657e8f85bed3c689, // popup_listed_1180
-        0x9194dd887fc48731, // inline_listed_1180
+        0x5aa9a81a6390ad62, // inline_listed_1180
     ],
     // Dark at 2
     [
@@ -8053,7 +8054,7 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0xf1a468043c5318c9, // popup_no_comments_1180
         0x1d2f421bf94ab574, // popup_no_comments_850
         0x54807e75c602168d, // popup_listed_1180
-        0x982c48687e8278b1, // inline_listed_1180
+        0xc30e9055875b1480, // inline_listed_1180
     ],
     // Light at 1
     [
@@ -8072,7 +8073,7 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x515d1c0cad51c048, // popup_no_comments_1180
         0xa8dade21e0ce5f8c, // popup_no_comments_850
         0xbe65ba0bb90a7e79, // popup_listed_1180
-        0x0377a1efdec60699, // inline_listed_1180
+        0xea0a5c5cfc91221a, // inline_listed_1180
     ],
     // Light at 2
     [
@@ -8091,7 +8092,7 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x32ce2ad1b9798180, // popup_no_comments_1180
         0xce9db1c39c7af1f3, // popup_no_comments_850
         0x80b1dfb328209225, // popup_listed_1180
-        0x5ddf86739c6faafd, // inline_listed_1180
+        0x1b435063d4d5d1a2, // inline_listed_1180
     ],
 ];
 

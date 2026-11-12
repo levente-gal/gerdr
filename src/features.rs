@@ -1814,6 +1814,22 @@ impl NewFeatureDialog {
     }
 }
 
+/// Whether a press at `pos` on a bar button named `label` at `now` is the
+/// second of a double click whose first, `last`, was on another button.
+fn other_button_again(
+    last: &(Instant, Point<f64, Logical>, String),
+    now: Instant,
+    pos: Point<f64, Logical>,
+    label: &str,
+) -> bool {
+    let (when, from, was) = last;
+    let slop = crate::input::MULTI_CLICK_SLOP;
+    now.duration_since(*when) < crate::input::MULTI_CLICK
+        && (from.x - pos.x).abs() < slop
+        && (from.y - pos.y).abs() < slop
+        && was != label
+}
+
 /// The feature panel's state, while it is open.
 #[derive(Debug, Default)]
 pub struct FeaturePanel {
@@ -1854,6 +1870,9 @@ pub struct FeaturePanel {
     pub review_area: Option<chrome::Rect>,
     /// On that page, the rail has the keys, not the review (Esc there).
     pub rail_keys: bool,
+    /// The last press on the page's bar: when, where, and the button's
+    /// label (see `bar_press_again`).
+    pub bar_press: Option<(Instant, Point<f64, Logical>, String)>,
     /// Each column's scroll, indexed by `TabColumn` (logical pixels).
     pub scroll: [Scroll; 3],
     /// The page the Page column's scroll is for: the stage, and whether
@@ -10962,6 +10981,35 @@ impl Gerdr {
         Some(at)
     }
 
+    /// Whether a press of `hit` at `pos` is the second of a double click on
+    /// the page's bar, there on another button than the first press took:
+    /// the bar's buttons change under the pointer as the page does, and
+    /// that one was not aimed at. Any other press of the bar is kept as the
+    /// last one.
+    fn bar_press_again(&mut self, hit: FeatureTabHit, pos: Point<f64, Logical>) -> bool {
+        let label = self.feature_tab_parts().and_then(|(view, layout)| {
+            let at = pos.to_i32_round();
+            match hit {
+                FeatureTabHit::PageButton(i) => (layout.bar_buttons.iter())
+                    .any(|(b, r)| *b == i && r.contains(at))
+                    .then(|| view.page.buttons.get(i).map(|b| b.label.clone()))?,
+                FeatureTabHit::ReviewButton(i) => {
+                    Some(view.review_switch?.buttons.get(i)?.label.clone())
+                }
+                _ => None,
+            }
+        });
+        let (Some(label), Some(panel)) = (label, self.features.panel.as_mut()) else {
+            return false;
+        };
+        let again = (panel.bar_press.as_ref())
+            .is_some_and(|last| other_button_again(last, Instant::now(), pos, &label));
+        if !again {
+            panel.bar_press = Some((Instant::now(), pos, label));
+        }
+        again
+    }
+
     /// A left click in the feature tab: a stage's node shows its page, a
     /// repository takes the keyboard, a button does what it says.
     pub fn feature_panel_click(&mut self, pos: Point<f64, Logical>) {
@@ -10978,6 +11026,9 @@ impl Gerdr {
         let Some(hit) = self.feature_tab_hit(pos) else {
             return;
         };
+        if self.bar_press_again(hit, pos) {
+            return;
+        }
         // A press off the search gives the keys back to the page.
         if !matches!(hit, FeatureTabHit::Search(_))
             && let Some(search) = (self.features.panel.as_mut()).and_then(|p| p.search.as_mut())
@@ -21180,6 +21231,22 @@ pub(crate) mod tests {
             page_enter(&f, Stage::Verify, ctx),
             Some(PanelOutcome::RunChecks)
         );
+    }
+
+    #[test]
+    fn a_double_click_on_the_bar_presses_no_other_button() {
+        let t = Instant::now();
+        let at: Point<f64, Logical> = (900.0, 200.0).into();
+        let last = (t, at, "Fix".to_owned());
+        let soon = t + Duration::from_millis(150);
+        // The button changed under the pointer: the second press is not it.
+        assert!(other_button_again(&last, soon, at, "Review in diff"));
+        // The same button again, a late press, a press elsewhere: all taken.
+        assert!(!other_button_again(&last, soon, at, "Fix"));
+        let late = t + crate::input::MULTI_CLICK;
+        assert!(!other_button_again(&last, late, at, "Review in diff"));
+        let off: Point<f64, Logical> = (800.0, 200.0).into();
+        assert!(!other_button_again(&last, soon, off, "Add comment\u{2026}"));
     }
 
     #[test]
