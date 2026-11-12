@@ -318,7 +318,7 @@ impl Gerdr {
             Overlay::Confirm => self.confirm_hover(pos),
             Overlay::Tasks => self.tasks_hover(pos),
             Overlay::Machines => self.machines_panel_hover(pos),
-            Overlay::NewFeature => self.new_feature_hover(pos),
+            Overlay::NewFeature => return self.new_feature_hover(pos),
             Overlay::FindingDialog => self.finding_dialog_hover(pos),
             Overlay::GitIdentity => self.identity_hover(pos),
             Overlay::ConnectMachine => self.machine_hover(pos),

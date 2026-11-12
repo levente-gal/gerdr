@@ -502,7 +502,7 @@ impl Chrome {
                 }
                 Kind::NewFeature => {
                     let dialog = view.new_feature.take().map(|v| {
-                        let layout = new_feature_layout(output, v.slots, v.error.is_some());
+                        let layout = new_feature_layout(output, v.slots, v.error.is_some(), &v.reviewers);
                         let (loc, size) = shadowed(layout.panel);
                         ((v, output, theme, scale), loc, size)
                     });

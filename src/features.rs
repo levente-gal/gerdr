@@ -909,7 +909,16 @@ pub struct Reviewing {
     note: Option<String>,
     /// The open review it changes the pull requests of: its slug and title.
     into: Option<(String, String)>,
+    /// The agents a new review's AI review may start with (see
+    /// `new_review_chips`), the one it will lit.
+    reviewers: Vec<AgentChip>,
+    /// The one it starts unless another is picked: no pick to save.
+    default_reviewer: Option<String>,
 }
+
+/// `NewFeatureDialog::focus` on the Reviewer row: past the rows, however
+/// many there come to be.
+const REVIEWER: usize = usize::MAX;
 
 /// What the review dialog knows of a repository's open pull requests.
 #[derive(Debug, Default)]
@@ -989,6 +998,9 @@ pub enum DialogOutcome {
         picks: Vec<crate::pr_review::Pick>,
         /// The open review whose pull requests become these, by slug.
         into: Option<String>,
+        /// The agent its AI review starts with, when not the one it would
+        /// anyway.
+        reviewer: Option<String>,
     },
 }
 
@@ -1386,6 +1398,8 @@ impl NewFeatureDialog {
             return;
         };
         review.into = Some((f.slug.clone(), f.title.clone()));
+        // Its AI review's agent is picked on its page.
+        review.reviewers.clear();
         for repo in &f.repos {
             let Some(pull) = f.pull_of(&repo.key()) else {
                 continue;
@@ -1456,13 +1470,55 @@ impl NewFeatureDialog {
                 "Pick a pull request of {name}: the project's only repository."
             ));
         }
+        let lit = review.reviewers.iter().find(|c| c.lit).map(|c| &c.name);
+        let reviewer = lit.filter(|name| {
+            (review.default_reviewer.as_ref()).is_none_or(|d| !d.eq_ignore_ascii_case(name))
+        });
         Ok(DialogOutcome::Review {
             title: self.title.trim().to_owned(),
             root: root.clone(),
             links: self.links(),
             picks,
             into: review.into.as_ref().map(|(slug, _)| slug.clone()),
+            reviewer: reviewer.cloned(),
         })
+    }
+
+    /// The Reviewer row's chips: none, no row.
+    fn reviewers(&self) -> &[AgentChip] {
+        self.review.as_ref().map_or(&[], |r| &r.reviewers)
+    }
+
+    /// Where its parts go on an output of `size`.
+    fn layout(&self, size: smithay::utils::Size<i32, Logical>) -> chrome::NewFeatureLayout {
+        chrome::new_feature_layout(size, self.slots(), self.error.is_some(), self.reviewers())
+    }
+
+    /// Light reviewer chip `i`, one that may review.
+    fn pick_reviewer(&mut self, i: usize) {
+        let Some(review) = self.review.as_mut() else {
+            return;
+        };
+        if review.reviewers.get(i).is_none_or(|c| c.off) {
+            return;
+        }
+        for (k, chip) in review.reviewers.iter_mut().enumerate() {
+            chip.lit = k == i;
+        }
+    }
+
+    /// Light the reviewer chip before (`back`) or after the lit one.
+    fn step_reviewer(&mut self, back: bool) {
+        let chips = self.reviewers();
+        let lit = chips.iter().position(|c| c.lit);
+        let to = match (lit, back) {
+            (None, _) => Some(0),
+            (Some(i), true) => i.checked_sub(1),
+            (Some(i), false) => Some(i + 1),
+        };
+        if let Some(to) = to {
+            self.pick_reviewer(to);
+        }
     }
 
     /// The row Alt+B acts on: the one with the keyboard, else the first
@@ -1710,16 +1766,17 @@ impl NewFeatureDialog {
         self.error = None;
     }
 
-    /// Move the keyboard between the title and the rows.
+    /// Move the keyboard between the title, the rows and the Reviewer row.
     fn step(&mut self, back: bool) {
         let n = if self.multi() { self.repos() } else { 0 };
-        let at = self.focus.map_or(0, |i| i + 1);
-        let to = if back {
-            (at + n) % (n + 1)
-        } else {
-            (at + 1) % (n + 1)
-        };
-        self.focus = to.checked_sub(1);
+        let reviewer = !self.picking && !self.reviewers().is_empty();
+        let stops: Vec<Option<usize>> = (std::iter::once(None))
+            .chain((0..n).map(Some))
+            .chain(reviewer.then_some(Some(REVIEWER)))
+            .collect();
+        let at = stops.iter().position(|s| *s == self.focus).unwrap_or(0);
+        let k = stops.len();
+        self.focus = stops[if back { (at + k - 1) % k } else { (at + 1) % k }];
     }
 
     /// What `pos` is over: a row with no base button there is only a row.
@@ -1741,7 +1798,7 @@ impl NewFeatureDialog {
     /// Scroll so the focused row is among the `fit` shown.
     fn reveal(&mut self, fit: usize) {
         let fit = fit.max(1);
-        if let Some(i) = self.focus {
+        if let Some(i) = self.focus.filter(|i| *i != REVIEWER) {
             if i < self.top {
                 self.top = i;
             } else if i >= self.top + fit {
@@ -1799,6 +1856,12 @@ impl NewFeatureDialog {
             Keysym::Up | Keysym::KP_Up => self.step(true),
             Keysym::j | Keysym::J if ctrl => self.step(false),
             Keysym::k | Keysym::K if ctrl => self.step(true),
+            Keysym::Left | Keysym::KP_Left if plain && self.focus == Some(REVIEWER) => {
+                self.step_reviewer(true)
+            }
+            Keysym::Right | Keysym::KP_Right if plain && self.focus == Some(REVIEWER) => {
+                self.step_reviewer(false)
+            }
             Keysym::space if plain && self.focus.is_some() => {
                 if let Some(i) = self.focus {
                     self.toggle(i);
@@ -8412,9 +8475,16 @@ impl Gerdr {
         self.overlays.context_menu = None;
         self.stop_key_repeat();
         let mut dialog = NewFeatureDialog::new(id.clone(), serial, from.clone());
-        dialog.review = wanted.map(|w| Reviewing {
-            wanted: (w.2 != 0).then_some(w),
-            ..Reviewing::default()
+        let workflow = self.projects.project(&id).map(|p| &p.workflow);
+        dialog.review = wanted.map(|w| {
+            let (reviewers, default_reviewer) =
+                crate::feature_agents::new_review_chips(workflow, &self.launcher.cli_agents);
+            Reviewing {
+                wanted: (w.2 != 0).then_some(w),
+                reviewers,
+                default_reviewer,
+                ..Reviewing::default()
+            }
         });
         self.features.dialog = Some(dialog);
         self.find_home_root(&id, from, serial);
@@ -8767,9 +8837,7 @@ impl Gerdr {
         let Some(dialog) = &self.features.dialog else {
             return 1;
         };
-        chrome::new_feature_layout(self.output_size(), dialog.slots(), dialog.error.is_some())
-            .rows
-            .len()
+        dialog.layout(self.output_size()).rows.len()
     }
 
     /// A key while the new feature dialog has the keyboard.
@@ -8808,6 +8876,7 @@ impl Gerdr {
                 links,
                 picks,
                 into: Some(slug),
+                ..
             } => return self.change_pulls(dialog.project, slug, root, links, picks, title),
             DialogOutcome::Review {
                 title,
@@ -8815,7 +8884,11 @@ impl Gerdr {
                 links,
                 picks,
                 into: None,
-            } => return self.start_review_of(dialog.project, root, links, picks, title),
+                reviewer,
+            } => {
+                let project = dialog.project;
+                return self.start_review_of(project, root, links, picks, title, reviewer);
+            }
         };
         let project = dialog.project;
         let all = self
@@ -9051,13 +9124,14 @@ impl Gerdr {
         let Some(dialog) = self.features.dialog.as_mut() else {
             return;
         };
-        let layout = chrome::new_feature_layout(size, dialog.slots(), dialog.error.is_some());
+        let layout = dialog.layout(size);
         let mut picked = false;
         let outcome = match dialog.hit(&layout, pos) {
             // The picker over the form leaves its buttons off.
             Some(NewFeatureHit::Button(_) | NewFeatureHit::Link) if dialog.choosing.is_some() => {
                 None
             }
+            Some(NewFeatureHit::Reviewer(_)) if dialog.choosing.is_some() => None,
             Some(NewFeatureHit::Button(chrome::CREATE)) => match dialog.create() {
                 Ok(outcome) => Some(outcome),
                 Err(why) => {
@@ -9090,6 +9164,11 @@ impl Gerdr {
                 dialog.focus = None;
                 None
             }
+            Some(NewFeatureHit::Reviewer(i)) => {
+                dialog.focus = Some(REVIEWER);
+                dialog.pick_reviewer(i);
+                None
+            }
             Some(NewFeatureHit::Link) => {
                 dialog.pick();
                 picked = true;
@@ -9108,13 +9187,19 @@ impl Gerdr {
         }
     }
 
-    /// The pointer moved while the new feature dialog is open.
-    pub fn new_feature_hover(&mut self, pos: Point<f64, Logical>) {
+    /// The pointer moved while the new feature dialog is open: a reviewer
+    /// chip offers its agent's name.
+    pub fn new_feature_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
         let size = self.output_size();
-        if let Some(dialog) = self.features.dialog.as_mut() {
-            let layout = chrome::new_feature_layout(size, dialog.slots(), dialog.error.is_some());
-            dialog.hover = dialog.hit(&layout, pos);
-        }
+        let dialog = self.features.dialog.as_mut()?;
+        let layout = dialog.layout(size);
+        dialog.hover = dialog.hit(&layout, pos);
+        let (Some(NewFeatureHit::Reviewer(i)), None) = (dialog.hover, &dialog.choosing) else {
+            return None;
+        };
+        let chip = dialog.reviewers().get(i)?;
+        let (_, _, spots) = layout.reviewer.as_ref()?;
+        Some(Tooltip::new(&chip.name, *spots.get(i)?))
     }
 
     /// Scroll the dialog's repositories `by` rows.
@@ -9131,7 +9216,7 @@ impl Gerdr {
         let Some(dialog) = &self.features.dialog else {
             return Vec::new();
         };
-        chrome::new_feature_layout(self.output_size(), dialog.slots(), dialog.error.is_some()).rows
+        dialog.layout(self.output_size()).rows
     }
 
     /// What the pointer can press in the new feature dialog.
@@ -9139,8 +9224,7 @@ impl Gerdr {
         let Some(dialog) = &self.features.dialog else {
             return Vec::new();
         };
-        chrome::new_feature_layout(self.output_size(), dialog.slots(), dialog.error.is_some())
-            .controls()
+        dialog.layout(self.output_size()).controls()
     }
 
     pub fn new_feature_view(&self) -> Option<NewFeatureView> {
@@ -12602,6 +12686,9 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
     let mut keys = match (dialog.choosing.is_some(), dialog.multi()) {
         (true, _) if review.is_some() => vec![("Tab", "next"), ("Enter", "pick")],
         (true, _) => vec![("Tab", "next"), ("Enter", "use branch")],
+        (false, true) if reviewing && dialog.focus == Some(REVIEWER) => {
+            vec![("Tab", "next"), ("Left / Right", "reviewer")]
+        }
         (false, true) if reviewing => vec![("Tab", "next"), ("Space", "pick or leave out")],
         // Nothing to tick with no project to link.
         (false, true) if dialog.picking && dialog.others.is_empty() => Vec::new(),
@@ -12676,6 +12763,8 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
         keys,
         create,
         choosing: chosen.is_some(),
+        reviewers: dialog.reviewers().to_vec(),
+        reviewer_focus: dialog.choosing.is_none() && dialog.focus == Some(REVIEWER),
     }
 }
 
@@ -17195,6 +17284,56 @@ pub(crate) mod tests {
         };
         assert_eq!(into.as_deref(), Some("pr-12"));
         assert_eq!(picks.iter().map(|p| p.number).collect::<Vec<_>>(), vec![12]);
+    }
+
+    #[test]
+    fn a_new_review_picks_its_reviewer_in_the_dialog() {
+        let chip = |name: &str, lit| AgentChip {
+            icon: AgentIcon::from_agent(name),
+            name: name.into(),
+            lit,
+            off: false,
+        };
+        let mut d = NewFeatureDialog::new("acme".into(), 1, "/work/api".into());
+        d.review = Some(Reviewing {
+            reviewers: vec![chip("Claude Code", true), chip("Cursor", false)],
+            default_reviewer: Some("Claude Code".into()),
+            ..Reviewing::default()
+        });
+        d.found(Ok(root(&["api"])));
+        d.unlisted();
+        let pull = feature::pr::OpenPull {
+            number: 12,
+            url: "https://github.com/o/r/pull/12".into(),
+            ..Default::default()
+        };
+        d.pulls_listed(&(None, "api".into()), Ok(vec![pull]));
+        d.pick_pull_of(&(None, "api".into()), 12);
+        // Tab: the title, the repository, then the Reviewer row.
+        dkey(&mut d, key(Keysym::Tab));
+        dkey(&mut d, key(Keysym::Tab));
+        let view = new_feature_view(&d, "Acme".into());
+        assert!(view.reviewer_focus);
+        assert!(view.keys.contains(&("Left / Right", "reviewer")));
+        let reviewer = |d: &mut NewFeatureDialog| match dkey(d, key(Keysym::Return)) {
+            Some(DialogOutcome::Review { reviewer, .. }) => reviewer,
+            other => panic!("a review, not {other:?}"),
+        };
+        // The default needs no pick; Right picks Cursor, past the end stays.
+        assert_eq!(reviewer(&mut d), None);
+        dkey(&mut d, key(Keysym::Right));
+        dkey(&mut d, key(Keysym::Right));
+        assert_eq!(reviewer(&mut d).as_deref(), Some("Cursor"));
+        dkey(&mut d, key(Keysym::Left));
+        assert_eq!(reviewer(&mut d), None);
+        // Tab goes round to the title; Left there moves no pick.
+        dkey(&mut d, key(Keysym::Tab));
+        assert_eq!(d.focus, None);
+        // Changing a review's pull requests offers no Reviewer row.
+        let mut f = feature("pr-12", vec![repo("api", true)], 4);
+        f.kind = feature::Kind::PrReview(Vec::new());
+        d.edit(&f);
+        assert!(new_feature_view(&d, "Acme".into()).reviewers.is_empty());
     }
 
     /// A feature at Plan with an agent at work, written on another machine.

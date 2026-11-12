@@ -56,6 +56,8 @@ pub const SAVE_PULLS: &str = "Save";
 pub const RETITLE_HINT: &str = "A new title, or empty to keep it";
 /// The review dialog's title field while empty.
 pub const REVIEW_TITLE_HINT: &str = "Its title; empty takes the first pull request's";
+/// The label in front of the review dialog's agent chips.
+const REVIEWER_LABEL: &str = "Reviewer";
 /// How wide a repository row's base branch button is: the same on all, so
 /// they line up, whatever the branch.
 const BASE_BUTTON_W: i32 = 168;
@@ -154,6 +156,11 @@ pub struct NewFeatureView {
     /// A picker over the form: a repository's base branch or pull request,
     /// one of the rows (radio, not tick boxes), the form's buttons off.
     pub choosing: bool,
+    /// The agents a new review's AI review may start with, the one it will
+    /// lit; none, no Reviewer row.
+    pub reviewers: Vec<AgentChip>,
+    /// The Reviewer row has the keyboard.
+    pub reviewer_focus: bool,
 }
 
 /// What the pointer is over in the new feature dialog.
@@ -168,6 +175,8 @@ pub enum NewFeatureHit {
     Link,
     /// 0 Cancel, 1 Create.
     Button(usize),
+    /// Chip `i` of the Reviewer row.
+    Reviewer(usize),
 }
 
 /// Where the new feature dialog's parts go, in output coordinates.
@@ -188,14 +197,25 @@ pub struct NewFeatureLayout {
     pub bases: Vec<Rect>,
     /// Cancel, Create.
     pub buttons: [Rect; 2],
+    /// The Reviewer row, its chips' outline and each chip, under the rows.
+    pub reviewer: Option<(Rect, Rect, Vec<Rect>)>,
 }
 
 /// Where the new feature dialog's parts go with `repos` repositories, an
-/// error line if `error`, centred on an output of `size`: as many
-/// repositories as fit.
-pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -> NewFeatureLayout {
+/// error line if `error`, a Reviewer row if there are `reviewers`, centred
+/// on an output of `size`: as many repositories as fit.
+pub fn new_feature_layout(
+    size: Size<i32, Logical>,
+    repos: usize,
+    error: bool,
+    reviewers: &[AgentChip],
+) -> NewFeatureLayout {
     // Its line has room kept, so the dialog doesn't grow when one shows.
     let error_h = QUIT_BODY + QUIT_LINE_GAP;
+    let reviewer_h = match reviewers.is_empty() {
+        true => 0,
+        false => PICK_TRACK + ROWS_END,
+    };
     let fixed = 2 * QUIT_PADDING
         + QUIT_TITLE
         + QUIT_LINE_GAP
@@ -208,7 +228,8 @@ pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -
         + QUIT_LINE_GAP
         + ROWS_END
         - ROW_GAP
-        + QUIT_BUTTON;
+        + QUIT_BUTTON
+        + reviewer_h;
     let fit = ((size.h - 2 * MARGIN - fixed) / (CHECKBOX_ROW + ROW_GAP)).max(1) as usize;
     let shown = repos.min(fit);
     let height = fixed + shown as i32 * (CHECKBOX_ROW + ROW_GAP);
@@ -252,6 +273,14 @@ pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -
         })
         .collect();
     let buttons = dialog_buttons(panel, &NEW_FEATURE_BUTTONS);
+    let reviewer = (!reviewers.is_empty()).then(|| {
+        let y = y + shown as i32 * (CHECKBOX_ROW + ROW_GAP) - ROW_GAP + ROWS_END;
+        let row = Rectangle::new((x, y).into(), (inner, PICK_TRACK).into());
+        let label = ROW_INSET + width_of(REVIEWER_LABEL, FONT_SIZE).ceil() as i32 + PLACE_GAP;
+        let names: Vec<&str> = reviewers.iter().map(|c| c.name.as_str()).collect();
+        let (track, chips) = agent_pick_rects(&names, x + label, y, inner - label);
+        (row, track, chips)
+    });
     NewFeatureLayout {
         panel,
         title,
@@ -263,6 +292,7 @@ pub fn new_feature_layout(size: Size<i32, Logical>, repos: usize, error: bool) -
         rows,
         bases,
         buttons: [buttons[0], buttons[1]],
+        reviewer,
     }
 }
 
@@ -282,6 +312,10 @@ impl NewFeatureLayout {
         if let Some(slot) = self.bases.iter().position(on) {
             return Some(NewFeatureHit::Base(top + slot));
         }
+        let chips = self.reviewer.iter().flat_map(|(_, _, chips)| chips);
+        if let Some(i) = chips.into_iter().position(on) {
+            return Some(NewFeatureHit::Reviewer(i));
+        }
         self.rows
             .iter()
             .position(on)
@@ -292,6 +326,7 @@ impl NewFeatureLayout {
     pub fn controls(&self) -> Vec<Rect> {
         (self.rows.iter().chain(&self.buttons))
             .chain(std::iter::once(&self.link))
+            .chain(self.reviewer.iter().flat_map(|(_, _, chips)| chips))
             .copied()
             .collect()
     }
@@ -300,7 +335,7 @@ impl NewFeatureLayout {
 /// The new feature dialog's title field, as the caret and the pointer
 /// care.
 pub fn new_feature_field(view: &NewFeatureView, size: Size<i32, Logical>, scale: f64) -> FieldSpot {
-    let area = new_feature_layout(size, view.slots, view.error.is_some()).field;
+    let area = new_feature_layout(size, view.slots, view.error.is_some(), &view.reviewers).field;
     FieldSpot {
         area,
         text: field_text(area, scale),
@@ -6337,7 +6372,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let layout = new_feature_layout(size, view.slots, view.error.is_some());
+        let layout = new_feature_layout(size, view.slots, view.error.is_some(), &view.reviewers);
         let panel = layout.panel;
         let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         let s = scale as f32;
@@ -6461,6 +6496,25 @@ impl Painter {
             );
         }
 
+        if let Some((row, track, chips)) = &layout.reviewer {
+            let row = shift(*row);
+            self.row_highlight(&mut c, row, (view.reviewer_focus, 0.0), scale, p);
+            let label = Rectangle::new(
+                (row.loc.x + ROW_INSET, row.loc.y).into(),
+                (row.size.w - ROW_INSET, row.size.h).into(),
+            );
+            let (x, end) = phys(label, scale);
+            let at = band(label, scale);
+            self.text(&mut c, REVIEWER_LABEL, FONT_SIZE, x, end, at, scale, p.text);
+            let rects: Vec<Rect> = chips.iter().map(|r| shift(*r)).collect();
+            let hover = match view.hover {
+                Some(NewFeatureHit::Reviewer(i)) if !view.choosing => Some(i),
+                _ => None,
+            };
+            let picks = &view.reviewers;
+            self.agent_chips(&mut c, shift(*track), &rects, picks, hover, scale, p);
+        }
+
         // Left of the buttons, how many repositories don't show, else the
         // keys besides the buttons; then Cancel and Create, the default.
         let first = shift(layout.buttons[0]);
@@ -6509,6 +6563,47 @@ impl Painter {
             );
         }
         c.into_buffer(false)
+    }
+
+    /// Agent chips `picks` at `rects` in their outline `track`, as an agent
+    /// card and the review dialog show them: the lit one ringed, chip
+    /// `hover` under the pointer.
+    #[allow(clippy::too_many_arguments)]
+    fn agent_chips(
+        &self,
+        c: &mut Canvas,
+        track: Rect,
+        rects: &[Rect],
+        picks: &[AgentChip],
+        hover: Option<usize>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let on = picks.iter().position(|c| c.lit).unwrap_or(usize::MAX);
+        let off: Vec<usize> = (picks.iter().enumerate())
+            .filter(|(_, c)| c.off)
+            .map(|(i, _)| i)
+            .collect();
+        self.segment_grounds(c, track, rects, (on, hover, &off), scale, p);
+        for (i, (chip, rect)) in picks.iter().zip(rects).enumerate() {
+            // One that can't be picked stands well back.
+            let tint = match chip.off && !chip.lit {
+                true => mix(p.element, p.placeholder, PICK_OFF),
+                false => segment_tint(i, on, &off, p),
+            };
+            let logo = Rectangle::new(rect.loc, (rect.size.w.min(PICK_CHIP), rect.size.h).into());
+            agent_icon(c, logo, PICK_ICON, chip.icon, tint, scale);
+            // Its name, where the row has room for it.
+            if rect.size.w > PICK_CHIP {
+                let label = Rectangle::new(
+                    (rect.loc.x + PICK_CHIP - PICK_NAME_IN, rect.loc.y).into(),
+                    (rect.size.w - PICK_CHIP + PICK_NAME_IN, rect.size.h).into(),
+                );
+                let (x, end) = phys(label, scale);
+                let at = band(label, scale);
+                self.text(c, &chip.name, SMALL_FONT_SIZE, x, end, at, scale, tint);
+            }
+        }
     }
 
     /// The feature tab's `slice` (see `TabSlice`), at `region` of a tab
@@ -7727,36 +7822,11 @@ impl Painter {
                         line(c, "Agent", label, SMALL_FONT_SIZE, p.muted);
                     }
                     let rects: Vec<Rect> = chips.iter().map(|r| at(*r)).collect();
-                    let on = picks.iter().position(|c| c.lit).unwrap_or(usize::MAX);
                     let hover = match view.hover {
                         Some(FeatureTabHit::AgentPick(i)) => Some(i),
                         _ => None,
                     };
-                    let off: Vec<usize> = (picks.iter().enumerate())
-                        .filter(|(_, c)| c.off)
-                        .map(|(i, _)| i)
-                        .collect();
-                    self.segment_grounds(c, track, &rects, (on, hover, &off), scale, p);
-                    for (i, (chip, rect)) in picks.iter().zip(&rects).enumerate() {
-                        // One that can't be picked stands well back.
-                        let tint = match chip.off && !chip.lit {
-                            true => mix(p.element, p.placeholder, PICK_OFF),
-                            false => segment_tint(i, on, &off, p),
-                        };
-                        let logo = Rectangle::new(
-                            rect.loc,
-                            (rect.size.w.min(PICK_CHIP), rect.size.h).into(),
-                        );
-                        agent_icon(c, logo, PICK_ICON, chip.icon, tint, scale);
-                        // Its name, where the row has room for it.
-                        if rect.size.w > PICK_CHIP {
-                            let label = Rectangle::new(
-                                (rect.loc.x + PICK_CHIP - PICK_NAME_IN, rect.loc.y).into(),
-                                (rect.size.w - PICK_CHIP + PICK_NAME_IN, rect.size.h).into(),
-                            );
-                            line(c, &chip.name, label, SMALL_FONT_SIZE, tint);
-                        }
-                    }
+                    self.agent_chips(c, track, &rects, picks, hover, scale, p);
                 }
                 let model_spot = l.agent_model.filter(|_| model.is_some()).map(at);
                 if let (Some(label), Some(r)) = (model, model_spot) {
@@ -8552,7 +8622,7 @@ mod tests {
 
     #[test]
     fn the_dialog_stacks_its_parts_inside_it() {
-        let l = new_feature_layout((1920, 1080).into(), 3, true);
+        let l = new_feature_layout((1920, 1080).into(), 3, true, &[]);
         assert_eq!(l.rows.len(), 3);
         for part in l
             .rows
@@ -8567,9 +8637,9 @@ mod tests {
                 .is_some_and(|e| e.loc.y > l.field.loc.y && e.loc.y < l.root.loc.y)
         );
         // An error showing doesn't grow it.
-        let calm = new_feature_layout((1920, 1080).into(), 3, false);
+        let calm = new_feature_layout((1920, 1080).into(), 3, false, &[]);
         assert_eq!((calm.panel, calm.root), (l.panel, l.root));
-        let short = new_feature_layout((800, 360).into(), 30, false);
+        let short = new_feature_layout((800, 360).into(), 30, false, &[]);
         assert!(!short.rows.is_empty() && short.rows.len() < 30);
         assert!(short.panel.size.h <= 360);
     }
