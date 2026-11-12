@@ -1412,7 +1412,12 @@ impl Gerdr {
     /// else there.
     pub(crate) fn pick_stage_model(&mut self, project: &str, slug: &str, stage: Stage) {
         if let Some(slot) = self.model_slot_of(project, slug, stage) {
-            return self.open_model_picker(project, slug, stage, slot);
+            let of = crate::switcher::ModelFor::Stage {
+                project: project.to_owned(),
+                slug: slug.to_owned(),
+                stage,
+            };
+            return self.open_model_picker(of, slot);
         }
         let chips = self.chips_of(project, slug, stage);
         if let Some(chip) = chips.iter().find(|c| c.lit) {

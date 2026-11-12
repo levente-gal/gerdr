@@ -45,7 +45,7 @@ use crate::{
     agents::AgentKey,
     app_icons::AppIcon,
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
-    cli_agents::Start,
+    cli_agents::{CliAgent, Start},
     desktop,
     feature::{Stage, agents::Flavor},
     feature_agents::ModelSlot,
@@ -131,20 +131,39 @@ pub enum Target {
     /// The worktrees of the shown project's feature `.0`, removed once it
     /// shipped, or it abandoned, brought back (see `Gerdr::undo_after_ship`).
     RestoreWorktrees(String),
-    /// A model for a feature stage's agent, picked (see
+    /// A model for a feature stage's agent or a new agent, picked (see
     /// `Gerdr::open_model_picker`).
     StageModel(ModelPick),
 }
 
-/// A model picked for `agent` on `stage` of feature `slug`; none for what it
-/// uses on its own.
+/// A model picked for `agent`, for what `of` says; none for what it uses on
+/// its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelPick {
-    pub project: String,
-    pub slug: String,
-    pub stage: Stage,
+    pub of: ModelFor,
     pub agent: String,
     pub model: Option<String>,
+}
+
+/// What a model is picked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelFor {
+    /// `stage` of feature `slug`, from its next start on.
+    Stage {
+        project: String,
+        slug: String,
+        stage: Stage,
+    },
+    /// The agent CLI `command`, to start now in a new tab of workspace
+    /// `workspace` (see `Gerdr::new_agent`).
+    Free { workspace: usize, command: String },
+}
+
+impl ModelPick {
+    /// Whether it starts a new agent rather than set a stage's model.
+    fn free(&self) -> bool {
+        matches!(self.of, ModelFor::Free { .. })
+    }
 }
 
 impl Target {
@@ -342,10 +361,10 @@ pub struct Switcher {
     hint_hover: Option<usize>,
     /// The installed apps' icons by program, for the typed command.
     icons: HashMap<String, AppIcon>,
-    /// Picking a stage's model: what a pick is for, its model left out. The
-    /// first item is the query, as a model no row offers.
+    /// Picking a model: what a pick is for, its model left out. The first
+    /// item is the query, as a model no row offers.
     model_slot: Option<ModelPick>,
-    /// What the query field says while empty, picking a stage's model.
+    /// What the query field says while empty, picking a model.
     model_hint: &'static str,
 }
 
@@ -858,6 +877,7 @@ impl Switcher {
             match key {
                 Key::Pick(Some(_)) => "in a new tab",
                 Key::Pick(None) if self.run => "run",
+                Key::Pick(None) if self.model_slot.as_ref().is_some_and(ModelPick::free) => "start",
                 Key::Pick(None) if self.model_slot.is_some() => "pick",
                 Key::Pick(None) => "open",
                 Key::Category(_) => "category",
@@ -898,7 +918,7 @@ fn command_icon(command: &str, icons: &HashMap<String, AppIcon>) -> ItemIcon {
         .map_or(ItemIcon::App, ItemIcon::Picture)
 }
 
-/// The item of a model typed into the picker of a stage's model.
+/// The item of a model typed into the picker of a model.
 fn typed_model(slot: &ModelPick, typed: &str) -> Item {
     Item::new(
         ItemIcon::Command,
@@ -909,6 +929,70 @@ fn typed_model(slot: &ModelPick, typed: &str) -> Item {
             ..slot.clone()
         }),
     )
+}
+
+/// The rows of the picker of `slot`'s model for `pick`: the agent's own
+/// choice, then what it offers (Cursor's from `cursor`), and the model picked
+/// now if it offers none such.
+fn model_rows(slot: &ModelSlot, pick: &ModelPick, cursor: &[Offer]) -> Vec<Item> {
+    let mut offers = match Flavor::of(&slot.base) {
+        Flavor::Cursor => cursor.to_vec(),
+        _ => stage_models::claude_offers(),
+    };
+    if let Some(id) = &slot.picked
+        && !offers.iter().any(|o| o.id == *id)
+    {
+        offers.push(Offer {
+            id: id.clone(),
+            name: id.clone(),
+        });
+    }
+    let icon = AgentIcon::from_agent(&slot.agent)
+        .picture()
+        .map_or(ItemIcon::Command, |picture| {
+            ItemIcon::Picture(picture.clone())
+        });
+    let row = |label: String, detail: String, model: Option<String>| {
+        // A new agent has no model picked before.
+        let now = model == slot.picked && !pick.free();
+        let detail = match now {
+            true => format!("{detail} \u{b7} picked"),
+            false => detail,
+        };
+        Item::new(
+            icon.clone(),
+            label,
+            detail,
+            Target::StageModel(ModelPick {
+                model,
+                ..pick.clone()
+            }),
+        )
+    };
+    let own = format!("{}'s own choice", slot.agent);
+    let mut items = vec![row("Default".to_owned(), own, None)];
+    items.extend((offers.into_iter()).map(|o| row(o.name, o.id.clone(), Some(o.id))));
+    items
+}
+
+/// The picker of a model for starting the agent CLI `command` in workspace
+/// `w`, named as `agents` name it; none for a CLI gerdr can't tell a model,
+/// which starts at once.
+fn free_model_pick(w: usize, command: &str, agents: &[CliAgent]) -> Option<(ModelFor, ModelSlot)> {
+    if !Flavor::of(command).takes_model() {
+        return None;
+    }
+    let agent = agents.iter().find(|a| a.command() == Some(command))?;
+    let slot = ModelSlot {
+        agent: agent.name.clone(),
+        base: command.to_owned(),
+        picked: None,
+    };
+    let of = ModelFor::Free {
+        workspace: w,
+        command: command.to_owned(),
+    };
+    Some((of, slot))
 }
 
 /// The run prompt's item for the typed `command`, to run in `place`: an
@@ -1123,23 +1207,15 @@ impl Gerdr {
         self.overlays.switcher = Some(switcher);
     }
 
-    /// Open the switcher as the picker of `stage`'s model on feature `slug`,
-    /// for the agent of `slot`, on the row of the model picked now.
-    pub(crate) fn open_model_picker(
-        &mut self,
-        project: &str,
-        slug: &str,
-        stage: Stage,
-        slot: ModelSlot,
-    ) {
+    /// Open the switcher as the picker of a model for what `of` says, for
+    /// the agent of `slot`, on the row of the model picked now.
+    pub(crate) fn open_model_picker(&mut self, of: ModelFor, slot: ModelSlot) {
         if Flavor::of(&slot.base) == Flavor::Cursor {
             self.read_cursor_models(&slot.base);
         }
         self.make_room_for_switcher();
         let pick = ModelPick {
-            project: project.to_owned(),
-            slug: slug.to_owned(),
-            stage,
+            of,
             agent: slot.agent.clone(),
             model: None,
         };
@@ -1148,31 +1224,43 @@ impl Gerdr {
             ..pick.clone()
         });
         let mut switcher = Switcher::new(Vec::new(), false, Place::Tab);
+        switcher.model_hint = self.model_hint(&slot, pick.free());
         switcher.model_slot = Some(pick);
-        switcher.model_hint = self.model_hint(&slot);
         switcher.set_items(self.model_items(&slot, switcher.model_slot.as_ref()));
         switcher.select(&now);
         switcher.set_room(self.switcher_room());
         self.overlays.switcher = Some(switcher);
     }
 
-    /// Bring the open picker of a stage's model up to date, after a read of
-    /// the models it offers.
+    /// Bring the open picker of a model up to date, after a read of the
+    /// models it offers.
     pub(crate) fn refresh_model_picker(&mut self) {
         let Some(mut switcher) = self.overlays.switcher.take_if(|s| s.model_slot.is_some()) else {
             return;
         };
-        let slot = (switcher.model_slot.as_ref())
-            .and_then(|p| self.model_slot_of(&p.project, &p.slug, p.stage));
+        let slot = (switcher.model_slot.as_ref()).and_then(|p| match &p.of {
+            ModelFor::Stage {
+                project,
+                slug,
+                stage,
+            } => self.model_slot_of(project, slug, *stage),
+            ModelFor::Free { command, .. } => Some(ModelSlot {
+                agent: p.agent.clone(),
+                base: command.clone(),
+                picked: None,
+            }),
+        });
         if let Some(slot) = slot {
-            switcher.model_hint = self.model_hint(&slot);
+            let free = switcher.model_slot.as_ref().is_some_and(ModelPick::free);
+            switcher.model_hint = self.model_hint(&slot, free);
             switcher.set_items(self.model_items(&slot, switcher.model_slot.as_ref()));
         }
         self.overlays.switcher = Some(switcher);
     }
 
-    /// What the picker of `slot`'s model says over its list.
-    fn model_hint(&self, slot: &ModelSlot) -> &'static str {
+    /// What the picker of `slot`'s model says over its list, for a stage
+    /// or, `free`, a new agent.
+    fn model_hint(&self, slot: &ModelSlot, free: bool) -> &'static str {
         let models = &self.features.cursor_models;
         match Flavor::of(&slot.base) {
             Flavor::Cursor if models.offers.is_empty() => match models.reading {
@@ -1182,54 +1270,20 @@ impl Gerdr {
             },
             // Tried on 2026.10.22: its first message saves `--model` as the
             // default of every Cursor chat, as its own `/model` does.
+            Flavor::Cursor if free => "Model for this agent; Cursor keeps it as its default…",
             Flavor::Cursor => "Model for this stage's next start; Cursor keeps it as its default…",
+            _ if free => "Model for this agent…",
             _ => "Model for this stage's next start…",
         }
     }
 
-    /// The rows of the picker of `slot`'s model: the agent's own choice, then
-    /// what it offers, and the model picked now if it offers none such.
+    /// The rows of the picker of `slot`'s model (see `model_rows`).
     fn model_items(&self, slot: &ModelSlot, pick: Option<&ModelPick>) -> Vec<Item> {
         let Some(pick) = pick else {
             return Vec::new();
         };
-        let mut offers = match Flavor::of(&slot.base) {
-            Flavor::Cursor => self.features.cursor_models.offers.clone(),
-            _ => stage_models::claude_offers(),
-        };
-        if let Some(id) = &slot.picked
-            && !offers.iter().any(|o| o.id == *id)
-        {
-            offers.push(Offer {
-                id: id.clone(),
-                name: id.clone(),
-            });
-        }
-        let icon = AgentIcon::from_agent(&slot.agent)
-            .picture()
-            .map_or(ItemIcon::Command, |picture| {
-                ItemIcon::Picture(picture.clone())
-            });
-        let row = |label: String, detail: String, model: Option<String>| {
-            let now = model == slot.picked;
-            let detail = match now {
-                true => format!("{detail} \u{b7} picked"),
-                false => detail,
-            };
-            Item::new(
-                icon.clone(),
-                label,
-                detail,
-                Target::StageModel(ModelPick {
-                    model,
-                    ..pick.clone()
-                }),
-            )
-        };
-        let own = format!("{}'s own choice", slot.agent);
-        let mut items = vec![row("Default".to_owned(), own, None)];
-        items.extend((offers.into_iter()).map(|o| row(o.name, o.id.clone(), Some(o.id))));
-        self.weighed(items)
+        let cursor = &self.features.cursor_models.offers;
+        self.weighed(model_rows(slot, pick, cursor))
     }
 
     /// Open the switcher as the run prompt, for a command to launch in
@@ -1713,7 +1767,12 @@ impl Gerdr {
             Target::Inbox => self.open_inbox(None),
             Target::Machines => self.open_machines(None),
             Target::ConnectMachine => self.open_machine_dialog(),
-            Target::NewAgent(w, command) => self.new_agent(w, &command),
+            Target::NewAgent(w, command) => {
+                match free_model_pick(w, &command, &self.launcher.cli_agents) {
+                    Some((of, slot)) => self.open_model_picker(of, slot),
+                    None => self.new_agent(w, &command),
+                }
+            }
             Target::T3(w) => self.new_t3_thread(w),
             Target::UpdateT3 => self.update_t3(None),
             Target::T3Updates => self.toggle_t3_updates(),
@@ -1728,13 +1787,17 @@ impl Gerdr {
                     self.undo_after_ship(&project, &slug, crate::feature::AfterStep::Remove);
                 }
             }
-            Target::StageModel(pick) => self.set_stage_model(
-                &pick.project,
-                &pick.slug,
-                pick.stage,
-                &pick.agent,
-                pick.model,
-            ),
+            Target::StageModel(pick) => match pick.of {
+                ModelFor::Stage {
+                    project,
+                    slug,
+                    stage,
+                } => self.set_stage_model(&project, &slug, stage, &pick.agent, pick.model),
+                ModelFor::Free { workspace, command } => self.new_agent(
+                    workspace,
+                    &crate::feature::agents::with_model(&command, pick.model.as_deref()),
+                ),
+            },
             Target::Settings => self.open_settings(place),
             Target::ProjectFile(id) => self.open_project_file(&id),
             Target::ReloadProjects => self.reload_projects(),
@@ -2344,12 +2407,72 @@ mod tests {
 
     fn model_pick(model: Option<&str>) -> ModelPick {
         ModelPick {
-            project: "p".into(),
-            slug: "s".into(),
-            stage: Stage::Plan,
+            of: ModelFor::Stage {
+                project: "p".into(),
+                slug: "s".into(),
+                stage: Stage::Plan,
+            },
             agent: "Claude Code".into(),
             model: model.map(str::to_owned),
         }
+    }
+
+    fn cli(name: &str, start: Start) -> CliAgent {
+        CliAgent {
+            name: name.into(),
+            start,
+            icon: AgentIcon::from_agent(name),
+        }
+    }
+
+    #[test]
+    fn a_new_claude_agent_picks_its_model_first() {
+        let agents = [
+            cli("Claude Code", Start::Command("claude".into())),
+            cli("Codex", Start::Command("codex".into())),
+            cli("T3 Code", Start::T3),
+        ];
+        let (of, slot) = free_model_pick(2, "claude", &agents).expect("a model step");
+        let free = ModelFor::Free {
+            workspace: 2,
+            command: "claude".into(),
+        };
+        assert_eq!(of, free);
+        assert_eq!(slot.agent, "Claude Code");
+        let pick = ModelPick {
+            of,
+            agent: slot.agent.clone(),
+            model: None,
+        };
+        let rows = model_rows(&slot, &pick, &[]);
+        assert_eq!(rows[0].label, "Default");
+        assert_eq!(rows[0].target, Target::StageModel(pick.clone()));
+        // Nothing was picked before: no row says so.
+        assert!(rows.iter().all(|r| !r.detail.contains("picked")));
+        let opus = rows
+            .iter()
+            .find(|r| r.label == "Opus")
+            .expect("an Opus row");
+        let Target::StageModel(ModelPick {
+            of: ModelFor::Free { workspace, command },
+            model,
+            ..
+        }) = &opus.target
+        else {
+            panic!("not a new agent's pick: {:?}", opus.target)
+        };
+        assert_eq!(*workspace, 2);
+        let with_model = crate::feature::agents::with_model;
+        assert_eq!(with_model(command, model.as_deref()), "claude --model opus");
+        assert_eq!(with_model(command, None), "claude");
+    }
+
+    #[test]
+    fn an_agent_gerdr_cant_tell_a_model_starts_at_once() {
+        let agents = [cli("Codex", Start::Command("codex".into()))];
+        assert_eq!(free_model_pick(0, "codex", &agents), None);
+        // Nor does one whose command no agent runs.
+        assert_eq!(free_model_pick(0, "claude", &agents), None);
     }
 
     /// The picker of a model, offering these and each agent's own choice.
@@ -2369,6 +2492,21 @@ mod tests {
         switcher.model_slot = Some(model_pick(None));
         switcher.set_items(items);
         switcher
+    }
+
+    #[test]
+    fn a_new_agents_model_picker_says_enter_starts_it() {
+        let mut switcher = model_switcher(&["opus"]);
+        let enter = |s: &Switcher| s.hints().into_iter().find(|(k, _)| k == "Enter");
+        assert_eq!(enter(&switcher).map(|(_, w)| w).as_deref(), Some("pick"));
+        switcher.model_slot = Some(ModelPick {
+            of: ModelFor::Free {
+                workspace: 0,
+                command: "claude".into(),
+            },
+            ..model_pick(None)
+        });
+        assert_eq!(enter(&switcher).map(|(_, w)| w).as_deref(), Some("start"));
     }
 
     fn typed_in(switcher: &mut Switcher, query: &str) {
