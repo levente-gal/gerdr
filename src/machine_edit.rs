@@ -290,15 +290,62 @@ pub fn same_machine(known: &[String], answered: &str) -> bool {
     known.is_empty() || known.iter().any(|id| id == answered)
 }
 
-impl Gerdr {
+impl crate::machines::Machines {
     /// The try of a new address under way, while its link is still that try.
     pub(crate) fn edit_try(&self) -> Option<&EditTry> {
-        let tried = self.machines.editing.as_ref()?;
-        (self.machines.links.get(&tried.name))
+        let tried = self.editing.as_ref()?;
+        (self.links.get(&tried.name))
             .is_some_and(|l| l.serial == tried.serial)
             .then_some(tried)
     }
 
+    /// Whether machine `name` is connecting, or a new address of it is
+    /// tried: what moves its link waits for that.
+    fn machine_busy(&self, name: &str) -> bool {
+        let connecting = matches!(
+            self.links.get(name).map(|l| &l.state),
+            Some(LinkState::Connecting(_))
+        );
+        connecting || self.edit_try().is_some_and(|t| t.name == name)
+    }
+
+    /// How far trying the new address got.
+    pub(crate) fn edit_progress(&mut self, text: String) {
+        if let Some(tried) = self.editing.as_mut() {
+            tried.progress = text;
+        }
+    }
+
+    /// The other saved machines that are machine `name` too, as the ids
+    /// each was seen by say.
+    pub(crate) fn same_machines_as(
+        &self,
+        projects: &crate::projects::Store,
+        name: &str,
+    ) -> Vec<String> {
+        let ids: BTreeMap<String, Vec<String>> = (self.saved.keys())
+            .map(|n| (n.clone(), self.machine_ids(projects, n)))
+            .collect();
+        same_machines(name, &ids)
+    }
+
+    /// Why machine `drop` can't merge into `keep` now, as a toast says it.
+    fn merge_refused(&self, keep: &str, drop: &str) -> Option<String> {
+        if let Some(gone) = [keep, drop]
+            .into_iter()
+            .find(|n| !self.saved.contains_key(*n))
+        {
+            return Some(format!("{gone} isn't in the settings any more"));
+        }
+        if keep == drop {
+            return Some(format!("{keep} is one machine already"));
+        }
+        let busy = [keep, drop].into_iter().find(|n| self.machine_busy(n))?;
+        Some(format!("Wait for {busy} to connect first"))
+    }
+}
+
+impl Gerdr {
     /// The edit form, if it is open on machine `machine`.
     fn edit_form_mut(&mut self, machine: &str) -> Option<&mut EditForm> {
         (self.overlays.machines_panel.as_mut()?.edit.as_mut()).filter(|f| f.machine == machine)
@@ -314,22 +361,12 @@ impl Gerdr {
         }
     }
 
-    /// Whether machine `name` is connecting, or a new address of it is
-    /// tried: what moves its link waits for that.
-    fn machine_busy(&self, name: &str) -> bool {
-        let connecting = matches!(
-            self.machines.links.get(name).map(|l| &l.state),
-            Some(LinkState::Connecting(_))
-        );
-        connecting || self.edit_try().is_some_and(|t| t.name == name)
-    }
-
     /// Save the form: a new name at once, new addresses once tried, or
     /// untried with `untried` ("Save anyway"). Addresses only put in
     /// another order, or added while the link is up on one still there,
     /// are kept at once, the link left as it is.
     pub(crate) fn save_edit(&mut self, untried: bool) {
-        if self.edit_try().is_some() {
+        if self.machines.edit_try().is_some() {
             return;
         }
         let Some(form) = self
@@ -386,7 +423,7 @@ impl Gerdr {
         if untried {
             return self.save_untried(&machine, &name, &target);
         }
-        let known = self.machine_ids(&machine);
+        let known = self.machines.machine_ids(&self.projects, &machine);
         let before = link.map(|l| l.serial);
         self.start_link(machine.clone(), target.clone(), false);
         let serial = (self.machines.links.get(&machine)).map(|l| l.serial);
@@ -412,7 +449,7 @@ impl Gerdr {
             panel.focus = MachinesFocus::EditButton(0);
         }
         self.starts_lost();
-        self.report_machines();
+        self.machines.report_machines();
     }
 
     /// Machine `machine` called `name` and kept at `target` without a try,
@@ -435,7 +472,7 @@ impl Gerdr {
             link.addresses = target.clone();
         }
         tracing::info!("machine {name}: addresses now {target}, its link kept");
-        self.report_machines();
+        self.machines.report_machines();
         self.show_success(format!("Saved {name}"));
         self.edit_closed(Some(name));
     }
@@ -457,7 +494,7 @@ impl Gerdr {
         (self.machines.saved).insert(name.to_owned(), target.clone());
         self.start_link(name.to_owned(), target.clone(), true);
         self.starts_lost();
-        self.report_machines();
+        self.machines.report_machines();
         self.show_success(format!("Saved {name}, not connected yet"));
         self.edit_closed(Some(name));
     }
@@ -465,7 +502,7 @@ impl Gerdr {
     /// Stop trying the new address: the machine's link goes back to how it
     /// was.
     pub(crate) fn stop_edit_try(&mut self) {
-        let live = self.edit_try().is_some();
+        let live = self.machines.edit_try().is_some();
         let Some(tried) = self.machines.editing.take() else {
             return;
         };
@@ -480,7 +517,7 @@ impl Gerdr {
             panel.focus = MachinesFocus::EditAddress(0);
         }
         self.starts_lost();
-        self.report_machines();
+        self.machines.report_machines();
     }
 
     /// Machine `tried.name`'s link as it was before the try: running at its
@@ -489,13 +526,6 @@ impl Gerdr {
         match tried.was_live {
             true => self.start_link(tried.name.clone(), tried.old_target.clone(), true),
             false => self.machines.link_off(&tried.name),
-        }
-    }
-
-    /// How far trying the new address got.
-    pub(crate) fn edit_progress(&mut self, text: String) {
-        if let Some(tried) = self.machines.editing.as_mut() {
-            tried.progress = text;
         }
     }
 
@@ -522,10 +552,14 @@ impl Gerdr {
     /// back, and the form says why.
     pub(crate) fn edit_failed(&mut self, name: &str, failure: Failure) {
         // The address it ran into trouble at: the last it tried.
-        let at = self.edit_try().map(|t| t.serial).and_then(|serial| {
-            let link = self.machines.links.get(name)?;
-            (link.serial == serial).then(|| link.target().to_owned())
-        });
+        let at = self
+            .machines
+            .edit_try()
+            .map(|t| t.serial)
+            .and_then(|serial| {
+                let link = self.machines.links.get(name)?;
+                (link.serial == serial).then(|| link.target().to_owned())
+            });
         let Some(tried) = self.machines.editing.take() else {
             return;
         };
@@ -554,7 +588,7 @@ impl Gerdr {
             )),
         }
         self.starts_lost();
-        self.report_machines();
+        self.machines.report_machines();
     }
 
     /// The new address reached the same machine, its link up there: kept in
@@ -619,7 +653,7 @@ impl Gerdr {
         if self.machines.saved.contains_key(new) || self.machines.links.contains_key(new) {
             return Err(format!("Another machine is called {new}."));
         }
-        if self.machine_busy(old) {
+        if self.machines.machine_busy(old) {
             return Err(format!("Wait for {old} to connect first."));
         }
         crate::config::rename_machine(old, new).map_err(|why| {
@@ -661,38 +695,14 @@ impl Gerdr {
                 Some(("Open log".to_owned(), MenuAction::OpenLog)),
             );
         }
-        self.report_machines();
+        self.machines.report_machines();
         Ok(())
-    }
-
-    /// The other saved machines that are machine `name` too, as the ids
-    /// each was seen by say.
-    pub(crate) fn same_machines_as(&self, name: &str) -> Vec<String> {
-        let ids: BTreeMap<String, Vec<String>> = (self.machines.saved.keys())
-            .map(|n| (n.clone(), self.machine_ids(n)))
-            .collect();
-        same_machines(name, &ids)
-    }
-
-    /// Why machine `drop` can't merge into `keep` now, as a toast says it.
-    fn merge_refused(&self, keep: &str, drop: &str) -> Option<String> {
-        if let Some(gone) = [keep, drop]
-            .into_iter()
-            .find(|n| !self.machines.saved.contains_key(*n))
-        {
-            return Some(format!("{gone} isn't in the settings any more"));
-        }
-        if keep == drop {
-            return Some(format!("{keep} is one machine already"));
-        }
-        let busy = [keep, drop].into_iter().find(|n| self.machine_busy(n))?;
-        Some(format!("Wait for {busy} to connect first"))
     }
 
     /// The Merge button of machine `keep`'s detail: asks first, as it has no
     /// undo.
     pub(crate) fn ask_merge_machines(&mut self, keep: &str, drop: &str) {
-        if let Some(why) = self.merge_refused(keep, drop) {
+        if let Some(why) = self.machines.merge_refused(keep, drop) {
             return self.show_warning(why);
         }
         self.ask(
@@ -712,7 +722,7 @@ impl Gerdr {
     /// moves to `keep`: the ids it was seen by and their `place.json`, and
     /// the projects' `machines` and `machine_folders`.
     pub(crate) fn merge_machines(&mut self, keep: &str, drop: &str) {
-        if let Some(why) = self.merge_refused(keep, drop) {
+        if let Some(why) = self.machines.merge_refused(keep, drop) {
             return self.show_warning(why);
         }
         let (Some(kept), Some(dropped)) = (
@@ -797,7 +807,7 @@ impl Gerdr {
             panel.merged(drop, row, (page, count));
         }
         self.starts_lost();
-        self.report_machines();
+        self.machines.report_machines();
         match trouble {
             true => self.toast_with(
                 format!("Merged {drop} into {keep}, but gerdr couldn't write all it keeps of it"),
@@ -1034,5 +1044,55 @@ mod tests {
             "home's addresses join office's, after them, and home goes. \
              Projects that name home name office instead."
         );
+    }
+
+    #[test]
+    fn a_merge_waits_for_what_connects_and_is_tried() {
+        let mut machines = crate::machines::Machines::default();
+        machines.saved.insert("box".into(), "me@box".into());
+        machines.saved.insert("zen".into(), "me@zen".into());
+        assert_eq!(machines.merge_refused("box", "zen"), None);
+        let refused =
+            |m: &crate::machines::Machines, keep, drop| m.merge_refused(keep, drop).unwrap();
+        assert_eq!(
+            refused(&machines, "box", "vm"),
+            "vm isn't in the settings any more"
+        );
+        assert_eq!(
+            refused(&machines, "box", "box"),
+            "box is one machine already"
+        );
+        let connecting = crate::machines::LinkState::Connecting("x".into());
+        machines.links.insert(
+            "zen".into(),
+            crate::machines::Link::for_test(connecting, None),
+        );
+        assert!(machines.machine_busy("zen"));
+        assert_eq!(
+            refused(&machines, "box", "zen"),
+            "Wait for zen to connect first"
+        );
+        // A new address tried for box makes it busy, while its link is that try.
+        machines.links.insert(
+            "box".into(),
+            crate::machines::Link::for_test(crate::machines::LinkState::Off, None),
+        );
+        machines.editing = Some(EditTry {
+            name: "box".into(),
+            serial: 1,
+            old_target: "me@box".into(),
+            was_live: false,
+            new_name: "box".into(),
+            new_target: "me@box2".into(),
+            known: Vec::new(),
+            progress: String::new(),
+        });
+        assert!(machines.edit_try().is_some());
+        assert!(machines.machine_busy("box"));
+        machines.edit_progress("Connecting".into());
+        assert_eq!(machines.editing.as_ref().unwrap().progress, "Connecting");
+        machines.links.get_mut("box").unwrap().serial = 2;
+        assert!(machines.edit_try().is_none());
+        assert!(!machines.machine_busy("box"));
     }
 }

@@ -133,7 +133,7 @@ impl Gerdr {
                 "\u{201c}{title}\u{201d} wasn't taken over from another machine"
             ));
         };
-        let name = self.machine_name(&id);
+        let name = self.machines.machine_name(&id);
         if feature.status != Status::Open {
             return self.show_warning(format!("\u{201c}{title}\u{201d} is over: it stays here"));
         }
@@ -145,7 +145,7 @@ impl Gerdr {
         if let Some(why) = self.keeps_feature(&feature) {
             return self.show_warning(why);
         }
-        let Some(work) = self.work_of(&id) else {
+        let Some(work) = self.machines.work_of(&id) else {
             return self.show_warning(format!(
                 "Connect {name} here to hand \u{201c}{title}\u{201d} back"
             ));
@@ -258,8 +258,11 @@ impl Gerdr {
             return Some(why);
         }
         let here = this_machines_name();
-        if self.work_of(&request.machine).is_none() {
-            return Some(format!("{here} isn't connected to {}: connect it there first", request.name));
+        if self.machines.work_of(&request.machine).is_none() {
+            return Some(format!(
+                "{here} isn't connected to {}: connect it there first",
+                request.name
+            ));
         }
         if (self.features.taking).contains_key(&(project.to_owned(), slug.to_owned())) {
             return None;

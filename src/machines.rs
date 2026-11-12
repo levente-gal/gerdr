@@ -998,6 +998,22 @@ pub(crate) struct Link {
 }
 
 impl Link {
+    /// A link in `state` holding `work`, as tests make it.
+    #[cfg(test)]
+    pub(crate) fn for_test(state: LinkState, work: Option<Work>) -> Self {
+        Link {
+            target: String::new(),
+            addresses: "me@box".into(),
+            serial: 1,
+            cancel: Arc::default(),
+            state,
+            lost: false,
+            work,
+            connected_since: None,
+            last_seen: None,
+        }
+    }
+
     fn stop(&self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
@@ -1238,7 +1254,60 @@ impl MachineDialog {
     }
 }
 
+impl Machines {
+    /// What needs the user goes on the "!" badge: a machine given up on.
+    /// Away is what its dot says, and it keeps trying.
+    pub(crate) fn report_machines(&self) {
+        let mut texts: Vec<String> = (self.links.iter())
+            .filter_map(|(name, link)| match &link.state {
+                LinkState::Failed(failure) => Some(format!("Machine {name}: {}", failure.why())),
+                _ => None,
+            })
+            .collect();
+        texts.sort();
+        crate::problems::set("machines", texts);
+    }
+
+    /// Machine `id` said how it is: seen now.
+    pub(crate) fn machine_seen(&mut self, id: &str) {
+        let link = (self.links.values_mut()).find(|l| l.work.as_ref().is_some_and(|w| w.id == id));
+        if let Some(link) = link {
+            link.last_seen = Some(Instant::now());
+        }
+    }
+
+    /// How many machines are connected, for the launcher.
+    pub fn machines_up(&self) -> usize {
+        (self.links.values())
+            .filter(|l| matches!(l.state, LinkState::Up(_)))
+            .count()
+    }
+
+    /// The machines saved, as tasks: connected ones and those in trouble
+    /// show in the footer, those disconnected only in the panel.
+    pub fn machine_tasks(&self) -> Vec<Task> {
+        (self.saved.iter())
+            .map(|(name, saved)| match self.links.get(name) {
+                // What it tries: a new address tried from the edit form is
+                // the link's before it is saved.
+                Some(link) => {
+                    machine_task(name, &link.addresses, Some((link.target(), &link.state)))
+                }
+                None => machine_task(name, saved, None),
+            })
+            .collect()
+    }
+}
+
 impl Gerdr {
+    pub fn machines_up(&self) -> usize {
+        self.machines.machines_up()
+    }
+
+    pub fn machine_tasks(&self) -> Vec<Task> {
+        self.machines.machine_tasks()
+    }
+
     /// Connect the machines saved, and clear what gerdrs before this one
     /// left behind.
     pub fn watch_machines(&mut self, saved: BTreeMap<String, crate::config::Addresses>) {
@@ -1316,7 +1385,7 @@ impl Gerdr {
         let order = try_order(&addresses.0, last);
         let target = order.first().cloned().unwrap_or_default();
         // Before this link takes the old one's place: what it was up as.
-        let known = self.machine_ids(&name);
+        let known = self.machines.machine_ids(&self.projects, &name);
         let Some(tx) = self.machines_sender() else {
             self.show_error(format!("gerdr couldn't start connecting to {name}"));
             return;
@@ -1367,7 +1436,7 @@ impl Gerdr {
         let mut kept = None;
         if trying {
             match &event {
-                LinkEvent::Step { text, .. } => self.edit_progress(text.clone()),
+                LinkEvent::Step { text, .. } => self.machines.edit_progress(text.clone()),
                 // Its thread passed over another machine at that address
                 // already; this checks it again, as the try's own say.
                 LinkEvent::Up { info, .. } => match self.edit_answered(&name, info) {
@@ -1458,7 +1527,7 @@ impl Gerdr {
             }
         }
         self.starts_lost();
-        self.report_machines();
+        self.machines.report_machines();
     }
 
     /// Machine `name` answered at address `target`: tried first next time
@@ -1500,19 +1569,6 @@ impl Gerdr {
         if had_last || !dropped.is_empty() {
             self.projects.save();
         }
-    }
-
-    /// What needs the user goes on the "!" badge: a machine given up on.
-    /// Away is what its dot says, and it keeps trying.
-    pub(crate) fn report_machines(&self) {
-        let mut texts: Vec<String> = (self.machines.links.iter())
-            .filter_map(|(name, link)| match &link.state {
-                LinkState::Failed(failure) => Some(format!("Machine {name}: {}", failure.why())),
-                _ => None,
-            })
-            .collect();
-        texts.sort();
-        crate::problems::set("machines", texts);
     }
 
     /// The machine asked for in the dialog is up: kept, and the dialog done.
@@ -1737,7 +1793,7 @@ impl Gerdr {
     pub fn connect_machine(&mut self, name: &str) {
         if let Some(target) = self.machines.saved.get(name).cloned() {
             self.start_link(name.to_owned(), target, true);
-            self.report_machines();
+            self.machines.report_machines();
         }
     }
 
@@ -1755,7 +1811,7 @@ impl Gerdr {
         link.connected_since = None;
         link.state = LinkState::Off;
         self.starts_lost();
-        self.report_machines();
+        self.machines.report_machines();
         self.show_success(format!(
             "Disconnected {name}; its herdr keeps running there"
         ));
@@ -1786,7 +1842,7 @@ impl Gerdr {
         self.forget_viewed_of(name);
         self.machines.saved.remove(name);
         self.starts_lost();
-        self.report_machines();
+        self.machines.report_machines();
         match crate::config::write_machine(name, None) {
             Ok(()) => {
                 self.settings.settings_modified = crate::config::modified();
@@ -1827,38 +1883,7 @@ impl Gerdr {
         self.settings.settings_modified = crate::config::modified();
         (self.machines.saved).insert(name.to_owned(), addresses.clone());
         self.start_link(name.to_owned(), addresses, true);
-        self.report_machines();
-    }
-
-    /// Machine `id` said how it is: seen now.
-    pub(crate) fn machine_seen(&mut self, id: &str) {
-        let link = (self.machines.links.values_mut())
-            .find(|l| l.work.as_ref().is_some_and(|w| w.id == id));
-        if let Some(link) = link {
-            link.last_seen = Some(Instant::now());
-        }
-    }
-
-    /// How many machines are connected, for the launcher.
-    pub fn machines_up(&self) -> usize {
-        (self.machines.links.values())
-            .filter(|l| matches!(l.state, LinkState::Up(_)))
-            .count()
-    }
-
-    /// The machines saved, as tasks: connected ones and those in trouble
-    /// show in the footer, those disconnected only in the panel.
-    pub fn machine_tasks(&self) -> Vec<Task> {
-        (self.machines.saved.iter())
-            .map(|(name, saved)| match self.machines.links.get(name) {
-                // What it tries: a new address tried from the edit form is
-                // the link's before it is saved.
-                Some(link) => {
-                    machine_task(name, &link.addresses, Some((link.target(), &link.state)))
-                }
-                None => machine_task(name, saved, None),
-            })
-            .collect()
+        self.machines.report_machines();
     }
 }
 
@@ -2480,5 +2505,37 @@ mod tests {
         assert_eq!(dialog.view().buttons, ["Cancel", "Try again"]);
         dialog.attempt = Some("b".into());
         assert_eq!(dialog.view().buttons, ["Stop"]);
+    }
+
+    fn up() -> LinkState {
+        LinkState::Up(LinkInfo {
+            site: Site::default(),
+            socket: PathBuf::new(),
+            control: PathBuf::new(),
+        })
+    }
+
+    #[test]
+    fn the_links_say_how_many_are_up_and_what_each_task_is() {
+        let mut machines = Machines::default();
+        for name in ["box", "zen", "vm"] {
+            machines
+                .saved
+                .insert(name.into(), format!("me@{name}").as_str().into());
+        }
+        machines
+            .links
+            .insert("box".into(), Link::for_test(up(), None));
+        let failed = LinkState::Failed(Failure::Auth);
+        machines
+            .links
+            .insert("vm".into(), Link::for_test(failed, None));
+        assert_eq!(machines.machines_up(), 1);
+        let chips: Vec<String> = machines
+            .machine_tasks()
+            .into_iter()
+            .map(|t| t.chip)
+            .collect();
+        assert_eq!(chips, ["box", "vm: can't connect", "zen disconnected"]);
     }
 }

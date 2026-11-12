@@ -501,7 +501,7 @@ impl Gerdr {
         pane: &str,
     ) -> Option<(Option<crate::herdr::AgentStatus>, bool)> {
         let seen = self.features.seen.get(pane)?;
-        let known = seen.stands(feature::now()) && self.work_of(&seen.writer).is_some();
+        let known = seen.stands(feature::now()) && self.machines.work_of(&seen.writer).is_some();
         Some(match known {
             true => (seen.status, seen.alive),
             false => (Some(crate::herdr::AgentStatus::Unknown), true),
@@ -511,7 +511,7 @@ impl Gerdr {
     /// Whether what pane `pane`'s writer says can't be told now.
     pub(crate) fn seen_out_of_reach(&self, pane: &str) -> Option<bool> {
         let seen = self.features.seen.get(pane)?;
-        Some(!seen.stands(feature::now()) || self.work_of(&seen.writer).is_none())
+        Some(!seen.stands(feature::now()) || self.machines.work_of(&seen.writer).is_none())
     }
 
     /// The line showing pane `pane` of a feature another machine writes, in a
@@ -521,7 +521,7 @@ impl Gerdr {
     pub(crate) fn seen_pane_line(&self, pane: &str) -> Option<Result<String, String>> {
         let seen = self.features.seen.get(pane)?;
         let (id, _) = split_pane(pane)?;
-        let writer = self.machine_name(&seen.writer);
+        let writer = self.machines.machine_name(&seen.writer);
         let Some(terminal) = seen.terminal.as_deref().filter(|_| seen.alive) else {
             return Some(Err(format!("That terminal is gone from {writer}")));
         };
@@ -533,8 +533,8 @@ impl Gerdr {
         if Self::is_this_machine(id) {
             return Some(Ok(crate::machine_work::attach_here(terminal)));
         }
-        let name = self.machine_name(id);
-        let Some(work) = self.work_of(id) else {
+        let name = self.machines.machine_name(id);
+        let Some(work) = self.machines.work_of(id) else {
             return Some(Err(format!("Connect {name} to show what runs there")));
         };
         Some(Ok(match &seen.session {
@@ -583,8 +583,12 @@ impl Gerdr {
         let (kept, clashing): (Vec<Feature>, Vec<Feature>) = (features.into_iter())
             .partition(|f| !own.contains(&f.slug) && !others.contains(&f.slug));
         for feature in clashing {
-            if self.features.clashes.insert((id.to_owned(), feature.slug.clone())) {
-                let name = self.machine_name(id);
+            if self
+                .features
+                .clashes
+                .insert((id.to_owned(), feature.slug.clone()))
+            {
+                let name = self.machines.machine_name(id);
                 self.show_warning(format!(
                     "\u{201c}{}\u{201d} on {name} isn't shown: a feature here has its name",
                     feature.title
@@ -649,7 +653,7 @@ impl Gerdr {
             let key = (project.to_owned(), slug.to_owned());
             self.features.taking.contains_key(&key)
                 || moved.get(slug).is_some_and(|to| {
-                    self.work_of(to).is_some() || Self::is_this_machine(to)
+                    self.machines.work_of(to).is_some() || Self::is_this_machine(to)
                 })
         };
         let held: Vec<Feature> = (self.viewed_of(project).iter())
@@ -697,7 +701,7 @@ impl Gerdr {
     /// workspace here goes first, unless what the user started runs in it. Views
     /// of what ran there aren't that.
     fn close_gone_workspace(&mut self, id: &str, project: &str, slug: &str, title: &str) {
-        let name = self.machine_name(id);
+        let name = self.machines.machine_name(id);
         let running = format!(
             "\u{201c}{title}\u{201d} is over on {name}: its folder here goes, and something runs in it"
         );
@@ -722,7 +726,7 @@ impl Gerdr {
             .flat_map(|tab| &tab.panes)
             .filter(|p| {
                 let herdr = p.herdr.as_ref().map(|h| h.pane_id.as_str());
-                !herdr.is_some_and(|pane| self.is_machine_view(pane))
+                !herdr.is_some_and(|pane| self.machines.is_machine_view(pane))
             })
             .filter_map(|p| self.running_in(p))
             .collect();
@@ -946,7 +950,7 @@ impl Gerdr {
                         let key = crate::agents::AgentKey::Herdr(pane.to_owned());
                         let (status, alive) = self.agent_key_state(&key);
                         LivePane {
-                            terminal: (self.work_of(id))
+                            terminal: (self.machines.work_of(id))
                                 .and_then(|w| w.panes.as_ref())
                                 .and_then(|p| p.get(bare))
                                 .map(|l| l.terminal.clone()),
@@ -1003,7 +1007,7 @@ impl Gerdr {
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
-            self.left_there_forgotten(&id);
+            self.machines.left_there_forgotten(&id);
             self.machines.names.remove(&id);
             self.forget_viewed(&id);
         }
@@ -1031,10 +1035,12 @@ impl Gerdr {
             return Some(note);
         }
         let id = f.writer.as_deref()?;
-        let name = self.machine_name(id);
-        if self.work_of(id).is_none() {
+        let name = self.machines.machine_name(id);
+        if self.machines.work_of(id).is_none() {
             return Some((
-                format!("Written on {name}, which can't be reached: this is how it last was. Changing it here asks first"),
+                format!(
+                    "Written on {name}, which can't be reached: this is how it last was. Changing it here asks first"
+                ),
                 true,
             ));
         }
