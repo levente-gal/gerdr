@@ -369,8 +369,9 @@ press and drag pick whole rows and a double click opens the line in Zed.
   The bar's buttons change under the pointer as the page goes on: the
   second press of a double click on another button than the first took
   is dropped (`other_button_again`). A
-  card's own primary (a finding's, a round's, a repository's on Ship) shows
-  on the bar, filled, and on its card, plain. While a note is written, Save
+  card's own primary (an agent's, a finding's, a round's, a repository's on
+  Ship) shows on the bar, filled, and on its card, plain: an agent's card
+  always has its Show agent. While a note is written, Save
   is the primary. The rare
   ones (Start over…, Set up again, Commands…, a sandbox's Reset data… and
   Remove sandbox…, and the feature's Open tab, Copy path, Stats, New

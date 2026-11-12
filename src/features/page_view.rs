@@ -462,10 +462,10 @@ fn in_menu(button: &PageButton, outcome: &PanelOutcome) -> bool {
 }
 
 /// Where `page`'s buttons go: its one primary to the page's bar (a card of
-/// its own holding it, a finding's, a round's, a repository's on Ship, keeps
-/// it too, drawn plain), the rare ones (`StagePage::menu`) off the page; and
-/// each row of buttons in one style: a quiet one beside outlined ones is
-/// outlined too.
+/// its own holding it, an agent's, a finding's, a round's, a repository's on
+/// Ship, keeps it too, drawn plain), the rare ones (`StagePage::menu`) off
+/// the page; and each row of buttons in one style: a quiet one beside
+/// outlined ones is outlined too.
 pub(crate) fn place_buttons(page: &mut StagePage) {
     let menu = page.menu.clone();
     let local: Vec<usize> = (page.sections.iter())
@@ -493,8 +493,12 @@ pub(crate) fn place_buttons(page: &mut StagePage) {
     let mut rows: Vec<Vec<usize>> = Vec::new();
     for section in &mut page.sections {
         match section {
-            PageSection::Agent { buttons, .. }
-            | PageSection::File { buttons, .. }
+            // An agent's card keeps the way to it, the bar's primary or not.
+            PageSection::Agent { buttons, .. } => {
+                buttons.retain(|i| !menu.contains(i));
+                rows.push(buttons.clone());
+            }
+            PageSection::File { buttons, .. }
             | PageSection::Milestones { buttons, .. } => {
                 buttons.retain(|i| !gone(i));
                 rows.push(buttons.clone());

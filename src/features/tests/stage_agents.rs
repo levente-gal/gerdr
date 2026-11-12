@@ -268,8 +268,8 @@ fn work_sent_back_to_build_shows_on_the_page_of_the_stage_at_hand() {
     let (shown, node) = card(&f, at_rest);
     let (status, _, buttons) = shown.unwrap();
     assert!(status.starts_with("Build agent \u{b7} your turn"));
-    // Send prompt, the primary, is on the page's bar.
-    assert_eq!(buttons, ["Show Build agent"]);
+    // Send prompt, the primary, is on the page's bar and the card.
+    assert_eq!(buttons, ["Send prompt", "Show Build agent"]);
     assert_eq!(node, (NodeMark::Waiting, "waiting to send".to_owned()));
     assert_eq!(
         page_enter(&f, stage, at_rest),

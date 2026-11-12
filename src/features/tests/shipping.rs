@@ -943,7 +943,7 @@ fn a_running_build_shows_its_agent_then_its_milestones() {
                 dot: Dot::Working,
                 status: "working \u{b7} started 16m ago".into(),
                 tail: Vec::new(),
-                buttons: vec![1],
+                buttons: vec![0, 1],
                 picks: Vec::new(),
                 model: None,
                 waits: false,
@@ -951,7 +951,8 @@ fn a_running_build_shows_its_agent_then_its_milestones() {
             PageSection::MilestoneMode { fresh: false }
         ]
     );
-    // Show agent, the primary, is on the page's bar; the rare ones in `⋯`.
+    // Show agent, the primary, is on the page's bar and its card; the rare
+    // ones in `⋯`.
     assert_eq!(
         (page.primary, page.menu.as_slice()),
         (Some(0), &[2, 3, 4][..])
@@ -986,9 +987,9 @@ fn a_running_build_shows_its_agent_then_its_milestones() {
     let PageSection::Agent { buttons, .. } = &page.sections[0] else {
         panic!("the agent's card first");
     };
-    // Continue, the primary, is on the page's bar; Show agent on the card.
+    // Continue, the primary, is on the page's bar and the card, with Show agent.
     assert_eq!(page.primary, Some(0));
-    assert_eq!(buttons[..1], [1], "Show agent");
+    assert_eq!(buttons[..2], [0, 1], "Continue, Show agent");
     let node = rail_node(&f, Stage::Build, &state, 2_000);
     assert_eq!(
         (node.mark, node.line.as_str()),

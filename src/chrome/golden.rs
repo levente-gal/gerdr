@@ -6268,7 +6268,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 68]; 4] = [
         0x4aeebc4ee531d16c, // tab_t3_draft_860
         0x8c220075497b10cd, // tab_milestone_mode_1180
         0x29830e5d29fa01d7, // tab_milestone_mode_860
-        0x9ddddacbd4cdf735, // tab_held_860
+        0xd48536b498728d7f, // tab_held_860
         0xb9b5abec51026e22, // tab_resume_1180
         0x6ae0307d76ca322f, // tab_resume_860
         0x5a416c6277a1dbfa, // tab_fixing_1180
@@ -6339,7 +6339,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 68]; 4] = [
         0xd7f89a700fb26ecb, // tab_t3_draft_860
         0x07f868a1b3351d10, // tab_milestone_mode_1180
         0xe981f1e324c8a8eb, // tab_milestone_mode_860
-        0xce776bb498395aae, // tab_held_860
+        0xe1b738927bc04dff, // tab_held_860
         0xfa642ff569c47dd4, // tab_resume_1180
         0x784b345544209786, // tab_resume_860
         0x72bd7713b0979b65, // tab_fixing_1180
@@ -6410,7 +6410,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 68]; 4] = [
         0xe6824a1424999774, // tab_t3_draft_860
         0xf3b023798e074634, // tab_milestone_mode_1180
         0x736209cf234a3c0d, // tab_milestone_mode_860
-        0xf508f861272953d2, // tab_held_860
+        0xe2d26d5fe9476731, // tab_held_860
         0xd94265203761ab25, // tab_resume_1180
         0xf1c073a808b19edd, // tab_resume_860
         0xaf8b56f163e2a0e2, // tab_fixing_1180
@@ -6481,7 +6481,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 68]; 4] = [
         0x02c4d0f0376ea347, // tab_t3_draft_860
         0x4fbf21d7a525e492, // tab_milestone_mode_1180
         0x8ffe2c2cc3978e51, // tab_milestone_mode_860
-        0x753127c484751579, // tab_held_860
+        0x87265f9a7ce4f430, // tab_held_860
         0xa0a1c07e8891b0c3, // tab_resume_1180
         0x386be938de478e3c, // tab_resume_860
         0x3d1e0f57a115bc5c, // tab_fixing_1180
