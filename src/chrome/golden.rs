@@ -3246,6 +3246,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
             ],
             sections: vec![
                 PageSection::Agent {
+                    stage: crate::feature::Stage::Build,
                     icon: AgentIcon::Claude,
                     name: "claude".into(),
                     dot: Dot::Working,
@@ -3356,6 +3357,7 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
         ],
         sections: vec![
             PageSection::Agent {
+                stage: crate::feature::Stage::Plan,
                 icon: AgentIcon::Codex,
                 name: "codex".into(),
                 dot: Dot::Idle,
@@ -3462,6 +3464,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
         ],
         sections: vec![
             PageSection::Agent {
+                stage: crate::feature::Stage::Discover,
                 icon: AgentIcon::Claude,
                 name: "claude".into(),
                 dot: Dot::Idle,
@@ -3527,6 +3530,7 @@ fn feature_tab_resume() -> super::FeatureTabView {
             },
         ],
         sections: vec![PageSection::Agent {
+            stage: crate::feature::Stage::Plan,
             icon: AgentIcon::Claude,
             name: "claude".into(),
             dot: Dot::Done,
@@ -4408,6 +4412,7 @@ fn feature_tab_start_over() -> super::FeatureTabView {
         ],
         sections: vec![
             PageSection::Agent {
+                stage: crate::feature::Stage::Plan,
                 icon: crate::agent_icons::AgentIcon::Claude,
                 name: "claude".into(),
                 dot: super::Dot::Idle,
@@ -4799,6 +4804,7 @@ fn feature_tab_picks_later() -> super::FeatureTabView {
         status: Some(tab_line("Comes after Verify", CheckTone::Note)),
         buttons: Vec::new(),
         sections: vec![PageSection::Agent {
+            stage: crate::feature::Stage::AiReview,
             icon: AgentIcon::Generic,
             name: String::new(),
             dot: Dot::Unknown,
@@ -4826,18 +4832,21 @@ fn feature_tab_picks_running() -> super::FeatureTabView {
     if let Some(restart) = (view.page.buttons.iter_mut()).find(|b| b.label == "Restart") {
         restart.label = "Restart with Cursor".into();
     }
-    view.hover = Some(super::FeatureTabHit::AgentPick(0));
+    view.hover = Some(super::FeatureTabHit::AgentPick(
+        crate::feature::Stage::Build,
+        0,
+    ));
     view
 }
 
 /// `view` with the agent card's model button saying `label`, the pointer on it.
 fn with_model_button(mut view: super::FeatureTabView, label: &str) -> super::FeatureTabView {
     for section in &mut view.page.sections {
-        if let super::PageSection::Agent { model, .. } = section {
+        if let super::PageSection::Agent { stage, model, .. } = section {
             *model = Some(label.into());
+            view.hover = Some(super::FeatureTabHit::AgentModel(*stage));
         }
     }
-    view.hover = Some(super::FeatureTabHit::AgentModel);
     view
 }
 
@@ -4888,6 +4897,7 @@ fn feature_tab_held() -> super::FeatureTabView {
             button("Show agent", ButtonStyle::Plain),
         ],
         sections: vec![PageSection::Agent {
+            stage: crate::feature::Stage::Plan,
             icon: AgentIcon::from_agent("Claude Code"),
             name: "Claude Code".into(),
             dot: Dot::Blocked,
@@ -5056,6 +5066,7 @@ fn feature_tab_fixing() -> super::FeatureTabView {
         }],
         sections: vec![
             PageSection::Agent {
+                stage: crate::feature::Stage::Build,
                 icon: AgentIcon::Claude,
                 name: "claude".into(),
                 dot: Dot::Working,
@@ -5072,6 +5083,81 @@ fn feature_tab_fixing() -> super::FeatureTabView {
             },
         ],
     };
+    view
+}
+
+/// AI review at work, Build done: the reviewer's card, then the card of the
+/// agent fixes go to, each with its own chips, the fixes' with its model.
+pub(super) fn feature_tab_fix_picks() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, Dot, NodeMark, PageButton, PageSection, StagePage};
+    use crate::{agent_icons::AgentIcon, feature::Stage};
+    let mut view = feature_tab();
+    at_stage(&mut view, 5, NodeMark::Current, "reviewing");
+    view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
+        title: "AI review".into(),
+        about: Stage::AiReview.about().into(),
+        status: None,
+        buttons: vec![PageButton {
+            label: "Show agent".into(),
+            style: ButtonStyle::Plain,
+        }],
+        sections: vec![
+            PageSection::Agent {
+                stage: Stage::AiReview,
+                icon: AgentIcon::Cursor,
+                name: "Cursor".into(),
+                dot: Dot::Working,
+                status: "working \u{b7} tab 3".into(),
+                tail: Vec::new(),
+                buttons: vec![0],
+                picks: agent_chips(1, true),
+                model: None,
+                waits: false,
+            },
+            PageSection::Agent {
+                stage: Stage::Build,
+                icon: AgentIcon::Claude,
+                name: "Claude Code".into(),
+                dot: Dot::Done,
+                status: "Build agent \u{b7} makes the fixes".into(),
+                tail: Vec::new(),
+                buttons: Vec::new(),
+                picks: agent_chips(0, false),
+                model: Some("Model: default".into()),
+                waits: false,
+            },
+            PageSection::Lines {
+                label: "Findings".into(),
+                lines: vec![tab_line("none yet", CheckTone::Note)],
+            },
+        ],
+    };
+    view
+}
+
+/// Ship with nothing ticked, its card picking the agent that writes the
+/// summary and resolves conflicts.
+fn feature_tab_ship_picks() -> super::FeatureTabView {
+    use super::{Dot, PageSection};
+    use crate::{agent_icons::AgentIcon, feature::Stage};
+    let mut view = feature_tab_ship_finish();
+    view.page.sections.insert(
+        0,
+        PageSection::Agent {
+            stage: Stage::Ship,
+            icon: AgentIcon::Generic,
+            name: String::new(),
+            dot: Dot::Unknown,
+            status: String::new(),
+            tail: Vec::new(),
+            buttons: Vec::new(),
+            picks: agent_chips(0, false),
+            model: Some("Model: default".into()),
+            waits: false,
+        },
+    );
     view
 }
 
@@ -5098,6 +5184,7 @@ fn feature_tab_t3_draft() -> super::FeatureTabView {
         status: Some(tab_line("not written yet", CheckTone::Note)),
         buttons: Vec::new(),
         sections: vec![PageSection::Agent {
+            stage: crate::feature::Stage::Plan,
             icon: AgentIcon::T3,
             name: "T3 Code".into(),
             dot: Dot::Blocked,
@@ -5920,7 +6007,7 @@ fn placed(mut view: super::FeatureTabView) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 50] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 52] {
     let views = [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -5981,12 +6068,14 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 50] {
         ("tab_manual_comment", feature_tab_manual_comment()),
         ("tab_manual_hand_back", feature_tab_manual_hand_back()),
         ("tab_ai_review_history", feature_tab_ai_review_history()),
+        ("tab_fix_picks", feature_tab_fix_picks()),
+        ("tab_ship_picks", feature_tab_ship_picks()),
     ];
     views.map(|(name, view)| (name, placed(view)))
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 64] = [
+const TAB_SURFACES: [(&str, i32); 68] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -6051,9 +6140,13 @@ const TAB_SURFACES: [(&str, i32); 64] = [
     ("tab_ship_after", 1180),
     ("tab_ai_review_history", 1920),
     ("tab_ai_review_history", 860),
+    ("tab_fix_picks", 1180),
+    ("tab_fix_picks", 860),
+    ("tab_ship_picks", 1180),
+    ("tab_ship_picks", 860),
 ];
 
-const FEATURE_TAB: [&str; 64] = [
+const FEATURE_TAB: [&str; 68] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -6118,10 +6211,14 @@ const FEATURE_TAB: [&str; 64] = [
     "tab_ship_after_1180",
     "tab_ai_review_history_1920",
     "tab_ai_review_history_860",
+    "tab_fix_picks_1180",
+    "tab_fix_picks_860",
+    "tab_ship_picks_1180",
+    "tab_ship_picks_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 64]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 68]; 4] = [
     // Dark at 1
     [
         0x67093ad27ab19c53, // tab_build_860
@@ -6188,6 +6285,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 64]; 4] = [
         0x0ee193c551feebce, // tab_ship_after_1180
         0xf0b361fda0322a07, // tab_ai_review_history_1920
         0x1de4e901ba6fea97, // tab_ai_review_history_860
+        0xc346dd36c5ff5ebc, // tab_fix_picks_1180
+        0x5f68cf44af600e94, // tab_fix_picks_860
+        0xddb25bbb6a08578d, // tab_ship_picks_1180
+        0x83e8ec2642379521, // tab_ship_picks_860
     ],
     // Dark at 2
     [
@@ -6255,6 +6356,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 64]; 4] = [
         0xf0a5d2a771bab02f, // tab_ship_after_1180
         0x67329f9283374816, // tab_ai_review_history_1920
         0x643d8a843b17d7b8, // tab_ai_review_history_860
+        0x62d5699dc5ea2019, // tab_fix_picks_1180
+        0x04c2c21e407a8e99, // tab_fix_picks_860
+        0xb7b376eb6e876146, // tab_ship_picks_1180
+        0x57b4940aafa16f64, // tab_ship_picks_860
     ],
     // Light at 1
     [
@@ -6322,6 +6427,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 64]; 4] = [
         0x7eefddd1989b7e37, // tab_ship_after_1180
         0x22df089cf65e1366, // tab_ai_review_history_1920
         0x6e3b30c1ee890337, // tab_ai_review_history_860
+        0x56ffff311e4fb859, // tab_fix_picks_1180
+        0x266768c5d3f9caad, // tab_fix_picks_860
+        0xdf91ba3454512187, // tab_ship_picks_1180
+        0x6b89864ca4b1fe53, // tab_ship_picks_860
     ],
     // Light at 2
     [
@@ -6389,6 +6498,10 @@ const GOLDEN_FEATURE_TAB: [[u64; 64]; 4] = [
         0xcf07238808ad1297, // tab_ship_after_1180
         0xc6b8f36371e87612, // tab_ai_review_history_1920
         0xcb5802f0ec976f52, // tab_ai_review_history_860
+        0x4941c37f440639c6, // tab_fix_picks_1180
+        0x2ea0b2312ab81d9f, // tab_fix_picks_860
+        0xe160aa9774f1b69d, // tab_ship_picks_1180
+        0x1c435ed0f49a72dc, // tab_ship_picks_860
     ],
 ];
 
@@ -6977,6 +7090,7 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
         page.buttons.push(button(label, *style));
     }
     page.sections.push(PageSection::Agent {
+        stage: crate::feature::Stage::PlanReview,
         icon: if writing {
             AgentIcon::Claude
         } else {

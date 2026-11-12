@@ -1359,16 +1359,18 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                         TabKey::Out(PanelOutcome::StartAgent(s, true))
                     }))
                 }),
-                row!("Ctrl+Shift+A", "pick the stage's next agent", |t| needs(
-                    t.stage
-                )
-                .is_some()
-                .then_some(TabKey::Out(PanelOutcome::CycleAgent(t.stage)))),
-                row!(MODEL_KEY, "pick the model of the stage's agent", |t| needs(
-                    t.stage
-                )
-                .is_some()
-                .then_some(TabKey::Out(PanelOutcome::PickModel(t.stage)))),
+                row!(
+                    "Ctrl+Shift+A",
+                    "pick the stage's next agent, or the one its fixes go to",
+                    |t| keyed_stage(t.feature, t.stage, t.findings())
+                        .map(|s| TabKey::Out(PanelOutcome::CycleAgent(s)))
+                ),
+                row!(
+                    MODEL_KEY,
+                    "pick the model of the stage's agent, or of the one its fixes go to",
+                    |t| keyed_stage(t.feature, t.stage, t.findings())
+                        .map(|s| TabKey::Out(PanelOutcome::PickModel(s)))
+                ),
                 row!(
                     "Ctrl+Shift+W",
                     "pick the machine the stage's next agent or check run goes on",
@@ -1786,6 +1788,33 @@ pub(super) struct AgentChoices<'a> {
     pub(super) model: bool,
     /// The machine it runs on too.
     pub(super) place: bool,
+    /// The same of the agent fixes go to, on a page that sends them
+    /// (`fix_page`).
+    pub(super) fix_picks: &'a [AgentChip],
+    pub(super) fix_model: bool,
+}
+
+/// Whether `stage`'s page of `feature` offers to pick the agent its fixes
+/// go to (Build's): a stage that sends fixes, at it, while they can go.
+pub(super) fn fix_page(feature: &Feature, stage: Stage) -> bool {
+    matches!(
+        stage,
+        Stage::AiReview | Stage::Verify | Stage::CodeReview | Stage::ManualTest
+    ) && feature.current() == Some(stage)
+        && crate::feature_agents::fires(feature, Stage::Build)
+}
+
+/// The stage whose agent Ctrl+Shift+A and Alt+Shift+A pick on `stage`'s
+/// page: its own while one can start, else the one fixes go to; on AI
+/// review, that one while the keyboard is on the findings.
+pub(super) fn keyed_stage(feature: &Feature, stage: Stage, findings: bool) -> Option<Stage> {
+    let own = crate::feature_agents::fires(feature, stage);
+    match (own, fix_page(feature, stage)) {
+        (true, true) if findings => Some(Stage::Build),
+        (true, _) => Some(stage),
+        (false, true) => Some(Stage::Build),
+        (false, false) => None,
+    }
 }
 
 /// The feature tab's key hints over `feature`, one of `slugs`, as `panel`
@@ -2181,12 +2210,26 @@ fn page_hints(f: &Footer, choices: AgentChoices) -> Vec<(String, String)> {
                 }
                 _ => String::new(),
             }));
-            let picks = choices.picks.iter().filter(|c| !c.off).count() > 1;
-            h.extend(f.says("Ctrl+Shift+A", "pick agent", |k| {
+            // The keys pick for the card they act on: the fixes' on a page
+            // that sends them, while the page's own can't or the findings
+            // have the keyboard.
+            let fixes = stage != Stage::Build
+                && keyed_stage(feature, stage, t.findings()) == Some(Stage::Build);
+            let (picks, model, agent_word, model_word) = match fixes {
+                true => (
+                    choices.fix_picks,
+                    choices.fix_model,
+                    "pick fixes' agent",
+                    "pick fixes' model",
+                ),
+                false => (choices.picks, choices.model, "pick agent", "pick model"),
+            };
+            let picks = picks.iter().filter(|c| !c.off).count() > 1;
+            h.extend(f.says("Ctrl+Shift+A", agent_word, |k| {
                 picks && matches!(k, TabKey::Out(_))
             }));
-            h.extend(f.says(MODEL_KEY, "pick model", |k| {
-                choices.model && matches!(k, TabKey::Out(_))
+            h.extend(f.says(MODEL_KEY, model_word, |k| {
+                model && matches!(k, TabKey::Out(_))
             }));
             h.extend(f.says("Ctrl+Shift+W", "pick machine", |k| {
                 choices.place && matches!(k, TabKey::Out(_))

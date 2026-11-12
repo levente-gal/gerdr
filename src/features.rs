@@ -10985,7 +10985,7 @@ impl Gerdr {
             search.typing = false;
         }
         let outcome = match hit {
-            FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(_) => None,
+            FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(..) => None,
             FeatureTabHit::MilestoneMode(i) => Some(PanelOutcome::FreshMilestones(i == 1)),
             FeatureTabHit::Fold(i) => {
                 let card = (self.feature_tab_parts()).and_then(|(view, _)| {
@@ -11087,19 +11087,15 @@ impl Gerdr {
                 }
                 None
             }
-            FeatureTabHit::AgentPick(i) => {
-                let stage = (self.features.panel.as_ref())
-                    .filter(|p| !p.keys)
-                    .map(|p| p.page_stage(&feature));
-                stage.and_then(|stage| {
-                    let mut chips = self.chips_of(&feature.project, &feature.slug, stage);
-                    (i < chips.len())
-                        .then(|| PanelOutcome::PickAgent(stage, chips.swap_remove(i).name))
-                })
+            FeatureTabHit::AgentPick(stage, i) => {
+                let keys = self.features.panel.as_ref().is_none_or(|p| p.keys);
+                let mut chips = self.chips_of(&feature.project, &feature.slug, stage);
+                (!keys && i < chips.len())
+                    .then(|| PanelOutcome::PickAgent(stage, chips.swap_remove(i).name))
             }
-            FeatureTabHit::AgentModel => (self.features.panel.as_ref())
+            FeatureTabHit::AgentModel(stage) => (self.features.panel.as_ref())
                 .filter(|p| !p.keys)
-                .map(|p| PanelOutcome::PickModel(p.page_stage(&feature))),
+                .map(|_| PanelOutcome::PickModel(stage)),
             FeatureTabHit::Hint(i) => {
                 let keys = self
                     .feature_tab_view()
@@ -11677,23 +11673,37 @@ impl Gerdr {
                 Some(Tooltip::new(&text, spot))
             }
             // Logos alone: their names.
-            FeatureTabHit::AgentPick(i) | FeatureTabHit::AgentPickOff(i) => {
-                let (_, chips) = layout.agent_picks.as_ref()?;
+            FeatureTabHit::AgentPick(stage, i) | FeatureTabHit::AgentPickOff(stage, i) => {
+                let (_, _, chips) = layout.agent_picks.iter().find(|(s, ..)| *s == stage)?;
                 let mut spot = *chips.get(i)?;
                 spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
-                let chip = view.agent_chip(i)?;
+                let chip = view.agent_chip(stage, i)?;
                 let text = match chip.off {
                     true => format!("{} built the code, so it can't review it", chip.name),
                     false => chip.name.clone(),
                 };
                 Some(Tooltip::new(&text, spot))
             }
-            FeatureTabHit::AgentModel => {
-                let mut spot = layout.agent_model?;
+            FeatureTabHit::AgentModel(stage) => {
+                let (_, mut spot) = *layout.agent_model.iter().find(|(s, _)| *s == stage)?;
                 spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
-                let text = format!(
-                    "The model its next start uses; an agent already open keeps its own ({MODEL_KEY})"
-                );
+                // Its key acts on this card, or on it from the findings.
+                let feature = self.panel_feature()?;
+                let page = self.features.panel.as_ref()?.page_stage(feature);
+                let keyed = |findings| keys::keyed_stage(feature, page, findings) == Some(stage);
+                let key = match (keyed(false), keyed(true)) {
+                    (true, _) => format!(" ({MODEL_KEY})"),
+                    (false, true) => format!(" ({MODEL_KEY} from the findings)"),
+                    _ => String::new(),
+                };
+                let text = match stage == Stage::Build && page != Stage::Build {
+                    true => format!(
+                        "The model the next fixes start on; an agent already open keeps its own{key}"
+                    ),
+                    false => format!(
+                        "The model its next start uses; an agent already open keeps its own{key}"
+                    ),
+                };
                 Some(Tooltip::new(&text, spot))
             }
             FeatureTabHit::ReviewView(i) => {
@@ -11756,7 +11766,7 @@ impl Gerdr {
             None | Some(
                 FeatureTabHit::Tab
                     | FeatureTabHit::Column(_)
-                    | FeatureTabHit::AgentPickOff(_)
+                    | FeatureTabHit::AgentPickOff(..)
                     | FeatureTabHit::Finding(_)
             )
         )
@@ -11911,6 +11921,14 @@ impl Gerdr {
             model: self
                 .model_slot_of(&panel.project, &panel.slug, panel.page_stage(feature))
                 .map(|slot| model_label(slot.picked.as_deref())),
+            fix_picks: match keys::fix_page(feature, panel.page_stage(feature)) {
+                true => self.chips_of(&panel.project, &panel.slug, Stage::Build),
+                false => Vec::new(),
+            },
+            fix_model: (self.model_slot_of(&panel.project, &panel.slug, Stage::Build))
+                .filter(|_| keys::fix_page(feature, panel.page_stage(feature)))
+                .map(|slot| model_label(slot.picked.as_deref())),
+            fix_moved: self.stage_agent_moved(feature, Stage::Build),
             place: self.place_label(feature, panel.page_stage(feature)),
             machine_line: self.machine_line(feature, panel.page_stage(feature)),
             seen_note: self.seen_note(feature),
@@ -12742,6 +12760,13 @@ struct PanelState<'a> {
     /// The button picking its model, where gerdr can start the agent on
     /// one (see `feature_agents::stage_model_slot`).
     model: Option<String>,
+    /// The same for the agent fixes go to (Build's), on a page sending
+    /// them (`keys::fix_page`).
+    fix_picks: Vec<AgentChip>,
+    fix_model: Option<String>,
+    /// Whether the next fixes start a fresh agent, not the one open
+    /// (`Gerdr::stage_agent_moved`).
+    fix_moved: bool,
     /// What the button placing the next agent says, with machines to place it
     /// on (see `machine_work::place_label`).
     place: Option<String>,
@@ -13875,6 +13900,7 @@ fn agent_card(
     let buttons = agent_buttons(stage, actions);
     let Some(run) = feature.runs.get(&stage) else {
         return (!picks.is_empty()).then(|| PageSection::Agent {
+            stage,
             icon: AgentIcon::Generic,
             name: String::new(),
             dot: Dot::Unknown,
@@ -13944,6 +13970,7 @@ fn agent_card(
         false => Vec::new(),
     };
     Some(PageSection::Agent {
+        stage,
         icon: AgentIcon::from_agent(&run.agent),
         name: run.agent.clone(),
         dot: if waits { Dot::Blocked } else { dot },
@@ -13986,30 +14013,57 @@ fn plain_tail(lines: &[String], waits: bool) -> Vec<String> {
 }
 
 /// The Build agent's card on the page of the stage `feature` is at, while
-/// work sent back to that agent is under way: this page's own agent is
-/// another one, and this is the page the user comes back to.
+/// work sent back to that agent is under way, or while the page picks the
+/// agent its fixes go to: this page's own agent is another one, and this
+/// is the page the user comes back to.
 fn rework_card(
     feature: &Feature,
     stage: Stage,
     state: &PanelState,
     actions: &[(PageButton, PanelOutcome)],
 ) -> Option<PageSection> {
-    let back = rework_on(feature, stage, state.ctx)?;
-    let run = feature.runs.get(&Stage::Build)?;
+    let back = rework_on(feature, stage, state.ctx);
+    if back.is_none() && (state.fix_picks.is_empty() || !keys::fix_page(feature, stage)) {
+        return None;
+    }
+    let lit = state.fix_picks.iter().find(|c| c.lit);
+    let buttons = agent_buttons(Stage::Build, actions);
+    let Some(run) = feature.runs.get(&Stage::Build) else {
+        // None built it (a pull request's own): only where its fixes go.
+        return back.is_none().then(|| PageSection::Agent {
+            stage: Stage::Build,
+            icon: lit.map_or(AgentIcon::Generic, |c| c.icon),
+            name: String::new(),
+            dot: Dot::Unknown,
+            status: "Fixes".to_owned(),
+            tail: Vec::new(),
+            buttons,
+            picks: state.fix_picks.clone(),
+            model: state.fix_model.clone(),
+            waits: false,
+        });
+    };
+    let status = match (back, lit) {
+        (Some(back), _) => back.status().to_owned(),
+        (None, Some(lit)) if state.fix_moved => format!("next fixes: a fresh {}", lit.name),
+        (None, _) => "makes the fixes".to_owned(),
+    };
     Some(PageSection::Agent {
+        stage: Stage::Build,
         icon: AgentIcon::from_agent(&run.agent),
         name: run.agent.clone(),
         dot: match back {
-            _ if back.waits_on_you() => Dot::Blocked,
-            Rework::Runs(dot) => dot,
-            _ => Dot::Unknown,
+            Some(back) if back.waits_on_you() => Dot::Blocked,
+            Some(Rework::Runs(dot)) => dot,
+            Some(_) => Dot::Unknown,
+            None => Dot::Done,
         },
-        status: format!("Build agent \u{b7} {}", back.status()),
+        status: format!("Build agent \u{b7} {status}"),
         tail: Vec::new(),
-        buttons: agent_buttons(Stage::Build, actions),
-        picks: Vec::new(),
-        model: None,
-        waits: back.waits_on_you(),
+        buttons,
+        picks: state.fix_picks.clone(),
+        model: state.fix_model.clone(),
+        waits: back.is_some_and(Rework::waits_on_you),
     })
 }
 
@@ -15703,8 +15757,14 @@ fn stage_page(
         // Over, it stays in the same place.
         sections.extend(last_round_on(feature, stage).map(|r| last_round_card(r, actions, now)));
     }
+    // Work sent back to Build heads the page; else on AI review the agent
+    // fixes go to follows the reviewer.
+    let mut fixes = rework_card(feature, stage, state, actions);
+    let fixes_under = stage == Stage::AiReview && rework_on(feature, stage, state.ctx).is_none();
     if mark != StageMark::Later {
-        sections.extend(rework_card(feature, stage, state, actions));
+        if !fixes_under {
+            sections.extend(fixes.take());
+        }
         if let Some(m) = feature.marks.get(&stage).filter(|m| !m.note.is_empty()) {
             sections.push(lines("Note", vec![line(m.note.clone(), CheckTone::Note)]));
         }
@@ -15724,6 +15784,7 @@ fn stage_page(
             // plan, once written, goes over the suggestions it came from.
             Stage::PlanReview | Stage::AiReview => {
                 sections.extend(card());
+                sections.extend(fixes.take());
                 sections.extend(review_page_sections(feature, stage, mark, state, actions));
             }
             Stage::Discover | Stage::Plan => {
@@ -15853,9 +15914,11 @@ fn stage_page(
                 }
             }
             Stage::Ship if feature.pull().is_some() => {
+                sections.extend(card());
                 sections.extend(submit_sections(feature, state, actions, now));
             }
             Stage::Ship => {
+                sections.extend(card());
                 let check = check_lines(feature, state.probe, state.shipping, now);
                 if !check.is_empty() {
                     sections.push(lines("Ship check", check));
@@ -15901,7 +15964,14 @@ fn stage_page(
     // agent's card, where the page is otherwise empty.
     // A stage no agent runs has it last, under what its page already holds.
     if let Some(next) = next_section(feature, stage, mark) {
-        let agent = (sections.iter()).position(|s| matches!(s, PageSection::Agent { .. }));
+        // The page's own agent's, else, on a stage with one, the agent's
+        // its fixes go to.
+        let agent = (sections.iter())
+            .position(|s| matches!(s, PageSection::Agent { stage: s, .. } if *s == stage))
+            .or_else(|| {
+                needs(stage)?;
+                (sections.iter()).position(|s| matches!(s, PageSection::Agent { .. }))
+            });
         let at = match (agent, needs(stage)) {
             (Some(i), _) => i + 1,
             (None, Some(_)) => 0,
@@ -16861,6 +16931,8 @@ fn tab_view(
                     picks: &state.picks,
                     model: state.model.is_some(),
                     place: state.place.is_some(),
+                    fix_picks: &state.fix_picks,
+                    fix_model: state.fix_model.is_some(),
                 },
                 &state.plan,
                 &ships,
@@ -25106,6 +25178,7 @@ pub(crate) mod tests {
             page.sections,
             [
                 PageSection::Agent {
+                    stage: Stage::Build,
                     icon: AgentIcon::Claude,
                     name: "Claude Code".into(),
                     dot: Dot::Working,
@@ -27376,6 +27449,71 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn fix_pages_pick_the_agent_fixes_go_to_and_ship_picks_its_own() {
+        let chip = |name: &str, lit| AgentChip {
+            icon: AgentIcon::from_agent(name),
+            name: name.into(),
+            lit,
+            off: false,
+        };
+        let chips = vec![chip("Claude Code", true), chip("Cursor", false)];
+        let state = PanelState {
+            picks: chips.clone(),
+            fix_picks: chips.clone(),
+            fix_model: Some("Model: default".into()),
+            ..PanelState::default()
+        };
+        let cards = |f: &Feature, stage: Stage| {
+            let actions = page_actions(f, stage, RowCtx::default());
+            let page = stage_page(f, stage, &state, &actions, 2_000);
+            (page.sections.iter())
+                .filter_map(|s| match s {
+                    PageSection::Agent {
+                        stage,
+                        name,
+                        status,
+                        picks,
+                        ..
+                    } => Some((*stage, name.clone(), status.clone(), picks.len())),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        // AI review, Build done: the reviewer's card, then the fixes'.
+        let mut f = feature("b", vec![repo("api", true)], 5);
+        assert!(keys::fix_page(&f, Stage::AiReview));
+        f.runs.insert(Stage::Build, agent_run(None, None));
+        assert_eq!(
+            cards(&f, Stage::AiReview),
+            [
+                (Stage::AiReview, String::new(), String::new(), 2),
+                (
+                    Stage::Build,
+                    "Claude Code".into(),
+                    "Build agent \u{b7} makes the fixes".into(),
+                    2
+                ),
+            ]
+        );
+        // The keys pick the reviewer, the fixes' agent from the findings.
+        assert_eq!(keys::keyed_stage(&f, Stage::AiReview, false), Some(Stage::AiReview));
+        assert_eq!(keys::keyed_stage(&f, Stage::AiReview, true), Some(Stage::Build));
+        // None built it: the card only says where fixes go.
+        f.runs.remove(&Stage::Build);
+        let fixes = (Stage::Build, String::new(), "Fixes".into(), 2);
+        assert_eq!(cards(&f, Stage::AiReview)[1], fixes);
+        // Verify has no agent of its own: its keys pick the fixes'.
+        let f = feature("b", vec![repo("api", true)], 4);
+        assert_eq!(cards(&f, Stage::Verify), [fixes]);
+        assert_eq!(keys::keyed_stage(&f, Stage::Verify, false), Some(Stage::Build));
+        // Ship picks the agent writing its summary.
+        let f = feature("b", vec![repo("api", true)], 8);
+        assert_eq!(f.current(), Some(Stage::Ship));
+        assert_eq!(cards(&f, Stage::Ship), [(Stage::Ship, String::new(), String::new(), 2)]);
+        assert_eq!(keys::keyed_stage(&f, Stage::Ship, false), Some(Stage::Ship));
+    }
+
+    #[test]
     fn a_stage_ahead_shows_its_chips_and_a_restart_names_the_other_agent() {
         let chips = vec![
             AgentChip {
@@ -27515,6 +27653,7 @@ pub(crate) mod tests {
                 picks: &[],
                 model,
                 place: false,
+                ..AgentChoices::default()
             };
             tab_hints(
                 &panel,
@@ -27627,6 +27766,7 @@ pub(crate) mod tests {
                 picks: &[],
                 model: false,
                 place,
+                ..AgentChoices::default()
             };
             let hints = tab_hints(
                 &panel,

@@ -1564,7 +1564,13 @@ impl Gerdr {
         if let Some(next) = next_chip(&chips) {
             self.pick_stage_agent(project, slug, stage, &next.name);
             // Only its chip's tooltip names it: the key says which it lit.
-            self.show_success(format!("Next {} agent: {}", stage.label(), next.name));
+            let built = self
+                .feature(project, slug)
+                .is_some_and(|f| f.is_done(Stage::Build));
+            self.show_success(match stage == Stage::Build && built {
+                true => format!("Fixes go to {}", next.name),
+                false => format!("Next {} agent: {}", stage.label(), next.name),
+            });
         }
     }
 
