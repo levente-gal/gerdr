@@ -20,7 +20,9 @@ pub struct Binding<C, A> {
     /// and in menus (checklist K3, K7).
     pub footer: bool,
     /// Its words on F1; empty to leave it off, for a chord another row of the
-    /// same words already lists there.
+    /// same words already lists there. A row with no F1 words and no footer
+    /// hint is an alias: a press the panel took before its keys were a table
+    /// (Shift+Esc for Esc, say), kept so that it still works, never shown.
     pub f1: &'static str,
 }
 
@@ -96,13 +98,14 @@ pub fn f1_rows<C, A>(table: &[Binding<C, A>]) -> Vec<(&'static str, &'static str
 
 /// For tests of a panel: over every context in `ctxs`, each footer hint
 /// presses a row that is offered, every chord parses, and every chord in
-/// the table has an F1 row. Panics naming what is wrong.
+/// the table but an alias's has an F1 row. Panics naming what is wrong.
 #[cfg(test)]
 pub fn check<C, A>(table: &[Binding<C, A>], ctxs: &[C]) {
     for b in table {
         assert!(crate::keys::hint_key(b.chord).is_some(), "{} doesn't parse", b.chord);
+        let alias = !b.footer && b.f1.is_empty();
         assert!(
-            table.iter().any(|o| o.chord == b.chord && !o.f1.is_empty()),
+            alias || table.iter().any(|o| o.chord == b.chord && !o.f1.is_empty()),
             "{} is on no F1 row",
             b.chord
         );
