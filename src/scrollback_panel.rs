@@ -23,8 +23,9 @@ use crate::{
     feature::{fix_round, setup, store},
     herdr,
     input::{MULTI_CLICK, MULTI_CLICK_SLOP, Overlay},
+    key_table,
     scroll::Motion,
-    scrollback::{Fit, Outcome, Scrollback, Source},
+    scrollback::{self, Fit, Key, Outcome, Scrollback, Source},
     toast::ToastHit,
     tooltip::Tooltip,
 };
@@ -38,8 +39,9 @@ const INSET: i32 = 4;
 /// How often a log shown is looked at for what it gained.
 const FOLLOW: Duration = Duration::from_millis(250);
 
-/// Every key the viewer takes, and the pointer's ways, as F1 lists them.
-const KEYS: &[(&str, &str)] = &[
+/// The keys F1 lists that are no rows of `scrollback::KEYS`: the caret's
+/// and the pages' (`Scrollback::motion`), before them.
+const MOTION_KEYS: &[(&str, &str)] = &[
     ("Arrows / H J K L", "Move the caret"),
     (
         "W / B / E",
@@ -55,41 +57,34 @@ const KEYS: &[(&str, &str)] = &[
     ("Space", "Go a page down"),
     ("Ctrl+U / Ctrl+D", "Go half a page up or down"),
     ("Shift+Arrows", "Select as the caret goes"),
-    (
-        "V / Shift+V",
-        "Select from the caret, by characters or by lines",
-    ),
-    ("Ctrl+A", "Select all"),
-    ("Y / Ctrl+C", "Copy the selection"),
-    ("Enter", "Copy the selection and close"),
-    ("/ / Ctrl+F", "Find"),
-    (
-        "Enter / Shift+Enter",
-        "Go to the next place found, or the one before",
-    ),
-    (
-        "N / Shift+N",
-        "Go to the next place or the one before, from the text",
-    ),
-    (
-        "F3 / Shift+F3",
-        "Go to the next place or the one before, from either",
-    ),
+];
+
+/// What else F1 lists, after the keys: `*` and `#` (`scrollback_key`)
+/// and the pointer's ways.
+const MORE_KEYS: &[(&str, &str)] = &[
     (
         "* / #",
         "Find the selection or the word at the caret, on or back",
     ),
-    ("Tab / Shift+Tab", "Move between the search and the text"),
-    ("Ctrl+R", "Read the output again"),
     (
         "Drag / Shift+Click",
         "Select with the pointer, or reach the selection there",
     ),
     ("Double Click / Triple Click", "Select a word, or a line"),
-    ("Esc", "Clear the selection or the search, then close"),
-    ("Q", "Close"),
-    ("F1", "List these keys"),
 ];
+
+/// Every key the viewer takes, and the pointer's ways, as F1 lists them.
+fn keys_sheet() -> Vec<(String, String)> {
+    let listed = |rows: &[(&str, &str)]| {
+        (rows.iter())
+            .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
+            .collect::<Vec<_>>()
+    };
+    let mut sheet = listed(MOTION_KEYS);
+    sheet.extend(key_table::joined(key_table::f1_rows(scrollback::KEYS)));
+    sheet.extend(listed(MORE_KEYS));
+    sheet
+}
 
 /// The viewer's key hints, each a key it takes and what it does: the
 /// search's while it is open, and while its field has the keyboard only
@@ -97,63 +92,34 @@ const KEYS: &[(&str, &str)] = &[
 /// says what it does now (see `Scrollback::key`). F1 and Esc are the
 /// last two, kept when the footer is too narrow for all.
 fn hints(viewer: &Scrollback) -> Vec<(String, String)> {
-    let selected = viewer.has_selection();
-    let hints: &[(&str, &str)] = match viewer.find_bar() {
-        _ if viewer.keys_open() => &[("Esc", "close keys")],
-        Some(bar) if bar.focused => &[
-            ("Enter", "next"),
-            ("Shift+Enter", "previous"),
-            ("Tab", "to the text"),
-            ("F1", "keys"),
-            (
-                "Esc",
-                if viewer.find_empty() {
-                    "close search"
-                } else {
-                    "clear"
-                },
-            ),
-        ],
-        Some(_) => &[
-            ("N", "next"),
-            ("Shift+N", "previous"),
-            ("Ctrl+C", "copy"),
-            ("Tab", "to the search"),
-            ("F1", "keys"),
-            ("Esc", if selected { "clear" } else { "close search" }),
-        ],
-        None if viewer.selecting() => &[
-            ("Y", "copy"),
-            ("Enter", "copy and close"),
-            ("F1", "keys"),
-            ("Esc", "stop selecting"),
-        ],
-        None if selected => &[
-            ("Ctrl+C", "copy"),
-            ("Enter", "copy and close"),
-            ("Q", "close"),
-            ("F1", "keys"),
-            ("Esc", "clear"),
-        ],
-        None if viewer.pane().is_none() => &[
-            ("V", "select"),
-            ("Ctrl+A", "select all"),
-            ("/", "find"),
-            ("F1", "keys"),
-            ("Esc / Q", "close"),
-        ],
-        None => &[
-            ("V", "select"),
-            ("/", "find"),
-            ("Ctrl+R", "reload"),
-            ("F1", "keys"),
-            ("Esc / Q", "close"),
-        ],
+    if viewer.keys_open() {
+        let hints = key_table::hints(scrollback::SHEET_KEYS, &(), |_| "close keys".to_owned());
+        return key_table::joined(hints);
+    }
+    let ctx = viewer.key_ctx(true);
+    let label = |key: &Key| {
+        match key {
+            Key::Find { back: false } => "next",
+            Key::Find { back: true } => "previous",
+            Key::ToggleFind if ctx.find == Some(true) => "to the text",
+            Key::ToggleFind => "to the search",
+            Key::Copy | Key::Yank => "copy",
+            Key::CopyClose => "copy and close",
+            Key::Close => "close",
+            Key::Visual(_) => "select",
+            Key::SelectAll => "select all",
+            Key::OpenFind => "find",
+            Key::Reload => "reload",
+            Key::Keys => "keys",
+            Key::ClearFind => "clear",
+            Key::CloseFind => "close search",
+            Key::ClearSelection if ctx.visual => "stop selecting",
+            Key::ClearSelection => "clear",
+        }
+        .to_owned()
     };
-    hints
-        .iter()
-        .map(|(key, what)| ((*key).to_owned(), (*what).to_owned()))
-        .collect()
+    // Esc and Q, both closing, are one choice: "Esc / Q".
+    key_table::joined(key_table::hints(scrollback::KEYS, &ctx, label))
 }
 
 /// What the viewer shows of log `path`, and how long the file is: a log
@@ -519,12 +485,13 @@ impl Gerdr {
             .find(|(pane, _)| *pane == id)?;
         let keys = self.scrollback.as_ref().is_some_and(Scrollback::keys_open);
         let small = rect.size.w < MIN_WIDTH || rect.size.h < MIN_HEIGHT;
-        let room =
-            if small || (keys && !chrome::scrollback_keys_fit(inset(rect, INSET), KEYS.len())) {
-                area
-            } else {
-                rect
-            };
+        let room = if small
+            || (keys && !chrome::scrollback_keys_fit(inset(rect, INSET), keys_sheet().len()))
+        {
+            area
+        } else {
+            rect
+        };
         Some(inset(room, INSET))
     }
 
@@ -549,12 +516,7 @@ impl Gerdr {
         let end = (first + chrome::scrollback_shown(panel)).min(viewer.row_count());
         // The keys listed show in place of the text.
         let (end, keys) = match viewer.keys_open() {
-            true => (
-                first,
-                KEYS.iter()
-                    .map(|(k, w)| (k.to_string(), w.to_string()))
-                    .collect(),
-            ),
+            true => (first, keys_sheet()),
             false => (end, Vec::new()),
         };
         let rows = (first..end)

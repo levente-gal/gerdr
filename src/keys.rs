@@ -793,6 +793,8 @@ fn key_sym(name: &str) -> Option<Keysym> {
                 "esc" => "Escape",
                 "enter" => "Return",
                 "del" => "Delete",
+                "pgup" => "Page_Up",
+                "pgdn" => "Page_Down",
                 _ => name,
             };
             match xkb::keysym_from_name(name, xkb::KEYSYM_NO_FLAGS) {

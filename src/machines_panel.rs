@@ -26,6 +26,7 @@ use crate::{
     },
     feature::{Feature, Stage},
     herdr::AgentStatus,
+    key_table::{self, Binding},
     machine_edit::{Draft, EditForm},
     machine_load::Load,
     machines::{Failure, LinkState},
@@ -463,16 +464,334 @@ fn placement_detail(name: String, runs: Vec<MachineRunView>, no_runs: &str) -> M
     }
 }
 
+/// What a key of the panel does (see `MACHINE_KEYS`, `EDIT_KEYS` and
+/// `PLACE_KEYS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Key {
+    Up,
+    Down,
+    /// The next button (or field), or with `back` the one before.
+    Next {
+        back: bool,
+    },
+    /// Press the focused button.
+    Press,
+    Remove,
+    Edit,
+    Rename,
+    /// Machines to Placement, or back.
+    ShowTab,
+    Close,
+    Save,
+    AddAddress,
+    Fix,
+    MoveAddress {
+        down: bool,
+    },
+    RemoveAddress,
+    StopTrying,
+    Cancel,
+    /// Give the stage the next machine, or with `back` the one before.
+    Stage {
+        back: bool,
+    },
+}
+
+/// What the keys read of the panel now (see `key_ctx`).
+#[derive(Default)]
+struct KeyCtx {
+    /// Tab has more than one place to go.
+    many_stops: bool,
+    /// The focused button presses something.
+    presses: bool,
+    /// The selected row is a machine, not the add row.
+    named: bool,
+    /// The form's new address is tried: only Stop works.
+    busy: bool,
+    /// The form's last try failed with a fix to press.
+    fix: bool,
+    /// The form's focused address is empty.
+    empty_address: bool,
+}
+
+/// What the keys read of `content`, row `selected` selected, the keyboard
+/// on `focus`.
+fn key_ctx(content: &Content, selected: usize, focus: MachinesFocus) -> KeyCtx {
+    let edit = content.edit.as_ref();
+    KeyCtx {
+        many_stops: content.stops().len() > 1,
+        presses: content.label(selected, focus).is_some(),
+        named: content.name(selected).is_some(),
+        busy: edit.is_some_and(|e| e.busy),
+        fix: edit.is_some_and(|e| e.fix),
+        empty_address: false,
+    }
+}
+
+/// The Machines page's keys, in the footer's order: the handler and the
+/// footer read them. k/j, the pages, Home and End stay `MachinesPanel::key`'s.
+const MACHINE_KEYS: &[Binding<KeyCtx, Key>] = &[
+    Binding {
+        chord: "Up",
+        does: |_| Some(Key::Up),
+        footer: true,
+        f1: "Move through the machines",
+    },
+    Binding {
+        chord: "Down",
+        does: |_| Some(Key::Down),
+        footer: true,
+        f1: "Move through the machines",
+    },
+    // Hinted while there is a button to go to.
+    Binding {
+        chord: "Tab",
+        does: |c| c.many_stops.then_some(Key::Next { back: false }),
+        footer: true,
+        f1: "Go through the buttons of the one selected",
+    },
+    Binding {
+        chord: "Tab",
+        does: |_| Some(Key::Next { back: false }),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Shift+Tab",
+        does: |_| Some(Key::Next { back: true }),
+        footer: false,
+        f1: "Go through the buttons of the one selected",
+    },
+    Binding {
+        chord: "Enter",
+        does: |c| c.presses.then_some(Key::Press),
+        footer: true,
+        f1: "Press the focused button",
+    },
+    Binding {
+        chord: "Enter",
+        does: |_| Some(Key::Press),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Del",
+        does: |c| c.named.then_some(Key::Remove),
+        footer: true,
+        f1: "Arm the machine, and again remove it",
+    },
+    Binding {
+        chord: "Ctrl+E",
+        does: |c| c.named.then_some(Key::Edit),
+        footer: true,
+        f1: "Edit its name and addresses",
+    },
+    // On the name: the press opening the form finds the keyboard there.
+    Binding {
+        chord: "F2",
+        does: |c| c.named.then_some(Key::Rename),
+        footer: false,
+        f1: "Edit its name",
+    },
+    Binding {
+        chord: "Ctrl+PgDn",
+        does: |_| Some(Key::ShowTab),
+        footer: true,
+        f1: "Go between Machines and Placement",
+    },
+    Binding {
+        chord: "Ctrl+PgUp",
+        does: |_| Some(Key::ShowTab),
+        footer: false,
+        f1: "Go between Machines and Placement",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(Key::Close),
+        footer: true,
+        f1: "Close",
+    },
+];
+
+/// The edit form's keys, in the footer's order: the handler and the
+/// footer read them. While it tries, only Stop works (and Tab, Enter).
+/// Up/Down (Ctrl+K/J) between the fields, and typing, stay `edit_key`'s.
+const EDIT_KEYS: &[Binding<KeyCtx, Key>] = &[
+    Binding {
+        chord: "Tab",
+        does: |c| (!c.busy).then_some(Key::Next { back: false }),
+        footer: true,
+        f1: "Go round the form's fields and buttons",
+    },
+    Binding {
+        chord: "Tab",
+        does: |_| Some(Key::Next { back: false }),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Shift+Tab",
+        does: |_| Some(Key::Next { back: true }),
+        footer: false,
+        f1: "Go round the form's fields and buttons",
+    },
+    Binding {
+        chord: "Enter",
+        does: |c| (!c.busy && c.presses).then_some(Key::Press),
+        footer: true,
+        f1: "Press the focused button",
+    },
+    Binding {
+        chord: "Enter",
+        does: |_| Some(Key::Press),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+Enter",
+        does: |c| (!c.busy).then_some(Key::Save),
+        footer: false,
+        f1: "Save",
+    },
+    Binding {
+        chord: "Ctrl+Enter",
+        does: |_| Some(Key::Press),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+N",
+        does: |c| (!c.busy).then_some(Key::AddAddress),
+        footer: true,
+        f1: "Add an address",
+    },
+    Binding {
+        chord: "Alt+X",
+        does: |c| (!c.busy && c.fix).then_some(Key::Fix),
+        footer: true,
+        f1: "Press the fix for what failed",
+    },
+    Binding {
+        chord: "Ctrl+Shift+Up",
+        does: |c| (!c.busy).then_some(Key::MoveAddress { down: false }),
+        footer: false,
+        f1: "Move the focused address up or down",
+    },
+    Binding {
+        chord: "Ctrl+Shift+Down",
+        does: |c| (!c.busy).then_some(Key::MoveAddress { down: true }),
+        footer: false,
+        f1: "Move the focused address up or down",
+    },
+    Binding {
+        chord: "Del",
+        does: |c| (!c.busy && c.empty_address).then_some(Key::RemoveAddress),
+        footer: false,
+        f1: "Take the empty address out",
+    },
+    Binding {
+        chord: "Ctrl+PgDn",
+        does: |_| Some(Key::ShowTab),
+        footer: false,
+        f1: "Go between Machines and Placement",
+    },
+    Binding {
+        chord: "Ctrl+PgUp",
+        does: |_| Some(Key::ShowTab),
+        footer: false,
+        f1: "Go between Machines and Placement",
+    },
+    Binding {
+        chord: "Esc",
+        does: |c| c.busy.then_some(Key::StopTrying),
+        footer: true,
+        f1: "Stop trying, else leave the form",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(Key::Cancel),
+        footer: true,
+        f1: "",
+    },
+];
+
+/// The Placement page's keys, in the footer's order: the handler and the
+/// footer read them. k/j stay `placement_key`'s.
+const PLACE_KEYS: &[Binding<(), Key>] = &[
+    Binding {
+        chord: "Up",
+        does: |_| Some(Key::Up),
+        footer: true,
+        f1: "Go between the stages",
+    },
+    Binding {
+        chord: "Down",
+        does: |_| Some(Key::Down),
+        footer: true,
+        f1: "Go between the stages",
+    },
+    Binding {
+        chord: "Left",
+        does: |_| Some(Key::Stage { back: true }),
+        footer: true,
+        f1: "Give the stage the machine before, or the next",
+    },
+    Binding {
+        chord: "Right",
+        does: |_| Some(Key::Stage { back: false }),
+        footer: true,
+        f1: "Give the stage the machine before, or the next",
+    },
+    Binding {
+        chord: "Enter",
+        does: |_| Some(Key::Stage { back: false }),
+        footer: false,
+        f1: "Give the stage the next machine",
+    },
+    Binding {
+        chord: "Ctrl+PgUp",
+        does: |_| Some(Key::ShowTab),
+        footer: true,
+        f1: "Go between Machines and Placement",
+    },
+    Binding {
+        chord: "Ctrl+PgDn",
+        does: |_| Some(Key::ShowTab),
+        footer: false,
+        f1: "Go between Machines and Placement",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(Key::Close),
+        footer: true,
+        f1: "Close",
+    },
+];
+
+/// The words of `key` in the footer.
+fn key_word(key: &Key) -> &'static str {
+    match key {
+        Key::Up | Key::Down => "move",
+        Key::Next { .. } => "next button",
+        Key::Edit => "edit",
+        Key::ShowTab => "placement",
+        Key::Close => "close",
+        Key::AddAddress => "add address",
+        Key::Fix => "fix",
+        Key::StopTrying => "stop",
+        Key::Cancel => "cancel",
+        Key::Stage { .. } => "machine",
+        _ => "",
+    }
+}
+
 /// The Placement page's key hints.
 fn placement_hints() -> Vec<(String, String)> {
-    [
-        ("Up / Down", "move"),
-        ("Left / Right", "machine"),
-        ("Ctrl+PgUp", "machines"),
-        ("Esc", "close"),
-    ]
-    .map(|(k, w)| (k.to_owned(), w.to_owned()))
-    .to_vec()
+    let label = |key: &Key| match key {
+        Key::ShowTab => "machines".to_owned(),
+        key => key_word(key).to_owned(),
+    };
+    key_table::joined(key_table::hints(PLACE_KEYS, &(), label))
 }
 
 /// A key on the Placement page, the keyboard on `focus` of `content`: Up /
@@ -485,7 +804,6 @@ fn placement_key(
     mods: &ModifiersState,
     sym: Keysym,
 ) -> Option<Outcome> {
-    let plain = !mods.ctrl && !mods.alt && !mods.logo;
     let rows = content.run_presses.len();
     let row = match focus {
         MachinesFocus::Run(r, _) => r,
@@ -495,13 +813,25 @@ fn placement_key(
         Press::Place { stage, .. } => Some(Outcome::Press(Press::Place { stage: *stage, back })),
         _ => None,
     };
-    match sym {
-        Keysym::Escape => return Some(Outcome::Close),
-        Keysym::Return | Keysym::KP_Enter | Keysym::Right if plain => return stage(false),
-        Keysym::Left if plain => return stage(true),
-        Keysym::Up | Keysym::k if rows > 0 => panel.focus = MachinesFocus::Run(row.saturating_sub(1), 0),
-        Keysym::Down | Keysym::j if rows > 0 => panel.focus = MachinesFocus::Run((row + 1).min(rows - 1), 0),
-        _ => {}
+    let up = match key_table::press(PLACE_KEYS, &(), mods, sym) {
+        Some(Key::Close) => return Some(Outcome::Close),
+        Some(Key::Stage { back }) => return stage(back),
+        Some(Key::ShowTab) => {
+            panel.show_tab(MachinesTab::Machines);
+            return None;
+        }
+        Some(key) => key == Key::Up,
+        None if sym == Keysym::k => true,
+        None if sym == Keysym::j => false,
+        None => return None,
+    };
+    if rows > 0 {
+        let to = if up {
+            row.saturating_sub(1)
+        } else {
+            (row + 1).min(rows - 1)
+        };
+        panel.focus = MachinesFocus::Run(to, 0);
     }
     None
 }
@@ -514,41 +844,38 @@ fn hints(
     focus: MachinesFocus,
     armed: bool,
 ) -> Vec<(String, String)> {
-    let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
-    if let Some(edit) = &content.edit {
-        if edit.busy {
-            return vec![hint("Esc", "stop")];
+    let label = |key: &Key| match key {
+        Key::Press => {
+            (content.label(selected, focus)).map_or_else(String::new, |l| l.to_lowercase())
         }
-        let mut hints = vec![hint("Tab", "next")];
-        if let Some(label) = content.label(selected, focus) {
-            hints.push(hint("Enter", &label.to_lowercase()));
-        }
-        hints.push(hint("Ctrl+N", "add address"));
-        if edit.fix {
-            hints.push(hint("Alt+X", "fix"));
-        }
-        hints.push(hint("Esc", "cancel"));
-        return hints;
-    }
-    let mut hints = vec![hint("Up / Down", "move")];
-    if content.stops().len() > 1 {
-        hints.push(hint("Tab", "next button"));
-    }
-    if let Some(label) = content.label(selected, focus) {
-        hints.push(hint("Enter", &label.to_lowercase()));
-    }
-    if content.name(selected).is_some() {
-        let what = match (armed, content.asks_remove) {
+        Key::Next { .. } if content.edit.is_some() => "next".to_owned(),
+        Key::Remove => match (armed, content.asks_remove) {
             (true, _) => "remove now",
             (false, true) => "remove\u{2026}",
             (false, false) => "remove",
-        };
-        hints.push(hint("Del", what));
-        hints.push(hint("Ctrl+E", "edit"));
+        }
+        .to_owned(),
+        key => key_word(key).to_owned(),
+    };
+    let ctx = key_ctx(content, selected, focus);
+    match content.edit {
+        Some(_) => (key_table::hints(EDIT_KEYS, &ctx, label).into_iter())
+            .map(|(k, w)| (k.to_owned(), w))
+            .collect(),
+        None => key_table::joined(key_table::hints(MACHINE_KEYS, &ctx, label)),
     }
-    hints.push(hint("Ctrl+PgDn", "placement"));
-    hints.push(hint("Esc", "close"));
-    hints
+}
+
+/// The stop of `content` after `focus`, or with `back` before it, round
+/// the ends.
+fn next_stop(content: &Content, focus: MachinesFocus, back: bool) -> MachinesFocus {
+    let stops = content.stops();
+    let at = stops.iter().position(|f| *f == focus).unwrap_or(0);
+    let next = match back {
+        true => (at + stops.len() - 1) % stops.len(),
+        false => (at + 1) % stops.len(),
+    };
+    stops[next]
 }
 
 /// `first` moved so `at` shows among `page` rows of `count`.
@@ -711,9 +1038,6 @@ impl MachinesPanel {
         typed: Keysym,
     ) -> Option<Outcome> {
         let edit = content.edit.as_ref()?;
-        let ctrl = mods.ctrl && !mods.alt && !mods.logo;
-        let alt = mods.alt && !mods.ctrl && !mods.logo;
-        let plain = !mods.ctrl && !mods.alt && !mods.logo && !mods.shift;
         // Up and Down go between the fields; from a button, to the last
         // address.
         let fields = content.fields();
@@ -729,40 +1053,47 @@ impl MachinesPanel {
                 .then_some(at),
             _ => None,
         };
-        match sym {
-            Keysym::Escape if edit.busy => return Some(Outcome::Press(Press::StopTrying)),
-            Keysym::Escape => return Some(Outcome::Press(Press::CancelEdit)),
-            Keysym::Return | Keysym::KP_Enter if ctrl && !edit.busy => {
-                return Some(Outcome::Press(Press::Save));
-            }
-            Keysym::Return | Keysym::KP_Enter => {
+        let ctx = KeyCtx {
+            empty_address: empty_at.is_some(),
+            ..key_ctx(content, self.selected, self.focus)
+        };
+        match key_table::press(EDIT_KEYS, &ctx, mods, sym) {
+            Some(Key::StopTrying) => return Some(Outcome::Press(Press::StopTrying)),
+            Some(Key::Cancel) => return Some(Outcome::Press(Press::CancelEdit)),
+            Some(Key::Save) => return Some(Outcome::Press(Press::Save)),
+            Some(Key::Press) => {
                 return content.press(self.selected, self.focus).map(Outcome::Press);
             }
-            Keysym::Tab | Keysym::ISO_Left_Tab => {
-                let back = sym == Keysym::ISO_Left_Tab || mods.shift;
-                let stops = content.stops();
-                let at = stops.iter().position(|f| *f == self.focus).unwrap_or(0);
-                let next = match back {
-                    true => (at + stops.len() - 1) % stops.len(),
-                    false => (at + 1) % stops.len(),
-                };
-                self.focus = stops[next];
-            }
-            // The fields wait while the address is tried, as it shows.
-            _ if edit.busy => {}
-            Keysym::x | Keysym::X if alt && edit.fix => {
-                return Some(Outcome::Press(Press::EditFix));
-            }
-            Keysym::n if ctrl && !mods.shift => self.add_address(),
-            Keysym::Up | Keysym::KP_Up if ctrl && mods.shift => self.move_address(false),
-            Keysym::Down | Keysym::KP_Down if ctrl && mods.shift => self.move_address(true),
+            Some(Key::Next { back }) => self.focus = next_stop(content, self.focus, back),
+            Some(Key::Fix) => return Some(Outcome::Press(Press::EditFix)),
+            Some(Key::AddAddress) => self.add_address(),
+            Some(Key::MoveAddress { down }) => self.move_address(down),
+            Some(Key::RemoveAddress) => self.remove_address(empty_at?),
+            Some(Key::ShowTab) => self.show_tab(MachinesTab::Placement),
+            Some(_) => {}
+            None => return self.edit_move(edit.busy, step, mods, sym, typed),
+        }
+        None
+    }
+
+    /// A key the edit form's `EDIT_KEYS` don't take: `step` the keyboard
+    /// between the fields, else the focused field's; nothing while `busy`
+    /// trying the address, as it shows.
+    fn edit_move(
+        &mut self,
+        busy: bool,
+        step: impl Fn(MachinesFocus, bool) -> MachinesFocus,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+    ) -> Option<Outcome> {
+        let ctrl = mods.ctrl && !mods.alt && !mods.logo;
+        match sym {
+            _ if busy => {}
             Keysym::Up | Keysym::KP_Up => self.focus = step(self.focus, false),
             Keysym::k | Keysym::K if ctrl => self.focus = step(self.focus, false),
             Keysym::Down | Keysym::KP_Down => self.focus = step(self.focus, true),
             Keysym::j | Keysym::J if ctrl => self.focus = step(self.focus, true),
-            Keysym::Delete | Keysym::KP_Delete if plain && empty_at.is_some() => {
-                self.remove_address(empty_at?);
-            }
             _ => {
                 let form = self.edit.as_mut()?;
                 let field = match self.focus {
@@ -799,52 +1130,47 @@ impl MachinesPanel {
         let move_key = plain || ctrl;
         let armed = self.armed.take();
         let mut to = None;
-        match sym {
-            Keysym::Escape => return Some(Outcome::Close),
-            Keysym::Up | Keysym::KP_Up => to = Some(row.saturating_sub(1)),
-            Keysym::k if move_key => to = Some(row.saturating_sub(1)),
-            Keysym::Down | Keysym::KP_Down => to = Some((row + 1).min(last)),
-            Keysym::j if move_key => to = Some((row + 1).min(last)),
-            Keysym::Page_Up | Keysym::KP_Page_Up => to = Some(row.saturating_sub(list_page)),
-            Keysym::Page_Down | Keysym::KP_Page_Down => to = Some((row + list_page).min(last)),
-            Keysym::Home | Keysym::KP_Home => to = Some(0),
-            Keysym::End | Keysym::KP_End => to = Some(last),
-            Keysym::Tab | Keysym::ISO_Left_Tab => {
-                let back = sym == Keysym::ISO_Left_Tab || mods.shift;
-                let stops = content.stops();
-                let at = stops.iter().position(|f| *f == self.focus).unwrap_or(0);
-                let next = match back {
-                    true => (at + stops.len() - 1) % stops.len(),
-                    false => (at + 1) % stops.len(),
-                };
-                self.focus = stops[next];
+        match key_table::press(MACHINE_KEYS, &key_ctx(content, row, self.focus), mods, sym) {
+            Some(Key::Close) => return Some(Outcome::Close),
+            Some(Key::Up) => to = Some(row.saturating_sub(1)),
+            Some(Key::Down) => to = Some((row + 1).min(last)),
+            Some(Key::Next { back }) => {
+                self.focus = next_stop(content, self.focus, back);
                 if let MachinesFocus::Run(r, _) = self.focus {
                     let runs = content.run_presses.len();
                     self.runs_first = reveal(self.runs_first, r, runs_page, runs);
                 }
             }
-            Keysym::Return | Keysym::KP_Enter => {
-                return content.press(row, self.focus).map(Outcome::Press);
-            }
-            Keysym::e | Keysym::E if ctrl => {
+            Some(Key::Press) => return content.press(row, self.focus).map(Outcome::Press),
+            Some(Key::Edit) => {
                 let name = content.name(row)?;
                 return Some(Outcome::Press(Press::Edit(name.to_owned())));
             }
-            // On the name: the press opening the form finds the keyboard
-            // there.
-            Keysym::F2 if plain => {
+            Some(Key::Rename) => {
                 let name = content.name(row)?;
                 self.focus = MachinesFocus::EditName;
                 return Some(Outcome::Press(Press::Edit(name.to_owned())));
             }
-            Keysym::Delete | Keysym::KP_Delete => {
+            Some(Key::Remove) => {
                 let name = content.name(row)?;
                 if content.asks_remove || armed.as_deref() == Some(name) {
                     return Some(Outcome::Press(Press::Remove(name.to_owned())));
                 }
                 self.armed = Some(name.to_owned());
             }
-            _ => {}
+            Some(Key::ShowTab) => self.show_tab(MachinesTab::Placement),
+            Some(_) => {}
+            None => match sym {
+                Keysym::k if move_key => to = Some(row.saturating_sub(1)),
+                Keysym::j if move_key => to = Some((row + 1).min(last)),
+                Keysym::Page_Up | Keysym::KP_Page_Up => to = Some(row.saturating_sub(list_page)),
+                Keysym::Page_Down | Keysym::KP_Page_Down => {
+                    to = Some((row + list_page).min(last));
+                }
+                Keysym::Home | Keysym::KP_Home => to = Some(0),
+                Keysym::End | Keysym::KP_End => to = Some(last),
+                _ => {}
+            },
         }
         if let Some(to) = to {
             self.select(to);
@@ -1201,14 +1527,6 @@ impl Gerdr {
         let (content, view) = self.machines_panel_parts()?;
         let pages = self.machines_pages(&view);
         let panel = self.machines_panel.as_mut()?;
-        let ctrl = mods.ctrl && !mods.alt && !mods.logo && !mods.shift;
-        if ctrl && matches!(sym, Keysym::Page_Up | Keysym::Page_Down) {
-            panel.show_tab(match panel.tab {
-                MachinesTab::Machines => MachinesTab::Placement,
-                MachinesTab::Placement => MachinesTab::Machines,
-            });
-            return None;
-        }
         match view.tab {
             MachinesTab::Placement => placement_key(&content, view.focus, panel, mods, sym),
             MachinesTab::Machines => panel.key(&content, mods, (sym, typed), pages),
@@ -1591,6 +1909,26 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_key_tables_agree_with_themselves() {
+        let mut ctxs = Vec::new();
+        for flags in 0..64u8 {
+            let bit = |i: u8| flags & (1 << i) != 0;
+            ctxs.push(KeyCtx {
+                many_stops: bit(0),
+                presses: bit(1),
+                named: bit(2),
+                busy: bit(3),
+                fix: bit(4),
+                empty_address: bit(5),
+            });
+        }
+        key_table::check(MACHINE_KEYS, &ctxs);
+        key_table::check(EDIT_KEYS, &ctxs);
+        key_table::check(PLACE_KEYS, &[()]);
+        assert_eq!(placement_hints()[0].0, "Up / Down");
+    }
     use crate::machines::{LinkInfo, Site};
 
     fn up() -> LinkState {

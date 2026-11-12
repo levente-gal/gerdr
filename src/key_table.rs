@@ -30,9 +30,11 @@ pub fn is(chord: &str, mods: &ModifiersState, sym: Keysym) -> bool {
     let Some((want, key)) = crate::keys::hint_key(chord) else {
         return false;
     };
+    // ISO_Left_Tab is Shift+Tab, as some layouts give it without Shift.
+    let shift = mods.shift || sym == Keysym::ISO_Left_Tab;
     want.ctrl == mods.ctrl
         && want.alt == mods.alt
-        && want.shift == mods.shift
+        && want.shift == shift
         && want.logo == mods.logo
         && same_key(sym, key)
 }
@@ -43,6 +45,14 @@ fn same_key(pressed: Keysym, key: Keysym) -> bool {
         Keysym::KP_Enter => Keysym::Return,
         Keysym::KP_Delete => Keysym::Delete,
         Keysym::ISO_Left_Tab => Keysym::Tab,
+        Keysym::KP_Up => Keysym::Up,
+        Keysym::KP_Down => Keysym::Down,
+        Keysym::KP_Left => Keysym::Left,
+        Keysym::KP_Right => Keysym::Right,
+        Keysym::KP_Home => Keysym::Home,
+        Keysym::KP_End => Keysym::End,
+        Keysym::KP_Page_Up => Keysym::Page_Up,
+        Keysym::KP_Page_Down => Keysym::Page_Down,
         sym => match sym.key_char() {
             Some(c) if c.is_ascii_uppercase() => {
                 Keysym::from_char(c.to_ascii_lowercase())
@@ -92,6 +102,25 @@ pub fn f1_rows<C, A>(table: &[Binding<C, A>]) -> Vec<(&'static str, &'static str
         .filter(|b| !b.f1.is_empty())
         .map(|b| (b.chord, b.f1))
         .collect()
+}
+
+/// `rows` (chord, words) with each run of rows saying the same words as
+/// one row, its chords joined as "Up / Down": how F1 lists a pair, and a
+/// footer offers a choice ("Esc / Q").
+pub fn joined<W: AsRef<str>>(
+    rows: impl IntoIterator<Item = (&'static str, W)>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (chord, words) in rows {
+        match out.last_mut() {
+            Some((keys, said)) if said == words.as_ref() => {
+                keys.push_str(" / ");
+                keys.push_str(chord);
+            }
+            _ => out.push((chord.to_owned(), words.as_ref().to_owned())),
+        }
+    }
+    out
 }
 
 /// For tests of a panel: over every context in `ctxs`, each footer hint

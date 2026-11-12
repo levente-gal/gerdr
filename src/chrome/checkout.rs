@@ -5,15 +5,13 @@
 use super::{
     ButtonStyle, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE, POPUP_RADIUS, Painter, Palette,
     QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, SHADOW,
-    band, dialog_buttons, phys,
+    band, dialog_buttons, hint_strs, phys,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The buttons' labels: Cancel, Leave behind, Bring along.
 const BUTTONS: [&str; 3] = ["Cancel", "Leave behind", "Bring along"];
-/// The keys the dialog takes besides its buttons, said by them.
-const KEYS: [(&str, &str); 2] = [("B", "bring"), ("L", "leave")];
 /// A file's row, the gap between rows, and the room between the last and
 /// the buttons.
 const ROW: i32 = 24;
@@ -258,9 +256,17 @@ impl Painter {
             (shift(layout.body).loc.x, first.loc.y).into(),
             (0, first.size.h).into(),
         );
-        let keys: &[(&str, &str)] = if view.can_bring { &KEYS } else { &KEYS[1..] };
+        let keys = crate::checkout::keys(view.can_bring);
         let keys_end = first.loc.x - QUIT_BUTTON_GAP;
-        self.dialog_keys(&mut c, keys, None, keys_row, keys_end, scale, p);
+        self.dialog_keys(
+            &mut c,
+            &hint_strs(&keys),
+            None,
+            keys_row,
+            keys_end,
+            scale,
+            p,
+        );
         let last = BUTTONS.len() - 1;
         for (i, (rect, label)) in layout.buttons.iter().zip(BUTTONS).enumerate() {
             let style = match i {

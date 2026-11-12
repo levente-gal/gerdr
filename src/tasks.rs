@@ -18,7 +18,9 @@ use smithay::{
 use crate::{
     Gerdr,
     chrome::{self, Dot, FooterHit, FooterView, TaskView, TasksHit, TasksView},
-    git_ops, keep, launch,
+    git_ops, keep,
+    key_table::{self, Binding},
+    launch,
     menu::MenuAction,
     t3_server,
     tooltip::Tooltip,
@@ -153,6 +155,79 @@ fn kept_tasks(kept: &[Kept]) -> Vec<Task> {
         })
         .collect()
 }
+
+/// What a key of the tasks panel does (see `KEYS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Key {
+    Up,
+    Down,
+    /// The selected task's next button, or with `back` the one before.
+    Button {
+        back: bool,
+    },
+    Run,
+    Close,
+}
+
+/// The selected task's next button of `buttons`, or with `back` the one
+/// before, in `panel`.
+fn step_button(panel: &mut TasksPanel, buttons: usize, back: bool) {
+    let at = panel.button.min(buttons.saturating_sub(1));
+    panel.button = if back {
+        at.saturating_sub(1)
+    } else {
+        (at + 1).min(buttons.saturating_sub(1))
+    };
+}
+
+/// The tasks panel's keys, in the footer's order, for how many buttons the
+/// selected task has: the handler and the footer read them. k/j, the
+/// pages, Home/End and Left/Right (h/l) stay `tasks_key`'s.
+const KEYS: &[Binding<usize, Key>] = &[
+    Binding {
+        chord: "Up",
+        does: |_| Some(Key::Up),
+        footer: true,
+        f1: "Move between the tasks",
+    },
+    Binding {
+        chord: "Down",
+        does: |_| Some(Key::Down),
+        footer: true,
+        f1: "Move between the tasks",
+    },
+    // Hinted while there is another button to go to.
+    Binding {
+        chord: "Tab",
+        does: |buttons| (*buttons > 1).then_some(Key::Button { back: false }),
+        footer: true,
+        f1: "The selected task's next button, or the one before",
+    },
+    Binding {
+        chord: "Tab",
+        does: |_| Some(Key::Button { back: false }),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Shift+Tab",
+        does: |_| Some(Key::Button { back: true }),
+        footer: false,
+        f1: "The selected task's next button, or the one before",
+    },
+    Binding {
+        chord: "Enter",
+        does: |buttons| (*buttons > 0).then_some(Key::Run),
+        footer: true,
+        f1: "Press the focused button",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(Key::Close),
+        footer: true,
+        f1: "Close",
+    },
+];
 
 impl Gerdr {
     /// Look at the apps projects keep running every `KEPT_EVERY`.
@@ -449,18 +524,15 @@ impl Gerdr {
     /// The key hints under the tasks, for task `task` selected with its
     /// button `button` focused.
     fn tasks_hints(task: Option<&Task>, button: usize) -> Vec<(String, String)> {
-        let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
-        let mut hints = vec![hint("Up / Down", "move")];
-        if let Some(task) = task {
-            if task.actions.len() > 1 {
-                hints.push(hint("Tab", "next button"));
-            }
-            if let Some((label, _)) = task.actions.get(button.min(task.actions.len() - 1)) {
-                hints.push(hint("Enter", &label.to_lowercase()));
-            }
-        }
-        hints.push(hint("Esc", "close"));
-        hints
+        let actions = task.map_or(&[][..], |t| t.actions.as_slice());
+        let label = |key: &Key| match key {
+            Key::Up | Key::Down => "move".to_owned(),
+            Key::Button { .. } => "next button".to_owned(),
+            Key::Run => (actions.get(button.min(actions.len().saturating_sub(1))))
+                .map_or_else(String::new, |(label, _)| label.to_lowercase()),
+            Key::Close => "close".to_owned(),
+        };
+        key_table::joined(key_table::hints(KEYS, &actions.len(), label))
     }
 
     pub fn tasks_view(&self, tasks: &[Task]) -> Option<TasksView> {
@@ -518,39 +590,39 @@ impl Gerdr {
         let buttons = tasks.get(row).map_or(0, |t| t.actions.len());
         let plain = !mods.ctrl && !mods.alt && !mods.logo;
         let mut to = None;
+        let key = key_table::press(KEYS, &buttons, mods, sym);
+        let back = match key {
+            Some(Key::Close) => return Some(Outcome::Close),
+            Some(Key::Run) => {
+                let actions = &tasks.get(row)?.actions;
+                let at = panel.button.min(actions.len().checked_sub(1)?);
+                return Some(Outcome::Run(actions[at].1.clone()));
+            }
+            Some(Key::Up) => {
+                to = Some(row.saturating_sub(1));
+                None
+            }
+            Some(Key::Down) => {
+                to = Some((row + 1).min(last));
+                None
+            }
+            Some(Key::Button { back }) => Some(back),
+            None => None,
+        };
         match sym {
-            Keysym::Escape => return Some(Outcome::Close),
-            Keysym::Up | Keysym::KP_Up => to = Some(row.saturating_sub(1)),
+            _ if key.is_some() => {}
             Keysym::k if plain || (mods.ctrl && !mods.alt) => to = Some(row.saturating_sub(1)),
-            Keysym::Down | Keysym::KP_Down => to = Some((row + 1).min(last)),
             Keysym::j if plain || (mods.ctrl && !mods.alt) => to = Some((row + 1).min(last)),
             Keysym::Page_Up | Keysym::KP_Page_Up => to = Some(row.saturating_sub(page)),
             Keysym::Page_Down | Keysym::KP_Page_Down => to = Some((row + page).min(last)),
             Keysym::Home | Keysym::KP_Home => to = Some(0),
             Keysym::End | Keysym::KP_End => to = Some(last),
-            Keysym::Tab
-            | Keysym::ISO_Left_Tab
-            | Keysym::Left
-            | Keysym::Right
-            | Keysym::h
-            | Keysym::l
-                if plain || matches!(sym, Keysym::Tab | Keysym::ISO_Left_Tab) =>
-            {
-                let back = matches!(sym, Keysym::ISO_Left_Tab | Keysym::Left | Keysym::h)
-                    || (sym == Keysym::Tab && mods.shift);
-                let at = panel.button.min(buttons.saturating_sub(1));
-                panel.button = if back {
-                    at.saturating_sub(1)
-                } else {
-                    (at + 1).min(buttons.saturating_sub(1))
-                };
-            }
-            Keysym::Return | Keysym::KP_Enter => {
-                let actions = &tasks.get(row)?.actions;
-                let at = panel.button.min(actions.len().checked_sub(1)?);
-                return Some(Outcome::Run(actions[at].1.clone()));
-            }
+            Keysym::Left | Keysym::h if plain => step_button(panel, buttons, true),
+            Keysym::Right | Keysym::l if plain => step_button(panel, buttons, false),
             _ => {}
+        }
+        if let Some(back) = back {
+            step_button(panel, buttons, back);
         }
         if let Some(to) = to.filter(|to| *to != row) {
             panel.selected = to;
@@ -661,6 +733,11 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_key_table_agrees_with_itself() {
+        key_table::check(KEYS, &[0, 1, 2]);
+    }
 
     #[test]
     fn uptime_reads_shortly() {
