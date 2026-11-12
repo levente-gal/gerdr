@@ -153,7 +153,7 @@ impl QuitDialog {
 
     /// Handle a key: `sym` is the key's own symbol (`typed`, with Shift and
     /// the layout applied, isn't needed).
-    fn key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
+    pub(crate) fn key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
         let plain = !(mods.ctrl || mods.alt || mods.logo);
         let switching = self.switch.is_some();
         let last = self.rows().len() - 1;
@@ -276,18 +276,6 @@ impl Gerdr {
             .as_deref()
             .map(keep::app_names)
             .unwrap_or_default()
-    }
-
-    /// A key while the quit dialog has the keyboard; what to do once the
-    /// keyboard is free again, if anything.
-    pub fn quit_key(
-        &mut self,
-        mods: &ModifiersState,
-        sym: Keysym,
-        typed: Keysym,
-    ) -> Option<Outcome> {
-        let _ = typed;
-        self.overlays.quit.as_mut()?.key(mods, sym)
     }
 
     /// Do what the quit dialog asked.
@@ -447,6 +435,7 @@ impl Gerdr {
         };
         // Where asking comes back, once it isn't asked on closing the window.
         let ask_again = self
+            .key_state
             .action_keys(crate::Action::Quit)
             .map_or_else(String::new, |keys| format!("{keys} asks again"));
         let rows = dialog

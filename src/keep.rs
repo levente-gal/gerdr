@@ -4,7 +4,7 @@
 //! gerdr, wprs's `wprsd`; while the project is shown, a `wprsc` gerdr
 //! starts shows their windows in it. Quitting gerdr ends only the `wprsc`:
 //! the next gerdr starts another, and the windows come back to the panes
-//! the project restores (see `Gerdr::take_kept`). Stopping the project ends
+//! the project restores (see `Keep::take_kept`). Stopping the project ends
 //! the server and its apps. Without `wprsd` and `wprsc` on PATH the apps
 //! run on gerdr, as any other does.
 //!
@@ -302,7 +302,7 @@ impl Gerdr {
             });
         }
         if !server_runs(&display) {
-            let server = self.start_server(&id, &display)?;
+            let server = self.procs.start_server(&id, &display)?;
             let mut record = read(&id);
             record.server = Some(Process::new(server));
             write(&id, &record);
@@ -323,50 +323,6 @@ impl Gerdr {
             self.hear_kept_cursor();
         }
         Some(display)
-    }
-
-    /// Start project `id`'s server on Wayland display `wayland`, in a
-    /// process group of its own, which gerdr doesn't end (see
-    /// `retire_children`); still reaped while gerdr runs.
-    fn start_server(&mut self, id: &str, wayland: &str) -> Option<u32> {
-        let socket = socket(id)?;
-        if let Some(dir) = socket.parent()
-            && let Err(err) = std::fs::create_dir_all(dir)
-        {
-            tracing::warn!("making {}: {err}", dir.display());
-            return None;
-        }
-        let mut cmd = Command::new(SERVER);
-        let mut arg = |name: &str, value: &dyn AsRef<std::ffi::OsStr>| {
-            let mut text = OsString::from(format!("--{name}="));
-            text.push(value);
-            cmd.arg(text);
-        };
-        arg("wayland-display", &wayland);
-        arg("socket", &socket);
-        arg("enable-xwayland", &"false");
-        arg("stderr-log-level", &"warn");
-        cmd.env_remove("WAYLAND_DISPLAY")
-            .env_remove("DISPLAY")
-            .current_dir(home_dir().unwrap_or_else(|| "/".into()))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .process_group(0);
-        if let Some(log) = launch::log_file(SERVER) {
-            cmd.stderr(Stdio::from(log));
-        }
-        match cmd.spawn() {
-            Ok(child) => {
-                let pid = child.id();
-                self.procs.children.push(child);
-                tracing::info!("started {SERVER} on {wayland}");
-                Some(pid)
-            }
-            Err(err) => {
-                tracing::error!("spawn {SERVER} failed: {err}");
-                None
-            }
-        }
     }
 
     /// Start a client showing the shown project's server in gerdr, once its
@@ -465,53 +421,6 @@ impl Gerdr {
         Some(pid)
     }
 
-    /// The pid of an app the shown project's server runs for `command` and
-    /// no pane has yet: a restored pane takes it instead of starting one.
-    pub fn take_kept(&mut self, command: &str) -> Option<u32> {
-        let keeper = self.keep.keeper.as_ref()?;
-        let record = read(&keeper.project);
-        let pid = record
-            .apps
-            .iter()
-            .find(|app| app.command == command.trim() && !keeper.pids.contains(&app.process.pid))?
-            .process
-            .pid;
-        self.keep.keeper.as_mut()?.pids.push(pid);
-        Some(pid)
-    }
-
-    /// The pid of an app the shown project's server runs for `command`,
-    /// whose other windows come back to their panes too.
-    pub fn kept_pid(&self, command: &str) -> Option<u32> {
-        let keeper = self.keep.keeper.as_ref()?;
-        read(&keeper.project)
-            .apps
-            .iter()
-            .find(|app| app.command == command.trim())
-            .map(|app| app.process.pid)
-    }
-
-    /// The command that started the app on the shown project's server a
-    /// window of app_id `app_id` belongs to: the one whose program the
-    /// app_id names, else the first.
-    pub fn kept_command(&self, app_id: &str) -> Option<String> {
-        let keeper = self.keep.keeper.as_ref()?;
-        let apps = read(&keeper.project).apps;
-        let named = apps.iter().find(|app| {
-            launch::program_name(&app.command)
-                .is_some_and(|program| app_id.contains(&program.to_ascii_lowercase()))
-        });
-        named.or(apps.first()).map(|app| app.command.clone())
-    }
-
-    /// Whether `pid` is an app on the shown project's server.
-    pub fn is_kept(&self, pid: Option<u32>) -> bool {
-        self.keep
-            .keeper
-            .as_ref()
-            .is_some_and(|k| pid.is_some_and(|pid| k.pids.contains(&pid)))
-    }
-
     /// Whether `window` comes from the shown project's server, through its
     /// client: an app kept running.
     pub fn is_kept_window(&self, window: &smithay::desktop::Window) -> bool {
@@ -519,17 +428,7 @@ impl Gerdr {
             .window_pid(window)
             .map(launch::lineage)
             .unwrap_or_default();
-        self.from_keeper(&lineage)
-    }
-
-    /// Whether a window whose client descends from `lineage` comes from
-    /// the shown project's server, through its client.
-    pub fn from_keeper(&self, lineage: &[u32]) -> bool {
-        self.keep
-            .keeper
-            .as_ref()
-            .and_then(|k| k.client)
-            .is_some_and(|client| lineage.contains(&client))
+        self.keep.is_from_keeper(&lineage)
     }
 
     /// Hear the hooks of a Cursor on the shown project's server, which
@@ -549,9 +448,128 @@ impl Gerdr {
     }
 }
 
+impl crate::state::Keep {
+    /// The pid of an app the shown project's server runs for `command` and
+    /// no pane has yet: a restored pane takes it instead of starting one.
+    pub fn take_kept(&mut self, command: &str) -> Option<u32> {
+        let keeper = self.keeper.as_ref()?;
+        let record = read(&keeper.project);
+        let pid = record
+            .apps
+            .iter()
+            .find(|app| app.command == command.trim() && !keeper.pids.contains(&app.process.pid))?
+            .process
+            .pid;
+        self.keeper.as_mut()?.pids.push(pid);
+        Some(pid)
+    }
+    /// The pid of an app the shown project's server runs for `command`,
+    /// whose other windows come back to their panes too.
+    pub fn kept_pid(&self, command: &str) -> Option<u32> {
+        let keeper = self.keeper.as_ref()?;
+        read(&keeper.project)
+            .apps
+            .iter()
+            .find(|app| app.command == command.trim())
+            .map(|app| app.process.pid)
+    }
+    /// The command that started the app on the shown project's server a
+    /// window of app_id `app_id` belongs to: the one whose program the
+    /// app_id names, else the first.
+    pub fn kept_command(&self, app_id: &str) -> Option<String> {
+        let keeper = self.keeper.as_ref()?;
+        let apps = read(&keeper.project).apps;
+        let named = apps.iter().find(|app| {
+            launch::program_name(&app.command)
+                .is_some_and(|program| app_id.contains(&program.to_ascii_lowercase()))
+        });
+        named.or(apps.first()).map(|app| app.command.clone())
+    }
+    /// Whether `pid` is an app on the shown project's server.
+    pub fn is_kept(&self, pid: Option<u32>) -> bool {
+        self.keeper
+            .as_ref()
+            .is_some_and(|k| pid.is_some_and(|pid| k.pids.contains(&pid)))
+    }
+    /// Whether a window whose client descends from `lineage` comes from
+    /// the shown project's server, through its client.
+    pub fn is_from_keeper(&self, lineage: &[u32]) -> bool {
+        self.keeper
+            .as_ref()
+            .and_then(|k| k.client)
+            .is_some_and(|client| lineage.contains(&client))
+    }
+}
+
+impl crate::state::Procs {
+    /// Start project `id`'s server on Wayland display `wayland`, in a
+    /// process group of its own, which gerdr doesn't end (see
+    /// `retire_children`); still reaped while gerdr runs.
+    fn start_server(&mut self, id: &str, wayland: &str) -> Option<u32> {
+        let socket = socket(id)?;
+        if let Some(dir) = socket.parent()
+            && let Err(err) = std::fs::create_dir_all(dir)
+        {
+            tracing::warn!("making {}: {err}", dir.display());
+            return None;
+        }
+        let mut cmd = Command::new(SERVER);
+        let mut arg = |name: &str, value: &dyn AsRef<std::ffi::OsStr>| {
+            let mut text = OsString::from(format!("--{name}="));
+            text.push(value);
+            cmd.arg(text);
+        };
+        arg("wayland-display", &wayland);
+        arg("socket", &socket);
+        arg("enable-xwayland", &"false");
+        arg("stderr-log-level", &"warn");
+        cmd.env_remove("WAYLAND_DISPLAY")
+            .env_remove("DISPLAY")
+            .current_dir(home_dir().unwrap_or_else(|| "/".into()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .process_group(0);
+        if let Some(log) = launch::log_file(SERVER) {
+            cmd.stderr(Stdio::from(log));
+        }
+        match cmd.spawn() {
+            Ok(child) => {
+                let pid = child.id();
+                self.children.push(child);
+                tracing::info!("started {SERVER} on {wayland}");
+                Some(pid)
+            }
+            Err(err) => {
+                tracing::error!("spawn {SERVER} failed: {err}");
+                None
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kept_apps_are_known_by_the_keepers_pids_and_client() {
+        let mut keep = crate::state::Keep::default();
+        assert!(!keep.is_kept(Some(5)));
+        assert!(!keep.is_from_keeper(&[1, 2]));
+        keep.keeper = Some(Keeper {
+            project: "p".into(),
+            display: "wprs-p".into(),
+            client: Some(2),
+            client_started: None,
+            pids: vec![5],
+            hooks: None,
+        });
+        assert!(keep.is_kept(Some(5)));
+        assert!(!keep.is_kept(Some(6)));
+        assert!(!keep.is_kept(None));
+        assert!(keep.is_from_keeper(&[9, 2, 1]));
+        assert!(!keep.is_from_keeper(&[9]));
+    }
 
     #[test]
     fn a_process_is_known_right_after_it_starts_until_it_ends() {

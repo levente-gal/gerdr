@@ -103,7 +103,7 @@ impl Gerdr {
                 .position(|block| block.to_f64().contains(pos))?;
             return (w != self.active_workspace).then_some(PaneDrop::Workspace(w));
         }
-        if pos.y < self.tab_strip_height() as f64 {
+        if pos.y < self.settings.tab_strip_height() as f64 {
             let view = self.tab_strip_view();
             return match self.tab_strip_hit_at(&view, pos)? {
                 TabHit::Tab(t) | TabHit::Close(t) | TabHit::Unzoom(t) => {

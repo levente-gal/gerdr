@@ -329,7 +329,7 @@ impl Gerdr {
     pub(crate) fn tab_strip_rect(&self) -> Rectangle<i32, Logical> {
         let size: Size<i32, Logical> = (
             (self.output_size().w - self.sidebar_width).max(1),
-            self.tab_strip_height(),
+            self.settings.tab_strip_height(),
         )
             .into();
         Rectangle::new((self.sidebar_width, 0).into(), size)
@@ -465,20 +465,6 @@ impl Gerdr {
     /// The strip's layout, for presses: from what it shows now.
     pub(crate) fn tab_strip_layout(&self, view: &TabStripView) -> TabLayout {
         view.layout(self.tab_strip_rect().size)
-    }
-
-    /// The keys the strip's menus and tooltips name, from the help.
-    fn tab_key_hints(&self) -> KeyHints {
-        let help = self.key_state.keymap.help();
-        let key = |action: Action| help.key_of(action, 0);
-        KeyHints {
-            new_tab: key(Action::NewTab),
-            close_tab: key(Action::CloseTab),
-            split_right: key(Action::Split(Dir::Right)),
-            split_down: key(Action::Split(Dir::Down)),
-            run_tab: key(Action::RunTab),
-            zoom_pane: key(Action::ZoomPane),
-        }
     }
 
     /// The back (`back`) or forward button's menu, at `anchor` (window
@@ -637,7 +623,7 @@ impl Gerdr {
             rect.loc += strip.loc;
             rect
         };
-        let hints = self.tab_key_hints();
+        let hints = self.key_state.tab_key_hints();
         let keyed = |tip: Tooltip, key: &Option<String>| match key {
             Some(key) => tip.key(key),
             None => tip,
@@ -691,7 +677,7 @@ impl Gerdr {
                 anchor(layout.prefix?),
             ),
             TabHit::Toggle => Tooltip::new(
-                &mode_tooltip(view.mode, self.theme() == chrome::Theme::Dark),
+                &mode_tooltip(view.mode, self.settings.theme() == chrome::Theme::Dark),
                 anchor(layout.toggle),
             ),
             TabHit::Watch => {
@@ -727,7 +713,7 @@ impl Gerdr {
             rect.loc += strip.loc;
             rect
         };
-        let hints = self.tab_key_hints();
+        let hints = self.key_state.tab_key_hints();
         let w = self.active_workspace;
         match hit {
             TabHit::Back => self.visited_menu(anchor(layout.back), true),
@@ -781,6 +767,22 @@ impl Gerdr {
             }
             TabHit::Problems => Some(self.problems_menu(anchor(layout.problems?))),
             TabHit::Prefix | TabHit::Watch | TabHit::Inbox => None,
+        }
+    }
+}
+
+impl crate::state::KeyState {
+    /// The keys the strip's menus and tooltips name, from the help.
+    fn tab_key_hints(&self) -> KeyHints {
+        let help = self.keymap.help();
+        let key = |action: Action| help.key_of(action, 0);
+        KeyHints {
+            new_tab: key(Action::NewTab),
+            close_tab: key(Action::CloseTab),
+            split_right: key(Action::Split(Dir::Right)),
+            split_down: key(Action::Split(Dir::Down)),
+            run_tab: key(Action::RunTab),
+            zoom_pane: key(Action::ZoomPane),
         }
     }
 }

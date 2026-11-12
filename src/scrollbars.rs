@@ -74,7 +74,7 @@ impl Gerdr {
                 chrome::project_menu_thumb(&view, &layout)
             }
             Bar::Switcher => {
-                let view = self.switcher_view()?;
+                let view = self.overlays.switcher_view()?;
                 let layout = chrome::switcher_geometry(&view, self.content_rect());
                 chrome::switcher_thumb(&view, &layout)
             }

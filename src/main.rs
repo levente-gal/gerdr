@@ -1614,21 +1614,11 @@ impl Gerdr {
         self.output.current_scale().fractional_scale()
     }
 
-    /// The look in use: the mode chosen, by what the system prefers.
-    pub fn theme(&self) -> Theme {
-        self.settings.theme_mode.resolve(self.settings.system_dark)
-    }
-
-    /// How high the tab strip is, at the density chosen.
-    pub fn tab_strip_height(&self) -> i32 {
-        chrome::tab_strip_height(self.settings.density)
-    }
-
     /// Where the panes go: right of the sidebar, below the tab strip,
     /// above the footer.
     fn content_rect(&self) -> Rectangle<i32, Logical> {
         let size = self.output_size();
-        let (x, y) = (self.sidebar_width, self.tab_strip_height());
+        let (x, y) = (self.sidebar_width, self.settings.tab_strip_height());
         let h = size.h - y - self.footer_height();
         Rectangle::new((x, y).into(), ((size.w - x).max(1), h.max(1)).into())
     }
@@ -2372,17 +2362,8 @@ impl Gerdr {
             }
         }
         if agents_changed {
-            self.poke_herdr();
+            self.session.poke_herdr();
         }
-    }
-
-    /// Whether the commands saved for the panes are kept whatever the panes
-    /// look like: the server restarted a moment ago, and they are still
-    /// being run again.
-    fn restoring(&self) -> bool {
-        self.session
-            .restored_at
-            .is_some_and(|at| at.elapsed() < RESTORE_PROTECT)
     }
 
     /// Run again what ran in the workspaces `ids` that a restarted server
@@ -2464,7 +2445,7 @@ impl Gerdr {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let restoring = self.restoring();
+        let restoring = self.session.restoring();
         if !restoring {
             self.session.replay_pending.clear();
         }
@@ -2648,7 +2629,7 @@ impl Gerdr {
         for (id, herdr_id) in mirrored {
             self.mirror_herdr(&id, &herdr_id);
         }
-        let restoring = self.restoring();
+        let restoring = self.session.restoring();
         let open: HashSet<&str> = self
             .workspaces
             .iter()
@@ -2898,13 +2879,6 @@ impl Gerdr {
         }
     }
 
-    /// Have the agents and tabs read again soon, off the event loop.
-    fn poke_herdr(&self) {
-        if let Some(poke) = &self.session.poke {
-            let _ = poke.send(());
-        }
-    }
-
     /// Notify of each agent that just came to need input or finished where
     /// the user can't see it: in a hidden tab, or anywhere while gerdr's
     /// window is in the background (see `agents::agent_news`). herdr's own
@@ -3090,7 +3064,7 @@ impl Gerdr {
         {
             tracing::debug!("herdr: {err}");
         }
-        self.poke_herdr();
+        self.session.poke_herdr();
     }
 
     /// Switch to the workspace and tab of herdr pane `pane_id` and focus its
@@ -3156,7 +3130,7 @@ impl Gerdr {
             .iter()
             .enumerate()
             .map(|(w, ws)| {
-                let mut views = self.herdr_cards(ws);
+                let mut views = self.session.herdr_cards(ws);
                 views.extend(self.cursor_cards(w));
                 views.extend(self.t3_cards(w));
                 views.extend(self.test_cards(ws));
@@ -3171,51 +3145,6 @@ impl Gerdr {
                 views
             })
             .collect()
-    }
-
-    /// The cards of herdr's agents in workspace `ws`, by tab.
-    fn herdr_cards(&self, ws: &Workspace) -> Vec<AgentView> {
-        {
-            {
-                let Some(id) = ws.herdr_id() else {
-                    return Vec::new();
-                };
-                let tab_of = |pane_id: &str| {
-                    ws.tabs
-                        .iter()
-                        .position(|t| t.herdr_panes().any(|p| p.pane_id == pane_id))
-                };
-                let mut cards: Vec<_> = self
-                    .session
-                    .agents
-                    .iter()
-                    .filter(|a| a.workspace_id == id)
-                    .map(|a| (tab_of(&a.pane_id), a))
-                    .collect();
-                // By tab, keeping herdr's order within one.
-                cards.sort_by_key(|(tab, _)| tab.unwrap_or(usize::MAX));
-                let pane_of = |a: &herdr::AgentInfo| {
-                    self.session
-                        .tabs
-                        .get(&a.tab_id)?
-                        .panes
-                        .iter()
-                        .find(|p| p.pane_id == a.pane_id)
-                };
-                // Unnamed, it goes by its tab's name: a stage's agent says
-                // its stage ("claude · Plan").
-                cards
-                    .into_iter()
-                    .map(|(t, a)| {
-                        let mut view = AgentView::new(a, pane_of(a));
-                        if view.name.is_none() {
-                            view.name = t.and_then(|t| ws.tabs[t].label.clone());
-                        }
-                        view
-                    })
-                    .collect()
-            }
-        }
     }
 
     /// Unlink herdr pane `pane_id` from what shows it; returns its window, or
@@ -3607,7 +3536,7 @@ impl Gerdr {
         // Only an app still running brings back its other windows; their
         // leaves wait for them, the others go (the caller prunes).
         for (id, command, title) in restored.windows {
-            let pid = self.kept_pid(&command);
+            let pid = self.keep.kept_pid(&command);
             let tab = &mut self.workspaces[w].tabs[t];
             match pid {
                 Some(pid) => {
@@ -3695,7 +3624,7 @@ impl Gerdr {
     /// Whether a window that didn't start left its leaf, for the caller to
     /// prune.
     fn launch_next_zed(&mut self) -> bool {
-        if self.old_zed_running() {
+        if self.procs.old_zed_running() {
             return false; // reaping tries again
         }
         self.launch_next(launch::ZED_APP_ID, |gerdr, w, t, i| {
@@ -3803,21 +3732,6 @@ impl Gerdr {
         );
     }
 
-    /// Whether the Zed of a project switched away from is still on its way
-    /// out: a `zed -n` would hand its window to it, to be ended with it.
-    /// Waited for until `old_zed_until`.
-    fn old_zed_running(&mut self) -> bool {
-        self.procs.old_zed.retain(|g| group_alive(*g));
-        if self
-            .procs
-            .old_zed_until
-            .is_some_and(|t| Instant::now() >= t)
-        {
-            self.procs.old_zed.clear();
-        }
-        !self.procs.old_zed.is_empty()
-    }
-
     /// Ask the user for a folder (on the host) to open as a new workspace of `kind`.
     pub fn pick_workspace(&mut self, kind: WorkspaceKind) {
         let start = self
@@ -3908,7 +3822,12 @@ impl Gerdr {
                     self.open_terminal(PathBuf::from(path))
                 }
                 PickFor::Workspace(WorkspaceKind::Cursor) => self.open_cursor(None),
-                PickFor::MenuFolder => self.project_menu_folder(PathBuf::from(path)),
+                PickFor::MenuFolder => {
+                    // zenity gave back the folder for the form.
+                    if let Some(menu) = self.overlays.project_menu.as_mut() {
+                        menu.browsed(Path::new(&path));
+                    }
+                }
                 PickFor::Venv { project, workspace } => {
                     self.set_venv(&project, &workspace, PathBuf::from(path))
                 }
@@ -4249,22 +4168,6 @@ impl Gerdr {
     /// Where the tab `id` is: its workspace and its place there.
     pub fn tab_place(&self, id: u64) -> Option<(usize, usize)> {
         tab_place(&self.workspaces, id)
-    }
-
-    /// The keys pressing `action` after the prefix, as the help panel
-    /// says them ("Ctrl+B Shift+Q"), if any do.
-    pub fn action_keys(&self, action: Action) -> Option<String> {
-        let help = self.key_state.keymap.help();
-        help.rows
-            .iter()
-            .zip(&help.presses)
-            .find_map(|((keys, _), presses)| {
-                let at = presses
-                    .iter()
-                    .position(|press| *press == Some(HelpPress::Action(action)))?;
-                let key = keys.split(" / ").nth(at)?;
-                Some(format!("{} {key}", help.prefix))
-            })
     }
 
     /// The help as the panel shows it now: the keys that don't work over
@@ -4611,7 +4514,7 @@ impl Gerdr {
     /// stops then, and the toast says so.
     pub fn toggle_theme(&mut self) {
         let was_system = self.settings.theme_mode == ThemeMode::System;
-        self.set_theme_mode(self.theme().toggled().into());
+        self.set_theme_mode(self.settings.theme().toggled().into());
         if was_system && let Some(toast) = self.toasts.back_mut() {
             toast
                 .text
@@ -4621,7 +4524,7 @@ impl Gerdr {
 
     /// Use `mode`, remembered for the next start.
     pub fn set_theme_mode(&mut self, mode: ThemeMode) {
-        let before = self.theme();
+        let before = self.settings.theme();
         self.settings.theme_mode = mode;
         if let Err(err) = projects::write_atomic(&theme_file(), mode.name().as_bytes()) {
             tracing::warn!("saving theme: {err}");
@@ -4631,7 +4534,7 @@ impl Gerdr {
 
     /// The system's preference came in (see `system_theme`): `dark` or not.
     pub fn system_theme_changed(&mut self, dark: bool) {
-        let before = self.theme();
+        let before = self.settings.theme();
         self.settings.system_dark = dark;
         self.theme_changed(before);
     }
@@ -4640,7 +4543,7 @@ impl Gerdr {
     /// keep their colours (they are passed on their command line), so say
     /// what new ones get.
     fn theme_changed(&mut self, before: Theme) {
-        let now = self.theme();
+        let now = self.settings.theme();
         if now != before {
             self.toast(
                 format!("New terminals use the {} theme", now.name()),
@@ -5022,7 +4925,7 @@ impl Gerdr {
         // project's server: it goes to a pane waiting for such an app, one
         // of its program first (see `keep`).
         let kept = || {
-            if !self.from_keeper(&lineage) {
+            if !self.keep.is_from_keeper(&lineage) {
                 return None;
             }
             let program = |e: &Expected| {
@@ -5103,8 +5006,9 @@ impl Gerdr {
             // Another window of an app kept running: it comes back to its
             // pane after a restart (see `Pane::window_of`).
             let window_of = self
-                .from_keeper(&lineage)
-                .then(|| self.kept_command(&app_id))
+                .keep
+                .is_from_keeper(&lineage)
+                .then(|| self.keep.kept_command(&app_id))
                 .flatten();
             // Maybe the splash screen of a launched app (see `x11` above): it
             // shows where the app's window will, and the app is alive, so the
@@ -5608,7 +5512,7 @@ impl Gerdr {
                 // clicked.
                 let strip_here = self.hover.strip == Some(w)
                     && self.hover.strip_record.as_deref() == Some(ws.record.as_str());
-                if strip_here && !self.sidebar_covered() {
+                if strip_here && !self.overlays.sidebar_covered() {
                     view.picks = self
                         .launcher
                         .cli_agents
@@ -6328,7 +6232,7 @@ impl Gerdr {
         self.ai_work.stop_pulls();
         self.take_web_urls(web_pages::read_now(self.web_panes(), &self.instance_dir));
         self.record_tabs();
-        self.close_web_control();
+        self.web.close_web_control();
         let stopped = stops.session && self.stop_session();
         if stops.t3 {
             self.stop_t3_now();
@@ -6626,14 +6530,18 @@ impl Gerdr {
             placeholders,
             context_menu: self.overlays.context_menu.as_ref().map(ContextMenu::view),
             tooltip: self.hover.tooltip.view(),
-            switcher: self.switcher_view(),
+            switcher: self.overlays.switcher_view(),
             prefix: (self.key_state.prefix_armed || self.hover.help_pinned)
                 .then(|| self.shown_help()),
             welcome: self.welcome_view(),
             quit: self.quit_view(),
             restart: self.restart_view(),
             checkout: self.checkout_view(),
-            confirm: self.confirm_view(),
+            confirm: self
+                .overlays
+                .confirm
+                .as_ref()
+                .map(confirm::ConfirmDialog::view),
             new_feature: self.new_feature_view(),
             finding_dialog: self.finding_dialog_view(),
             identity: self.identity_view(),
@@ -6658,7 +6566,7 @@ impl Gerdr {
             tasks: self.tasks_view(&tasks),
             machines: self.machines_panel_view(),
             unzoom: self.unzoom_button().filter(|_| !flat).map(|(_, rect)| rect),
-            theme: self.theme(),
+            theme: self.settings.theme(),
             density: self.settings.density,
             sidebar_width: self.sidebar_width,
             size: self.output_size(),
@@ -6666,6 +6574,106 @@ impl Gerdr {
             doc_tab_rect: self.review_area(),
             scale: self.scale(),
         }
+    }
+}
+
+impl crate::state::KeyState {
+    /// The keys pressing `action` after the prefix, as the help panel
+    /// says them ("Ctrl+B Shift+Q"), if any do.
+    pub fn action_keys(&self, action: Action) -> Option<String> {
+        let help = self.keymap.help();
+        help.rows
+            .iter()
+            .zip(&help.presses)
+            .find_map(|((keys, _), presses)| {
+                let at = presses
+                    .iter()
+                    .position(|press| *press == Some(HelpPress::Action(action)))?;
+                let key = keys.split(" / ").nth(at)?;
+                Some(format!("{} {key}", help.prefix))
+            })
+    }
+}
+
+impl crate::state::Procs {
+    /// Whether the Zed of a project switched away from is still on its way
+    /// out: a `zed -n` would hand its window to it, to be ended with it.
+    /// Waited for until `old_zed_until`.
+    fn old_zed_running(&mut self) -> bool {
+        self.old_zed.retain(|g| group_alive(*g));
+        if self.old_zed_until.is_some_and(|t| Instant::now() >= t) {
+            self.old_zed.clear();
+        }
+        !self.old_zed.is_empty()
+    }
+}
+
+impl crate::state::Session {
+    /// Whether the commands saved for the panes are kept whatever the panes
+    /// look like: the server restarted a moment ago, and they are still
+    /// being run again.
+    fn restoring(&self) -> bool {
+        self.restored_at
+            .is_some_and(|at| at.elapsed() < RESTORE_PROTECT)
+    }
+    /// Have the agents and tabs read again soon, off the event loop.
+    fn poke_herdr(&self) {
+        if let Some(poke) = &self.poke {
+            let _ = poke.send(());
+        }
+    }
+    /// The cards of herdr's agents in workspace `ws`, by tab.
+    fn herdr_cards(&self, ws: &Workspace) -> Vec<AgentView> {
+        {
+            {
+                let Some(id) = ws.herdr_id() else {
+                    return Vec::new();
+                };
+                let tab_of = |pane_id: &str| {
+                    ws.tabs
+                        .iter()
+                        .position(|t| t.herdr_panes().any(|p| p.pane_id == pane_id))
+                };
+                let mut cards: Vec<_> = self
+                    .agents
+                    .iter()
+                    .filter(|a| a.workspace_id == id)
+                    .map(|a| (tab_of(&a.pane_id), a))
+                    .collect();
+                // By tab, keeping herdr's order within one.
+                cards.sort_by_key(|(tab, _)| tab.unwrap_or(usize::MAX));
+                let pane_of = |a: &herdr::AgentInfo| {
+                    self.tabs
+                        .get(&a.tab_id)?
+                        .panes
+                        .iter()
+                        .find(|p| p.pane_id == a.pane_id)
+                };
+                // Unnamed, it goes by its tab's name: a stage's agent says
+                // its stage ("claude · Plan").
+                cards
+                    .into_iter()
+                    .map(|(t, a)| {
+                        let mut view = AgentView::new(a, pane_of(a));
+                        if view.name.is_none() {
+                            view.name = t.and_then(|t| ws.tabs[t].label.clone());
+                        }
+                        view
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+impl crate::state::Settings {
+    /// The look in use: the mode chosen, by what the system prefers.
+    pub fn theme(&self) -> Theme {
+        self.theme_mode.resolve(self.system_dark)
+    }
+    /// How high the tab strip is, at the density chosen.
+    pub fn tab_strip_height(&self) -> i32 {
+        chrome::tab_strip_height(self.density)
     }
 }
 
@@ -6833,35 +6841,8 @@ impl ClientData for ClientState {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Run by Cursor's hooks, many times a chat: in and out at once.
-    if std::env::args().nth(1).as_deref() == Some(cursor_agents::HOOK_COMMAND) {
-        cursor_agents::run_hook();
+    let Some(args) = command_line() else {
         return Ok(());
-    }
-    // Run by the browser, for gerdr's extension in it: nothing may go to
-    // stdout but its messages.
-    let mut args = std::env::args_os().skip(1);
-    if args.next().as_deref() == Some(web_control::HOST_COMMAND.as_ref()) {
-        if let Some(socket) = args.next() {
-            web_control::run_host(Path::new(&socket));
-        }
-        return Ok(());
-    }
-    // Before anything starts: a mistyped option must not open a gerdr.
-    let args = match parse_args(std::env::args_os().skip(1)) {
-        Ok(args) => args,
-        Err(ArgError::Help) => {
-            print!("{USAGE}");
-            return Ok(());
-        }
-        Err(ArgError::Version) => {
-            println!("gerdr {}", env!("CARGO_PKG_VERSION"));
-            return Ok(());
-        }
-        Err(ArgError::Bad(why)) => {
-            eprint!("gerdr: {why}\n{USAGE}");
-            std::process::exit(2);
-        }
     };
     init_logging();
     // Before the window opens, which takes the size it was left at.
@@ -6876,6 +6857,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let display: Display<Gerdr> = Display::new()?;
     let dh = display.handle();
 
+    let (mut backend, winit_loop) = host_window(&store)?;
+    let (wayland, socket, _globals) = wayland(&dh, &mut backend)?;
+    let output = wayland.output.clone();
+
+    let settings = config::load();
+    let (mut state, saved_machines, settings_problems) =
+        new_gerdr(&event_loop, dh, backend, wayland, settings, &store, &args);
+    register_sources(&event_loop, socket, display, winit_loop, output)?;
+    start(
+        &mut state,
+        store,
+        loaded,
+        system_theme,
+        saved_machines,
+        settings_problems,
+        args,
+    );
+
+    // Send what the loop queued for the clients (a paste's request to the
+    // app that copied, say) right away: drawing, which flushes too, stops
+    // while the host doesn't show gerdr.
+    event_loop.run(None, &mut state, |state| {
+        // Once all an event did is done: a tab shown on the way to
+        // another isn't a visit.
+        state.note_visit();
+        let _ = state.display_handle.flush_clients();
+    })?;
+
+    shut_down(state, &mut event_loop);
+    Ok(())
+}
+
+/// Read the command line. Cursor's hooks and the browser's host for
+/// gerdr's extension run here and end, as do `--help` and `--version`:
+/// `None` then. A mistyped option exits before anything starts.
+fn command_line() -> Option<Args> {
+    // Run by Cursor's hooks, many times a chat: in and out at once.
+    if std::env::args().nth(1).as_deref() == Some(cursor_agents::HOOK_COMMAND) {
+        cursor_agents::run_hook();
+        return None;
+    }
+    // Run by the browser, for gerdr's extension in it: nothing may go to
+    // stdout but its messages.
+    let mut args = std::env::args_os().skip(1);
+    if args.next().as_deref() == Some(web_control::HOST_COMMAND.as_ref()) {
+        if let Some(socket) = args.next() {
+            web_control::run_host(Path::new(&socket));
+        }
+        return None;
+    }
+    // Before anything starts: a mistyped option must not open a gerdr.
+    match parse_args(std::env::args_os().skip(1)) {
+        Ok(args) => Some(args),
+        Err(ArgError::Help) => {
+            print!("{USAGE}");
+            None
+        }
+        Err(ArgError::Version) => {
+            println!("gerdr {}", env!("CARGO_PKG_VERSION"));
+            None
+        }
+        Err(ArgError::Bad(why)) => {
+            eprint!("gerdr: {why}\n{USAGE}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Open the host window gerdr draws in, at the size it was left at (as
+/// `store` has it), and its event source.
+fn host_window(
+    store: &projects::Store,
+) -> Result<(WinitGraphicsBackend<GlesRenderer>, winit::WinitEventLoop), Box<dyn std::error::Error>>
+{
     // Host window.
     let attrs = WindowAttributes::default()
         .with_title("gerdr")
@@ -6885,8 +6940,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (w, h) = store.window_size.unwrap_or(WINDOW_SIZE);
             smithay::reexports::winit::dpi::LogicalSize::new(w.max(320) as f64, h.max(240) as f64)
         });
-    let (mut backend, winit_loop) = winit::init_from_attributes::<GlesRenderer>(attrs)?;
+    Ok(winit::init_from_attributes::<GlesRenderer>(attrs)?)
+}
 
+/// The Wayland side gerdr's apps reach, made before `Gerdr` holds it (see
+/// `wayland`).
+struct Wayland {
+    output: Output,
+    space: Space<Window>,
+    dmabuf_state: DmabufState,
+    seat_state: SeatState<Gerdr>,
+    seat: Seat<Gerdr>,
+    primary_selection_state: PrimarySelectionState,
+    data_control_state: DataControlState,
+    ext_data_control_state: ExtDataControlState,
+    socket_name: OsString,
+    instance_dir: PathBuf,
+    zed_data: PathBuf,
+}
+
+/// The output's and dmabuf's globals, kept for the whole run.
+type KeptGlobals = (
+    smithay::reexports::wayland_server::backend::GlobalId,
+    smithay::wayland::dmabuf::DmabufGlobal,
+);
+
+/// Set up what gerdr's apps reach: the output mirroring the host window,
+/// the dmabuf, seat and clipboard globals, and the apps' Wayland socket
+/// with this gerdr's data dirs named after it. Also the socket's event
+/// source, and the ids of the globals kept for the whole run.
+fn wayland(
+    dh: &DisplayHandle,
+    backend: &mut WinitGraphicsBackend<GlesRenderer>,
+) -> Result<(Wayland, ListeningSocketSource, KeptGlobals), Box<dyn std::error::Error>> {
     // Output that mirrors the host window.
     let output = Output::new(
         "gerdr".into(),
@@ -6897,7 +6983,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             model: "nested".into(),
         },
     );
-    let _output_global = output.create_global::<Gerdr>(&dh);
+    let output_global = output.create_global::<Gerdr>(dh);
     let mode = Mode {
         size: backend.window_size(),
         refresh: 60_000,
@@ -6921,13 +7007,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()
             .ok()
     });
-    let _dmabuf_global = match feedback {
-        Some(fb) => dmabuf_state.create_global_with_default_feedback::<Gerdr>(&dh, &fb),
-        None => dmabuf_state.create_global::<Gerdr>(&dh, formats),
+    let dmabuf_global = match feedback {
+        Some(fb) => dmabuf_state.create_global_with_default_feedback::<Gerdr>(dh, &fb),
+        None => dmabuf_state.create_global::<Gerdr>(dh, formats),
     };
 
     let mut seat_state = SeatState::new();
-    let mut seat: Seat<Gerdr> = seat_state.new_wl_seat(&dh, "gerdr");
+    let mut seat: Seat<Gerdr> = seat_state.new_wl_seat(dh, "gerdr");
     seat.add_keyboard(Default::default(), REPEAT_DELAY as i32, REPEAT_RATE as i32)?;
     seat.add_pointer();
 
@@ -6937,11 +7023,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Data control lets clipboard tools such as wl-copy set the selection
     // without a window of their own; without it they open one to get the
     // keyboard focus, and gerdr would tile it as a pane.
-    let primary_selection_state = PrimarySelectionState::new::<Gerdr>(&dh);
+    let primary_selection_state = PrimarySelectionState::new::<Gerdr>(dh);
     let data_control_state =
-        DataControlState::new::<Gerdr, _>(&dh, Some(&primary_selection_state), |_| true);
+        DataControlState::new::<Gerdr, _>(dh, Some(&primary_selection_state), |_| true);
     let ext_data_control_state =
-        ExtDataControlState::new::<Gerdr, _>(&dh, Some(&primary_selection_state), |_| true);
+        ExtDataControlState::new::<Gerdr, _>(dh, Some(&primary_selection_state), |_| true);
 
     // Wayland socket for the children. A fixed name, so shells that outlive
     // gerdr in herdr still reach the next one.
@@ -6952,8 +7038,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let home = home_dir().unwrap_or_default();
     let instance_dir = launch::instance_dir(&home, &socket_name.to_string_lossy());
     let zed_data = launch::zed_data_dir(&home, &instance_dir);
+    let wayland = Wayland {
+        output,
+        space,
+        dmabuf_state,
+        seat_state,
+        seat,
+        primary_selection_state,
+        data_control_state,
+        ext_data_control_state,
+        socket_name,
+        instance_dir,
+        zed_data,
+    };
+    Ok((wayland, socket, (output_global, dmabuf_global)))
+}
 
-    let settings = config::load();
+/// Make the `Gerdr` value gerdr starts with, from the config file's
+/// `settings`, the store and the command line, and start its X11 bridge.
+/// Also the config file's machines and problems, taken in later (see
+/// `start`).
+fn new_gerdr(
+    event_loop: &EventLoop<'static, Gerdr>,
+    dh: DisplayHandle,
+    backend: WinitGraphicsBackend<GlesRenderer>,
+    wayland: Wayland,
+    settings: config::Settings,
+    store: &projects::Store,
+    args: &Args,
+) -> (
+    Gerdr,
+    std::collections::BTreeMap<String, config::Addresses>,
+    Vec<String>,
+) {
+    let Wayland {
+        output,
+        space,
+        dmabuf_state,
+        seat_state,
+        seat,
+        primary_selection_state,
+        data_control_state,
+        ext_data_control_state,
+        socket_name,
+        instance_dir,
+        zed_data,
+    } = wayland;
     let config::Settings {
         keymap,
         apps,
@@ -7213,7 +7343,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     state.x11.ensure(&socket_name);
     state.t3.auto_update = t3_settings.updates;
+    (state, saved_machines, settings_problems)
+}
 
+/// Register the event sources the loop follows: the apps' socket and
+/// their requests, the host window's events (drawing each frame on
+/// `output`), and the timers reaping children and cutting big logs.
+fn register_sources(
+    event_loop: &EventLoop<'static, Gerdr>,
+    socket: ListeningSocketSource,
+    display: Display<Gerdr>,
+    winit_loop: winit::WinitEventLoop,
+    output: Output,
+) -> Result<(), Box<dyn std::error::Error>> {
     event_loop
         .handle()
         .insert_source(socket, |stream, _, state| {
@@ -7260,7 +7402,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let start = Instant::now();
                 let size = state.backend.window_size();
                 let view = state.chrome_view();
-                let clear_color = state.theme().clear_color();
+                let clear_color = state.settings.theme().clear_color();
                 {
                     let Ok((renderer, mut framebuffer)) = state.backend.bind() else {
                         tracing::warn!("the window can't be drawn to: frame skipped");
@@ -7332,13 +7474,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             TimeoutAction::ToDuration(LOG_CUT_INTERVAL)
         })?;
+    Ok(())
+}
 
+/// What runs once before the loop: take in `store` (as `loaded` read it),
+/// the features and the config file's problems and machines, wait for the
+/// system's look where it matters, start every watcher, and show the
+/// project the command line asks for.
+fn start(
+    state: &mut Gerdr,
+    store: projects::Store,
+    loaded: projects::Loaded,
+    system_theme: system_theme::Reading,
+    saved_machines: std::collections::BTreeMap<String, config::Addresses>,
+    settings_problems: Vec<String>,
+    args: Args,
+) {
     // The first run turns the session gerdr used before projects into one.
     if let Some(share) = store.dock_share {
         state.web.previews.share = share.clamp(chrome::DOCK_SHARE_MIN, chrome::DOCK_SHARE_MAX);
     }
     state.projects = store;
-    state.restore_nav();
+    state.nav.restore_nav(&state.projects.nav);
     // Before the features, so each is seen as it is at start.
     if let Some(done) = state.feature_sender() {
         state.ai_work = ai_work::Live::start(&projects::data_dir(), done);
@@ -7387,31 +7544,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_keyring();
     state.watch_installed_apps();
     state.start_project(args.project.as_deref(), args.folders);
+}
 
-    // Send what the loop queued for the clients (a paste's request to the
-    // app that copied, say) right away: drawing, which flushes too, stops
-    // while the host doesn't show gerdr.
-    event_loop.run(None, &mut state, |state| {
-        // Once all an event did is done: a tab shown on the way to
-        // another isn't a visit.
-        state.note_visit();
-        let _ = state.display_handle.flush_clients();
-    })?;
-
+/// What gerdr does once the loop ends: keep the frecency, close the
+/// windows, and end the kept apps' client, the children, the X11 bridge
+/// and the folder picker.
+fn shut_down(mut state: Gerdr, event_loop: &mut EventLoop<'static, Gerdr>) {
     state.launcher.frecency.save();
-    state.close_windows(&mut event_loop);
+    state.close_windows(event_loop);
     state.detach_keeper();
     state.kill_children();
     state.x11.stop();
     if let Some((mut picker, _)) = state.overlays.picker.take() {
         let _ = picker.kill();
     }
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_resolve_the_look_by_what_the_system_prefers() {
+        let mut settings = state::Settings {
+            system_dark: true,
+            ..Default::default()
+        };
+        assert_eq!(settings.theme(), Theme::Dark);
+        settings.system_dark = false;
+        assert_eq!(settings.theme(), Theme::Light);
+        settings.theme_mode = ThemeMode::Dark;
+        assert_eq!(settings.theme(), Theme::Dark);
+        assert_eq!(
+            settings.tab_strip_height(),
+            chrome::tab_strip_height(settings.density)
+        );
+    }
+
+    #[test]
+    fn a_session_restores_only_a_moment_after_its_server_came_back() {
+        let mut session = state::Session::default();
+        assert!(!session.restoring());
+        session.restored_at = Some(Instant::now());
+        assert!(session.restoring());
+        session.restored_at = Instant::now().checked_sub(RESTORE_PROTECT);
+        assert!(!session.restoring());
+    }
+
+    #[test]
+    fn a_session_pokes_its_poller_when_it_has_one() {
+        let mut session = state::Session::default();
+        session.poke_herdr();
+        let (tx, rx) = std::sync::mpsc::channel();
+        session.poke = Some(tx);
+        session.poke_herdr();
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[test]
+    fn no_old_zed_runs_once_its_wait_is_over() {
+        let mut procs = state::Procs::default();
+        assert!(!procs.old_zed_running());
+        // A group no process leads.
+        procs.old_zed = vec![i32::MAX];
+        assert!(!procs.old_zed_running());
+        assert!(procs.old_zed.is_empty());
+    }
+
+    #[test]
+    fn the_keys_of_an_action_name_the_prefix_first() {
+        let keys = state::KeyState::default();
+        let quit = keys.action_keys(Action::Quit).expect("quit has a key");
+        assert!(quit.starts_with(&keys.keymap.help().prefix), "{quit}");
+    }
 
     #[test]
     fn only_a_launched_app_waits_for_a_window_from_the_x11_bridge() {

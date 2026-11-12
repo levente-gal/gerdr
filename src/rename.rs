@@ -57,7 +57,7 @@ impl Gerdr {
         }
         match sym {
             Keysym::Return | Keysym::KP_Enter => self.commit_rename(),
-            Keysym::Escape => self.cancel_rename(),
+            Keysym::Escape => self.overlays.rename = None,
             _ => {
                 if let Some(rename) = self.overlays.rename.as_mut() {
                     rename.field.key(mods, sym, typed);
@@ -128,10 +128,6 @@ impl Gerdr {
                 }
             }
         }
-    }
-
-    pub fn cancel_rename(&mut self) {
-        self.overlays.rename = None;
     }
 
     /// Call workspace `w` `name`, here and in the project's records.

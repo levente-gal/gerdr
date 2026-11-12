@@ -179,7 +179,7 @@ impl Gerdr {
         // (see `keep`).
         let kept = leaf
             .filter(|_| !queued && self.keeps(original))
-            .and_then(|_| self.take_kept(original));
+            .and_then(|_| self.keep.take_kept(original));
         // An app keeping its logins in the keyring waits for it to be
         // open (see `keyring`).
         let held = !queued && kept.is_none() && uses_keyring(original) && !keyring::state().ready();
@@ -204,7 +204,7 @@ impl Gerdr {
         let id = leaf.unwrap_or_else(|| self.new_split(w, t));
         let mut expected = Expected::new(pid, &app_id, id, leaf.is_none());
         expected.app_command = Some(original.to_owned());
-        expected.kept = self.is_kept(pid);
+        expected.kept = self.keep.is_kept(pid);
         expected.held = held;
         self.workspaces[w].tabs[t].expected.push(expected);
         if held {
@@ -265,7 +265,11 @@ impl Gerdr {
     pub fn open_cursor(&mut self, command: Option<&str>) {
         let command = command
             .map(str::to_owned)
-            .or_else(|| self.installed_cursor().map(|app| app.command.clone()))
+            .or_else(|| {
+                self.launcher
+                    .installed_cursor()
+                    .map(|app| app.command.clone())
+            })
             .unwrap_or_else(|| CURSOR.to_owned());
         if let Some((w, t, leaf)) = self.running_vs_code(&command) {
             return self.show_leaf(w, t, leaf);
@@ -401,6 +405,7 @@ impl Gerdr {
     /// `CHAT_LINK`).
     pub fn focus_cursor_chat(&mut self, id: &str) {
         let command = self
+            .launcher
             .installed_cursor()
             .map(|app| app.command.clone())
             .unwrap_or_else(|| CURSOR.to_owned());
@@ -430,25 +435,17 @@ impl Gerdr {
     fn leaf_pid(&self, w: usize, t: usize, leaf: u32) -> Option<u32> {
         let tab = self.workspaces.get(w)?.tabs.get(t)?;
         match tab.panes.iter().find(|p| p.id == leaf) {
-            Some(pane) if self.is_kept_window(&pane.window) => {
-                self.kept_pid(pane.app_command.as_deref().or(pane.window_of.as_deref())?)
-            }
+            Some(pane) if self.is_kept_window(&pane.window) => self
+                .keep
+                .kept_pid(pane.app_command.as_deref().or(pane.window_of.as_deref())?),
             Some(pane) => self.window_pid(&pane.window),
             None => tab.expected.iter().find(|e| e.pane == leaf)?.pid,
         }
     }
 
-    /// The installed Cursor, if any.
-    fn installed_cursor(&self) -> Option<&App> {
-        self.launcher
-            .installed
-            .iter()
-            .find(|app| program_name(&app.command).as_deref() == Some(CURSOR))
-    }
-
     /// The installed Cursor's icon, for its workspace's row.
     pub fn cursor_icon(&self) -> Option<AppIcon> {
-        self.installed_cursor()?.icon.clone()
+        self.launcher.installed_cursor()?.icon.clone()
     }
 
     /// Show tab `t` of workspace `w` with the pane in `leaf` focused, or
@@ -760,15 +757,23 @@ impl Gerdr {
         match inserted {
             Ok(_) => {
                 self.launcher.installed_tx = Some(tx);
-                self.scan_installed_apps();
+                self.launcher.scan_installed_apps();
             }
             Err(err) => tracing::warn!("installed apps: {err}"),
         }
     }
+}
 
+impl crate::state::Launcher {
+    /// The installed Cursor, if any.
+    fn installed_cursor(&self) -> Option<&App> {
+        self.installed
+            .iter()
+            .find(|app| program_name(&app.command).as_deref() == Some(CURSOR))
+    }
     /// Read the installed apps again, off the event loop.
     pub fn scan_installed_apps(&self) {
-        let Some(tx) = self.launcher.installed_tx.clone() else {
+        let Some(tx) = self.installed_tx.clone() else {
             return;
         };
         std::thread::spawn(move || {
@@ -1707,6 +1712,25 @@ fn cut_big_log(path: &Path) {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    #[test]
+    fn the_launcher_finds_the_installed_cursor() {
+        let mut launcher = crate::state::Launcher::default();
+        assert!(launcher.installed_cursor().is_none());
+        // Without a sender, nothing is read.
+        launcher.scan_installed_apps();
+        let app = |name: &str, command: &str| super::App {
+            name: name.into(),
+            command: command.into(),
+            detail: String::new(),
+            icon: None,
+        };
+        launcher.installed = vec![app("Zed", "zed"), app("Cursor", "cursor %F")];
+        assert_eq!(
+            launcher.installed_cursor().map(|a| a.name.as_str()),
+            Some("Cursor")
+        );
+    }
 
     use super::{
         alacritty_command, cmdline_args, copy_browser_profile, ghostty_command, instance_dir,

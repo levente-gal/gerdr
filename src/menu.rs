@@ -395,6 +395,12 @@ pub struct ContextMenu {
 }
 
 impl ContextMenu {
+    /// The pointer moved to `pos` while the menu is open: light the item
+    /// under it, or none off the items, so Enter picks nothing it left.
+    pub fn motion(&mut self, pos: Point<f64, Logical>) {
+        self.hover = self.item_at(pos);
+    }
+
     pub fn new(spec: MenuSpec, output: Size<i32, Logical>) -> Self {
         Self {
             spec,
@@ -489,14 +495,6 @@ impl Gerdr {
     pub fn close_menu(&mut self) {
         if self.overlays.context_menu.take().is_some() {
             self.refresh_pointer_focus();
-        }
-    }
-
-    /// The pointer moved to `pos` while the menu is open: light the item
-    /// under it, or none off the items, so Enter picks nothing it left.
-    pub fn menu_motion(&mut self, pos: Point<f64, Logical>) {
-        if let Some(menu) = self.overlays.context_menu.as_mut() {
-            menu.hover = menu.item_at(pos);
         }
     }
 
@@ -763,6 +761,14 @@ impl Gerdr {
 mod tests {
     use super::{ContextMenu, MenuAction, MenuItem, MenuSpec};
     use crate::chrome::Rect;
+
+    #[test]
+    fn a_menu_lights_nothing_off_its_items() {
+        let mut menu = menu();
+        menu.hover = Some(0);
+        menu.motion((-100.0, -100.0).into());
+        assert_eq!(menu.hover, None);
+    }
 
     fn menu() -> ContextMenu {
         ContextMenu::new(

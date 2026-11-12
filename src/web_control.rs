@@ -656,13 +656,6 @@ impl Gerdr {
         }
     }
 
-    /// Stop listening for the extension's hosts: the socket goes.
-    pub fn close_web_control(&mut self) {
-        if let Some(socket) = self.web.control.socket.take() {
-            let _ = std::fs::remove_file(socket);
-        }
-    }
-
     fn take_web_event(&mut self, event: Event) {
         let control = &mut self.web.control;
         // From here on a message names its pane by its token.
@@ -691,7 +684,7 @@ impl Gerdr {
                 if let Some(pane) = token_pane(&pane) {
                     control.panes.remove(&pane);
                     control.history.remove(&pane);
-                    self.preview_closed(pane);
+                    self.web.preview_closed(pane);
                 }
             }
             Event::Message(_, FromBrowser::Open { pane, url }) => {
@@ -886,7 +879,7 @@ impl Gerdr {
             let why = format!("{name} is too big to preview");
             preview_message(pane, shown, Err(&why))
         });
-        message.is_some_and(|message| self.send_bytes(pane, &message))
+        message.is_some_and(|message| self.web.send_bytes(pane, &message))
     }
 
     /// Mark the block holding `line` in `pane`'s preview page, if the
@@ -923,13 +916,21 @@ impl Gerdr {
         let Ok(message) = serde_json::to_vec(message) else {
             return false;
         };
-        self.send_bytes(pane, &message)
+        self.web.send_bytes(pane, &message)
     }
+}
 
+impl crate::state::Web {
+    /// Stop listening for the extension's hosts: the socket goes.
+    pub fn close_web_control(&mut self) {
+        if let Some(socket) = self.control.socket.take() {
+            let _ = std::fs::remove_file(socket);
+        }
+    }
     /// Send `message`, JSON, to the browser holding `pane`'s tab; whether
     /// it went.
     fn send_bytes(&mut self, pane: u32, message: &[u8]) -> bool {
-        let control = &mut self.web.control;
+        let control = &mut self.control;
         let Some(id) = control.panes.get(&pane).copied() else {
             return false;
         };
@@ -1003,6 +1004,31 @@ fn strings(dirs: &[PathBuf]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_sends_framed_to_the_pane_s_browser_only() {
+        let mut web = crate::state::Web::default();
+        assert!(!web.send_bytes(3, b"{}"));
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        web.control.connections.insert(1, ours);
+        web.control.panes.insert(3, 1);
+        assert!(web.send_bytes(3, b"{}"));
+        assert!(!web.send_bytes(4, b"{}"));
+        let mut got = vec![0; framed(b"{}").len()];
+        theirs.read_exact(&mut got).unwrap();
+        assert_eq!(got, framed(b"{}"));
+    }
+
+    #[test]
+    fn closing_web_control_takes_its_socket_away() {
+        let mut web = crate::state::Web::default();
+        web.close_web_control();
+        let socket = std::env::temp_dir().join(format!("gerdr-web-close-{}", std::process::id()));
+        std::fs::write(&socket, "").unwrap();
+        web.control.socket = Some(socket.clone());
+        web.close_web_control();
+        assert!(!socket.exists() && web.control.socket.is_none());
+    }
 
     #[test]
     fn a_pane_is_known_by_this_gerdrs_pid() {

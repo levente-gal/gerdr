@@ -623,7 +623,7 @@ impl Gerdr {
                 store.map(|p| p.text)
             });
         // The prefix and the key after it that quit, for the bar at the bottom.
-        let quit_keys = self.action_keys(crate::Action::Quit);
+        let quit_keys = self.key_state.action_keys(crate::Action::Quit);
         Some(welcome.view(
             self.welcome_page(),
             greeting,

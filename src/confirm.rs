@@ -14,7 +14,7 @@
 //! cancels.
 
 use smithay::{
-    input::keyboard::{Keysym, ModifiersState},
+    input::keyboard::Keysym,
     utils::{Logical, Point},
 };
 
@@ -253,6 +253,18 @@ pub enum Outcome {
 }
 
 impl ConfirmDialog {
+    /// What the chrome draws of the dialog.
+    pub fn view(&self) -> ConfirmView {
+        ConfirmView {
+            title: self.title.clone(),
+            body: self.body.clone(),
+            go: self.go,
+            selected: self.selected,
+            hover: self.hover,
+            loses: self.then.loses(),
+        }
+    }
+
     /// Where its parts go on an output of `size`.
     fn layout(&self, size: smithay::utils::Size<i32, Logical>) -> chrome::ConfirmLayout {
         let lines = chrome::confirm_body_lines(&self.body);
@@ -268,7 +280,7 @@ impl ConfirmDialog {
     }
 
     /// Handle a key: `sym` is the key's own symbol.
-    fn key(&mut self, sym: Keysym) -> Option<Outcome> {
+    pub(crate) fn key(&mut self, sym: Keysym) -> Option<Outcome> {
         match sym {
             Keysym::Escape => return Some(Outcome::Cancel),
             Keysym::Return | Keysym::KP_Enter => return Some(self.press(self.selected)),
@@ -527,7 +539,7 @@ impl Gerdr {
             return tracing::warn!("no project {id} to stop");
         };
         let name = project.name.clone();
-        let session = stops.session && self.session_runs(id);
+        let session = stops.session && self.life.session_runs(&self.projects, id);
         let apps = if stops.apps {
             keep::app_names(id)
         } else {
@@ -555,7 +567,7 @@ impl Gerdr {
         let Some(name) = self.projects.project(id).map(|p| p.name.clone()) else {
             return;
         };
-        if !self.session_runs(id) && keep::app_names(id).is_empty() {
+        if !self.life.session_runs(&self.projects, id) && keep::app_names(id).is_empty() {
             return self.forget_project_now(id);
         }
         let (title, body) = forget_question(&name);
@@ -565,21 +577,6 @@ impl Gerdr {
             "Stop and forget",
             Then::ForgetProject(id.to_owned()),
         );
-    }
-
-    /// Whether project `id`'s herdr session runs, as last found out, else
-    /// asked now.
-    pub(crate) fn session_runs(&self, id: &str) -> bool {
-        if self.life.stopping.contains(id) {
-            return false;
-        }
-        match self.life.running.get(id) {
-            Some(running) => *running,
-            None => self
-                .projects
-                .project(id)
-                .is_some_and(|p| herdr::is_running(&p.session)),
-        }
     }
 
     /// Whether herdr pane `pane_id` runs a command (an agent, say), as its
@@ -769,11 +766,6 @@ impl Gerdr {
             AgentKey::T3(thread) => self.delete_t3_thread(thread),
             AgentKey::Ci(_) => {}
         }
-    }
-
-    /// A key while the confirm dialog has the keyboard.
-    pub fn confirm_key(&mut self, _mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
-        self.overlays.confirm.as_mut()?.key(sym)
     }
 
     /// Do what the confirm dialog asked.
@@ -975,17 +967,21 @@ impl Gerdr {
             None => Vec::new(),
         }
     }
+}
 
-    pub fn confirm_view(&self) -> Option<ConfirmView> {
-        let dialog = self.overlays.confirm.as_ref()?;
-        Some(ConfirmView {
-            title: dialog.title.clone(),
-            body: dialog.body.clone(),
-            go: dialog.go,
-            selected: dialog.selected,
-            hover: dialog.hover,
-            loses: dialog.then.loses(),
-        })
+impl crate::state::Life {
+    /// Whether project `id` (of `projects`)'s herdr session runs, as last
+    /// found out, else asked now.
+    pub(crate) fn session_runs(&self, projects: &crate::projects::Store, id: &str) -> bool {
+        if self.stopping.contains(id) {
+            return false;
+        }
+        match self.running.get(id) {
+            Some(running) => *running,
+            None => projects
+                .project(id)
+                .is_some_and(|p| herdr::is_running(&p.session)),
+        }
     }
 }
 
@@ -1000,6 +996,20 @@ fn button_at(layout: &chrome::ConfirmLayout, pos: Point<f64, Logical>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_stopping_does_not_run_and_one_checked_runs_as_found() {
+        let projects = crate::projects::Store::default();
+        let mut life = crate::state::Life::default();
+        life.running.insert("a".into(), true);
+        life.running.insert("b".into(), false);
+        assert!(life.session_runs(&projects, "a"));
+        assert!(!life.session_runs(&projects, "b"));
+        life.stopping.insert("a".into());
+        assert!(!life.session_runs(&projects, "a"));
+        // Unknown, and no such project to ask about.
+        assert!(!life.session_runs(&projects, "c"));
+    }
 
     fn dialog() -> ConfirmDialog {
         ConfirmDialog {

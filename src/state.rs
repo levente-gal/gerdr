@@ -4,6 +4,7 @@
 use super::*;
 
 /// The apps and agents the launcher offers, and where it was used.
+#[derive(Default)]
 pub struct Launcher {
     /// How often and recently things were switched to, for ordering lists.
     pub frecency: Frecency,
@@ -24,6 +25,7 @@ pub struct Launcher {
 }
 
 /// What settings.toml says, as last read (see `config::apply_settings`).
+#[derive(Default)]
 pub struct Settings {
     /// The look chosen: the system's, dark or light.
     pub theme_mode: ThemeMode,
@@ -52,6 +54,7 @@ pub struct Settings {
 }
 
 /// The keyboard: the keymap, the prefix, and keys held or repeating.
+#[derive(Default)]
 pub struct KeyState {
     /// Keys whose press was a gerdr shortcut; their release is swallowed too.
     pub suppressed_keys: Vec<Keycode>,
@@ -64,6 +67,7 @@ pub struct KeyState {
 }
 
 /// The pointer: where it is, what it presses and what it drags.
+#[derive(Default)]
 pub struct Mouse {
     /// The divider being dragged, while the left button holds it.
     pub drag: Option<Drag>,
@@ -107,6 +111,7 @@ pub struct Mouse {
 }
 
 /// What the pointer is over in the chrome, and what that shows.
+#[derive(Default)]
 pub struct Hover {
     /// What of the footer the pointer is on.
     pub footer: Option<chrome::FooterHit>,
@@ -138,6 +143,7 @@ pub struct Hover {
 }
 
 /// The popups and panels over the apps; none open is all `None`.
+#[derive(Default)]
 pub struct Overlays {
     /// The tasks panel, while it is open over the footer.
     pub tasks_panel: Option<tasks::TasksPanel>,
@@ -208,6 +214,7 @@ pub struct GitWatch {
 }
 
 /// Back and forward through visited tabs (see `nav_history`).
+#[derive(Default)]
 pub struct Nav {
     /// The tabs shown, to go back and forward through.
     pub history: nav_history::NavHistory<nav_history::Visit>,
@@ -219,6 +226,7 @@ pub struct Nav {
 }
 
 /// Apps kept across gerdr restarts (see `keep`).
+#[derive(Default)]
 pub struct Keep {
     /// The apps projects keep running, as last looked at (see `tasks`).
     pub kept: Vec<tasks::Kept>,
@@ -232,6 +240,7 @@ pub struct Keep {
 }
 
 /// Child processes and process groups gerdr started and must end.
+#[derive(Default)]
 pub struct Procs {
     pub children: Vec<Child>,
     /// Process groups we started, all terminated when gerdr exits.
@@ -248,6 +257,7 @@ pub struct Procs {
 }
 
 /// The project's start, stop and attach (see `projects`).
+#[derive(Default)]
 pub struct Life {
     /// The project to stop once another is shown instead, and what of it
     /// (see `ask_switch`).
@@ -297,6 +307,7 @@ pub struct Life {
 }
 
 /// Web panes steered through the browser extension, and page previews.
+#[derive(Default)]
 pub struct Web {
     /// A read of where the web pages are is under way (see `watch_web_pages`).
     pub pending: bool,
@@ -326,6 +337,7 @@ pub struct CursorWatch {
 }
 
 /// Desktop notifications, focus asks, and the clipboard.
+#[derive(Default)]
 pub struct Notices {
     /// gerdr's connection to the host's notification daemon; `None` without
     /// a session bus.

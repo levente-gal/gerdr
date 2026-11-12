@@ -716,18 +716,9 @@ fn signal(herdr: &mut Herdr, pane_id: &str, phase: Phase, group: i32) {
 }
 
 impl Gerdr {
-    /// What herdr last said of pane `pane_id`.
-    pub(crate) fn pane_state(&self, pane_id: &str) -> Option<&PaneState> {
-        self.session
-            .tabs
-            .values()
-            .flat_map(|detail| &detail.panes)
-            .find(|p| p.pane_id == pane_id)
-    }
-
     /// What the bar of herdr pane `pane_id` shows.
     pub(crate) fn pane_bar_content(&self, pane_id: &str) -> BarContent {
-        let pane = self.pane_state(pane_id);
+        let pane = self.session.pane_state(pane_id);
         let mut content = bar_content(
             pane.and_then(|p| p.process.as_ref()),
             self.session.last_commands.get(pane_id),
@@ -1093,7 +1084,10 @@ impl Gerdr {
                     .then(|| (pane.pane_id.clone(), service.captured.clone()))
             })
             .filter(|(pane_id, captured)| {
-                let seen = self.pane_state(pane_id).is_some_and(|p| p.agent.is_some());
+                let seen = self
+                    .session
+                    .pane_state(pane_id)
+                    .is_some_and(|p| p.agent.is_some());
                 !holds_agent(seen, &captured.command, &self.settings.agent_config)
             })
             .collect()
@@ -1262,6 +1256,16 @@ impl Gerdr {
         {
             tracing::warn!("pane jobs: {err}");
         }
+    }
+}
+
+impl crate::state::Session {
+    /// What herdr last said of pane `pane_id`.
+    pub(crate) fn pane_state(&self, pane_id: &str) -> Option<&PaneState> {
+        self.tabs
+            .values()
+            .flat_map(|detail| &detail.panes)
+            .find(|p| p.pane_id == pane_id)
     }
 }
 

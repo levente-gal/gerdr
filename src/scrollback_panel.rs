@@ -301,9 +301,12 @@ impl Gerdr {
         if content.status.runs() {
             return content.label;
         }
-        (self.pane_state(pane_id).and_then(|p| p.cwd.as_deref()))
-            .map(|cwd| crate::paths::tilde(cwd, crate::home_dir().as_deref()))
-            .unwrap_or(content.label)
+        (self
+            .session
+            .pane_state(pane_id)
+            .and_then(|p| p.cwd.as_deref()))
+        .map(|cwd| crate::paths::tilde(cwd, crate::home_dir().as_deref()))
+        .unwrap_or(content.label)
     }
 
     /// What the viewer takes the place of goes.
@@ -738,21 +741,6 @@ impl Gerdr {
         }
     }
 
-    /// Whether a press on the viewer's text is held.
-    pub fn scrollback_dragging(&self) -> bool {
-        self.overlays
-            .scrollback
-            .as_ref()
-            .is_some_and(Scrollback::dragging)
-    }
-
-    /// The left button went up.
-    pub fn scrollback_release(&mut self) {
-        if let Some(viewer) = self.overlays.scrollback.as_mut() {
-            viewer.release();
-        }
-    }
-
     /// The pointer moved while the viewer is open: its key hints and the
     /// search's buttons light up, the buttons with a tooltip.
     pub fn scrollback_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
@@ -822,7 +810,7 @@ impl Gerdr {
             self.close_scrollback();
             return false;
         };
-        let edge = if self.scrollback_dragging() {
+        let edge = if self.overlays.scrollback_dragging() {
             chrome::scrollback_edge(&chrome::scrollback_layout(panel, &[]), self.mouse.pos)
         } else {
             0.0
@@ -838,5 +826,18 @@ impl Gerdr {
             self.scrollback_drag(self.mouse.pos);
         }
         moving
+    }
+}
+
+impl crate::state::Overlays {
+    /// Whether a press on the viewer's text is held.
+    pub fn scrollback_dragging(&self) -> bool {
+        self.scrollback.as_ref().is_some_and(Scrollback::dragging)
+    }
+    /// The left button went up.
+    pub fn scrollback_release(&mut self) {
+        if let Some(viewer) = self.scrollback.as_mut() {
+            viewer.release();
+        }
     }
 }

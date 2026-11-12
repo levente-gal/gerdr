@@ -1050,7 +1050,7 @@ impl ProjectMenu {
     }
 
     /// zenity gave back `dir` for the form's folder.
-    fn browsed(&mut self, dir: &Path) {
+    pub(crate) fn browsed(&mut self, dir: &Path) {
         if let Some(form) = self.form.as_mut() {
             form.folder.set(&tilde(dir, self.home.as_deref()));
             form.folder_changed(self.home.as_deref());
@@ -1606,7 +1606,7 @@ impl Gerdr {
         self.overlays.project_menu = Some(ProjectMenu::new(home_dir()));
         self.refresh_project_menu();
         self.check_running();
-        self.query_zoxide();
+        self.launcher.query_zoxide();
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
     }
@@ -1683,7 +1683,7 @@ impl Gerdr {
             Outcome::Refresh => {
                 self.refresh_project_menu();
                 self.check_running();
-                self.query_zoxide();
+                self.launcher.query_zoxide();
             }
             Outcome::Browse(start) => self.pick_folder_for_menu(start),
             // A refusal: the field stays open to try another.
@@ -1811,13 +1811,6 @@ impl Gerdr {
     pub fn project_menu_view(&self) -> Option<ProjectMenuView> {
         let menu = self.overlays.project_menu.as_ref()?;
         Some(menu.view(&self.life.running, Instant::now()))
-    }
-
-    /// zenity gave back `dir` for the form's folder.
-    pub fn project_menu_folder(&mut self, dir: PathBuf) {
-        if let Some(menu) = self.overlays.project_menu.as_mut() {
-            menu.browsed(&dir);
-        }
     }
 
     /// The projects, or which of them run, changed: show them again.
