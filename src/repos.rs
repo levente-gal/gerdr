@@ -1436,6 +1436,8 @@ const PANEL_KEYS: &[Key<PanelKey>] = &[
         footer: true,
         f1: "back a step: the field or the diff to the tree, then close",
     },
+    // Aliases: presses taken before the keys were a table.
+    key!("Shift+Esc", PanelKey::Back, ""),
     key!(
         "Alt+F",
         PanelKey::Grouping,
@@ -1523,6 +1525,10 @@ const TREE_KEYS: &[Key<TreeKey>] = &[
         "check the line, or the diff's file"
     ),
     key!("Ctrl+A", TreeKey::CheckAll, "check everything, or nothing"),
+    // Aliases: presses taken before the keys were a table.
+    key!("Shift+Space", TreeKey::Check, ""),
+    key!("Ctrl+Shift+A", TreeKey::CheckAll, ""),
+    key!("Shift+Enter", TreeKey::Open, ""),
     key!(
         "Enter",
         TreeKey::Open,
@@ -1551,11 +1557,15 @@ const STASH_KEYS: &[Key<ReposButton>] = &[
 ];
 
 /// The Log tab's keys, with its keys: on the commit picked.
-const LOG_KEYS: &[Key<ReposButton>] = &[key!(
-    "Enter",
-    ReposButton::ShowCommit,
-    "in the Log tab, show the commit's diff (Esc back)"
-)];
+const LOG_KEYS: &[Key<ReposButton>] = &[
+    key!(
+        "Enter",
+        ReposButton::ShowCommit,
+        "in the Log tab, show the commit's diff (Esc back)"
+    ),
+    // An alias: a press taken before the keys were a table.
+    key!("Shift+Enter", ReposButton::ShowCommit, ""),
+];
 
 /// A key of the branch menu's (`branch_menu_key`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1593,6 +1603,13 @@ const MENU_KEYS: &[Key<MenuKey>] = &[
         "in the branch menu, take the branch picked"
     ),
     key!("Esc", MenuKey::Close, "in the branch menu, close it"),
+    // Aliases: presses taken before the keys were a table (Ctrl+Enter
+    // creates).
+    key!("Shift+Enter", MenuKey::Pick, ""),
+    key!("Alt+Enter", MenuKey::Pick, ""),
+    key!("Shift+Esc", MenuKey::Close, ""),
+    key!("Ctrl+Esc", MenuKey::Close, ""),
+    key!("Alt+Esc", MenuKey::Close, ""),
 ];
 
 /// A key on a sheet with buttons (`sheet_step`).
@@ -1633,6 +1650,19 @@ const SHEET_KEYS: &[Key<SheetKey>] = &[
         "on a question, press the button chosen"
     ),
     key!("Esc", SheetKey::Cancel, "on a question, back out of it"),
+    // Aliases: presses taken before the keys were a table.
+    key!("Shift+Left", SheetKey::Before, ""),
+    key!("Ctrl+Left", SheetKey::Before, ""),
+    key!("Alt+Left", SheetKey::Before, ""),
+    key!("Shift+Right", SheetKey::After, ""),
+    key!("Ctrl+Right", SheetKey::After, ""),
+    key!("Alt+Right", SheetKey::After, ""),
+    key!("Shift+Enter", SheetKey::Press, ""),
+    key!("Ctrl+Enter", SheetKey::Press, ""),
+    key!("Alt+Enter", SheetKey::Press, ""),
+    key!("Shift+Esc", SheetKey::Cancel, ""),
+    key!("Ctrl+Esc", SheetKey::Cancel, ""),
+    key!("Alt+Esc", SheetKey::Cancel, ""),
 ];
 
 /// Whether `item` is stopped on conflicts: an operation half-way, or
@@ -1756,7 +1786,12 @@ pub fn sheet_step(
     if n == 0 {
         return None;
     }
-    match key_table::press(SHEET_KEYS, &(), mods, unpad(sym))? {
+    // ISO_Left_Tab goes back, Shift held or not, as it did.
+    let mods = ModifiersState {
+        shift: mods.shift || sym == Keysym::ISO_Left_Tab,
+        ..*mods
+    };
+    match key_table::press(SHEET_KEYS, &(), &mods, unpad(sym))? {
         SheetKey::Before => *choice = (*choice + n - 1) % n,
         SheetKey::After => *choice = (*choice + 1) % n,
         SheetKey::Press => return Some(buttons[(*choice).min(n - 1)]),
@@ -5988,6 +6023,18 @@ mod tests {
         assert_eq!(panel.selected, Some(Selected::Repo(root("zed"))));
         panel.select_repo(&root("nowhere"), &ctx);
         assert_eq!(panel.selected, Some(Selected::Repo(root("zed"))));
+    }
+
+    #[test]
+    fn shift_space_in_the_tree_checks_as_space_does() {
+        let items = items();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        press(&mut panel, mods(false, true, false), Keysym::space, &ctx);
+        assert_eq!(checks(&panel, &ctx)[0], Check::On);
+        // Nothing typed into the message.
+        assert_eq!(panel.focus, Focus::Tree);
+        assert!(panel.field.trim().is_empty());
     }
 
     #[test]
