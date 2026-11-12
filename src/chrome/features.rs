@@ -4759,41 +4759,21 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
             Rectangle::new((left, rail_top).into(), (next - left, rail_h).into())
         })
         .collect();
-    // Under the rail's rule, the work running, then the columns; or across
-    // it all, the review.
+    // Under the rail's rule, the work running, the repositories, Code
+    // review's switch or Manual test's strip, then the columns; or across
+    // the rest, the review.
     let rule_end = rail_top + rail_h + RAIL_GAP + 1;
     let (running_card, running, running_more) = running_spots(view, x, rule_end + RUN_BELOW, inner);
     let rule_end = rule_end + running_card.map_or(0, |c| c.size.h + 2 * RUN_BELOW);
-    let row_top = rule_end;
-    let rule_end = match view.review_switch.is_some() || view.test_strip.is_some() {
-        true => rule_end + 2 * REVIEW_SWITCH_GAP + REVIEW_SWITCH_H,
-        false => rule_end,
+    let strip = Rectangle::new((x, rule_end + COLUMN_GAP).into(), (inner, CHIP_ROW).into());
+    let row_top = strip.loc.y + CHIP_ROW;
+    let rows_end = match view.review_switch.is_some() || view.test_strip.is_some() {
+        true => row_top + 2 * REVIEW_SWITCH_GAP + REVIEW_SWITCH_H,
+        false => row_top,
     };
-    // The page's bar: its title, then its buttons from the right, the one
-    // to press next last. Right over the page: under the switch on Code
-    // review's page under the rail, whose own buttons it has, else under
-    // the repositories.
-    let title_w = bar_title_width(&view.page).min(inner);
-    let bar_at = |y: i32| Rectangle::new((x, y).into(), (inner, PAGE_BAR).into());
-    let review_bar = view.review_page.then(|| bar_at(rule_end));
-    let review_switch = view.review_switch.as_ref().map(|switch| {
-        let buttons = review_bar.map(|bar| {
-            let from = (x + title_w + PAGE_GAP).min(right);
-            Rectangle::new((from, bar.loc.y).into(), (right - from, PAGE_BAR).into())
-        });
-        review_switch_spots(switch, x, row_top + REVIEW_SWITCH_GAP, inner, buttons)
-    });
-    let test_strip = (view.test_strip.as_ref())
-        .filter(|_| review_switch.is_none())
-        .map(|_| test_strip_spots(x, row_top + REVIEW_SWITCH_GAP, inner));
-    let rule_end = rule_end + review_bar.map_or(0, |_| PAGE_BAR + REVIEW_SWITCH_GAP);
-    let review = view.review_page.then(|| {
-        Rectangle::new(
-            (frame.loc.x, rule_end).into(),
-            (width, (frame.loc.y + frame.size.h - rule_end).max(0)).into(),
-        )
-    });
-    let mut body_top = rule_end + COLUMN_GAP;
+    // The review's bar keeps close to its switch: it has the switch's
+    // buttons.
+    let mut body_top = rows_end + if view.review_page { 0 } else { COLUMN_GAP };
 
     let hints_h = measured_footer_height(&hint_strs(&view.hints), width);
     let hints = Rectangle::new(
@@ -4806,9 +4786,6 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let mut repo_buttons = Vec::new();
     let mut repo_removes = Vec::new();
     let mut more_repos = Vec::new();
-    let strip_h = if view.review_page { 0 } else { CHIP_ROW };
-    let strip = Rectangle::new((x, body_top).into(), (inner, strip_h).into());
-    body_top += CHIP_ROW + COLUMN_GAP;
     let chip_y = strip.loc.y + (CHIP_ROW - ROW_BUTTON) / 2;
     let label_w = width_of(REPOS_LABEL, SMALL_FONT_SIZE).ceil() as i32;
     let repos_label = Rectangle::new((x, strip.loc.y).into(), (label_w, CHIP_ROW).into());
@@ -4817,9 +4794,9 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     });
     let repos_toggle = Rectangle::new(
         (right - toggle_w, chip_y).into(),
-        (if view.review_page { 0 } else { toggle_w }, ROW_BUTTON).into(),
+        (toggle_w, ROW_BUTTON).into(),
     );
-    if !view.expanded && view.repos_error.is_none() && !view.review_page {
+    if !view.expanded && view.repos_error.is_none() {
         // The chips that fit, from the selected one if it would be past
         // them.
         let start = x + label_w + REPOS_LABEL_GAP;
@@ -4891,7 +4868,7 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let bottom = hints.loc.y - 4;
     // Unfolded, the rows' card goes across the tab, as tall as they need
     // up to its share of the body, pushing the other columns down.
-    let repos_card = (view.expanded && !view.review_page).then(|| {
+    let repos_card = view.expanded.then(|| {
         let mut dry = Stack {
             x: 0,
             w: (inner - 2 * CARD_PAD).max(1),
@@ -4914,11 +4891,27 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
         body_top += h + COLUMN_GAP;
         card
     });
-    let page_bar = review_bar.unwrap_or_else(|| {
-        // Close over its page: it is the page's.
-        let bar = bar_at(body_top);
-        body_top += PAGE_BAR + REVIEW_SWITCH_GAP;
-        bar
+    // The page's bar: its title, then its buttons from the right, the one
+    // to press next last. Close over its page: it is the page's. On Code
+    // review's page under the rail it has the switch's buttons.
+    let title_w = bar_title_width(&view.page).min(inner);
+    let page_bar = Rectangle::new((x, body_top).into(), (inner, PAGE_BAR).into());
+    body_top += PAGE_BAR + REVIEW_SWITCH_GAP;
+    let review_switch = view.review_switch.as_ref().map(|switch| {
+        let buttons = view.review_page.then(|| {
+            let from = (x + title_w + PAGE_GAP).min(right);
+            Rectangle::new((from, page_bar.loc.y).into(), (right - from, PAGE_BAR).into())
+        });
+        review_switch_spots(switch, x, row_top + REVIEW_SWITCH_GAP, inner, buttons)
+    });
+    let test_strip = (view.test_strip.as_ref())
+        .filter(|_| review_switch.is_none())
+        .map(|_| test_strip_spots(x, row_top + REVIEW_SWITCH_GAP, inner));
+    let review = view.review_page.then(|| {
+        Rectangle::new(
+            (frame.loc.x, body_top).into(),
+            (width, (frame.loc.y + frame.size.h - body_top).max(0)).into(),
+        )
     });
     let (bar_row, free_on_bar) = bar_row(view, inner);
     let widths: Vec<i32> = (bar_row.iter())
@@ -5590,8 +5583,10 @@ impl FeatureTabLayout {
     pub(super) fn slice_rect(&self, slice: TabSlice, down: f64, scale: f64) -> Option<Rect> {
         match slice {
             TabSlice::Head => {
-                // To the strip's end: it fills, and any column's card is below.
-                let bottom = self.strip.loc.y + self.strip.size.h + COLUMN_GAP;
+                // To the repositories' card or the page's bar: it fills, and
+                // they and any column's card are below.
+                let repos = self.columns[TabColumn::Repos as usize];
+                let bottom = repos.map_or(self.page_bar.loc.y, |card| card.loc.y);
                 Some(Rectangle::new(
                     self.frame.loc,
                     (self.frame.size.w, bottom - self.frame.loc.y).into(),
@@ -7246,10 +7241,6 @@ impl Painter {
                 color,
             )
         };
-        // The review over the tab has no strip.
-        if view.review_page {
-            return;
-        }
         let focused = view.focus == TabArea::Repos;
         let label = if focused { p.accent } else { p.muted };
         line(c, REPOS_LABEL, l.repos_label, label);
@@ -9058,11 +9049,14 @@ mod tests {
         assert!(review.loc.y >= rail_end);
         assert_eq!(review.size.w, 1180);
         assert_eq!(review.loc.y + review.size.h, l.frame.loc.y + l.frame.size.h);
-        // No columns, chips or toggle left to press under it.
+        // No columns under it; the repositories over it, as on every page.
         assert!(l.columns.iter().all(Option::is_none));
-        assert_eq!(l.strip.size.h, 0);
-        assert_eq!(l.repos_toggle.size.w, 0);
-        assert!(l.repos.iter().all(|r| r.size.w == 0));
+        assert!(l.strip.size.h > 0 && l.repos_toggle.size.w > 0);
+        assert!(review.loc.y >= l.strip.loc.y + l.strip.size.h);
+        assert_eq!(
+            l.hit(&view, centre(l.repos[0])),
+            Some(FeatureTabHit::Repo(0))
+        );
         // The rail still works.
         assert_eq!(
             l.hit(&view, centre(l.nodes[2])),
@@ -9085,6 +9079,8 @@ mod tests {
         });
         let l = tab_at(&view, 1180);
         let spots = l.review_switch.as_ref().unwrap();
+        // The switch under the repositories.
+        assert!(spots.track.loc.y >= l.strip.loc.y + l.strip.size.h);
         let approve = spots.buttons[0].expect("room for it");
         assert!(l.page_bar.contains_rect(approve));
         assert!(l.page_bar.loc.y >= spots.track.loc.y + spots.track.size.h);
