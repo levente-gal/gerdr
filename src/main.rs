@@ -8,6 +8,18 @@
 //! other Wayland app can be launched into a split too (see `launch`); some,
 //! Cursor by default, keep running when gerdr quits as well (see `keep`).
 
+/// The toasts' part of `Gerdr` (`toast::Ui`), borrowing only the fields it
+/// needs: a group's method can take it beside `&mut gerdr.<group>`.
+macro_rules! ui {
+    ($gerdr:expr) => {
+        $crate::toast::Ui {
+            toasts: &mut $gerdr.toasts,
+            loop_handle: &$gerdr.loop_handle,
+            chrome: &$gerdr.chrome,
+        }
+    };
+}
+
 mod activate;
 mod agent_icons;
 mod agent_tell;
@@ -134,6 +146,7 @@ mod services;
 mod sidebar;
 mod stage_lock;
 mod stage_models;
+mod state;
 mod stats_panel;
 mod switcher;
 mod syntax;
@@ -1458,87 +1471,23 @@ pub struct Gerdr {
     pub workspaces: Vec<Workspace>,
     pub active_workspace: usize,
     pub chrome: Chrome,
-    /// The look chosen: the system's, dark or light.
-    pub theme_mode: ThemeMode,
-    /// Whether the system prefers a dark look (see `system_theme`).
-    pub system_dark: bool,
-    /// How much room the chrome takes, from the config file.
-    pub density: Density,
-    /// Whether the sidebar shows its "Needs you" list, from the config file.
-    pub needs_you: bool,
-    /// Whether agents that need the user say so with a desktop
-    /// notification, from the config file.
-    pub notify: bool,
-    /// Whether new Alacrittys reload their config file (`[terminal]`).
-    pub live_config_reload: bool,
     /// How close the user is to the inotify limit (see `inotify_limit`).
     pub inotify: inotify_limit::Watch,
-    /// When the config file was last read as written (see
-    /// `Gerdr::watch_settings`).
-    pub settings_modified: Option<std::time::SystemTime>,
-    /// How wide the sidebar is, kept in `state.json` for the next start.
-    /// Whether the footer shows, from the config file.
-    pub show_footer: bool,
-    /// What of the footer the pointer is on.
-    pub footer_hover: Option<chrome::FooterHit>,
-    /// The tasks panel, while it is open over the footer.
-    pub tasks_panel: Option<tasks::TasksPanel>,
-    /// The machines panel, while it is open (see `machines_panel`).
-    pub machines_panel: Option<machines_panel::MachinesPanel>,
     /// Other machines, and the dialog connecting one (see `machines`).
     pub machines: machines::Machines,
     /// The features of every project, and the dialog and panel on them.
     pub features: features::Features,
     /// Each feature's code review counts, once read (see `feature_diff`).
     pub code_reviews: feature_diff::Lines,
-    /// The apps projects keep running, as last looked at (see `tasks`).
-    pub kept: Vec<tasks::Kept>,
     /// T3 Code's server gerdr started, as last looked at.
     pub t3_started: Option<t3_server::Started>,
-    /// Whether T3 Code's server has a log, as last looked at.
-    pub t3_log: bool,
     pub sidebar_width: i32,
     /// The next pane id to hand out.
     pub next_pane: u32,
-    /// The divider being dragged, while the left button holds it.
-    pub drag: Option<Drag>,
-    /// Where the held pane (see `reorder`) would land if dropped now.
-    pub pane_drop: Option<pane_drag::PaneDrop>,
-    /// The workspace row or tab held, while the left button holds it.
-    pub reorder: Option<Reorder>,
-    /// The cursor shape gerdr last set over its chrome.
-    pub chrome_cursor: CursorIcon,
-    /// Keys whose press was a gerdr shortcut; their release is swallowed too.
-    pub suppressed_keys: Vec<Keycode>,
-    /// The prefix was pressed; the next key is a gerdr command.
-    pub prefix_armed: bool,
-    /// The key help stays open until closed again.
-    pub help_pinned: bool,
-    /// What the pointer is on in the help panel, while it shows.
-    pub help_hover: Option<HelpHit>,
-    /// The prefix and the keys after it, from the config file.
-    pub keymap: keys::Keymap,
-    /// Where the pointer is, in window coordinates.
-    pub pointer: Point<f64, Logical>,
-    /// The last press anywhere (when, where, which button), to tell a
-    /// double click.
-    pub last_press: Option<(Instant, Point<f64, Logical>, u32)>,
-    /// A workspace or tab being renamed in place.
-    pub rename: Option<Rename>,
-    /// What the pointer is over in the tab strip, and how far it has lit
-    /// up (or faded since the pointer left).
-    pub tab_hover: anim::Hover<chrome::TabHit>,
-    /// What the pointer is over in the sidebar, with its fades.
-    pub sidebar_hover: anim::Hover<chrome::SidebarHit>,
     /// How far the sidebar's rows are scrolled up, in logical pixels, and
     /// the active workspace they were last scrolled to show.
     pub sidebar_scroll: scroll::Scroll,
     pub sidebar_shown: Option<usize>,
-    /// Whether a scrolled list moved on its own or under the fingers at the
-    /// last frame (see `tick_scrolls`).
-    pub scrolling: bool,
-    /// How often and recently things were switched to, for ordering lists.
-    pub frecency: Frecency,
     /// Where each pane bar stands between hidden and shown.
     /// Where a window goes once it has drawn a new size, by its surface:
     /// the size it had when asked, and its place then. A window that is
@@ -1556,290 +1505,42 @@ pub struct Gerdr {
     /// The data dir of the project's Zed, which all its workspaces run in
     /// (see `launch::zed_data_dir`).
     pub zed_data: PathBuf,
-    pub children: Vec<Child>,
-    /// gerdr's herdr session, holding the terminals; `None` without herdr.
-    pub herdr: Option<herdr::Herdr>,
-    /// The coding agents herdr sees in the session, shown in the sidebar.
-    pub agents: Vec<herdr::AgentInfo>,
-    /// What herdr reports about the tabs of gerdr's workspaces, by herdr tab
-    /// id, shown in the tab strip.
-    pub herdr_tabs: HashMap<String, herdr::TabDetail>,
     /// The test runs seen in herdr's panes, a run each (see `test_runs`).
     pub test_runs: Vec<test_runs::TestRun>,
-    /// The Git status of the workspace folders in a repository, by folder.
-    pub git: HashMap<PathBuf, git::GitStatus>,
-    /// A read of where the web pages are is under way (see `watch_web_pages`).
-    pub web_pending: bool,
-    /// The browsers following and steering the web pages (see
-    /// `web_control`).
-    pub web_control: web_control::WebControl,
-    /// The web tabs showing a markdown file's preview (see `md_preview`).
-    pub previews: md_preview::Previews,
-    /// The CI of the shown project's repositories, by root (see
-    /// `ci_watch`).
-    pub ci: HashMap<PathBuf, ci::RepoCi>,
-    /// The repositories the last round of reading the CI was asked about.
-    pub ci_asked: Vec<PathBuf>,
-    /// Where each row of the CI stood, for telling what finished.
-    pub ci_states: HashMap<(String, ci::Subject), ci::CiState>,
-    /// A round of reading the CI is still running, and another is wanted
-    /// once it is done.
-    pub ci_pending: bool,
-    pub ci_again: bool,
-    /// Hands a round's CI to the event loop (see `watch_ci`).
-    ci_sender: Option<channel::Sender<ci_watch::CiRead>>,
-    /// A round of reading the Git status is still running.
-    pub git_pending: bool,
-    /// Another round is wanted once it is done.
-    pub git_again: bool,
-    /// Hands a round's Git status to the event loop (see `watch_git`).
-    git_read: Option<channel::Sender<HashMap<PathBuf, git::GitStatus>>>,
     /// The worktrees popup and what is being done to worktrees.
     pub worktrees: worktrees::Worktrees,
     /// The repositories panel and its batches.
     pub repos: repos::Repos,
     /// The inbox panel and what it reads for itself (see `inbox`).
     pub inbox: inbox::Inbox,
-    /// The scrollback viewer, while it is open over a terminal pane.
-    pub scrollback: Option<scrollback::Scrollback>,
-    /// The herdr pane whose output is being read for the viewer, off the
-    /// event loop (see `scrollback_panel`).
-    pub scrollback_reading: Option<String>,
     /// The criteria strip over a sandbox's app, and what it holds.
     pub criteria_strip: criteria_strip::CriteriaStrip,
-    /// gerdr's connection to the host's notification daemon; `None` without
-    /// a session bus.
-    pub notifier: Option<notify::Notifier>,
-    /// The host's xdg-activation for gerdr's window, made at the first
-    /// notification click; `None` until then or on a host without it.
-    pub activation: Option<activate::Activation>,
-    /// Since when each blocked agent was last notified of (or seen to be
-    /// blocked): a reminder goes after `BLOCKED_REMINDER`.
-    pub blocked_since: HashMap<agents::AgentKey, Instant>,
-    /// What each agent was doing when last looked at, to tell news by.
-    pub agent_statuses: HashMap<agents::AgentKey, herdr::AgentStatus>,
     /// What each agent is doing, and since when it has been, for the
     /// inbox's ages.
     pub agent_since: HashMap<agents::AgentKey, (herdr::AgentStatus, Instant)>,
-    /// What gerdr knows of its Cursor's chats (see `cursor_agents`).
-    pub cursor: cursor_agents::Chats,
-    /// Those doing something or with news, shown as cards.
-    pub cursor_chats: Vec<cursor_agents::CursorChat>,
-    /// Those idle that the database has, some shown as history (see
-    /// `cursor_agents::History`).
-    pub cursor_idle: Vec<cursor_agents::CursorChat>,
-    /// Asks for Cursor's database to be read now, keeping the chats given.
-    cursor_poke: Option<std::sync::mpsc::Sender<Vec<String>>>,
-    /// Where Cursor's hooks reach this gerdr.
-    cursor_socket: Option<PathBuf>,
     /// What gerdr knows of T3 Code's threads (see `t3_agents`).
     pub t3: t3_agents::T3,
-    /// The programs whose apps keep running when gerdr quits (see `keep`).
-    pub keep_apps: Vec<String>,
-    /// The shown project's server of apps kept running, while gerdr shows
-    /// its windows.
-    pub keeper: Option<keep::Keeper>,
-    /// Whether gerdr said that keeping apps running needs wprs.
-    pub keep_warned: bool,
-    /// The project to stop once another is shown instead, and what of it
-    /// (see `ask_switch`).
-    pub stop_left: Option<(String, projects::Stops)>,
-    /// The Cursor chat last shown from its card, whose card is filled
-    /// while Cursor has the keyboard.
-    pub cursor_opened: Option<String>,
-    /// gerdr's own window has the host's keyboard focus.
-    pub host_focused: bool,
-    /// Process groups we started, all terminated when gerdr exits.
-    pub process_groups: Vec<i32>,
-    /// The folder picker, while it is open, and what it is open for.
-    pub picker: Option<(Child, PickFor)>,
-    /// The context menu open, if one is.
-    pub context_menu: Option<ContextMenu>,
-    /// The tooltip offered for what is under the pointer, and the one shown.
-    pub tooltip: TooltipState,
-    /// The switcher, while it is open.
-    pub switcher: Option<switcher::Switcher>,
-    /// The folders zoxide knows, the highest ranked first.
-    pub recent_dirs: Vec<PathBuf>,
-    /// Where a read of zoxide's folders sends them; `None` until set up.
-    pub zoxide: Option<channel::Sender<Vec<PathBuf>>>,
-    /// Where an import of an app's profile tells how it went; `None` until
-    /// set up (see `profile_import`).
-    pub profile_imports: Option<channel::Sender<profile_import::Imported>>,
-    /// The key held over an overlay, and the timer repeating it.
-    pub key_repeat: Option<(Keycode, RegistrationToken)>,
-    /// The apps named in the config file, to launch into a split.
-    pub apps: Vec<launch::App>,
-    /// The apps installed on the system, offered in the run prompt.
-    pub installed_apps: Vec<launch::App>,
-    /// The agent CLI commands the config file names (see `cli_agents`),
-    /// and the agent CLIs installed, as of the last look.
-    pub agent_config: std::collections::BTreeMap<String, String>,
-    pub cli_agents: Vec<cli_agents::CliAgent>,
-    /// The workspace whose header shows the strip of agents to start,
-    /// while the pointer is on its AI button or the strip.
-    pub agent_strip: Option<usize>,
-    /// The record of the workspace `agent_strip` opened on: a strip whose
-    /// workspace moved or closed since isn't shown on another's header.
-    pub agent_strip_record: Option<String>,
-    /// The workspace whose strip of agents opens, and when, while the
-    /// pointer rests on its AI button; whether a timer waits for it.
-    pub agent_strip_due: Option<(usize, std::time::Instant)>,
-    pub agent_strip_timed: bool,
-    /// Where a read of the installed apps sends them; `None` until set up.
-    pub installed_apps_tx: Option<channel::Sender<Vec<launch::App>>>,
 
     /// The projects gerdr knows, and what it remembers of them.
     pub projects: projects::Store,
     /// The project shown, by id; `None` before one is open.
     pub project: Option<String>,
-    /// The lock that tells other gerdrs the project shown is open here;
-    /// kept while it is shown again after a reload.
-    project_lock: Option<project_lock::ProjectLock>,
-    /// Says to other machines that this gerdr shows the project: `project_lock`
-    /// is under a runtime folder they can't name (see `feature::lease`).
-    lease_lock: Option<project_lock::ProjectLock>,
-    /// Started with `--attach`: projects another gerdr has open may be
-    /// shown here too.
-    attach: bool,
-    /// The welcome screen, while it is shown.
-    pub welcome: Option<welcome::Welcome>,
-    /// Whether each project's session runs, by id, as last checked.
-    pub running: HashMap<String, bool>,
-    /// Where a check of which projects' sessions run sends its answer (by
-    /// project id); `None` until set up.
-    pub running_status: Option<channel::Sender<Vec<(String, bool)>>>,
-    /// Where stopping a project's session in the background sends whether
-    /// it stopped (by project id); `None` until set up.
-    pub stop_status: Option<channel::Sender<(String, bool)>>,
-    /// Where a project's start or stop commands send how they went; `None`
-    /// until set up.
-    pub hook_status: Option<channel::Sender<hooks::Done>>,
-    /// The projects whose start commands run, by id.
-    pub starting: HashSet<String>,
-    /// The project to show once its start commands are done.
-    pub pending_enter: Option<PendingEnter>,
-    /// Brings the clipboard's text read for a paste back (see `clipboard`).
-    pub paste: Option<channel::Sender<(input::Overlay, String)>>,
-    /// The text copied from one of gerdr's own text fields, while gerdr
-    /// owns the clipboard with it (see `clipboard`).
-    pub copied: Option<String>,
-    /// How many left presses in a row the last was, a moment apart and in
-    /// about one place (see `count_press`).
-    pub press_count: u32,
-    /// While a press in a text field is held past its text: when it last
-    /// went on for it, and the part of a step carried to the next frame.
-    pub field_edge: Option<(std::time::Instant, f64)>,
-    /// A key, a paste or a press may have moved a text field's caret since
-    /// the last frame: `keep_field_scroll` keeps where its view starts.
-    pub field_scroll_due: bool,
-    /// A press in an overlay's text field is held: moving selects.
-    pub field_drag: bool,
-    /// The left button went down on the repositories panel's diff and is
-    /// held: moving drags the diff cursor's range on.
-    pub repos_rows_drag: bool,
-    /// The left button went down on the comment being written in the
-    /// diff and is held: moving selects its text.
-    pub repos_editor_drag: bool,
-    /// While a press on the diff (either of those) is held past its rows:
-    /// when they last scrolled for it, and the part of a row carried to
-    /// the next frame.
-    pub repos_drag_edge: Option<(std::time::Instant, f64)>,
     /// The file's tab showing as of the last frame, by id: one coming to
     /// show reads its file again (see `doc_tab`).
     pub doc_tab_shown: Option<u64>,
-    /// A scrollbar's thumb held with the left button: moving drags it.
-    pub thumb_drag: Option<scrollbars::ThumbDrag>,
-    /// The projects whose sessions are being stopped, by id: not shown
-    /// until they have.
-    pub stopping: HashSet<String>,
-    /// The projects to forget once their sessions have stopped, by id (see
-    /// `Gerdr::forget_project`).
-    pub forget_after_stop: HashSet<String>,
-    /// Projects to give a new id once stopped: by id, the new one (see
-    /// `project_rename`).
-    pub id_after_stop: HashMap<String, String>,
-    /// The project just made and being shown, by id: the switch's notice
-    /// says it was made.
-    pub just_created: Option<String>,
-    /// A project to show although another gerdr has it open, by id (see
-    /// `Gerdr::attach_project`).
-    pub attach_once: Option<String>,
-    /// The project menu, while it is open.
-    pub project_menu: Option<project_menu::ProjectMenu>,
-    /// The pointer is over the sidebar header's project name.
-    pub header_hover: bool,
-    /// The project shown before the one shown now, by id, for
-    /// `Action::LastProject`.
-    pub previous_project: Option<String>,
-    /// The tabs shown, to go back and forward through.
-    pub nav: nav_history::NavHistory<nav_history::Visit>,
-    /// A step back or forward to a tab of another project, waiting for it
-    /// to show (see `nav`).
-    pub nav_pending: Option<nav::PendingVisit>,
-    /// The history as it was last put in the store (see `Gerdr::keep_nav`).
-    pub nav_kept: Option<nav_history::NavHistory<nav_history::Visit>>,
     /// The notes shown over the apps, oldest first (see `toast`).
     pub toasts: VecDeque<Toast>,
-    /// The quit dialog, while it is open.
-    pub quit: Option<quit::QuitDialog>,
-    /// The restart dialog, while it is open.
-    pub restart: Option<restart::RestartDialog>,
-    /// The checkout dialog, while it is open.
-    pub checkout: Option<checkout::CheckoutDialog>,
-    /// The confirm dialog, while it is open.
-    pub confirm: Option<confirm::ConfirmDialog>,
-    /// The event loop sources following the project's herdr session, removed
-    /// when switching to another project.
-    pub herdr_sources: Vec<RegistrationToken>,
-    /// Asks the thread polling the project's herdr session for a round now.
-    herdr_poke: Option<std::sync::mpsc::Sender<()>>,
-    /// Since when each herdr pane's shell has been idle, by pane id: its
-    /// command is forgotten only after a while, so panes dying on shutdown
-    /// don't count.
-    pub idle_since: HashMap<String, Instant>,
-    /// Process groups of projects switched away from, until they are gone;
-    /// their late windows are closed instead of placed.
-    pub retired_groups: Vec<i32>,
     /// Counts the times gerdr's processes were ended, to name the Ghostty
     /// and Alacritty gerdr starts next apart from those on their way out
     /// (see `launch`).
     pub shared_generation: u32,
-    /// Since when the tab layouts differ from what was saved of them.
-    pub tabs_changed: Option<Instant>,
     /// The projects whose file was reloaded while they weren't running: they
     /// take its workspace order and labels when they start.
     pub order_pending: HashSet<String>,
-    /// The process leading each herdr pane's foreground when its command was
-    /// last noted, by pane id: a command is noted once per process, as
-    /// some rewrite their command line once running.
-    pub pane_leaders: HashMap<String, i32>,
-    /// The last command run in each herdr pane, by pane id, to run again
-    /// from its bar.
-    pub last_commands: HashMap<String, pane_control::Remembered>,
     /// The errors the services print (see `services`).
     pub service_errors: services::ServiceErrors,
-    /// The panes being stopped or restarted, by herdr pane id.
-    pub pane_jobs: HashMap<String, pane_control::Job>,
     /// Where those jobs report; `None` until set up.
     pub pane_job_tx: Option<channel::Sender<pane_control::JobEvent>>,
-    /// The pane bar button under the pointer, by pane.
-    pub pane_bar_hover: Option<(u32, BarButton)>,
-    /// Since when each workspace herdr said closed has been, by herdr id:
-    /// forgotten only after a while, so a server going down doesn't count.
-    pub closed_workspaces: HashMap<String, Instant>,
-    /// Since when each record without a herdr workspace has had no
-    /// workspace open, by id (see `keep_records`).
-    pub gone_since: HashMap<String, Instant>,
-    /// The records of the workspaces closed on purpose, to forget once
-    /// they are gone (see `keep_records`).
-    pub closing_records: HashSet<String>,
-    /// When the shown project's server was restarted and brought its
-    /// workspaces back, if it was.
-    pub restored_at: Option<Instant>,
-    /// The project's workspaces, by herdr id, that the restarted server
-    /// hasn't brought back yet: what ran in them runs again once it does.
-    pub replay_pending: HashSet<String>,
     /// Windows opened by the shells of projects not shown, by project id
     /// (`""` for windows of no known project while none is shown): shown
     /// once their project is.
@@ -1853,22 +1554,8 @@ pub struct Gerdr {
     /// Windows of panes gerdr was asked to close (see `close_panes`): a Zed
     /// one leaves no placeholder when it goes (see `remove_window`).
     pub closing: Vec<Window>,
-    /// The process groups of the Zed launches of the shown project.
-    pub zed_groups: Vec<i32>,
-    /// Those of the project switched away from, while they may still take
-    /// the next `zed -n`, and until when they are waited for.
-    pub old_zed: Vec<i32>,
-    pub old_zed_until: Option<Instant>,
-    /// The address of each workspace folder's repository page, once read
-    /// (see `git::web_url`).
-    pub repo_pages: HashMap<PathBuf, Option<String>>,
     /// The features' AI work, kept as it happens (see `ai_work`).
     pub ai_work: ai_work::Live,
-    /// The stats panel on the AI work, while it is open (see `stats_panel`).
-    pub(crate) ai_stats: Option<stats_panel::StatsPanel>,
-    /// The stats panel as it was when it opened a file in the scrollback
-    /// viewer: closing the viewer shows it again.
-    pub(crate) ai_stats_behind: Option<stats_panel::StatsPanel>,
 
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
@@ -1887,6 +1574,22 @@ pub struct Gerdr {
     pub fractional_scale_state: FractionalScaleManagerState,
     pub cursor_shape_state: CursorShapeManagerState,
     pub seat: Seat<Gerdr>,
+    pub launcher: state::Launcher,
+    pub settings: state::Settings,
+    pub key_state: state::KeyState,
+    pub mouse: state::Mouse,
+    pub hover: state::Hover,
+    pub overlays: state::Overlays,
+    pub ci: state::CiWatch,
+    pub git: state::GitWatch,
+    pub nav: state::Nav,
+    pub keep: state::Keep,
+    pub procs: state::Procs,
+    pub life: state::Life,
+    pub web: state::Web,
+    pub cursor: state::CursorWatch,
+    pub notices: state::Notices,
+    pub session: state::Session,
 }
 
 impl Gerdr {
@@ -1913,12 +1616,12 @@ impl Gerdr {
 
     /// The look in use: the mode chosen, by what the system prefers.
     pub fn theme(&self) -> Theme {
-        self.theme_mode.resolve(self.system_dark)
+        self.settings.theme_mode.resolve(self.settings.system_dark)
     }
 
     /// How high the tab strip is, at the density chosen.
     pub fn tab_strip_height(&self) -> i32 {
-        chrome::tab_strip_height(self.density)
+        chrome::tab_strip_height(self.settings.density)
     }
 
     /// Where the panes go: right of the sidebar, below the tab strip,
@@ -1944,7 +1647,7 @@ impl Gerdr {
             let on = layout.splitter.to_f64().contains(pos)
                 && layout.sheet.is_none()
                 && layout.branch_menu.is_none()
-                && self.context_menu.is_none();
+                && self.overlays.context_menu.is_none();
             return on.then_some(Drag::ReposSplit);
         }
         if let Some(drag) = self.doc_gap_at(pos) {
@@ -2031,7 +1734,7 @@ impl Gerdr {
                 }
             }
             // A pane only lands when dropped; meanwhile, where it would.
-            Reorderable::Pane(id) => self.pane_drop = self.pane_drop_at(id, pos),
+            Reorderable::Pane(id) => self.mouse.pane_drop = self.pane_drop_at(id, pos),
         }
     }
 
@@ -2041,7 +1744,7 @@ impl Gerdr {
         let Some(ws) = self.workspaces.get(self.active_workspace) else {
             return;
         };
-        let Some(herdr) = self.herdr.as_mut() else {
+        let Some(herdr) = self.session.herdr.as_mut() else {
             return;
         };
         let moved = match what {
@@ -2093,7 +1796,7 @@ impl Gerdr {
         self.x11.ensure(&display);
         let x_display = self.x11.display().map(OsStr::to_owned);
         let pid = self.spawn_on(cmd, dir, app, &display, x_display.as_deref())?;
-        self.process_groups.push(pid as i32);
+        self.procs.groups.push(pid as i32);
         Some(pid)
     }
 
@@ -2122,7 +1825,11 @@ impl Gerdr {
         display: &std::ffi::OsStr,
         x_display: Option<&std::ffi::OsStr>,
     ) -> Option<u32> {
-        let socket = self.herdr.as_ref().map(|h| h.socket().to_path_buf());
+        let socket = self
+            .session
+            .herdr
+            .as_ref()
+            .map(|h| h.socket().to_path_buf());
         herdr::scrub_env(&mut cmd, socket.as_deref());
         match x_display {
             Some(x_display) => cmd.env("DISPLAY", x_display),
@@ -2137,7 +1844,7 @@ impl Gerdr {
         match cmd.spawn() {
             Ok(child) => {
                 let pid = child.id();
-                self.children.push(child);
+                self.procs.children.push(child);
                 Some(pid)
             }
             Err(err) => {
@@ -2195,7 +1902,7 @@ impl Gerdr {
             }
         };
         if pid.is_none()
-            && let Some((herdr, pane)) = self.herdr.as_mut().zip(pane.as_ref())
+            && let Some((herdr, pane)) = self.session.herdr.as_mut().zip(pane.as_ref())
         {
             let _ = herdr.pane_close(&pane.pane_id);
         }
@@ -2213,6 +1920,7 @@ impl Gerdr {
         cwd: &Path,
     ) -> Option<Result<herdr::PaneInfo, String>> {
         let env = self
+            .session
             .herdr
             .as_ref()?
             .pane_env(&self.socket_name, self.x11.display());
@@ -2221,7 +1929,7 @@ impl Gerdr {
         let (dir, name, kind) = (ws.dir.clone(), ws.name.clone(), ws.kind);
         let record = ws.record.clone();
         let new_workspace = target.is_none() && workspace_id.is_none();
-        let herdr = self.herdr.as_mut()?;
+        let herdr = self.session.herdr.as_mut()?;
         let pane = match (target, workspace_id) {
             (Some(target), _) => herdr.pane_split(&target, split, cwd, &env),
             (None, Some(workspace_id)) => herdr.tab_create(&workspace_id, cwd, &env),
@@ -2257,7 +1965,7 @@ impl Gerdr {
                 return None;
             }
         };
-        let socket = self.herdr.as_ref()?.socket().to_path_buf();
+        let socket = self.session.herdr.as_ref()?.socket().to_path_buf();
         // The new shell gets the workspace's venv.
         let venv = self
             .herdr_record(&pane.workspace_id)
@@ -2405,7 +2113,7 @@ impl Gerdr {
         }
         let subscribed = herdr.subscribe();
         let socket = herdr.socket().to_path_buf();
-        self.herdr = Some(herdr);
+        self.session.herdr = Some(herdr);
         // Let go of the workspaces closed while gerdr wasn't looking: their
         // apps come back without them (see `restore_saved`). An empty
         // list may be a server still restoring: keep them then, unless it
@@ -2439,7 +2147,8 @@ impl Gerdr {
         if complete
             && let Some(id) = self.project.clone()
             && self.order_pending.remove(&id)
-            && let (Some(herdr), Some(project)) = (self.herdr.as_mut(), self.projects.project(&id))
+            && let (Some(herdr), Some(project)) =
+                (self.session.herdr.as_mut(), self.projects.project(&id))
         {
             for problem in reload::apply_order(herdr, project) {
                 tracing::warn!("project file order: {problem}");
@@ -2453,8 +2162,8 @@ impl Gerdr {
         }
         self.restore_saved(false);
         if start == herdr::Start::Restored {
-            self.restored_at = Some(Instant::now());
-            self.replay_pending = self
+            self.session.restored_at = Some(Instant::now());
+            self.session.replay_pending = self
                 .project
                 .as_deref()
                 .and_then(|id| self.projects.project(id))
@@ -2470,7 +2179,7 @@ impl Gerdr {
         self.refresh_agents();
         // The events' source goes last: it removes itself when the server goes.
         let tabs = self.watch_herdr_tabs(socket.clone());
-        self.herdr_sources.extend(tabs);
+        self.session.sources.extend(tabs);
         if let Some(project) = self.project.clone() {
             let fresh = start != herdr::Start::Attached;
             self.watch_project_services(&project, socket, fresh);
@@ -2499,17 +2208,17 @@ impl Gerdr {
                         "herdr",
                         "herdr's server went away: new terminals won't persist".into(),
                     );
-                    state.herdr = None;
-                    state.herdr_poke = None;
-                    state.agents.clear();
+                    state.session.herdr = None;
+                    state.session.poke = None;
+                    state.session.agents.clear();
                     state.notify_agents();
-                    state.herdr_tabs.clear();
+                    state.session.tabs.clear();
                     state.services_server_gone();
                     // Closed as it went down: they come back with it.
-                    state.closed_workspaces.clear();
+                    state.session.closed_workspaces.clear();
                     // This source is the last one and removes itself.
-                    state.herdr_sources.pop();
-                    for token in std::mem::take(&mut state.herdr_sources) {
+                    state.session.sources.pop();
+                    for token in std::mem::take(&mut state.session.sources) {
                         state.loop_handle.remove(token);
                     }
                     return Ok(PostAction::Remove);
@@ -2518,7 +2227,7 @@ impl Gerdr {
             Ok(PostAction::Continue)
         });
         match inserted {
-            Ok(token) => self.herdr_sources.push(token),
+            Ok(token) => self.session.sources.push(token),
             Err(err) => tracing::warn!("herdr events: {err}"),
         }
     }
@@ -2528,7 +2237,7 @@ impl Gerdr {
     /// get their venv. A pane is found in the records by its id, else by its
     /// place in the workspace.
     fn replay(&mut self, workspaces: &[herdr::WorkspaceInfo]) {
-        let Some(herdr) = self.herdr.as_mut() else {
+        let Some(herdr) = self.session.herdr.as_mut() else {
             return;
         };
         let socket = herdr.socket().to_path_buf();
@@ -2582,7 +2291,9 @@ impl Gerdr {
                     env: prep.captured_env.clone(),
                 };
                 let service = pane_control::Remembered::service(captured, now);
-                self.last_commands.insert(prep.pane_id.clone(), service);
+                self.session
+                    .last_commands
+                    .insert(prep.pane_id.clone(), service);
             }
         }
         prepare::spawn_prepare(socket, preps);
@@ -2635,7 +2346,8 @@ impl Gerdr {
             }
             // Forgotten if it stays closed (see `capture_commands`).
             herdr::Event::WorkspaceClosed { workspace_id } => {
-                self.closed_workspaces
+                self.session
+                    .closed_workspaces
                     .entry(workspace_id)
                     .or_insert_with(Instant::now);
             }
@@ -2668,14 +2380,15 @@ impl Gerdr {
     /// look like: the server restarted a moment ago, and they are still
     /// being run again.
     fn restoring(&self) -> bool {
-        self.restored_at
+        self.session
+            .restored_at
             .is_some_and(|at| at.elapsed() < RESTORE_PROTECT)
     }
 
     /// Run again what ran in the workspaces `ids` that a restarted server
     /// brought back late.
     fn replay_late(&mut self, ids: Vec<String>) {
-        let Some(herdr) = self.herdr.as_mut() else {
+        let Some(herdr) = self.session.herdr.as_mut() else {
             return;
         };
         let workspaces: Vec<_> = ids
@@ -2683,7 +2396,7 @@ impl Gerdr {
             .filter_map(|id| herdr.workspace_get(id).ok())
             .collect();
         for ws in &workspaces {
-            self.replay_pending.remove(&ws.workspace_id);
+            self.session.replay_pending.remove(&ws.workspace_id);
         }
         if !workspaces.is_empty() {
             self.replay(&workspaces);
@@ -2698,9 +2411,9 @@ impl Gerdr {
         let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
             // Rounds are dropped once the server is gone.
             if let channel::Event::Msg(round) = event
-                && state.herdr.is_some()
+                && state.session.herdr.is_some()
             {
-                state.herdr_tabs = round.tabs;
+                state.session.tabs = round.tabs;
                 state.capture_commands();
                 state.feed_services();
                 state.track_tests();
@@ -2716,7 +2429,7 @@ impl Gerdr {
                     );
                 }
                 if let Some(agents) = round.agents {
-                    state.agents = agents;
+                    state.session.agents = agents;
                     state.notify_agents();
                     state.stage_agents_tick();
                 }
@@ -2727,7 +2440,7 @@ impl Gerdr {
                 // The thread stops once the source is removed.
                 let poke =
                     herdr::watch_tabs(socket, AGENT_INTERVAL, move |round| tx.send(round).is_ok());
-                self.herdr_poke = Some(poke);
+                self.session.poke = Some(poke);
                 Some(token)
             }
             Err(err) => {
@@ -2745,7 +2458,7 @@ impl Gerdr {
     /// Nothing is forgotten while the server is being restored, and the
     /// workspaces it brings back late have their commands run again.
     fn capture_commands(&mut self) {
-        if self.herdr_tabs.is_empty() {
+        if self.session.tabs.is_empty() {
             return;
         }
         let Some(project) = self.project.clone() else {
@@ -2753,13 +2466,13 @@ impl Gerdr {
         };
         let restoring = self.restoring();
         if !restoring {
-            self.replay_pending.clear();
+            self.session.replay_pending.clear();
         }
         let now = Instant::now();
         let mut changed = false;
         let mut live: HashSet<&str> = HashSet::new();
         let mut seen_workspaces: HashSet<&str> = HashSet::new();
-        for detail in self.herdr_tabs.values() {
+        for detail in self.session.tabs.values() {
             for (index, pane) in detail.panes.iter().enumerate() {
                 live.insert(&pane.pane_id);
                 seen_workspaces.insert(&pane.workspace_id);
@@ -2769,7 +2482,7 @@ impl Gerdr {
                     .as_ref()
                     .and_then(|info| projects::foreground_command(info, pane.cwd.as_deref()));
                 pane_control::remember(
-                    &mut self.last_commands,
+                    &mut self.session.last_commands,
                     &pane.pane_id,
                     foreground.as_ref(),
                     pane.cwd.as_deref(),
@@ -2777,19 +2490,23 @@ impl Gerdr {
                 );
                 let idle_long = match foreground {
                     Some(projects::Foreground::Idle) => {
-                        let since = self.idle_since.entry(pane.pane_id.clone()).or_insert(now);
+                        let since = self
+                            .session
+                            .idle_since
+                            .entry(pane.pane_id.clone())
+                            .or_insert(now);
                         now - *since >= FORGET_IDLE && !restoring
                     }
                     _ => {
-                        self.idle_since.remove(&pane.pane_id);
+                        self.session.idle_since.remove(&pane.pane_id);
                         false
                     }
                 };
-                let leader = self.pane_leaders.get(&pane.pane_id).copied();
+                let leader = self.session.pane_leaders.get(&pane.pane_id).copied();
                 let (mut note, leader) = leader_note(foreground, leader, idle_long);
                 match leader {
-                    Some(pid) => self.pane_leaders.insert(pane.pane_id.clone(), pid),
-                    None => self.pane_leaders.remove(&pane.pane_id),
+                    Some(pid) => self.session.pane_leaders.insert(pane.pane_id.clone(), pid),
+                    None => self.session.pane_leaders.remove(&pane.pane_id),
                 };
                 if restoring && note == Note::Clear {
                     note = Note::Keep;
@@ -2800,10 +2517,14 @@ impl Gerdr {
                 }
             }
         }
-        self.pane_leaders.retain(|id, _| live.contains(id.as_str()));
-        self.last_commands
+        self.session
+            .pane_leaders
+            .retain(|id, _| live.contains(id.as_str()));
+        self.session
+            .last_commands
             .retain(|id, _| live.contains(id.as_str()));
         let late: Vec<String> = self
+            .session
             .replay_pending
             .iter()
             .filter(|id| seen_workspaces.contains(id.as_str()))
@@ -2811,13 +2532,14 @@ impl Gerdr {
             .collect();
         // Closed for a while, and not back.
         let closed: Vec<String> = self
+            .session
             .closed_workspaces
             .iter()
             .filter(|(_, since)| now - **since >= FORGET_IDLE && !restoring)
             .map(|(id, _)| id.clone())
             .collect();
         for id in &closed {
-            self.closed_workspaces.remove(id);
+            self.session.closed_workspaces.remove(id);
         }
         let closed: HashSet<&str> = closed
             .iter()
@@ -2861,7 +2583,11 @@ impl Gerdr {
                     if live.contains(r.pane_id.as_str()) {
                         return true;
                     }
-                    let since = self.idle_since.entry(r.pane_id.clone()).or_insert(now);
+                    let since = self
+                        .session
+                        .idle_since
+                        .entry(r.pane_id.clone())
+                        .or_insert(now);
                     now - *since < FORGET_IDLE
                 });
                 changed |= record.panes.len() != before;
@@ -2872,7 +2598,8 @@ impl Gerdr {
                 .flat_map(|r| &r.panes)
                 .map(|r| r.pane_id.as_str())
                 .collect();
-            self.idle_since
+            self.session
+                .idle_since
                 .retain(|id, _| live.contains(id.as_str()) || recorded.contains(id.as_str()));
         }
         if changed {
@@ -2907,8 +2634,8 @@ impl Gerdr {
         let now = Instant::now();
         let mut changed = false;
         if self.changed_tabs().is_empty() {
-            self.tabs_changed = None;
-        } else if now - *self.tabs_changed.get_or_insert(now) >= TABS_SETTLE {
+            self.session.tabs_changed = None;
+        } else if now - *self.session.tabs_changed.get_or_insert(now) >= TABS_SETTLE {
             changed |= self.record_tabs();
         }
         changed |= self.record_workspace_order();
@@ -2928,6 +2655,7 @@ impl Gerdr {
             .map(|ws| ws.record.as_str())
             .collect();
         let closed: Vec<String> = self
+            .session
             .closing_records
             .extract_if(|id| !open.contains(id.as_str()))
             .collect();
@@ -2944,11 +2672,11 @@ impl Gerdr {
                 .map(|r| r.id.clone())
                 .collect()
         });
-        self.gone_since.retain(|id, _| gone.contains(id));
+        self.session.gone_since.retain(|id, _| gone.contains(id));
         for id in gone {
-            let since = *self.gone_since.entry(id.clone()).or_insert(now);
+            let since = *self.session.gone_since.entry(id.clone()).or_insert(now);
             if now - since >= FORGET_IDLE && !restoring {
-                self.gone_since.remove(&id);
+                self.session.gone_since.remove(&id);
                 if let Some(p) = self.projects.project_mut(&project) {
                     match p.workspaces.iter_mut().find(|r| r.id == id) {
                         // Its app quit: keep the place, not what to start.
@@ -2991,7 +2719,7 @@ impl Gerdr {
     /// Remember the tab layouts of the shown project's workspaces; whether
     /// anything changed.
     fn record_tabs(&mut self) -> bool {
-        self.tabs_changed = None;
+        self.session.tabs_changed = None;
         let changed = self.changed_tabs();
         let Some(project) = self.project.clone() else {
             return false;
@@ -3025,22 +2753,22 @@ impl Gerdr {
         let (tx, rx): (_, Channel<HashMap<PathBuf, git::GitStatus>>) = channel::channel();
         let read = self.loop_handle.insert_source(rx, |event, _, state| {
             if let channel::Event::Msg(git) = event {
-                state.git = git;
-                state.git_pending = false;
+                state.git.status = git;
+                state.git.pending = false;
                 state.worktrees_read();
                 state.repos_read();
                 state.ci_roots_changed();
-                if std::mem::take(&mut state.git_again) {
+                if std::mem::take(&mut state.git.again) {
                     state.refresh_git();
                 }
             }
         });
-        self.git_read = Some(tx);
+        self.git.read = Some(tx);
         let timer = self
             .loop_handle
             .insert_source(Timer::immediate(), move |_, _, state| {
                 // A round can outlast the interval in a big repository.
-                if !state.git_pending {
+                if !state.git.pending {
                     state.refresh_git();
                 }
                 TimeoutAction::ToDuration(GIT_INTERVAL)
@@ -3056,14 +2784,14 @@ impl Gerdr {
     /// Read the Git status of the workspace folders now, off the event
     /// loop; once the round under way is done, if there is one.
     pub fn refresh_git(&mut self) {
-        let Some(tx) = self.git_read.clone() else {
+        let Some(tx) = self.git.read.clone() else {
             return;
         };
-        if self.git_pending {
-            self.git_again = true;
+        if self.git.pending {
+            self.git.again = true;
             return;
         }
-        self.git_pending = true;
+        self.git.pending = true;
         let mut dirs: Vec<PathBuf> = self.workspaces.iter().map(|ws| ws.dir.clone()).collect();
         dirs.sort();
         dirs.dedup();
@@ -3078,17 +2806,17 @@ impl Gerdr {
         let (tx, rx): (_, Channel<Vec<(web_pages::WebPane, String)>>) = channel::channel();
         let read = self.loop_handle.insert_source(rx, |event, _, state| {
             if let channel::Event::Msg(found) = event {
-                state.web_pending = false;
+                state.web.pending = false;
                 state.take_web_urls(found);
             }
         });
         let timer = self
             .loop_handle
             .insert_source(Timer::immediate(), move |_, _, state| {
-                if !state.web_pending {
+                if !state.web.pending {
                     let panes = state.web_panes();
                     if !panes.is_empty() {
-                        state.web_pending = true;
+                        state.web.pending = true;
                         let tx = tx.clone();
                         let instance = state.instance_dir.clone();
                         web_pages::read_all(panes, instance, move |found| {
@@ -3117,7 +2845,7 @@ impl Gerdr {
                     let Some(command) = pane.app_command.as_deref() else {
                         continue;
                     };
-                    if !is_web_link(command) || self.web_control.follows(pane.id) {
+                    if !is_web_link(command) || self.web.control.follows(pane.id) {
                         continue;
                     }
                     let Some(title) = window_title(&pane.window) else {
@@ -3157,12 +2885,12 @@ impl Gerdr {
 
     /// Ask herdr which agents run in the session now.
     fn refresh_agents(&mut self) {
-        let Some(herdr) = self.herdr.as_mut() else {
+        let Some(herdr) = self.session.herdr.as_mut() else {
             return;
         };
         match herdr.agent_list() {
             Ok(agents) => {
-                self.agents = agents;
+                self.session.agents = agents;
                 self.notify_agents();
                 self.stage_agents_tick();
             }
@@ -3172,7 +2900,7 @@ impl Gerdr {
 
     /// Have the agents and tabs read again soon, off the event loop.
     fn poke_herdr(&self) {
-        if let Some(poke) = &self.herdr_poke {
+        if let Some(poke) = &self.session.poke {
             let _ = poke.send(());
         }
     }
@@ -3185,6 +2913,7 @@ impl Gerdr {
     /// `done`: both count.
     fn notify_agents(&mut self) {
         let mut watched: Vec<agents::Watched> = self
+            .session
             .agents
             .iter()
             .map(|agent| {
@@ -3205,7 +2934,8 @@ impl Gerdr {
                     status: agent.agent_status,
                     label: agent.label().to_owned(),
                     body: body.join(" · "),
-                    seen: self.host_focused && place.is_some_and(|(w, t)| self.is_visible(w, t)),
+                    seen: self.notices.host_focused
+                        && place.is_some_and(|(w, t)| self.is_visible(w, t)),
                     finished: None,
                 }
             })
@@ -3214,9 +2944,9 @@ impl Gerdr {
         watched.extend(self.t3_watched());
         watched.extend(self.test_watched());
         let news = agents::agent_news(
-            &self.agent_statuses,
+            &self.session.agent_statuses,
             &watched,
-            &mut self.blocked_since,
+            &mut self.session.blocked_since,
             Instant::now(),
             BLOCKED_REMINDER,
         );
@@ -3232,8 +2962,13 @@ impl Gerdr {
             })
             .collect();
         self.agent_since = since;
-        self.agent_statuses = watched.into_iter().map(|a| (a.key, a.status)).collect();
-        if let Some(notifier) = self.notifier.as_mut().filter(|_| self.notify) {
+        self.session.agent_statuses = watched.into_iter().map(|a| (a.key, a.status)).collect();
+        if let Some(notifier) = self
+            .notices
+            .notifier
+            .as_mut()
+            .filter(|_| self.settings.notify)
+        {
             for news in news {
                 notifier.send(&news.key.to_string(), &news.summary, &news.body);
             }
@@ -3264,10 +2999,10 @@ impl Gerdr {
         if token.is_none() && activate::niri_focus() {
             return;
         }
-        if self.activation.is_none() {
-            self.activation = activate::Activation::new(self.backend.window());
+        if self.notices.activation.is_none() {
+            self.notices.activation = activate::Activation::new(self.backend.window());
         }
-        match self.activation.as_mut() {
+        match self.notices.activation.as_mut() {
             Some(activation) => activation.activate(token),
             None => self.backend.window().focus_window(),
         }
@@ -3286,7 +3021,7 @@ impl Gerdr {
         };
         let source = Generic::new(fd, Interest::READ, smithay::reexports::calloop::Mode::Level);
         let inserted = self.loop_handle.insert_source(source, |_, _, state| {
-            let Some(notifier) = state.notifier.as_mut() else {
+            let Some(notifier) = state.notices.notifier.as_mut() else {
                 return Ok(PostAction::Remove);
             };
             match notifier.dispatch() {
@@ -3303,13 +3038,13 @@ impl Gerdr {
                 }
                 Err(()) => {
                     tracing::warn!("session bus went away; no more notifications");
-                    state.notifier = None;
+                    state.notices.notifier = None;
                     Ok(PostAction::Remove)
                 }
             }
         });
         match inserted {
-            Ok(_) => self.notifier = Some(notifier),
+            Ok(_) => self.notices.notifier = Some(notifier),
             Err(err) => tracing::warn!("notifications: {err}"),
         }
     }
@@ -3350,7 +3085,7 @@ impl Gerdr {
         if !self.show_herdr_pane(pane_id) {
             return;
         }
-        if let Some(herdr) = self.herdr.as_mut()
+        if let Some(herdr) = self.session.herdr.as_mut()
             && let Err(err) = herdr.agent_focus(pane_id)
         {
             tracing::debug!("herdr: {err}");
@@ -3401,7 +3136,7 @@ impl Gerdr {
         }
         if panes.is_empty() {
             // Nothing shows it: herdr alone has it.
-            if let Some(herdr) = self.herdr.as_mut()
+            if let Some(herdr) = self.session.herdr.as_mut()
                 && let Err(err) = herdr.pane_close(pane_id)
             {
                 tracing::warn!("herdr: {err}");
@@ -3425,7 +3160,7 @@ impl Gerdr {
                 views.extend(self.cursor_cards(w));
                 views.extend(self.t3_cards(w));
                 views.extend(self.test_cards(ws));
-                if self.needs_you && w != self.active_workspace {
+                if self.settings.needs_you && w != self.active_workspace {
                     for view in &mut views {
                         // Only what is the user's turn, as the inbox counts.
                         let yours = view.status == herdr::AgentStatus::Blocked
@@ -3451,6 +3186,7 @@ impl Gerdr {
                         .position(|t| t.herdr_panes().any(|p| p.pane_id == pane_id))
                 };
                 let mut cards: Vec<_> = self
+                    .session
                     .agents
                     .iter()
                     .filter(|a| a.workspace_id == id)
@@ -3459,7 +3195,8 @@ impl Gerdr {
                 // By tab, keeping herdr's order within one.
                 cards.sort_by_key(|(tab, _)| tab.unwrap_or(usize::MAX));
                 let pane_of = |a: &herdr::AgentInfo| {
-                    self.herdr_tabs
+                    self.session
+                        .tabs
                         .get(&a.tab_id)?
                         .panes
                         .iter()
@@ -3514,7 +3251,7 @@ impl Gerdr {
             .flat_map(Tab::herdr_panes)
             .map(|p| p.pane_id.clone())
             .collect();
-        let Some(herdr) = self.herdr.as_mut() else {
+        let Some(herdr) = self.session.herdr.as_mut() else {
             return;
         };
         // Events replay when the subscription opens: what they name may be gone.
@@ -3901,8 +3638,10 @@ impl Gerdr {
         }
 
         switcher::remember(&dir);
-        self.frecency.touch(&format!("folder:{}", dir.display()));
-        self.frecency.save();
+        self.launcher
+            .frecency
+            .touch(&format!("folder:{}", dir.display()));
+        self.launcher.frecency.save();
         let zed = self.new_pane_id();
         let mut tab = Tab {
             layout: Some(Node::Leaf(zed)),
@@ -3974,7 +3713,7 @@ impl Gerdr {
                     gerdr.spawn(zed, &dir, "zed")?
                 }
             };
-            gerdr.zed_groups.push(pid as i32);
+            gerdr.procs.zed.push(pid as i32);
             Some(pid)
         })
     }
@@ -4068,11 +3807,15 @@ impl Gerdr {
     /// out: a `zed -n` would hand its window to it, to be ended with it.
     /// Waited for until `old_zed_until`.
     fn old_zed_running(&mut self) -> bool {
-        self.old_zed.retain(|g| group_alive(*g));
-        if self.old_zed_until.is_some_and(|t| Instant::now() >= t) {
-            self.old_zed.clear();
+        self.procs.old_zed.retain(|g| group_alive(*g));
+        if self
+            .procs
+            .old_zed_until
+            .is_some_and(|t| Instant::now() >= t)
+        {
+            self.procs.old_zed.clear();
         }
-        !self.old_zed.is_empty()
+        !self.procs.old_zed.is_empty()
     }
 
     /// Ask the user for a folder (on the host) to open as a new workspace of `kind`.
@@ -4103,8 +3846,8 @@ impl Gerdr {
     /// open for the same purpose already stays; one open for another gives
     /// way, so the folder picked goes where it was last asked for.
     fn pick_folder(&mut self, title: &str, start: Option<PathBuf>, purpose: PickFor) {
-        match self.picker.take() {
-            Some(open) if open.1 == purpose => return self.picker = Some(open),
+        match self.overlays.picker.take() {
+            Some(open) if open.1 == purpose => return self.overlays.picker = Some(open),
             Some((mut other, _)) => {
                 let _ = other.kill();
                 let _ = other.wait();
@@ -4122,7 +3865,7 @@ impl Gerdr {
         match cmd.spawn() {
             Ok(child) => {
                 problems::clear("zenity");
-                self.picker = Some((child, purpose));
+                self.overlays.picker = Some((child, purpose));
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => self.report_problem(
                 "zenity",
@@ -4137,20 +3880,20 @@ impl Gerdr {
     }
 
     fn poll_picker(&mut self) {
-        let Some((picker, _)) = &mut self.picker else {
+        let Some((picker, _)) = &mut self.overlays.picker else {
             return;
         };
         let status = match picker.try_wait() {
             Ok(None) => return,
             Ok(Some(status)) => status,
             Err(_) => {
-                self.picker = None;
+                self.overlays.picker = None;
                 return;
             }
         };
         // Already reaped by `try_wait` above.
         #[allow(clippy::zombie_processes)]
-        let (mut picker, kind) = self.picker.take().expect("looked at above");
+        let (mut picker, kind) = self.overlays.picker.take().expect("looked at above");
         let mut out = String::new();
         if let Some(stdout) = picker.stdout.as_mut() {
             let _ = stdout.read_to_string(&mut out);
@@ -4207,7 +3950,7 @@ impl Gerdr {
     pub fn close_workspace_now(&mut self, idx: usize) {
         if let Some(ws) = self.workspaces.get(idx) {
             // Closed on purpose: once gone, it doesn't come back.
-            self.closing_records.insert(ws.record.clone());
+            self.session.closing_records.insert(ws.record.clone());
             let tabs: Vec<_> = ws.tabs.iter().map(Self::closing).collect();
             tabs.into_iter().for_each(|panes| self.close_panes(panes));
             for t in 0..self.workspaces[idx].tabs.len() {
@@ -4253,7 +3996,7 @@ impl Gerdr {
     /// other windows to close.
     fn close_panes(&mut self, panes: Vec<(Option<Window>, Option<herdr::PaneInfo>)>) {
         for (window, pane) in panes {
-            let closed = match (self.herdr.as_mut(), &pane) {
+            let closed = match (self.session.herdr.as_mut(), &pane) {
                 (Some(herdr), Some(pane)) => herdr
                     .pane_close(&pane.pane_id)
                     .inspect_err(|err| tracing::warn!("herdr: {err}"))
@@ -4511,7 +4254,7 @@ impl Gerdr {
     /// The keys pressing `action` after the prefix, as the help panel
     /// says them ("Ctrl+B Shift+Q"), if any do.
     pub fn action_keys(&self, action: Action) -> Option<String> {
-        let help = self.keymap.help();
+        let help = self.key_state.keymap.help();
         help.rows
             .iter()
             .zip(&help.presses)
@@ -4532,9 +4275,9 @@ impl Gerdr {
             .open_overlays()
             .find(|o| o.takes_keys() && *o != Overlay::ContextMenu);
         let Some(over) = over else {
-            return self.keymap.help();
+            return self.key_state.keymap.help();
         };
-        Arc::new(self.keymap.help_at(keys::Reach {
+        Arc::new(self.key_state.keymap.help_at(keys::Reach {
             works: &|action| prefix_works(over, action),
             to_app: false,
         }))
@@ -4542,13 +4285,13 @@ impl Gerdr {
 
     /// What `pos` is over in the help panel, while it shows.
     pub fn help_hit(&self, pos: Point<f64, Logical>) -> Option<HelpHit> {
-        if !(self.prefix_armed || self.help_pinned) {
+        if !(self.key_state.prefix_armed || self.hover.help_pinned) {
             return None;
         }
         let help = self.shown_help();
         let (area, scale) = (self.content_rect(), self.scale());
         self.chrome
-            .help_hit(&help, self.help_pinned, area, scale, pos)
+            .help_hit(&help, self.hover.help_pinned, area, scale, pos)
     }
 
     /// A click at `pos` on what `press` says in the help panel: as its
@@ -4556,10 +4299,10 @@ impl Gerdr {
     /// is under the pointer is found again, as the panel may be gone or
     /// covered.
     pub fn help_press(&mut self, press: HelpPress, pos: Point<f64, Logical>) {
-        self.prefix_armed = false;
+        self.key_state.prefix_armed = false;
         match press {
             HelpPress::Action(action) => self.run_action(action),
-            HelpPress::Close => self.help_pinned = false,
+            HelpPress::Close => self.hover.help_pinned = false,
             HelpPress::NotHere => {}
         }
         let time = self.start_time.elapsed().as_millis() as u32;
@@ -4610,7 +4353,7 @@ impl Gerdr {
             }
             Action::ToggleTheme => self.toggle_theme(),
             Action::ReloadProjects => self.reload_projects(),
-            Action::Shortcuts => self.help_pinned = !self.help_pinned,
+            Action::Shortcuts => self.hover.help_pinned = !self.hover.help_pinned,
             Action::Switcher => self.open_switcher(),
             Action::Run => self.open_run_prompt(launch::Place::Split),
             Action::RunTab => self.open_run_prompt(launch::Place::Tab),
@@ -4738,7 +4481,7 @@ impl Gerdr {
     /// arrow keys and Enter to go on from.
     fn open_menu_by_key(&mut self, spec: MenuSpec) {
         self.open_menu(spec);
-        if let Some(menu) = self.context_menu.as_mut() {
+        if let Some(menu) = self.overlays.context_menu.as_mut() {
             menu.step_to_end(false);
         }
     }
@@ -4867,7 +4610,7 @@ impl Gerdr {
     /// Flip between the dark and the light look. Following the system's
     /// stops then, and the toast says so.
     pub fn toggle_theme(&mut self) {
-        let was_system = self.theme_mode == ThemeMode::System;
+        let was_system = self.settings.theme_mode == ThemeMode::System;
         self.set_theme_mode(self.theme().toggled().into());
         if was_system && let Some(toast) = self.toasts.back_mut() {
             toast
@@ -4879,7 +4622,7 @@ impl Gerdr {
     /// Use `mode`, remembered for the next start.
     pub fn set_theme_mode(&mut self, mode: ThemeMode) {
         let before = self.theme();
-        self.theme_mode = mode;
+        self.settings.theme_mode = mode;
         if let Err(err) = projects::write_atomic(&theme_file(), mode.name().as_bytes()) {
             tracing::warn!("saving theme: {err}");
         }
@@ -4889,7 +4632,7 @@ impl Gerdr {
     /// The system's preference came in (see `system_theme`): `dark` or not.
     pub fn system_theme_changed(&mut self, dark: bool) {
         let before = self.theme();
-        self.system_dark = dark;
+        self.settings.system_dark = dark;
         self.theme_changed(before);
     }
 
@@ -4975,16 +4718,18 @@ impl Gerdr {
         let mut exited = Vec::new();
         // Of those, the ones that went wrong.
         let mut failed = Vec::new();
-        self.children.retain_mut(|child| match child.try_wait() {
-            Ok(None) => true,
-            status => {
-                exited.push(child.id());
-                if !status.is_ok_and(|status| status.is_some_and(|s| s.success())) {
-                    failed.push(child.id());
+        self.procs
+            .children
+            .retain_mut(|child| match child.try_wait() {
+                Ok(None) => true,
+                status => {
+                    exited.push(child.id());
+                    if !status.is_ok_and(|status| status.is_some_and(|s| s.success())) {
+                        failed.push(child.id());
+                    }
+                    false
                 }
-                false
-            }
-        });
+            });
         self.kept_client_exited(&exited);
         self.t3_child_exited(&exited);
         let now = Instant::now();
@@ -5076,7 +4821,7 @@ impl Gerdr {
                 dropped = true;
             }
         }
-        if dropped || stopped || !self.old_zed.is_empty() {
+        if dropped || stopped || !self.procs.old_zed.is_empty() {
             // The next queued windows, and the Zed waiting for the old one
             // to exit.
             dropped |= self.launch_next_zed();
@@ -5113,7 +4858,7 @@ impl Gerdr {
                 "{name} closed without a window; it may be running already"
             ));
         }
-        self.retired_groups.retain(|g| group_alive(*g));
+        self.procs.retired.retain(|g| group_alive(*g));
         self.poll_picker();
     }
 
@@ -5213,7 +4958,7 @@ impl Gerdr {
     /// End `pid`, started for a window that didn't show up: a `zed -n`
     /// would hand its window to the stuck editor.
     fn end_expected(&mut self, pid: u32) {
-        self.zed_groups.retain(|g| *g != pid as i32);
+        self.procs.zed.retain(|g| *g != pid as i32);
         // A `zed` that started the editor leads its group, and the
         // editor may show other workspaces' windows by now: then only
         // the `zed` itself is ended, not the windows with it.
@@ -5338,7 +5083,7 @@ impl Gerdr {
                     .any(|g| *g == *pid as i32 || *g == group_of(*pid))
             })
         };
-        if claimed.is_none() && in_groups(&self.retired_groups) {
+        if claimed.is_none() && in_groups(&self.procs.retired) {
             if let Some(toplevel) = window.toplevel() {
                 toplevel.send_close();
             }
@@ -5350,7 +5095,7 @@ impl Gerdr {
         let Some((w, t, e)) = found else {
             // Not one we started: opened from a shell, maybe of a project
             // not shown, or by what gerdr started (a second Zed window).
-            let stray = !in_groups(&self.process_groups);
+            let stray = !in_groups(&self.procs.groups);
             if stray && let Some(owner) = self.stray_owner(&lineage) {
                 self.held.entry(owner).or_default().push(window);
                 return;
@@ -5376,7 +5121,7 @@ impl Gerdr {
         let expected = &self.workspaces[w].tabs[t].expected[e];
         let since = booting.unwrap_or_else(Instant::now);
         if expected.app_id.contains(web_control::EXTENSION_ID)
-            && !self.web_control.follows(expected.pane)
+            && !self.web.control.follows(expected.pane)
             && since.elapsed() < WEB_PAGE_WAIT
         {
             self.booting.push((window, since));
@@ -5529,7 +5274,7 @@ impl Gerdr {
         let area = self.content_rect();
         // While a divider moves, clients may skip sizes between frames (Zed
         // otherwise rebuilds its swapchain for every one and falls far behind).
-        let resizing = self.drag.is_some();
+        let resizing = self.mouse.drag.is_some();
         let mut panes = Vec::new();
         for (w, ws) in self.workspaces.iter().enumerate() {
             for (t, tab) in ws.tabs.iter().enumerate() {
@@ -5746,10 +5491,11 @@ impl Gerdr {
         pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
         let over_menu = self
+            .overlays
             .context_menu
             .as_ref()
             .is_some_and(|menu| menu.layout().0.to_f64().contains(pos));
-        let reordering = self.reorder.is_some_and(|r| r.moving);
+        let reordering = self.mouse.reorder.is_some_and(|r| r.moving);
         // These take every click.
         if self.grabbing_overlay().is_some() {
             return None;
@@ -5761,7 +5507,7 @@ impl Gerdr {
         if self.on_footer(pos) {
             return None;
         }
-        if over_menu || self.drag.is_some() || reordering || self.divider_at(pos).is_some() {
+        if over_menu || self.mouse.drag.is_some() || reordering || self.divider_at(pos).is_some() {
             return None;
         }
         // The help panel and the unzoom button take the clicks on them.
@@ -5816,9 +5562,13 @@ impl Gerdr {
                         data.title.clone().or_else(|| data.app_id.clone())
                     })
                 });
-                let detail = tab.herdr_tab_id().and_then(|id| self.herdr_tabs.get(id));
-                let mut view =
-                    TabView::derive(tab.label.as_deref(), title.as_deref(), detail, &self.agents);
+                let detail = tab.herdr_tab_id().and_then(|id| self.session.tabs.get(id));
+                let mut view = TabView::derive(
+                    tab.label.as_deref(),
+                    title.as_deref(),
+                    detail,
+                    &self.session.agents,
+                );
                 let record = tab.restart_target().and_then(|p| self.pane_record(p));
                 view.restart = record.and_then(|r| {
                     let command = r.command.as_ref()?;
@@ -5856,10 +5606,15 @@ impl Gerdr {
                     .count();
                 // Not under what covers the sidebar, where it cannot be
                 // clicked.
-                let strip_here = self.agent_strip == Some(w)
-                    && self.agent_strip_record.as_deref() == Some(ws.record.as_str());
+                let strip_here = self.hover.strip == Some(w)
+                    && self.hover.strip_record.as_deref() == Some(ws.record.as_str());
                 if strip_here && !self.sidebar_covered() {
-                    view.picks = self.cli_agents.iter().map(|agent| agent.icon).collect();
+                    view.picks = self
+                        .launcher
+                        .cli_agents
+                        .iter()
+                        .map(|agent| agent.icon)
+                        .collect();
                 }
                 view.more_agents = self
                     .cursor_history(w)
@@ -5869,14 +5624,15 @@ impl Gerdr {
                     .collect();
                 // Cursor's chats under it count as its tabs' agents do.
                 view.status = self
-                    .cursor_chats
+                    .cursor
+                    .chats
                     .iter()
                     .filter(|chat| self.cursor_chat_place(chat) == Some(w))
                     .map(|chat| chat.status)
                     .chain(self.t3_statuses(w))
                     .chain(view.status)
                     .max_by_key(|s| chrome::urgency(*s));
-                if let Some(git) = self.git.get(&ws.dir) {
+                if let Some(git) = self.git.status.get(&ws.dir) {
                     // Without herdr the panes don't report a branch: take the folder's.
                     view.branch = view.branch.or_else(|| {
                         Some(git.branch.clone().unwrap_or_else(|| "detached HEAD".into()))
@@ -5920,16 +5676,16 @@ impl Gerdr {
             return self.refuse_open(id);
         }
         if self.project.as_deref() != Some(id)
-            && !self.stopping.contains(id)
+            && !self.life.stopping.contains(id)
             && let Some(project) = self.projects.project(id)
         {
             let name = project.name.clone();
             let cold = || {
                 !Hook::BeforeStart.line(project).is_empty() && !herdr::is_running(&project.session)
             };
-            let still_starting = self.starting.contains(id);
+            let still_starting = self.life.starting.contains(id);
             if still_starting || cold() {
-                self.pending_enter = Some(PendingEnter {
+                self.life.pending_enter = Some(PendingEnter {
                     id: id.to_owned(),
                     pick,
                     folders,
@@ -5941,7 +5697,7 @@ impl Gerdr {
                     return self.show_notice(format!("Starting {name}…"));
                 }
                 // They couldn't run: start it anyway.
-                let pending = self.pending_enter.take();
+                let pending = self.life.pending_enter.take();
                 return self.enter_project_now(
                     id,
                     pick,
@@ -5958,7 +5714,7 @@ impl Gerdr {
     /// keeps running.
     fn enter_project_now(&mut self, id: &str, pick: bool, folders: Vec<PathBuf>) {
         // Another project was asked for since.
-        self.pending_enter = None;
+        self.life.pending_enter = None;
         if !self.show_project(id, pick) {
             return;
         }
@@ -5971,7 +5727,7 @@ impl Gerdr {
     /// folder to open in it. Whether it is shown now.
     fn show_project(&mut self, id: &str, pick: bool) -> bool {
         if self.project.as_deref() == Some(id) {
-            self.welcome = None;
+            self.overlays.welcome = None;
             return true;
         }
         let Some((session, name)) = self
@@ -5983,7 +5739,7 @@ impl Gerdr {
             return false;
         };
         // Its server is going down: attaching now would lose it.
-        if self.stopping.contains(id) {
+        if self.life.stopping.contains(id) {
             self.show_notice(format!("{name} is still stopping"));
             return false;
         }
@@ -5993,8 +5749,9 @@ impl Gerdr {
         }
         // Open in another gerdr as well (`--attach`): a Zed and VS Codes of
         // their own here.
-        let alongside = self.attach
+        let alongside = self.life.attach
             && self
+                .life
                 .project_lock
                 .as_ref()
                 .is_none_or(|lock| lock.id() != id)
@@ -6016,18 +5773,18 @@ impl Gerdr {
         };
         let left = self.project.clone();
         self.detach_project();
-        self.project_lock = lock;
+        self.life.project_lock = lock;
         let lease_dir = feature::lease::lock_dir(&projects::data_dir());
-        self.lease_lock = project_lock::ProjectLock::take(&lease_dir, id)
+        self.life.lease_lock = project_lock::ProjectLock::take(&lease_dir, id)
             .inspect_err(|err| tracing::warn!("saying project {id} is open: {err}"))
             .ok();
-        self.welcome = None;
-        self.quit = None;
-        self.restart = None;
-        self.checkout = None;
-        self.confirm = None;
-        self.tasks_panel = None;
-        self.machines_panel = None;
+        self.overlays.welcome = None;
+        self.overlays.quit = None;
+        self.overlays.restart = None;
+        self.overlays.checkout = None;
+        self.overlays.confirm = None;
+        self.overlays.tasks_panel = None;
+        self.overlays.machines_panel = None;
         self.features.dialog = None;
         self.features.panel = None;
         self.project = Some(id.to_owned());
@@ -6048,13 +5805,13 @@ impl Gerdr {
             project.state = RunState::Kept;
         }
         self.projects.save();
-        self.frecency.touch(&format!("project:{id}"));
+        self.launcher.frecency.touch(&format!("project:{id}"));
         self.connect_herdr(&session);
         // Without herdr, what comes back without it still does.
-        if self.herdr.is_none() {
+        if self.session.herdr.is_none() {
             self.restore_saved(true);
         }
-        self.running.insert(id.to_owned(), true);
+        self.life.running.insert(id.to_owned(), true);
         self.place_held(id);
         self.show_active();
         self.show_last_tab();
@@ -6062,6 +5819,7 @@ impl Gerdr {
         if let Some(left) = left {
             // Asked for when switching (see `ask_switch`).
             let stops = self
+                .life
                 .stop_left
                 .take()
                 .filter(|(stop, _)| *stop == left)
@@ -6069,19 +5827,19 @@ impl Gerdr {
                 .unwrap_or_default();
             let name = |id: &str| self.projects.project(id).map(|p| p.name.clone());
             if let (Some(new), Some(old)) = (name(id), name(&left)) {
-                let created = self.just_created.as_deref() == Some(id);
+                let created = self.life.just_created.as_deref() == Some(id);
                 let notice = if stops.session {
                     projects::stop_notice(&new, &old, created)
                 } else {
                     projects::switch_notice(&new, &old, created)
                 };
                 self.show_success(notice);
-                self.just_created = None;
+                self.life.just_created = None;
             }
             if stops.any() {
                 self.stop_project_now(&left, stops);
             }
-            self.previous_project = Some(left);
+            self.life.previous_project = Some(left);
         }
         if pick && self.workspaces.is_empty() {
             self.pick_workspace(WorkspaceKind::Project);
@@ -6092,10 +5850,11 @@ impl Gerdr {
     /// Whether project `id` is open in another gerdr, and so not to be
     /// shown here: never when started with `--attach`.
     fn open_elsewhere(&self, id: &str) -> bool {
-        !self.attach
-            && self.attach_once.as_deref() != Some(id)
+        !self.life.attach
+            && self.life.attach_once.as_deref() != Some(id)
             && self.project.as_deref() != Some(id)
             && self
+                .life
                 .project_lock
                 .as_ref()
                 .is_none_or(|lock| lock.id() != id)
@@ -6105,7 +5864,7 @@ impl Gerdr {
     /// Show project `id` here although another gerdr has it open, as
     /// `--attach` does for every project: the refusal's "Join here".
     pub fn attach_project(&mut self, id: &str) {
-        self.attach_once = Some(id.to_owned());
+        self.life.attach_once = Some(id.to_owned());
         self.switch_project(id);
     }
 
@@ -6122,10 +5881,10 @@ impl Gerdr {
             let text = format!("{name} is open in another gerdr");
             return self.toast_with(text, Level::Warning, Some(join));
         }
-        if self.welcome.is_none() {
+        if self.overlays.welcome.is_none() {
             self.open_welcome(false);
         }
-        if let Some(welcome) = self.welcome.as_mut() {
+        if let Some(welcome) = self.overlays.welcome.as_mut() {
             welcome.refused = Some(why);
         }
     }
@@ -6141,11 +5900,11 @@ impl Gerdr {
             return self.toast_with(text, Level::Error, Some(open_log));
         }
         // Nothing shown keeps no lock, as one kept over a reload would.
-        self.project_lock = None;
-        if self.welcome.is_none() {
+        self.life.project_lock = None;
+        if self.overlays.welcome.is_none() {
             self.open_welcome(false);
         }
-        if let Some(welcome) = self.welcome.as_mut() {
+        if let Some(welcome) = self.overlays.welcome.as_mut() {
             welcome.refused = Some(text);
         }
     }
@@ -6161,11 +5920,11 @@ impl Gerdr {
         if self.record_tabs() | kept {
             self.projects.save();
         }
-        for token in std::mem::take(&mut self.herdr_sources) {
+        for token in std::mem::take(&mut self.session.sources) {
             self.loop_handle.remove(token);
         }
-        self.herdr_poke = None;
-        self.project_lock = None;
+        self.session.poke = None;
+        self.life.project_lock = None;
         let project = self.project.clone().unwrap_or_default();
         let panes: Vec<Pane> = self
             .workspaces
@@ -6188,7 +5947,7 @@ impl Gerdr {
         // Its apps kept running stay on their server (see `keep`).
         self.detach_keeper();
         self.retire_children();
-        if let Some((mut picker, _)) = self.picker.take() {
+        if let Some((mut picker, _)) = self.overlays.picker.take() {
             let _ = picker.kill();
             let _ = picker.wait();
         }
@@ -6196,38 +5955,25 @@ impl Gerdr {
         for window in windows {
             self.space.unmap_elem(&window);
         }
-        self.agents.clear();
-        self.blocked_since.clear();
-        self.agent_statuses.clear();
-        self.herdr_tabs.clear();
-        self.git.clear();
-        self.idle_since.clear();
-        self.tabs_changed = None;
-        self.pane_leaders.clear();
-        self.last_commands.clear();
-        self.pane_jobs.clear();
-        self.pane_bar_hover = None;
-        self.closed_workspaces.clear();
-        self.gone_since.clear();
-        self.closing_records.clear();
-        self.restored_at = None;
-        self.replay_pending.clear();
-        self.herdr = None;
+        // The rest of its herdr session goes (`sources` and `poke` went above).
+        self.session = state::Session::default();
+        self.git.status.clear();
+        self.hover.pane_bar = None;
         self.active_workspace = 0;
-        self.drag = None;
-        self.reorder = None;
-        self.pane_drop = None;
-        self.context_menu = None;
-        self.tooltip.hide();
-        self.rename = None;
+        self.mouse.drag = None;
+        self.mouse.reorder = None;
+        self.mouse.pane_drop = None;
+        self.overlays.context_menu = None;
+        self.hover.tooltip.hide();
+        self.overlays.rename = None;
         self.stop_key_repeat();
-        self.switcher = None;
-        self.project_menu = None;
+        self.overlays.switcher = None;
+        self.overlays.project_menu = None;
         self.worktrees.close();
         self.repos.close();
         self.inbox.close();
-        self.scrollback = None;
-        self.header_hover = false;
+        self.overlays.scrollback = None;
+        self.hover.header = false;
         self.project = None;
         self.focus(None);
     }
@@ -6238,11 +5984,11 @@ impl Gerdr {
     /// windows that still show up are closed (see `place`), and the next
     /// Zed waits for the old one to exit (see `launch_next_zed`).
     fn retire_children(&mut self) {
-        let groups = std::mem::take(&mut self.process_groups);
-        self.retired_groups.extend(&groups);
+        let groups = std::mem::take(&mut self.procs.groups);
+        self.procs.retired.extend(&groups);
         self.retire_shared();
-        self.old_zed.append(&mut self.zed_groups);
-        self.old_zed_until = Some(Instant::now() + CLOSE_GRACE + ZED_EXIT_WAIT);
+        self.procs.old_zed.append(&mut self.procs.zed);
+        self.procs.old_zed_until = Some(Instant::now() + CLOSE_GRACE + ZED_EXIT_WAIT);
         let end = move |_, _: &mut (), _: &mut Gerdr| {
             for &group in &groups {
                 // A process group gerdr started.
@@ -6261,13 +6007,13 @@ impl Gerdr {
     /// End every process group gerdr started, and those retired still
     /// waiting to be ended.
     fn kill_children(&mut self) {
-        let groups = std::mem::take(&mut self.process_groups);
+        let groups = std::mem::take(&mut self.procs.groups);
         self.retire_shared();
-        for &group in groups.iter().chain(&self.retired_groups) {
+        for &group in groups.iter().chain(&self.procs.retired) {
             // A process group gerdr started.
             process::kill_group(group, libc::SIGTERM);
         }
-        self.retired_groups.extend(groups);
+        self.procs.retired.extend(groups);
     }
 
     /// Ask the windows of the project shown to close, and give them
@@ -6375,7 +6121,7 @@ impl Gerdr {
     /// of `kind`, if given.
     fn enter_project_with(&mut self, id: &str, folder: Option<PathBuf>, kind: WorkspaceKind) {
         // The switch's notice says it was made, if there is one.
-        self.just_created = Some(id.to_owned());
+        self.life.just_created = Some(id.to_owned());
         self.enter_project(id, false, Vec::new());
         match (folder, kind) {
             (Some(folder), WorkspaceKind::Project) => self.open_project(folder),
@@ -6384,7 +6130,7 @@ impl Gerdr {
             (None, _) => {}
         }
         // No switch said so: nothing was shown before.
-        if self.just_created.take().is_some()
+        if self.life.just_created.take().is_some()
             && let Some(name) = self.projects.project(id).map(|p| p.name.clone())
         {
             self.show_success(format!("Created {name}"));
@@ -6436,17 +6182,17 @@ impl Gerdr {
             self.stop_kept(id);
         }
         // Only its apps: the project runs on.
-        if !stops.session || !self.stopping.insert(id.to_owned()) {
-            if self.forget_after_stop.remove(id) {
+        if !stops.session || !self.life.stopping.insert(id.to_owned()) {
+            if self.life.forget_after_stop.remove(id) {
                 self.forget_project_now(id);
-            } else if let Some(new) = self.id_after_stop.remove(id) {
+            } else if let Some(new) = self.life.id_after_stop.remove(id) {
                 self.change_project_id_now(id, &new);
             }
             return;
         }
         // Neither running nor stopped until it answers.
-        self.running.remove(id);
-        if self.stop_status.is_none() {
+        self.life.running.remove(id);
+        if self.life.stop_status.is_none() {
             let (tx, rx) = channel::channel::<(String, bool)>();
             let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
                 if let channel::Event::Msg((id, stopped)) = event {
@@ -6454,15 +6200,15 @@ impl Gerdr {
                 }
             });
             match inserted {
-                Ok(_) => self.stop_status = Some(tx),
+                Ok(_) => self.life.stop_status = Some(tx),
                 Err(err) => {
-                    self.stopping.remove(id);
+                    self.life.stopping.remove(id);
                     return tracing::warn!("stopping project {id}: {err}");
                 }
             }
         }
-        let Some(tx) = self.stop_status.clone() else {
-            self.stopping.remove(id);
+        let Some(tx) = self.life.stop_status.clone() else {
+            self.life.stopping.remove(id);
             return;
         };
         let id = id.to_owned();
@@ -6481,9 +6227,9 @@ impl Gerdr {
     /// Project `id`'s session was asked to stop, and `stopped` says whether
     /// it did: then it counts as stopped, and the windows held for it close.
     fn project_stopped(&mut self, id: &str, stopped: bool) {
-        self.stopping.remove(id);
-        let forget = self.forget_after_stop.remove(id);
-        let new_id = self.id_after_stop.remove(id);
+        self.life.stopping.remove(id);
+        let forget = self.life.forget_after_stop.remove(id);
+        let new_id = self.life.id_after_stop.remove(id);
         let Some(name) = self.projects.project(id).map(|p| p.name.clone()) else {
             return;
         };
@@ -6497,7 +6243,7 @@ impl Gerdr {
             };
             return self.show_error(format!("Couldn't stop {name}{kept}"));
         }
-        self.running.insert(id.to_owned(), false);
+        self.life.running.insert(id.to_owned(), false);
         if let Some(project) = self.projects.project_mut(id) {
             project.state = RunState::Stopped;
         }
@@ -6522,7 +6268,7 @@ impl Gerdr {
 
     /// Show the project shown before this one, if it is still there.
     pub fn switch_to_last_project(&mut self) {
-        let Some(id) = self.previous_project.clone() else {
+        let Some(id) = self.life.previous_project.clone() else {
             return;
         };
         if self.projects.project(&id).is_some() {
@@ -6541,13 +6287,13 @@ impl Gerdr {
         if self.projects.last_active.as_deref() == Some(id) {
             self.projects.last_active = None;
         }
-        if self.previous_project.as_deref() == Some(id) {
-            self.previous_project = None;
+        if self.life.previous_project.as_deref() == Some(id) {
+            self.life.previous_project = None;
         }
         self.projects.save();
         self.refresh_project_menu();
         let rows = self.project_rows();
-        if let Some(welcome) = self.welcome.as_mut() {
+        if let Some(welcome) = self.overlays.welcome.as_mut() {
             welcome.set_projects(rows);
         }
     }
@@ -6621,7 +6367,7 @@ impl Gerdr {
         let size = self.output_size();
         self.projects.window_size = Some((size.w, size.h));
         self.projects.sidebar_width = Some(self.sidebar_width);
-        self.projects.dock_share = Some(self.previews.share);
+        self.projects.dock_share = Some(self.web.previews.share);
         self.keep_nav(true);
         self.projects.save();
         self.close_cursor_socket();
@@ -6639,7 +6385,7 @@ impl Gerdr {
         else {
             return false;
         };
-        let stopped = match self.herdr.as_mut() {
+        let stopped = match self.session.herdr.as_mut() {
             Some(herdr) => herdr.stop(),
             None if herdr::is_running(&session) => {
                 herdr::Herdr::on_socket(herdr::socket_path(&session)).stop()
@@ -6729,11 +6475,11 @@ impl Gerdr {
             return false;
         };
         let line = hook.line(project).to_owned();
-        if line.is_empty() || (hook == Hook::BeforeStart && self.starting.contains(id)) {
+        if line.is_empty() || (hook == Hook::BeforeStart && self.life.starting.contains(id)) {
             return false;
         }
         let dir = hooks::project_dir(project);
-        if self.hook_status.is_none() {
+        if self.life.hook_status.is_none() {
             let (tx, rx) = channel::channel::<hooks::Done>();
             let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
                 if let channel::Event::Msg((id, hook, result)) = event {
@@ -6741,18 +6487,18 @@ impl Gerdr {
                 }
             });
             match inserted {
-                Ok(_) => self.hook_status = Some(tx),
+                Ok(_) => self.life.hook_status = Some(tx),
                 Err(err) => {
                     tracing::warn!("running project {id}'s {}: {err}", hook.label());
                     return false;
                 }
             }
         }
-        let Some(tx) = self.hook_status.clone() else {
+        let Some(tx) = self.life.hook_status.clone() else {
             return false;
         };
         if hook == Hook::BeforeStart {
-            self.starting.insert(id.to_owned());
+            self.life.starting.insert(id.to_owned());
         }
         hooks::spawn(id.to_owned(), hook, line, dir, tx);
         true
@@ -6767,7 +6513,7 @@ impl Gerdr {
         let name = project.name.clone();
         if Hook::BeforeStart.line(project).is_empty() {
             self.show_notice(format!("{name} has no start commands"));
-        } else if self.starting.contains(id) {
+        } else if self.life.starting.contains(id) {
             self.show_notice(format!("{name}'s start commands are running"));
         } else if self.run_hook(id, Hook::BeforeStart) {
             self.show_notice(format!("Running {name}'s start commands…"));
@@ -6779,9 +6525,9 @@ impl Gerdr {
     fn hook_done(&mut self, id: &str, hook: Hook, result: Result<(), String>) {
         let mut entered = false;
         if hook == Hook::BeforeStart {
-            self.starting.remove(id);
-            if self.pending_enter.as_ref().is_some_and(|p| p.id == id)
-                && let Some(PendingEnter { id, pick, folders }) = self.pending_enter.take()
+            self.life.starting.remove(id);
+            if self.life.pending_enter.as_ref().is_some_and(|p| p.id == id)
+                && let Some(PendingEnter { id, pick, folders }) = self.life.pending_enter.take()
             {
                 self.enter_project_now(&id, pick, folders);
                 entered = true;
@@ -6806,7 +6552,7 @@ impl Gerdr {
     fn chrome_view(&mut self) -> ChromeView {
         let now = Instant::now();
         self.tick_scrolls(now);
-        self.tooltip.tick(now);
+        self.hover.tooltip.tick(now);
         self.expire_toasts(now);
         self.t3_seen();
         let mut doc_tab = self.sync_doc_tab();
@@ -6858,17 +6604,18 @@ impl Gerdr {
         let tasks = self.tasks();
         ChromeView {
             now,
-            pointer: self.pointer,
-            help_pinned: self.help_pinned,
+            pointer: self.mouse.pos,
+            help_pinned: self.hover.help_pinned,
             help_hover: self
-                .help_hover
-                .filter(|_| self.prefix_armed || self.help_pinned),
+                .hover
+                .help
+                .filter(|_| self.key_state.prefix_armed || self.hover.help_pinned),
             sidebar: chrome::SidebarView {
                 workspaces,
                 agents,
                 active,
                 project,
-                header_lit: self.header_hover || self.project_menu.is_some(),
+                header_lit: self.hover.header || self.overlays.project_menu.is_some(),
                 features: self.feature_rows(),
                 state: sidebar_state,
             },
@@ -6877,10 +6624,11 @@ impl Gerdr {
             focused_pane,
             pane_drop: self.pane_drop_rect(),
             placeholders,
-            context_menu: self.context_menu.as_ref().map(ContextMenu::view),
-            tooltip: self.tooltip.view(),
+            context_menu: self.overlays.context_menu.as_ref().map(ContextMenu::view),
+            tooltip: self.hover.tooltip.view(),
             switcher: self.switcher_view(),
-            prefix: (self.prefix_armed || self.help_pinned).then(|| self.shown_help()),
+            prefix: (self.key_state.prefix_armed || self.hover.help_pinned)
+                .then(|| self.shown_help()),
             welcome: self.welcome_view(),
             quit: self.quit_view(),
             restart: self.restart_view(),
@@ -6911,7 +6659,7 @@ impl Gerdr {
             machines: self.machines_panel_view(),
             unzoom: self.unzoom_button().filter(|_| !flat).map(|(_, rect)| rect),
             theme: self.theme(),
-            density: self.density,
+            density: self.settings.density,
             sidebar_width: self.sidebar_width,
             size: self.output_size(),
             repos_rect: self.repos_rect(),
@@ -7235,66 +6983,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         workspaces: Vec::new(),
         active_workspace: 0,
         chrome: Chrome::new(),
-        theme_mode: start_theme(ui.theme),
-        system_dark: true,
-        density: ui.density,
-        needs_you: ui.needs_you,
-        notify: notifications.enabled,
-        live_config_reload: terminal.live_config_reload,
         inotify: inotify_limit::Watch::default(),
-        settings_modified: config::modified(),
         sidebar_width: store
             .sidebar_width
             .unwrap_or(SIDEBAR_WIDTH)
             .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH),
-        show_footer: ui.footer,
-        footer_hover: None,
-        tasks_panel: None,
-        machines_panel: None,
         machines: machines::Machines::default(),
         features: features::Features::default(),
         code_reviews: Default::default(),
-        kept: Vec::new(),
         t3_started: None,
-        t3_log: false,
         next_pane: 0,
-        drag: None,
-        reorder: None,
-        pane_drop: None,
-        chrome_cursor: CursorIcon::Default,
-        suppressed_keys: Vec::new(),
-        prefix_armed: false,
-        help_pinned: false,
-        help_hover: None,
-        keymap,
-        pointer: (0.0, 0.0).into(),
-        last_press: None,
-        rename: None,
-        tab_hover: anim::Hover::default(),
-        sidebar_hover: anim::Hover::default(),
         sidebar_scroll: scroll::Scroll::default(),
-        scrolling: false,
         sidebar_shown: None,
-        frecency: Frecency::load(),
         pending_place: HashMap::new(),
         socket_name: socket_name.clone(),
         instance_dir,
         zed_data,
-        children: Vec::new(),
-        herdr: None,
-        agents: Vec::new(),
-        herdr_tabs: HashMap::new(),
         test_runs: Vec::new(),
-        git: HashMap::new(),
-        ci: HashMap::new(),
-        ci_asked: Vec::new(),
-        ci_states: HashMap::new(),
-        ci_pending: false,
-        ci_again: false,
-        ci_sender: None,
-        git_pending: false,
-        git_again: false,
-        git_read: None,
         worktrees: worktrees::Worktrees::default(),
         repos: repos::Repos {
             same_branches: git_config.same_branches,
@@ -7305,114 +7010,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             linear,
             ..Default::default()
         },
-        web_pending: false,
-        web_control: web_control::WebControl::default(),
-        previews: md_preview::Previews::default(),
-        notifier: None,
-        activation: None,
-        blocked_since: HashMap::new(),
-        agent_statuses: HashMap::new(),
         agent_since: HashMap::new(),
-        cursor: Default::default(),
-        cursor_chats: Vec::new(),
-        cursor_idle: Vec::new(),
-        cursor_poke: None,
-        cursor_socket: None,
         t3: Default::default(),
-        keep_apps,
-        keeper: None,
-        keep_warned: false,
-        stop_left: None,
-        cursor_opened: None,
-        host_focused: true,
-        process_groups: Vec::new(),
-        picker: None,
-        context_menu: None,
-        tooltip: TooltipState::default(),
-        switcher: None,
-        recent_dirs: Vec::new(),
-        zoxide: None,
-        profile_imports: None,
-        key_repeat: None,
-        apps,
-        installed_apps: Vec::new(),
-        installed_apps_tx: None,
-        cli_agents: cli_agents::installed(&agent_config),
-        agent_config,
-        agent_strip: None,
-        agent_strip_record: None,
-        agent_strip_due: None,
-        agent_strip_timed: false,
         projects: projects::Store::default(),
         project: None,
-        project_lock: None,
-        lease_lock: None,
-        attach: args.attach,
-        welcome: None,
-        running: HashMap::new(),
-        running_status: None,
-        stop_status: None,
-        hook_status: None,
-        starting: HashSet::new(),
-        pending_enter: None,
-        paste: None,
-        copied: None,
-        press_count: 0,
-        field_edge: None,
-        field_scroll_due: false,
-        field_drag: false,
-        repos_rows_drag: false,
-        repos_editor_drag: false,
-        repos_drag_edge: None,
         doc_tab_shown: None,
-        scrollback: None,
-        scrollback_reading: None,
         criteria_strip: Default::default(),
-        thumb_drag: None,
-        stopping: HashSet::new(),
-        forget_after_stop: HashSet::new(),
-        id_after_stop: HashMap::new(),
-        just_created: None,
-        attach_once: None,
-        project_menu: None,
-        header_hover: false,
-        previous_project: None,
-        nav: Default::default(),
-        nav_pending: None,
-        nav_kept: None,
         toasts: VecDeque::new(),
-        quit: None,
-        restart: None,
-        checkout: None,
-        confirm: None,
-        herdr_sources: Vec::new(),
-        herdr_poke: None,
-        idle_since: HashMap::new(),
-        retired_groups: Vec::new(),
         shared_generation: 0,
-        tabs_changed: None,
         order_pending: HashSet::new(),
-        pane_leaders: HashMap::new(),
-        last_commands: HashMap::new(),
         service_errors: services::ServiceErrors::new(service_settings),
-        pane_jobs: HashMap::new(),
         pane_job_tx: None,
-        pane_bar_hover: None,
-        closed_workspaces: HashMap::new(),
-        gone_since: HashMap::new(),
-        closing_records: HashSet::new(),
-        restored_at: None,
-        replay_pending: HashSet::new(),
         held: HashMap::new(),
         booting: Vec::new(),
         closing: Vec::new(),
-        zed_groups: Vec::new(),
-        old_zed: Vec::new(),
-        old_zed_until: None,
-        repo_pages: HashMap::new(),
         ai_work: ai_work::Live::off(),
-        ai_stats: None,
-        ai_stats_behind: None,
         compositor_state: CompositorState::new::<Gerdr>(&dh),
         xdg_shell_state: XdgShellState::new::<Gerdr>(&dh),
         xdg_decoration_state: XdgDecorationState::new::<Gerdr>(&dh),
@@ -7430,6 +7042,174 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor_shape_state: CursorShapeManagerState::new::<Gerdr>(&dh),
         seat,
         x11: x11::Bridge::default(),
+        launcher: state::Launcher {
+            frecency: Frecency::load(),
+            recent_dirs: Vec::new(),
+            zoxide: None,
+            profile_imports: None,
+            apps,
+            installed: Vec::new(),
+            installed_tx: None,
+            cli_agents: cli_agents::installed(&agent_config),
+        },
+        settings: state::Settings {
+            theme_mode: start_theme(ui.theme),
+            system_dark: true,
+            density: ui.density,
+            needs_you: ui.needs_you,
+            notify: notifications.enabled,
+            live_config_reload: terminal.live_config_reload,
+            settings_modified: config::modified(),
+            show_footer: ui.footer,
+            t3_log: false,
+            agent_config,
+        },
+        key_state: state::KeyState {
+            suppressed_keys: Vec::new(),
+            prefix_armed: false,
+            keymap,
+            key_repeat: None,
+        },
+        mouse: state::Mouse {
+            drag: None,
+            reorder: None,
+            pane_drop: None,
+            chrome_cursor: CursorIcon::Default,
+            pos: (0.0, 0.0).into(),
+            last_press: None,
+            scrolling: false,
+            press_count: 0,
+            field_edge: None,
+            field_scroll_due: false,
+            field_drag: false,
+            repos_rows_drag: false,
+            repos_editor_drag: false,
+            repos_drag_edge: None,
+            thumb_drag: None,
+        },
+        hover: state::Hover {
+            footer: None,
+            help_pinned: false,
+            help: None,
+            tab: anim::Hover::default(),
+            sidebar: anim::Hover::default(),
+            tooltip: TooltipState::default(),
+            strip: None,
+            strip_record: None,
+            strip_due: None,
+            strip_timed: false,
+            header: false,
+            pane_bar: None,
+        },
+        overlays: state::Overlays {
+            tasks_panel: None,
+            machines_panel: None,
+            rename: None,
+            picker: None,
+            context_menu: None,
+            switcher: None,
+            welcome: None,
+            scrollback: None,
+            scrollback_reading: None,
+            project_menu: None,
+            quit: None,
+            restart: None,
+            checkout: None,
+            confirm: None,
+            ai_stats: None,
+            ai_stats_behind: None,
+        },
+        ci: state::CiWatch {
+            repos: HashMap::new(),
+            asked: Vec::new(),
+            states: HashMap::new(),
+            pending: false,
+            again: false,
+            sender: None,
+        },
+        git: state::GitWatch {
+            status: HashMap::new(),
+            pending: false,
+            again: false,
+            read: None,
+            repo_pages: HashMap::new(),
+        },
+        nav: state::Nav {
+            history: Default::default(),
+            pending: None,
+            kept: None,
+        },
+        keep: state::Keep {
+            kept: Vec::new(),
+            apps: keep_apps,
+            keeper: None,
+            warned: false,
+        },
+        procs: state::Procs {
+            children: Vec::new(),
+            groups: Vec::new(),
+            retired: Vec::new(),
+            zed: Vec::new(),
+            old_zed: Vec::new(),
+            old_zed_until: None,
+        },
+        life: state::Life {
+            stop_left: None,
+            project_lock: None,
+            lease_lock: None,
+            attach: args.attach,
+            running: HashMap::new(),
+            running_status: None,
+            stop_status: None,
+            hook_status: None,
+            starting: HashSet::new(),
+            pending_enter: None,
+            stopping: HashSet::new(),
+            forget_after_stop: HashSet::new(),
+            id_after_stop: HashMap::new(),
+            just_created: None,
+            attach_once: None,
+            previous_project: None,
+        },
+        web: state::Web {
+            pending: false,
+            control: web_control::WebControl::default(),
+            previews: md_preview::Previews::default(),
+        },
+        cursor: state::CursorWatch {
+            reads: Default::default(),
+            chats: Vec::new(),
+            idle: Vec::new(),
+            poke: None,
+            socket: None,
+            opened: None,
+        },
+        notices: state::Notices {
+            notifier: None,
+            activation: None,
+            host_focused: true,
+            paste: None,
+            copied: None,
+        },
+        session: state::Session {
+            herdr: None,
+            agents: Vec::new(),
+            tabs: HashMap::new(),
+            blocked_since: HashMap::new(),
+            agent_statuses: HashMap::new(),
+            sources: Vec::new(),
+            poke: None,
+            idle_since: HashMap::new(),
+            tabs_changed: None,
+            pane_leaders: HashMap::new(),
+            last_commands: HashMap::new(),
+            pane_jobs: HashMap::new(),
+            closed_workspaces: HashMap::new(),
+            gone_since: HashMap::new(),
+            closing_records: HashSet::new(),
+            restored_at: None,
+            replay_pending: HashSet::new(),
+        },
     };
     state.x11.ensure(&socket_name);
     state.t3.auto_update = t3_settings.updates;
@@ -7524,7 +7304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.backend.window().request_redraw();
             }
             WinitEvent::Focus(focused) => {
-                state.host_focused = focused;
+                state.notices.host_focused = focused;
                 // The key's release goes elsewhere now.
                 if !focused {
                     state.stop_key_repeat();
@@ -7555,7 +7335,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The first run turns the session gerdr used before projects into one.
     if let Some(share) = store.dock_share {
-        state.previews.share = share.clamp(chrome::DOCK_SHARE_MIN, chrome::DOCK_SHARE_MAX);
+        state.web.previews.share = share.clamp(chrome::DOCK_SHARE_MIN, chrome::DOCK_SHARE_MAX);
     }
     state.projects = store;
     state.restore_nav();
@@ -7575,9 +7355,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // Before the first terminals, which take the look's colours with them,
     // when the look follows the system; any other look can do without it.
-    let system_theme = if state.theme_mode == ThemeMode::System {
+    let system_theme = if state.settings.theme_mode == ThemeMode::System {
         if let Some(dark) = system_theme.wait() {
-            state.system_dark = dark;
+            state.settings.system_dark = dark;
         }
         None
     } else {
@@ -7595,7 +7375,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.watch_ci();
     state.watch_pr_reviews();
     state.watch_issues();
-    if state.notify {
+    if state.settings.notify {
         state.connect_notifier();
     }
     state.watch_settings();
@@ -7618,12 +7398,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = state.display_handle.flush_clients();
     })?;
 
-    state.frecency.save();
+    state.launcher.frecency.save();
     state.close_windows(&mut event_loop);
     state.detach_keeper();
     state.kill_children();
     state.x11.stop();
-    if let Some((mut picker, _)) = state.picker.take() {
+    if let Some((mut picker, _)) = state.overlays.picker.take() {
         let _ = picker.kill();
     }
     Ok(())

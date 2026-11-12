@@ -199,7 +199,7 @@ impl Gerdr {
     pub(crate) fn terminal_options(&self) -> Vec<String> {
         terminal_options(
             self.theme().palette().alacritty_options(),
-            self.live_config_reload,
+            self.settings.live_config_reload,
         )
     }
 
@@ -295,7 +295,7 @@ impl Gerdr {
     /// Turn terminals reloading their config on or off: Settings'
     /// `[terminal] live_config_reload`, written there and read again.
     pub fn toggle_terminal_reload(&mut self) {
-        let on = !self.live_config_reload;
+        let on = !self.settings.live_config_reload;
         if let Err(err) = crate::config::write_bool("terminal", "live_config_reload", on) {
             let text = format!("Couldn't change terminal config reload in Settings: {err}");
             let open = ("Open settings".to_owned(), MenuAction::OpenSettings);
@@ -304,7 +304,7 @@ impl Gerdr {
         // Read again whole, so what else changed in the file counts too;
         // its problems were told when they came.
         let _ = self.apply_settings();
-        let text = match self.live_config_reload {
+        let text = match self.settings.live_config_reload {
             true => "New terminals reload their config \u{b7} in Settings",
             false => {
                 "New terminals stop reloading their config \u{b7} open ones when gerdr restarts"

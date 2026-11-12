@@ -161,20 +161,20 @@ impl Gerdr {
         if !dialog.can_bring() {
             dialog.selected = LEAVE;
         }
-        self.context_menu = None;
-        self.checkout = Some(dialog);
+        self.overlays.context_menu = None;
+        self.overlays.checkout = Some(dialog);
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
     }
 
     /// A key while the checkout dialog has the keyboard.
     pub fn checkout_key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
-        self.checkout.as_mut()?.key(mods, sym)
+        self.overlays.checkout.as_mut()?.key(mods, sym)
     }
 
     /// Do what the checkout dialog asked.
     pub fn apply_checkout(&mut self, outcome: Outcome) {
-        let Some(dialog) = self.checkout.take() else {
+        let Some(dialog) = self.overlays.checkout.take() else {
             return;
         };
         // Gone, what is under the pointer gets it back.
@@ -189,7 +189,7 @@ impl Gerdr {
 
     /// Where the checkout dialog's parts go, as it asks now.
     fn checkout_layout(&self) -> Option<chrome::CheckoutLayout> {
-        let rows = self.checkout.as_ref()?.files.len();
+        let rows = self.overlays.checkout.as_ref()?.files.len();
         Some(chrome::checkout_layout(self.output_size(), rows))
     }
 
@@ -198,7 +198,7 @@ impl Gerdr {
         let Some(layout) = self.checkout_layout() else {
             return false;
         };
-        let Some(dialog) = self.checkout.as_mut() else {
+        let Some(dialog) = self.overlays.checkout.as_mut() else {
             return false;
         };
         let outcome = match checkout_hit(&layout, pos) {
@@ -217,7 +217,7 @@ impl Gerdr {
         let Some(layout) = self.checkout_layout() else {
             return;
         };
-        if let Some(dialog) = self.checkout.as_mut() {
+        if let Some(dialog) = self.overlays.checkout.as_mut() {
             dialog.hover = checkout_hit(&layout, pos);
         }
     }
@@ -230,7 +230,7 @@ impl Gerdr {
     }
 
     pub fn checkout_view(&self) -> Option<CheckoutView> {
-        let dialog = self.checkout.as_ref()?;
+        let dialog = self.overlays.checkout.as_ref()?;
         let rows = dialog
             .files
             .iter()

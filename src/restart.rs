@@ -312,8 +312,8 @@ impl Gerdr {
     }
 
     fn open_picks(&mut self, asks: Asks, rows: Vec<Row>) {
-        self.context_menu = None;
-        self.restart = Some(RestartDialog {
+        self.overlays.context_menu = None;
+        self.overlays.restart = Some(RestartDialog {
             asks,
             rows,
             cursor: 0,
@@ -328,21 +328,21 @@ impl Gerdr {
     /// A key while the restart dialog has the keyboard.
     pub fn restart_key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
         let fit = self.restart_fit();
-        self.restart.as_mut()?.key(mods, sym, fit)
+        self.overlays.restart.as_mut()?.key(mods, sym, fit)
     }
 
     /// Scroll the restart dialog's rows `by` rows (down when positive),
     /// as the wheel over it does.
     pub fn restart_scroll(&mut self, by: isize) {
         let fit = self.restart_fit();
-        if let Some(dialog) = self.restart.as_mut() {
+        if let Some(dialog) = self.overlays.restart.as_mut() {
             dialog.scroll(by, fit);
         }
     }
 
     /// How many rows the restart dialog shows at once.
     fn restart_fit(&self) -> usize {
-        let Some(dialog) = &self.restart else {
+        let Some(dialog) = &self.overlays.restart else {
             return 0;
         };
         chrome::restart_layout(self.output_size(), dialog.rows.len(), dialog.asks.action())
@@ -353,7 +353,7 @@ impl Gerdr {
     /// Do what the restart dialog asked: keep the choices and go on with
     /// the checked commands.
     pub fn apply_restart(&mut self, outcome: Outcome) {
-        let Some(dialog) = self.restart.take() else {
+        let Some(dialog) = self.overlays.restart.take() else {
             return;
         };
         // Gone, what is under the pointer gets it back.
@@ -411,7 +411,7 @@ impl Gerdr {
     /// A left click while the restart dialog is open; `false` if it isn't.
     pub fn restart_click(&mut self, pos: Point<f64, Logical>) -> bool {
         let size = self.output_size();
-        let Some(dialog) = self.restart.as_mut() else {
+        let Some(dialog) = self.overlays.restart.as_mut() else {
             return false;
         };
         let layout = chrome::restart_layout(size, dialog.rows.len(), dialog.asks.action());
@@ -434,7 +434,7 @@ impl Gerdr {
     /// The pointer moved while the restart dialog is open.
     pub fn restart_hover(&mut self, pos: Point<f64, Logical>) {
         let size = self.output_size();
-        if let Some(dialog) = self.restart.as_mut() {
+        if let Some(dialog) = self.overlays.restart.as_mut() {
             let layout = chrome::restart_layout(size, dialog.rows.len(), dialog.asks.action());
             dialog.hover = restart_hit(&layout, dialog.top, pos);
         }
@@ -443,7 +443,7 @@ impl Gerdr {
     /// The controls of the restart dialog, while it is open: what the
     /// pointer can press.
     pub fn restart_controls(&self) -> Vec<chrome::Rect> {
-        let Some(dialog) = &self.restart else {
+        let Some(dialog) = &self.overlays.restart else {
             return Vec::new();
         };
         let layout =
@@ -452,7 +452,7 @@ impl Gerdr {
     }
 
     pub fn restart_view(&self) -> Option<RestartView> {
-        let dialog = self.restart.as_ref()?;
+        let dialog = self.overlays.restart.as_ref()?;
         let (title, body) = match &dialog.asks {
             Asks::Workspace(w) => {
                 let name = self.workspaces.get(*w).map_or("", |ws| ws.name.as_str());

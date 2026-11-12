@@ -206,7 +206,7 @@ impl Gerdr {
         if let Some(fit) = self.scrollback_fit_for(id) {
             viewer.fit(fit);
         }
-        self.scrollback = Some(viewer);
+        self.overlays.scrollback = Some(viewer);
         // It takes the pointer from the terminal under it.
         self.refresh_pointer_focus();
     }
@@ -214,7 +214,7 @@ impl Gerdr {
     /// Read pane `pane_id`'s output off the event loop, for the viewer
     /// `opening` over it or reading it again.
     fn read_scrollback(&mut self, pane_id: &str, opening: bool) -> Result<(), String> {
-        let socket = (self.herdr.as_ref())
+        let socket = (self.session.herdr.as_ref())
             .map(|h| h.socket().to_path_buf())
             .ok_or("no herdr session")?;
         let (tx, rx) = channel::channel();
@@ -234,7 +234,7 @@ impl Gerdr {
                 let _ = tx.send(read_pane(socket, &id));
             })
             .map_err(|err| err.to_string())?;
-        self.scrollback_reading = Some(pane_id.to_owned());
+        self.overlays.scrollback_reading = Some(pane_id.to_owned());
         Ok(())
     }
 
@@ -242,14 +242,14 @@ impl Gerdr {
     /// reading it again. A viewer closed since, or over something else
     /// now, drops it: nothing waits for it any more.
     fn scrollback_read(&mut self, pane_id: &str, opening: bool, read: PaneRead) {
-        let pane = match self.scrollback.as_ref().map(|v| &v.source) {
+        let pane = match self.overlays.scrollback.as_ref().map(|v| &v.source) {
             Some(Source::Pane { pane, pane_id: p }) if p == pane_id => *pane,
             _ => return,
         };
-        if self.scrollback_reading.as_deref() != Some(pane_id) {
+        if self.overlays.scrollback_reading.as_deref() != Some(pane_id) {
             return;
         }
-        self.scrollback_reading = None;
+        self.overlays.scrollback_reading = None;
         let (text, from_bottom, styled) = match read {
             Ok(read) => read,
             Err(err) if opening => {
@@ -265,20 +265,25 @@ impl Gerdr {
         if opening {
             // Its errors are in view now.
             self.see_service_errors(pane_id);
-            let label = self.scrollback.take().map(|v| v.label).unwrap_or_default();
+            let label = self
+                .overlays
+                .scrollback
+                .take()
+                .map(|v| v.label)
+                .unwrap_or_default();
             let mut viewer = Scrollback::new(pane, pane_id.to_owned(), label, &text, from_bottom);
             viewer.set_styles(&styled);
             if let Some(fit) = self.scrollback_fit_for(pane) {
                 viewer.fit(fit);
             }
-            self.scrollback = Some(viewer);
+            self.overlays.scrollback = Some(viewer);
             return;
         }
         let Some((_, fit)) = self.scrollback_place() else {
             return;
         };
         let label = self.scrollback_label(pane_id);
-        if let Some(viewer) = self.scrollback.as_mut() {
+        if let Some(viewer) = self.overlays.scrollback.as_mut() {
             viewer.label = label;
             viewer.reload(&text, fit);
             viewer.set_styles(&styled);
@@ -304,15 +309,15 @@ impl Gerdr {
     /// What the viewer takes the place of goes.
     fn close_for_scrollback(&mut self) {
         // Another file in the viewer: the stats panel isn't what is under it.
-        self.ai_stats_behind = None;
-        self.switcher = None;
-        self.project_menu = None;
+        self.overlays.ai_stats_behind = None;
+        self.overlays.switcher = None;
+        self.overlays.project_menu = None;
         self.worktrees.close();
         self.repos.close();
         self.inbox.close();
         self.stop_key_repeat();
         self.close_menu();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
     }
 
@@ -340,9 +345,9 @@ impl Gerdr {
         };
         self.close_for_scrollback();
         let what = format!("Fix plan of {label}");
-        self.scrollback = Some(Scrollback::of(Source::File { what }, title, &text, 0));
+        self.overlays.scrollback = Some(Scrollback::of(Source::File { what }, title, &text, 0));
         if let Some((_, fit)) = self.scrollback_place()
-            && let Some(viewer) = self.scrollback.as_mut()
+            && let Some(viewer) = self.overlays.scrollback.as_mut()
         {
             viewer.fit(fit);
         }
@@ -370,9 +375,9 @@ impl Gerdr {
         };
         let mut viewer = Scrollback::of(source, title, &text, 0);
         viewer.set_styles(&setup::log_styles(&text));
-        self.scrollback = Some(viewer);
+        self.overlays.scrollback = Some(viewer);
         if let Some((_, fit)) = self.scrollback_place()
-            && let Some(viewer) = self.scrollback.as_mut()
+            && let Some(viewer) = self.overlays.scrollback.as_mut()
         {
             viewer.fit(fit);
         }
@@ -391,7 +396,7 @@ impl Gerdr {
     /// reading drops the selection: it catches up once that goes. Whether
     /// the viewer still shows a log.
     fn follow_log(&mut self) -> bool {
-        let Some(viewer) = self.scrollback.as_ref() else {
+        let Some(viewer) = self.overlays.scrollback.as_ref() else {
             return false;
         };
         let Source::SetupLog { path, read, .. } = &viewer.source else {
@@ -413,7 +418,7 @@ impl Gerdr {
         let Some((_, fit)) = self.scrollback_place() else {
             return false;
         };
-        let Some(viewer) = self.scrollback.as_mut() else {
+        let Some(viewer) = self.overlays.scrollback.as_mut() else {
             return false;
         };
         let Source::SetupLog { path, read, .. } = &mut viewer.source else {
@@ -435,12 +440,16 @@ impl Gerdr {
     /// Read the viewer's pane again, for what it printed since the viewer
     /// opened (see `Scrollback::reload`), or its log.
     pub fn reload_scrollback(&mut self) {
-        let Some(source) = self.scrollback.as_ref().map(|v| v.source.clone()) else {
+        let Some(source) = self.overlays.scrollback.as_ref().map(|v| v.source.clone()) else {
             return;
         };
         let Source::Pane { pane_id, .. } = source else {
             if self.reread_log()
-                && let Some(n) = self.scrollback.as_ref().map(Scrollback::line_count)
+                && let Some(n) = self
+                    .overlays
+                    .scrollback
+                    .as_ref()
+                    .map(Scrollback::line_count)
             {
                 let s = if n == 1 { "" } else { "s" };
                 self.show_success(format!("Log read again: {n} line{s}"));
@@ -450,7 +459,7 @@ impl Gerdr {
             return;
         };
         // One read at a time: the note says it reads.
-        if self.scrollback_reading.is_some() {
+        if self.overlays.scrollback_reading.is_some() {
             return;
         }
         if let Err(err) = self.read_scrollback(&pane_id, false) {
@@ -461,11 +470,11 @@ impl Gerdr {
 
     /// Close the viewer.
     pub fn close_scrollback(&mut self) {
-        self.scrollback = None;
-        self.scrollback_reading = None;
+        self.overlays.scrollback = None;
+        self.overlays.scrollback_reading = None;
         // Opened from the stats panel, the viewer goes back to it.
-        if let Some(panel) = self.ai_stats_behind.take() {
-            self.ai_stats = Some(panel);
+        if let Some(panel) = self.overlays.ai_stats_behind.take() {
+            self.overlays.ai_stats = Some(panel);
             self.ai_stats_refresh();
         }
         // Gone, the terminal under the pointer gets it back.
@@ -483,7 +492,11 @@ impl Gerdr {
             .shown_rects(area)
             .into_iter()
             .find(|(pane, _)| *pane == id)?;
-        let keys = self.scrollback.as_ref().is_some_and(Scrollback::keys_open);
+        let keys = self
+            .overlays
+            .scrollback
+            .as_ref()
+            .is_some_and(Scrollback::keys_open);
         let small = rect.size.w < MIN_WIDTH || rect.size.h < MIN_HEIGHT;
         let room = if small
             || (keys && !chrome::scrollback_keys_fit(inset(rect, INSET), keys_sheet().len()))
@@ -501,7 +514,7 @@ impl Gerdr {
 
     /// Where the open viewer goes, and how its text fits there.
     fn scrollback_place(&self) -> Option<(Rect, Fit)> {
-        let panel = match self.scrollback.as_ref()?.pane() {
+        let panel = match self.overlays.scrollback.as_ref()?.pane() {
             Some(pane) => self.scrollback_panel_for(pane)?,
             None => inset(self.content_rect(), INSET),
         };
@@ -510,7 +523,7 @@ impl Gerdr {
 
     /// What the viewer shows, while it is open over a pane that shows.
     pub fn scrollback_view(&self) -> Option<ScrollbackView> {
-        let viewer = self.scrollback.as_ref()?;
+        let viewer = self.overlays.scrollback.as_ref()?;
         let (panel, _) = self.scrollback_place()?;
         let first = viewer.first();
         let end = (first + chrome::scrollback_shown(panel)).min(viewer.row_count());
@@ -536,10 +549,14 @@ impl Gerdr {
             None => format!("{} lines", viewer.line_count()),
         };
         let (title, note) = match &viewer.source {
-            Source::Pane { pane_id, .. } if self.scrollback_reading.as_ref() == Some(pane_id) => (
-                format!("Scrollback snapshot · {}", viewer.label),
-                "reading".to_owned(),
-            ),
+            Source::Pane { pane_id, .. }
+                if self.overlays.scrollback_reading.as_ref() == Some(pane_id) =>
+            {
+                (
+                    format!("Scrollback snapshot · {}", viewer.label),
+                    "reading".to_owned(),
+                )
+            }
             Source::Pane { .. } => (format!("Scrollback snapshot · {}", viewer.label), note),
             Source::File { what } => (format!("{what} · {}", viewer.label), note),
             Source::SetupLog { project, slug, .. } => {
@@ -594,17 +611,18 @@ impl Gerdr {
             _ => None,
         };
         let others = mods.ctrl || mods.alt || mods.logo;
-        let viewer = self.scrollback.as_ref()?;
+        let viewer = self.overlays.scrollback.as_ref()?;
         if let Some(back) = star.filter(|_| !others)
             && !viewer.find_focused()
             && !viewer.keys_open()
         {
-            if !self.scrollback.as_mut()?.star(back, fit) {
+            if !self.overlays.scrollback.as_mut()?.star(back, fit) {
                 self.show_notice("No word at the caret: move it to one, or select text".into());
             }
             return None;
         }
-        self.scrollback
+        self.overlays
+            .scrollback
             .as_mut()?
             .key(mods, sym, typed, Instant::now(), fit)
     }
@@ -644,13 +662,13 @@ impl Gerdr {
         // The keys listed, a click on the viewer but on a hint puts the
         // text back.
         if !view.keys.is_empty() && matches!(hit, Some(h) if !matches!(h, ScrollbackHit::Hint(_))) {
-            if let Some(viewer) = self.scrollback.as_mut() {
+            if let Some(viewer) = self.overlays.scrollback.as_mut() {
                 viewer.show_keys(false);
             }
             return;
         }
         if !matches!(hit, Some(ScrollbackHit::Search(_)))
-            && let Some(viewer) = self.scrollback.as_mut()
+            && let Some(viewer) = self.overlays.scrollback.as_mut()
         {
             viewer.blur_find();
         }
@@ -659,7 +677,7 @@ impl Gerdr {
                 let Some((_, fit)) = self.scrollback_place() else {
                     return;
                 };
-                if let Some(viewer) = self.scrollback.as_mut() {
+                if let Some(viewer) = self.overlays.scrollback.as_mut() {
                     viewer.find_click(part, fit);
                 }
             }
@@ -667,7 +685,7 @@ impl Gerdr {
                 let (row, col) = chrome::scrollback_point(&view, &layout, pos);
                 let (_, under) = chrome::scrollback_char(&view, &layout, pos);
                 let extend = self.keyboard().modifier_state().shift;
-                let Some(viewer) = self.scrollback.as_mut() else {
+                let Some(viewer) = self.overlays.scrollback.as_mut() else {
                     return;
                 };
                 let now = Instant::now();
@@ -715,19 +733,22 @@ impl Gerdr {
         let (top, bottom) = (text.loc.y as f64, (text.loc.y + text.size.h) as f64 - 1.0);
         let at = Point::from((pos.x, pos.y.clamp(top, bottom)));
         let (row, col) = chrome::scrollback_point(&view, &layout, at);
-        if let Some(viewer) = self.scrollback.as_mut() {
+        if let Some(viewer) = self.overlays.scrollback.as_mut() {
             viewer.drag_to(row, col);
         }
     }
 
     /// Whether a press on the viewer's text is held.
     pub fn scrollback_dragging(&self) -> bool {
-        self.scrollback.as_ref().is_some_and(Scrollback::dragging)
+        self.overlays
+            .scrollback
+            .as_ref()
+            .is_some_and(Scrollback::dragging)
     }
 
     /// The left button went up.
     pub fn scrollback_release(&mut self) {
-        if let Some(viewer) = self.scrollback.as_mut() {
+        if let Some(viewer) = self.overlays.scrollback.as_mut() {
             viewer.release();
         }
     }
@@ -738,7 +759,7 @@ impl Gerdr {
         let view = self.scrollback_view()?;
         let layout = chrome::scrollback_layout(view.panel, &view.hints);
         let hit = chrome::scrollback_hit(&view, &layout, pos);
-        self.scrollback.as_mut()?.hover =
+        self.overlays.scrollback.as_mut()?.hover =
             hit.filter(|hit| matches!(hit, ScrollbackHit::Hint(_) | ScrollbackHit::Search(_)));
         let Some(ScrollbackHit::Search(part)) = hit else {
             return None;
@@ -773,7 +794,7 @@ impl Gerdr {
         let Some((_, fit)) = self.scrollback_place() else {
             return;
         };
-        if let Some(viewer) = self.scrollback.as_mut().filter(|v| !v.keys_open()) {
+        if let Some(viewer) = self.overlays.scrollback.as_mut().filter(|v| !v.keys_open()) {
             viewer.scroll(motion, Instant::now(), fit);
         }
     }
@@ -784,7 +805,7 @@ impl Gerdr {
         let Some((_, fit)) = self.scrollback_place() else {
             return;
         };
-        if let Some(viewer) = self.scrollback.as_mut() {
+        if let Some(viewer) = self.overlays.scrollback.as_mut() {
             viewer.scroll_to(pos, fit);
         }
     }
@@ -794,7 +815,7 @@ impl Gerdr {
     /// or bottom, the selection going on with it. Its pane gone from view,
     /// it closes. Whether its text still moves.
     pub fn scrollback_scroll_tick(&mut self, now: Instant) -> bool {
-        if self.scrollback.is_none() {
+        if self.overlays.scrollback.is_none() {
             return false;
         }
         let Some((panel, fit)) = self.scrollback_place() else {
@@ -802,11 +823,11 @@ impl Gerdr {
             return false;
         };
         let edge = if self.scrollback_dragging() {
-            chrome::scrollback_edge(&chrome::scrollback_layout(panel, &[]), self.pointer)
+            chrome::scrollback_edge(&chrome::scrollback_layout(panel, &[]), self.mouse.pos)
         } else {
             0.0
         };
-        let Some(viewer) = self.scrollback.as_mut() else {
+        let Some(viewer) = self.overlays.scrollback.as_mut() else {
             return false;
         };
         viewer.fit(fit);
@@ -814,7 +835,7 @@ impl Gerdr {
         let moving = viewer.tick(now, fit, edge);
         // Moved at all, the last step of a glide too.
         if viewer.dragging() && (viewer.first(), viewer.part()) != before {
-            self.scrollback_drag(self.pointer);
+            self.scrollback_drag(self.mouse.pos);
         }
         moving
     }

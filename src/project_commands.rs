@@ -992,7 +992,7 @@ impl Gerdr {
             }
         }
         dialog.looking = looks.len();
-        self.context_menu = None;
+        self.overlays.context_menu = None;
         self.stop_key_repeat();
         self.features.commands = Some(dialog);
         for (id, from, (dirs, ignore, bases), others, seen) in looks {

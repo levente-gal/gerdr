@@ -1250,25 +1250,25 @@ impl Gerdr {
     /// Open the machines panel, on the machine of name `on` if given.
     /// The other panels close: it would cover them.
     pub fn open_machines(&mut self, on: Option<&str>) {
-        self.switcher = None;
+        self.overlays.switcher = None;
         self.repos.close();
         self.worktrees.close();
-        self.project_menu = None;
-        self.scrollback = None;
-        self.tasks_panel = None;
+        self.overlays.project_menu = None;
+        self.overlays.scrollback = None;
+        self.overlays.tasks_panel = None;
         if self.inbox.is_open() {
             self.close_inbox();
         }
         self.stop_key_repeat();
         self.close_menu();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
         let selected = on
             .and_then(|name| self.machines.saved.keys().position(|n| n == name))
             .unwrap_or(0);
         let count = self.machines.saved.len() + 1;
         let page = chrome::machines_shown(count, self.output_size());
-        self.machines_panel = Some(MachinesPanel {
+        self.overlays.machines_panel = Some(MachinesPanel {
             selected,
             first: reveal(0, selected, page, count),
             ..MachinesPanel::default()
@@ -1281,7 +1281,7 @@ impl Gerdr {
     /// being tried.
     pub fn close_machines(&mut self) {
         self.stop_edit_try();
-        self.machines_panel = None;
+        self.overlays.machines_panel = None;
         self.refresh_pointer_focus();
     }
 
@@ -1505,7 +1505,7 @@ impl Gerdr {
 
     /// The panel's content, and the view of it for its state now.
     fn machines_panel_parts(&self) -> Option<(Content, MachinesPanelView)> {
-        let panel = self.machines_panel.as_ref()?;
+        let panel = self.overlays.machines_panel.as_ref()?;
         if panel.tab == MachinesTab::Placement {
             let content = self.placement_content();
             // Always on a stage: the page has no list to be on.
@@ -1581,7 +1581,7 @@ impl Gerdr {
     ) -> Option<Outcome> {
         let (content, view) = self.machines_panel_parts()?;
         let pages = self.machines_pages(&view);
-        let panel = self.machines_panel.as_mut()?;
+        let panel = self.overlays.machines_panel.as_mut()?;
         match view.tab {
             MachinesTab::Placement => placement_key(&content, view.focus, panel, mods, sym),
             MachinesTab::Machines => panel.key(&content, mods, (sym, typed), pages),
@@ -1666,7 +1666,7 @@ impl Gerdr {
         let Some(address) = self.machines.saved.get(name).cloned() else {
             return;
         };
-        if let Some(panel) = self.machines_panel.as_mut() {
+        if let Some(panel) = self.overlays.machines_panel.as_mut() {
             panel.open_edit(name, &address.0, on_name);
         }
     }
@@ -1677,7 +1677,7 @@ impl Gerdr {
         let row = name.and_then(|name| self.machines.saved.keys().position(|n| n == name));
         let count = self.machines.saved.len() + 1;
         let page = chrome::machines_shown(count, self.output_size());
-        let Some(panel) = self.machines_panel.as_mut() else {
+        let Some(panel) = self.overlays.machines_panel.as_mut() else {
             return;
         };
         if let Some(form) = panel.edit.take() {
@@ -1756,7 +1756,7 @@ impl Gerdr {
             }
             Press::Edit(name) => {
                 // F2 put the keyboard on the name already.
-                let on_name = (self.machines_panel.as_ref())
+                let on_name = (self.overlays.machines_panel.as_ref())
                     .is_some_and(|p| p.focus == MachinesFocus::EditName);
                 self.open_edit(&name, on_name);
             }
@@ -1765,12 +1765,16 @@ impl Gerdr {
             Press::StopTrying => self.stop_edit_try(),
             Press::CancelEdit => {
                 self.stop_edit_try();
-                if let Some(panel) = self.machines_panel.as_mut() {
+                if let Some(panel) = self.overlays.machines_panel.as_mut() {
                     panel.close_edit();
                 }
             }
             Press::EditFix => {
-                let form = self.machines_panel.as_ref().and_then(|p| p.edit.as_ref());
+                let form = self
+                    .overlays
+                    .machines_panel
+                    .as_ref()
+                    .and_then(|p| p.edit.as_ref());
                 let Some(fix) = form.and_then(EditForm::fix) else {
                     return;
                 };
@@ -1782,12 +1786,12 @@ impl Gerdr {
             // The list waits while it is tried, as the fields do.
             Press::AddAddress | Press::RemoveAddress(_) if self.edit_try().is_some() => {}
             Press::AddAddress => {
-                if let Some(panel) = self.machines_panel.as_mut() {
+                if let Some(panel) = self.overlays.machines_panel.as_mut() {
                     panel.add_address();
                 }
             }
             Press::RemoveAddress(i) => {
-                if let Some(panel) = self.machines_panel.as_mut() {
+                if let Some(panel) = self.overlays.machines_panel.as_mut() {
                     panel.remove_address(i);
                 }
             }
@@ -1831,7 +1835,10 @@ impl Gerdr {
             None => Some(Outcome::Close),
             Some(MachinesHit::Panel | MachinesHit::Run(_)) => None,
             Some(MachinesHit::Tab(i)) => {
-                if let (Some(panel), Some(tab)) = (self.machines_panel.as_mut(), MachinesTab::ALL.get(i)) {
+                if let (Some(panel), Some(tab)) = (
+                    self.overlays.machines_panel.as_mut(),
+                    MachinesTab::ALL.get(i),
+                ) {
                     panel.show_tab(*tab);
                 }
                 None
@@ -1848,21 +1855,21 @@ impl Gerdr {
                 if row != view.selected {
                     self.stop_edit_try();
                 }
-                if let Some(panel) = self.machines_panel.as_mut() {
+                if let Some(panel) = self.overlays.machines_panel.as_mut() {
                     panel.select(row);
                 }
                 (i >= content.add_row()).then_some(Outcome::Press(Press::Add))
             }
             Some(MachinesHit::RunButton(r, b)) => {
                 let focus = MachinesFocus::Run(r, b);
-                if let Some(panel) = self.machines_panel.as_mut() {
+                if let Some(panel) = self.overlays.machines_panel.as_mut() {
                     panel.focus = focus;
                 }
                 content.press(view.selected, focus).map(Outcome::Press)
             }
             Some(MachinesHit::Button(b)) => {
                 let focus = MachinesFocus::Button(b);
-                if let Some(panel) = self.machines_panel.as_mut() {
+                if let Some(panel) = self.overlays.machines_panel.as_mut() {
                     panel.focus = focus;
                 }
                 content.press(view.selected, focus).map(Outcome::Press)
@@ -1879,7 +1886,7 @@ impl Gerdr {
             // A field takes the keyboard; `press_field` puts the caret.
             Some(hit @ (MachinesHit::EditName | MachinesHit::EditAddress(_))) => {
                 let busy = content.edit.as_ref().is_none_or(|e| e.busy);
-                if let Some(panel) = self.machines_panel.as_mut().filter(|_| !busy) {
+                if let Some(panel) = self.overlays.machines_panel.as_mut().filter(|_| !busy) {
                     panel.focus = match hit {
                         MachinesHit::EditAddress(i) => MachinesFocus::EditAddress(i),
                         _ => MachinesFocus::EditName,
@@ -1889,7 +1896,7 @@ impl Gerdr {
             }
             Some(MachinesHit::EditButton(b)) => {
                 let focus = MachinesFocus::EditButton(b);
-                if let Some(panel) = self.machines_panel.as_mut() {
+                if let Some(panel) = self.overlays.machines_panel.as_mut() {
                     panel.focus = focus;
                 }
                 content.press(view.selected, focus).map(Outcome::Press)
@@ -1904,7 +1911,7 @@ impl Gerdr {
     pub fn machines_panel_hover(&mut self, pos: Point<f64, Logical>) {
         let hit = (self.machines_panel_view())
             .and_then(|view| chrome::machines_layout(&view, self.output_size()).hit(pos));
-        if let Some(panel) = self.machines_panel.as_mut() {
+        if let Some(panel) = self.overlays.machines_panel.as_mut() {
             panel.hover = hit;
         }
     }
@@ -1925,7 +1932,7 @@ impl Gerdr {
             true => (view.detail.as_ref().map_or(0, |d| d.runs.len()), runs_page),
             false => (view.rows.len() + 1, list_page),
         };
-        if let Some(panel) = self.machines_panel.as_mut() {
+        if let Some(panel) = self.overlays.machines_panel.as_mut() {
             panel.scroll(rows, on_runs, count, page);
         }
     }
@@ -1944,7 +1951,7 @@ impl Gerdr {
         if self.edit_try().is_some() {
             return None;
         }
-        let panel = self.machines_panel.as_mut()?;
+        let panel = self.overlays.machines_panel.as_mut()?;
         let form = panel.edit.as_mut()?;
         match panel.focus {
             MachinesFocus::EditName => Some(&mut form.name),

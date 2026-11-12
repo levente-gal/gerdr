@@ -1594,16 +1594,16 @@ impl Gerdr {
     /// Open the project menu, and find out which projects' sessions run.
     pub fn open_project_menu(&mut self) {
         // One popup at a time: it doesn't open over another.
-        self.switcher = None;
+        self.overlays.switcher = None;
         self.inbox.close();
-        self.scrollback = None;
+        self.overlays.scrollback = None;
         self.worktrees.close();
         self.repos.close();
         self.stop_key_repeat();
         self.close_menu();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
-        self.project_menu = Some(ProjectMenu::new(home_dir()));
+        self.overlays.project_menu = Some(ProjectMenu::new(home_dir()));
         self.refresh_project_menu();
         self.check_running();
         self.query_zoxide();
@@ -1613,7 +1613,7 @@ impl Gerdr {
 
     /// Open the project menu, or close it if it is open.
     pub fn toggle_project_menu(&mut self) {
-        if self.project_menu.is_some() {
+        if self.overlays.project_menu.is_some() {
             self.apply_project_menu(Outcome::Closed);
         } else {
             self.open_project_menu();
@@ -1629,7 +1629,7 @@ impl Gerdr {
         typed: Keysym,
     ) -> Option<Outcome> {
         let room = self.project_menu_room();
-        let menu = self.project_menu.as_mut()?;
+        let menu = self.overlays.project_menu.as_mut()?;
         menu.set_room(room);
         menu.key(mods, sym, typed)
     }
@@ -1638,14 +1638,14 @@ impl Gerdr {
     pub fn apply_project_menu(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Switch(id) => {
-                self.project_menu = None;
+                self.overlays.project_menu = None;
                 // The project shown is already shown.
                 if self.project.as_deref() != Some(id.as_str()) {
                     self.switch_project(&id);
                 }
             }
             Outcome::Create { name, folder, kind } => {
-                self.project_menu = None;
+                self.overlays.project_menu = None;
                 self.create_project_with(&name, folder, kind);
             }
             // Each lists the projects again once done: a rename at once,
@@ -1659,13 +1659,13 @@ impl Gerdr {
                     (p.before_start.clone(), p.after_stop.clone(), dir)
                 });
                 if let (Some((before, after, dir)), Some(menu)) =
-                    (found, self.project_menu.as_mut())
+                    (found, self.overlays.project_menu.as_mut())
                 {
                     menu.open_settings(&id, &before, &after, &dir);
                 }
             }
             Outcome::ProjectFile(id) => {
-                self.project_menu = None;
+                self.overlays.project_menu = None;
                 self.open_project_file(&id);
             }
             Outcome::SaveSettings {
@@ -1688,10 +1688,10 @@ impl Gerdr {
             Outcome::Browse(start) => self.pick_folder_for_menu(start),
             // A refusal: the field stays open to try another.
             Outcome::Notice(text) => self.show_warning(text),
-            Outcome::Closed => self.project_menu = None,
+            Outcome::Closed => self.overlays.project_menu = None,
         }
         // Gone, the client under the pointer gets it back.
-        if self.project_menu.is_none() {
+        if self.overlays.project_menu.is_none() {
             self.refresh_pointer_focus();
         }
     }
@@ -1707,7 +1707,7 @@ impl Gerdr {
             Some(MenuHit::Hint(i)) => {
                 return self.press_hint(Overlay::ProjectMenu, &view.hints[i].0, pos);
             }
-            Some(hit) => match self.project_menu.as_mut() {
+            Some(hit) => match self.overlays.project_menu.as_mut() {
                 Some(menu) => menu.click(hit),
                 None => None,
             },
@@ -1732,7 +1732,7 @@ impl Gerdr {
         let view = self.project_menu_view()?;
         let size = self.output_size();
         let now = Instant::now();
-        let menu = self.project_menu.as_mut()?;
+        let menu = self.overlays.project_menu.as_mut()?;
         // Entries passing under the pointer don't light up.
         let moving = menu.scroll.moving(now);
         let hit = chrome::project_menu_hit(&view, size, pos)
@@ -1776,7 +1776,7 @@ impl Gerdr {
     /// The wheel or the touchpad moved the project menu's list.
     pub fn project_menu_scroll(&mut self, motion: Motion) {
         let room = self.project_menu_room();
-        if let Some(menu) = self.project_menu.as_mut() {
+        if let Some(menu) = self.overlays.project_menu.as_mut() {
             menu.set_room(room);
             menu.scroll(motion, Instant::now());
         }
@@ -1786,7 +1786,7 @@ impl Gerdr {
     /// thumb held there puts it.
     pub fn project_menu_scroll_to(&mut self, px: f64) {
         let room = self.project_menu_room();
-        if let Some(menu) = self.project_menu.as_mut() {
+        if let Some(menu) = self.overlays.project_menu.as_mut() {
             menu.set_room(room);
             menu.stand_at(px);
         }
@@ -1796,11 +1796,11 @@ impl Gerdr {
     /// still moves (see `Scroll::moving`). Run before every frame, it also
     /// fits the list to the output as it is now, resized or not.
     pub fn project_menu_scroll_tick(&mut self, now: Instant) -> bool {
-        if self.project_menu.is_none() {
+        if self.overlays.project_menu.is_none() {
             return false;
         }
         let room = self.project_menu_room();
-        let Some(menu) = self.project_menu.as_mut() else {
+        let Some(menu) = self.overlays.project_menu.as_mut() else {
             return false;
         };
         menu.set_room(room);
@@ -1809,27 +1809,27 @@ impl Gerdr {
 
     /// What the project menu shows, while it is open.
     pub fn project_menu_view(&self) -> Option<ProjectMenuView> {
-        let menu = self.project_menu.as_ref()?;
-        Some(menu.view(&self.running, Instant::now()))
+        let menu = self.overlays.project_menu.as_ref()?;
+        Some(menu.view(&self.life.running, Instant::now()))
     }
 
     /// zenity gave back `dir` for the form's folder.
     pub fn project_menu_folder(&mut self, dir: PathBuf) {
-        if let Some(menu) = self.project_menu.as_mut() {
+        if let Some(menu) = self.overlays.project_menu.as_mut() {
             menu.browsed(&dir);
         }
     }
 
     /// The projects, or which of them run, changed: show them again.
     pub fn refresh_project_menu(&mut self) {
-        if self.project_menu.is_none() {
+        if self.overlays.project_menu.is_none() {
             return;
         }
         let rows = self
             .project_rows()
             .into_iter()
             .map(|(id, row)| {
-                let running = self.running.get(&id).copied().or(row.running);
+                let running = self.life.running.get(&id).copied().or(row.running);
                 (id, ProjectRow { running, ..row })
             })
             .collect();
@@ -1839,9 +1839,9 @@ impl Gerdr {
             .iter()
             .flat_map(|p| p.workspaces.iter().map(|w| w.dir.clone()))
             .collect();
-        let recent = self.recent_dirs.clone();
+        let recent = self.launcher.recent_dirs.clone();
         let room = self.project_menu_room();
-        if let Some(menu) = self.project_menu.as_mut() {
+        if let Some(menu) = self.overlays.project_menu.as_mut() {
             menu.set_room(room);
             menu.set_lists(rows, recent, taken);
         }

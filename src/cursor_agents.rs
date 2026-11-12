@@ -1157,8 +1157,12 @@ impl crate::Gerdr {
         let (tx, rx) = channel::channel();
         let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
             if let channel::Event::Msg(rows) = event {
-                state.cursor.set_rows(rows);
-                if state.projects.cursor_history.update(&state.cursor.rows) {
+                state.cursor.reads.set_rows(rows);
+                if state
+                    .projects
+                    .cursor_history
+                    .update(&state.cursor.reads.rows)
+                {
                     state.cursor_history_changed();
                 }
                 state.cursor_changed();
@@ -1168,18 +1172,18 @@ impl crate::Gerdr {
             return tracing::warn!("cursor's agents: {err}");
         }
         let keep = self.projects.cursor_history.ids();
-        self.cursor_poke = Some(watch_db(db, keep, move |rows| tx.send(rows).is_ok()));
+        self.cursor.poke = Some(watch_db(db, keep, move |rows| tx.send(rows).is_ok()));
         match hook_socket(&self.socket_name) {
             Some(path) => {
                 if self.listen_cursor_hooks(&path).is_some() {
-                    self.cursor_socket = Some(path);
+                    self.cursor.socket = Some(path);
                 }
             }
             None => tracing::warn!("cursor's hooks: no XDG_RUNTIME_DIR"),
         }
         let timer = Timer::from_duration(DB_INTERVAL);
         let tick = |_, _: &mut (), state: &mut crate::Gerdr| {
-            if state.cursor.ageing() {
+            if state.cursor.reads.ageing() {
                 state.cursor_changed();
             }
             TimeoutAction::ToDuration(DB_INTERVAL)
@@ -1203,7 +1207,7 @@ impl crate::Gerdr {
         self.loop_handle
             .insert_source(source, |_, socket, state| {
                 for event in take_events(socket) {
-                    state.cursor.hear(event);
+                    state.cursor.reads.hear(event);
                 }
                 state.cursor_changed();
                 state.read_cursor_db();
@@ -1215,31 +1219,31 @@ impl crate::Gerdr {
 
     /// Take in what Cursor's chats do now, and notify of what is news.
     fn cursor_changed(&mut self) {
-        let all = self.cursor.all(now_ms());
+        let all = self.cursor.reads.all(now_ms());
         let history = &mut self.projects.cursor_history;
-        if history.settle(&all, &self.cursor.hooks) {
+        if history.settle(&all, &self.cursor.reads.hooks) {
             self.projects.save();
         }
         let (idle, live): (Vec<CursorChat>, Vec<CursorChat>) = all
             .into_iter()
             .partition(|chat| chat.status == AgentStatus::Idle);
-        let (history, hooks) = (&self.projects.cursor_history, &self.cursor.hooks);
-        self.cursor_chats = live
+        let (history, hooks) = (&self.projects.cursor_history, &self.cursor.reads.hooks);
+        self.cursor.chats = live
             .into_iter()
             .filter(|chat| !history.hides(chat, hooks.get(&chat.row.id)))
             .collect();
         // A chat only hooks know of goes once idle: there is nothing to
         // show it by.
-        self.cursor_idle = idle
+        self.cursor.idle = idle
             .into_iter()
-            .filter(|chat| self.cursor.rows.contains_key(&chat.row.id))
+            .filter(|chat| self.cursor.reads.rows.contains_key(&chat.row.id))
             .collect();
         self.notify_agents();
     }
 
     /// Ask for Cursor's database to be read now.
     fn read_cursor_db(&self) {
-        if let Some(poke) = &self.cursor_poke {
+        if let Some(poke) = &self.cursor.poke {
             let _ = poke.send(self.projects.cursor_history.ids());
         }
     }
@@ -1255,10 +1259,11 @@ impl crate::Gerdr {
     /// leaves it.
     pub fn delete_cursor_chat(&mut self, id: &str) {
         let Some(chat) = self
-            .cursor_idle
+            .cursor
+            .idle
             .iter()
-            .chain(&self.cursor_chats)
-            .find(|chat| chat.row.id == id && self.cursor.rows.contains_key(id))
+            .chain(&self.cursor.chats)
+            .find(|chat| chat.row.id == id && self.cursor.reads.rows.contains_key(id))
         else {
             return;
         };
@@ -1273,7 +1278,7 @@ impl crate::Gerdr {
 
     /// Stop hearing Cursor's hooks: gerdr quits.
     pub fn close_cursor_socket(&mut self) {
-        if let Some(path) = self.cursor_socket.take() {
+        if let Some(path) = self.cursor.socket.take() {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -1286,7 +1291,7 @@ impl crate::Gerdr {
             .iter()
             .map(|ws| Spot {
                 dir: &ws.dir,
-                worktrees: self.git.get(&ws.dir).map_or_else(Vec::new, |git| {
+                worktrees: self.git.status.get(&ws.dir).map_or_else(Vec::new, |git| {
                     git.worktrees.iter().map(|w| w.path.as_path()).collect()
                 }),
                 fallback: ws.kind == crate::WorkspaceKind::Cursor,
@@ -1308,7 +1313,8 @@ impl crate::Gerdr {
     /// `History::pick`): those shown, and the kept ones that don't fit.
     pub fn cursor_history(&self, w: usize) -> (Vec<&CursorChat>, Vec<&CursorChat>) {
         let idle: Vec<&CursorChat> = self
-            .cursor_idle
+            .cursor
+            .idle
             .iter()
             .filter(|chat| self.cursor_chat_place(chat) == Some(w))
             .collect();
@@ -1319,12 +1325,13 @@ impl crate::Gerdr {
     /// something, then its history; those in the database can be deleted.
     pub fn cursor_cards(&self, w: usize) -> Vec<crate::chrome::AgentView> {
         let live = self
-            .cursor_chats
+            .cursor
+            .chats
             .iter()
             .filter(|chat| self.cursor_chat_place(chat) == Some(w))
             .map(|chat| {
                 let mut card = crate::chrome::AgentView::cursor(chat);
-                card.closable = self.cursor.rows.contains_key(&chat.row.id);
+                card.closable = self.cursor.reads.rows.contains_key(&chat.row.id);
                 card
             });
         let history = self.cursor_history(w).0.into_iter().map(|chat| {
@@ -1349,7 +1356,8 @@ impl crate::Gerdr {
                     .map(|t| (w, t))
             })
             .is_some_and(|(w, t)| self.is_visible(w, t));
-        self.cursor_chats
+        self.cursor
+            .chats
             .iter()
             .filter_map(|chat| {
                 let w = self.cursor_chat_place(chat)?;
@@ -1361,7 +1369,7 @@ impl crate::Gerdr {
                     status: chat.status,
                     label: card.label(),
                     body: body.join(" · "),
-                    seen: self.host_focused && shown,
+                    seen: self.notices.host_focused && shown,
                     finished: None,
                 })
             })

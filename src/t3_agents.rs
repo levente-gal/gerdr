@@ -1445,7 +1445,7 @@ impl crate::Gerdr {
             .iter()
             .map(|ws| Spot {
                 dir: &ws.dir,
-                worktrees: self.git.get(&ws.dir).map_or_else(Vec::new, |git| {
+                worktrees: self.git.status.get(&ws.dir).map_or_else(Vec::new, |git| {
                     git.worktrees.iter().map(|w| w.path.as_path()).collect()
                 }),
                 fallback: false,
@@ -1520,7 +1520,7 @@ impl crate::Gerdr {
                     status: thread.status,
                     label: card.label(),
                     body: body.join(" · "),
-                    seen: self.host_focused && shown.as_deref() == Some(&thread.row.id),
+                    seen: self.notices.host_focused && shown.as_deref() == Some(&thread.row.id),
                     finished: None,
                 })
             })
@@ -1530,7 +1530,10 @@ impl crate::Gerdr {
     /// The thread the user looks at now: shown in T3 Code's app, in the
     /// shown tab's focused pane, while gerdr's window has the keyboard.
     fn t3_seen_thread(&self) -> Option<String> {
-        self.host_focused.then(|| self.shown_t3_thread()).flatten()
+        self.notices
+            .host_focused
+            .then(|| self.shown_t3_thread())
+            .flatten()
     }
 
     /// Let a thread held done (see `hold_finished`) go once the user
@@ -2078,7 +2081,7 @@ impl crate::Gerdr {
                 crate::feature_agents::t3_reviews_its_build(
                     feature,
                     workflow,
-                    &self.cli_agents,
+                    &self.launcher.cli_agents,
                     &agent,
                 )
             });

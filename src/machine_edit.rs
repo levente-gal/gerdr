@@ -301,12 +301,12 @@ impl Gerdr {
 
     /// The edit form, if it is open on machine `machine`.
     fn edit_form_mut(&mut self, machine: &str) -> Option<&mut EditForm> {
-        (self.machines_panel.as_mut()?.edit.as_mut()).filter(|f| f.machine == machine)
+        (self.overlays.machines_panel.as_mut()?.edit.as_mut()).filter(|f| f.machine == machine)
     }
 
     /// Say what is wrong in the form, the keyboard on the field at fault.
     fn edit_error(&mut self, why: String, field: MachinesFocus) {
-        if let Some(panel) = self.machines_panel.as_mut() {
+        if let Some(panel) = self.overlays.machines_panel.as_mut() {
             if let Some(form) = panel.edit.as_mut() {
                 form.error = Some(why);
             }
@@ -332,7 +332,12 @@ impl Gerdr {
         if self.edit_try().is_some() {
             return;
         }
-        let Some(form) = self.machines_panel.as_ref().and_then(|p| p.edit.as_ref()) else {
+        let Some(form) = self
+            .overlays
+            .machines_panel
+            .as_ref()
+            .and_then(|p| p.edit.as_ref())
+        else {
             return;
         };
         let machine = form.machine.clone();
@@ -400,7 +405,7 @@ impl Gerdr {
             known,
             progress: "connecting\u{2026}".into(),
         });
-        if let Some(panel) = self.machines_panel.as_mut() {
+        if let Some(panel) = self.overlays.machines_panel.as_mut() {
             if let Some(form) = panel.edit.as_mut() {
                 form.failed = None;
             }
@@ -424,7 +429,7 @@ impl Gerdr {
             let why = format!("gerdr couldn't keep it in the settings: {why}.");
             return self.edit_error(why, MachinesFocus::EditAddress(0));
         }
-        self.settings_modified = crate::config::modified();
+        self.settings.settings_modified = crate::config::modified();
         (self.machines.saved).insert(name.to_owned(), target.clone());
         if let Some(link) = self.machines.links.get_mut(name) {
             link.addresses = target.clone();
@@ -448,7 +453,7 @@ impl Gerdr {
             let why = format!("gerdr couldn't keep it in the settings: {why}.");
             return self.edit_error(why, MachinesFocus::EditAddress(0));
         }
-        self.settings_modified = crate::config::modified();
+        self.settings.settings_modified = crate::config::modified();
         (self.machines.saved).insert(name.to_owned(), target.clone());
         self.start_link(name.to_owned(), target.clone(), true);
         self.starts_lost();
@@ -469,7 +474,7 @@ impl Gerdr {
         }
         // The keyboard goes back to the address, as after a failed try:
         // the only button it was on is gone.
-        if let Some(panel) = self.machines_panel.as_mut()
+        if let Some(panel) = self.overlays.machines_panel.as_mut()
             && panel.edit.is_some()
         {
             panel.focus = MachinesFocus::EditAddress(0);
@@ -538,7 +543,7 @@ impl Gerdr {
             Some(form) => {
                 let field = form.field_of(&at);
                 form.failed = Some((at, failure));
-                if let Some(panel) = self.machines_panel.as_mut() {
+                if let Some(panel) = self.overlays.machines_panel.as_mut() {
                     panel.focus = MachinesFocus::EditAddress(field);
                 }
             }
@@ -568,7 +573,7 @@ impl Gerdr {
                 "Connected to {name} at {at}, but gerdr couldn't keep it in the settings: {why}"
             ));
         }
-        self.settings_modified = crate::config::modified();
+        self.settings.settings_modified = crate::config::modified();
         (self.machines.saved).insert(name.clone(), new_target);
         let mut called = name.clone();
         if new_name != name {
@@ -588,7 +593,7 @@ impl Gerdr {
     pub(crate) fn rename_machine_back(&mut self, from: &str, to: &str) {
         match self.rename_machine(from, to) {
             Ok(()) => {
-                if let Some(panel) = self.machines_panel.as_mut()
+                if let Some(panel) = self.overlays.machines_panel.as_mut()
                     && let Some(row) = self.machines.saved.keys().position(|n| n == to)
                 {
                     panel.selected = row;
@@ -622,7 +627,7 @@ impl Gerdr {
             format!("gerdr couldn't rename it in the settings: {why}.")
         })?;
         // Written here: the settings read back don't take the old name out.
-        self.settings_modified = crate::config::modified();
+        self.settings.settings_modified = crate::config::modified();
         let ids = self.machines.rename(old, new);
         self.rename_last(old, new);
         let mut trouble = false;
@@ -646,7 +651,7 @@ impl Gerdr {
                 trouble = true;
             }
         }
-        if let Some(panel) = self.machines_panel.as_mut() {
+        if let Some(panel) = self.overlays.machines_panel.as_mut() {
             panel.renamed(old, new);
         }
         if trouble {
@@ -725,7 +730,7 @@ impl Gerdr {
         }
         let dropped_too = crate::config::write_machine(drop, None);
         // Written here: the settings read back don't take it out again.
-        self.settings_modified = crate::config::modified();
+        self.settings.settings_modified = crate::config::modified();
         if let Err(why) = dropped_too {
             // `keep` has its addresses already: both stay, as the file says.
             tracing::warn!("machines: taking {drop} out of the settings: {why}");
@@ -788,7 +793,7 @@ impl Gerdr {
         let row = self.machines.saved.keys().position(|n| n == keep);
         let count = self.machines.saved.len() + 1;
         let page = crate::chrome::machines_shown(count, self.output_size());
-        if let (Some(panel), Some(row)) = (self.machines_panel.as_mut(), row) {
+        if let (Some(panel), Some(row)) = (self.overlays.machines_panel.as_mut(), row) {
             panel.merged(drop, row, (page, count));
         }
         self.starts_lost();

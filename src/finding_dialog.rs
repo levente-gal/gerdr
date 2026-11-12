@@ -324,7 +324,7 @@ impl Gerdr {
             .iter()
             .map(|text| TextField::multiline(text))
             .collect();
-        self.context_menu = None;
+        self.overlays.context_menu = None;
         self.stop_key_repeat();
         self.features.finding_dialog = Some(FindingDialog {
             project: project.to_owned(),
@@ -658,8 +658,8 @@ impl Gerdr {
                 if let Some(at) = chrome::finding_field_at(&view, i, size, pos)
                     && let Some(field) = dialog.fields.get_mut(i)
                 {
-                    field.click(at, shift, self.press_count);
-                    self.field_drag = self.press_count == 1;
+                    field.click(at, shift, self.mouse.press_count);
+                    self.mouse.field_drag = self.mouse.press_count == 1;
                 }
                 None
             }
@@ -678,7 +678,7 @@ impl Gerdr {
     pub fn finding_dialog_drag(&mut self, pos: Point<f64, Logical>) {
         let size = self.output_size();
         let Some(view) = self.finding_dialog_view() else {
-            self.field_drag = false;
+            self.mouse.field_drag = false;
             return;
         };
         let i = view.focus;
@@ -704,7 +704,7 @@ impl Gerdr {
             return;
         };
         let size = self.output_size();
-        let at = chrome::finding_field_past(&view, view.focus, size, by, self.pointer.x);
+        let at = chrome::finding_field_past(&view, view.focus, size, by, self.mouse.pos.x);
         if let (Some(at), Some(field)) = (at, self.finding_dialog_field_mut()) {
             field.drag_to(at);
         }

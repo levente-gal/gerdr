@@ -245,7 +245,7 @@ impl Gerdr {
             .iter()
             .any(|ws| ws.record == record && ws.tabs.iter().any(|t| !t.is_feature()));
         if new && !kept {
-            self.closing_records.insert(record.clone());
+            self.session.closing_records.insert(record.clone());
             self.prune();
             self.forget_workspace(&record);
             self.switch_workspace(before);
@@ -270,7 +270,10 @@ impl Gerdr {
     pub(crate) fn pin_feature_tabs(&mut self) -> bool {
         let mut changed = false;
         for w in 0..self.workspaces.len() {
-            let closing = self.closing_records.contains(&self.workspaces[w].record);
+            let closing = self
+                .session
+                .closing_records
+                .contains(&self.workspaces[w].record);
             let want = !closing && self.workspace_feature(w).is_some();
             // A file's tab goes with its feature: its page's window too.
             if !want {
@@ -349,7 +352,7 @@ impl Gerdr {
         }
         // Each feature's moved to the end in turn keeps them in order.
         let first = n - feature.iter().filter(|f| **f).count();
-        if let Some(herdr) = self.herdr.as_mut() {
+        if let Some(herdr) = self.session.herdr.as_mut() {
             for id in self.workspaces[first..]
                 .iter()
                 .filter_map(Workspace::herdr_id)

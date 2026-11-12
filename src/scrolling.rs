@@ -104,12 +104,12 @@ impl Gerdr {
         // Every one of them, not just up to the first flung.
         [
             self.sidebar_scroll.stop_fling(),
-            (self.project_menu.as_mut()).is_some_and(|menu| menu.stop_fling()),
-            (self.switcher.as_mut()).is_some_and(|switcher| switcher.stop_fling()),
+            (self.overlays.project_menu.as_mut()).is_some_and(|menu| menu.stop_fling()),
+            (self.overlays.switcher.as_mut()).is_some_and(|switcher| switcher.stop_fling()),
             self.worktrees.stop_fling(),
             self.repos.stop_fling(),
             (self.inbox.panel.as_mut()).is_some_and(|panel| panel.stop_fling()),
-            (self.scrollback.as_mut()).is_some_and(|viewer| viewer.stop_fling()),
+            (self.overlays.scrollback.as_mut()).is_some_and(|viewer| viewer.stop_fling()),
             self.feature_tab_stop_fling(),
             (self.review_tab_mut()).is_some_and(|tab| tab.wd.diff.scroll.stop_fling()),
         ]
@@ -136,11 +136,11 @@ impl Gerdr {
         ]
         .contains(&true);
         self.keep_field_scroll();
-        if self.scrolling && !moving {
+        if self.mouse.scrolling && !moving {
             let time = self.start_time.elapsed().as_millis() as u32;
-            self.pointer_moved(self.pointer, time);
+            self.pointer_moved(self.mouse.pos, time);
         }
-        self.scrolling = moving;
+        self.mouse.scrolling = moving;
     }
 }
 

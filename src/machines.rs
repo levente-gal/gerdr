@@ -1525,7 +1525,7 @@ impl Gerdr {
         match crate::config::write_machine(&name, Some(&addresses)) {
             Ok(()) => {
                 // Written here: no need to read it back and say so.
-                self.settings_modified = crate::config::modified();
+                self.settings.settings_modified = crate::config::modified();
                 self.show_success(format!("Connected to {name}"));
             }
             Err(why) => {
@@ -1547,7 +1547,7 @@ impl Gerdr {
             dialog.target.set(&target);
             dialog.name.set(&name);
         }
-        self.context_menu = None;
+        self.overlays.context_menu = None;
         self.stop_key_repeat();
         self.machines.dialog = Some(dialog);
         self.refresh_pointer_focus();
@@ -1789,7 +1789,7 @@ impl Gerdr {
         self.report_machines();
         match crate::config::write_machine(name, None) {
             Ok(()) => {
-                self.settings_modified = crate::config::modified();
+                self.settings.settings_modified = crate::config::modified();
                 let undo = target.map(|addresses| {
                     let name = name.to_owned();
                     (
@@ -1824,7 +1824,7 @@ impl Gerdr {
                 "gerdr couldn't put {name} back in the settings: {why}"
             ));
         }
-        self.settings_modified = crate::config::modified();
+        self.settings.settings_modified = crate::config::modified();
         (self.machines.saved).insert(name.to_owned(), addresses.clone());
         self.start_link(name.to_owned(), addresses, true);
         self.report_machines();

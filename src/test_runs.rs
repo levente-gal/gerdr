@@ -440,10 +440,10 @@ impl Gerdr {
     /// read how each that just finished went from its pane's text. One
     /// finished in sight is seen.
     pub(crate) fn track_tests(&mut self) {
-        let finished = step(&mut self.test_runs, &self.herdr_tabs, Instant::now());
+        let finished = step(&mut self.test_runs, &self.session.tabs, Instant::now());
         for i in finished {
             let run = &self.test_runs[i];
-            let Some(herdr) = self.herdr.as_mut() else {
+            let Some(herdr) = self.session.herdr.as_mut() else {
                 break;
             };
             let text = herdr
@@ -470,7 +470,7 @@ impl Gerdr {
 
     /// Whether the user sees herdr pane `pane_id` now.
     fn test_run_shown(&self, pane_id: &str) -> bool {
-        self.host_focused
+        self.notices.host_focused
             && self
                 .herdr_pane_place(pane_id)
                 .is_some_and(|(w, t)| self.is_visible(w, t))
@@ -576,7 +576,7 @@ impl Gerdr {
             .filter_map(|f| Some((f, f.verify.as_ref()?)))
             .flat_map(|(f, v)| v.checks.iter().map(move |row| (f, row)))
             .collect();
-        let panes: Vec<&PaneState> = self.herdr_tabs.values().flat_map(|d| &d.panes).collect();
+        let panes: Vec<&PaneState> = self.session.tabs.values().flat_map(|d| &d.panes).collect();
         // A check no longer among them takes its card along: its terminal
         // may stay, for the user to look at.
         self.test_runs.retain(|r| {

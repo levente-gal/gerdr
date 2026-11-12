@@ -121,7 +121,7 @@ impl Gerdr {
     /// One of our clients took the selection: offer it to the host too.
     pub fn export_selection(&mut self, target: SelectionTarget, mime_types: Vec<String>) {
         if target == SelectionTarget::Clipboard {
-            self.copied = None;
+            self.notices.copied = None;
         }
         let Some(clip) = self.host_clipboard.as_mut() else {
             return;
@@ -154,14 +154,14 @@ impl Gerdr {
         let mimes: Vec<String> = TEXT_MIMES.iter().map(|m| (*m).to_owned()).collect();
         self.export_selection(SelectionTarget::Clipboard, mimes.clone());
         set_data_device_selection(&self.display_handle, &self.seat, mimes, ());
-        self.copied = Some(text);
+        self.notices.copied = Some(text);
     }
 
     /// One of our clients pastes a selection that came from the host, or
     /// the text copied from gerdr's own fields.
     pub fn import_selection(&mut self, target: SelectionTarget, mime_type: String, fd: OwnedFd) {
         if target == SelectionTarget::Clipboard
-            && let Some(text) = &self.copied
+            && let Some(text) = &self.notices.copied
         {
             return write_copied(text, fd);
         }
@@ -225,7 +225,7 @@ impl Gerdr {
     /// Where the clipboard's text read for a paste goes back to the event
     /// loop, with the overlay it is for.
     fn paste_sender(&mut self) -> Option<channel::Sender<(Overlay, String)>> {
-        if self.paste.is_none() {
+        if self.notices.paste.is_none() {
             let (tx, rx) = channel::channel::<(Overlay, String)>();
             let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
                 if let channel::Event::Msg((into, text)) = event {
@@ -233,11 +233,11 @@ impl Gerdr {
                 }
             });
             match inserted {
-                Ok(_) => self.paste = Some(tx),
+                Ok(_) => self.notices.paste = Some(tx),
                 Err(err) => tracing::warn!("paste: {err}"),
             }
         }
-        self.paste.clone()
+        self.notices.paste.clone()
     }
 
     fn apply_host_selections(&mut self) {
@@ -261,7 +261,7 @@ impl Gerdr {
             }
             if target == SelectionTarget::Clipboard {
                 // A host app took the clipboard from gerdr's copy.
-                self.copied = None;
+                self.notices.copied = None;
             }
             let (dh, seat) = (&self.display_handle, &self.seat);
             match (target, mimes) {
@@ -354,7 +354,7 @@ impl Dispatch<ZwlrDataControlSourceV1, SelectionTarget> for Gerdr {
             // A host app pastes our client's selection, or our own copy.
             zwlr_data_control_source_v1::Event::Send { mime_type, fd } => {
                 if *target == SelectionTarget::Clipboard
-                    && let Some(text) = &state.copied
+                    && let Some(text) = &state.notices.copied
                 {
                     return write_copied(text, fd);
                 }

@@ -46,20 +46,20 @@ impl Gerdr {
         };
         let mut field = TextField::from(current);
         field.select_all();
-        self.rename = Some(Rename { target, field });
+        self.overlays.rename = Some(Rename { target, field });
     }
 
     /// A key while renaming: Enter keeps the name, Esc drops it, the rest
     /// edits it. Whether a rename took the key (every key while one runs).
     pub fn rename_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym) -> bool {
-        if self.rename.is_none() {
+        if self.overlays.rename.is_none() {
             return false;
         }
         match sym {
             Keysym::Return | Keysym::KP_Enter => self.commit_rename(),
             Keysym::Escape => self.cancel_rename(),
             _ => {
-                if let Some(rename) = self.rename.as_mut() {
+                if let Some(rename) = self.overlays.rename.as_mut() {
                     rename.field.key(mods, sym, typed);
                 }
             }
@@ -85,17 +85,17 @@ impl Gerdr {
         let scale = self.scale();
         let at = self.chrome.caret_at(&field, pos.x, scale);
         let extend = self.keyboard().modifier_state().shift;
-        if let Some(rename) = self.rename.as_mut() {
-            rename.field.click(at, extend, self.press_count);
+        if let Some(rename) = self.overlays.rename.as_mut() {
+            rename.field.click(at, extend, self.mouse.press_count);
         }
-        self.field_drag = self.press_count == 1;
+        self.mouse.field_drag = self.mouse.press_count == 1;
         true
     }
 
     /// Where the name being typed is drawn and what it shows, while the
     /// rename is on screen (a tab's only while its workspace is shown).
     pub fn rename_field_spot(&self) -> Option<FieldSpot> {
-        let rename = self.rename.as_ref()?;
+        let rename = self.overlays.rename.as_ref()?;
         match rename.target {
             RenameTarget::Tab(w, _) if w == self.active_workspace => {
                 let view = self.tab_strip_view();
@@ -115,7 +115,7 @@ impl Gerdr {
 
     /// Write the name typed into the rename target, and stop renaming.
     pub fn commit_rename(&mut self) {
-        let Some(rename) = self.rename.take() else {
+        let Some(rename) = self.overlays.rename.take() else {
             return;
         };
         let name = rename.field.trim().to_owned();
@@ -131,7 +131,7 @@ impl Gerdr {
     }
 
     pub fn cancel_rename(&mut self) {
-        self.rename = None;
+        self.overlays.rename = None;
     }
 
     /// Call workspace `w` `name`, here and in the project's records.

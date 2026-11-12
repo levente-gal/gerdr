@@ -393,7 +393,7 @@ impl Gerdr {
 
     /// Look for the installed agent CLIs again (see `cli_agents`).
     pub fn refresh_cli_agents(&mut self) {
-        self.cli_agents = cli_agents::installed(&self.agent_config);
+        self.launcher.cli_agents = cli_agents::installed(&self.settings.agent_config);
     }
 
     /// Show Cursor chat `id`: the project's Cursor, started if it isn't
@@ -408,7 +408,7 @@ impl Gerdr {
             .running_vs_code(&command)
             .and_then(|(w, t, leaf)| self.leaf_pid(w, t, leaf));
         self.open_cursor(Some(&command));
-        self.cursor_opened = Some(id.to_owned());
+        self.cursor.opened = Some(id.to_owned());
         // One just started would take the link as its own start. To the
         // one running, by its own profile: by another, the link would
         // start a second Cursor, which gerdr doesn't keep.
@@ -440,7 +440,8 @@ impl Gerdr {
 
     /// The installed Cursor, if any.
     fn installed_cursor(&self) -> Option<&App> {
-        self.installed_apps
+        self.launcher
+            .installed
             .iter()
             .find(|app| program_name(&app.command).as_deref() == Some(CURSOR))
     }
@@ -627,7 +628,7 @@ impl Gerdr {
     /// can't run its host.
     fn steered(&self, web: &str, url: &str, pane: Option<u32>, dir: &Path) -> Option<String> {
         let pane = pane?;
-        let socket = self.web_control.socket()?;
+        let socket = self.web.control.socket()?;
         let (key, _, flatpak) = program(web)?;
         if flatpak || !STEERED.contains(&key.as_str()) {
             return None;
@@ -752,13 +753,13 @@ impl Gerdr {
         let (tx, rx) = channel::channel();
         let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
             if let channel::Event::Msg(apps) = event {
-                state.installed_apps = apps;
+                state.launcher.installed = apps;
                 state.refresh_run_prompt();
             }
         });
         match inserted {
             Ok(_) => {
-                self.installed_apps_tx = Some(tx);
+                self.launcher.installed_tx = Some(tx);
                 self.scan_installed_apps();
             }
             Err(err) => tracing::warn!("installed apps: {err}"),
@@ -767,7 +768,7 @@ impl Gerdr {
 
     /// Read the installed apps again, off the event loop.
     pub fn scan_installed_apps(&self) {
-        let Some(tx) = self.installed_apps_tx.clone() else {
+        let Some(tx) = self.launcher.installed_tx.clone() else {
             return;
         };
         std::thread::spawn(move || {

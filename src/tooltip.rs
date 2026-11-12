@@ -161,21 +161,21 @@ impl Gerdr {
     /// Offer `tip` for what is under the pointer at `now` (see
     /// `TooltipState::offer`), and have a timer show it when it is due.
     pub fn offer_tooltip(&mut self, tip: Option<Tooltip>, now: Instant) {
-        self.tooltip.offer(tip, now);
-        let Some(due) = self.tooltip.due() else {
+        self.hover.tooltip.offer(tip, now);
+        let Some(due) = self.hover.tooltip.due() else {
             return;
         };
-        if self.tooltip.timed {
+        if self.hover.tooltip.timed {
             return;
         }
         let show = move |_, _: &mut (), state: &mut Gerdr| {
             let now = Instant::now();
-            state.tooltip.tick(now);
-            match state.tooltip.due() {
+            state.hover.tooltip.tick(now);
+            match state.hover.tooltip.due() {
                 // Another tooltip took the wait over: wait for it.
                 Some(due) if due > now => TimeoutAction::ToInstant(due),
                 _ => {
-                    state.tooltip.timed = false;
+                    state.hover.tooltip.timed = false;
                     TimeoutAction::Drop
                 }
             }
@@ -184,7 +184,7 @@ impl Gerdr {
             .loop_handle
             .insert_source(Timer::from_deadline(due), show)
         {
-            Ok(_) => self.tooltip.timed = true,
+            Ok(_) => self.hover.tooltip.timed = true,
             Err(err) => tracing::warn!("timing the tooltip: {err}"),
         }
     }

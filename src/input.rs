@@ -324,7 +324,7 @@ impl Gerdr {
         match event {
             InputEvent::Keyboard { event, .. } => {
                 // A key may move a field's caret: its view follows.
-                self.field_scroll_due = true;
+                self.mouse.field_scroll_due = true;
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = Event::time_msec(&event);
                 let code = event.key_code();
@@ -337,11 +337,20 @@ impl Gerdr {
                     time,
                     |state, mods, handle| {
                         if key_state == KeyState::Released {
-                            if state.key_repeat.is_some_and(|(held, _)| held == code) {
+                            if state
+                                .key_state
+                                .key_repeat
+                                .is_some_and(|(held, _)| held == code)
+                            {
                                 state.stop_key_repeat();
                             }
-                            if let Some(i) = state.suppressed_keys.iter().position(|k| *k == code) {
-                                state.suppressed_keys.remove(i);
+                            if let Some(i) = state
+                                .key_state
+                                .suppressed_keys
+                                .iter()
+                                .position(|k| *k == code)
+                            {
+                                state.key_state.suppressed_keys.remove(i);
                                 return FilterResult::Intercept(None);
                             }
                             return FilterResult::Forward;
@@ -361,12 +370,12 @@ impl Gerdr {
                         // A key moves what an overlay shows from under
                         // its tooltip.
                         if state.grabbing_overlay().is_some() {
-                            state.tooltip.hide();
+                            state.hover.tooltip.hide();
                             state.drop_agent_strip();
                         }
                         // A dialog takes every key.
                         if let Some(dialog) = top.filter(|o| o.is_dialog()) {
-                            state.suppressed_keys.push(code);
+                            state.key_state.suppressed_keys.push(code);
                             // The dialogs with fields take pastes, and
                             // repeat what they take while held.
                             let fielded = match dialog {
@@ -378,7 +387,7 @@ impl Gerdr {
                                 _ => None,
                             };
                             if let Some(into) = fielded {
-                                state.prefix_armed = false;
+                                state.key_state.prefix_armed = false;
                                 if text_field::is_paste(mods, sym) {
                                     state.paste_clipboard(into);
                                     return FilterResult::Intercept(None);
@@ -395,8 +404,8 @@ impl Gerdr {
                         }
                         // A name being typed takes every key, repeating
                         // what its field takes while held.
-                        if state.rename.is_some() {
-                            state.suppressed_keys.push(code);
+                        if state.overlays.rename.is_some() {
+                            state.key_state.suppressed_keys.push(code);
                             let typed = handle.modified_sym();
                             text_field::took_key();
                             state.rename_key(mods, sym, typed);
@@ -410,25 +419,31 @@ impl Gerdr {
                         // Only the prefix, or the key after it, closes it and
                         // goes on, to be armed or to pick an action.
                         if top == Some(overlay::Overlay::ContextMenu) {
-                            if state.prefix_armed || state.keymap.is_prefix(mods, sym) {
+                            if state.key_state.prefix_armed
+                                || state.key_state.keymap.is_prefix(mods, sym)
+                            {
                                 state.close_menu();
                             } else {
                                 state.menu_key(sym);
-                                state.suppressed_keys.push(code);
+                                state.key_state.suppressed_keys.push(code);
                                 return FilterResult::Intercept(None);
                             }
                         }
                         // A paste into an overlay's text field: the
                         // clipboard's text comes back as a key for it.
-                        if !state.prefix_armed
+                        if !state.key_state.prefix_armed
                             && text_field::is_paste(mods, sym)
                             && !state.doc_cycles(mods, sym)
                             && let Some(overlay) = state.text_overlay().filter(|o| {
                                 *o != Overlay::Scrollback
-                                    || state.scrollback.as_ref().is_some_and(|s| s.find_focused())
+                                    || state
+                                        .overlays
+                                        .scrollback
+                                        .as_ref()
+                                        .is_some_and(|s| s.find_focused())
                             })
                         {
-                            state.suppressed_keys.push(code);
+                            state.key_state.suppressed_keys.push(code);
                             state.paste_clipboard(overlay);
                             return FilterResult::Intercept(None);
                         }
@@ -439,14 +454,14 @@ impl Gerdr {
                         // `works_over`), and the key that opened a panel
                         // closes it.
                         if let Some(top) = state.key_overlay() {
-                            state.suppressed_keys.push(code);
-                            if state.prefix_armed {
-                                state.prefix_armed = false;
+                            state.key_state.suppressed_keys.push(code);
+                            if state.key_state.prefix_armed {
+                                state.key_state.prefix_armed = false;
                                 let out = state.prefix_key(Some(top), mods, sym);
                                 return FilterResult::Intercept(out);
                             }
-                            if state.keymap.is_prefix(mods, sym) {
-                                state.prefix_armed = true;
+                            if state.key_state.keymap.is_prefix(mods, sym) {
+                                state.key_state.prefix_armed = true;
                                 arm_prefix(mods);
                                 return FilterResult::Intercept(None);
                             }
@@ -459,19 +474,19 @@ impl Gerdr {
                             state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(out);
                         }
-                        if state.prefix_armed {
-                            state.prefix_armed = false;
+                        if state.key_state.prefix_armed {
+                            state.key_state.prefix_armed = false;
                             // The prefix twice sends it to the app.
-                            if state.keymap.is_prefix(mods, sym) {
+                            if state.key_state.keymap.is_prefix(mods, sym) {
                                 return FilterResult::Forward;
                             }
-                            state.suppressed_keys.push(code);
+                            state.key_state.suppressed_keys.push(code);
                             return FilterResult::Intercept(state.prefix_key(None, mods, sym));
                         }
-                        if state.keymap.is_prefix(mods, sym) {
-                            state.prefix_armed = true;
+                        if state.key_state.keymap.is_prefix(mods, sym) {
+                            state.key_state.prefix_armed = true;
                             arm_prefix(mods);
-                            state.suppressed_keys.push(code);
+                            state.key_state.suppressed_keys.push(code);
                             return FilterResult::Intercept(None);
                         }
                         // A file's tab showing its page takes what acts on
@@ -479,7 +494,7 @@ impl Gerdr {
                         if state.review_tab().is_some()
                             && crate::doc_tab::doc_preview_key(mods, sym)
                         {
-                            state.suppressed_keys.push(code);
+                            state.key_state.suppressed_keys.push(code);
                             let typed = handle.modified_sym();
                             let out = state.overlay_key(Overlay::Repos, mods, sym, typed);
                             return FilterResult::Intercept(out);
@@ -488,9 +503,9 @@ impl Gerdr {
                         // and still goes on to the app: it may be what
                         // leaves a mode there.
                         if sym == Keysym::Escape {
-                            state.tooltip.hide();
+                            state.hover.tooltip.hide();
                             state.drop_agent_strip();
-                            state.help_pinned = false;
+                            state.hover.help_pinned = false;
                         }
                         // What it interrupts stopped on purpose.
                         if mods.ctrl && matches!(sym, Keysym::c | Keysym::C | Keysym::backslash) {
@@ -517,16 +532,16 @@ impl Gerdr {
                 let location = pointer.current_location();
 
                 if state == ButtonState::Released {
-                    self.field_drag = false;
-                    self.repos_rows_drag = false;
-                    self.repos_editor_drag = false;
+                    self.mouse.field_drag = false;
+                    self.mouse.repos_rows_drag = false;
+                    self.mouse.repos_editor_drag = false;
                     self.scrollback_release();
                     self.release_page_text();
-                    if self.thumb_drag.take().is_some() {
+                    if self.mouse.thumb_drag.take().is_some() {
                         return;
                     }
                 }
-                if state == ButtonState::Released && self.drag.take().is_some() {
+                if state == ButtonState::Released && self.mouse.drag.take().is_some() {
                     // The final size, without Resizing, so every client applies it.
                     self.arrange();
                     // Hand the pointer back to the client under it.
@@ -534,7 +549,7 @@ impl Gerdr {
                     return;
                 }
                 if state == ButtonState::Released
-                    && let Some(reorder) = self.reorder.take()
+                    && let Some(reorder) = self.mouse.reorder.take()
                 {
                     // A pane let go without moving was a click on its bar.
                     if reorder.moving {
@@ -571,9 +586,9 @@ impl Gerdr {
                     && event.button_code() == BTN_LEFT
                     && self.press_thumb(location)
                 {
-                    self.tooltip.hide();
+                    self.hover.tooltip.hide();
                     self.chrome.drop_tooltip();
-                    if self.rename.is_some() {
+                    if self.overlays.rename.is_some() {
                         self.commit_rename();
                     }
                     return;
@@ -585,10 +600,10 @@ impl Gerdr {
                 }
                 if state == ButtonState::Pressed && !pointer.is_grabbed() {
                     let button = event.button_code();
-                    self.press_count = self.count_press(location, button);
-                    self.field_scroll_due = true;
+                    self.mouse.press_count = self.count_press(location, button);
+                    self.mouse.field_scroll_due = true;
                     let taken = self.press(location, button);
-                    self.last_press = Some((Instant::now(), location, button));
+                    self.mouse.last_press = Some((Instant::now(), location, button));
                     if taken {
                         return;
                     }
@@ -607,15 +622,16 @@ impl Gerdr {
             }
             InputEvent::PointerAxis { event, .. } => {
                 let motion = self.scroll_motion::<I>(&event);
-                let at = self.overlay_at(self.pointer);
+                let at = self.overlay_at(self.mouse.pos);
                 // The wheel over an open context menu leaves it be; off
                 // it, the wheel closes it, as a press outside would, and
                 // scrolls nothing.
                 if at == Some(overlay::Overlay::ContextMenu) {
                     let over_menu = self
+                        .overlays
                         .context_menu
                         .as_ref()
-                        .is_some_and(|menu| menu.layout().0.to_f64().contains(self.pointer));
+                        .is_some_and(|menu| menu.layout().0.to_f64().contains(self.mouse.pos));
                     if !over_menu {
                         self.close_menu();
                     }
@@ -641,11 +657,11 @@ impl Gerdr {
                 }
                 // Over a toast, the help panel or the footer, nothing
                 // moves.
-                if at.is_some() || self.on_footer(self.pointer) {
+                if at.is_some() || self.on_footer(self.mouse.pos) {
                     return;
                 }
                 // Over the sidebar, its rows scroll.
-                if self.pointer.x < self.sidebar_width as f64 {
+                if self.mouse.pos.x < self.sidebar_width as f64 {
                     if let Some(motion) = motion {
                         self.sidebar_scroll(motion);
                     }
@@ -682,15 +698,15 @@ impl Gerdr {
     /// region for its menu). Whether gerdr took the press; else it goes on
     /// to the client under it.
     fn press(&mut self, location: Point<f64, Logical>, button: u32) -> bool {
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
         // A press stops the wait for the strip of agents, as for the
         // tooltip: a click on the AI button opens the agent picker, and
         // the strip must not open beside it.
-        self.agent_strip_due = None;
+        self.hover.strip_due = None;
         // A press in the name being typed moves its caret; anywhere else
         // keeps the name.
-        if self.rename.is_some() {
+        if self.overlays.rename.is_some() {
             if self.rename_press(location, button) {
                 return true;
             }
@@ -699,8 +715,8 @@ impl Gerdr {
         let hit = self.overlay_at(location);
         // A press off the pinned help, on what is under it, closes it and
         // goes on.
-        if self.help_pinned && hit.is_none_or(|o| overlay::Overlay::Help.is_above(o)) {
-            self.help_pinned = false;
+        if self.hover.help_pinned && hit.is_none_or(|o| overlay::Overlay::Help.is_above(o)) {
+            self.hover.help_pinned = false;
         }
         if let Some(hit) = hit {
             self.overlay_press(hit, location, button);
@@ -743,7 +759,7 @@ impl Gerdr {
         if button == BTN_LEFT
             && let Some(drag) = self.divider_at(location)
         {
-            self.drag = Some(drag);
+            self.mouse.drag = Some(drag);
             return true;
         }
         // A second click on a workspace row or a tab renames it.
@@ -755,8 +771,8 @@ impl Gerdr {
                 RegionHit::Control | RegionHit::Nothing => None,
             };
             if let Some(target) = target {
-                self.reorder = None;
-                self.pane_drop = None;
+                self.mouse.reorder = None;
+                self.mouse.pane_drop = None;
                 self.start_rename(target);
                 return true;
             }
@@ -868,7 +884,7 @@ impl Gerdr {
             O::Help => {
                 let press = self
                     .help_hit(pos)
-                    .and_then(|hit| self.keymap.help().press(hit));
+                    .and_then(|hit| self.key_state.keymap.help().press(hit));
                 if let Some(press) = press {
                     self.help_press(press, pos);
                 }
@@ -927,6 +943,7 @@ impl Gerdr {
                 None | Some(chrome::StripHit::Panel)
             ),
             O::ContextMenu => self
+                .overlays
                 .context_menu
                 .as_ref()
                 .is_some_and(|menu| menu.item_at(pos).is_some()),
@@ -1008,11 +1025,15 @@ impl Gerdr {
         sym: Keysym,
     ) -> Option<Intercepted> {
         let carried = CTRL_FROM_PREFIX.replace(false);
-        if sym == Keysym::Escape || self.keymap.is_prefix(mods, sym) {
+        if sym == Keysym::Escape || self.key_state.keymap.is_prefix(mods, sym) {
             return None;
         }
-        let (mods, action) = after_prefix(&self.keymap, mods, sym, carried);
-        let keys = format!("{} {}", self.keymap.help().prefix, key_name(&mods, sym));
+        let (mods, action) = after_prefix(&self.key_state.keymap, mods, sym, carried);
+        let keys = format!(
+            "{} {}",
+            self.key_state.keymap.help().prefix,
+            key_name(&mods, sym)
+        );
         let Some(action) = action else {
             self.show_warning(format!("No shortcut on {keys}"));
             return None;
@@ -1132,7 +1153,7 @@ impl Gerdr {
     /// Whether a press at `pos` now, after the last one, makes a double
     /// click: soon after it, close to it, and with the left button.
     pub fn is_double(&self, pos: Point<f64, Logical>) -> bool {
-        self.last_press.is_some_and(|(when, from, button)| {
+        self.mouse.last_press.is_some_and(|(when, from, button)| {
             button == BTN_LEFT
                 && when.elapsed() < MULTI_CLICK
                 && (from.x - pos.x).abs() < MULTI_CLICK_SLOP
@@ -1144,7 +1165,7 @@ impl Gerdr {
     /// where the pointer is.
     pub(crate) fn hold(&mut self, what: Reorderable) {
         let from = self.pointer().current_location();
-        self.reorder = Some(Reorder {
+        self.mouse.reorder = Some(Reorder {
             what,
             from,
             moving: false,
@@ -1156,13 +1177,13 @@ impl Gerdr {
     /// client it is over are found. Also run in place when what is under
     /// it changed without it moving.
     pub fn pointer_moved(&mut self, pos: Point<f64, Logical>, time: u32) {
-        self.pointer = pos;
+        self.mouse.pos = pos;
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.pointer();
-        if let Some(drag) = self.drag.clone() {
+        if let Some(drag) = self.mouse.drag.clone() {
             self.drag_to(&drag, pos);
         }
-        if let Some(reorder) = self.reorder.as_mut() {
+        if let Some(reorder) = self.mouse.reorder.as_mut() {
             let moved = pos - reorder.from;
             reorder.moving |= moved.x.hypot(moved.y) > REORDER_START;
             if reorder.moving {
@@ -1170,10 +1191,10 @@ impl Gerdr {
                 self.reorder_to(what, pos);
             }
         }
-        if self.field_drag {
+        if self.mouse.field_drag {
             self.drag_field(pos);
         }
-        if self.repos_rows_drag || self.repos_editor_drag {
+        if self.mouse.repos_rows_drag || self.mouse.repos_editor_drag {
             self.repos_drag_rows(pos);
         }
         if self.scrollback_dragging() {
@@ -1182,7 +1203,7 @@ impl Gerdr {
         if self.picking_page_text() {
             self.drag_page_text(pos);
         }
-        if self.thumb_drag.is_some() {
+        if self.mouse.thumb_drag.is_some() {
             self.drag_thumb(pos);
         }
         // The overlay on top at the pointer takes the hover from
@@ -1198,7 +1219,7 @@ impl Gerdr {
             self.criteria_strip.hover = None;
         }
         // The keys of the help panel light up under the pointer.
-        self.help_hover = if at == Some(overlay::Overlay::Help) {
+        self.hover.help = if at == Some(overlay::Overlay::Help) {
             self.help_hit(pos)
         } else {
             None
@@ -1212,13 +1233,13 @@ impl Gerdr {
         // over it, and may offer a tooltip. Its layout is worked
         // out once for the event.
         let covered = at.is_some();
-        self.header_hover = false;
+        self.hover.header = false;
         let regions = self.regions_at(pos);
         // The strip of agents closes off the sidebar (see
         // `track_agent_strip`).
         if covered || regions.sidebar.is_none() {
-            self.agent_strip = None;
-            self.agent_strip_due = None;
+            self.hover.strip = None;
+            self.hover.strip_due = None;
         }
         let on_footer = !covered && self.on_footer(pos);
         if !on_footer {
@@ -1236,7 +1257,7 @@ impl Gerdr {
             self.pane_bar_motion(pos)
         };
         // So do the buttons of a terminal pane's bar.
-        let free = !covered && self.drag.is_none() && self.reorder.is_none();
+        let free = !covered && self.mouse.drag.is_none() && self.mouse.reorder.is_none();
         self.pane_bar_hover(free.then_some(pos));
         let offered = free || covered;
         self.offer_tooltip(tip.filter(|_| offered), Instant::now());
@@ -1261,23 +1282,25 @@ impl Gerdr {
             };
             let icon = if over_field {
                 CursorIcon::Text
-            } else if self.reorder.is_some_and(|r| r.moving) || self.thumb_drag.is_some() {
+            } else if self.mouse.reorder.is_some_and(|r| r.moving)
+                || self.mouse.thumb_drag.is_some()
+            {
                 CursorIcon::Grabbing
-            } else if let Some(drag) = self.drag.clone().or_else(|| self.divider_at(pos)) {
+            } else if let Some(drag) = self.mouse.drag.clone().or_else(|| self.divider_at(pos)) {
                 drag_cursor(&drag)
             } else if draggable() {
                 CursorIcon::Grab
             } else if hit != RegionHit::Nothing
-                || self.help_hover.is_some_and(|hit| hit != HelpHit::Panel)
+                || self.hover.help.is_some_and(|hit| hit != HelpHit::Panel)
             {
                 CursorIcon::Pointer
             } else {
                 CursorIcon::Default
             };
-            if pointer.current_focus().is_some() || icon != self.chrome_cursor {
+            if pointer.current_focus().is_some() || icon != self.mouse.chrome_cursor {
                 self.backend.window().set_cursor_visible(true);
                 self.backend.window().set_cursor(icon);
-                self.chrome_cursor = icon;
+                self.mouse.chrome_cursor = icon;
             }
         }
         pointer.motion(
@@ -1327,7 +1350,7 @@ impl Gerdr {
             Intercepted::Scrollback(outcome) => self.apply_scrollback(outcome),
             Intercepted::AiStats(outcome) => self.apply_ai_stats(outcome),
             Intercepted::CloseSwitcher => {
-                self.switcher = None;
+                self.overlays.switcher = None;
                 self.refresh_pointer_focus();
             }
             Intercepted::Tasks(outcome) => self.apply_tasks(outcome),
@@ -1362,7 +1385,11 @@ impl Gerdr {
             O::Inbox => Some(Overlay::Inbox),
             O::AiStats => Some(Overlay::AiStats),
             O::Scrollback => Some(Overlay::Scrollback),
-            O::Switcher => self.switcher.as_ref().map(|s| Overlay::Switcher(s.serial)),
+            O::Switcher => self
+                .overlays
+                .switcher
+                .as_ref()
+                .map(|s| Overlay::Switcher(s.serial)),
             O::Tasks => Some(Overlay::Tasks),
             O::Machines => Some(Overlay::MachinesPanel),
             O::NewFeature => Some(Overlay::NewFeature),
@@ -1381,7 +1408,7 @@ impl Gerdr {
         if self.text_overlay() != Some(into) {
             return;
         }
-        self.field_scroll_due = true;
+        self.mouse.field_scroll_due = true;
         let mods = ModifiersState::default();
         let out = text_field::pasting(text, |key| self.overlay_key(into, &mods, key, key));
         if let Some(out) = out {
@@ -1553,16 +1580,16 @@ impl Gerdr {
     /// The text field with the keyboard, in the overlay that has it.
     fn field_mut(&mut self) -> Option<&mut TextField> {
         match self.text_overlay()? {
-            Overlay::Welcome => self.welcome.as_mut()?.field_mut(),
-            Overlay::ProjectMenu => self.project_menu.as_mut()?.field_mut(),
+            Overlay::Welcome => self.overlays.welcome.as_mut()?.field_mut(),
+            Overlay::ProjectMenu => self.overlays.project_menu.as_mut()?.field_mut(),
             Overlay::Worktrees => self.worktrees.field_mut(),
             // A file's tab holds its own search.
             Overlay::Repos if !self.repos.is_open() => self.wd_mut()?.diff.search_field_mut(),
             Overlay::Repos => self.repos.field_mut(),
             Overlay::Inbox => self.inbox.field_mut(),
             Overlay::AiStats => self.ai_stats_field_mut(),
-            Overlay::Scrollback => self.scrollback.as_mut()?.field_mut(),
-            Overlay::Switcher(_) => Some(self.switcher.as_mut()?.field_mut()),
+            Overlay::Scrollback => self.overlays.scrollback.as_mut()?.field_mut(),
+            Overlay::Switcher(_) => Some(self.overlays.switcher.as_mut()?.field_mut()),
             Overlay::MachinesPanel => self.machines_panel_field_mut(),
             Overlay::Tasks => None,
             Overlay::Features => {
@@ -1599,26 +1626,26 @@ impl Gerdr {
             return;
         };
         let at = base + self.chrome.caret_at(&field, pos.x, self.scale());
-        let count = self.press_count;
+        let count = self.mouse.press_count;
         let extend = self.keyboard().modifier_state().shift;
         if let Some(field) = self.field_mut() {
             field.click(at, extend, count);
         }
-        self.field_drag = count == 1;
+        self.mouse.field_drag = count == 1;
     }
 
     /// How many left presses in a row the one at `pos` is, a moment apart
     /// and in about one place: the second selects a word in a text field,
     /// the third all of it.
     fn count_press(&self, pos: Point<f64, Logical>, button: u32) -> u32 {
-        match self.last_press {
+        match self.mouse.last_press {
             Some((when, from, b))
                 if b == button
                     && when.elapsed() < MULTI_CLICK
                     && (from.x - pos.x).abs() < MULTI_CLICK_SLOP
                     && (from.y - pos.y).abs() < MULTI_CLICK_SLOP =>
             {
-                self.press_count + 1
+                self.mouse.press_count + 1
             }
             _ => 1,
         }
@@ -1628,7 +1655,7 @@ impl Gerdr {
     /// it, and the byte of its text that starts at (see `field_line_at`):
     /// the name being typed, else the overlay's field with the keyboard.
     fn held_field_at(&self, pos: Point<f64, Logical>) -> Option<(FieldSpot, usize)> {
-        if self.rename.is_some() {
+        if self.overlays.rename.is_some() {
             return self.rename_field_spot().map(|spot| (spot, 0));
         }
         self.field_line_at(pos, true)
@@ -1636,27 +1663,30 @@ impl Gerdr {
 
     /// The text field a held press drags in: see `held_field_at`.
     fn held_field_mut(&mut self) -> Option<&mut TextField> {
-        if self.rename.is_none() {
+        if self.overlays.rename.is_none() {
             return self.field_mut();
         }
-        self.rename.as_mut().map(|rename| &mut rename.field)
+        self.overlays
+            .rename
+            .as_mut()
+            .map(|rename| &mut rename.field)
     }
 
     /// Whether a held press drags in the finding dialog's field.
     fn holds_finding_field(&self) -> bool {
-        self.rename.is_none() && self.text_overlay() == Some(Overlay::FindingDialog)
+        self.overlays.rename.is_none() && self.text_overlay() == Some(Overlay::FindingDialog)
     }
 
     /// The pointer moved to `pos` holding a press in a text field: the
     /// selection reaches the character there, of the text in view (held
     /// past it, `field_edge_tick` scrolls).
     fn drag_field(&mut self, pos: Point<f64, Logical>) {
-        self.field_scroll_due = true;
+        self.mouse.field_scroll_due = true;
         if self.holds_finding_field() {
             return self.finding_dialog_drag(pos);
         }
         let Some((field, base)) = self.held_field_at(pos) else {
-            self.field_drag = false;
+            self.mouse.field_drag = false;
             return;
         };
         let scale = self.scale();
@@ -1694,16 +1724,16 @@ impl Gerdr {
     /// step along the line there, or a row a step in the finding dialog.
     /// Whether it scrolls.
     pub(crate) fn field_edge_tick(&mut self, now: Instant) -> bool {
-        let edge = match self.field_drag {
-            true => self.field_edge(self.pointer),
+        let edge = match self.mouse.field_drag {
+            true => self.field_edge(self.mouse.pos),
             false => 0.0,
         };
-        let by = crate::scrolling::edge_steps(&mut self.field_edge, now, edge);
+        let by = crate::scrolling::edge_steps(&mut self.mouse.field_edge, now, edge);
         if by != 0 {
-            self.field_scroll_due = true;
+            self.mouse.field_scroll_due = true;
             if self.holds_finding_field() {
                 self.finding_dialog_past(by);
-            } else if let Some((field, base)) = self.held_field_at(self.pointer) {
+            } else if let Some((field, base)) = self.held_field_at(self.mouse.pos) {
                 let line = &field.line;
                 let at = base + text_field::chars_from(line, line.caret.min(line.len()), by);
                 if let Some(field) = self.held_field_mut() {
@@ -1719,13 +1749,13 @@ impl Gerdr {
     /// or a press may have moved its caret (`field_scroll_due`), not every
     /// frame, as the views it takes are not cheap.
     pub(crate) fn keep_field_scroll(&mut self) {
-        if !std::mem::take(&mut self.field_scroll_due) {
+        if !std::mem::take(&mut self.mouse.field_scroll_due) {
             return;
         }
         let scale = self.scale();
-        if self.rename.is_some() {
+        if self.overlays.rename.is_some() {
             let at = (self.rename_field_spot()).map(|spot| self.chrome.field_first(&spot, scale));
-            if let (Some(at), Some(rename)) = (at, self.rename.as_mut()) {
+            if let (Some(at), Some(rename)) = (at, self.overlays.rename.as_mut()) {
                 rename.field.set_scroll(at);
             }
         }
@@ -1760,7 +1790,7 @@ impl Gerdr {
         took: bool,
     ) {
         self.stop_key_repeat();
-        if self.rename.is_some() {
+        if self.overlays.rename.is_some() {
             self.repeat_rename_key(code, mods, sym, typed, took);
             return;
         }
@@ -1783,9 +1813,9 @@ impl Gerdr {
         let interval = Duration::from_millis(1000 / u64::from(REPEAT_RATE));
         let timer = Timer::from_duration(Duration::from_millis(REPEAT_DELAY.into()));
         let repeat = self.loop_handle.insert_source(timer, move |_, _, state| {
-            state.field_scroll_due = true;
+            state.mouse.field_scroll_due = true;
             if state.text_overlay() != Some(overlay) {
-                state.key_repeat = None;
+                state.key_state.key_repeat = None;
                 return TimeoutAction::Drop;
             }
             text_field::took_key();
@@ -1796,12 +1826,12 @@ impl Gerdr {
             }
             state.copy_from_field();
             if !(switcher || took || moves) {
-                state.key_repeat = None;
+                state.key_state.key_repeat = None;
                 return TimeoutAction::Drop;
             }
             TimeoutAction::ToDuration(interval)
         });
-        self.key_repeat = repeat.ok().map(|token| (code, token));
+        self.key_state.key_repeat = repeat.ok().map(|token| (code, token));
     }
 
     /// Repeat `code`, held while a name is typed, for as long as the
@@ -1820,25 +1850,25 @@ impl Gerdr {
         let interval = Duration::from_millis(1000 / u64::from(REPEAT_RATE));
         let timer = Timer::from_duration(Duration::from_millis(REPEAT_DELAY.into()));
         let repeat = self.loop_handle.insert_source(timer, move |_, _, state| {
-            state.field_scroll_due = true;
-            if state.rename.is_none() {
-                state.key_repeat = None;
+            state.mouse.field_scroll_due = true;
+            if state.overlays.rename.is_none() {
+                state.key_state.key_repeat = None;
                 return TimeoutAction::Drop;
             }
             text_field::took_key();
             state.rename_key(&mods, sym, typed);
             if !text_field::took_key() {
-                state.key_repeat = None;
+                state.key_state.key_repeat = None;
                 return TimeoutAction::Drop;
             }
             TimeoutAction::ToDuration(interval)
         });
-        self.key_repeat = repeat.ok().map(|token| (code, token));
+        self.key_state.key_repeat = repeat.ok().map(|token| (code, token));
     }
 
     /// Stop repeating the key held over an overlay.
     pub fn stop_key_repeat(&mut self) {
-        if let Some((_, token)) = self.key_repeat.take() {
+        if let Some((_, token)) = self.key_state.key_repeat.take() {
             self.loop_handle.remove(token);
         }
     }
@@ -1860,15 +1890,20 @@ impl Gerdr {
                 time,
                 |state, _, _| {
                     // A key gerdr kept from the apps has no press to undo there.
-                    if let Some(i) = state.suppressed_keys.iter().position(|k| *k == code) {
-                        state.suppressed_keys.remove(i);
+                    if let Some(i) = state
+                        .key_state
+                        .suppressed_keys
+                        .iter()
+                        .position(|k| *k == code)
+                    {
+                        state.key_state.suppressed_keys.remove(i);
                         return FilterResult::Intercept(());
                     }
                     FilterResult::Forward
                 },
             );
         }
-        self.suppressed_keys.clear();
+        self.key_state.suppressed_keys.clear();
     }
 }
 

@@ -690,7 +690,7 @@ impl crate::Gerdr {
                     // Kept in t3.json, to try again next time.
                     return tracing::warn!("{}: [t3] updates: {err}", path.display());
                 }
-                self.settings_modified = crate::config::modified();
+                self.settings.settings_modified = crate::config::modified();
                 self.t3.auto_update = false;
                 let text = "T3 Code updates off \u{b7} now in Settings".to_owned();
                 let open = (

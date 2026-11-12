@@ -91,15 +91,15 @@ impl Gerdr {
     /// Open the inbox panel with item `item` selected while it is listed,
     /// else the first item of section `focus`, else the first item.
     pub fn open_inbox_on(&mut self, focus: Option<Section>, item: Option<ItemId>) {
-        self.switcher = None;
+        self.overlays.switcher = None;
         self.repos.close();
         self.worktrees.close();
-        self.project_menu = None;
+        self.overlays.project_menu = None;
         self.stop_key_repeat();
         self.close_menu();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
-        self.scrollback = None;
+        self.overlays.scrollback = None;
         self.inbox.open(focus, item);
         self.inbox_mark_seen();
         if self.issues_due(ISSUES_OPEN) {
@@ -143,8 +143,8 @@ impl Gerdr {
         };
         inbox_sources::agent_fingerprint(
             view,
-            &self.agents,
-            &self.cursor_chats,
+            &self.session.agents,
+            &self.cursor.chats,
             &self.t3.threads,
             &self.test_runs,
         )
@@ -259,12 +259,12 @@ impl Gerdr {
             records: &records,
             active: self.workspace().map(|_| self.active_workspace),
             agents,
-            herdr_agents: &self.agents,
-            cursor_chats: &self.cursor_chats,
+            herdr_agents: &self.session.agents,
+            cursor_chats: &self.cursor.chats,
             t3_threads: &self.t3.threads,
             test_runs: &self.test_runs,
             agent_since: &self.agent_since,
-            ci: &self.ci,
+            ci: &self.ci.repos,
             issues: &self.inbox.issues,
             tickets: self.ticket_repos(),
             store: self.inbox_file(),
@@ -910,7 +910,7 @@ impl Gerdr {
 
     /// The repositories whose issues are read: the CI's, each once.
     fn gh_repos(&self) -> Vec<GhRepo> {
-        let mut roots: Vec<_> = self.ci.iter().collect();
+        let mut roots: Vec<_> = self.ci.repos.iter().collect();
         roots.sort_by(|a, b| a.0.cmp(b.0));
         let mut repos: Vec<GhRepo> = Vec::new();
         for (root, ci) in roots {
@@ -1020,7 +1020,12 @@ impl Gerdr {
         {
             return;
         }
-        let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf()) else {
+        let Some(socket) = self
+            .session
+            .herdr
+            .as_ref()
+            .map(|h| h.socket().to_path_buf())
+        else {
             return;
         };
         let Some(tx) = self.pane_sender() else {

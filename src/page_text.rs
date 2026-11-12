@@ -174,8 +174,11 @@ impl Gerdr {
             let at = layout.text_at(&view, pos.to_i32_round(), false)?;
             Some((at, layout.line_text(at.line)?.to_owned()))
         });
-        let shift = self.seat.get_keyboard().is_some_and(|k| k.modifier_state().shift);
-        let count = self.press_count.max(1);
+        let shift = self
+            .seat
+            .get_keyboard()
+            .is_some_and(|k| k.modifier_state().shift);
+        let count = self.mouse.press_count.max(1);
         let Some(panel) = self.features.panel.as_mut() else {
             return;
         };
@@ -260,9 +263,12 @@ impl Gerdr {
         };
         let col = TabColumn::Page as usize;
         let room = f64::from(layout.scroll_room(TabColumn::Page));
-        let y: f64 = self.pointer.y;
+        let y: f64 = self.mouse.pos.y;
         let edge = layout.columns[col].map_or(0.0, |place| {
-            let (top, bottom) = (f64::from(place.loc.y), f64::from(place.loc.y + place.size.h));
+            let (top, bottom) = (
+                f64::from(place.loc.y),
+                f64::from(place.loc.y + place.size.h),
+            );
             match y {
                 y if y < top => y - top,
                 y if y > bottom => y - bottom,
@@ -278,7 +284,7 @@ impl Gerdr {
             let to = (scroll.pos() + (by * i64::from(chrome::BODY_LINE)) as f64).clamp(0.0, room);
             if to != scroll.pos() {
                 scroll.jump(to);
-                self.drag_page_text(self.pointer);
+                self.drag_page_text(self.mouse.pos);
             }
         }
         edge != 0.0

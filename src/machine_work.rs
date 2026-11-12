@@ -983,7 +983,7 @@ impl Gerdr {
     pub(crate) fn pane_socket(&self, pane: &str) -> Option<(PathBuf, String)> {
         match split_pane(pane) {
             None => {
-                let socket = self.herdr.as_ref()?.socket().to_path_buf();
+                let socket = self.session.herdr.as_ref()?.socket().to_path_buf();
                 Some((socket, pane.to_owned()))
             }
             Some((id, bare)) => {

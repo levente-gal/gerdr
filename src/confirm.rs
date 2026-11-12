@@ -570,10 +570,10 @@ impl Gerdr {
     /// Whether project `id`'s herdr session runs, as last found out, else
     /// asked now.
     pub(crate) fn session_runs(&self, id: &str) -> bool {
-        if self.stopping.contains(id) {
+        if self.life.stopping.contains(id) {
             return false;
         }
-        match self.running.get(id) {
+        match self.life.running.get(id) {
             Some(running) => *running,
             None => self
                 .projects
@@ -739,8 +739,8 @@ impl Gerdr {
     /// Open the confirm dialog: `title`, `body` under it, and the `go`
     /// button doing `then`. Cancel is selected.
     pub(crate) fn ask(&mut self, title: String, body: String, go: &'static str, then: Then) {
-        self.context_menu = None;
-        self.confirm = Some(ConfirmDialog {
+        self.overlays.context_menu = None;
+        self.overlays.confirm = Some(ConfirmDialog {
             title,
             body,
             go,
@@ -773,12 +773,12 @@ impl Gerdr {
 
     /// A key while the confirm dialog has the keyboard.
     pub fn confirm_key(&mut self, _mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
-        self.confirm.as_mut()?.key(sym)
+        self.overlays.confirm.as_mut()?.key(sym)
     }
 
     /// Do what the confirm dialog asked.
     pub fn apply_confirm(&mut self, outcome: Outcome) {
-        let Some(dialog) = self.confirm.take() else {
+        let Some(dialog) = self.overlays.confirm.take() else {
             return;
         };
         // Gone, what is under the pointer gets it back.
@@ -929,12 +929,12 @@ impl Gerdr {
                 self.refresh_project_menu();
             }
             Then::ForgetProject(id) => {
-                self.forget_after_stop.insert(id.clone());
+                self.life.forget_after_stop.insert(id.clone());
                 self.stop_project_now(&id, Stops::ALL);
                 self.refresh_project_menu();
             }
             Then::ChangeProjectId(id, new) => {
-                self.id_after_stop.insert(id.clone(), new);
+                self.life.id_after_stop.insert(id.clone(), new);
                 self.stop_project_now(&id, Stops::ALL);
                 self.refresh_project_menu();
             }
@@ -944,7 +944,7 @@ impl Gerdr {
     /// A left click while the confirm dialog is open; `false` if it isn't.
     pub fn confirm_click(&mut self, pos: Point<f64, Logical>) -> bool {
         let size = self.output_size();
-        let Some(dialog) = self.confirm.as_mut() else {
+        let Some(dialog) = self.overlays.confirm.as_mut() else {
             return false;
         };
         let layout = dialog.layout(size);
@@ -962,7 +962,7 @@ impl Gerdr {
     /// The pointer moved while the confirm dialog is open.
     pub fn confirm_hover(&mut self, pos: Point<f64, Logical>) {
         let size = self.output_size();
-        if let Some(dialog) = self.confirm.as_mut() {
+        if let Some(dialog) = self.overlays.confirm.as_mut() {
             dialog.hover = button_at(&dialog.layout(size), pos);
         }
     }
@@ -970,14 +970,14 @@ impl Gerdr {
     /// The buttons of the confirm dialog, while it is open: what the
     /// pointer can press.
     pub fn confirm_controls(&self) -> Vec<chrome::Rect> {
-        match &self.confirm {
+        match &self.overlays.confirm {
             Some(dialog) => dialog.layout(self.output_size()).buttons.to_vec(),
             None => Vec::new(),
         }
     }
 
     pub fn confirm_view(&self) -> Option<ConfirmView> {
-        let dialog = self.confirm.as_ref()?;
+        let dialog = self.overlays.confirm.as_ref()?;
         Some(ConfirmView {
             title: dialog.title.clone(),
             body: dialog.body.clone(),

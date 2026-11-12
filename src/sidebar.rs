@@ -190,18 +190,23 @@ impl Gerdr {
             .map(|(ws, _)| ws)
             .collect();
         let rows = self.feature_rows();
-        chrome::sidebar_layout_at(&workspaces, &agents, self.sidebar_width, self.density)
-            .with_features(&rows, self.sidebar_width, self.density)
-            .with_feature_head(
-                !workspaces.is_empty(),
-                chrome::features_waiting(&workspaces, &rows),
-                self.sidebar_width,
-            )
-            .scrolled_over(
-                self.sidebar_scroll.pos(),
-                self.sidebar_scroll.overscroll(),
-                self.sidebar_height(),
-            )
+        chrome::sidebar_layout_at(
+            &workspaces,
+            &agents,
+            self.sidebar_width,
+            self.settings.density,
+        )
+        .with_features(&rows, self.sidebar_width, self.settings.density)
+        .with_feature_head(
+            !workspaces.is_empty(),
+            chrome::features_waiting(&workspaces, &rows),
+            self.sidebar_width,
+        )
+        .scrolled_over(
+            self.sidebar_scroll.pos(),
+            self.sidebar_scroll.overscroll(),
+            self.sidebar_height(),
+        )
     }
 
     /// Whether workspace `w` was folded or unfolded by hand: this run, else
@@ -314,14 +319,14 @@ impl Gerdr {
 
     /// Whether something covers the sidebar, taking the pointer from it.
     pub(crate) fn sidebar_covered(&self) -> bool {
-        self.quit.is_some()
-            || self.restart.is_some()
-            || self.checkout.is_some()
-            || self.confirm.is_some()
-            || self.welcome.is_some()
-            || self.project_menu.is_some()
-            || self.switcher.is_some()
-            || self.context_menu.is_some()
+        self.overlays.quit.is_some()
+            || self.overlays.restart.is_some()
+            || self.overlays.checkout.is_some()
+            || self.overlays.confirm.is_some()
+            || self.overlays.welcome.is_some()
+            || self.overlays.project_menu.is_some()
+            || self.overlays.switcher.is_some()
+            || self.overlays.context_menu.is_some()
     }
 
     /// What is under the pointer in the sidebar, if it is free and there.
@@ -330,7 +335,7 @@ impl Gerdr {
             return None;
         }
         // Nothing lights up while a scrollbar's thumb is held.
-        if self.thumb_drag.is_some() {
+        if self.mouse.thumb_drag.is_some() {
             return None;
         }
         // Rows passing under a still pointer don't light up.
@@ -353,7 +358,8 @@ impl Gerdr {
         }
         let cursor = pane.app_command.as_deref().and_then(launch::program_name);
         let chat = self
-            .cursor_opened
+            .cursor
+            .opened
             .clone()
             .filter(|_| cursor.as_deref() == Some("cursor"))?;
         Some(AgentKey::Cursor(chat))
@@ -370,14 +376,18 @@ impl Gerdr {
     ) -> SidebarState {
         let height = self.sidebar_height();
         let rows = self.feature_rows();
-        let layout =
-            chrome::sidebar_layout_at(workspaces, agents, self.sidebar_width, self.density)
-                .with_features(&rows, self.sidebar_width, self.density)
-                .with_feature_head(
-                    !workspaces.is_empty(),
-                    chrome::features_waiting(workspaces, &rows),
-                    self.sidebar_width,
-                );
+        let layout = chrome::sidebar_layout_at(
+            workspaces,
+            agents,
+            self.sidebar_width,
+            self.settings.density,
+        )
+        .with_features(&rows, self.sidebar_width, self.settings.density)
+        .with_feature_head(
+            !workspaces.is_empty(),
+            chrome::features_waiting(workspaces, &rows),
+            self.sidebar_width,
+        );
         // Held to what the rows now take, and moved to show the active
         // workspace when another becomes it: gliding there, or at once
         // the first time.
@@ -395,9 +405,9 @@ impl Gerdr {
         }
         let (scroll, over) = (self.sidebar_scroll.pos(), self.sidebar_scroll.overscroll());
         let layout = layout.scrolled_over(scroll, over, height);
-        let hit = self.sidebar_hit(&layout, self.pointer);
-        self.sidebar_hover.track(hit.map(SidebarHit::pill), now);
-        let hover = &self.sidebar_hover;
+        let hit = self.sidebar_hit(&layout, self.mouse.pos);
+        self.hover.sidebar.track(hit.map(SidebarHit::pill), now);
+        let hover = &self.hover.sidebar;
         let rows = (0..layout.rows.len())
             .map(|i| RowState {
                 hover: quantize(hover.alpha(SidebarHit::Row(i), now)),
@@ -468,18 +478,19 @@ impl Gerdr {
         let features_plus = quantize(hover.alpha(SidebarHit::NewFeature, now));
         let plus = quantize(hover.alpha(SidebarHit::Plus, now));
         let plus_open = self
+            .overlays
             .context_menu
             .as_ref()
             .is_some_and(|menu| menu.spec.anchor == layout.plus);
         let repos = quantize(hover.alpha(SidebarHit::Repos, now));
         let repos_open = self.repos.panel.is_some();
         let counts = self.repos_changed();
-        let rename = self.rename.as_ref().and_then(|r| match r.target {
+        let rename = self.overlays.rename.as_ref().and_then(|r| match r.target {
             RenameTarget::Workspace(w) => Some((w, r.field.line())),
             RenameTarget::Tab(..) => None,
         });
         SidebarState {
-            density: self.density,
+            density: self.settings.density,
             rows,
             cards,
             ci,
@@ -510,14 +521,14 @@ impl Gerdr {
         self.apply_agent_strip(strip_after(
             hit,
             bridge,
-            self.agent_strip,
-            self.agent_strip_due,
+            self.hover.strip,
+            self.hover.strip_due,
             now,
         ));
-        let Some((_, at)) = self.agent_strip_due else {
+        let Some((_, at)) = self.hover.strip_due else {
             return;
         };
-        if self.agent_strip_timed {
+        if self.hover.strip_timed {
             return;
         }
         // Open it when due, if the pointer still rests on that button:
@@ -526,25 +537,25 @@ impl Gerdr {
         // may have moved or closed.
         let show = move |_, _: &mut (), state: &mut Gerdr| {
             let now = Instant::now();
-            if let Some((_, at)) = state.agent_strip_due {
+            if let Some((_, at)) = state.hover.strip_due {
                 if now < at {
                     return TimeoutAction::ToInstant(at);
                 }
                 let (hit, bridge) = state.strip_pointer();
-                let (open, due) = (state.agent_strip, state.agent_strip_due);
+                let (open, due) = (state.hover.strip, state.hover.strip_due);
                 state.apply_agent_strip(strip_after(hit, bridge, open, due, now));
-                if let Some((_, at)) = state.agent_strip_due {
+                if let Some((_, at)) = state.hover.strip_due {
                     return TimeoutAction::ToInstant(at);
                 }
             }
-            state.agent_strip_timed = false;
+            state.hover.strip_timed = false;
             TimeoutAction::Drop
         };
         match self
             .loop_handle
             .insert_source(Timer::from_deadline(at), show)
         {
-            Ok(_) => self.agent_strip_timed = true,
+            Ok(_) => self.hover.strip_timed = true,
             Err(err) => tracing::warn!("timing the strip of agents: {err}"),
         }
     }
@@ -579,30 +590,30 @@ impl Gerdr {
     /// has them: the AI button's tooltip, due or shown, steps aside for
     /// a strip opening under it.
     fn apply_agent_strip(&mut self, (open, due): (Option<usize>, Option<(usize, Instant)>)) {
-        self.agent_strip_due = due;
-        let opens = open.is_some() && open != self.agent_strip;
+        self.hover.strip_due = due;
+        let opens = open.is_some() && open != self.hover.strip;
         self.set_agent_strip(open);
         if opens {
-            self.tooltip.offer(None, Instant::now());
+            self.hover.tooltip.offer(None, Instant::now());
         }
     }
 
     /// Close the strip of agents and stop waiting to open one: on a press
     /// or a key, as the tooltip hides.
     pub(crate) fn drop_agent_strip(&mut self) {
-        self.agent_strip = None;
-        self.agent_strip_record = None;
-        self.agent_strip_due = None;
+        self.hover.strip = None;
+        self.hover.strip_record = None;
+        self.hover.strip_due = None;
     }
 
     /// Show the strip of agents on workspace `open`'s header (none when
     /// `None`), looking for the installed agents again as it opens.
     fn set_agent_strip(&mut self, open: Option<usize>) {
-        if open.is_some() && open != self.agent_strip {
+        if open.is_some() && open != self.hover.strip {
             self.refresh_cli_agents();
         }
-        self.agent_strip = open;
-        self.agent_strip_record = open
+        self.hover.strip = open;
+        self.hover.strip_record = open
             .and_then(|i| self.workspaces.get(i))
             .map(|ws| ws.record.clone());
     }
@@ -611,10 +622,10 @@ impl Gerdr {
     /// it; `None` on the ellipsis standing for those that don't fit.
     fn picked_agent(&self, layout: &SidebarLayout, i: usize, k: usize) -> Option<&CliAgent> {
         let slots = layout.rows.get(i)?.pick_slots();
-        if self.cli_agents.len() > slots && k + 1 == slots {
+        if self.launcher.cli_agents.len() > slots && k + 1 == slots {
             return None;
         }
-        self.cli_agents.get(k)
+        self.launcher.cli_agents.get(k)
     }
 
     /// The menu listing the Cursor chats of workspace `w` its rows leave
@@ -823,10 +834,11 @@ impl Gerdr {
         pos: Point<f64, Logical>,
     ) -> Option<Tooltip> {
         let hit = self.sidebar_hit(layout, pos);
-        self.header_hover = self.project.is_some() && hit == Some(SidebarHit::Header);
+        self.hover.header = self.project.is_some() && hit == Some(SidebarHit::Header);
         let bridge = self.strip_bridge(layout, pos);
         self.track_agent_strip(hit, bridge);
-        self.sidebar_hover
+        self.hover
+            .sidebar
             .track(hit.map(SidebarHit::pill), Instant::now());
         let workspaces = self.workspace_views();
         let agents = self.agent_views();
@@ -836,7 +848,7 @@ impl Gerdr {
                     "Add a workspace (a terminal, or a folder in Zed or Cursor), start a feature, or open the inbox",
                     layout.plus,
                 );
-                let help = self.keymap.help();
+                let help = self.key_state.keymap.help();
                 let keys: Vec<_> = [Action::NewTerminal, Action::NewProject]
                     .into_iter()
                     .filter_map(|action| help.key_of(action, 0))
@@ -849,29 +861,40 @@ impl Gerdr {
             }
             SidebarHit::Repos => {
                 let tip = Tooltip::new(&repos_tip(&self.repos_changed()), layout.repos);
-                Some(match self.keymap.help().key_of(Action::Repos, 0) {
-                    Some(key) => tip.key(&key),
-                    None => tip,
-                })
+                Some(
+                    match self.key_state.keymap.help().key_of(Action::Repos, 0) {
+                        Some(key) => tip.key(&key),
+                        None => tip,
+                    },
+                )
             }
             SidebarHit::Close(i) => {
                 let tip = Tooltip::new("Close workspace", layout.rows[i].close);
-                Some(match self.keymap.help().key_of(Action::CloseWorkspace, 0) {
-                    Some(key) => tip.key(&key),
-                    None => tip,
-                })
+                Some(
+                    match self
+                        .key_state
+                        .keymap
+                        .help()
+                        .key_of(Action::CloseWorkspace, 0)
+                    {
+                        Some(key) => tip.key(&key),
+                        None => tip,
+                    },
+                )
             }
             // No tip of its own while it has agents: the strip it opens
             // under it says each one, and a tip shown before the strip
             // opens would sit in the way of the pointer moving onto it.
-            SidebarHit::NewAgent(_) if !self.cli_agents.is_empty() => None,
+            SidebarHit::NewAgent(_) if !self.launcher.cli_agents.is_empty() => None,
             SidebarHit::NewAgent(i) => {
                 let text = "No agent CLI found on PATH · add yours under [agents] in Settings";
                 let tip = Tooltip::new(text, layout.rows[i].agent);
-                Some(match self.keymap.help().key_of(Action::NewAgent, 0) {
-                    Some(key) => tip.key(&key),
-                    None => tip,
-                })
+                Some(
+                    match self.key_state.keymap.help().key_of(Action::NewAgent, 0) {
+                        Some(key) => tip.key(&key),
+                        None => tip,
+                    },
+                )
             }
             SidebarHit::PickAgent(i, k) => {
                 let rect = layout.rows.get(i)?.pick(k)?;
@@ -891,7 +914,7 @@ impl Gerdr {
                     None => {
                         let tip = Tooltip::new("More agents…", rect);
                         let key = (i == self.active_workspace)
-                            .then(|| self.keymap.help().key_of(Action::NewAgent, 0))
+                            .then(|| self.key_state.keymap.help().key_of(Action::NewAgent, 0))
                             .flatten();
                         match key {
                             Some(key) => tip.key(&key),
@@ -1012,10 +1035,12 @@ impl Gerdr {
                      which lists repos, pull requests and tickets too",
                     layout.inbox_title?,
                 );
-                Some(match self.keymap.help().key_of(Action::Inbox, 0) {
-                    Some(key) => tip.key(&key),
-                    None => tip,
-                })
+                Some(
+                    match self.key_state.keymap.help().key_of(Action::Inbox, 0) {
+                        Some(key) => tip.key(&key),
+                        None => tip,
+                    },
+                )
             }
             SidebarHit::FeaturesTitle => {
                 // Shipped and abandoned features leave the list: say where.
@@ -1028,10 +1053,12 @@ impl Gerdr {
                     ),
                 };
                 let tip = Tooltip::new(&text, layout.features_title?);
-                Some(match self.keymap.help().key_of(Action::Features, 0) {
-                    Some(key) => tip.key(&key),
-                    None => tip,
-                })
+                Some(
+                    match self.key_state.keymap.help().key_of(Action::Features, 0) {
+                        Some(key) => tip.key(&key),
+                        None => tip,
+                    },
+                )
             }
             SidebarHit::NewFeature => {
                 Some(Tooltip::new("New feature\u{2026}", layout.features_plus?))
@@ -1120,10 +1147,12 @@ impl Gerdr {
             SidebarHit::Attention(i, _) => {
                 let lines = layout.rows.get(i)?.attention?;
                 let tip = Tooltip::new("Review, merge or delete", lines);
-                Some(match self.keymap.help().key_of(Action::Worktrees, 0) {
-                    Some(key) => tip.key(&key),
-                    None => tip,
-                })
+                Some(
+                    match self.key_state.keymap.help().key_of(Action::Worktrees, 0) {
+                        Some(key) => tip.key(&key),
+                        None => tip,
+                    },
+                )
             }
             SidebarHit::Row(i) => {
                 let (ws, row) = (workspaces.get(i)?, layout.rows.get(i)?);
@@ -1132,10 +1161,12 @@ impl Gerdr {
             SidebarHit::Header => {
                 self.project.as_ref()?;
                 let tip = Tooltip::new("Project menu: switch, add or stop projects", layout.header);
-                Some(match self.keymap.help().key_of(Action::Projects, 0) {
-                    Some(key) => tip.key(&key),
-                    None => tip,
-                })
+                Some(
+                    match self.key_state.keymap.help().key_of(Action::Projects, 0) {
+                        Some(key) => tip.key(&key),
+                        None => tip,
+                    },
+                )
             }
             SidebarHit::Ci(i) => {
                 let repo = self.ci_repo(i)?;
@@ -1301,7 +1332,7 @@ impl Gerdr {
             hit => {
                 let i = hit.row()?;
                 let dir = self.workspaces.get(i)?.dir.clone();
-                let help = self.keymap.help();
+                let help = self.key_state.keymap.help();
                 let hinted = |item: MenuItem, action: Action| match help.key_of(action, 0) {
                     Some(key) => item.hint(&key),
                     None => item,
@@ -1324,7 +1355,7 @@ impl Gerdr {
                     let open = MenuAction::OpenFeature(f.project.clone(), f.slug.clone());
                     items.insert(4, MenuItem::new("Open feature", open));
                 }
-                let git = self.git.get(&dir);
+                let git = self.git.status.get(&dir);
                 if git.is_some_and(|g| g.root.is_some()) {
                     let item = MenuItem::new("Repositories", MenuAction::Repos);
                     items.push(hinted(item, Action::Repos));
@@ -1353,7 +1384,7 @@ impl Gerdr {
     /// `docs/ux-conventions.md`), and the inbox, with the keys that do the
     /// same.
     pub(crate) fn sidebar_plus_menu(&self, layout: &SidebarLayout) -> MenuSpec {
-        let help = self.keymap.help();
+        let help = self.key_state.keymap.help();
         let hinted = |item: MenuItem, action: Action| match help.key_of(action, 0) {
             Some(key) => item.hint(&key),
             None => item,

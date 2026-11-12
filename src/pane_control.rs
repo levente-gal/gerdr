@@ -718,7 +718,8 @@ fn signal(herdr: &mut Herdr, pane_id: &str, phase: Phase, group: i32) {
 impl Gerdr {
     /// What herdr last said of pane `pane_id`.
     pub(crate) fn pane_state(&self, pane_id: &str) -> Option<&PaneState> {
-        self.herdr_tabs
+        self.session
+            .tabs
             .values()
             .flat_map(|detail| &detail.panes)
             .find(|p| p.pane_id == pane_id)
@@ -729,8 +730,8 @@ impl Gerdr {
         let pane = self.pane_state(pane_id);
         let mut content = bar_content(
             pane.and_then(|p| p.process.as_ref()),
-            self.last_commands.get(pane_id),
-            self.pane_jobs.get(pane_id),
+            self.session.last_commands.get(pane_id),
+            self.session.pane_jobs.get(pane_id),
         );
         let agent = pane.filter(|p| p.agent.is_some()).map(|p| p.agent_status);
         content.status = status_with_agent(content.status, agent);
@@ -775,9 +776,9 @@ impl Gerdr {
         let Some(url) = web_page(pane) else {
             return content;
         };
-        let follows = self.web_control.follows(pane.id);
+        let follows = self.web.control.follows(pane.id);
         // Where the page couldn't say, the way is left open.
-        let history = self.web_control.history(pane.id);
+        let history = self.web.control.history(pane.id);
         let can_back = follows && history.back != Some(false);
         let can_forward = follows && history.forward != Some(false);
         BarContent {
@@ -817,7 +818,8 @@ impl Gerdr {
                     zoom: tab.bar_zoom(id),
                     focused: focused == Some(id),
                     hover: self
-                        .pane_bar_hover
+                        .hover
+                        .pane_bar
                         .filter(|(hovered, _)| *hovered == id)
                         .map(|(_, button)| button),
                 })
@@ -867,7 +869,11 @@ impl Gerdr {
             .unzoom_button()
             .filter(|(_, rect)| rect.to_f64().contains(pos))
         {
-            return Some(button_tooltip(BarButton::Unzoom, rect, &self.keymap.help()));
+            return Some(button_tooltip(
+                BarButton::Unzoom,
+                rect,
+                &self.key_state.keymap.help(),
+            ));
         }
         let (id, hit) = self.pane_bar_at(pos)?;
         let tab = self.tab()?;
@@ -892,7 +898,7 @@ impl Gerdr {
         let (_, rect) = chrome::pane_bar_buttons(bar, kind, tab.bar_zoom(id))
             .into_iter()
             .find(|(b, _)| *b == button)?;
-        let tip = button_tooltip(button, rect, &self.keymap.help());
+        let tip = button_tooltip(button, rect, &self.key_state.keymap.help());
         Some(match button_unavailable(button, &content) {
             Some(why) => tip.fields(vec![("Unavailable".into(), why.into())]),
             None => tip,
@@ -917,12 +923,12 @@ impl Gerdr {
             .collect();
         content.pane_count = tab.layout.as_ref().map_or(0, |l| l.leaves().len());
         content.zoomed = tab.zoomed() == Some(id);
-        Some(bar_menu(pos, id, &content, &self.keymap.help()))
+        Some(bar_menu(pos, id, &content, &self.key_state.keymap.help()))
     }
 
     /// Light up the bar button under the pointer at `pos`, if any.
     pub fn pane_bar_hover(&mut self, pos: Option<Point<f64, Logical>>) {
-        self.pane_bar_hover = pos
+        self.hover.pane_bar = pos
             .and_then(|pos| self.pane_bar_at(pos))
             .and_then(|(id, hit)| match hit {
                 BarHit::Button(button) => Some((id, button)),
@@ -1027,7 +1033,7 @@ impl Gerdr {
     /// again; while it is being stopped, have it run again after all.
     pub fn restart_pane(&mut self, pane_id: &str) {
         let content = self.pane_bar_content(pane_id);
-        if let Some(job) = self.pane_jobs.get(pane_id) {
+        if let Some(job) = self.session.pane_jobs.get(pane_id) {
             if content.can_restart {
                 job.rerun.store(true, Ordering::Relaxed);
             }
@@ -1036,7 +1042,11 @@ impl Gerdr {
         if !content.can_restart {
             return self.show_notice("Nothing to restart in this pane".into());
         }
-        let captured = self.last_commands.get(pane_id).map(|r| r.captured.clone());
+        let captured = self
+            .session
+            .last_commands
+            .get(pane_id)
+            .map(|r| r.captured.clone());
         self.start_job(pane_id, content.label, captured.as_ref(), true);
     }
 
@@ -1063,7 +1073,7 @@ impl Gerdr {
                     return None;
                 }
                 let record = self.pane_record(pane);
-                let remembered = self.last_commands.get(&pane.pane_id);
+                let remembered = self.session.last_commands.get(&pane.pane_id);
                 if let Some(record) = record
                     && let Some(command) = record.restart_command()
                 {
@@ -1084,7 +1094,7 @@ impl Gerdr {
             })
             .filter(|(pane_id, captured)| {
                 let seen = self.pane_state(pane_id).is_some_and(|p| p.agent.is_some());
-                !holds_agent(seen, &captured.command, &self.agent_config)
+                !holds_agent(seen, &captured.command, &self.settings.agent_config)
             })
             .collect()
     }
@@ -1097,14 +1107,14 @@ impl Gerdr {
         let now = Instant::now();
         for (pane_id, captured) in restarts {
             // A service from now on, crashing again or not.
-            match self.last_commands.get_mut(&pane_id) {
+            match self.session.last_commands.get_mut(&pane_id) {
                 Some(r) if r.captured.command == captured.command => r.long = true,
                 _ => {
                     let service = Remembered::service(captured.clone(), now);
-                    self.last_commands.insert(pane_id.clone(), service);
+                    self.session.last_commands.insert(pane_id.clone(), service);
                 }
             }
-            if let Some(job) = self.pane_jobs.get(&pane_id) {
+            if let Some(job) = self.session.pane_jobs.get(&pane_id) {
                 if job.can_rerun {
                     job.rerun.store(true, Ordering::Relaxed);
                 }
@@ -1124,7 +1134,7 @@ impl Gerdr {
     /// leave it stopped.
     pub fn stop_pane(&mut self, pane_id: &str) {
         let content = self.pane_bar_content(pane_id);
-        if let Some(job) = self.pane_jobs.get(pane_id) {
+        if let Some(job) = self.session.pane_jobs.get(pane_id) {
             if content.can_stop {
                 job.rerun.store(false, Ordering::Relaxed);
             }
@@ -1133,7 +1143,11 @@ impl Gerdr {
         if !content.can_stop {
             return self.show_notice("Nothing runs in this pane".into());
         }
-        let captured = self.last_commands.get(pane_id).map(|r| r.captured.clone());
+        let captured = self
+            .session
+            .last_commands
+            .get(pane_id)
+            .map(|r| r.captured.clone());
         self.start_job(pane_id, content.label, captured.as_ref(), false);
     }
 
@@ -1146,7 +1160,12 @@ impl Gerdr {
         captured: Option<&Captured>,
         rerun: bool,
     ) {
-        let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf()) else {
+        let Some(socket) = self
+            .session
+            .herdr
+            .as_ref()
+            .map(|h| h.socket().to_path_buf())
+        else {
             return;
         };
         let Some(tx) = self.job_sender() else {
@@ -1166,7 +1185,7 @@ impl Gerdr {
         };
         match spawn_job(socket, pane_id.to_owned(), line, flag, tx) {
             Ok(()) => {
-                self.pane_jobs.insert(pane_id.to_owned(), job);
+                self.session.pane_jobs.insert(pane_id.to_owned(), job);
             }
             Err(err) => tracing::warn!("stopping pane {pane_id}: {err}"),
         }
@@ -1194,12 +1213,12 @@ impl Gerdr {
     fn on_job_event(&mut self, event: JobEvent) {
         match event {
             JobEvent::Phase(pane_id, phase) => {
-                if let Some(job) = self.pane_jobs.get_mut(&pane_id) {
+                if let Some(job) = self.session.pane_jobs.get_mut(&pane_id) {
                     job.phase = Some(phase);
                 }
             }
             JobEvent::Finished(pane_id, outcome) => {
-                let Some(job) = self.pane_jobs.get_mut(&pane_id) else {
+                let Some(job) = self.session.pane_jobs.get_mut(&pane_id) else {
                     return;
                 };
                 if outcome == Outcome::Restarted {
@@ -1209,6 +1228,7 @@ impl Gerdr {
                     return;
                 }
                 let command = self
+                    .session
                     .pane_jobs
                     .remove(&pane_id)
                     .map(|job| job.command)
@@ -1227,11 +1247,12 @@ impl Gerdr {
     fn settle_job(&mut self, pane_id: String, at: Instant) {
         let forget = move |_, _: &mut (), state: &mut Gerdr| {
             if state
+                .session
                 .pane_jobs
                 .get(&pane_id)
                 .is_some_and(|job| job.restarted == Some(at))
             {
-                state.pane_jobs.remove(&pane_id);
+                state.session.pane_jobs.remove(&pane_id);
             }
             TimeoutAction::Drop
         };

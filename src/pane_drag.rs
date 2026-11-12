@@ -131,6 +131,7 @@ impl Gerdr {
     /// The area `pane_drop` lands in, to light up while the pane is held.
     pub fn pane_drop_rect(&self) -> Option<Rect> {
         if !self
+            .mouse
             .reorder
             .is_some_and(|r| matches!(r.what, Reorderable::Pane(_)))
         {
@@ -149,7 +150,7 @@ impl Gerdr {
             rect.loc += strip.loc;
             Some(rect)
         };
-        match self.pane_drop? {
+        match self.mouse.pane_drop? {
             PaneDrop::Beside { target: t, side } => Some(near_half(target(t)?, side)),
             PaneDrop::Swap(t) => target(t),
             PaneDrop::Tab(t) => in_strip(|layout, t| layout.tabs.get(t).copied(), t),
@@ -160,7 +161,7 @@ impl Gerdr {
 
     /// Drop the held pane `id` where `pane_drop` says, and forget it.
     pub fn drop_pane(&mut self, id: u32) {
-        match self.pane_drop.take() {
+        match self.mouse.pane_drop.take() {
             Some(PaneDrop::Beside { target, side }) => self.move_pane_beside(id, target, side),
             Some(PaneDrop::Swap(target)) => self.swap_panes(id, target),
             Some(PaneDrop::Tab(t)) => self.move_pane_to_tab(id, Some(t)),

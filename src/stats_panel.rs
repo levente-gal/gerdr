@@ -1515,7 +1515,7 @@ fn first_line(text: &str) -> Option<String> {
 impl Gerdr {
     /// Open the stats panel, or close it again.
     pub(crate) fn toggle_ai_stats(&mut self) {
-        match self.ai_stats.is_some() {
+        match self.overlays.ai_stats.is_some() {
             true => self.close_ai_stats(),
             false => self.open_ai_stats(),
         }
@@ -1523,15 +1523,15 @@ impl Gerdr {
 
     /// Open the stats panel on the open project's features, and read them.
     pub(crate) fn open_ai_stats(&mut self) {
-        self.switcher = None;
+        self.overlays.switcher = None;
         self.repos.close();
         self.worktrees.close();
-        self.project_menu = None;
+        self.overlays.project_menu = None;
         self.inbox.close();
-        self.scrollback = None;
+        self.overlays.scrollback = None;
         self.stop_key_repeat();
         self.close_menu();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
         let project = self.project.clone().map(|id| {
             let name = self
@@ -1542,8 +1542,8 @@ impl Gerdr {
         });
         // Over a feature's tab, on that feature, by the title its record has.
         let feature = (self.features.panel.as_ref()).map(|p| (p.project.clone(), p.slug.clone()));
-        self.ai_stats_behind = None;
-        self.ai_stats = Some(match feature {
+        self.overlays.ai_stats_behind = None;
+        self.overlays.ai_stats = Some(match feature {
             Some((p, slug)) => {
                 let title = self.feature(&p, &slug).map(|f| f.title.clone());
                 StatsPanel::on_feature(project, (p, slug), title)
@@ -1557,7 +1557,7 @@ impl Gerdr {
 
     /// Close the stats panel.
     pub(crate) fn close_ai_stats(&mut self) {
-        self.ai_stats = None;
+        self.overlays.ai_stats = None;
         // Gone, what is under the pointer gets it back.
         self.refresh_pointer_focus();
     }
@@ -1565,14 +1565,14 @@ impl Gerdr {
     /// Read the index again for the panel, if it is open: the AI work's
     /// thread took new lines in.
     pub(crate) fn ai_stats_refresh(&mut self) {
-        if self.ai_stats.as_ref().is_some_and(|p| !p.reading) {
+        if self.overlays.ai_stats.as_ref().is_some_and(|p| !p.reading) {
             self.ai_stats_request();
         }
     }
 
     /// Ask for the panel's scope off the loop; `ai_stats_read` takes it.
     fn ai_stats_request(&mut self) {
-        let Some(panel) = self.ai_stats.as_mut() else {
+        let Some(panel) = self.overlays.ai_stats.as_mut() else {
             return;
         };
         panel.reading = true;
@@ -1608,7 +1608,7 @@ impl Gerdr {
         let filling = self.ai_work.busy.is_some();
         // Closed since, or moved on to another scope: what was read is of
         // no use, and a newer read is under way for the scope shown.
-        let Some(panel) = self.ai_stats.as_mut() else {
+        let Some(panel) = self.overlays.ai_stats.as_mut() else {
             return;
         };
         if panel.scope != scope {
@@ -1636,7 +1636,12 @@ impl Gerdr {
 
     /// What the panel shows, while it is open.
     pub(crate) fn ai_stats_view(&self) -> Option<StatsView> {
-        Some(self.ai_stats.as_ref()?.view(crate::clock::now_secs()))
+        Some(
+            self.overlays
+                .ai_stats
+                .as_ref()?
+                .view(crate::clock::now_secs()),
+        )
     }
 
     /// A key while the panel has the keyboard. `sym` is the key's own
@@ -1648,7 +1653,7 @@ impl Gerdr {
         typed: Keysym,
     ) -> Option<Outcome> {
         let page = self.ai_stats_page();
-        let panel = self.ai_stats.as_mut()?;
+        let panel = self.overlays.ai_stats.as_mut()?;
         panel.key(mods, sym, typed, page, crate::clock::now_secs())
     }
 
@@ -1768,7 +1773,7 @@ impl Gerdr {
     /// The text of `what` came, to show in the viewer in the panel's place.
     /// With the panel closed meanwhile it isn't shown: the user moved on.
     fn ai_stats_opened(&mut self, what: &str, title: &str, result: Result<String, String>) {
-        if self.ai_stats.is_none() {
+        if self.overlays.ai_stats.is_none() {
             return;
         }
         let text = match result {
@@ -1779,12 +1784,12 @@ impl Gerdr {
             }
         };
         // Esc from the viewer comes back to the panel as it was.
-        self.ai_stats_behind = self.ai_stats.take().map(|mut panel| {
+        self.overlays.ai_stats_behind = self.overlays.ai_stats.take().map(|mut panel| {
             panel.hover = None;
             panel
         });
         self.stop_key_repeat();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
         let source = Source::File {
             what: what.to_owned(),
@@ -1802,7 +1807,7 @@ impl Gerdr {
                 .into(),
         );
         viewer.fit(chrome::scrollback_fit(panel));
-        self.scrollback = Some(viewer);
+        self.overlays.scrollback = Some(viewer);
         self.refresh_pointer_focus();
     }
 
@@ -1822,7 +1827,7 @@ impl Gerdr {
             }
             Some(hit) => {
                 let page = self.ai_stats_page();
-                let panel = self.ai_stats.as_mut();
+                let panel = self.overlays.ai_stats.as_mut();
                 panel.and_then(|panel| panel.click(hit, page, crate::clock::now_secs()))
             }
             None => match self.toast_press(pos) {
@@ -1845,7 +1850,7 @@ impl Gerdr {
         let view = self.ai_stats_view()?;
         let layout = chrome::stats_layout(&view, self.output_size());
         let hit = chrome::stats_hit(&view, &layout, pos);
-        self.ai_stats.as_mut()?.hover = hit;
+        self.overlays.ai_stats.as_mut()?.hover = hit;
         match hit? {
             StatsHit::Back => Some(Tooltip::new("Back to the list", layout.back?).key("Esc")),
             StatsHit::Delete(i) => {
@@ -1870,12 +1875,12 @@ impl Gerdr {
 
     /// The wheel or the touchpad moved the panel's list.
     pub(crate) fn ai_stats_scroll(&mut self, motion: crate::scroll::Motion) {
-        if self.ai_stats.is_none() {
+        if self.overlays.ai_stats.is_none() {
             return;
         }
         let rows = self.motion_rows(motion, chrome::STATS_ROW as f64);
         let page = self.ai_stats_page();
-        if let Some(panel) = self.ai_stats.as_mut() {
+        if let Some(panel) = self.overlays.ai_stats.as_mut() {
             panel.scroll_by(rows, page, crate::clock::now_secs());
         }
     }
@@ -1884,7 +1889,7 @@ impl Gerdr {
     /// (in pixels) down.
     pub(crate) fn ai_stats_scroll_to(&mut self, pos: f64) {
         let page = self.ai_stats_page();
-        if let Some(panel) = self.ai_stats.as_mut() {
+        if let Some(panel) = self.overlays.ai_stats.as_mut() {
             let row = (pos / chrome::STATS_ROW as f64).round() as isize;
             let by = row - panel.first as isize;
             panel.scroll_by(by, page, crate::clock::now_secs());
@@ -1893,7 +1898,7 @@ impl Gerdr {
 
     /// The query's field, for a press or a drag in it.
     pub(crate) fn ai_stats_field_mut(&mut self) -> Option<&mut TextField> {
-        Some(&mut self.ai_stats.as_mut()?.query)
+        Some(&mut self.overlays.ai_stats.as_mut()?.query)
     }
 }
 

@@ -2272,11 +2272,11 @@ impl crate::Gerdr {
             false => 0.0,
         };
         Env {
-            page: crate::chrome::diff_only_page(size, self.density),
+            page: crate::chrome::diff_only_page(size, self.settings.density),
             cols: crate::chrome::diff_tree_cols(size, tree_share),
-            density: self.density,
+            density: self.settings.density,
             sheet_rows: crate::chrome::repos_sheet_rows(size, true),
-            tree_page: crate::chrome::diff_tree_page(size, self.density),
+            tree_page: crate::chrome::diff_tree_page(size, self.settings.density),
             tree_share,
         }
     }
@@ -2294,13 +2294,13 @@ impl crate::Gerdr {
         target: Option<String>,
         (workspace, home): (usize, Option<usize>),
     ) {
-        self.switcher = None;
-        self.project_menu = None;
+        self.overlays.switcher = None;
+        self.overlays.project_menu = None;
         self.inbox.close();
-        self.scrollback = None;
+        self.overlays.scrollback = None;
         self.stop_key_repeat();
         self.close_menu();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
         self.worktrees.park();
         if let Some(panel) = self.repos.panel.take() {
@@ -2324,7 +2324,7 @@ impl crate::Gerdr {
             return;
         };
         let (label, workspace) = (item.label.clone(), item.workspace);
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
         let commit = CommitOf { oid, line };
         let wd = WorktreeDiff::of_commit(root, label, commit, workspace);
@@ -2343,7 +2343,7 @@ impl crate::Gerdr {
         if self.repos.worktree.is_some() {
             self.close_worktree_diff();
         }
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
         let line = format!("{oid} \u{b7} where the fix was made");
         let commit = CommitOf { oid, line };
@@ -2781,7 +2781,7 @@ impl crate::Gerdr {
             ctrl,
         } = click;
         let env = self.worktree_env();
-        let count = self.press_count.max(1);
+        let count = self.mouse.press_count.max(1);
         let Some(wd) = self.wd_mut() else {
             return;
         };
@@ -2814,8 +2814,8 @@ impl crate::Gerdr {
                 done
             }
         };
-        self.repos_rows_drag = drags;
-        self.repos_editor_drag = editor_drag;
+        self.mouse.repos_rows_drag = drags;
+        self.mouse.repos_editor_drag = editor_drag;
         if let Some(outcome) = self.worktree_done(done) {
             self.apply_repos(outcome);
         }
@@ -2842,7 +2842,7 @@ impl crate::Gerdr {
         let env = self.worktree_env();
         let over_tree = (self.repos_view())
             .map(|view| crate::chrome::repos_layout(&view, self.repos_rect()))
-            .is_some_and(|layout| layout.tree.to_f64().contains(self.pointer));
+            .is_some_and(|layout| layout.tree.to_f64().contains(self.mouse.pos));
         if let Some(wd) = self.wd_mut() {
             match over_tree {
                 true => wd.scroll_tree(motion, now, env),

@@ -260,15 +260,15 @@ impl Gerdr {
         let area = self.content_rect();
         let share = match mode {
             DocMode::Preview => 1.0,
-            _ => detail_share(mode, self.doc_wide(), self.previews.share),
+            _ => detail_share(mode, self.doc_wide(), self.web.previews.share),
         };
         let (left, ..) = chrome::split_rects(area, share);
         Env {
-            page: chrome::diff_only_page(area, self.density),
+            page: chrome::diff_only_page(area, self.settings.density),
             cols: chrome::diff_only_cols(left),
-            density: self.density,
+            density: self.settings.density,
             sheet_rows: chrome::repos_sheet_rows(area, true),
-            tree_page: chrome::diff_tree_page(area, self.density),
+            tree_page: chrome::diff_tree_page(area, self.settings.density),
             tree_share: 0.0,
         }
     }
@@ -282,7 +282,7 @@ impl Gerdr {
         let mut view = tab.wd.repos_view(self.doc_env(tab.mode));
         let wide = self.doc_wide();
         view.flat = true;
-        view.detail_share = detail_share(tab.mode, wide, self.previews.share);
+        view.detail_share = detail_share(tab.mode, wide, self.web.previews.share);
         let without_page = tab.no_browser;
         view.modes = mode_switch(file, tab.mode, ModeRoom { wide, without_page });
         if tab.mode == DocMode::Preview {
@@ -495,17 +495,17 @@ impl Gerdr {
     /// The panels a tab coming to show would sit under close, the
     /// repositories panel kept as it was.
     pub(crate) fn close_panels_for_tab(&mut self) {
-        self.switcher = None;
-        self.project_menu = None;
-        self.tasks_panel = None;
+        self.overlays.switcher = None;
+        self.overlays.project_menu = None;
+        self.overlays.tasks_panel = None;
         if self.inbox.is_open() {
             self.close_inbox();
         }
-        self.scrollback = None;
+        self.overlays.scrollback = None;
         self.worktrees.close();
         self.stop_key_repeat();
         self.close_menu();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
         if self.repos.worktree.is_some() {
             self.worktree_save_review();
@@ -641,7 +641,7 @@ impl Gerdr {
 
     /// The gap between the review and its page, if it is at `pos`.
     pub(crate) fn doc_gap_at(&self, pos: Point<f64, Logical>) -> Option<Drag> {
-        if self.context_menu.is_some() || self.grabbing_overlay().is_some() {
+        if self.overlays.context_menu.is_some() || self.grabbing_overlay().is_some() {
             return None;
         }
         let view = self.doc_tab_view()?;
@@ -665,7 +665,7 @@ impl Gerdr {
     pub(crate) fn doc_drag_to(&mut self, pos: Point<f64, Logical>) {
         let area = self.content_rect();
         let share = (pos.x - area.loc.x as f64) / area.size.w.max(1) as f64;
-        self.previews.share = share.clamp(DOCK_SHARE_MIN, DOCK_SHARE_MAX);
+        self.web.previews.share = share.clamp(DOCK_SHARE_MIN, DOCK_SHARE_MAX);
     }
 
     /// Where the repositories panel goes: centred in the output; the
@@ -714,11 +714,11 @@ impl Gerdr {
         else {
             return;
         };
-        if (self.previews.top(pane)).is_some_and(|was| (was - top).abs() < SCROLL_STILL) {
+        if (self.web.previews.top(pane)).is_some_and(|was| (was - top).abs() < SCROLL_STILL) {
             return;
         }
         if self.scroll_to_browser(pane, top) {
-            self.previews.set_top(pane, top);
+            self.web.previews.set_top(pane, top);
         }
     }
 
@@ -746,7 +746,7 @@ impl Gerdr {
             diff.top_line()
         });
         // What the review stands at is what the page shows: not sent back.
-        self.previews.set_top(pane, top.unwrap_or(line));
+        self.web.previews.set_top(pane, top.unwrap_or(line));
     }
 
     /// A block clicked in `pane`'s page, at `line` of its file: its
@@ -764,7 +764,7 @@ impl Gerdr {
         // The review moved to show its caret; the page, clicked, stays where
         // it is, with text being chosen in it: this isn't sent to it.
         if let Some(top) = top {
-            self.previews.set_top(pane, top);
+            self.web.previews.set_top(pane, top);
         }
     }
 }

@@ -92,7 +92,7 @@ impl Gerdr {
                 Some(AgentKey::Herdr(pane)) if split_pane(&pane).is_some() => {
                     self.tell_machine_pane(&pane, told)
                 }
-                Some(AgentKey::Herdr(pane)) => match self.herdr.as_mut() {
+                Some(AgentKey::Herdr(pane)) => match self.session.herdr.as_mut() {
                     Some(herdr) => herdr.send_agent_line(&pane, &told.text),
                     None => Err("herdr isn't connected".into()),
                 },
@@ -128,7 +128,7 @@ impl Gerdr {
         if split_pane(pane).is_some() {
             return self.tell_machine_pane(pane, told);
         }
-        let Some(herdr) = self.herdr.as_mut() else {
+        let Some(herdr) = self.session.herdr.as_mut() else {
             return Err("herdr isn't connected".into());
         };
         if crate::prepare::step(&herdr.process_info(pane)) != crate::prepare::Step::Busy {

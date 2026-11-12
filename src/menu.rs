@@ -481,13 +481,13 @@ impl ContextMenu {
 impl Gerdr {
     /// Show `spec`; it takes every press and key until it closes.
     pub fn open_menu(&mut self, spec: MenuSpec) {
-        self.tooltip.hide();
-        self.context_menu = Some(ContextMenu::new(spec, self.output_size()));
+        self.hover.tooltip.hide();
+        self.overlays.context_menu = Some(ContextMenu::new(spec, self.output_size()));
         self.refresh_pointer_focus();
     }
 
     pub fn close_menu(&mut self) {
-        if self.context_menu.take().is_some() {
+        if self.overlays.context_menu.take().is_some() {
             self.refresh_pointer_focus();
         }
     }
@@ -495,7 +495,7 @@ impl Gerdr {
     /// The pointer moved to `pos` while the menu is open: light the item
     /// under it, or none off the items, so Enter picks nothing it left.
     pub fn menu_motion(&mut self, pos: Point<f64, Logical>) {
-        if let Some(menu) = self.context_menu.as_mut() {
+        if let Some(menu) = self.overlays.context_menu.as_mut() {
             menu.hover = menu.item_at(pos);
         }
     }
@@ -503,7 +503,7 @@ impl Gerdr {
     /// Any press at `pos` while the menu is open: an enabled item runs,
     /// anything else just closes the menu. The press goes no further.
     pub fn menu_press(&mut self, pos: Point<f64, Logical>) {
-        let picked = self.context_menu.as_ref().and_then(|menu| {
+        let picked = self.overlays.context_menu.as_ref().and_then(|menu| {
             let item = menu.items().get(menu.item_at(pos)?)?;
             item.enabled.then(|| item.action.clone())
         });
@@ -518,7 +518,7 @@ impl Gerdr {
     /// open every key is, and any other only closes it, so a key meant
     /// for the menu never reaches the app under it.
     pub fn menu_key(&mut self, sym: Keysym) -> bool {
-        let Some(menu) = self.context_menu.as_mut() else {
+        let Some(menu) = self.overlays.context_menu.as_mut() else {
             return false;
         };
         match sym {

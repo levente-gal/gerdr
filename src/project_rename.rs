@@ -556,7 +556,7 @@ impl Gerdr {
                 "Switch to another project to change {name}\u{2019}s id"
             ));
         }
-        if self.stopping.contains(id) {
+        if self.life.stopping.contains(id) {
             return Err(format!("{name} is still stopping"));
         }
         if crate::project_lock::dir()
@@ -629,7 +629,7 @@ impl Gerdr {
         self.load_features();
         self.refresh_project_menu();
         let rows = self.project_rows();
-        if let Some(welcome) = self.welcome.as_mut() {
+        if let Some(welcome) = self.overlays.welcome.as_mut() {
             welcome.set_projects(rows);
         }
         let undo = MenuAction::ChangeProjectId(new.to_owned(), id.to_owned());
@@ -648,24 +648,24 @@ impl Gerdr {
     /// What gerdr holds of project `rewrite.old`, made `rewrite.new`'s.
     fn renamed_in_memory(&mut self, rewrite: &Rewrite) {
         let (old, new) = (rewrite.old.as_str(), rewrite.new.as_str());
-        if let Some(running) = self.running.remove(old) {
-            self.running.insert(new.to_owned(), running);
+        if let Some(running) = self.life.running.remove(old) {
+            self.life.running.insert(new.to_owned(), running);
         }
         if let Some(held) = self.held.remove(old) {
             self.held.insert(new.to_owned(), held);
         }
-        for set in [&mut self.order_pending, &mut self.starting] {
+        for set in [&mut self.order_pending, &mut self.life.starting] {
             if set.remove(old) {
                 set.insert(new.to_owned());
             }
         }
-        if self.previous_project.as_deref() == Some(old) {
-            self.previous_project = Some(new.to_owned());
+        if self.life.previous_project.as_deref() == Some(old) {
+            self.life.previous_project = Some(new.to_owned());
         }
-        if self.just_created.as_deref() == Some(old) {
-            self.just_created = Some(new.to_owned());
+        if self.life.just_created.as_deref() == Some(old) {
+            self.life.just_created = Some(new.to_owned());
         }
-        for nav in std::iter::once(&mut self.nav).chain(self.nav_kept.as_mut()) {
+        for nav in std::iter::once(&mut self.nav.history).chain(self.nav.kept.as_mut()) {
             if let Err(why) = rewrite.typed(nav) {
                 tracing::warn!("changing project {old}'s id in the tab history: {why}");
             }
@@ -678,10 +678,11 @@ impl Gerdr {
             self.repos.kept = None;
         }
         if self
+            .launcher
             .frecency
             .rename(&format!("project:{old}"), &format!("project:{new}"))
         {
-            self.frecency.save();
+            self.launcher.frecency.save();
         }
     }
 }

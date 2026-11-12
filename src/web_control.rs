@@ -651,20 +651,20 @@ impl Gerdr {
                 .map_err(|e| e.to_string())
         });
         match inserted {
-            Ok(_) => self.web_control.socket = Some(socket),
+            Ok(_) => self.web.control.socket = Some(socket),
             Err(err) => tracing::warn!("web pages' socket {}: {err}", socket.display()),
         }
     }
 
     /// Stop listening for the extension's hosts: the socket goes.
     pub fn close_web_control(&mut self) {
-        if let Some(socket) = self.web_control.socket.take() {
+        if let Some(socket) = self.web.control.socket.take() {
             let _ = std::fs::remove_file(socket);
         }
     }
 
     fn take_web_event(&mut self, event: Event) {
-        let control = &mut self.web_control;
+        let control = &mut self.web.control;
         // From here on a message names its pane by its token.
         let event = match event {
             Event::Message(id, mut message) => {
@@ -929,7 +929,7 @@ impl Gerdr {
     /// Send `message`, JSON, to the browser holding `pane`'s tab; whether
     /// it went.
     fn send_bytes(&mut self, pane: u32, message: &[u8]) -> bool {
-        let control = &mut self.web_control;
+        let control = &mut self.web.control;
         let Some(id) = control.panes.get(&pane).copied() else {
             return false;
         };

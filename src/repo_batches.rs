@@ -569,7 +569,7 @@ impl Gerdr {
     fn repo_items(&self) -> Vec<RepoItem> {
         let mut items: Vec<RepoItem> = Vec::new();
         for (w, ws) in self.workspaces.iter().enumerate() {
-            let Some(status) = self.git.get(&ws.dir) else {
+            let Some(status) = self.git.status.get(&ws.dir) else {
                 continue;
             };
             let Some(root) = status.root.clone() else {
@@ -594,12 +594,12 @@ impl Gerdr {
         let statuses = self
             .workspaces
             .iter()
-            .filter_map(|ws| self.git.get(&ws.dir));
+            .filter_map(|ws| self.git.status.get(&ws.dir));
         changed_repos(statuses)
     }
 
     fn repos_page(&self) -> (usize, usize) {
-        chrome::repos_page(self.repos_rect(), self.density)
+        chrome::repos_page(self.repos_rect(), self.settings.density)
     }
 
     /// What the panel's views and keys need of the chrome: the density,
@@ -609,20 +609,20 @@ impl Gerdr {
         let share = self.repos.tree_share.unwrap_or(chrome::REPOS_TREE_SHARE);
         let cols = chrome::repos_detail_cols(self.repos_rect(), share);
         let sheet = chrome::repos_sheet_rows(self.repos_rect(), false);
-        (self.density, share, cols, sheet)
+        (self.settings.density, share, cols, sheet)
     }
 
     /// Open the repositories panel: as it was left, for the same project.
     pub fn open_repos(&mut self) {
-        self.switcher = None;
-        self.project_menu = None;
+        self.overlays.switcher = None;
+        self.overlays.project_menu = None;
         self.worktrees.close();
         self.repos.close_worktree();
         self.inbox.close();
-        self.scrollback = None;
+        self.overlays.scrollback = None;
         self.stop_key_repeat();
         self.close_menu();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
         self.repos.items = self.repo_items();
         let panel = match self.repos.kept.take() {
@@ -705,6 +705,7 @@ impl Gerdr {
                 continue;
             };
             let here: Vec<&crate::herdr::AgentInfo> = self
+                .session
                 .agents
                 .iter()
                 .filter(|a| a.workspace_id == id)
@@ -732,7 +733,7 @@ impl Gerdr {
             return self
                 .show_warning("No agent runs in this workspace: copy the review instead".into());
         };
-        let Some(herdr) = self.herdr.as_mut() else {
+        let Some(herdr) = self.session.herdr.as_mut() else {
             return self.show_error("herdr isn't running: copy the review instead".into());
         };
         match herdr.send_agent_line(&pane, text.trim_end()) {
@@ -1034,7 +1035,7 @@ impl Gerdr {
         }
         // The gap beside the file's preview drags their split.
         if let Some(drag) = self.doc_gap_at(pos) {
-            self.drag = Some(drag);
+            self.mouse.drag = Some(drag);
             return;
         }
         let layout = chrome::repos_layout(&view, self.repos_rect());
@@ -1059,7 +1060,7 @@ impl Gerdr {
                 return;
             }
             ReposHit::Splitter => {
-                self.drag = Some(Drag::ReposSplit);
+                self.mouse.drag = Some(Drag::ReposSplit);
                 return;
             }
             _ => {}
@@ -1092,7 +1093,7 @@ impl Gerdr {
             };
             return self.worktree_diff_hit(hit, click);
         }
-        let count = self.press_count.max(1);
+        let count = self.mouse.press_count.max(1);
         let page = self.repos_page();
         let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
@@ -1148,8 +1149,8 @@ impl Gerdr {
         });
         // Held, the press drags the cursor's range on, or the selection of
         // the comment being written.
-        self.repos_rows_drag = drags;
-        self.repos_editor_drag = editor_drag;
+        self.mouse.repos_rows_drag = drags;
+        self.mouse.repos_editor_drag = editor_drag;
         self.repos_detail();
         self.repos_save_review();
         if let Some(outcome) = outcome {
@@ -1287,11 +1288,11 @@ impl Gerdr {
     /// range, or the selection of the comment being written, going on
     /// with them. Whether it scrolls.
     pub fn repos_drag_edge_tick(&mut self, now: std::time::Instant) -> bool {
-        let edge = match self.repos_rows_drag || self.repos_editor_drag {
+        let edge = match self.mouse.repos_rows_drag || self.mouse.repos_editor_drag {
             true => self.repos_view().map_or(0.0, |view| {
                 let list = chrome::repos_layout(&view, self.repos_rect()).detail_list;
                 let (top, bottom) = (list.loc.y as f64, (list.loc.y + list.size.h) as f64);
-                match self.pointer.y {
+                match self.mouse.pos.y {
                     y if y < top => y - top,
                     y if y >= bottom => y - bottom + 1.0,
                     _ => 0.0,
@@ -1300,11 +1301,11 @@ impl Gerdr {
             false => 0.0,
         };
         // The whole rows, as many as a page at most.
-        let steps = crate::scrolling::edge_steps(&mut self.repos_drag_edge, now, edge);
+        let steps = crate::scrolling::edge_steps(&mut self.mouse.repos_drag_edge, now, edge);
         let (list, diff) = self.repos_page();
         let page = list.max(diff).max(1) as i64;
         if steps != 0 {
-            self.repos_diff_drag(self.pointer, steps.clamp(-page, page));
+            self.repos_diff_drag(self.mouse.pos, steps.clamp(-page, page));
         }
         edge != 0.0
     }
@@ -1314,11 +1315,11 @@ impl Gerdr {
     /// cursor's range or the comment's selection going on with them.
     fn repos_diff_drag(&mut self, pos: Point<f64, Logical>, step: i64) {
         let Some(view) = self.repos_view() else {
-            self.repos_rows_drag = false;
-            self.repos_editor_drag = false;
+            self.mouse.repos_rows_drag = false;
+            self.mouse.repos_editor_drag = false;
             return;
         };
-        let editor = match self.repos_editor_drag {
+        let editor = match self.mouse.repos_editor_drag {
             true => match chrome::repos_editor_char(&view, self.repos_rect(), pos) {
                 Some(at) => Some(at),
                 None => return,
@@ -2468,10 +2469,10 @@ impl Gerdr {
                 };
                 self.repos.mark_commits.insert((root, ahead), read);
                 // The tooltip waiting or up on the mark gets them.
-                if self.tooltip.is_up()
-                    && let Some(tip) = self.repos_hover(self.pointer)
+                if self.hover.tooltip.is_up()
+                    && let Some(tip) = self.repos_hover(self.mouse.pos)
                 {
-                    self.tooltip.refresh(tip);
+                    self.hover.tooltip.refresh(tip);
                 }
             }
         }

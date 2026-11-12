@@ -249,23 +249,24 @@ impl Gerdr {
     /// not one any more.
     pub(crate) fn preview_page(&mut self, pane: u32, url: &str) {
         let Some(file) = file_of(url) else {
-            self.previews.shown.remove(&pane);
+            self.web.previews.shown.remove(&pane);
             return;
         };
         let same = self
+            .web
             .previews
             .shown
             .get(&pane)
             .is_some_and(|p| p.file == file);
         if !same {
-            self.previews.shown.insert(pane, Preview::new(file));
+            self.web.previews.shown.insert(pane, Preview::new(file));
         }
         self.send_preview(pane);
     }
 
     /// `pane`'s preview page loaded (again), empty: its file is sent to it.
     pub(crate) fn preview_ready(&mut self, pane: u32) {
-        if let Some(preview) = self.previews.shown.get_mut(&pane) {
+        if let Some(preview) = self.web.previews.shown.get_mut(&pane) {
             preview.sent = None;
             preview.caret = None;
             preview.top = None;
@@ -276,16 +277,16 @@ impl Gerdr {
 
     /// `pane`'s tab closed.
     pub(crate) fn preview_closed(&mut self, pane: u32) {
-        self.previews.shown.remove(&pane);
+        self.web.previews.shown.remove(&pane);
     }
 
     /// Send every preview whose file, theme or review changed again; the
     /// previews of panes gone are dropped.
     pub fn refresh_previews(&mut self) {
-        let panes: Vec<u32> = self.previews.shown.keys().copied().collect();
+        let panes: Vec<u32> = self.web.previews.shown.keys().copied().collect();
         for pane in panes {
             if self.pane_place(pane).is_none() {
-                self.previews.shown.remove(&pane);
+                self.web.previews.shown.remove(&pane);
                 continue;
             }
             self.send_preview(pane);
@@ -294,7 +295,7 @@ impl Gerdr {
 
     /// Send `pane`'s preview to its page, unless it was sent as it is.
     fn send_preview(&mut self, pane: u32) {
-        let Some(preview) = self.previews.shown.get(&pane) else {
+        let Some(preview) = self.web.previews.shown.get(&pane) else {
             return;
         };
         let file = preview.file.clone();
@@ -309,7 +310,7 @@ impl Gerdr {
             return;
         }
         let sent = self.preview_to_browser(pane, &shown);
-        if let Some(preview) = self.previews.shown.get_mut(&pane) {
+        if let Some(preview) = self.web.previews.shown.get_mut(&pane) {
             // Not sent: tried again with the next read.
             preview.sent = sent.then_some(hash);
             // Not sent, it is all sent with the next read: not every frame.
@@ -321,7 +322,7 @@ impl Gerdr {
     /// it again if the review's comments changed; one whose file isn't
     /// under review marks nothing.
     pub(crate) fn sync_preview_marks(&mut self) {
-        let wanted: Vec<(u32, Option<usize>, u64, bool, bool)> = (self.previews.shown.iter())
+        let wanted: Vec<(u32, Option<usize>, u64, bool, bool)> = (self.web.previews.shown.iter())
             .map(|(&pane, p)| {
                 let (caret, marks) = self.review_marks(&p.file).unwrap_or_default();
                 let hash = marks_hash(&marks);
@@ -340,7 +341,7 @@ impl Gerdr {
             }
             if caret_moved
                 && self.caret_to_browser(pane, caret)
-                && let Some(preview) = self.previews.shown.get_mut(&pane)
+                && let Some(preview) = self.web.previews.shown.get_mut(&pane)
             {
                 preview.caret = Some(caret);
             }
@@ -350,7 +351,7 @@ impl Gerdr {
     /// A link clicked in `pane`'s preview: a web page opens in a tab of
     /// the preview's workspace.
     pub(crate) fn preview_link(&mut self, pane: u32, url: &str) {
-        if !self.previews.has(pane) {
+        if !self.web.previews.has(pane) {
             return;
         }
         if !crate::is_web_link(url) {

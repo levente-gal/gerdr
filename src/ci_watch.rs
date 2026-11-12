@@ -36,14 +36,14 @@ impl Gerdr {
         let (tx, rx): (_, Channel<CiRead>) = channel::channel();
         let read = self.loop_handle.insert_source(rx, |event, _, state| {
             if let channel::Event::Msg(read) = event {
-                state.ci_pending = false;
+                state.ci.pending = false;
                 state.ci_read(read);
-                if std::mem::take(&mut state.ci_again) {
+                if std::mem::take(&mut state.ci.again) {
                     state.refresh_ci();
                 }
             }
         });
-        self.ci_sender = Some(tx);
+        self.ci.sender = Some(tx);
         let timer = self
             .loop_handle
             .insert_source(Timer::immediate(), move |_, _, state| {
@@ -60,7 +60,7 @@ impl Gerdr {
 
     /// How long until the CI is read again.
     fn ci_interval(&self) -> Duration {
-        if self.ci.values().any(RepoCi::busy) {
+        if self.ci.repos.values().any(RepoCi::busy) {
             ci::BUSY_INTERVAL
         } else {
             ci::IDLE_INTERVAL
@@ -72,7 +72,7 @@ impl Gerdr {
         let mut roots: Vec<PathBuf> = self
             .workspaces
             .iter()
-            .filter_map(|ws| self.git.get(&ws.dir)?.root.clone())
+            .filter_map(|ws| self.git.status.get(&ws.dir)?.root.clone())
             .collect();
         roots.sort();
         roots.dedup();
@@ -82,22 +82,22 @@ impl Gerdr {
     /// Read the CI now, off the event loop; once the round under way is
     /// done, if there is one.
     pub fn refresh_ci(&mut self) {
-        let Some(tx) = self.ci_sender.clone() else {
+        let Some(tx) = self.ci.sender.clone() else {
             return;
         };
-        if self.ci_pending {
-            self.ci_again = true;
+        if self.ci.pending {
+            self.ci.again = true;
             return;
         }
         let roots = self.ci_roots();
-        self.ci_asked = roots.clone();
+        self.ci.asked = roots.clone();
         if roots.is_empty() {
-            self.ci.clear();
+            self.ci.repos.clear();
             // Nothing to read: nothing failed to be.
             crate::problems::clear(ci::CI_PROBLEMS);
             return;
         }
-        self.ci_pending = true;
+        self.ci.pending = true;
         ci::read_all(roots, self.projects.ci_watched.clone(), move |read| {
             let _ = tx.send(read);
         });
@@ -106,7 +106,7 @@ impl Gerdr {
     /// The Git status was read again: a repository the CI wasn't read for
     /// (a workspace opened, another project shown) is read now.
     pub fn ci_roots_changed(&mut self) {
-        if self.ci_roots() != self.ci_asked {
+        if self.ci_roots() != self.ci.asked {
             self.refresh_ci();
         }
     }
@@ -117,7 +117,7 @@ impl Gerdr {
     /// pull requests found closed are watched no more. Rows that finished
     /// are notified of.
     fn ci_read(&mut self, read: CiRead) {
-        let asked: HashSet<&PathBuf> = self.ci_asked.iter().collect();
+        let asked: HashSet<&PathBuf> = self.ci.asked.iter().collect();
         let mut ci: HashMap<PathBuf, RepoCi> = HashMap::new();
         for (root, result) in read {
             if !asked.contains(&root) {
@@ -129,7 +129,7 @@ impl Gerdr {
                 }
                 Err(err) => {
                     tracing::debug!("ci of {}: {err}", root.display());
-                    if let Some(repo) = ci::unread(&root, self.ci.remove(&root), err) {
+                    if let Some(repo) = ci::unread(&root, self.ci.repos.remove(&root), err) {
                         ci.insert(root, repo);
                     }
                 }
@@ -146,8 +146,8 @@ impl Gerdr {
             self.projects.save();
         }
         let repos: Vec<&RepoCi> = ci.values().collect();
-        let news = ci::ci_news(&self.ci_states, &repos);
-        self.ci_states = repos
+        let news = ci::ci_news(&self.ci.states, &repos);
+        self.ci.states = repos
             .iter()
             .flat_map(|repo| {
                 let key = ci::key(&repo.host, &repo.slug);
@@ -156,8 +156,8 @@ impl Gerdr {
                     .map(move |row| ((key.clone(), row.subject.clone()), row.state))
             })
             .collect();
-        self.ci = ci;
-        if let Some(notifier) = self.notifier.as_mut() {
+        self.ci.repos = ci;
+        if let Some(notifier) = self.notices.notifier.as_mut() {
             for news in news {
                 notifier.send(
                     &AgentKey::Ci(news.link).to_string(),
@@ -170,8 +170,8 @@ impl Gerdr {
 
     /// The CI of the repository workspace `ws` is in, as last read.
     fn ci_of(&self, ws: &Workspace) -> Option<(&Path, &RepoCi)> {
-        let root = self.git.get(&ws.dir)?.root.as_deref()?;
-        Some((root, self.ci.get(root)?))
+        let root = self.git.status.get(&ws.dir)?.root.as_deref()?;
+        Some((root, self.ci.repos.get(root)?))
     }
 
     /// The CI card of workspace `ws`, if its repository has CI to show.
@@ -224,7 +224,7 @@ impl Gerdr {
             .app_command
             .as_deref()?;
         let (host, slug, n) = ci::pull_request_of(url)?;
-        let repo = self.ci.values().find(|repo| {
+        let repo = self.ci.repos.values().find(|repo| {
             repo.host.eq_ignore_ascii_case(&host) && repo.slug.eq_ignore_ascii_case(&slug)
         })?;
         let own = repo
@@ -262,7 +262,7 @@ impl Gerdr {
         if self.unwatch_pr(key, n) {
             self.projects.save();
         }
-        for repo in self.ci.values_mut() {
+        for repo in self.ci.repos.values_mut() {
             if ci::key(&repo.host, &repo.slug) == key {
                 repo.rows
                     .retain(|row| !(row.watched && row.subject == Subject::Pr(n)));
@@ -336,7 +336,7 @@ impl Gerdr {
         let in_tab = |t: usize| {
             ws.tabs.get(t)?.panes.iter().find_map(|p| {
                 let page = p.app_command.as_deref()?.trim().trim_end_matches('/');
-                (self.web_control.follows(p.id) && wanted(page)).then_some((t, p.id))
+                (self.web.control.follows(p.id) && wanted(page)).then_some((t, p.id))
             })
         };
         in_tab(ws.active_tab).or_else(|| (0..ws.tabs.len()).find_map(in_tab))
@@ -370,10 +370,12 @@ impl Gerdr {
         }
         let root = self
             .git
+            .status
             .get(&ws.dir)
             .and_then(|g| g.root.clone())
             .unwrap_or_else(|| ws.dir.clone());
-        self.repo_pages
+        self.git
+            .repo_pages
             .entry(root)
             .or_insert_with_key(|dir| git::web_url(dir))
             .clone()

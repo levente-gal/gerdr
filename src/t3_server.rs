@@ -183,7 +183,7 @@ impl Gerdr {
         match cmd.spawn() {
             Ok(child) => {
                 let pid = child.id();
-                self.children.push(child);
+                self.procs.children.push(child);
                 write(&Started {
                     process: process::Process::new(pid),
                     log: log_path,

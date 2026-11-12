@@ -1344,7 +1344,7 @@ impl Gerdr {
     pub(crate) fn chips_of(&self, project: &str, slug: &str, stage: Stage) -> Vec<AgentChip> {
         let workflow = self.projects.project(project).map(|p| &p.workflow);
         self.feature(project, slug).map_or_else(Vec::new, |f| {
-            stage_chips(f, stage, workflow, &self.cli_agents)
+            stage_chips(f, stage, workflow, &self.launcher.cli_agents)
         })
     }
 
@@ -1361,7 +1361,7 @@ impl Gerdr {
             return;
         };
         let by_default = matches!(
-            default_pick(feature, stage, workflow, &self.cli_agents),
+            default_pick(feature, stage, workflow, &self.launcher.cli_agents),
             Pick::Agent(agent, _) if agent.eq_ignore_ascii_case(name)
         );
         let Some(feature) = self.feature_mut(project, slug) else {
@@ -1384,7 +1384,7 @@ impl Gerdr {
     ) -> Option<ModelSlot> {
         let workflow = self.projects.project(project).map(|p| &p.workflow);
         let feature = self.feature(project, slug)?;
-        stage_model_slot(feature, stage, workflow, &self.cli_agents)
+        stage_model_slot(feature, stage, workflow, &self.launcher.cli_agents)
     }
 
     /// Name the tab holding herdr pane `pane` after its agent and `stage`
@@ -1465,7 +1465,7 @@ impl Gerdr {
     pub(crate) fn takes_a_machine(&self, feature: &Feature, stage: Stage) -> bool {
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
         !matches!(
-            stage_pick(feature, stage, workflow, &self.cli_agents),
+            stage_pick(feature, stage, workflow, &self.launcher.cli_agents),
             Pick::Agent(_, base) if Flavor::of(&base) == Flavor::T3
         )
     }
@@ -1486,7 +1486,7 @@ impl Gerdr {
     /// name and command; why none can, if so.
     pub(crate) fn summary_agent(&self, feature: &Feature) -> Result<(String, String), String> {
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
-        match stage_pick(feature, Stage::Build, workflow, &self.cli_agents) {
+        match stage_pick(feature, Stage::Build, workflow, &self.launcher.cli_agents) {
             Pick::Agent(agent, base) if Flavor::of(&base) != Flavor::T3 => Ok((agent, base)),
             Pick::Agent(..) => Err("T3 Code can't write it: pick a CLI agent for Build".into()),
             Pick::NoCli => Err("No coding agent CLI is installed".into()),
@@ -1878,7 +1878,7 @@ impl Gerdr {
         self.refresh_feature_graphs(project, slug, false);
         let names = self.projects.names(&feature);
         let workflow = self.projects.project(project).map(|p| &p.workflow);
-        let picked = stage_pick(&feature, stage, workflow, &self.cli_agents);
+        let picked = stage_pick(&feature, stage, workflow, &self.launcher.cli_agents);
         let (agent, base) = match picked {
             Pick::Agent(agent, base) => (agent, base),
             Pick::NoCli => {
@@ -2413,17 +2413,17 @@ impl Gerdr {
     /// See what became of the lines typed to agents: one left in its input
     /// box gets its Enter again. An agent that won't take it is the user's.
     fn agent_lines_tick(&mut self) {
-        let Some(mut herdr) = self.herdr.take() else {
+        let Some(mut herdr) = self.session.herdr.take() else {
             return;
         };
         let at_work = |pane: &str| {
-            (self.agents.iter()).any(|a| {
+            (self.session.agents.iter()).any(|a| {
                 a.pane_id == pane
                     && matches!(a.agent_status, AgentStatus::Working | AgentStatus::Blocked)
             })
         };
         let gave_up = herdr.check_agent_lines(at_work);
-        self.herdr = Some(herdr);
+        self.session.herdr = Some(herdr);
         for pane in gave_up {
             tracing::warn!("pane {pane} never took the line typed to it");
             let place = (self.herdr_pane_place(&pane))
@@ -2456,7 +2456,7 @@ impl Gerdr {
                 if let Some(state) = self.machine_pane_state(pane) {
                     return state;
                 }
-                let status = (self.agents.iter())
+                let status = (self.session.agents.iter())
                     .find(|a| a.pane_id == *pane)
                     .map(|a| a.agent_status);
                 (
@@ -2676,7 +2676,7 @@ impl Gerdr {
                     r.questions(&data).display()
                 )
             };
-            let sent = match self.herdr.as_mut() {
+            let sent = match self.session.herdr.as_mut() {
                 Some(herdr) => herdr.send_agent_line(&pane, &text),
                 None => Err("herdr isn't connected".into()),
             };
@@ -2846,12 +2846,18 @@ impl Gerdr {
         pane: Option<String>,
         summary: &str,
     ) {
-        let in_sight = self.host_focused
+        let in_sight = self.notices.host_focused
             && pane
                 .as_deref()
                 .and_then(|p| self.herdr_pane_place(p))
                 .is_some_and(|(w, t)| self.is_visible(w, t));
-        if !in_sight && let Some(notifier) = self.notifier.as_mut().filter(|_| self.notify) {
+        if !in_sight
+            && let Some(notifier) = self
+                .notices
+                .notifier
+                .as_mut()
+                .filter(|_| self.settings.notify)
+        {
             let key = pane.map_or_else(
                 || format!("feature:{project}/{slug}"),
                 |p| agents::AgentKey::Herdr(p).to_string(),

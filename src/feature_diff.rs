@@ -1280,17 +1280,17 @@ impl Gerdr {
         wd.tree = Some(FileTree::new(self.projects.repo_grouping));
         // It covers the other panels: they close, the repositories panel
         // kept as it was.
-        self.switcher = None;
-        self.project_menu = None;
-        self.tasks_panel = None;
+        self.overlays.switcher = None;
+        self.overlays.project_menu = None;
+        self.overlays.tasks_panel = None;
         if self.inbox.is_open() {
             self.close_inbox();
         }
-        self.scrollback = None;
+        self.overlays.scrollback = None;
         self.worktrees.close();
         self.stop_key_repeat();
         self.close_menu();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
         if self.wd().is_some() {
             self.worktree_save_review();

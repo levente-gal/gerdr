@@ -629,7 +629,7 @@ impl Gerdr {
             }
         });
         match inserted {
-            Ok(_) => self.profile_imports = Some(tx),
+            Ok(_) => self.launcher.profile_imports = Some(tx),
             Err(err) => tracing::warn!("profile imports: {err}"),
         }
     }
@@ -646,7 +646,7 @@ impl Gerdr {
     /// Import `source` off the event loop (a profile can be large):
     /// `closing` its app first if it runs (see `import_closing`).
     pub fn start_import(&mut self, source: Source, closing: bool) {
-        let (Some(tx), Some(home)) = (self.profile_imports.clone(), home_dir()) else {
+        let (Some(tx), Some(home)) = (self.launcher.profile_imports.clone(), home_dir()) else {
             return;
         };
         if IMPORTING.swap(true, Ordering::AcqRel) {

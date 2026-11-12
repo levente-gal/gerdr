@@ -904,7 +904,7 @@ impl Gerdr {
             return;
         }
         let local = |pane: &str| {
-            (self.herdr_tabs.values())
+            (self.session.tabs.values())
                 .flat_map(|d| &d.panes)
                 .find(|p| p.pane_id == pane)
         };

@@ -155,23 +155,23 @@ impl Gerdr {
     /// Find out off the event loop which projects' sessions run; the answer
     /// lands in `running`, through `running_status`, set up the first time.
     pub fn check_running(&mut self) {
-        if self.running_status.is_none() {
+        if self.life.running_status.is_none() {
             let (tx, rx) = channel::channel::<Vec<(String, bool)>>();
             let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
                 if let channel::Event::Msg(status) = event {
-                    state.running = status.into_iter().collect();
+                    state.life.running = status.into_iter().collect();
                     state.refresh_project_menu();
                 }
             });
             match inserted {
-                Ok(_) => self.running_status = Some(tx),
+                Ok(_) => self.life.running_status = Some(tx),
                 Err(err) => {
                     tracing::warn!("checking which projects run: {err}");
                     return;
                 }
             }
         }
-        let Some(tx) = self.running_status.clone() else {
+        let Some(tx) = self.life.running_status.clone() else {
             return;
         };
         let sessions: Vec<(String, String)> = self

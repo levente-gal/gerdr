@@ -1131,8 +1131,8 @@ impl Gerdr {
         let timer = Timer::from_duration(WATCH_INTERVAL);
         let look = |_, _: &mut (), state: &mut Gerdr| {
             let modified = modified();
-            if modified != state.settings_modified {
-                state.settings_modified = modified;
+            if modified != state.settings.settings_modified {
+                state.settings.settings_modified = modified;
                 state.reload_settings();
             }
             TimeoutAction::ToDuration(WATCH_INTERVAL)
@@ -1155,44 +1155,48 @@ impl Gerdr {
     /// whether new terminals reload their config.
     /// What is wrong with it.
     pub fn apply_settings(&mut self) -> Vec<String> {
-        self.settings_modified = modified();
+        self.settings.settings_modified = modified();
         let settings = load();
-        self.keymap = settings.keymap;
-        self.apps = settings.apps;
-        self.density = settings.ui.density;
-        self.needs_you = settings.ui.needs_you;
+        self.key_state.keymap = settings.keymap;
+        self.launcher.apps = settings.apps;
+        self.settings.density = settings.ui.density;
+        self.settings.needs_you = settings.ui.needs_you;
         // The panes take the footer's room, or give it back (`arrange`).
-        self.show_footer = settings.ui.footer;
-        if !self.show_footer {
-            self.footer_hover = None;
-            self.tasks_panel = None;
+        self.settings.show_footer = settings.ui.footer;
+        if !self.settings.show_footer {
+            self.hover.footer = None;
+            self.overlays.tasks_panel = None;
         }
         crate::anim::set_motion(settings.ui.motion);
-        if let Some(mode) = settings.ui.theme.filter(|mode| *mode != self.theme_mode) {
+        if let Some(mode) = settings
+            .ui
+            .theme
+            .filter(|mode| *mode != self.settings.theme_mode)
+        {
             self.set_theme_mode(mode);
         }
         self.repos.same_branches = settings.git.same_branches;
         self.repos.top_branches = settings.git.top_branches;
         self.inbox.linear = settings.linear;
-        self.keep_apps = settings.keep;
-        self.cli_agents = crate::cli_agents::installed(&settings.agents);
-        self.agent_config = settings.agents;
+        self.keep.apps = settings.keep;
+        self.launcher.cli_agents = crate::cli_agents::installed(&settings.agents);
+        self.settings.agent_config = settings.agents;
         self.set_saved_machines(settings.machines);
-        if let Some(notifier) = &mut self.notifier {
+        if let Some(notifier) = &mut self.notices.notifier {
             notifier.set_settings(settings.notifications);
         }
-        if settings.notifications.enabled != self.notify {
-            self.notify = settings.notifications.enabled;
+        if settings.notifications.enabled != self.settings.notify {
+            self.settings.notify = settings.notifications.enabled;
             // The bus source lets go once the notifier is gone.
-            match self.notify {
+            match self.settings.notify {
                 true => self.connect_notifier(),
-                false => self.notifier = None,
+                false => self.notices.notifier = None,
             }
         }
         self.set_service_settings(settings.services);
         self.t3.auto_update = settings.t3.updates;
         // Terminals read it when they start: only new ones change.
-        self.live_config_reload = settings.terminal.live_config_reload;
+        self.settings.live_config_reload = settings.terminal.live_config_reload;
         self.arrange();
         settings.problems
     }

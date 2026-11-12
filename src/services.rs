@@ -241,7 +241,11 @@ impl Gerdr {
         }
         // The shown project's at once; the others' as they are found.
         if let Some(project) = self.project.clone().filter(|p| ids.contains(p))
-            && let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf())
+            && let Some(socket) = self
+                .session
+                .herdr
+                .as_ref()
+                .map(|h| h.socket().to_path_buf())
         {
             self.watch_project_services(&project, socket, false);
             self.feed_services();
@@ -263,7 +267,7 @@ impl Gerdr {
     pub(crate) fn may_be_service(&self, command: &str) -> bool {
         !test_runs::runs_tests(command)
             && !crate::feature::verify::runs_check(command)
-            && !cli_agents::runs_agent(command, &self.agent_config)
+            && !cli_agents::runs_agent(command, &self.settings.agent_config)
     }
 
     /// The services project `project`'s records keep: the commands its
@@ -323,6 +327,7 @@ impl Gerdr {
             return;
         };
         let mut list: Vec<Service> = self
+            .session
             .last_commands
             .iter()
             .filter(|(_, r)| r.long)
@@ -339,7 +344,7 @@ impl Gerdr {
         list.retain(|s| self.may_be_service(&s.command));
         // Only the panes there: a record may outlive its pane a while.
         let panes: Vec<&herdr::PaneState> =
-            self.herdr_tabs.values().flat_map(|d| &d.panes).collect();
+            self.session.tabs.values().flat_map(|d| &d.panes).collect();
         if !panes.is_empty() {
             list.retain(|s| {
                 panes
@@ -533,7 +538,7 @@ impl Gerdr {
         if self.project.as_deref() != Some(project) {
             return false;
         }
-        self.pane_jobs.contains_key(pane_id)
+        self.session.pane_jobs.contains_key(pane_id)
             || self
                 .service_errors
                 .interrupts
@@ -622,7 +627,12 @@ impl Gerdr {
             (None, n) => format!("{title} (×{n})"),
         };
         // `[notifications] enabled` turns every notification off.
-        if let Some(notifier) = self.notifier.as_mut().filter(|_| self.notify) {
+        if let Some(notifier) = self
+            .notices
+            .notifier
+            .as_mut()
+            .filter(|_| self.settings.notify)
+        {
             let key = format!("{NOTIFY_PREFIX}{project}|{pane_id}|{fingerprint}");
             notifier.send(&key, &summary, &body);
         }
@@ -631,7 +641,7 @@ impl Gerdr {
     /// Whether project `project`'s pane `pane_id` is in sight: the project
     /// and the pane's tab shown, gerdr's window with the keyboard.
     fn service_in_sight(&self, project: &str, pane_id: &str) -> bool {
-        self.host_focused
+        self.notices.host_focused
             && self.project.as_deref() == Some(project)
             && self
                 .herdr_pane_place(pane_id)
@@ -700,7 +710,9 @@ impl Gerdr {
         };
         self.open_scrollback(id);
         let fit = self.scrollback_fit_for(id);
-        if let (Some(viewer), Some(fit), Some(first)) = (self.scrollback.as_mut(), fit, first) {
+        if let (Some(viewer), Some(fit), Some(first)) =
+            (self.overlays.scrollback.as_mut(), fit, first)
+        {
             viewer.reveal_last(&first, fit);
         }
     }

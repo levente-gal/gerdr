@@ -8,19 +8,23 @@
 //! old name for an `Info` toast.
 
 use std::{
+    collections::VecDeque,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
 use smithay::{
-    reexports::calloop::timer::{TimeoutAction, Timer},
+    reexports::calloop::{
+        LoopHandle,
+        timer::{TimeoutAction, Timer},
+    },
     utils::{Logical, Point},
 };
 
 use crate::{
     Gerdr,
     anim::FAST,
-    chrome::{self, Rect, ToastView},
+    chrome::{self, Chrome, Rect, ToastView},
     menu::MenuAction,
 };
 
@@ -178,7 +182,17 @@ pub enum ToastHit {
     Dismiss,
 }
 
-impl Gerdr {
+/// What a part of gerdr needs to tell the user something: the toasts, the
+/// loop that times them out and the chrome that sizes their buttons. Made
+/// with `ui!(gerdr)`, which borrows only those, so a method of one group of
+/// `Gerdr`'s fields can take it beside `&mut gerdr.<group>`.
+pub struct Ui<'a> {
+    pub toasts: &'a mut VecDeque<Toast>,
+    pub loop_handle: &'a LoopHandle<'static, Gerdr>,
+    pub chrome: &'a Chrome,
+}
+
+impl Ui<'_> {
     /// Show `text` for `TOAST_TIME`.
     pub fn toast(&mut self, text: String, level: Level) {
         self.toast_with(text, level, None);
@@ -198,7 +212,7 @@ impl Gerdr {
             .as_ref()
             .map_or(0, |(label, _)| self.chrome.toast_button_width(label));
         let toast = Toast::new(text, level, action, button_w, now + time);
-        enqueue(&mut self.toasts, toast, now);
+        enqueue(self.toasts, toast, now);
         self.time_toasts(time);
     }
 
@@ -216,6 +230,38 @@ impl Gerdr {
             // `chrome_view` leaves it out once it is past anyway.
             tracing::warn!("timing the toast out: {err}");
         }
+    }
+
+    /// Show `text` over the apps for `TOAST_TIME`.
+    pub fn show_notice(&mut self, text: String) {
+        self.toast(text, Level::Info);
+    }
+
+    /// Show what went well.
+    pub fn show_success(&mut self, text: String) {
+        self.toast(text, Level::Success);
+    }
+
+    /// Show what needs a look but didn't fail.
+    pub fn show_warning(&mut self, text: String) {
+        self.toast(text, Level::Warning);
+    }
+
+    /// Show what failed.
+    pub fn show_error(&mut self, text: String) {
+        self.toast(text, Level::Error);
+    }
+}
+
+impl Gerdr {
+    /// Show `text` for `TOAST_TIME`.
+    pub fn toast(&mut self, text: String, level: Level) {
+        ui!(self).toast(text, level);
+    }
+
+    /// See `Ui::toast_with`.
+    pub fn toast_with(&mut self, text: String, level: Level, action: Option<(String, MenuAction)>) {
+        ui!(self).toast_with(text, level, action);
     }
 
     /// The pointer is at `pos`, or off the toasts (`None`): the toast under
@@ -239,28 +285,28 @@ impl Gerdr {
             }
         }
         if let Some(left) = longest {
-            self.time_toasts(left);
+            ui!(self).time_toasts(left);
         }
     }
 
     /// Show `text` over the apps for `TOAST_TIME`.
     pub fn show_notice(&mut self, text: String) {
-        self.toast(text, Level::Info);
+        ui!(self).show_notice(text);
     }
 
     /// Show what went well.
     pub fn show_success(&mut self, text: String) {
-        self.toast(text, Level::Success);
+        ui!(self).show_success(text);
     }
 
     /// Show what needs a look but didn't fail.
     pub fn show_warning(&mut self, text: String) {
-        self.toast(text, Level::Warning);
+        ui!(self).show_warning(text);
     }
 
     /// Show what failed.
     pub fn show_error(&mut self, text: String) {
-        self.toast(text, Level::Error);
+        ui!(self).show_error(text);
     }
 
     /// Send the toasts whose button does what `used` says on their way: it

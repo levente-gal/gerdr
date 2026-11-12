@@ -230,7 +230,7 @@ impl Gerdr {
         };
         // Not connected to its session: ask only if it or its apps run all
         // the same.
-        if self.herdr.is_none()
+        if self.session.herdr.is_none()
             && !self
                 .projects
                 .project(id)
@@ -249,8 +249,8 @@ impl Gerdr {
 
     /// Ask, even if a choice was remembered.
     pub fn open_quit(&mut self) {
-        self.project_menu = None;
-        self.quit = Some(
+        self.overlays.project_menu = None;
+        self.overlays.quit = Some(
             QuitDialog::quitting(
                 self.stop_picks(),
                 self.shown_apps(),
@@ -287,7 +287,7 @@ impl Gerdr {
         typed: Keysym,
     ) -> Option<Outcome> {
         let _ = typed;
-        self.quit.as_mut()?.key(mods, sym)
+        self.overlays.quit.as_mut()?.key(mods, sym)
     }
 
     /// Do what the quit dialog asked.
@@ -295,8 +295,8 @@ impl Gerdr {
         if let Outcome::Go { stops, .. } = outcome {
             self.projects.stop_picks = Some(stops);
         }
-        if let Some(switch) = self.quit.as_mut().and_then(|d| d.switch.take()) {
-            self.quit = None;
+        if let Some(switch) = self.overlays.quit.as_mut().and_then(|d| d.switch.take()) {
+            self.overlays.quit = None;
             self.refresh_pointer_focus();
             return match outcome {
                 Outcome::Go { stops, .. } => {
@@ -309,14 +309,14 @@ impl Gerdr {
             };
         }
         let Outcome::Go { stops, remember } = outcome else {
-            self.quit = None;
+            self.overlays.quit = None;
             // Gone, what is under the pointer gets it back.
             self.refresh_pointer_focus();
             return;
         };
         self.projects.quit_choice = remember.then_some(QuitChoice::Stops(stops));
         self.projects.save();
-        self.quit = None;
+        self.overlays.quit = None;
         self.quit_app(stops);
     }
 
@@ -332,8 +332,8 @@ impl Gerdr {
         if self.open_elsewhere(&switch.id) {
             return self.refuse_open(&switch.id);
         }
-        self.project_menu = None;
-        self.quit = Some(QuitDialog::switching(
+        self.overlays.project_menu = None;
+        self.overlays.quit = Some(QuitDialog::switching(
             self.stop_picks(),
             self.shown_apps(),
             switch,
@@ -344,7 +344,7 @@ impl Gerdr {
     /// Show the project `switch` is about, stopping what `stops` says of
     /// the one left (see `show_project`).
     fn switch_now(&mut self, switch: Switch, stops: Stops) {
-        self.stop_left = self
+        self.life.stop_left = self
             .project
             .clone()
             .filter(|_| stops.any())
@@ -384,7 +384,7 @@ impl Gerdr {
         }
         match cmd.spawn() {
             Ok(child) => {
-                self.children.push(child);
+                self.procs.children.push(child);
                 let name = self
                     .projects
                     .project(&switch.id)
@@ -398,7 +398,7 @@ impl Gerdr {
     /// A left click while the quit dialog is open; `false` if it isn't.
     pub fn quit_click(&mut self, pos: Point<f64, Logical>) -> bool {
         let layout = self.quit_layout();
-        let Some(dialog) = self.quit.as_mut() else {
+        let Some(dialog) = self.overlays.quit.as_mut() else {
             return false;
         };
         let outcome = match quit_hit(&layout, pos) {
@@ -423,6 +423,7 @@ impl Gerdr {
     /// Where the quit dialog's parts go, as it asks now.
     pub fn quit_layout(&self) -> chrome::QuitLayout {
         let (rows, switching) = self
+            .overlays
             .quit
             .as_ref()
             .map_or((0, false), |d| (d.rows().len(), d.switch.is_some()));
@@ -432,13 +433,13 @@ impl Gerdr {
     /// The pointer moved while the quit dialog is open.
     pub fn quit_hover(&mut self, pos: Point<f64, Logical>) {
         let layout = self.quit_layout();
-        if let Some(dialog) = self.quit.as_mut() {
+        if let Some(dialog) = self.overlays.quit.as_mut() {
             dialog.hover = quit_hit(&layout, pos);
         }
     }
 
     pub fn quit_view(&self) -> Option<QuitView> {
-        let dialog = self.quit.as_ref()?;
+        let dialog = self.overlays.quit.as_ref()?;
         let name = |id: &str| {
             self.projects
                 .project(id)

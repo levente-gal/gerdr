@@ -223,7 +223,7 @@ impl Gerdr {
     /// one `[keep] apps` names, and a project is shown.
     pub fn keeps(&self, command: &str) -> bool {
         self.project.is_some()
-            && launch::program_name(command).is_some_and(|key| self.keep_apps.contains(&key))
+            && launch::program_name(command).is_some_and(|key| self.keep.apps.contains(&key))
     }
 
     /// Show the windows of the shown project's server, if it runs: start
@@ -236,7 +236,7 @@ impl Gerdr {
         if !available() || !server_runs(&display) {
             return;
         }
-        self.keeper = Some(Keeper {
+        self.keep.keeper = Some(Keeper {
             project: id,
             display,
             client: None,
@@ -252,7 +252,7 @@ impl Gerdr {
     /// quits. Its client ends with gerdr's other children; the server
     /// and its apps run on.
     pub fn detach_keeper(&mut self) {
-        let Some(keeper) = self.keeper.take() else {
+        let Some(keeper) = self.keep.keeper.take() else {
             return;
         };
         // Now, not with the other children: the next client may connect
@@ -270,7 +270,7 @@ impl Gerdr {
 
     /// End project `id`'s server and the apps on it.
     pub fn stop_kept(&mut self, id: &str) {
-        if self.keeper.as_ref().is_some_and(|k| k.project == id) {
+        if self.keep.keeper.as_ref().is_some_and(|k| k.project == id) {
             self.detach_keeper();
         }
         stop(id);
@@ -281,8 +281,8 @@ impl Gerdr {
     fn ensure_keeper(&mut self) -> Option<String> {
         let id = self.project.clone()?;
         if !available() {
-            if !self.keep_warned {
-                self.keep_warned = true;
+            if !self.keep.warned {
+                self.keep.warned = true;
                 let text = "Install wprs (wprsd and wprsc) to keep apps running when gerdr quits";
                 crate::problems::report("wprs", text);
                 self.toast(text.into(), Level::Warning);
@@ -290,9 +290,9 @@ impl Gerdr {
             return None;
         }
         let display = display(&id);
-        if self.keeper.as_ref().is_none_or(|k| k.project != id) {
+        if self.keep.keeper.as_ref().is_none_or(|k| k.project != id) {
             self.detach_keeper();
-            self.keeper = Some(Keeper {
+            self.keep.keeper = Some(Keeper {
                 project: id.clone(),
                 display: display.clone(),
                 client: None,
@@ -307,14 +307,19 @@ impl Gerdr {
             record.server = Some(Process::new(server));
             write(&id, &record);
             // The old client, if any, lost the old server.
-            if let Some(keeper) = self.keeper.as_mut() {
+            if let Some(keeper) = self.keep.keeper.as_mut() {
                 keeper.client = None;
             }
         }
-        if self.keeper.as_ref().is_some_and(|k| k.client.is_none()) {
+        if self
+            .keep
+            .keeper
+            .as_ref()
+            .is_some_and(|k| k.client.is_none())
+        {
             self.start_client();
         }
-        if self.keeper.as_ref().is_some_and(|k| k.hooks.is_none()) {
+        if self.keep.keeper.as_ref().is_some_and(|k| k.hooks.is_none()) {
             self.hear_kept_cursor();
         }
         Some(display)
@@ -353,7 +358,7 @@ impl Gerdr {
         match cmd.spawn() {
             Ok(child) => {
                 let pid = child.id();
-                self.children.push(child);
+                self.procs.children.push(child);
                 tracing::info!("started {SERVER} on {wayland}");
                 Some(pid)
             }
@@ -367,7 +372,7 @@ impl Gerdr {
     /// Start a client showing the shown project's server in gerdr, once its
     /// socket is there. It is one of gerdr's children, ended with them.
     fn start_client(&mut self) {
-        let Some(keeper) = self.keeper.as_ref() else {
+        let Some(keeper) = self.keep.keeper.as_ref() else {
             return;
         };
         let (Some(socket), Some(control)) =
@@ -385,7 +390,7 @@ impl Gerdr {
             .arg(&control);
         let dir = home_dir().unwrap_or_else(|| "/".into());
         let pid = self.spawn(cmd, &dir, CLIENT);
-        if let Some(keeper) = self.keeper.as_mut() {
+        if let Some(keeper) = self.keep.keeper.as_mut() {
             keeper.client = pid;
             keeper.client_started = Some(Instant::now());
         }
@@ -394,7 +399,7 @@ impl Gerdr {
     /// The client of the shown project's server ended: start another if
     /// the server runs and the last didn't end right away.
     pub fn kept_client_exited(&mut self, exited: &[u32]) {
-        let Some(keeper) = self.keeper.as_mut() else {
+        let Some(keeper) = self.keep.keeper.as_mut() else {
             return;
         };
         if !keeper.client.is_some_and(|pid| exited.contains(&pid)) {
@@ -424,7 +429,7 @@ impl Gerdr {
         let Some(display) = self.ensure_keeper() else {
             return self.spawn(cmd, dir, log);
         };
-        let id = self.keeper.as_ref()?.project.clone();
+        let id = self.keep.keeper.as_ref()?.project.clone();
         let socket = runtime_dir()?.join(&display);
         // `sh -c <command>`: wait for the server's socket first.
         let args: Vec<OsString> = cmd.get_args().map(OsString::from).collect();
@@ -454,7 +459,7 @@ impl Gerdr {
             process: Process::new(pid),
         });
         write(&id, &record);
-        if let Some(keeper) = self.keeper.as_mut() {
+        if let Some(keeper) = self.keep.keeper.as_mut() {
             keeper.pids.push(pid);
         }
         Some(pid)
@@ -463,7 +468,7 @@ impl Gerdr {
     /// The pid of an app the shown project's server runs for `command` and
     /// no pane has yet: a restored pane takes it instead of starting one.
     pub fn take_kept(&mut self, command: &str) -> Option<u32> {
-        let keeper = self.keeper.as_ref()?;
+        let keeper = self.keep.keeper.as_ref()?;
         let record = read(&keeper.project);
         let pid = record
             .apps
@@ -471,14 +476,14 @@ impl Gerdr {
             .find(|app| app.command == command.trim() && !keeper.pids.contains(&app.process.pid))?
             .process
             .pid;
-        self.keeper.as_mut()?.pids.push(pid);
+        self.keep.keeper.as_mut()?.pids.push(pid);
         Some(pid)
     }
 
     /// The pid of an app the shown project's server runs for `command`,
     /// whose other windows come back to their panes too.
     pub fn kept_pid(&self, command: &str) -> Option<u32> {
-        let keeper = self.keeper.as_ref()?;
+        let keeper = self.keep.keeper.as_ref()?;
         read(&keeper.project)
             .apps
             .iter()
@@ -490,7 +495,7 @@ impl Gerdr {
     /// window of app_id `app_id` belongs to: the one whose program the
     /// app_id names, else the first.
     pub fn kept_command(&self, app_id: &str) -> Option<String> {
-        let keeper = self.keeper.as_ref()?;
+        let keeper = self.keep.keeper.as_ref()?;
         let apps = read(&keeper.project).apps;
         let named = apps.iter().find(|app| {
             launch::program_name(&app.command)
@@ -501,7 +506,8 @@ impl Gerdr {
 
     /// Whether `pid` is an app on the shown project's server.
     pub fn is_kept(&self, pid: Option<u32>) -> bool {
-        self.keeper
+        self.keep
+            .keeper
             .as_ref()
             .is_some_and(|k| pid.is_some_and(|pid| k.pids.contains(&pid)))
     }
@@ -519,7 +525,8 @@ impl Gerdr {
     /// Whether a window whose client descends from `lineage` comes from
     /// the shown project's server, through its client.
     pub fn from_keeper(&self, lineage: &[u32]) -> bool {
-        self.keeper
+        self.keep
+            .keeper
             .as_ref()
             .and_then(|k| k.client)
             .is_some_and(|client| lineage.contains(&client))
@@ -528,14 +535,14 @@ impl Gerdr {
     /// Hear the hooks of a Cursor on the shown project's server, which
     /// sends them by its display (see `cursor_agents::run_hook`).
     fn hear_kept_cursor(&mut self) {
-        let Some(display) = self.keeper.as_ref().map(|k| k.display.clone()) else {
+        let Some(display) = self.keep.keeper.as_ref().map(|k| k.display.clone()) else {
             return;
         };
         let Some(path) = cursor_agents::hook_socket(std::ffi::OsStr::new(&display)) else {
             return;
         };
         if let Some(token) = self.listen_cursor_hooks(&path)
-            && let Some(keeper) = self.keeper.as_mut()
+            && let Some(keeper) = self.keep.keeper.as_mut()
         {
             keeper.hooks = Some((path, token));
         }

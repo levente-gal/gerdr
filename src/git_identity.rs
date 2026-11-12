@@ -250,7 +250,7 @@ impl Gerdr {
             dialog.guessed(draft);
             dialog.global = global;
         }
-        self.context_menu = None;
+        self.overlays.context_menu = None;
         self.stop_key_repeat();
         self.repos.identity = Some(dialog);
         if let Some(tx) = self.repos_sender() {

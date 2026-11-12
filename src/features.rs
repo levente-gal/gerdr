@@ -8409,7 +8409,7 @@ impl Gerdr {
         };
         self.features.serial += 1;
         let serial = self.features.serial;
-        self.context_menu = None;
+        self.overlays.context_menu = None;
         self.stop_key_repeat();
         let mut dialog = NewFeatureDialog::new(id.clone(), serial, from.clone());
         dialog.review = wanted.map(|w| Reviewing {
@@ -9215,18 +9215,18 @@ impl Gerdr {
         if self.feature(project, slug).is_none() {
             return self.show_warning("That feature is gone".into());
         }
-        self.switcher = None;
+        self.overlays.switcher = None;
         self.repos.close();
         self.worktrees.close();
-        self.project_menu = None;
-        self.scrollback = None;
-        self.tasks_panel = None;
+        self.overlays.project_menu = None;
+        self.overlays.scrollback = None;
+        self.overlays.tasks_panel = None;
         if self.inbox.is_open() {
             self.close_inbox();
         }
         self.stop_key_repeat();
         self.close_menu();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
         // It shows as it was left (its parked panel), on the picked
         // stage while the feature didn't move on.
@@ -9387,7 +9387,7 @@ impl Gerdr {
                 let feature = self.panel_feature().cloned()?;
                 let ctx = self.row_ctx(&feature);
                 self.open_feature_menu(&feature, ctx);
-                if let Some(menu) = self.context_menu.as_mut() {
+                if let Some(menu) = self.overlays.context_menu.as_mut() {
                     menu.step_to_end(false);
                 }
                 return None;
@@ -11777,23 +11777,23 @@ impl Gerdr {
     /// found again once the column stops (see `tick_scrolls`).
     pub fn feature_panel_scroll(&mut self, motion: Motion) {
         self.sync_feature_page();
-        let pos = self.pointer.to_i32_round();
+        let pos = self.mouse.pos.to_i32_round();
         let on_strip = (self.feature_tab_parts()).is_some_and(|(_, l)| {
             l.columns[TabColumn::Repos as usize].is_none() && l.strip.contains(pos)
         });
         if on_strip {
             return self.feature_strip_scroll(motion);
         }
-        if let Some((col, bounds)) = self.feature_tab_column(self.pointer)
+        if let Some((col, bounds)) = self.feature_tab_column(self.mouse.pos)
             && let Some(panel) = self.features.panel.as_mut()
         {
             panel.scroll[col as usize].apply(motion, Instant::now(), bounds);
         }
         // What is under the pointer is found again now, and once the
         // column stops (see `tick_scrolls`): a tooltip left goes.
-        self.scrolling = true;
+        self.mouse.scrolling = true;
         let time = self.start_time.elapsed().as_millis() as u32;
-        self.pointer_moved(self.pointer, time);
+        self.pointer_moved(self.mouse.pos, time);
     }
 
     /// The wheel over the narrow tab's repository chips: the next one down
@@ -11814,7 +11814,7 @@ impl Gerdr {
             panel.select_row(strip_step(panel.repo, rows, repos));
         }
         let time = self.start_time.elapsed().as_millis() as u32;
-        self.pointer_moved(self.pointer, time);
+        self.pointer_moved(self.mouse.pos, time);
     }
 
     /// Move the feature tab's columns on to `now` if they move on their

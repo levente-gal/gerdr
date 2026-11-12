@@ -297,7 +297,12 @@ impl Gerdr {
         };
         let mut preps = Vec::new();
         let venv = self.feature_venv(project, slug);
-        let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf()) else {
+        let Some(socket) = self
+            .session
+            .herdr
+            .as_ref()
+            .map(|h| h.socket().to_path_buf())
+        else {
             return refuse(rows, &pending, "herdr isn't connected".to_owned());
         };
         // A terminal at its prompt runs it again; any other gets a new one,
@@ -308,7 +313,7 @@ impl Gerdr {
             let pane = rows[i].pane.take().filter(|pane| {
                 !used.contains(pane)
                     && self.herdr_pane_place(pane).is_some()
-                    && (self.herdr.as_mut()).is_some_and(|herdr| {
+                    && (self.session.herdr.as_mut()).is_some_and(|herdr| {
                         prepare::step(&herdr.process_info(pane)) == prepare::Step::Send
                     })
             });
@@ -465,7 +470,7 @@ impl Gerdr {
             }
         };
         let Some(pid) = self.attach(&pane, cwd) else {
-            if let Some(herdr) = self.herdr.as_mut()
+            if let Some(herdr) = self.session.herdr.as_mut()
                 && let Err(err) = herdr.pane_close(&pane.pane_id)
             {
                 tracing::warn!("herdr: {err}");
@@ -520,7 +525,11 @@ impl Gerdr {
             },
             None => None,
         };
-        let socket = self.herdr.as_ref().map(|h| h.socket().to_path_buf());
+        let socket = self
+            .session
+            .herdr
+            .as_ref()
+            .map(|h| h.socket().to_path_buf());
         if there.is_none() && socket.is_none() {
             return;
         }
@@ -772,7 +781,7 @@ impl Gerdr {
     /// Wait again for the runs of the shown project's features that were
     /// under way when gerdr last stopped: their terminals went on.
     pub(crate) fn adopt_checks(&mut self, project: &str) {
-        let here = self.herdr.is_some() && !self.herdr_tabs.is_empty();
+        let here = self.session.herdr.is_some() && !self.session.tabs.is_empty();
         let Some(all) = self.features.all.get(project) else {
             return;
         };

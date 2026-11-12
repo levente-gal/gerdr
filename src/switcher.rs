@@ -1051,14 +1051,14 @@ impl Gerdr {
     /// when they open: one popup at a time, no key repeating into it, no
     /// menu or tooltip left over it.
     fn make_room_for_switcher(&mut self) {
-        self.project_menu = None;
+        self.overlays.project_menu = None;
         self.inbox.close();
-        self.scrollback = None;
+        self.overlays.scrollback = None;
         self.worktrees.close();
         self.repos.close();
         self.stop_key_repeat();
         self.close_menu();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
     }
 
@@ -1067,7 +1067,7 @@ impl Gerdr {
         self.make_room_for_switcher();
         let mut switcher = Switcher::new(self.switcher_items(), false, Place::Split);
         switcher.set_room(self.switcher_room());
-        self.switcher = Some(switcher);
+        self.overlays.switcher = Some(switcher);
         self.query_zoxide();
     }
 
@@ -1083,7 +1083,7 @@ impl Gerdr {
         self.make_room_for_switcher();
         let mut switcher = Switcher::new(self.weighed(items), false, Place::Tab);
         switcher.set_room(self.switcher_room());
-        self.switcher = Some(switcher);
+        self.overlays.switcher = Some(switcher);
         true
     }
 
@@ -1115,7 +1115,7 @@ impl Gerdr {
         self.make_room_for_switcher();
         let mut switcher = Switcher::new(self.weighed(items), false, Place::Tab);
         switcher.set_room(self.switcher_room());
-        self.switcher = Some(switcher);
+        self.overlays.switcher = Some(switcher);
     }
 
     /// Open the switcher as the picker of `stage`'s model on feature `slug`,
@@ -1148,18 +1148,18 @@ impl Gerdr {
         switcher.set_items(self.model_items(&slot, switcher.model_slot.as_ref()));
         switcher.select(&now);
         switcher.set_room(self.switcher_room());
-        self.switcher = Some(switcher);
+        self.overlays.switcher = Some(switcher);
     }
 
     /// Whether the picker of a stage's model is open.
     pub(crate) fn model_picker_open(&self) -> bool {
-        (self.switcher.as_ref()).is_some_and(|s| s.model_slot.is_some())
+        (self.overlays.switcher.as_ref()).is_some_and(|s| s.model_slot.is_some())
     }
 
     /// Bring the open picker of a stage's model up to date, after a read of
     /// the models it offers.
     pub(crate) fn refresh_model_picker(&mut self) {
-        let Some(mut switcher) = self.switcher.take_if(|s| s.model_slot.is_some()) else {
+        let Some(mut switcher) = self.overlays.switcher.take_if(|s| s.model_slot.is_some()) else {
             return;
         };
         let slot = (switcher.model_slot.as_ref())
@@ -1168,7 +1168,7 @@ impl Gerdr {
             switcher.model_hint = self.model_hint(&slot);
             switcher.set_items(self.model_items(&slot, switcher.model_slot.as_ref()));
         }
-        self.switcher = Some(switcher);
+        self.overlays.switcher = Some(switcher);
     }
 
     /// What the picker of `slot`'s model says over its list.
@@ -1242,10 +1242,11 @@ impl Gerdr {
             .map(|command| format!("app:{command}"))
             .collect();
         if !history.is_empty() {
-            self.frecency.seed(&history, SystemTime::now());
+            self.launcher.frecency.seed(&history, SystemTime::now());
         }
         if let Some(dir) = self.workspace().map(|ws| ws.dir.clone()) {
-            self.repo_pages
+            self.git
+                .repo_pages
                 .entry(dir)
                 .or_insert_with_key(|dir| git::web_url(dir));
         }
@@ -1253,16 +1254,16 @@ impl Gerdr {
         switcher.icons = self.program_icons();
         switcher.set_items(self.run_items());
         switcher.set_room(self.switcher_room());
-        self.switcher = Some(switcher);
+        self.overlays.switcher = Some(switcher);
         self.scan_installed_apps();
     }
 
     /// Bring the open run prompt's items up to date.
     pub fn refresh_run_prompt(&mut self) {
-        if let Some(mut switcher) = self.switcher.take_if(|s| s.run) {
+        if let Some(mut switcher) = self.overlays.switcher.take_if(|s| s.run) {
             switcher.icons = self.program_icons();
             switcher.set_items(self.run_items());
-            self.switcher = Some(switcher);
+            self.overlays.switcher = Some(switcher);
         }
     }
 
@@ -1274,7 +1275,7 @@ impl Gerdr {
         let icons = self.program_icons();
         let page = self
             .workspace()
-            .and_then(|ws| self.repo_pages.get(&ws.dir).cloned().flatten());
+            .and_then(|ws| self.git.repo_pages.get(&ws.dir).cloned().flatten());
         let mut items: Vec<Item> = page
             .iter()
             .map(|url| {
@@ -1288,7 +1289,12 @@ impl Gerdr {
             })
             .collect();
         items.extend(self.app_items());
-        items.extend(self.installed_apps.iter().map(|app| app_item(app, &icons)));
+        items.extend(
+            self.launcher
+                .installed
+                .iter()
+                .map(|app| app_item(app, &icons)),
+        );
         let history = launch::history()
             .into_iter()
             .filter(|command| page.as_ref() != Some(command));
@@ -1333,7 +1339,8 @@ impl Gerdr {
         let Some(ws) = self.workspaces.get(w) else {
             return Vec::new();
         };
-        self.cli_agents
+        self.launcher
+            .cli_agents
             .iter()
             .map(|agent| {
                 let icon = agent.icon.picture().map_or(ItemIcon::Command, |picture| {
@@ -1503,7 +1510,7 @@ impl Gerdr {
         let now = SystemTime::now();
         for item in &mut items {
             if let Some(key) = self.frecency_key(&item.target) {
-                item.weight = self.frecency.score(&key, now);
+                item.weight = self.launcher.frecency.score(&key, now);
             }
         }
         items
@@ -1525,7 +1532,7 @@ impl Gerdr {
             .iter()
             .position(|chip| chip.to_f64().contains(pos));
         let hint = chrome::switcher_hint(&view, &layout, pos);
-        if let Some(switcher) = self.switcher.as_mut() {
+        if let Some(switcher) = self.overlays.switcher.as_mut() {
             // Rows passing under the pointer don't light up.
             let moving = switcher.scroll.moving(Instant::now());
             let hover = hover.filter(|_| !moving);
@@ -1562,7 +1569,7 @@ impl Gerdr {
     /// The installed apps' icons, by the program each starts.
     fn program_icons(&self) -> HashMap<String, AppIcon> {
         let mut icons = HashMap::new();
-        for app in &self.installed_apps {
+        for app in &self.launcher.installed {
             if let (Some(icon), Some(program)) = (&app.icon, launch::program_name(&app.command)) {
                 icons.entry(program).or_insert_with(|| icon.clone());
             }
@@ -1572,16 +1579,20 @@ impl Gerdr {
 
     /// The switcher's rows, while it is open.
     pub fn switcher_view(&self) -> Option<SwitcherView> {
-        Some(self.switcher.as_ref()?.view())
+        Some(self.overlays.switcher.as_ref()?.view())
     }
 
     /// Bring the open switcher's items up to date.
     pub fn refresh_switcher(&mut self) {
         // What the run prompt and the picker of a model list is their own.
-        if let Some(mut switcher) = self.switcher.take_if(|s| !s.run && s.model_slot.is_none()) {
+        if let Some(mut switcher) = self
+            .overlays
+            .switcher
+            .take_if(|s| !s.run && s.model_slot.is_none())
+        {
             let items = self.switcher_items();
             switcher.set_items(items);
-            self.switcher = Some(switcher);
+            self.overlays.switcher = Some(switcher);
         }
     }
 
@@ -1594,16 +1605,16 @@ impl Gerdr {
         typed: Keysym,
     ) -> Option<(Target, Place)> {
         let room = self.switcher_room();
-        let switcher = self.switcher.as_mut()?;
+        let switcher = self.overlays.switcher.as_mut()?;
         switcher.set_room(room);
         match switcher.key(mods, sym, typed) {
             Outcome::Open => None,
             Outcome::Closed => {
-                self.switcher = None;
+                self.overlays.switcher = None;
                 None
             }
             Outcome::Picked(target, place) => {
-                self.switcher = None;
+                self.overlays.switcher = None;
                 Some((target, place))
             }
         }
@@ -1612,7 +1623,7 @@ impl Gerdr {
     /// The wheel or the touchpad moved the switcher's list.
     pub fn switcher_scroll(&mut self, motion: Motion) {
         let room = self.switcher_room();
-        if let Some(switcher) = self.switcher.as_mut() {
+        if let Some(switcher) = self.overlays.switcher.as_mut() {
             switcher.set_room(room);
             switcher.scroll(motion, Instant::now());
         }
@@ -1622,7 +1633,7 @@ impl Gerdr {
     /// thumb held there puts it.
     pub fn switcher_scroll_to(&mut self, px: f64) {
         let room = self.switcher_room();
-        if let Some(switcher) = self.switcher.as_mut() {
+        if let Some(switcher) = self.overlays.switcher.as_mut() {
             switcher.set_room(room);
             switcher.stand_at(px);
         }
@@ -1632,11 +1643,11 @@ impl Gerdr {
     /// still moves (see `Scroll::moving`). Run before every frame, it also
     /// fits the list to the output as it is now, resized or not.
     pub fn switcher_scroll_tick(&mut self, now: Instant) -> bool {
-        if self.switcher.is_none() {
+        if self.overlays.switcher.is_none() {
             return false;
         }
         let room = self.switcher_room();
-        let Some(switcher) = self.switcher.as_mut() else {
+        let Some(switcher) = self.overlays.switcher.as_mut() else {
             return false;
         };
         switcher.set_room(room);
@@ -1651,14 +1662,15 @@ impl Gerdr {
         // A key hint: its key, pressed.
         if let Some(view) = self.switcher_view() {
             let layout = chrome::switcher_geometry(&view, self.content_rect());
-            if let (Some(i), Some(switcher)) =
-                (chrome::switcher_hint(&view, &layout, pos), &self.switcher)
-            {
+            if let (Some(i), Some(switcher)) = (
+                chrome::switcher_hint(&view, &layout, pos),
+                &self.overlays.switcher,
+            ) {
                 let into = Overlay::Switcher(switcher.serial);
                 return self.press_hint(into, &view.hints[i].0, pos);
             }
         }
-        let Some(mut switcher) = self.switcher.take() else {
+        let Some(mut switcher) = self.overlays.switcher.take() else {
             return;
         };
         let layout = chrome::switcher_geometry(&switcher.view(), self.content_rect());
@@ -1668,7 +1680,7 @@ impl Gerdr {
             .position(|chip| chip.to_f64().contains(pos))
         {
             switcher.set_category(chip);
-            self.switcher = Some(switcher);
+            self.overlays.switcher = Some(switcher);
             return;
         }
         match chrome::switcher_row_at(&layout, pos) {
@@ -1677,11 +1689,11 @@ impl Gerdr {
                     self.switch_to(target, switcher.place);
                 }
             }
-            None if layout.panel.to_f64().contains(pos) => self.switcher = Some(switcher),
+            None if layout.panel.to_f64().contains(pos) => self.overlays.switcher = Some(switcher),
             // A toast takes the click, and the switcher stays.
             None => {
                 if let Some(hit) = self.toast_press(pos) {
-                    self.switcher = Some(switcher);
+                    self.overlays.switcher = Some(switcher);
                     if let ToastHit::Action(action) = hit {
                         self.menu_action(action);
                     }
@@ -1694,8 +1706,8 @@ impl Gerdr {
     /// counts for the frecency.
     pub fn switch_to(&mut self, target: Target, place: Place) {
         if let Some(key) = self.frecency_key(&target) {
-            self.frecency.touch(&key);
-            self.frecency.save();
+            self.launcher.frecency.touch(&key);
+            self.launcher.frecency.save();
         }
         match target {
             Target::Workspace(w) => self.switch_workspace(w),
@@ -1713,7 +1725,7 @@ impl Gerdr {
             // shown, else the welcome screen.
             Target::Welcome if self.project.is_some() => self.open_project_menu(),
             Target::Welcome => self.open_welcome(true),
-            Target::Shortcuts => self.help_pinned = true,
+            Target::Shortcuts => self.hover.help_pinned = true,
             Target::Inbox => self.open_inbox(None),
             Target::Machines => self.open_machines(None),
             Target::ConnectMachine => self.open_machine_dialog(),
@@ -1837,7 +1849,11 @@ impl Gerdr {
     /// apps they start.
     fn app_items(&self) -> Vec<Item> {
         let icons = self.program_icons();
-        self.apps.iter().map(|app| app_item(app, &icons)).collect()
+        self.launcher
+            .apps
+            .iter()
+            .map(|app| app_item(app, &icons))
+            .collect()
     }
 
     /// Everything to switch to: the workspaces, their tabs (of those with
@@ -1899,6 +1915,7 @@ impl Gerdr {
         items.extend(self.app_items());
         let open: HashSet<&Path> = self.workspaces.iter().map(|ws| ws.dir.as_path()).collect();
         for dir in self
+            .launcher
             .recent_dirs
             .iter()
             .filter(|dir| !open.contains(dir.as_path()))
@@ -1928,7 +1945,7 @@ impl Gerdr {
             Target::Settings,
         ));
         // Settings' `[terminal] live_config_reload`, written there.
-        items.push(if self.live_config_reload {
+        items.push(if self.settings.live_config_reload {
             Item::new(
                 ItemIcon::Command,
                 "Turn off terminal config reload in Settings",
@@ -1963,14 +1980,14 @@ impl Gerdr {
         let (tx, rx) = channel::channel();
         let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
             if let channel::Event::Msg(dirs) = event {
-                state.recent_dirs = dirs;
+                state.launcher.recent_dirs = dirs;
                 state.refresh_switcher();
                 state.refresh_project_menu();
             }
         });
         match inserted {
             Ok(_) => {
-                self.zoxide = Some(tx);
+                self.launcher.zoxide = Some(tx);
                 self.query_zoxide();
             }
             Err(err) => tracing::warn!("zoxide: {err}"),
@@ -1979,7 +1996,7 @@ impl Gerdr {
 
     /// Read zoxide's folders again, off the event loop, into `recent_dirs`.
     pub fn query_zoxide(&self) {
-        let Some(tx) = self.zoxide.clone() else {
+        let Some(tx) = self.launcher.zoxide.clone() else {
             return;
         };
         std::thread::spawn(move || {

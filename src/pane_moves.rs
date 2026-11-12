@@ -99,7 +99,7 @@ impl Gerdr {
             return;
         };
         let (a, b) = (a.pane_id.clone(), b.pane_id.clone());
-        if let Some(herdr) = self.herdr.as_mut()
+        if let Some(herdr) = self.session.herdr.as_mut()
             && let Err(err) = herdr.pane_swap(&a, &b)
         {
             tracing::warn!("herdr: {err}");
@@ -158,7 +158,7 @@ impl Gerdr {
             .herdr()
             .map(|p| (p.pane_id.clone(), p.workspace_id.clone()));
         if let Some((pane_id, workspace_id)) = pane
-            && let Some(herdr) = self.herdr.as_mut()
+            && let Some(herdr) = self.session.herdr.as_mut()
         {
             // herdr must follow: gerdr's tabs are matched to herdr's by
             // their panes' tab when they come back.
@@ -218,7 +218,7 @@ impl Gerdr {
                 self.show_warning(format!("{name} has no terminal to put a terminal pane by"));
                 return;
             };
-            let Some(herdr) = self.herdr.as_mut() else {
+            let Some(herdr) = self.session.herdr.as_mut() else {
                 return;
             };
             match herdr.pane_move_to_new_tab(&pane, &dest) {

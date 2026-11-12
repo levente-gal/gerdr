@@ -433,13 +433,11 @@ impl Gerdr {
             r.plan(&data).display()
         );
         // A pane back at its shell would run the line as a command.
-        let told = match (r.pane.as_deref(), self.herdr.as_mut()) {
-            (Some(pane), Some(herdr)) => {
-                match crate::prepare::step(&herdr.process_info(pane)) {
-                    crate::prepare::Step::Busy => herdr.send_agent_line(pane, &line),
-                    _ => Err(crate::feature_build::AGENT_QUIT.to_owned()),
-                }
-            }
+        let told = match (r.pane.as_deref(), self.session.herdr.as_mut()) {
+            (Some(pane), Some(herdr)) => match crate::prepare::step(&herdr.process_info(pane)) {
+                crate::prepare::Step::Busy => herdr.send_agent_line(pane, &line),
+                _ => Err(crate::feature_build::AGENT_QUIT.to_owned()),
+            },
             (None, _) => Err("its agent's tab is gone".to_owned()),
             (_, None) => Err("herdr isn't connected".to_owned()),
         };

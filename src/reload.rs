@@ -347,7 +347,7 @@ impl Gerdr {
         let mut lock = None;
         if shown_edited.is_some() {
             // Its lock stays: another gerdr mustn't take it in the meantime.
-            lock = self.project_lock.take();
+            lock = self.life.project_lock.take();
             self.detach_project();
             self.project = None;
         } else if self.record_tabs() {
@@ -389,7 +389,7 @@ impl Gerdr {
         self.projects.save();
         let reshown = match shown_edited {
             Some(id) if self.projects.project(&id).is_some() => {
-                self.project_lock = lock;
+                self.life.project_lock = lock;
                 self.show_project(&id, false);
                 self.projects.project(&id).map(|p| p.name.clone())
             }

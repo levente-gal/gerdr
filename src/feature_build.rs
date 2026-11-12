@@ -1042,7 +1042,7 @@ impl Gerdr {
                 ));
             }
         };
-        if machine.is_none() && self.herdr.is_none() {
+        if machine.is_none() && self.session.herdr.is_none() {
             return self.show_error(
                 "The checks run in herdr's terminals, and herdr isn't connected".into(),
             );

@@ -757,7 +757,12 @@ impl Gerdr {
             )
         });
         let preps: Vec<Prep> = preps.collect();
-        if let Some(socket) = self.herdr.as_ref().map(|h| h.socket().to_path_buf()) {
+        if let Some(socket) = self
+            .session
+            .herdr
+            .as_ref()
+            .map(|h| h.socket().to_path_buf())
+        {
             spawn_prepare(socket, preps);
         }
         let missing: Vec<String> = (lines.iter().skip(panes.len()))

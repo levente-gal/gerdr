@@ -130,7 +130,7 @@ impl Gerdr {
             return false;
         };
         let grab = thumb.on_thumb(pos.y).unwrap_or(thumb.h / 2.0);
-        self.thumb_drag = Some(ThumbDrag { bar, grab });
+        self.mouse.thumb_drag = Some(ThumbDrag { bar, grab });
         self.drag_thumb(pos);
         true
     }
@@ -138,12 +138,12 @@ impl Gerdr {
     /// The pointer moved to `pos` with a thumb held: its list stands
     /// where the thumb is then.
     pub(crate) fn drag_thumb(&mut self, pos: Point<f64, Logical>) {
-        let Some(drag) = self.thumb_drag else {
+        let Some(drag) = self.mouse.thumb_drag else {
             return;
         };
         let Some(thumb) = self.thumb(drag.bar) else {
             // The list all shows now, or something covers it.
-            self.thumb_drag = None;
+            self.mouse.thumb_drag = None;
             return;
         };
         let at = thumb.pos_at(pos.y - drag.grab);

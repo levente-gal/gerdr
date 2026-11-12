@@ -379,15 +379,15 @@ impl Gerdr {
             (n + 1, blocked + usize::from(is_blocked))
         });
         let inbox = self.inbox_count(workspaces, agents);
-        let renaming = self.rename.as_ref().and_then(|r| match r.target {
+        let renaming = self.overlays.rename.as_ref().and_then(|r| match r.target {
             RenameTarget::Tab(w, t) if w == self.active_workspace => Some((t, r.field.line())),
             _ => None,
         });
         let mut view = TabStripView {
             tabs,
             active: self.workspace().map_or(0, |ws| ws.active_tab),
-            prefix: self.prefix_armed || self.help_pinned,
-            mode: self.theme_mode,
+            prefix: self.key_state.prefix_armed || self.hover.help_pinned,
+            mode: self.settings.theme_mode,
             hover: None,
             hover_alpha: 0,
             renaming,
@@ -398,23 +398,23 @@ impl Gerdr {
             plus: self.workspace().is_some(),
             nav: self.can_go(),
         };
-        view.hover = self.tab_hover.over();
-        view.hover_alpha = self.tab_hover.alpha_over(Instant::now());
+        view.hover = self.hover.tab.over();
+        view.hover_alpha = self.hover.tab.alpha_over(Instant::now());
         view
     }
 
     /// Whether something covers the strip, so nothing in it lights up.
     fn tab_strip_covered(&self) -> bool {
-        self.quit.is_some()
-            || self.restart.is_some()
-            || self.checkout.is_some()
-            || self.confirm.is_some()
-            || self.welcome.is_some()
-            || self.project_menu.is_some()
-            || self.switcher.is_some()
-            || self.context_menu.is_some()
-            || self.drag.is_some()
-            || self.reorder.is_some_and(|r| r.moving)
+        self.overlays.quit.is_some()
+            || self.overlays.restart.is_some()
+            || self.overlays.checkout.is_some()
+            || self.overlays.confirm.is_some()
+            || self.overlays.welcome.is_some()
+            || self.overlays.project_menu.is_some()
+            || self.overlays.switcher.is_some()
+            || self.overlays.context_menu.is_some()
+            || self.mouse.drag.is_some()
+            || self.mouse.reorder.is_some_and(|r| r.moving)
     }
 
     /// Move the strip's hover on, once a frame: what the pointer is over
@@ -431,11 +431,11 @@ impl Gerdr {
         let hit = if self.tab_strip_covered() {
             None
         } else {
-            self.tab_strip_hit_at(&view, self.pointer)
+            self.tab_strip_hit_at(&view, self.mouse.pos)
         };
-        self.tab_hover.track(hit, now);
-        view.hover = self.tab_hover.over();
-        view.hover_alpha = self.tab_hover.alpha_over(now);
+        self.hover.tab.track(hit, now);
+        view.hover = self.hover.tab.over();
+        view.hover_alpha = self.hover.tab.alpha_over(now);
         view
     }
 
@@ -469,7 +469,7 @@ impl Gerdr {
 
     /// The keys the strip's menus and tooltips name, from the help.
     fn tab_key_hints(&self) -> KeyHints {
-        let help = self.keymap.help();
+        let help = self.key_state.keymap.help();
         let key = |action: Action| help.key_of(action, 0);
         KeyHints {
             new_tab: key(Action::NewTab),
@@ -487,9 +487,9 @@ impl Gerdr {
     fn visited_menu(&self, anchor: Rectangle<i32, Logical>, back: bool) -> Option<MenuSpec> {
         let can = |v: &Visit| self.can_visit(v);
         let visits = if back {
-            self.nav.backs(can)
+            self.nav.history.backs(can)
         } else {
-            self.nav.forwards(can)
+            self.nav.history.forwards(can)
         };
         let items: Vec<MenuItem> = visits
             .into_iter()
@@ -575,7 +575,9 @@ impl Gerdr {
         match (button, hit) {
             (BTN_LEFT, Some(TabHit::Back)) => self.go_back(),
             (BTN_LEFT, Some(TabHit::Forward)) => self.go_forward(),
-            (BTN_LEFT, Some(TabHit::Toggle)) => self.set_theme_mode(next_mode(self.theme_mode)),
+            (BTN_LEFT, Some(TabHit::Toggle)) => {
+                self.set_theme_mode(next_mode(self.settings.theme_mode))
+            }
             (BTN_LEFT, Some(TabHit::Overflow)) => {
                 let blocked: Vec<usize> = self
                     .blocked_elsewhere()
@@ -643,15 +645,15 @@ impl Gerdr {
         Some(match hit {
             TabHit::Back => keyed(
                 Tooltip::new(&visited_tooltip(true, view.nav.0), anchor(layout.back)),
-                &self.keymap.help().key_of(Action::GoBack, 0),
+                &self.key_state.keymap.help().key_of(Action::GoBack, 0),
             ),
             TabHit::Forward => keyed(
                 Tooltip::new(&visited_tooltip(false, view.nav.1), anchor(layout.forward)),
-                &self.keymap.help().key_of(Action::GoForward, 0),
+                &self.key_state.keymap.help().key_of(Action::GoForward, 0),
             ),
             TabHit::Tab(i) => keyed(
                 Tooltip::new(&view.tabs.get(i)?.tooltip(), anchor(layout.tabs[i])),
-                &tab_key(&self.keymap.help(), i),
+                &tab_key(&self.key_state.keymap.help(), i),
             ),
             TabHit::More => {
                 let hidden: Vec<(usize, &str)> = layout
@@ -706,7 +708,7 @@ impl Gerdr {
             }
             TabHit::Inbox => {
                 let tip = Tooltip::new(&inbox_tooltip(view.inbox?), anchor(layout.inbox?));
-                let key = self.keymap.help().key_of(Action::Inbox, 0);
+                let key = self.key_state.keymap.help().key_of(Action::Inbox, 0);
                 keyed(tip, &key)
             }
         })

@@ -475,8 +475,8 @@ impl Welcome {
 impl Gerdr {
     /// Show the welcome screen, and find out which projects' sessions run.
     pub fn open_welcome(&mut self, in_app: bool) {
-        self.project_menu = None;
-        self.welcome = Some(Welcome {
+        self.overlays.project_menu = None;
+        self.overlays.welcome = Some(Welcome {
             herdr_missing: !herdr::is_installed(),
             ..Welcome::new(self.project_rows(), in_app)
         });
@@ -494,26 +494,26 @@ impl Gerdr {
         typed: Keysym,
     ) -> Option<Outcome> {
         let page = self.welcome_page();
-        self.welcome.as_mut()?.key(mods, sym, typed, page)
+        self.overlays.welcome.as_mut()?.key(mods, sym, typed, page)
     }
 
     /// Do what the welcome screen asked.
     pub fn apply_welcome(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Pick(id) => {
-                self.welcome = None;
+                self.overlays.welcome = None;
                 // The project behind is already shown.
                 if self.project.as_deref() != Some(id.as_str()) {
                     self.switch_project(&id);
                 }
             }
             Outcome::Create(name) => {
-                self.welcome = None;
+                self.overlays.welcome = None;
                 self.create_project(&name);
             }
             // Asked first while it runs; the rows follow once it is gone.
             Outcome::Forget(id) => self.forget_project(&id),
-            Outcome::Closed => self.welcome = None,
+            Outcome::Closed => self.overlays.welcome = None,
         }
         // Gone, the client under the pointer gets it back.
         self.refresh_pointer_focus();
@@ -543,7 +543,7 @@ impl Gerdr {
             }
             return true;
         }
-        let Some(welcome) = self.welcome.as_mut() else {
+        let Some(welcome) = self.overlays.welcome.as_mut() else {
             return false;
         };
         welcome.confirm_forget = None;
@@ -583,7 +583,7 @@ impl Gerdr {
         let page = self.welcome_page();
         let size = self.output_size();
         let hint = self.welcome_hint(pos).map(|(hit, _)| hit);
-        let welcome = self.welcome.as_mut()?;
+        let welcome = self.overlays.welcome.as_mut()?;
         let hit = hint.or_else(|| welcome_hit(welcome, size, page, pos));
         welcome.set_hover(hit, Instant::now());
         // A project's mark says whether it runs.
@@ -603,7 +603,7 @@ impl Gerdr {
     }
 
     pub fn welcome_view(&self) -> Option<WelcomeView> {
-        let welcome = self.welcome.as_ref()?;
+        let welcome = self.overlays.welcome.as_ref()?;
         let hello = projects::greeting(projects::local_hour());
         let greeting = match std::env::var("USER").ok().filter(|u| !u.is_empty()) {
             Some(user) => format!("{hello}, {user}"),
@@ -628,7 +628,7 @@ impl Gerdr {
             self.welcome_page(),
             greeting,
             note,
-            &self.running,
+            &self.life.running,
             quit_keys,
             Instant::now(),
         ))
@@ -638,7 +638,7 @@ impl Gerdr {
     /// positive), as the wheel over them does.
     pub fn welcome_scroll(&mut self, by: isize) {
         let page = self.welcome_page();
-        if let Some(welcome) = self.welcome.as_mut() {
+        if let Some(welcome) = self.overlays.welcome.as_mut() {
             welcome.scroll_by(by, page);
         }
     }
@@ -654,7 +654,7 @@ impl Gerdr {
     /// (a row, to the fraction), as its scrollbar's thumb dragged says.
     pub(crate) fn welcome_scroll_to(&mut self, at: f64) {
         let page = self.welcome_page();
-        if let Some(welcome) = self.welcome.as_mut() {
+        if let Some(welcome) = self.overlays.welcome.as_mut() {
             let first = welcome.first_shown(page) as isize;
             welcome.scroll_by(at.round() as isize - first, page);
         }

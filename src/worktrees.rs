@@ -941,7 +941,7 @@ impl Gerdr {
     fn worktree_items(&self, focus: Option<&Path>) -> (Vec<String>, Vec<Item>) {
         let mut repos: Vec<(PathBuf, PathBuf, usize, Vec<Worktree>)> = Vec::new();
         for (w, ws) in self.workspaces.iter().enumerate() {
-            let Some(status) = self.git.get(&ws.dir) else {
+            let Some(status) = self.git.status.get(&ws.dir) else {
                 continue;
             };
             let Some(main) = status.main_path() else {
@@ -1029,22 +1029,23 @@ impl Gerdr {
     /// (else the active one's) first, with worktree `dir` selected when it
     /// is one.
     pub fn open_worktrees(&mut self, dir: Option<PathBuf>) {
-        self.switcher = None;
+        self.overlays.switcher = None;
         self.repos.close();
         self.inbox.close();
-        self.scrollback = None;
-        self.project_menu = None;
+        self.overlays.scrollback = None;
+        self.overlays.project_menu = None;
         self.stop_key_repeat();
         self.close_menu();
         // The count's list would linger beside it, and go stale.
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
         let ws_dir = dir
             .clone()
             .or_else(|| self.workspace().map(|ws| ws.dir.clone()));
         let status = ws_dir.as_ref().and_then(|d| {
-            self.git.get(d).or_else(|| {
+            self.git.status.get(d).or_else(|| {
                 self.git
+                    .status
                     .values()
                     .find(|g| g.worktrees.iter().any(|w| &w.path == d))
             })
@@ -1333,7 +1334,7 @@ impl Gerdr {
     /// folder is in), the active one first.
     fn worktree_home(&self, item: &Item) -> Option<usize> {
         let own = |ws: &crate::Workspace| {
-            let here = self.git.get(&ws.dir).and_then(|s| s.here.as_ref());
+            let here = self.git.status.get(&ws.dir).and_then(|s| s.here.as_ref());
             here.is_some_and(|here| here.path == item.wt.path)
         };
         if self.workspace().is_some_and(own) {
@@ -1419,7 +1420,8 @@ impl Gerdr {
             .map(|ws| ws.tabs.iter().filter_map(|t| t.herdr_tab_id()).collect())
             .unwrap_or_default();
         let tabs = self
-            .herdr_tabs
+            .session
+            .tabs
             .iter()
             .filter(|(id, _)| !own_tabs.contains(&id.as_str()));
         let mut panes = tabs.flat_map(|(_, t)| &t.panes);

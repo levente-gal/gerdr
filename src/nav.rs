@@ -124,29 +124,30 @@ impl Gerdr {
         if let Some(project) = self.project.as_deref()
             && self
                 .nav
+                .history
                 .any(|v| matches!(v, Visit::Parked { project: p, .. } if p == project))
         {
-            let mut nav = std::mem::take(&mut self.nav);
+            let mut nav = std::mem::take(&mut self.nav.history);
             nav.rebind(|v| Some(self.unpark(v)));
-            self.nav = nav;
+            self.nav.history = nav;
         }
         if self.take_pending_visit() {
             return;
         }
         let shown = self.tab().map(|tab| Visit::Tab(tab.id));
-        let mut nav = std::mem::take(&mut self.nav);
+        let mut nav = std::mem::take(&mut self.nav.history);
         nav.visit(shown, |v| self.keeps_visit(v));
-        self.nav = nav;
+        self.nav.history = nav;
     }
 
     /// Take the step waiting for another project once its tab is back;
     /// whether it still waits. It waits while that project is asked for
     /// (the switch dialog is open) and for `PENDING_WAIT` once it shows.
     fn take_pending_visit(&mut self) -> bool {
-        let Some(mut pending) = self.nav_pending.take() else {
+        let Some(mut pending) = self.nav.pending.take() else {
             return false;
         };
-        if self.quit.is_some() {
+        if self.overlays.quit.is_some() {
             pending.since = Instant::now();
         }
         let waited = pending.since.elapsed() > PENDING_WAIT;
@@ -155,7 +156,7 @@ impl Gerdr {
         };
         if self.project.as_deref() != Some(project) {
             if !waited {
-                self.nav_pending = Some(pending);
+                self.nav.pending = Some(pending);
             }
             return false;
         }
@@ -179,27 +180,42 @@ impl Gerdr {
             }
             return false;
         }
-        self.nav_pending = Some(pending);
+        self.nav.pending = Some(pending);
         true
     }
 
     /// Whether going back, and going forward, would show a tab.
     pub fn can_go(&self) -> (bool, bool) {
         let can = |v: &Visit| self.can_visit(v);
-        (self.nav.can_back(can), self.nav.can_forward(can))
+        (
+            self.nav.history.can_back(can),
+            self.nav.history.can_forward(can),
+        )
     }
 
     /// Show the tab shown before this one, in whatever workspace or
     /// project.
     pub fn go_back(&mut self) {
-        if let Some(to) = self.nav.backs(|v| self.can_visit(v)).into_iter().next() {
+        if let Some(to) = self
+            .nav
+            .history
+            .backs(|v| self.can_visit(v))
+            .into_iter()
+            .next()
+        {
             self.go_to_visited(to, true);
         }
     }
 
     /// Undo a step back.
     pub fn go_forward(&mut self) {
-        if let Some(to) = self.nav.forwards(|v| self.can_visit(v)).into_iter().next() {
+        if let Some(to) = self
+            .nav
+            .history
+            .forwards(|v| self.can_visit(v))
+            .into_iter()
+            .next()
+        {
             self.go_to_visited(to, false);
         }
     }
@@ -214,28 +230,28 @@ impl Gerdr {
                 return;
             }
             let project = project.clone();
-            self.nav_pending = Some(PendingVisit {
+            self.nav.pending = Some(PendingVisit {
                 to,
                 step: Some(back),
                 since: Instant::now(),
             });
             return self.switch_project(&project);
         }
-        self.nav_pending = None;
+        self.nav.pending = None;
         self.step_to(&to, back);
     }
 
     /// Step back (`back`) or forward to `to`, a tab of the shown project,
     /// and show it.
     fn step_to(&mut self, to: &Visit, back: bool) {
-        let mut nav = std::mem::take(&mut self.nav);
+        let mut nav = std::mem::take(&mut self.nav.history);
         let keep = |v: &Visit| self.keeps_visit(v);
         let to = if back {
             nav.back_to(to, keep)
         } else {
             nav.forward_to(to, keep)
         };
-        self.nav = nav;
+        self.nav.history = nav;
         if let Some(to) = to {
             self.show_visit(&to);
         }
@@ -260,11 +276,11 @@ impl Gerdr {
             return;
         };
         let of = |v: &Visit| matches!(v, Visit::Parked { project: p, .. } if *p == project);
-        if self.nav_pending.as_ref().is_some_and(|p| of(&p.to)) {
+        if self.nav.pending.as_ref().is_some_and(|p| of(&p.to)) {
             return;
         }
-        if let Some(to) = self.nav.latest(of).cloned() {
-            self.nav_pending = Some(PendingVisit {
+        if let Some(to) = self.nav.history.latest(of).cloned() {
+            self.nav.pending = Some(PendingVisit {
                 to,
                 step: None,
                 since: Instant::now(),
@@ -277,14 +293,14 @@ impl Gerdr {
     /// Whether the store's copy changed.
     pub fn park_visits(&mut self) -> bool {
         let kept = self.keep_nav(true);
-        self.nav = self.parked_nav();
+        self.nav.history = self.parked_nav();
         kept
     }
 
     /// The history with the shown project's tabs parked, as it outlives
     /// them.
     fn parked_nav(&self) -> NavHistory<Visit> {
-        let mut nav = self.nav.clone();
+        let mut nav = self.nav.history.clone();
         let project = self.project.as_deref();
         nav.rebind(|v| match (v, project) {
             (Visit::Tab(id), Some(project)) => self.park(project, *id),
@@ -299,10 +315,10 @@ impl Gerdr {
     /// may have moved, or got its herdr tab, since); whether the store's
     /// copy changed.
     pub fn keep_nav(&mut self, fresh: bool) -> bool {
-        if !fresh && self.nav_kept.as_ref() == Some(&self.nav) {
+        if !fresh && self.nav.kept.as_ref() == Some(&self.nav.history) {
             return false;
         }
-        self.nav_kept = Some(self.nav.clone());
+        self.nav.kept = Some(self.nav.history.clone());
         let parked = self.parked_nav();
         if self.projects.nav == parked {
             return false;
@@ -316,7 +332,7 @@ impl Gerdr {
     pub fn restore_nav(&mut self) {
         let mut nav = self.projects.nav.clone();
         nav.rebind(|v| matches!(v, Visit::Parked { .. }).then(|| v.clone()));
-        self.nav = nav.restored();
+        self.nav.history = nav.restored();
     }
 
     /// Tab `id` of `project`, the shown one, parked; `None` if it is gone.

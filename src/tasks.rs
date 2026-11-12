@@ -267,8 +267,8 @@ impl Gerdr {
     /// gerdr started and its log.
     pub fn look_at_kept(&mut self) {
         self.t3_started = t3_server::started();
-        self.t3_log = launch::log_path(t3_server::LOG).exists();
-        self.kept = self
+        self.settings.t3_log = launch::log_path(t3_server::LOG).exists();
+        self.keep.kept = self
             .projects
             .projects
             .iter()
@@ -292,7 +292,7 @@ impl Gerdr {
         }
         let mut tasks = Vec::new();
         let log = launch::log_path(t3_server::LOG);
-        let has_log = self.t3_log;
+        let has_log = self.settings.t3_log;
         let server = self.t3.server.as_ref().filter(|_| self.t3.alive);
         let task = if self.t3.stopping {
             Task {
@@ -402,7 +402,7 @@ impl Gerdr {
         let mut tasks = self.t3_tasks();
         tasks.extend(git_tasks(&git_ops::turns()));
         tasks.extend(import_task(crate::profile_import::importing()));
-        tasks.extend(kept_tasks(&self.kept));
+        tasks.extend(kept_tasks(&self.keep.kept));
         tasks.extend(self.feature_tasks());
         tasks.extend(self.machine_tasks());
         tasks.extend(self.sandbox_left_tasks());
@@ -418,8 +418,8 @@ impl Gerdr {
 
     /// How high the footer is: nothing when the config file hides it.
     pub fn footer_height(&self) -> i32 {
-        if self.show_footer {
-            chrome::status_bar_height(self.density)
+        if self.settings.show_footer {
+            chrome::status_bar_height(self.settings.density)
         } else {
             0
         }
@@ -434,14 +434,14 @@ impl Gerdr {
 
     /// Whether `pos` is on the footer.
     pub fn on_footer(&self, pos: Point<f64, Logical>) -> bool {
-        self.show_footer && self.footer_rect().to_f64().contains(pos)
+        self.settings.show_footer && self.footer_rect().to_f64().contains(pos)
     }
 
     /// The footer: a chip per task that runs.
     pub fn footer_view(&self, tasks: &[Task]) -> Option<FooterView> {
-        self.show_footer.then(|| FooterView {
+        self.settings.show_footer.then(|| FooterView {
             tasks: tasks.iter().filter(|t| t.runs()).map(Task::view).collect(),
-            hover: self.footer_hover,
+            hover: self.hover.footer,
         })
     }
 
@@ -491,7 +491,7 @@ impl Gerdr {
     /// what a chip is for.
     pub fn footer_motion(&mut self, pos: Option<Point<f64, Logical>>) -> Option<Tooltip> {
         let hit = pos.and_then(|pos| self.footer_hit(pos));
-        self.footer_hover = hit;
+        self.hover.footer = hit;
         let hit = hit?;
         let rect = self.footer_rect();
         let tasks = self.tasks();
@@ -511,19 +511,19 @@ impl Gerdr {
     /// Open the tasks panel at task `selected`.
     /// The other panels close: it would cover them.
     pub fn open_tasks(&mut self, selected: usize) {
-        self.switcher = None;
+        self.overlays.switcher = None;
         self.repos.close();
         self.worktrees.close();
-        self.project_menu = None;
-        self.scrollback = None;
+        self.overlays.project_menu = None;
+        self.overlays.scrollback = None;
         if self.inbox.is_open() {
             self.close_inbox();
         }
         self.stop_key_repeat();
         self.close_menu();
-        self.tooltip.hide();
+        self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
-        self.tasks_panel = Some(TasksPanel {
+        self.overlays.tasks_panel = Some(TasksPanel {
             selected,
             ..TasksPanel::default()
         });
@@ -534,7 +534,7 @@ impl Gerdr {
 
     /// Close the tasks panel.
     pub fn close_tasks(&mut self) {
-        self.tasks_panel = None;
+        self.overlays.tasks_panel = None;
         self.refresh_pointer_focus();
     }
 
@@ -553,7 +553,7 @@ impl Gerdr {
     }
 
     pub fn tasks_view(&self, tasks: &[Task]) -> Option<TasksView> {
-        let panel = self.tasks_panel.as_ref()?;
+        let panel = self.overlays.tasks_panel.as_ref()?;
         let selected = (!tasks.is_empty()).then(|| panel.selected.min(tasks.len() - 1));
         Some(TasksView {
             rows: tasks.iter().map(Task::view).collect(),
@@ -581,7 +581,7 @@ impl Gerdr {
     fn reveal_task(&mut self) {
         let count = self.tasks().len();
         let page = self.tasks_page(count);
-        if let Some(panel) = self.tasks_panel.as_mut() {
+        if let Some(panel) = self.overlays.tasks_panel.as_mut() {
             panel.selected = panel.selected.min(count.saturating_sub(1));
             if panel.selected < panel.first {
                 panel.first = panel.selected;
@@ -600,7 +600,7 @@ impl Gerdr {
         let tasks = self.tasks();
         let count = tasks.len();
         let page = self.tasks_page(count);
-        let panel = self.tasks_panel.as_mut()?;
+        let panel = self.overlays.tasks_panel.as_mut()?;
         let last = count.saturating_sub(1);
         panel.selected = panel.selected.min(last);
         let row = panel.selected;
@@ -689,7 +689,7 @@ impl Gerdr {
                 None
             }
             Some(TasksHit::Row(i)) => {
-                if let Some(panel) = self.tasks_panel.as_mut()
+                if let Some(panel) = self.overlays.tasks_panel.as_mut()
                     && panel.selected != i
                 {
                     panel.selected = i;
@@ -698,7 +698,7 @@ impl Gerdr {
                 None
             }
             Some(TasksHit::Button(i, b)) => {
-                if let Some(panel) = self.tasks_panel.as_mut() {
+                if let Some(panel) = self.overlays.tasks_panel.as_mut() {
                     panel.selected = i;
                     panel.button = b;
                 }
@@ -718,7 +718,7 @@ impl Gerdr {
         let hit = self
             .tasks_layout()
             .and_then(|(_, _, layout)| layout.hit(pos));
-        if let Some(panel) = self.tasks_panel.as_mut() {
+        if let Some(panel) = self.overlays.tasks_panel.as_mut() {
             panel.hover = hit;
         }
     }
@@ -727,7 +727,7 @@ impl Gerdr {
     pub fn tasks_scroll(&mut self, rows: i32) {
         let count = self.tasks().len();
         let page = self.tasks_page(count);
-        if let Some(panel) = self.tasks_panel.as_mut() {
+        if let Some(panel) = self.overlays.tasks_panel.as_mut() {
             let first = panel.first as i64 + rows as i64;
             panel.first = first.clamp(0, count.saturating_sub(page) as i64) as usize;
         }

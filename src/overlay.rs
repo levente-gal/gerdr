@@ -222,34 +222,34 @@ impl Gerdr {
     /// going out does not.
     pub fn is_open(&self, overlay: Overlay) -> bool {
         match overlay {
-            Overlay::Tooltip => self.tooltip.is_up(),
-            Overlay::Quit => self.quit.is_some(),
-            Overlay::Restart => self.restart.is_some(),
-            Overlay::Checkout => self.checkout.is_some(),
+            Overlay::Tooltip => self.hover.tooltip.is_up(),
+            Overlay::Quit => self.overlays.quit.is_some(),
+            Overlay::Restart => self.overlays.restart.is_some(),
+            Overlay::Checkout => self.overlays.checkout.is_some(),
             Overlay::NewFeature => self.features.dialog.is_some(),
             Overlay::FindingDialog => self.features.finding_dialog.is_some(),
             Overlay::GitIdentity => self.repos.identity.is_some(),
             Overlay::ConnectMachine => self.machines.dialog.is_some(),
             Overlay::ProjectCommands => self.features.commands.is_some(),
-            Overlay::Confirm => self.confirm.is_some(),
-            Overlay::ContextMenu => self.context_menu.is_some(),
+            Overlay::Confirm => self.overlays.confirm.is_some(),
+            Overlay::ContextMenu => self.overlays.context_menu.is_some(),
             Overlay::Toasts => {
                 let now = Instant::now();
                 self.toasts.iter().any(|toast| now < toast.until)
             }
-            Overlay::Welcome => self.welcome.is_some(),
-            Overlay::Help => self.prefix_armed || self.help_pinned,
-            Overlay::Tasks => self.tasks_panel.is_some(),
-            Overlay::Machines => self.machines_panel.is_some(),
+            Overlay::Welcome => self.overlays.welcome.is_some(),
+            Overlay::Help => self.key_state.prefix_armed || self.hover.help_pinned,
+            Overlay::Tasks => self.overlays.tasks_panel.is_some(),
+            Overlay::Machines => self.overlays.machines_panel.is_some(),
             Overlay::Features => self.features.panel.is_some(),
             Overlay::Doc => self.review_tab().is_some() || self.inline_wd().is_some(),
-            Overlay::ProjectMenu => self.project_menu.is_some(),
+            Overlay::ProjectMenu => self.overlays.project_menu.is_some(),
             Overlay::Worktrees => self.worktrees.is_open(),
             Overlay::Repos => self.repos.is_open(),
             Overlay::Inbox => self.inbox.is_open(),
-            Overlay::AiStats => self.ai_stats.is_some(),
-            Overlay::Scrollback => self.scrollback.is_some(),
-            Overlay::Switcher => self.switcher.is_some(),
+            Overlay::AiStats => self.overlays.ai_stats.is_some(),
+            Overlay::Scrollback => self.overlays.scrollback.is_some(),
+            Overlay::Switcher => self.overlays.switcher.is_some(),
             Overlay::Criteria => self.criteria_strip_view().is_some(),
         }
     }
@@ -346,7 +346,7 @@ impl Gerdr {
     pub fn overlay_scroll(&mut self, overlay: Overlay, motion: Motion) {
         match overlay {
             Overlay::Restart => {
-                let Some(dialog) = &self.restart else {
+                let Some(dialog) = &self.overlays.restart else {
                     return;
                 };
                 let layout = chrome::restart_layout(
