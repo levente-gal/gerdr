@@ -53,7 +53,7 @@ use crate::{
     herdr::AgentStatus,
     inbox_store::{InboxFile, TodoId, Triage},
     issues::{IssueSource, IssuesRead, IssuesState, TicketRepo},
-    key_table::{self, Binding},
+    key_table::{self, Binding, alias},
     scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, TextField},
 };
@@ -1089,6 +1089,15 @@ const LIST_KEYS: &[Binding<ListCtx, ListKey>] = {
             footer: true,
             f1: "Clear the filter, back from the hidden ones, then close",
         },
+        // Aliases: presses the panel took before its keys were a table.
+        alias("Shift+Esc", |_| Some(ListKey::Esc)),
+        alias("Ctrl+Esc", |_| Some(ListKey::Esc)),
+        alias("Shift+Enter", |c| c.has(A::GoTo)),
+        alias("Ctrl+Shift+R", |_| Some(ListKey::Refresh)),
+        alias("Ctrl+Shift+N", |_| Some(ListKey::NewTodo)),
+        alias("Ctrl+Shift+T", |_| Some(ListKey::AddTickets)),
+        alias("Ctrl+Shift+E", |c| c.has(A::Edit)),
+        alias("Ctrl+Shift+C", |c| c.has(A::CopyLink)),
     ]
 };
 
@@ -1141,6 +1150,10 @@ const COMPOSE_KEYS: &[Binding<ComposeCtx, ComposeKey>] = &[
         footer: true,
         f1: "Back to the list, the writing kept",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |_| Some(ComposeKey::Back)),
+    alias("Ctrl+Esc", |_| Some(ComposeKey::Back)),
+    alias("Shift+Enter", |_| Some(ComposeKey::Save)),
 ];
 
 /// A pane's last lines as last read, for an agent's detail.
@@ -3292,6 +3305,29 @@ mod tests {
             detail
                 .fields
                 .contains(&("Ahead".into(), "2 to push".into()))
+        );
+    }
+
+    #[test]
+    fn ctrl_del_is_hinted_after_del() {
+        // A service error has Dismiss on Del whenever its group dismisses
+        // all (`inbox_sources::service_item`), so Ctrl+Del follows Del.
+        let mut error = item("s1", Section::Services, Some(0));
+        error.actions = vec![A::GoTo, A::Snooze, A::SnoozeLong, A::Dismiss];
+        let items = vec![error];
+        let triage = BTreeMap::new();
+        let names = names();
+        let list = listing(&items, &triage, &names);
+        let panel = Panel::new(None);
+        let keys: Vec<String> = panel
+            .view(&list)
+            .hints
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            keys[..5],
+            ["Enter", "Del", "Ctrl+Del", "Ctrl+H", "Ctrl+Shift+H"]
         );
     }
 

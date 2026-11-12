@@ -19,7 +19,7 @@ use crate::{
     Gerdr,
     chrome::{self, Dot, FooterHit, FooterView, TaskView, TasksHit, TasksView},
     git_ops, keep,
-    key_table::{self, Binding},
+    key_table::{self, Binding, alias},
     launch,
     menu::MenuAction,
     t3_server,
@@ -227,6 +227,23 @@ const KEYS: &[Binding<usize, Key>] = &[
         footer: true,
         f1: "Close",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |_| Some(Key::Close)),
+    alias("Ctrl+Esc", |_| Some(Key::Close)),
+    alias("Alt+Esc", |_| Some(Key::Close)),
+    alias("Shift+Up", |_| Some(Key::Up)),
+    alias("Ctrl+Up", |_| Some(Key::Up)),
+    alias("Alt+Up", |_| Some(Key::Up)),
+    alias("Shift+Down", |_| Some(Key::Down)),
+    alias("Ctrl+Down", |_| Some(Key::Down)),
+    alias("Alt+Down", |_| Some(Key::Down)),
+    alias("Ctrl+Tab", |_| Some(Key::Button { back: false })),
+    alias("Alt+Tab", |_| Some(Key::Button { back: false })),
+    alias("Ctrl+Shift+Tab", |_| Some(Key::Button { back: true })),
+    alias("Alt+Shift+Tab", |_| Some(Key::Button { back: true })),
+    alias("Shift+Enter", |buttons| (*buttons > 0).then_some(Key::Run)),
+    alias("Ctrl+Enter", |buttons| (*buttons > 0).then_some(Key::Run)),
+    alias("Alt+Enter", |buttons| (*buttons > 0).then_some(Key::Run)),
 ];
 
 impl Gerdr {

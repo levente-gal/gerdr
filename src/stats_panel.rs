@@ -31,7 +31,7 @@ use crate::{
     features::Done,
     input::Overlay,
     clock::ago,
-    key_table::{self, Binding},
+    key_table::{self, Binding, alias},
     scrollback::{Scrollback, Source},
     text_field::{Edit, PASTE, TextField},
     toast::ToastHit,
@@ -247,6 +247,49 @@ const KEYS: &[Binding<KeyCtx, Key>] = &[
         footer: true,
         f1: "Clear the search, go back, then close",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |_| Some(Key::Esc)),
+    alias("Ctrl+Esc", |_| Some(Key::Esc)),
+    alias("Alt+Esc", |_| Some(Key::Esc)),
+    alias("Shift+Enter", |_| Some(Key::Enter)),
+    alias("Ctrl+Enter", |_| Some(Key::Enter)),
+    alias("Alt+Enter", |_| Some(Key::Enter)),
+    alias("Shift+Up", |_| Some(Key::Step(-1))),
+    alias("Ctrl+Up", |_| Some(Key::Step(-1))),
+    alias("Alt+Up", |_| Some(Key::Step(-1))),
+    alias("Shift+Down", |_| Some(Key::Step(1))),
+    alias("Ctrl+Down", |_| Some(Key::Step(1))),
+    alias("Alt+Down", |_| Some(Key::Step(1))),
+    alias("Shift+PgUp", |_| Some(Key::Page(-1))),
+    alias("Alt+PgUp", |_| Some(Key::Page(-1))),
+    alias("Shift+PgDn", |_| Some(Key::Page(1))),
+    alias("Alt+PgDn", |_| Some(Key::Page(1))),
+    alias("Shift+Home", |_| Some(Key::First)),
+    alias("Ctrl+Home", |_| Some(Key::First)),
+    alias("Alt+Home", |_| Some(Key::First)),
+    alias("Shift+End", |_| Some(Key::Last)),
+    alias("Ctrl+End", |_| Some(Key::Last)),
+    alias("Alt+End", |_| Some(Key::Last)),
+    alias("Shift+Left", |c| {
+        (!c.on_list && !c.searching).then_some(Key::Pick(-1))
+    }),
+    alias("Ctrl+Left", |c| {
+        (!c.on_list && !c.searching).then_some(Key::Pick(-1))
+    }),
+    alias("Alt+Left", |c| {
+        (!c.on_list && !c.searching).then_some(Key::Pick(-1))
+    }),
+    alias("Shift+Right", |c| {
+        (!c.on_list && !c.searching).then_some(Key::Pick(1))
+    }),
+    alias("Ctrl+Right", |c| {
+        (!c.on_list && !c.searching).then_some(Key::Pick(1))
+    }),
+    alias("Alt+Right", |c| {
+        (!c.on_list && !c.searching).then_some(Key::Pick(1))
+    }),
+    alias("Alt+Tab", |_| Some(Key::Focus { back: false })),
+    alias("Alt+Shift+Tab", |_| Some(Key::Focus { back: true })),
 ];
 
 /// What the panel asks of gerdr, once a key or a click is taken.

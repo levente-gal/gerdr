@@ -35,7 +35,7 @@ use smithay::{
 use crate::{
     chrome::{self, ScrollbackHit, SearchBar, SearchPart},
     find,
-    key_table::{self, Binding},
+    key_table::{self, Binding, alias},
     scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, TextField},
 };
@@ -299,6 +299,22 @@ pub(crate) const KEYS: &[Binding<KeyCtx, Key>] = &[
         footer: false,
         f1: "",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Ctrl+Shift+F", |_| Some(Key::OpenFind)),
+    alias("Shift+Esc", |c| {
+        (c.view && (c.visual || c.selected)).then_some(Key::ClearSelection)
+    }),
+    alias("Shift+Esc", |c| c.view.then_some(Key::Close)),
+    alias("Alt+Esc", |c| c.view.then_some(Key::Close)),
+    alias("Shift+Q", |c| c.view.then_some(Key::Close)),
+    alias("Alt+Q", |c| c.view.then_some(Key::Close)),
+    alias("Shift+Enter", |c| c.view.then_some(Key::CopyClose)),
+    alias("Ctrl+Enter", |c| c.view.then_some(Key::CopyClose)),
+    alias("Alt+Enter", |c| c.view.then_some(Key::CopyClose)),
+    alias("Ctrl+Shift+R", |c| c.view.then_some(Key::Reload)),
+    alias("Shift+Y", |c| c.view.then_some(Key::Yank)),
+    alias("Alt+Y", |c| c.view.then_some(Key::Yank)),
+    alias("Ctrl+Shift+A", |c| c.view.then_some(Key::SelectAll)),
 ];
 
 /// The keys while the viewer's keys are listed: they close the list.

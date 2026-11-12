@@ -26,7 +26,7 @@ use crate::{
     },
     feature::{Feature, Stage},
     herdr::AgentStatus,
-    key_table::{self, Binding},
+    key_table::{self, Binding, alias},
     machine_edit::{Draft, EditForm},
     machine_load::Load,
     machines::{Failure, LinkState},
@@ -611,6 +611,28 @@ const MACHINE_KEYS: &[Binding<KeyCtx, Key>] = &[
         footer: true,
         f1: "Close",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |_| Some(Key::Close)),
+    alias("Ctrl+Esc", |_| Some(Key::Close)),
+    alias("Alt+Esc", |_| Some(Key::Close)),
+    alias("Shift+Up", |_| Some(Key::Up)),
+    alias("Ctrl+Up", |_| Some(Key::Up)),
+    alias("Alt+Up", |_| Some(Key::Up)),
+    alias("Shift+Down", |_| Some(Key::Down)),
+    alias("Ctrl+Down", |_| Some(Key::Down)),
+    alias("Alt+Down", |_| Some(Key::Down)),
+    alias("Ctrl+Tab", |_| Some(Key::Next { back: false })),
+    alias("Alt+Tab", |_| Some(Key::Next { back: false })),
+    alias("Ctrl+Shift+Tab", |_| Some(Key::Next { back: true })),
+    alias("Alt+Shift+Tab", |_| Some(Key::Next { back: true })),
+    alias("Shift+Enter", |_| Some(Key::Press)),
+    alias("Ctrl+Enter", |_| Some(Key::Press)),
+    alias("Alt+Enter", |_| Some(Key::Press)),
+    alias("Ctrl+Shift+E", |c| c.named.then_some(Key::Edit)),
+    alias("Shift+F2", |c| c.named.then_some(Key::Rename)),
+    alias("Shift+Del", |c| c.named.then_some(Key::Remove)),
+    alias("Ctrl+Del", |c| c.named.then_some(Key::Remove)),
+    alias("Alt+Del", |c| c.named.then_some(Key::Remove)),
 ];
 
 /// The edit form's keys, in the footer's order: the handler and the
@@ -713,6 +735,26 @@ const EDIT_KEYS: &[Binding<KeyCtx, Key>] = &[
         footer: true,
         f1: "",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |c| {
+        Some(if c.busy { Key::StopTrying } else { Key::Cancel })
+    }),
+    alias("Ctrl+Esc", |c| {
+        Some(if c.busy { Key::StopTrying } else { Key::Cancel })
+    }),
+    alias("Alt+Esc", |c| {
+        Some(if c.busy { Key::StopTrying } else { Key::Cancel })
+    }),
+    alias("Ctrl+Shift+Enter", |c| {
+        Some(if c.busy { Key::Press } else { Key::Save })
+    }),
+    alias("Shift+Enter", |_| Some(Key::Press)),
+    alias("Alt+Enter", |_| Some(Key::Press)),
+    alias("Ctrl+Tab", |_| Some(Key::Next { back: false })),
+    alias("Alt+Tab", |_| Some(Key::Next { back: false })),
+    alias("Ctrl+Shift+Tab", |_| Some(Key::Next { back: true })),
+    alias("Alt+Shift+Tab", |_| Some(Key::Next { back: true })),
+    alias("Alt+Shift+X", |c| (!c.busy && c.fix).then_some(Key::Fix)),
 ];
 
 /// The Placement page's keys, in the footer's order: the handler and the
@@ -766,6 +808,19 @@ const PLACE_KEYS: &[Binding<(), Key>] = &[
         footer: true,
         f1: "Close",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |_| Some(Key::Close)),
+    alias("Ctrl+Esc", |_| Some(Key::Close)),
+    alias("Alt+Esc", |_| Some(Key::Close)),
+    alias("Shift+Up", |_| Some(Key::Up)),
+    alias("Ctrl+Up", |_| Some(Key::Up)),
+    alias("Alt+Up", |_| Some(Key::Up)),
+    alias("Shift+Down", |_| Some(Key::Down)),
+    alias("Ctrl+Down", |_| Some(Key::Down)),
+    alias("Alt+Down", |_| Some(Key::Down)),
+    alias("Shift+Left", |_| Some(Key::Stage { back: true })),
+    alias("Shift+Right", |_| Some(Key::Stage { back: false })),
+    alias("Shift+Enter", |_| Some(Key::Stage { back: false })),
 ];
 
 /// The words of `key` in the footer.

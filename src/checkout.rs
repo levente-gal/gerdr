@@ -19,7 +19,7 @@ use crate::{
     Gerdr,
     chrome::{self, CheckoutRow, CheckoutView},
     git::{self, Untracked},
-    key_table::{self, Binding},
+    key_table::{self, Binding, alias},
 };
 
 /// Leave behind, after Cancel.
@@ -43,6 +43,9 @@ const KEYS: &[Binding<bool, usize>] = &[
         footer: true,
         f1: "Leave them behind",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+B", |can_bring| can_bring.then_some(BRING)),
+    alias("Shift+L", |_| Some(LEAVE)),
 ];
 
 /// The keys shown beside the buttons, Bring along pressable (`can_bring`)

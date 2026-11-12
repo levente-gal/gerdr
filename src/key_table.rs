@@ -26,6 +26,17 @@ pub struct Binding<C, A> {
     pub f1: &'static str,
 }
 
+/// An alias of a table: `chord`, doing what `does` says, neither hinted
+/// nor on F1 (see `Binding::f1`).
+pub const fn alias<C, A>(chord: &'static str, does: fn(&C) -> Option<A>) -> Binding<C, A> {
+    Binding {
+        chord,
+        does,
+        footer: false,
+        f1: "",
+    }
+}
+
 /// Whether the key `mods` and `sym` (its own symbol, as a press gives it) is
 /// `chord`.
 pub fn is(chord: &str, mods: &ModifiersState, sym: Keysym) -> bool {
