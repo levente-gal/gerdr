@@ -64,9 +64,10 @@ use super::{
     Feature, PerProject,
     layout::git,
     now, patch,
-    setup::{kill_group, minutes},
+    setup::minutes,
 };
 use crate::desktop::shell_quote;
+use crate::process::kill_group;
 
 /// The checks' key for the feature folder as a whole.
 pub const FEATURE_KEY: &str = "_feature";

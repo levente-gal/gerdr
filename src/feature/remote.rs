@@ -616,9 +616,13 @@ impl Look {
 }
 
 /// The script sending `signal` (a name, like `TERM`) to process group `group`
-/// there. One gone is fine: what is wanted of it is that it ended.
+/// there. One gone is fine: what is wanted of it is that it ended. Groups 0
+/// and 1 are never meant: the script then does nothing.
 pub fn kill_group_script(group: i32, signal: &str) -> String {
-    format!("kill -s {signal} -- -{group} 2>/dev/null\nexit 0\n")
+    match group > 1 {
+        true => format!("kill -s {signal} -- -{group} 2>/dev/null\nexit 0\n"),
+        false => "exit 0\n".to_owned(),
+    }
 }
 
 /// `kill_group_script`, for the group process `pid` is in: its shell's job.
@@ -1337,6 +1341,14 @@ impl Reach {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_kill_script_never_names_group_0_or_1() {
+        for group in [-1, 0, 1] {
+            assert!(!kill_group_script(group, "KILL").contains("kill"));
+        }
+        assert!(kill_group_script(42, "TERM").contains("-- -42"));
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn sh_c(script: &str) -> std::process::Output {

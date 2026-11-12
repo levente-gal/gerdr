@@ -475,7 +475,7 @@ pub fn look(home: &Path, now_reading: &Reading) -> Result<Found, String> {
     let mut updates = Updates::load();
     let current = now_reading.version.clone().or_else(|| updates.pin.clone());
     let newest = release(channel(current.as_deref().unwrap_or_default()))?;
-    updates.checked_at = crate::projects::now();
+    updates.checked_at = crate::clock::now_secs();
     let version = newest.version.clone();
     if current
         .as_deref()
@@ -547,7 +547,7 @@ impl crate::Gerdr {
         self.move_t3_switch();
         let tick = |_, _: &mut (), state: &mut crate::Gerdr| {
             state.t3.updates = Updates::load();
-            if state.t3.auto_update && state.t3.updates.due(crate::projects::now()) {
+            if state.t3.auto_update && state.t3.updates.due(crate::clock::now_secs()) {
                 state.check_t3(false);
             }
             TimeoutAction::ToDuration(LOOK_EVERY)

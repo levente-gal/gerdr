@@ -595,7 +595,7 @@ fn stamp() -> String {
         let now = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
         if libc::localtime_r(&now, &mut tm).is_null() {
-            return crate::projects::now().to_string();
+            return crate::clock::now_secs().to_string();
         }
         tm
     };

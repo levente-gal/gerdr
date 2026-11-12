@@ -1173,16 +1173,13 @@ pub(super) fn shell_until(
         return Exit::TimedOut(timeout);
     };
     // What it left behind in the background.
-    kill_group(group, libc::SIGKILL);
+    crate::process::kill_group(group, libc::SIGKILL);
     match (status.code(), status.signal()) {
         (Some(code), _) => Exit::Code(code),
         (None, Some(signal)) => Exit::Code(128 + signal),
         (None, None) => Exit::Code(-1),
     }
 }
-
-// `verify` reaches it by this path.
-pub(super) use crate::process::kill_group;
 
 /// The log of the feature with data dir `data`.
 pub fn log_path(data: &Path) -> PathBuf {

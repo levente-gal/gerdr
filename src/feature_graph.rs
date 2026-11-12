@@ -8,7 +8,7 @@ use std::{path::PathBuf, sync::Arc};
 use crate::{
     Gerdr,
     feature::{Status, graph, store},
-    features::{Busy, Done, Job, tilde},
+    features::{Busy, Done, Job, short_folder},
 };
 
 /// The problems list's source for a missing graphify.
@@ -27,7 +27,7 @@ fn excluded_text(excludes: &[PathBuf]) -> Option<String> {
     let out = graph::OUT_DIR;
     match excludes {
         [] => None,
-        [one] => Some(format!("Added /{out}/ to {}", tilde(one))),
+        [one] => Some(format!("Added /{out}/ to {}", short_folder(one))),
         many => Some(format!(
             "Added /{out}/ to the git exclude files of {} repositories",
             many.len()
@@ -41,7 +41,7 @@ fn linked_text(linked: &[PathBuf]) -> Option<String> {
         [] => None,
         [one] => Some(format!(
             "Linked {} to the project's copy, kept out of git",
-            tilde(one)
+            short_folder(one)
         )),
         many => Some(format!(
             "Linked {} .graphifyignore files to the project's copies, kept out of git",

@@ -3513,7 +3513,7 @@ fn check_card(
         None if running => (FindingTag::Running, None),
         None => (FindingTag::NotRun, None),
     };
-    let took = |secs: u64| crate::test_runs::took(std::time::Duration::from_secs(secs));
+    let took = |secs: u64| crate::clock::took(std::time::Duration::from_secs(secs));
     let mut said = Vec::new();
     match (tag, outcome) {
         (FindingTag::Running | FindingTag::Queued, _) if row.is_some_and(|row| row.stopping) => {
@@ -4200,7 +4200,7 @@ fn check_lines(
         .squash_at
         .filter(|_| feature.squash_going())
     {
-        let when = projects::ago(now, at);
+        let when = crate::clock::ago(now, at);
         let text = format!("Squash started {when}: done once it is merged");
         return vec![line(text, CheckTone::Note)];
     }
@@ -4454,7 +4454,7 @@ fn ship_repo_meta(repo: &ship::RepoCheck, stat: Option<feature::page::Stat>) -> 
 
 /// When a step ran and what it sent, for its row: "2h ago \u{b7} a1b2c3d".
 fn ran_when(done: &feature::ShipDone, now: u64) -> String {
-    let when = (done.at > 0).then(|| projects::ago(now, done.at));
+    let when = (done.at > 0).then(|| crate::clock::ago(now, done.at));
     let sha = (done.sha.as_deref()).map(|sha| sha.chars().take(7).collect::<String>());
     let url = done.url.as_deref().map(pr_tail);
     let parts: Vec<String> = when.into_iter().chain(sha).chain(url).collect();
@@ -4826,13 +4826,13 @@ fn shipped_after_group(
                 }
                 AfterStep::Remove => "Removed the worktree and branch",
             };
-            let mut when = projects::ago(now, done.at);
+            let mut when = crate::clock::ago(now, done.at);
             if let Some(at) = done.undone {
                 let word = match step {
                     AfterStep::Close => "reopened",
                     AfterStep::Remove => "restored",
                 };
-                when = format!("{when} \u{b7} {word} {}", projects::ago(now, at));
+                when = format!("{when} \u{b7} {word} {}", crate::clock::ago(now, at));
             }
             let button = (actions.iter()).position(|(_, o)| *o == PanelOutcome::UndoAfter(step));
             Some(chrome::ShipStepRow {
@@ -4915,10 +4915,10 @@ fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
             .repo(&done.repo)
             .map_or("its base", |r| r.base.as_str());
         let said = format!("{}: {}", done.repo, done.said(&branch, base));
-        let when = (done.at > 0).then(|| projects::ago(now, done.at));
+        let when = (done.at > 0).then(|| crate::clock::ago(now, done.at));
         let sha = done.sha.as_deref().map(short);
         let url = done.url.as_deref().map(pr_tail);
-        let undone = (done.undone).map(|at| format!("undone {}", projects::ago(now, at)));
+        let undone = (done.undone).map(|at| format!("undone {}", crate::clock::ago(now, at)));
         let parts: Vec<String> = (when.into_iter())
             .chain(std::iter::once(said))
             .chain(sha)
@@ -4931,7 +4931,7 @@ fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
     let updates = feature.shipping.updates.iter().map(|update| {
         let text = format!(
             "{} \u{b7} {}: {} {} \u{b7} {}",
-            projects::ago(now, update.at),
+            crate::clock::ago(now, update.at),
             update.repo,
             update.way.done_word(),
             update.onto,
@@ -4945,10 +4945,10 @@ fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
             feature::AfterStep::Close => "closed the workspace",
             feature::AfterStep::Remove => "removed the worktrees",
         };
-        let undone = (done.undone).map(|at| format!(" \u{b7} undone {}", projects::ago(now, at)));
+        let undone = (done.undone).map(|at| format!(" \u{b7} undone {}", crate::clock::ago(now, at)));
         let text = format!(
             "{} \u{b7} {said}{}",
-            projects::ago(now, done.at),
+            crate::clock::ago(now, done.at),
             undone.unwrap_or_default()
         );
         (done.at, text)
@@ -7036,14 +7036,10 @@ pub(crate) fn short_folder(path: &Path) -> String {
     paths::display(path, home_dir().as_deref(), 60)
 }
 
-/// `short_folder`, by its old name for `feature_graph`.
-pub(crate) fn tilde(path: &Path) -> String {
-    short_folder(path)
-}
 
 /// What a done stage's row says of its mark.
 fn mark_detail(mark: &feature::Mark, now: u64) -> String {
-    let when = projects::ago(now, mark.at);
+    let when = crate::clock::ago(now, mark.at);
     if mark.note.is_empty() {
         format!("done {when} by {}", mark.by)
     } else {
@@ -13545,7 +13541,7 @@ fn card_line(feature: &Feature, stage: Option<Stage>, state: &LineState, now: u6
     let mut what = current_line(feature, stage, state, now);
     if what.is_empty() {
         let last = feature.history.iter().map(|e| e.at).max();
-        what = projects::ago(now, last.unwrap_or(feature.created));
+        what = crate::clock::ago(now, last.unwrap_or(feature.created));
     }
     match &state.machine {
         Some((line, true)) => what.clone_from(line),
@@ -13627,7 +13623,7 @@ fn waits(feature: &Feature, stage: Stage, state: &LineState) -> bool {
 /// "working 14m": how long an agent started at `started` has worked.
 fn running_for(now: u64, started: u64) -> String {
     let word = chrome::Standing::Working.word();
-    match projects::ago(now, started).strip_suffix(" ago") {
+    match crate::clock::ago(now, started).strip_suffix(" ago") {
         Some(long) => format!("{word} {long}"),
         None => word.to_owned(),
     }
@@ -13790,11 +13786,11 @@ fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now: u64) -> R
         (StageMark::Done, _) if mark == NodeMark::Stale => "code changed".to_owned(),
         (StageMark::Done, _) => {
             let at = feature.marks.get(&stage).map_or(0, |m| m.at);
-            projects::ago(now, at)
+            crate::clock::ago(now, at)
         }
         (StageMark::Current, _) => current_line(feature, stage, &lines, now),
         (StageMark::Later, _) => {
-            (feature.ran_once.get(&stage)).map_or_else(String::new, |at| projects::ago(now, *at))
+            (feature.ran_once.get(&stage)).map_or_else(String::new, |at| crate::clock::ago(now, *at))
         }
     };
     RailNode {
@@ -13972,7 +13968,7 @@ fn submit_sections(
     let done: Vec<CheckLine> = (feature.shipping.reviews.iter().rev())
         .map(|r| {
             let short = r.commit.get(..7).unwrap_or(&r.commit);
-            let mut text = format!("{} {} at {short}", r.event.done(), projects::ago(now, r.at));
+            let mut text = format!("{} {} at {short}", r.event.done(), crate::clock::ago(now, r.at));
             if r.inline + r.in_body > 0 {
                 text.push_str(&format!(
                     " \u{b7} {}",
@@ -14267,14 +14263,14 @@ fn pull_card(
     let state = if let Some(end) = pull.ended() {
         let how = if end.merged() { "merged" } else { "closed" };
         line(
-            format!("{how} on GitHub {}", projects::ago(now, end.at)),
+            format!("{how} on GitHub {}", crate::clock::ago(now, end.at)),
             CheckTone::Note,
         )
     } else if let Some(moved) = pull.moved() {
         let text = match moved.base_ref == pull.base_ref {
             true => format!(
                 "new commits on GitHub {}: at {}, reviewed at {}",
-                projects::ago(now, moved.at),
+                crate::clock::ago(now, moved.at),
                 moved.head_sha.get(..7).unwrap_or(&moved.head_sha),
                 pull.short_head()
             ),
@@ -14441,7 +14437,7 @@ fn agent_card(
             .map_or(line.as_str(), str::trim_start)
             .to_owned(),
         _ => {
-            let started = format!("started {}", projects::ago(now, run.started));
+            let started = format!("started {}", crate::clock::ago(now, run.started));
             match &run.model {
                 Some(model) => format!("{model} \u{b7} {started}"),
                 None => started,
@@ -14585,7 +14581,7 @@ fn fix_round_card(
 ) -> PageSection {
     let mut state = fix_round_state(feature, round);
     if let Some(at) = round.ready.filter(|_| round.phase == FixPhase::Ready) {
-        let written = format!(" \u{b7} written {}", projects::ago(now, at));
+        let written = format!(" \u{b7} written {}", crate::clock::ago(now, at));
         state.text.push_str(&written);
     }
     PageSection::File {
@@ -14633,7 +14629,7 @@ fn last_round_card(
     now: u64,
 ) -> PageSection {
     let mut said = vec![round.what.clone(), round.made()];
-    let ago = |at| projects::ago(now, at);
+    let ago = |at| crate::clock::ago(now, at);
     said.extend(round.ready.map(|at| format!("written {}", ago(at))));
     said.extend(round.ended.map(|at| format!("finished {}", ago(at))));
     PageSection::File {
@@ -15219,8 +15215,8 @@ fn fix_round_open(newest: Option<u32>, n: u32, flipped: &BTreeSet<u32>) -> bool 
 /// ago", "making fixes · 1 of 3 made".
 pub(crate) fn round_state_words(round: &FixRound, now: u64) -> String {
     match (round.trail.dropped, round.ended) {
-        (Some(at), _) => format!("dropped {}", projects::ago(now, at)),
-        (None, Some(at)) => format!("{} {}", round.made(), projects::ago(now, at)),
+        (Some(at), _) => format!("dropped {}", crate::clock::ago(now, at)),
+        (None, Some(at)) => format!("{} {}", round.made(), crate::clock::ago(now, at)),
         (None, None) => round.stalled.clone().unwrap_or_else(|| round.line()),
     }
 }
@@ -15415,25 +15411,25 @@ fn fix_card(
         meta.push(format!(
             "run {} failed {}",
             fix.run,
-            projects::ago(now, fix.at)
+            crate::clock::ago(now, fix.at)
         ));
     }
     // A round kept only by its number has no times.
     match (asked_by, round.asked > 0) {
-        (Some(by), true) => meta.insert(0, format!("{by} {}", projects::ago(now, round.asked))),
+        (Some(by), true) => meta.insert(0, format!("{by} {}", crate::clock::ago(now, round.asked))),
         (Some(by), false) => meta.insert(0, by),
-        (None, true) => meta.push(format!("asked {}", projects::ago(now, round.asked))),
+        (None, true) => meta.push(format!("asked {}", crate::clock::ago(now, round.asked))),
         (None, false) => {}
     }
     if let Some(at) = round.ready.filter(|_| round.trail.went.is_none()) {
-        meta.push(format!("plan written {}", projects::ago(now, at)));
+        meta.push(format!("plan written {}", crate::clock::ago(now, at)));
     }
     if let Some(went) = round.trail.went {
-        meta.push(format!("fixes went {}", projects::ago(now, went)));
+        meta.push(format!("fixes went {}", crate::clock::ago(now, went)));
     }
     if let Some(over) = round.over_at() {
         if round.trail.dropped.is_none() {
-            meta.push(format!("finished {}", projects::ago(now, over)));
+            meta.push(format!("finished {}", crate::clock::ago(now, over)));
         }
         if let Some(went) = round.trail.went {
             meta.push(format!("took {}", took(went, over)));
@@ -16185,12 +16181,12 @@ fn draft_cards(
                 false => format!("{} ({})", draft.agent, draft.model),
             });
         }
-        meta.push(format!("written {}", projects::ago(now, draft.written)));
+        meta.push(format!("written {}", crate::clock::ago(now, draft.written)));
         if let Some(at) = draft.sent_back {
-            meta.push(format!("sent back {}", projects::ago(now, at)));
+            meta.push(format!("sent back {}", crate::clock::ago(now, at)));
         }
         if let Some(at) = draft.approved {
-            meta.push(format!("approved {}", projects::ago(now, at)));
+            meta.push(format!("approved {}", crate::clock::ago(now, at)));
         }
         let held = |o: &PanelOutcome| match o {
             PanelOutcome::DraftChanges(s, k) => *s == stage && *k == draft.k,
@@ -16301,12 +16297,12 @@ fn stage_page(
         StageMark::Done if stage == Stage::Ship && pr_wait(feature, state.probe).is_some() => {
             feature.marks.get(&stage).map(|m| {
                 let wait = pr_wait(feature, state.probe).unwrap_or_default();
-                let when = projects::ago(now, m.at);
+                let when = crate::clock::ago(now, m.at);
                 line(format!("Shipped {when} by {}: {wait}", m.by), CheckTone::Note)
             })
         }
         StageMark::Done => feature.marks.get(&stage).map(|m| {
-            let mut text = format!("Done {} by {}", projects::ago(now, m.at), m.by);
+            let mut text = format!("Done {} by {}", crate::clock::ago(now, m.at), m.by);
             if let Some(by) = state.ctx.locked_by(feature, stage) {
                 text.push_str(&format!(" \u{b7} locked: {}", lock_why(feature, by)));
             }
@@ -17052,7 +17048,7 @@ fn activity(feature: &Feature, now: u64) -> Vec<ActivityRow> {
         .map(|e| ActivityRow {
             // Capitalised as every line is, older records' "created" too.
             what: capitalised(&e.what),
-            ago: projects::ago(now, e.at),
+            ago: crate::clock::ago(now, e.at),
             tone: event_tone(&e.what),
         })
         .collect()
@@ -18111,7 +18107,7 @@ fn repo_row(
         RepoEntry::Removed(i) => {
             if let Some(gone) = feature.removed.get(i) {
                 row.name = state.names.label_of(gone.project.as_deref(), &gone.name);
-                row.line = format!("removed {}", projects::ago(now, gone.at));
+                row.line = format!("removed {}", crate::clock::ago(now, gone.at));
             }
         }
         RepoEntry::Offered { source, repo } => {
@@ -18363,7 +18359,7 @@ fn tab_view(
         "{} \u{b7} {} \u{b7} started {}",
         feature.slug,
         short_folder(&feature.dir),
-        projects::ago(now, feature.created)
+        crate::clock::ago(now, feature.created)
     );
     if feature.status == Status::Done {
         sub = format!("done \u{b7} {sub}");
@@ -28043,7 +28039,7 @@ pub(crate) mod tests {
         }];
         assert_eq!(
             card_line(&f, Some(Stage::Build), &state, now),
-            format!("Build \u{b7} {}", projects::ago(now, now - 3 * 86_400)),
+            format!("Build \u{b7} {}", crate::clock::ago(now, now - 3 * 86_400)),
         );
         let setting_up = LineState {
             setup: Some("npm ci"),

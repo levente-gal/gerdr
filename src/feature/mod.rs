@@ -1703,7 +1703,7 @@ impl PerProject<String> {
     }
 }
 
-// shortcut: forwarder kept for callers outside dup-clock, inline at merge
+/// The Unix second now, as the feature code reads it (`clock::now_secs`).
 pub use crate::clock::now_secs as now;
 
 #[cfg(test)]

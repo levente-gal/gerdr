@@ -366,8 +366,6 @@ fn check_outcome(o: &crate::feature::verify::Outcome) -> Outcome {
     }
 }
 
-// shortcut: forwarder kept for callers outside dup-clock, inline at merge
-pub(crate) use crate::clock::took;
 
 impl TestRun {
     /// Working while it runs; done once finished, until seen, then idle.

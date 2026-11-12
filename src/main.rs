@@ -3412,7 +3412,7 @@ impl Gerdr {
     /// show in the "Needs you" list, unless the config hides it or the inbox has them
     /// dismissed or snoozed.
     pub fn agent_views(&self) -> Vec<Vec<AgentView>> {
-        let now = inbox_store::now_secs();
+        let now = crate::clock::now_secs();
         self.workspaces
             .iter()
             .enumerate()
@@ -6052,7 +6052,7 @@ impl Gerdr {
         self.load_inbox();
         self.projects.last_active = Some(id.to_owned());
         if let Some(project) = self.projects.project_mut(id) {
-            project.last_used = projects::now();
+            project.last_used = crate::clock::now_secs();
             project.state = RunState::Kept;
         }
         self.projects.save();
@@ -6345,7 +6345,7 @@ impl Gerdr {
             }
             taken.push(id);
         };
-        let now = projects::now();
+        let now = crate::clock::now_secs();
         self.projects.projects.push(projects::Project {
             id: id.clone(),
             name: name.to_owned(),
@@ -6563,7 +6563,7 @@ impl Gerdr {
     /// The projects for the welcome screen, most recently used first, by id;
     /// `running` is left `None`.
     pub fn project_rows(&self) -> Vec<(String, chrome::ProjectRow)> {
-        let now = projects::now();
+        let now = crate::clock::now_secs();
         let home = home_dir();
         let mut projects: Vec<_> = self.projects.projects.iter().collect();
         projects.sort_by_key(|p| std::cmp::Reverse(p.last_used));
@@ -6574,7 +6574,7 @@ impl Gerdr {
                 let row = chrome::ProjectRow {
                     name: p.name.clone(),
                     detail: project_detail(&dirs, home.as_deref()),
-                    ago: projects::ago(now, p.last_used),
+                    ago: crate::clock::ago(now, p.last_used),
                     running: None,
                     current: self.project.as_deref() == Some(p.id.as_str()),
                 };

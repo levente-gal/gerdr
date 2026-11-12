@@ -1831,9 +1831,6 @@ pub fn environ_whitelist(raw: &[u8]) -> Vec<(String, String)> {
     vars
 }
 
-// shortcut: forwarder kept for callers outside dup-clock, inline at merge
-pub use crate::clock::ago;
-
 /// The notice on switching to project `new` (just made, if `created`)
 /// from project `old`, which keeps running.
 pub fn switch_notice(new: &str, old: &str, created: bool) -> String {
@@ -1882,9 +1879,6 @@ pub fn local_hour() -> u32 {
         12
     }
 }
-
-// shortcut: forwarder kept for callers outside dup-clock, inline at merge
-pub use crate::clock::now_secs as now;
 
 /// The project made of the session gerdr used before it had projects
 /// (`gerdr`): its workspaces from the running server's metadata (`live`),

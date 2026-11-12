@@ -83,8 +83,6 @@ fn forget() {
     }
 }
 
-// shortcut: kept for `tasks.rs`, which reads it here; drop once it calls `clock`.
-pub use crate::clock::now_secs;
 
 /// The last line of the log at `path` that says something.
 pub fn last_log_line(path: &std::path::Path) -> Option<String> {
@@ -189,7 +187,7 @@ impl Gerdr {
                 write(&Started {
                     process: process::Process::new(pid),
                     log: log_path,
-                    at: now_secs(),
+                    at: crate::clock::now_secs(),
                 });
                 self.t3.started_at = Some(Instant::now());
                 self.look_at_kept();

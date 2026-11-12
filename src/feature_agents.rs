@@ -46,7 +46,6 @@ use crate::{
     },
     herdr::AgentStatus,
     machine_work::{Placed, StartKind},
-    projects,
     projects::Workflow,
     prompts::{self, render::Vars},
 };
@@ -1116,7 +1115,7 @@ pub(crate) fn agent_line(
     if run.held {
         return format!("{} closed \u{b7} its prompt wasn't sent", run.agent);
     }
-    let started = format!("started {}", projects::ago(now, run.started));
+    let started = format!("started {}", crate::clock::ago(now, run.started));
     if !run.live() {
         return match run.resumes() {
             true => format!("{} closed \u{b7} can be resumed", run.agent),

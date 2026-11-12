@@ -204,9 +204,6 @@ pub fn prune(inbox: &mut InboxFile, now: u64) {
     inbox.todos.retain(|todo| todo.done.is_none_or(fresh));
 }
 
-// shortcut: forwarder kept for callers outside dup-clock, inline at merge
-pub use crate::clock::now_secs;
-
 #[cfg(test)]
 mod tests {
     use super::*;
