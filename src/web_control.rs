@@ -456,6 +456,18 @@ fn extension_hash() -> u64 {
     content_hash(all.join("\0").as_bytes())
 }
 
+/// What makes the extension in `profile` a version of its own, with a
+/// worker of its own name. A profile copied from another (see
+/// `seed_browser_profile`) says the worker is registered, without the
+/// worker's script, which isn't copied: the browser then fails to start it
+/// (`DidStartWorkerFail … 5`) until its next start, and a boot page it
+/// refused meanwhile stays an error page. A new version is registered
+/// afresh.
+fn profile_hash(profile: &Path) -> u64 {
+    use std::os::unix::ffi::OsStrExt;
+    content_hash(profile.as_os_str().as_bytes())
+}
+
 /// The extension's version for its worker's `hash`: four numbers of up to
 /// 16 bits.
 fn version(hash: u64) -> String {
@@ -477,9 +489,9 @@ fn write_if_changed(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 pub fn install(profile: &Path, socket: &Path) -> std::io::Result<PathBuf> {
     let dir = profile.join(EXTENSION_DIR);
     std::fs::create_dir_all(&dir)?;
-    let hash = content_hash(WORKER.as_bytes());
+    let hash = content_hash(WORKER.as_bytes()) ^ profile_hash(profile);
     let worker = format!("worker-{hash:016x}.js");
-    let version_hash = extension_hash();
+    let version_hash = extension_hash() ^ profile_hash(profile);
     for entry in std::fs::read_dir(&dir)?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with("worker-") && name != worker {
@@ -1196,11 +1208,15 @@ mod tests {
         let dir = install(&profile, Path::new("/run/gerdr.sock")).unwrap();
         std::fs::write(dir.join("worker-old.js"), "").unwrap();
         install(&profile, Path::new("/run/gerdr.sock")).unwrap();
-        let worker = format!("worker-{:016x}.js", content_hash(WORKER.as_bytes()));
+        let place = profile_hash(&profile);
+        let worker = format!("worker-{:016x}.js", content_hash(WORKER.as_bytes()) ^ place);
         let manifest = std::fs::read_to_string(dir.join("manifest.json")).unwrap();
         assert!(manifest.contains(&format!("\"service_worker\": \"{worker}\"")));
-        let hash = extension_hash();
+        let hash = extension_hash() ^ place;
         assert!(manifest.contains(&format!("\"version\": \"{}\"", version(hash))));
+        // A copy of the profile elsewhere is another version, with
+        // another worker: the copy's stale registration isn't used.
+        assert_ne!(place, profile_hash(&profile.join("copy")));
         assert!(dir.join(&worker).exists());
         assert!(dir.join("preview.html").exists());
         assert!(dir.join("markdown-dark.css").exists());
