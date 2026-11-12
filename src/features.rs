@@ -6556,7 +6556,7 @@ impl Gerdr {
         // Chats at work before gerdr started, or before the projects were
         // read again, are kept again while they last.
         if self.ai_work.is_on() {
-            let chats = self.ai_work_chats();
+            let chats = self.features.ai_work_chats();
             self.ai_work.send(ai_work::thread::Job::Watch { chats });
         }
         self.seen_folders_changed();
@@ -6577,21 +6577,12 @@ impl Gerdr {
         self.sync_feature_panel();
     }
 
-    /// Feature `slug` of project `project`, whichever machine writes it.
     pub fn feature(&self, project: &str, slug: &str) -> Option<&Feature> {
-        let own = self.features.all.get(project).into_iter().flatten();
-        let viewed = self.features.viewed.get(project).into_iter().flatten();
-        own.chain(viewed).find(|f| f.slug == slug)
+        self.features.feature(project, slug)
     }
 
-    /// Feature `slug` of project `project`, to change: only this machine's own
-    /// can be.
     pub(crate) fn feature_mut(&mut self, project: &str, slug: &str) -> Option<&mut Feature> {
-        self.features
-            .all
-            .get_mut(project)?
-            .iter_mut()
-            .find(|f| f.slug == slug)
+        self.features.feature_mut(project, slug)
     }
 
     /// Save feature `slug` of `project` as it is now; a failure says so.
@@ -6609,54 +6600,6 @@ impl Gerdr {
         }
         self.plan_doc_follows();
         self.feature_diff_stands(project, slug);
-    }
-
-    /// What the read of feature `slug` found of repositories built on another
-    /// branch than their base, `sits` by `Repo::key`, where `was` is what the
-    /// read before found: kept as a problem, and a repository newly found so
-    /// gets a warning with a button to make that branch its base.
-    fn feature_bases_read(
-        &mut self,
-        project: &str,
-        slug: &str,
-        was: &BTreeMap<String, (String, String)>,
-        sits: &BTreeMap<String, (String, String)>,
-    ) {
-        let at = format!("{project}/{slug}");
-        let Some(feature) = self.feature(project, slug) else {
-            return;
-        };
-        let title = feature.title.clone();
-        let mut lines = Vec::new();
-        let mut fresh = Vec::new();
-        for (key, (branch, oid)) in sits {
-            let Some(repo) = feature.repo(key) else {
-                continue;
-            };
-            let text = format!(
-                "{key} of \u{201c}{title}\u{201d} is built on {branch}, not on its base {}",
-                repo.base
-            );
-            // The branch moving on isn't news.
-            if was.get(key).is_none_or(|(b, _)| b != branch) {
-                fresh.push((key.clone(), branch.clone(), oid.clone(), text.clone()));
-            }
-            lines.push(text);
-        }
-        if lines.is_empty() {
-            return crate::problems::clear_at(BASE_PROBLEM, &at);
-        }
-        crate::problems::report_at(BASE_PROBLEM, &at, lines.join("; "));
-        for (repo, branch, oid, text) in fresh {
-            let then = MenuAction::SetFeatureBase {
-                project: project.to_owned(),
-                slug: slug.to_owned(),
-                repo,
-                to: (branch, oid),
-                undoing: false,
-            };
-            self.toast_with(text, Level::Warning, Some(("Use as base".into(), then)));
-        }
     }
 
     /// Make branch `to.0`, at commit `to.1`, the base of repository `key` of
@@ -6832,7 +6775,7 @@ impl Gerdr {
                         .and_then(|record| append(Event::Snapshot { record }, None)),
                 ),
                 Follow::Watch => self.ai_work.send(Job::Watch {
-                    chats: self.ai_work_chats(),
+                    chats: self.features.ai_work_chats(),
                 }),
             }
         }
@@ -6857,22 +6800,6 @@ impl Gerdr {
                 slug: s,
             });
         }
-    }
-
-    /// The chats at work now, on every feature this machine writes: the
-    /// AI work keeps them again while they last.
-    fn ai_work_chats(&self) -> Vec<(String, String, ai_work::Chat)> {
-        let mut chats = Vec::new();
-        for (project, features) in &self.features.all {
-            for feature in features.iter().filter(|f| f.status == Status::Open) {
-                let live = ai_work::observe::runs_of(feature).filter(|(_, run)| run.live());
-                for (stage, run) in live {
-                    let chat = ai_work::observe::chat(feature, stage, run, run.session());
-                    chats.push((project.clone(), feature.slug.clone(), chat));
-                }
-            }
-        }
-        chats
     }
 
     /// The slugs of the features the panel lists for `project`.
@@ -7285,7 +7212,7 @@ impl Gerdr {
                 slug,
                 probe,
             } => self.feature_probed(&project, &slug, *probe),
-            Done::Tail { pane, lines } => self.feature_tail_read(&pane, lines),
+            Done::Tail { pane, lines } => self.features.feature_tail_read(&pane, lines),
             Done::CheckTail { pane, lines } => {
                 if let Some(tail) = self.features.check_tails.get_mut(&pane) {
                     tail.read(&pane, lines);
@@ -7493,44 +7420,24 @@ impl Gerdr {
         }
     }
 
-    /// `job` on feature `slug` of `project` is over.
     pub(crate) fn unbusy(&mut self, project: &str, slug: &str, job: Job) {
-        self.features
-            .busy
-            .retain(|b| !(b.project == project && b.slug == slug && b.job == job));
-        self.features.forget_ended();
+        self.features.unbusy(project, slug, job)
     }
 
-    /// Whether feature `slug` of `project` has work running off the thread
-    /// that other work on it must wait for.
     pub(crate) fn feature_busy(&self, project: &str, slug: &str) -> bool {
-        self.features
-            .busy
-            .iter()
-            .any(|b| b.project == project && b.slug == slug && b.job != Job::Graph)
+        self.features.feature_busy(project, slug)
     }
 
-    /// Feature `slug`'s work of kind `job` running off the thread.
     pub(crate) fn busy_with(&self, project: &str, slug: &str, job: Job) -> Option<&Busy> {
-        self.features
-            .busy
-            .iter()
-            .find(|b| b.project == project && b.slug == slug && b.job == job)
+        self.features.busy_with(project, slug, job)
     }
 
-    /// What the latest probe of feature `slug` of `project` read of its
-    /// code, if it could.
     pub(crate) fn feature_reading(&self, project: &str, slug: &str) -> Option<&Reading> {
-        let key = (project.to_owned(), slug.to_owned());
-        let probe = self.features.probes.get(&key)?.last.as_ref()?;
-        probe.reading.as_ref().ok()
+        self.features.feature_reading(project, slug)
     }
 
-    /// What the latest probe of feature `slug` of `project` found of its
-    /// files, if one is back.
     pub(crate) fn feature_docs(&self, project: &str, slug: &str) -> Option<&feature::page::Docs> {
-        let key = (project.to_owned(), slug.to_owned());
-        Some(&self.features.probes.get(&key)?.last.as_ref()?.docs)
+        self.features.feature_docs(project, slug)
     }
 
     /// The checks `feature`'s Verify page lists (see `verify::plan_cards`).
@@ -7637,7 +7544,7 @@ impl Gerdr {
     /// The pane of the shown feature's current stage agent, while it is
     /// there.
     fn tail_pane(&self) -> Option<String> {
-        let feature = self.panel_feature()?;
+        let feature = self.features.panel_feature()?;
         let stage = feature.current().filter(|s| needs(*s).is_some())?;
         let pane = feature.runs.get(&stage)?.pane.clone()?;
         self.pane_there(&pane).then_some(pane)
@@ -7684,16 +7591,19 @@ impl Gerdr {
     /// shown, each unless a read of it runs. A check that ended takes its
     /// tail along: its card has what it printed by then.
     fn check_tails_tick(&mut self) {
-        let panes: Vec<(String, bool)> = (self.panel_feature().zip(self.features.panel.as_ref()))
-            .filter(|(feature, panel)| panel.page_stage(feature) == Stage::Verify && !panel.keys)
-            .map(|(feature, _)| {
-                (check_rows(feature, Stage::Verify).iter())
-                    .filter(|row| row.outcome.is_none() && checks_running(feature))
-                    .filter_map(|row| Some((row.pane.clone()?, row.began.is_some())))
-                    .filter(|(pane, _)| self.pane_there(pane))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let panes: Vec<(String, bool)> = (self
+            .features
+            .panel_feature()
+            .zip(self.features.panel.as_ref()))
+        .filter(|(feature, panel)| panel.page_stage(feature) == Stage::Verify && !panel.keys)
+        .map(|(feature, _)| {
+            (check_rows(feature, Stage::Verify).iter())
+                .filter(|row| row.outcome.is_none() && checks_running(feature))
+                .filter_map(|row| Some((row.pane.clone()?, row.began.is_some())))
+                .filter(|(pane, _)| self.pane_there(pane))
+                .collect()
+        })
+        .unwrap_or_default();
         (self.features.check_tails).retain(|pane, _| panes.iter().any(|(p, _)| p == pane));
         for (pane, began) in panes {
             let Some((socket, there)) = self.pane_socket(&pane) else {
@@ -7710,16 +7620,6 @@ impl Gerdr {
                 pane,
             });
         }
-    }
-
-    /// A read of pane `pane`'s tail is back. One for a pane no longer the
-    /// tail's (the agent or the tab changed meanwhile) is dropped: the
-    /// tail of the new one is read on its own.
-    fn feature_tail_read(&mut self, pane: &str, lines: Result<Vec<String>, String>) {
-        let Some(tail) = self.features.tail.as_mut().filter(|t| t.pane == pane) else {
-            return;
-        };
-        tail.read(pane, lines);
     }
 
     /// Probe what is due.
@@ -7917,7 +7817,8 @@ impl Gerdr {
         probed.last = Some(probe);
         self.reselect_review_card(selected);
         if let Some(sits) = &sits {
-            self.feature_bases_read(project, slug, &was, sits);
+            self.features
+                .feature_bases_read(&mut ui!(self), project, slug, &was, sits);
         }
         // The conflicts resolved, the code is the update's: its marks hold.
         if let Some(found) = &resolution {
@@ -8323,20 +8224,8 @@ impl Gerdr {
         self.feature_diff_changed(project, slug);
     }
 
-    /// The tasks running on features, for the tasks panel.
     pub fn feature_tasks(&self) -> Vec<Task> {
-        self.features
-            .busy
-            .iter()
-            .map(|b| {
-                let project = self
-                    .projects
-                    .project(&b.project)
-                    .map_or(b.project.as_str(), |p| p.name.as_str());
-                let title = self.feature(&b.project, &b.slug).map(|f| f.title.as_str());
-                task_of(b, title, project)
-            })
-            .collect()
+        self.features.feature_tasks(&self.projects)
     }
 
     // ----------------------------------------------------------- dialog
@@ -8502,51 +8391,14 @@ impl Gerdr {
             .collect()
     }
 
-    /// The repository `key` as the feature panel's sources found it: its
-    /// source, the root holding it, and where it is.
-    fn offered_repo(&self, key: &str) -> Option<(RepoSource, Found)> {
-        let panel = self.features.panel.as_ref()?;
-        panel.sources.iter().find_map(|source| {
-            let Finding::Found(root) = &source.finding else {
-                return None;
-            };
-            let found = (root.repos.iter())
-                .find(|r| feature::repo_key(source.project.as_deref(), &r.name) == key)?;
-            Some((source.clone(), found.clone()))
-        })
-    }
-
-    /// Why feature `slug` can't change its repositories now, said; `false`
-    /// when it can.
-    fn repos_locked(&mut self, project: &str, slug: &str) -> bool {
-        let Some(feature) = self.feature(project, slug) else {
-            self.show_warning("That feature is gone".into());
-            return true;
-        };
-        let title = feature.title.clone();
-        if !linkable(feature) {
-            self.show_warning(format!(
-                "\u{201c}{title}\u{201d} has shipped; its repositories can't change now"
-            ));
-            return true;
-        }
-        if self.feature_busy(project, slug) {
-            self.show_warning(format!(
-                "\u{201c}{title}\u{201d} is busy; try again once it is done"
-            ));
-            return true;
-        }
-        false
-    }
-
     /// Make feature `slug` hold repository `key` on its branch: a new
     /// worktree from its base. Taken
     /// out before, it gets a new branch.
     fn add_repo_to_feature(&mut self, project: &str, slug: &str, key: &str) {
-        if self.repos_locked(project, slug) {
+        if self.features.repos_locked(&mut ui!(self), project, slug) {
             return;
         }
-        let Some((source, found)) = self.offered_repo(key) else {
+        let Some((source, found)) = self.features.offered_repo(key) else {
             return self.show_warning(format!(
                 "{key} wasn't found among the projects' repositories"
             ));
@@ -8567,10 +8419,10 @@ impl Gerdr {
     /// no git, no worktree. An agent running keeps what it started with,
     /// which the toast says.
     fn add_context_repo(&mut self, project: &str, slug: &str, key: &str) {
-        if self.repos_locked(project, slug) {
+        if self.features.repos_locked(&mut ui!(self), project, slug) {
             return;
         }
-        let Some((source, found)) = self.offered_repo(key) else {
+        let Some((source, found)) = self.features.offered_repo(key) else {
             return self.show_warning(format!(
                 "{key} wasn't found among the projects' repositories"
             ));
@@ -8586,14 +8438,14 @@ impl Gerdr {
         feature.log(feature::now(), format!("added {key} as context"));
         feature.add_context(repo);
         self.save_feature(project, slug);
-        self.select_repo(project, slug, key);
+        self.features.select_repo(project, slug, key);
         self.show_success(context_text(&self.repo_name(project, slug, key)));
     }
 
     /// Stop offering repository `key` to agents of feature `slug`: nothing
     /// is lost, and the toast can undo it (checklist C4).
     fn drop_context_repo(&mut self, project: &str, slug: &str, key: &str) {
-        if self.repos_locked(project, slug) {
+        if self.features.repos_locked(&mut ui!(self), project, slug) {
             return;
         }
         let named = self.repo_name(project, slug, key);
@@ -8609,7 +8461,7 @@ impl Gerdr {
         feature.log(now, format!("removed {key} from context"));
         let title = feature.title.clone();
         self.save_feature(project, slug);
-        self.select_repo(project, slug, key);
+        self.features.select_repo(project, slug, key);
         let undo = MenuAction::RestoreContextRepo {
             project: project.to_owned(),
             slug: slug.to_owned(),
@@ -8640,20 +8492,7 @@ impl Gerdr {
         feature.log(feature::now(), format!("added {key} as context"));
         feature.add_context(repo);
         self.save_feature(project, slug);
-        self.select_repo(project, slug, &key);
-    }
-
-    /// The row of repository `key` takes the keyboard on the panel of
-    /// feature `slug`, wherever it went: it moved group.
-    fn select_repo(&mut self, project: &str, slug: &str, key: &str) {
-        let Some(feature) = self.feature(project, slug).cloned() else {
-            return;
-        };
-        let open =
-            (self.features.panel.as_mut()).filter(|p| p.project == project && p.slug == slug);
-        if let Some(panel) = open {
-            panel.select_repo(&feature, key);
-        }
+        self.features.select_repo(project, slug, &key);
     }
 
     /// List the store's other projects in the dialog's picker, once, and
@@ -9037,7 +8876,7 @@ impl Gerdr {
         let title = feature.title.clone();
         self.save_feature(project, slug);
         if let Some(key) = keys.first() {
-            self.select_repo(project, slug, key);
+            self.features.select_repo(project, slug, key);
         }
         self.show_success(linked_text(&title, names, &root, &ignores));
         self.probe_feature(project, slug);
@@ -9144,12 +8983,7 @@ impl Gerdr {
     }
 
     pub fn new_feature_view(&self) -> Option<NewFeatureView> {
-        let dialog = self.features.dialog.as_ref()?;
-        let project = self
-            .projects
-            .project(&dialog.project)
-            .map_or_else(|| dialog.project.clone(), |p| p.name.clone());
-        Some(new_feature_view(dialog, project))
+        self.features.new_feature_view(&self.projects)
     }
 
     // ------------------------------------------------------------ panel
@@ -9321,7 +9155,7 @@ impl Gerdr {
                 .feature(project, slug)
                 .is_some_and(|f| f.status == Status::Open && f.current() == Some(stage))
             && !self.criteria(project, slug).is_empty();
-        let Some(feature) = self.panel_feature().cloned() else {
+        let Some(feature) = self.features.panel_feature().cloned() else {
             return;
         };
         let on_it = |p: &&mut FeaturePanel| p.project == project && p.slug == slug;
@@ -9339,25 +9173,8 @@ impl Gerdr {
         }
     }
 
-    /// Hold the feature tab's Page scroll for the page it shows now (see
-    /// `FeaturePanel::sync_page`).
     pub(crate) fn sync_feature_page(&mut self) {
-        let Some(panel) = self.features.panel.as_ref() else {
-            return;
-        };
-        let Some(key) = (self.feature(&panel.project, &panel.slug)).map(|f| panel.page_key(f))
-        else {
-            return;
-        };
-        if let Some(panel) = self.features.panel.as_mut() {
-            panel.hold_page(key);
-        }
-    }
-
-    /// The feature the panel is on.
-    fn panel_feature(&self) -> Option<&Feature> {
-        let panel = self.features.panel.as_ref()?;
-        self.feature(&panel.project, &panel.slug)
+        self.features.sync_feature_page()
     }
 
     /// A key while the feature panel has the keyboard.
@@ -9377,14 +9194,14 @@ impl Gerdr {
             return None;
         }
         let pre = keys::PreCtx {
-            feature: self.panel_feature().is_some(),
+            feature: self.features.panel_feature().is_some(),
             inline: self.inline_wd().is_some(),
             keys: (self.features.panel.as_ref()).is_some_and(|p| p.keys),
         };
         match keys::pre_key(&pre, mods, sym) {
             // Its first row picked: the arrows, Enter and Esc go on in it.
             Some(keys::PreKey::Menu) => {
-                let feature = self.panel_feature().cloned()?;
+                let feature = self.features.panel_feature().cloned()?;
                 let ctx = self.row_ctx(&feature);
                 self.open_feature_menu(&feature, ctx);
                 if let Some(menu) = self.overlays.context_menu.as_mut() {
@@ -9709,7 +9526,7 @@ impl Gerdr {
             PanelOutcome::ManualTest => self.focus_criteria(&project, &slug),
             PanelOutcome::Manual(outcome) => self.apply_manual_test(outcome),
             PanelOutcome::FoldCriterion(i, open) => self.fold_criterion(i, open),
-            PanelOutcome::FoldCard(i, open) => self.fold_card(i, open),
+            PanelOutcome::FoldCard(i, open) => self.features.fold_card(i, open),
             PanelOutcome::FoldCriteria(scope, open) => self.fold_criteria(scope, open),
             PanelOutcome::NoteSave => {
                 self.keep_criterion_note();
@@ -9855,13 +9672,8 @@ impl Gerdr {
         ));
     }
 
-    /// Show the current stage's page of feature `slug`, when the panel
-    /// shows it: it moved on.
     pub(crate) fn feature_cursor_to_current_of(&mut self, project: &str, slug: &str) {
-        let on_it = |p: &&mut FeaturePanel| p.project == project && p.slug == slug;
-        if let Some(panel) = self.features.panel.as_mut().filter(on_it) {
-            panel.unpick();
-        }
+        self.features.feature_cursor_to_current_of(project, slug)
     }
 
     /// What repository `key` of `feature` is called on screen.
@@ -10201,7 +10013,7 @@ impl Gerdr {
             self.rebuild_feature_graphs(project, slug);
         }
         if let Some(key) = gone.first() {
-            self.select_repo(project, slug, key);
+            self.features.select_repo(project, slug, key);
         }
         if !failed.is_empty() {
             self.show_error(format!("Couldn't remove {}", failed.join("; ")));
@@ -10396,10 +10208,8 @@ impl Gerdr {
         self.save_feature(project, slug);
     }
 
-    /// The latest read of feature `slug` of `project`, if one came back.
     pub(crate) fn last_probe(&self, project: &str, slug: &str) -> Option<&Probe> {
-        let key = (project.to_owned(), slug.to_owned());
-        self.features.probes.get(&key)?.last.as_ref()
+        self.features.last_probe(project, slug)
     }
 
     /// Ship was asked for on feature `slug`: say what stops it, or ask
@@ -10654,7 +10464,7 @@ impl Gerdr {
     /// Finish feature `slug` with nothing shipped, once asked: Ship is done,
     /// its branch and worktrees stay.
     pub fn finish_unshipped(&mut self, project: &str, slug: &str) {
-        if !self.ship_plan_open(project, slug) {
+        if !self.features.ship_plan_open(&mut ui!(self), project, slug) {
             return;
         }
         self.settle_ship_plan(project, slug);
@@ -10683,48 +10493,12 @@ impl Gerdr {
         self.probe_feature(project, slug);
     }
 
-    /// Whether the Ship page's ticks of feature `slug` can change now; else
-    /// says why not.
-    fn ship_plan_open(&mut self, project: &str, slug: &str) -> bool {
-        if !self.feature_busy(project, slug) {
-            return true;
-        }
-        let title = (self.feature(project, slug)).map_or(String::new(), |f| f.title.clone());
-        self.show_warning(format!(
-            "\u{201c}{title}\u{201d} is busy; try again once it is done"
-        ));
-        false
-    }
-
-    /// The plan of repository `repo` of feature `slug`, kept from now on, with
-    /// the route it has now if it had no plan yet.
-    fn ship_repo_plan(
-        &mut self,
-        project: &str,
-        slug: &str,
-        repo: &str,
-    ) -> Option<&mut feature::RepoPlan> {
-        let key = (project.to_owned(), slug.to_owned());
-        let default = (self.features.probes.get(&key))
-            .and_then(|p| p.last.as_ref())
-            .and_then(|p| p.ship.as_ref())
-            .and_then(|c| c.repos.iter().find(|r| r.key == repo))?
-            .route;
-        let feature = self.feature_mut(project, slug)?;
-        let plans = &mut feature.ship_plan.repos;
-        Some(
-            plans
-                .entry(repo.to_owned())
-                .or_insert_with(|| feature::RepoPlan::new(default)),
-        )
-    }
-
     /// Send repository `repo` of feature `slug` the way `route` says.
     fn set_ship_route(&mut self, project: &str, slug: &str, repo: &str, route: Route) {
-        if !self.ship_plan_open(project, slug) {
+        if !self.features.ship_plan_open(&mut ui!(self), project, slug) {
             return;
         }
-        if let Some(plan) = self.ship_repo_plan(project, slug, repo) {
+        if let Some(plan) = self.features.ship_repo_plan(project, slug, repo) {
             plan.route = route;
             self.save_feature(project, slug);
         }
@@ -10732,10 +10506,10 @@ impl Gerdr {
 
     /// Flip tick `step` of repository `repo` of feature `slug`.
     fn tick_ship_step(&mut self, project: &str, slug: &str, repo: &str, step: ShipStep) {
-        if !self.ship_plan_open(project, slug) {
+        if !self.features.ship_plan_open(&mut ui!(self), project, slug) {
             return;
         }
-        if let Some(plan) = self.ship_repo_plan(project, slug, repo) {
+        if let Some(plan) = self.features.ship_repo_plan(project, slug, repo) {
             plan.toggle(step);
             self.save_feature(project, slug);
         }
@@ -10743,7 +10517,7 @@ impl Gerdr {
 
     /// Flip a tick of what follows shipping feature `slug`.
     fn tick_ship_after(&mut self, project: &str, slug: &str, after: ShipAfter) {
-        if !self.ship_plan_open(project, slug) {
+        if !self.features.ship_plan_open(&mut ui!(self), project, slug) {
             return;
         }
         let key = (project.to_owned(), slug.to_owned());
@@ -10949,24 +10723,11 @@ impl Gerdr {
         layout.hit(&view, pos.to_i32_round())
     }
 
-    /// Row `row` of the Ship page takes the keyboard, and is what a click
-    /// on it acts on.
-    fn ship_row_at(&mut self, feature: &Feature, row: usize) -> Option<ShipRow> {
-        let key = (feature.project.clone(), feature.slug.clone());
-        let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
-        let at = ship_rows(feature, probe).get(row).cloned()?;
-        if let Some(panel) = self.features.panel.as_mut() {
-            panel.focus = TabArea::Findings;
-            panel.finding = row;
-        }
-        Some(at)
-    }
-
     /// A left click in the feature tab: a stage's node shows its page, a
     /// repository takes the keyboard, a button does what it says.
     pub fn feature_panel_click(&mut self, pos: Point<f64, Logical>) {
         use crate::manual_test::Outcome;
-        let Some(feature) = self.panel_feature().cloned() else {
+        let Some(feature) = self.features.panel_feature().cloned() else {
             return;
         };
         // A press on the header or the rail: the page it leaves on has the
@@ -11029,19 +10790,22 @@ impl Gerdr {
                 0 => chrome::ReviewView::Code,
                 _ => chrome::ReviewView::Fixes,
             })),
-            FeatureTabHit::ShipRoute(row, segment) => {
-                self.ship_row_at(&feature, row).and_then(|row| match row {
+            FeatureTabHit::ShipRoute(row, segment) => self
+                .features
+                .ship_row_at(&feature, row)
+                .and_then(|row| match row {
                     ShipRow::Route { repo, .. } => {
                         Some(PanelOutcome::ShipRoute(repo, *Route::ALL.get(segment)?))
                     }
                     _ => None,
-                })
-            }
+                }),
             FeatureTabHit::ShipRow(row) => {
-                self.ship_row_at(&feature, row).and_then(|at| match at {
-                    ShipRow::Route { .. } => None,
-                    at => Some(at.outcome()),
-                })
+                self.features
+                    .ship_row_at(&feature, row)
+                    .and_then(|at| match at {
+                        ShipRow::Route { .. } => None,
+                        at => Some(at.outcome()),
+                    })
             }
             // A summary's pill: its tag's first card takes the keys, in view.
             FeatureTabHit::Jump(tag) => {
@@ -11130,7 +10894,9 @@ impl Gerdr {
             }
             // Work running goes to its stage's page.
             FeatureTabHit::Running(i) => {
-                let (rows, _) = self.running_of(&feature.project, &feature.slug, &feature.title);
+                let (rows, _) =
+                    self.features
+                        .running_of(&feature.project, &feature.slug, &feature.title);
                 let stage = rows.get(i).and_then(|(row, _)| Stage::ALL.get(row.node?));
                 if let (Some(panel), Some(stage)) = (self.features.panel.as_mut(), stage) {
                     panel.focus = TabArea::Stages;
@@ -11140,7 +10906,9 @@ impl Gerdr {
                 None
             }
             FeatureTabHit::RunningButton(i, b) => {
-                let (rows, _) = self.running_of(&feature.project, &feature.slug, &feature.title);
+                let (rows, _) =
+                    self.features
+                        .running_of(&feature.project, &feature.slug, &feature.title);
                 rows.get(i).and_then(|(_, job)| {
                     let mut buttons = running_buttons(*job);
                     (b < buttons.len()).then(|| buttons.swap_remove(b).1)
@@ -11270,18 +11038,6 @@ impl Gerdr {
         self.see_selected_criterion();
     }
 
-    /// The cards of the review stage's page in the panel (AI review's, Plan
-    /// review's), with what `visit` makes of them and the panel's selection.
-    fn with_review_cards<R>(&self, visit: impl FnOnce(&[ReviewCard], usize) -> R) -> Option<R> {
-        let panel = self.features.panel.as_ref()?;
-        let feature = self.feature(&panel.project, &panel.slug)?;
-        let key = (panel.project.clone(), panel.slug.clone());
-        let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
-        let stage = panel.page_stage(feature);
-        let cards = review_cards(feature, stage, notes_of(probe));
-        Some(visit(&cards, panel.finding))
-    }
-
     /// Finding `id` of the page's stage has the keyboard, and shows.
     pub(crate) fn select_panel_finding(&mut self, id: &str) {
         self.select_panel_item(ItemOf::Finding, id);
@@ -11291,6 +11047,7 @@ impl Gerdr {
     /// shows.
     pub(crate) fn select_panel_item(&mut self, of: ItemOf, id: &str) {
         let at = self
+            .features
             .with_review_cards(|cards, _| {
                 (cards.iter()).position(|c| c.item().is_some_and(|i| i.of() == of && i.id() == id))
             })
@@ -11300,41 +11057,8 @@ impl Gerdr {
         }
     }
 
-    /// The comments feature `slug`'s latest Code review round took, as its page
-    /// has them, to show in its diff.
     pub(crate) fn sent_notes(&self, project: &str, slug: &str) -> Vec<Comment> {
-        let key = (project.to_owned(), slug.to_owned());
-        let made = self
-            .feature(project, slug)
-            .and_then(|f| f.comment_fixes.last());
-        (self.features.probes.get(&key).and_then(|p| p.last.as_ref()))
-            .map_or(&[][..], |p| p.docs.notes.as_slice())
-            .iter()
-            .filter(|c| c.flag.is_some())
-            .cloned()
-            .map(|mut c| {
-                if let (Some(flag), Some(fix)) = (c.flag.as_mut(), made) {
-                    flag.made = fix.made.contains(&flag.id);
-                }
-                let feature = self.feature(project, slug);
-                if let Some(flag) = c.flag.as_mut() {
-                    flag.planning = feature::fix_round::planning(
-                        feature.and_then(|f| f.fix_round.as_ref()),
-                        Stage::CodeReview,
-                    );
-                    // Where its round left the code: the fix is there.
-                    let round = (feature.and_then(|f| f.last_fix_round.as_ref()))
-                        .filter(|r| made.is_some_and(|fix| fix.round == r.n));
-                    let repo = (feature.into_iter().flat_map(|f| &f.repos))
-                        .find(|r| r.worktree == c.root);
-                    flag.fixed_in = (round.zip(repo))
-                        .filter(|_| flag.made)
-                        .and_then(|(round, repo)| round.trail.to.get(&repo.key()))
-                        .map(|sha| sha.chars().take(7).collect());
-                }
-                c
-            })
-            .collect()
+        self.features.sent_notes(project, slug)
     }
 
     /// The comments feature `slug`'s diff holds are `notes` now, without
@@ -11360,37 +11084,12 @@ impl Gerdr {
         }
     }
 
-    /// The card of AI review's page with the selection, to find it again.
-    /// Open review card `i` of the page (true), or fold it to its line; it
-    /// takes the keyboard.
-    fn fold_card(&mut self, i: usize, open: bool) {
-        let id = self.with_review_cards(|cards, _| cards.get(i).map(|c| c.id()));
-        let (Some(Some(id)), Some(panel)) = (id, self.features.panel.as_mut()) else {
-            return;
-        };
-        panel.cards_open.retain(|(c, _)| *c != id);
-        panel.cards_open.push((id, open));
-        panel.focus = TabArea::Findings;
-        panel.finding = i;
-    }
-
     pub(crate) fn selected_review_card(&self) -> Option<CardId> {
-        self.with_review_cards(|cards, at| cards.get(at).map(|c| c.id()))
-            .flatten()
+        self.features.selected_review_card()
     }
 
-    /// The selection goes back on card `id` once the list around it changed.
-    /// Nothing moves if the card is gone: the next takes its place.
     pub(crate) fn reselect_review_card(&mut self, id: Option<CardId>) {
-        let Some(id) = id else {
-            return;
-        };
-        let at = self
-            .with_review_cards(|cards, _| cards.iter().position(|c| c.id() == id))
-            .flatten();
-        if let (Some(at), Some(panel)) = (at, self.features.panel.as_mut()) {
-            panel.finding = at;
-        }
+        self.features.reselect_review_card(id)
     }
 
     /// The keyboard goes from finding `id`, just decided, to the next card
@@ -11403,6 +11102,7 @@ impl Gerdr {
     /// next card left to decide, if there is one.
     pub(crate) fn select_next_open_item(&mut self, of: ItemOf, id: &str) {
         let next = self
+            .features
             .with_review_cards(|cards, _| {
                 let at = (cards.iter())
                     .position(|c| c.item().is_some_and(|i| i.of() == of && i.id() == id))?;
@@ -11581,7 +11281,7 @@ impl Gerdr {
         match hit? {
             FeatureTabHit::Node(i) => {
                 let stage = Stage::ALL.get(i)?;
-                let feature = self.panel_feature()?;
+                let feature = self.features.panel_feature()?;
                 let text = match feature.marks.get(stage) {
                     Some(mark) => mark_detail(mark, feature::now()),
                     None => stage.about().to_owned(),
@@ -11597,7 +11297,7 @@ impl Gerdr {
                     .features
                     .panel
                     .as_ref()?
-                    .page_stage(self.panel_feature()?);
+                    .page_stage(self.features.panel_feature()?);
                 let w = words(stage_items(stage));
                 let text = match tag.word()? {
                     "yours" => format!("Go to your first {}", w.item),
@@ -11610,6 +11310,7 @@ impl Gerdr {
             }
             FeatureTabHit::Fold(i) => {
                 let open = self
+                    .features
                     .panel_feature()
                     .map(|f| self.criterion_rows(f))?
                     .get(i)?
@@ -11640,7 +11341,7 @@ impl Gerdr {
                     .or_else(|| mark_tip(&view.page, i))
                     .or_else(|| self.ship_button_tip(i))
                     .or_else(|| {
-                        let feature = self.panel_feature()?;
+                        let feature = self.features.panel_feature()?;
                         let panel = self.features.panel.as_ref()?;
                         pull_tip(feature, panel.page_stage(feature), &view.page, i)
                     })?;
@@ -11667,7 +11368,7 @@ impl Gerdr {
             }
             // What joining or leaving makes of the repository.
             FeatureTabHit::RepoButton(i, b) => {
-                let feature = self.panel_feature()?;
+                let feature = self.features.panel_feature()?;
                 let panel = self.features.panel.as_ref()?;
                 let entries = repo_entries(feature, &panel.sources, panel.expanded);
                 let buttons = entry_buttons(feature, &panel.sources, *entries.get(i)?);
@@ -11801,6 +11502,7 @@ impl Gerdr {
     fn feature_strip_scroll(&mut self, motion: Motion) {
         let sources = (self.features.panel.as_ref()).map_or(&[][..], |p| p.sources.as_slice());
         let Some(repos) = self
+            .features
             .panel_feature()
             .map(|f| repo_entries(f, sources, false).len())
         else {
@@ -11844,13 +11546,8 @@ impl Gerdr {
         still
     }
 
-    /// Stop the feature tab's columns flung; whether one was.
     pub fn feature_tab_stop_fling(&mut self) -> bool {
-        (self.features.panel.as_mut()).is_some_and(|p| {
-            p.scroll
-                .iter_mut()
-                .fold(false, |any, s| s.stop_fling() | any)
-        })
+        self.features.feature_tab_stop_fling()
     }
 
     /// The feature tab's view, while a feature's tab shows.
@@ -11926,7 +11623,9 @@ impl Gerdr {
             fix_rounds_flipped: panel.fix_rounds_flipped.clone(),
         };
         let mut view = tab_view(panel, feature, &slugs, &state, now);
-        let (running, more) = self.running_of(&panel.project, &panel.slug, &feature.title);
+        let (running, more) = self
+            .features
+            .running_of(&panel.project, &panel.slug, &feature.title);
         view.running = running.into_iter().map(|(row, _)| row).collect();
         view.running_more = more;
         // Under a dialog or a panel the page takes no keys: its footer
@@ -11946,26 +11645,6 @@ impl Gerdr {
             }
         }
         Some(view)
-    }
-
-    /// The feature tab's strip of what runs on feature `slug` of
-    /// `project`, called `title`, each row with its job (see
-    /// `running_rows`).
-    fn running_of(
-        &self,
-        project: &str,
-        slug: &str,
-        title: &str,
-    ) -> (Vec<(chrome::RunningRow, Job)>, usize) {
-        let since = |b: &Busy| {
-            let key = (b.project.clone(), b.slug.clone(), b.job);
-            self.features.since.get(&key).copied()
-        };
-        let busy: Vec<_> = (self.features.busy.iter())
-            .filter(|b| b.project == project && b.slug == slug)
-            .filter_map(|b| Some((b, since(b)?)))
-            .collect();
-        running_rows(&busy, title, Instant::now())
     }
 
     /// The sidebar's rows for the shown project's open features.
@@ -12075,6 +11754,541 @@ impl Features {
         self.since.retain(|(project, slug, job), _| {
             (busy.iter()).any(|b| &b.project == project && &b.slug == slug && b.job == *job)
         });
+    }
+
+    /// Feature `slug` of project `project`, whichever machine writes it.
+    pub(crate) fn feature(&self, project: &str, slug: &str) -> Option<&Feature> {
+        let own = self.all.get(project).into_iter().flatten();
+        let viewed = self.viewed.get(project).into_iter().flatten();
+        own.chain(viewed).find(|f| f.slug == slug)
+    }
+
+    /// Feature `slug` of project `project`, to change: only this machine's own
+    /// can be.
+    pub(crate) fn feature_mut(&mut self, project: &str, slug: &str) -> Option<&mut Feature> {
+        self.all
+            .get_mut(project)?
+            .iter_mut()
+            .find(|f| f.slug == slug)
+    }
+
+    /// What the read of feature `slug` found of repositories built on another
+    /// branch than their base, `sits` by `Repo::key`, where `was` is what the
+    /// read before found: kept as a problem, and a repository newly found so
+    /// gets a warning with a button to make that branch its base.
+    pub(crate) fn feature_bases_read(
+        &mut self,
+        ui: &mut crate::toast::Ui,
+        project: &str,
+        slug: &str,
+        was: &BTreeMap<String, (String, String)>,
+        sits: &BTreeMap<String, (String, String)>,
+    ) {
+        let at = format!("{project}/{slug}");
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let title = feature.title.clone();
+        let mut lines = Vec::new();
+        let mut fresh = Vec::new();
+        for (key, (branch, oid)) in sits {
+            let Some(repo) = feature.repo(key) else {
+                continue;
+            };
+            let text = format!(
+                "{key} of \u{201c}{title}\u{201d} is built on {branch}, not on its base {}",
+                repo.base
+            );
+            // The branch moving on isn't news.
+            if was.get(key).is_none_or(|(b, _)| b != branch) {
+                fresh.push((key.clone(), branch.clone(), oid.clone(), text.clone()));
+            }
+            lines.push(text);
+        }
+        if lines.is_empty() {
+            return crate::problems::clear_at(BASE_PROBLEM, &at);
+        }
+        crate::problems::report_at(BASE_PROBLEM, &at, lines.join("; "));
+        for (repo, branch, oid, text) in fresh {
+            let then = MenuAction::SetFeatureBase {
+                project: project.to_owned(),
+                slug: slug.to_owned(),
+                repo,
+                to: (branch, oid),
+                undoing: false,
+            };
+            ui.toast_with(text, Level::Warning, Some(("Use as base".into(), then)));
+        }
+    }
+
+    /// The chats at work now, on every feature this machine writes: the
+    /// AI work keeps them again while they last.
+    pub(crate) fn ai_work_chats(&self) -> Vec<(String, String, ai_work::Chat)> {
+        let mut chats = Vec::new();
+        for (project, features) in &self.all {
+            for feature in features.iter().filter(|f| f.status == Status::Open) {
+                let live = ai_work::observe::runs_of(feature).filter(|(_, run)| run.live());
+                for (stage, run) in live {
+                    let chat = ai_work::observe::chat(feature, stage, run, run.session());
+                    chats.push((project.clone(), feature.slug.clone(), chat));
+                }
+            }
+        }
+        chats
+    }
+
+    /// `job` on feature `slug` of `project` is over.
+    pub(crate) fn unbusy(&mut self, project: &str, slug: &str, job: Job) {
+        self.busy
+            .retain(|b| !(b.project == project && b.slug == slug && b.job == job));
+        self.forget_ended();
+    }
+
+    /// Whether feature `slug` of `project` has work running off the thread
+    /// that other work on it must wait for.
+    pub(crate) fn feature_busy(&self, project: &str, slug: &str) -> bool {
+        self.busy
+            .iter()
+            .any(|b| b.project == project && b.slug == slug && b.job != Job::Graph)
+    }
+
+    /// Feature `slug`'s work of kind `job` running off the thread.
+    pub(crate) fn busy_with(&self, project: &str, slug: &str, job: Job) -> Option<&Busy> {
+        self.busy
+            .iter()
+            .find(|b| b.project == project && b.slug == slug && b.job == job)
+    }
+
+    /// What the latest probe of feature `slug` of `project` read of its
+    /// code, if it could.
+    pub(crate) fn feature_reading(&self, project: &str, slug: &str) -> Option<&Reading> {
+        let key = (project.to_owned(), slug.to_owned());
+        let probe = self.probes.get(&key)?.last.as_ref()?;
+        probe.reading.as_ref().ok()
+    }
+
+    /// What the latest probe of feature `slug` of `project` found of its
+    /// files, if one is back.
+    pub(crate) fn feature_docs(&self, project: &str, slug: &str) -> Option<&feature::page::Docs> {
+        let key = (project.to_owned(), slug.to_owned());
+        Some(&self.probes.get(&key)?.last.as_ref()?.docs)
+    }
+
+    /// A read of pane `pane`'s tail is back. One for a pane no longer the
+    /// tail's (the agent or the tab changed meanwhile) is dropped: the
+    /// tail of the new one is read on its own.
+    pub(crate) fn feature_tail_read(&mut self, pane: &str, lines: Result<Vec<String>, String>) {
+        let Some(tail) = self.tail.as_mut().filter(|t| t.pane == pane) else {
+            return;
+        };
+        tail.read(pane, lines);
+    }
+
+    /// The tasks running on features, for the tasks panel.
+    pub(crate) fn feature_tasks(&self, projects: &projects::Store) -> Vec<Task> {
+        self.busy
+            .iter()
+            .map(|b| {
+                let project = projects
+                    .project(&b.project)
+                    .map_or(b.project.as_str(), |p| p.name.as_str());
+                let title = self.feature(&b.project, &b.slug).map(|f| f.title.as_str());
+                task_of(b, title, project)
+            })
+            .collect()
+    }
+
+    /// The repository `key` as the feature panel's sources found it: its
+    /// source, the root holding it, and where it is.
+    pub(crate) fn offered_repo(&self, key: &str) -> Option<(RepoSource, Found)> {
+        let panel = self.panel.as_ref()?;
+        panel.sources.iter().find_map(|source| {
+            let Finding::Found(root) = &source.finding else {
+                return None;
+            };
+            let found = (root.repos.iter())
+                .find(|r| feature::repo_key(source.project.as_deref(), &r.name) == key)?;
+            Some((source.clone(), found.clone()))
+        })
+    }
+
+    /// Why feature `slug` can't change its repositories now, said; `false`
+    /// when it can.
+    pub(crate) fn repos_locked(
+        &mut self,
+        ui: &mut crate::toast::Ui,
+        project: &str,
+        slug: &str,
+    ) -> bool {
+        let Some(feature) = self.feature(project, slug) else {
+            ui.show_warning("That feature is gone".into());
+            return true;
+        };
+        let title = feature.title.clone();
+        if !linkable(feature) {
+            ui.show_warning(format!(
+                "\u{201c}{title}\u{201d} has shipped; its repositories can't change now"
+            ));
+            return true;
+        }
+        if self.feature_busy(project, slug) {
+            ui.show_warning(format!(
+                "\u{201c}{title}\u{201d} is busy; try again once it is done"
+            ));
+            return true;
+        }
+        false
+    }
+
+    /// The row of repository `key` takes the keyboard on the panel of
+    /// feature `slug`, wherever it went: it moved group.
+    pub(crate) fn select_repo(&mut self, project: &str, slug: &str, key: &str) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        let open = (self.panel.as_mut()).filter(|p| p.project == project && p.slug == slug);
+        if let Some(panel) = open {
+            panel.select_repo(&feature, key);
+        }
+    }
+
+    pub(crate) fn new_feature_view(&self, projects: &projects::Store) -> Option<NewFeatureView> {
+        let dialog = self.dialog.as_ref()?;
+        let project = projects
+            .project(&dialog.project)
+            .map_or_else(|| dialog.project.clone(), |p| p.name.clone());
+        Some(new_feature_view(dialog, project))
+    }
+
+    /// Hold the feature tab's Page scroll for the page it shows now (see
+    /// `FeaturePanel::sync_page`).
+    pub(crate) fn sync_feature_page(&mut self) {
+        let Some(panel) = self.panel.as_ref() else {
+            return;
+        };
+        let Some(key) = (self.feature(&panel.project, &panel.slug)).map(|f| panel.page_key(f))
+        else {
+            return;
+        };
+        if let Some(panel) = self.panel.as_mut() {
+            panel.hold_page(key);
+        }
+    }
+
+    /// The feature the panel is on.
+    pub(crate) fn panel_feature(&self) -> Option<&Feature> {
+        let panel = self.panel.as_ref()?;
+        self.feature(&panel.project, &panel.slug)
+    }
+
+    /// Show the current stage's page of feature `slug`, when the panel
+    /// shows it: it moved on.
+    pub(crate) fn feature_cursor_to_current_of(&mut self, project: &str, slug: &str) {
+        let on_it = |p: &&mut FeaturePanel| p.project == project && p.slug == slug;
+        if let Some(panel) = self.panel.as_mut().filter(on_it) {
+            panel.unpick();
+        }
+    }
+
+    /// The latest read of feature `slug` of `project`, if one came back.
+    pub(crate) fn last_probe(&self, project: &str, slug: &str) -> Option<&Probe> {
+        let key = (project.to_owned(), slug.to_owned());
+        self.probes.get(&key)?.last.as_ref()
+    }
+
+    /// Whether the Ship page's ticks of feature `slug` can change now; else
+    /// says why not.
+    pub(crate) fn ship_plan_open(
+        &mut self,
+        ui: &mut crate::toast::Ui,
+        project: &str,
+        slug: &str,
+    ) -> bool {
+        if !self.feature_busy(project, slug) {
+            return true;
+        }
+        let title = (self.feature(project, slug)).map_or(String::new(), |f| f.title.clone());
+        ui.show_warning(format!(
+            "\u{201c}{title}\u{201d} is busy; try again once it is done"
+        ));
+        false
+    }
+
+    /// The plan of repository `repo` of feature `slug`, kept from now on, with
+    /// the route it has now if it had no plan yet.
+    pub(crate) fn ship_repo_plan(
+        &mut self,
+        project: &str,
+        slug: &str,
+        repo: &str,
+    ) -> Option<&mut feature::RepoPlan> {
+        let key = (project.to_owned(), slug.to_owned());
+        let default = (self.probes.get(&key))
+            .and_then(|p| p.last.as_ref())
+            .and_then(|p| p.ship.as_ref())
+            .and_then(|c| c.repos.iter().find(|r| r.key == repo))?
+            .route;
+        let feature = self.feature_mut(project, slug)?;
+        let plans = &mut feature.ship_plan.repos;
+        Some(
+            plans
+                .entry(repo.to_owned())
+                .or_insert_with(|| feature::RepoPlan::new(default)),
+        )
+    }
+
+    /// Row `row` of the Ship page takes the keyboard, and is what a click
+    /// on it acts on.
+    pub(crate) fn ship_row_at(&mut self, feature: &Feature, row: usize) -> Option<ShipRow> {
+        let key = (feature.project.clone(), feature.slug.clone());
+        let probe = (self.probes.get(&key)).and_then(|p| p.last.as_ref());
+        let at = ship_rows(feature, probe).get(row).cloned()?;
+        if let Some(panel) = self.panel.as_mut() {
+            panel.focus = TabArea::Findings;
+            panel.finding = row;
+        }
+        Some(at)
+    }
+
+    /// The cards of the review stage's page in the panel (AI review's, Plan
+    /// review's), with what `visit` makes of them and the panel's selection.
+    pub(crate) fn with_review_cards<R>(
+        &self,
+        visit: impl FnOnce(&[ReviewCard], usize) -> R,
+    ) -> Option<R> {
+        let panel = self.panel.as_ref()?;
+        let feature = self.feature(&panel.project, &panel.slug)?;
+        let key = (panel.project.clone(), panel.slug.clone());
+        let probe = (self.probes.get(&key)).and_then(|p| p.last.as_ref());
+        let stage = panel.page_stage(feature);
+        let cards = review_cards(feature, stage, notes_of(probe));
+        Some(visit(&cards, panel.finding))
+    }
+
+    /// The comments feature `slug`'s latest Code review round took, as its page
+    /// has them, to show in its diff.
+    pub(crate) fn sent_notes(&self, project: &str, slug: &str) -> Vec<Comment> {
+        let key = (project.to_owned(), slug.to_owned());
+        let made = self
+            .feature(project, slug)
+            .and_then(|f| f.comment_fixes.last());
+        (self.probes.get(&key).and_then(|p| p.last.as_ref()))
+            .map_or(&[][..], |p| p.docs.notes.as_slice())
+            .iter()
+            .filter(|c| c.flag.is_some())
+            .cloned()
+            .map(|mut c| {
+                if let (Some(flag), Some(fix)) = (c.flag.as_mut(), made) {
+                    flag.made = fix.made.contains(&flag.id);
+                }
+                let feature = self.feature(project, slug);
+                if let Some(flag) = c.flag.as_mut() {
+                    flag.planning = feature::fix_round::planning(
+                        feature.and_then(|f| f.fix_round.as_ref()),
+                        Stage::CodeReview,
+                    );
+                    // Where its round left the code: the fix is there.
+                    let round = (feature.and_then(|f| f.last_fix_round.as_ref()))
+                        .filter(|r| made.is_some_and(|fix| fix.round == r.n));
+                    let repo =
+                        (feature.into_iter().flat_map(|f| &f.repos)).find(|r| r.worktree == c.root);
+                    flag.fixed_in = (round.zip(repo))
+                        .filter(|_| flag.made)
+                        .and_then(|(round, repo)| round.trail.to.get(&repo.key()))
+                        .map(|sha| sha.chars().take(7).collect());
+                }
+                c
+            })
+            .collect()
+    }
+
+    /// The card of AI review's page with the selection, to find it again.
+    /// Open review card `i` of the page (true), or fold it to its line; it
+    /// takes the keyboard.
+    pub(crate) fn fold_card(&mut self, i: usize, open: bool) {
+        let id = self.with_review_cards(|cards, _| cards.get(i).map(|c| c.id()));
+        let (Some(Some(id)), Some(panel)) = (id, self.panel.as_mut()) else {
+            return;
+        };
+        panel.cards_open.retain(|(c, _)| *c != id);
+        panel.cards_open.push((id, open));
+        panel.focus = TabArea::Findings;
+        panel.finding = i;
+    }
+
+    pub(crate) fn selected_review_card(&self) -> Option<CardId> {
+        self.with_review_cards(|cards, at| cards.get(at).map(|c| c.id()))
+            .flatten()
+    }
+
+    /// The selection goes back on card `id` once the list around it changed.
+    /// Nothing moves if the card is gone: the next takes its place.
+    pub(crate) fn reselect_review_card(&mut self, id: Option<CardId>) {
+        let Some(id) = id else {
+            return;
+        };
+        let at = self
+            .with_review_cards(|cards, _| cards.iter().position(|c| c.id() == id))
+            .flatten();
+        if let (Some(at), Some(panel)) = (at, self.panel.as_mut()) {
+            panel.finding = at;
+        }
+    }
+
+    /// Stop the feature tab's columns flung; whether one was.
+    pub(crate) fn feature_tab_stop_fling(&mut self) -> bool {
+        (self.panel.as_mut()).is_some_and(|p| {
+            p.scroll
+                .iter_mut()
+                .fold(false, |any, s| s.stop_fling() | any)
+        })
+    }
+
+    /// The feature tab's strip of what runs on feature `slug` of
+    /// `project`, called `title`, each row with its job (see
+    /// `running_rows`).
+    pub(crate) fn running_of(
+        &self,
+        project: &str,
+        slug: &str,
+        title: &str,
+    ) -> (Vec<(chrome::RunningRow, Job)>, usize) {
+        let since = |b: &Busy| {
+            let key = (b.project.clone(), b.slug.clone(), b.job);
+            self.since.get(&key).copied()
+        };
+        let busy: Vec<_> = (self.busy.iter())
+            .filter(|b| b.project == project && b.slug == slug)
+            .filter_map(|b| Some((b, since(b)?)))
+            .collect();
+        running_rows(&busy, title, Instant::now())
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::{
+        tests::{feature, repo},
+        *,
+    };
+
+    fn busy(slug: &str, job: Job) -> Busy {
+        Busy {
+            project: "acme".into(),
+            slug: slug.into(),
+            job,
+            repo: None,
+            what: format!("Working on {slug}"),
+        }
+    }
+
+    fn with(own: Vec<Feature>, viewed: Vec<Feature>) -> Features {
+        let mut features = Features::default();
+        features.all.insert("acme".into(), own);
+        features.viewed.insert("acme".into(), viewed);
+        features
+    }
+
+    #[test]
+    fn a_feature_is_found_written_here_or_elsewhere_but_changes_only_here() {
+        let mut theirs = feature("theirs", vec![repo("api", true)], 1);
+        theirs.writer = Some("m1".into());
+        let mine = feature("mine", vec![repo("api", true)], 1);
+        let mut features = with(vec![mine], vec![theirs]);
+        assert_eq!(
+            features.feature("acme", "mine").map(|f| f.slug.as_str()),
+            Some("mine")
+        );
+        assert!(features.feature("acme", "theirs").is_some());
+        assert!(features.feature("other", "mine").is_none());
+        assert!(features.feature_mut("acme", "mine").is_some());
+        assert!(features.feature_mut("acme", "theirs").is_none());
+    }
+
+    #[test]
+    fn busy_work_counts_until_it_is_over_and_a_graph_holds_nothing_up() {
+        let mut features = Features::default();
+        features.busy.push(busy("f", Job::Graph));
+        assert!(!features.feature_busy("acme", "f"));
+        assert!(features.busy_with("acme", "f", Job::Graph).is_some());
+        features.busy.push(busy("f", Job::Verify));
+        features
+            .since
+            .insert(("acme".into(), "f".into(), Job::Verify), Instant::now());
+        assert!(features.feature_busy("acme", "f"));
+        assert!(!features.feature_busy("acme", "g"));
+        features.unbusy("acme", "f", Job::Verify);
+        assert!(!features.feature_busy("acme", "f"));
+        assert!(features.busy_with("acme", "f", Job::Verify).is_none());
+        assert!(features.since.is_empty(), "the start time goes with it");
+        assert_eq!(features.busy.len(), 1);
+    }
+
+    #[test]
+    fn the_tasks_panel_lists_busy_work_by_its_feature() {
+        let mut features = with(vec![feature("f", Vec::new(), 1)], Vec::new());
+        features.busy.push(busy("f", Job::Setup));
+        let tasks = features.feature_tasks(&projects::Store::default());
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].chip, "setup");
+        assert_eq!(tasks[0].detail, "\u{201c}Feature f\u{201d} \u{b7} acme");
+    }
+
+    #[test]
+    fn without_a_probe_or_a_panel_nothing_is_read_or_selected() {
+        let mut features = with(vec![feature("f", Vec::new(), 1)], Vec::new());
+        assert!(features.last_probe("acme", "f").is_none());
+        assert!(features.feature_reading("acme", "f").is_none());
+        assert!(features.feature_docs("acme", "f").is_none());
+        assert!(features.sent_notes("acme", "f").is_empty());
+        assert!(features.panel_feature().is_none());
+        assert!(features.selected_review_card().is_none());
+        assert!(features.offered_repo("api").is_none());
+        assert!(!features.feature_tab_stop_fling());
+        assert!(
+            features
+                .new_feature_view(&projects::Store::default())
+                .is_none()
+        );
+        assert!(features.ai_work_chats().is_empty());
+        features.sync_feature_page();
+        features.feature_cursor_to_current_of("acme", "f");
+        assert!(features.panel.is_none());
+    }
+
+    #[test]
+    fn the_panel_shows_the_current_stage_again_only_for_its_feature() {
+        let mut features = with(vec![feature("f", Vec::new(), 1)], Vec::new());
+        features.panel = Some(FeaturePanel {
+            project: "acme".into(),
+            slug: "f".into(),
+            stage: Some(Stage::Plan),
+            ..FeaturePanel::default()
+        });
+        assert_eq!(features.panel_feature().map(|f| f.slug.as_str()), Some("f"));
+        features.feature_cursor_to_current_of("acme", "g");
+        assert_eq!(
+            features.panel.as_ref().and_then(|p| p.stage),
+            Some(Stage::Plan)
+        );
+        features.feature_cursor_to_current_of("acme", "f");
+        assert_eq!(features.panel.as_ref().and_then(|p| p.stage), None);
+    }
+
+    #[test]
+    fn the_strip_shows_only_the_features_work() {
+        let mut features = Features::default();
+        features.busy.push(busy("f", Job::Verify));
+        features.busy.push(busy("g", Job::Verify));
+        let long_ago = Instant::now() - Duration::from_secs(60);
+        for slug in ["f", "g"] {
+            features
+                .since
+                .insert(("acme".into(), slug.into(), Job::Verify), long_ago);
+        }
+        let (rows, more) = features.running_of("acme", "f", "Feature f");
+        assert_eq!((rows.len(), more), (1, 0));
+        assert_eq!(rows[0].1, Job::Verify);
     }
 }
 
