@@ -90,6 +90,27 @@ pub enum Outcome {
 }
 
 impl CheckoutDialog {
+    /// The dialog asking how worktree `wt`'s untracked `files` go when its
+    /// branch is checked out in the main worktree at `main`, called
+    /// `main_name`: Bring along selected, unless nothing can come.
+    fn new(wt: git::Worktree, main: &Path, main_name: String, files: Vec<Untracked>) -> Self {
+        let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+        let mut dialog = CheckoutDialog {
+            branch: wt.name(),
+            worktree: wt.path,
+            main_name,
+            main_folder: crate::paths::folder_name(main),
+            files,
+            clashes: git::clashes(main, &paths),
+            selected: BRING,
+            hover: None,
+        };
+        if !dialog.can_bring() {
+            dialog.selected = LEAVE;
+        }
+        dialog
+    }
+
     /// The files that can come along: those nothing is in the way of.
     fn movable(&self) -> impl Iterator<Item = &Untracked> {
         self.files
@@ -135,6 +156,38 @@ impl CheckoutDialog {
         let buttons = if self.can_bring() { 3 } else { 2 };
         self.selected = (self.selected as isize + by).rem_euclid(buttons) as usize;
     }
+
+    /// What a left click at `pos` asks, the dialog laid out as `layout`:
+    /// off it, Cancel.
+    fn click(&self, layout: &chrome::CheckoutLayout, pos: Point<f64, Logical>) -> Option<Outcome> {
+        match checkout_hit(layout, pos) {
+            Some(button) => self.press(button),
+            None if layout.panel.to_f64().contains(pos) => None,
+            None => Some(Outcome::Cancel),
+        }
+    }
+
+    fn view(&self) -> CheckoutView {
+        let rows = self
+            .files
+            .iter()
+            .map(|f| CheckoutRow {
+                path: f.path.clone(),
+                files: f.files,
+                link: f.link,
+                clash: self.clashes.contains(&f.path),
+            })
+            .collect();
+        CheckoutView {
+            branch: self.branch.clone(),
+            main: self.main_folder.clone(),
+            worktree: crate::paths::folder_name(&self.worktree),
+            rows,
+            can_bring: self.can_bring(),
+            selected: self.selected,
+            hover: self.hover,
+        }
+    }
 }
 
 impl Gerdr {
@@ -147,22 +200,8 @@ impl Gerdr {
         main_name: String,
         files: Vec<Untracked>,
     ) {
-        let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
-        let mut dialog = CheckoutDialog {
-            branch: wt.name(),
-            worktree: wt.path,
-            main_name,
-            main_folder: crate::paths::folder_name(main),
-            files,
-            clashes: git::clashes(main, &paths),
-            selected: BRING,
-            hover: None,
-        };
-        if !dialog.can_bring() {
-            dialog.selected = LEAVE;
-        }
         self.overlays.context_menu = None;
-        self.overlays.checkout = Some(dialog);
+        self.overlays.checkout = Some(CheckoutDialog::new(wt, main, main_name, files));
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
     }
@@ -198,15 +237,10 @@ impl Gerdr {
         let Some(layout) = self.checkout_layout() else {
             return false;
         };
-        let Some(dialog) = self.overlays.checkout.as_mut() else {
+        let Some(dialog) = self.overlays.checkout.as_ref() else {
             return false;
         };
-        let outcome = match checkout_hit(&layout, pos) {
-            Some(button) => dialog.press(button),
-            None if layout.panel.to_f64().contains(pos) => None,
-            None => Some(Outcome::Cancel),
-        };
-        if let Some(outcome) = outcome {
+        if let Some(outcome) = dialog.click(&layout, pos) {
             self.apply_checkout(outcome);
         }
         true
@@ -230,26 +264,7 @@ impl Gerdr {
     }
 
     pub fn checkout_view(&self) -> Option<CheckoutView> {
-        let dialog = self.overlays.checkout.as_ref()?;
-        let rows = dialog
-            .files
-            .iter()
-            .map(|f| CheckoutRow {
-                path: f.path.clone(),
-                files: f.files,
-                link: f.link,
-                clash: dialog.clashes.contains(&f.path),
-            })
-            .collect();
-        Some(CheckoutView {
-            branch: dialog.branch.clone(),
-            main: dialog.main_folder.clone(),
-            worktree: crate::paths::folder_name(&dialog.worktree),
-            rows,
-            can_bring: dialog.can_bring(),
-            selected: dialog.selected,
-            hover: dialog.hover,
-        })
+        self.overlays.checkout.as_ref().map(CheckoutDialog::view)
     }
 }
 
@@ -325,5 +340,52 @@ mod tests {
         press(&mut d, Keysym::Right);
         assert_eq!(d.selected, LEAVE);
         assert_eq!(d.press(BRING), None);
+    }
+
+    #[test]
+    fn a_new_dialog_selects_bring_along_unless_all_are_in_the_way() {
+        let main = std::env::temp_dir().join("gerdr-checkout-no-such-main");
+        let wt = git::Worktree {
+            path: "/r/wt".into(),
+            branch: Some("topic".into()),
+            ..Default::default()
+        };
+        let files = vec![Untracked {
+            path: "venv".into(),
+            files: 1,
+            link: false,
+        }];
+        let d = CheckoutDialog::new(wt, &main, "main".into(), files);
+        assert_eq!((d.branch.as_str(), d.selected), ("topic", BRING));
+        assert!(d.clashes.is_empty());
+        let view = d.view();
+        assert_eq!((view.worktree.as_str(), view.can_bring), ("wt", true));
+        assert_eq!(view.rows.len(), 1);
+
+        let mut d = dialog(&["dev/a.py", "venv"]);
+        d.hover = Some(LEAVE);
+        let view = d.view();
+        assert!(!view.can_bring && view.rows.iter().all(|r| r.clash));
+        assert_eq!(view.hover, Some(LEAVE));
+    }
+
+    #[test]
+    fn a_click_presses_its_button_and_off_the_panel_cancels() {
+        let d = dialog(&[]);
+        let layout = chrome::checkout_layout((1600, 1000).into(), d.files.len());
+        let at = |r: chrome::Rect| Point::from(((r.loc.x + 1) as f64, (r.loc.y + 1) as f64));
+        assert_eq!(
+            d.click(&layout, at(layout.buttons[BRING])),
+            Some(Outcome::Bring)
+        );
+        assert_eq!(
+            d.click(&layout, at(layout.buttons[0])),
+            Some(Outcome::Cancel)
+        );
+        assert_eq!(d.click(&layout, at(layout.title)), None);
+        assert_eq!(
+            d.click(&layout, Point::from((0.0, 0.0))),
+            Some(Outcome::Cancel)
+        );
     }
 }

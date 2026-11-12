@@ -563,13 +563,14 @@ fn level(tone: Tone) -> Level {
     }
 }
 
-impl Gerdr {
-    /// The project's repositories: one per checkout among its workspaces,
-    /// in the sidebar's order, named after the first workspace in each.
-    fn repo_items(&self) -> Vec<RepoItem> {
+impl crate::state::GitWatch {
+    /// The project's repositories: one per checkout among its
+    /// `workspaces`, in the sidebar's order, named after the first
+    /// workspace in each.
+    fn repo_items(&self, workspaces: &[crate::Workspace]) -> Vec<RepoItem> {
         let mut items: Vec<RepoItem> = Vec::new();
-        for (w, ws) in self.workspaces.iter().enumerate() {
-            let Some(status) = self.git.status.get(&ws.dir) else {
+        for (w, ws) in workspaces.iter().enumerate() {
+            let Some(status) = self.status.get(&ws.dir) else {
                 continue;
             };
             let Some(root) = status.root.clone() else {
@@ -588,14 +589,103 @@ impl Gerdr {
         items
     }
 
+    /// What the sidebar's repositories button shows of the repositories
+    /// `workspaces` are in: its badge and its ↑/↓ marks.
+    fn repos_changed(&self, workspaces: &[crate::Workspace]) -> RepoCounts {
+        changed_repos(workspaces.iter().filter_map(|ws| self.status.get(&ws.dir)))
+    }
+}
+
+impl crate::repos::Repos {
+    /// The edits made from the diff can't be undone once it closes: they
+    /// are let go, and the tree's marks with them.
+    fn forget_edits(&mut self) {
+        let edits = self.cuts.len();
+        self.cuts.clear();
+        self.undone.clear();
+        if let Some((_, panel)) = self.kept.as_mut() {
+            panel.edited.clear();
+        }
+        if edits > 0 {
+            tracing::debug!("let go of {edits} edits made from the diff");
+        }
+    }
+
+    /// Say under the field why the panel's last ask wasn't done; in a toast
+    /// when the panel is closed.
+    fn refuse(&mut self, ui: &mut crate::toast::Ui, why: &str) {
+        match self.panel.as_mut() {
+            Some(panel) => panel.error = Some(why.to_owned()),
+            None => ui.toast(why.to_owned(), Level::Warning),
+        }
+    }
+
+    /// A batch's run in the repository at `root`, while it is the batch
+    /// or runs in the background.
+    fn batch_run_mut(&mut self, batch: u64, root: &Path) -> Option<&mut RepoRun> {
+        let mut batches = self.batch.iter_mut().chain(&mut self.background);
+        let found = batches.find(|b| b.id == batch)?;
+        found.runs.iter_mut().find(|r| r.root == root)
+    }
+
+    /// Stop every batch running: their commands killed, the rest not run.
+    fn stop_batches(&mut self) {
+        let running = (self.batch.iter_mut())
+            .chain(&mut self.background)
+            .filter(|b| !b.finished());
+        for batch in running {
+            batch.stopping = true;
+            if let Some(stop) = self.stops.get(&batch.id) {
+                stop.store(true, AtomicOrdering::Relaxed);
+            }
+        }
+    }
+
+    /// A batch running in the background is done: told in a toast, as
+    /// the result bar shows another.
+    fn background_finished(&mut self, ui: &mut crate::toast::Ui, id: u64) {
+        let Some(at) = (self.background.iter()).position(|b| b.id == id && b.finished()) else {
+            return;
+        };
+        let batch = self.background.remove(at);
+        self.stops.remove(&id);
+        let (summary, tone) = batch.summary();
+        ui.toast(summary, level(tone));
+    }
+
+    /// The panel's batch again where it failed but in conflict: what
+    /// committed only pushed again.
+    fn retry_jobs(&self) -> Option<(BatchKind, Vec<Job>)> {
+        let batch = self.batch.as_ref()?;
+        let jobs = batch
+            .runs
+            .iter()
+            .filter(|r| match &r.state {
+                RunState::Failed { failure, .. } => !matches!(failure, Failure::Conflict(_)),
+                _ => false,
+            })
+            .map(|r| {
+                // What committed is only pushed again.
+                let committed = r
+                    .log
+                    .iter()
+                    .any(|ran| ran.ok && ran.command.contains(" commit "));
+                let mut job = r.job.clone();
+                if matches!(batch.kind, BatchKind::Commit { push: true, .. }) && committed {
+                    job.files.clear();
+                }
+                job
+            })
+            .collect();
+        Some((batch.kind.clone(), jobs))
+    }
+}
+
+impl Gerdr {
     /// What the sidebar's repositories button shows of the project's
     /// repositories: its badge and its ↑/↓ marks.
     pub(crate) fn repos_changed(&self) -> RepoCounts {
-        let statuses = self
-            .workspaces
-            .iter()
-            .filter_map(|ws| self.git.status.get(&ws.dir));
-        changed_repos(statuses)
+        self.git.repos_changed(&self.workspaces)
     }
 
     fn repos_page(&self) -> (usize, usize) {
@@ -624,7 +714,7 @@ impl Gerdr {
         self.close_menu();
         self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
-        self.repos.items = self.repo_items();
+        self.repos.items = self.git.repo_items(&self.workspaces);
         let panel = match self.repos.kept.take() {
             Some((project, panel)) if project == self.project => panel,
             _ => {
@@ -778,13 +868,13 @@ impl Gerdr {
         if self.wd().is_some() {
             self.close_worktree_diff();
             if !commit {
-                return self.forget_edits();
+                return self.repos.forget_edits();
             }
         }
         if let Some(panel) = self.repos.panel.take() {
             self.repos.kept = Some((self.project.clone(), panel));
         }
-        self.forget_edits();
+        self.repos.forget_edits();
         self.refresh_pointer_focus();
     }
 
@@ -907,7 +997,7 @@ impl Gerdr {
         if self.repos.panel.is_none() && self.repos.batch.is_none() {
             return;
         }
-        self.repos.items = self.repo_items();
+        self.repos.items = self.git.repo_items(&self.workspaces);
         self.repos_refresh();
     }
 
@@ -1754,7 +1844,7 @@ impl Gerdr {
             Outcome::Cut(edit) => self.repos_cut(edit),
             Outcome::Yank(edit) => self.repos_yank(edit),
             Outcome::Paste(put) => self.repos_paste(put),
-            Outcome::Stop => self.stop_batches(),
+            Outcome::Stop => self.repos.stop_batches(),
             Outcome::OpenCommit { root, oid, line } => self.open_commit_diff(root, oid, line),
             Outcome::Refresh => {
                 self.refresh_git();
@@ -1768,7 +1858,8 @@ impl Gerdr {
             | Outcome::RetryFailed
                 if self.repos.checking.is_some() =>
             {
-                self.repos_refuse("Wait for the check to finish")
+                self.repos
+                    .refuse(&mut ui!(self), "Wait for the check to finish")
             }
             Outcome::CreateBranch { name, jobs } => self.repos_look_for(name, jobs),
             Outcome::Batch { kind, jobs } if kind.checked_first() => self.repos_check(kind, jobs),
@@ -1778,7 +1869,7 @@ impl Gerdr {
             Outcome::SetIdentity => self.open_identity(),
             // git can't commit without a name and email: asked first, the
             // dialog runs it again once saved.
-            Outcome::RetryFailed if self.identity_failed() => self.open_identity(),
+            Outcome::RetryFailed if self.repos.identity_failed() => self.open_identity(),
             Outcome::RetryFailed => self.retry_failed(),
             Outcome::OpenInZed { root, paths, at } => self.repos_open_in_zed(&root, &paths, at),
             Outcome::Copy { text, count } => {
@@ -1945,20 +2036,6 @@ impl Gerdr {
                 self.repos_reread(&root);
             }
             Err(why) => self.show_error(why),
-        }
-    }
-
-    /// The edits made from the diff can't be undone once it closes: they
-    /// are let go, and the tree's marks with them.
-    fn forget_edits(&mut self) {
-        let edits = self.repos.cuts.len();
-        self.repos.cuts.clear();
-        self.repos.undone.clear();
-        if let Some((_, panel)) = self.repos.kept.as_mut() {
-            panel.edited.clear();
-        }
-        if edits > 0 {
-            tracing::debug!("let go of {edits} edits made from the diff");
         }
     }
 
@@ -2130,9 +2207,10 @@ impl Gerdr {
             .find(|b| jobs.iter().any(|j| b.runs_in(&j.root)));
         if let Some(batch) = running {
             let what = batch.kind.label().to_lowercase();
-            return self.repos_refuse(&format!(
-                "Wait for the {what} running there (Alt+C stops it)"
-            ));
+            return self.repos.refuse(
+                &mut ui!(self),
+                &format!("Wait for the {what} running there (Alt+C stops it)"),
+            );
         }
         let Some(tx) = self.repos_sender() else {
             return;
@@ -2264,60 +2342,13 @@ impl Gerdr {
         }
     }
 
-    /// Say under the field why the panel's last ask wasn't done; in a toast
-    /// when the panel is closed.
-    fn repos_refuse(&mut self, why: &str) {
-        match self.repos.panel.as_mut() {
-            Some(panel) => panel.error = Some(why.to_owned()),
-            None => self.toast(why.to_owned(), Level::Warning),
-        }
-    }
-
-    /// A batch's run in the repository at `root`, while it is the batch
-    /// or runs in the background.
-    fn batch_run_mut(&mut self, batch: u64, root: &Path) -> Option<&mut RepoRun> {
-        let mut batches = self
-            .repos
-            .batch
-            .iter_mut()
-            .chain(&mut self.repos.background);
-        let found = batches.find(|b| b.id == batch)?;
-        found.runs.iter_mut().find(|r| r.root == root)
-    }
-
-    /// Stop every batch running: their commands killed, the rest not run.
-    fn stop_batches(&mut self) {
-        let running = (self.repos.batch.iter_mut())
-            .chain(&mut self.repos.background)
-            .filter(|b| !b.finished());
-        for batch in running {
-            batch.stopping = true;
-            if let Some(stop) = self.repos.stops.get(&batch.id) {
-                stop.store(true, AtomicOrdering::Relaxed);
-            }
-        }
-    }
-
-    /// A batch running in the background is done: told in a toast, as
-    /// the result bar shows another.
-    fn background_finished(&mut self, id: u64) {
-        let Some(at) = (self.repos.background.iter()).position(|b| b.id == id && b.finished())
-        else {
-            return;
-        };
-        let batch = self.repos.background.remove(at);
-        self.repos.stops.remove(&id);
-        let (summary, tone) = batch.summary();
-        self.toast(summary, level(tone));
-    }
-
     /// A thread's news.
     fn repos_event(&mut self, event: RepoEvent) {
         match event {
-            RepoEvent::IdentityGuess { serial, guess } => self.identity_guess(serial, guess),
+            RepoEvent::IdentityGuess { serial, guess } => self.repos.identity_guess(serial, guess),
             RepoEvent::IdentitySaved { serial, result } => self.identity_saved(serial, result),
             RepoEvent::Step { batch, root, what } => {
-                if let Some(run) = self.batch_run_mut(batch, &root) {
+                if let Some(run) = self.repos.batch_run_mut(batch, &root) {
                     run.state = RunState::Running(what);
                     run.since.get_or_insert_with(SystemTime::now);
                 }
@@ -2329,7 +2360,7 @@ impl Gerdr {
                 before,
                 after,
             } => {
-                if let Some(run) = self.batch_run_mut(batch, &root) {
+                if let Some(run) = self.repos.batch_run_mut(batch, &root) {
                     run.before = before;
                     run.after = after;
                     match result {
@@ -2358,7 +2389,7 @@ impl Gerdr {
                     self.repos.stops.remove(&batch);
                     self.batch_finished();
                 }
-                self.background_finished(batch);
+                self.repos.background_finished(&mut ui!(self), batch);
                 self.refresh_git();
             }
             RepoEvent::Checked {
@@ -2481,31 +2512,9 @@ impl Gerdr {
     /// Run the panel's batch again where it failed but in conflict: what
     /// committed only pushed again.
     pub(crate) fn retry_failed(&mut self) {
-        let Some(batch) = &self.repos.batch else {
-            return;
-        };
-        let jobs = batch
-            .runs
-            .iter()
-            .filter(|r| match &r.state {
-                RunState::Failed { failure, .. } => !matches!(failure, Failure::Conflict(_)),
-                _ => false,
-            })
-            .map(|r| {
-                // What committed is only pushed again.
-                let committed = r
-                    .log
-                    .iter()
-                    .any(|ran| ran.ok && ran.command.contains(" commit "));
-                let mut job = r.job.clone();
-                if matches!(batch.kind, BatchKind::Commit { push: true, .. }) && committed {
-                    job.files.clear();
-                }
-                job
-            })
-            .collect();
-        let kind = batch.kind.clone();
-        self.start_batch(kind, jobs);
+        if let Some((kind, jobs)) = self.repos.retry_jobs() {
+            self.start_batch(kind, jobs);
+        }
     }
 
     /// The batch is done in every repository: empty the field it used, ask
@@ -2550,7 +2559,7 @@ impl Gerdr {
         let long = SystemTime::now()
             .duration_since(batch_started)
             .is_ok_and(|d| d >= SAY_DONE_AFTER);
-        let identity = self.identity_failed();
+        let identity = self.repos.identity_failed();
         if identity && self.repos.panel.is_some() {
             // git wants a name and email to commit: asked at once, the
             // batch run again once they are saved.
@@ -2856,6 +2865,129 @@ fn above(button: chrome::Rect, spec: &MenuSpec, output: Size<i32, Logical>) -> c
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run(root: &str, state: RunState) -> RepoRun {
+        RepoRun {
+            job: Job {
+                root: root.into(),
+                files: vec!["a.rs".into()],
+            },
+            root: root.into(),
+            before: None,
+            after: None,
+            state,
+            log: Vec::new(),
+            since: None,
+        }
+    }
+
+    fn batch(id: u64, kind: BatchKind, runs: Vec<RepoRun>) -> Batch {
+        Batch {
+            id,
+            kind,
+            runs,
+            started: SystemTime::UNIX_EPOCH,
+            stopping: false,
+        }
+    }
+
+    fn failed(failure: Failure) -> RunState {
+        RunState::Failed {
+            failure,
+            why: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_run_is_found_in_the_batch_or_the_background() {
+        let mut repos = Repos {
+            batch: Some(batch(
+                1,
+                BatchKind::Fetch,
+                vec![run("/a", RunState::Queued)],
+            )),
+            ..Repos::default()
+        };
+        repos.background.push(batch(
+            2,
+            BatchKind::Fetch,
+            vec![run("/b", RunState::Queued)],
+        ));
+        assert!(repos.batch_run_mut(1, Path::new("/a")).is_some());
+        assert!(repos.batch_run_mut(2, Path::new("/b")).is_some());
+        assert!(repos.batch_run_mut(1, Path::new("/b")).is_none());
+        assert!(repos.batch_run_mut(3, Path::new("/a")).is_none());
+    }
+
+    #[test]
+    fn stopping_reaches_only_the_batches_still_running() {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut repos = Repos {
+            batch: Some(batch(1, BatchKind::Fetch, vec![run("/a", RunState::Done)])),
+            ..Repos::default()
+        };
+        repos.background.push(batch(
+            2,
+            BatchKind::Fetch,
+            vec![run("/b", RunState::Queued)],
+        ));
+        repos.stops.insert(2, stop.clone());
+        repos.stop_batches();
+        assert!(!repos.batch.as_ref().is_some_and(|b| b.stopping));
+        assert!(repos.background[0].stopping);
+        assert!(stop.load(AtomicOrdering::Relaxed));
+    }
+
+    #[test]
+    fn a_retry_skips_conflicts_and_only_pushes_what_committed() {
+        assert_eq!(Repos::default().retry_jobs(), None);
+        let mut committed = run("/b", failed(Failure::Rejected));
+        committed.log.push(Ran {
+            command: "git commit -m x".into(),
+            output: String::new(),
+            ok: true,
+        });
+        let kind = BatchKind::Commit {
+            msg: "x".into(),
+            push: true,
+        };
+        let runs = vec![
+            run("/a", failed(Failure::Conflict(Vec::new()))),
+            committed,
+            run("/c", failed(Failure::Identity)),
+            run("/d", RunState::Done),
+        ];
+        let repos = Repos {
+            batch: Some(batch(1, kind.clone(), runs)),
+            ..Repos::default()
+        };
+        let (again, jobs) = repos.retry_jobs().unwrap();
+        assert_eq!(again, kind);
+        let roots: Vec<_> = jobs
+            .iter()
+            .map(|j| (j.root.to_str().unwrap(), j.files.len()))
+            .collect();
+        assert_eq!(roots, [("/b", 0), ("/c", 1)]);
+    }
+
+    #[test]
+    fn the_repositories_are_one_per_root_named_after_their_first_workspace() {
+        let mut git = crate::state::GitWatch::default();
+        git.status.insert("/r/src".into(), status("/r", true));
+        git.status.insert("/r".into(), status("/r", true));
+        git.status.insert("/s".into(), status("/s", false));
+        let ws = |dir: &str| crate::Workspace::new(dir.into(), crate::WorkspaceKind::Terminal);
+        let workspaces = [ws("/none"), ws("/r/src"), ws("/s"), ws("/r")];
+        let items = git.repo_items(&workspaces);
+        let got: Vec<_> = (items.iter())
+            .map(|i| (i.root.to_str().unwrap(), i.label.as_str(), i.workspace))
+            .collect();
+        assert_eq!(got, [("/r", "src", 1), ("/s", "s", 2)]);
+        assert_eq!(
+            git.repos_changed(&workspaces),
+            changed_repos([status("/r", true), status("/s", false)].iter())
+        );
+    }
 
     fn status(root: &str, dirty: bool) -> GitStatus {
         GitStatus {

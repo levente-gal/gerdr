@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
-    utils::{Logical, Point},
+    utils::{Logical, Point, Size},
 };
 
 use crate::{
@@ -158,6 +158,39 @@ impl IdentityDialog {
         None
     }
 
+    /// What a left click at `pos` asks, on an output of `size`: nothing
+    /// while it is being saved.
+    fn click(
+        &mut self,
+        size: Size<i32, Logical>,
+        pos: Point<f64, Logical>,
+    ) -> Option<IdentityOutcome> {
+        if self.saving {
+            return None;
+        }
+        let layout = chrome::identity_layout(size, self.error.is_some());
+        match layout.hit(pos) {
+            Some(IdentityHit::Button(IDENTITY_SAVE)) => self.save(),
+            Some(IdentityHit::Button(_)) => Some(IdentityOutcome::Cancel),
+            Some(IdentityHit::Name) => {
+                self.focus = IdentityFocus::Name;
+                None
+            }
+            Some(IdentityHit::Email) => {
+                self.focus = IdentityFocus::Email;
+                None
+            }
+            Some(IdentityHit::Scope(global)) => {
+                self.focus = IdentityFocus::Scope;
+                self.global = global;
+                None
+            }
+            // Off it, it stays: a click away never throws what was typed
+            // away.
+            None => None,
+        }
+    }
+
     fn view(&self) -> IdentityView {
         let only = match self.roots.as_slice() {
             [root] => format!("Only {}", repo_name(root)),
@@ -216,15 +249,33 @@ fn identity_roots(batch: &crate::repos::Batch) -> Vec<PathBuf> {
         .collect()
 }
 
-impl Gerdr {
+impl crate::repos::Repos {
     /// The panel's batch failed somewhere for want of a name and email.
     pub(crate) fn identity_failed(&self) -> bool {
-        self.repos
-            .batch
+        self.batch
             .as_ref()
             .is_some_and(|b| !identity_roots(b).is_empty())
     }
 
+    /// The fields' guess came: filled where still empty.
+    pub(crate) fn identity_guess(&mut self, serial: u64, guess: Identity) {
+        if let Some(dialog) = self.identity.as_mut().filter(|d| d.serial == serial) {
+            dialog.guessed(guess);
+        }
+    }
+
+    /// Close the dialog, keeping what was typed for its next opening.
+    fn drop_identity(&mut self) {
+        if let Some(dialog) = self.identity.take() {
+            let who = dialog.who();
+            if !(who.name.is_empty() && who.email.is_empty()) || !dialog.global {
+                self.identity_draft = Some((who, dialog.global));
+            }
+        }
+    }
+}
+
+impl Gerdr {
     /// Open the dialog on the panel's batch's repositories that failed for
     /// want of a name and email, its fields filled off the thread.
     pub fn open_identity(&mut self) {
@@ -263,13 +314,6 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
-    /// The fields' guess came: filled where still empty.
-    pub(crate) fn identity_guess(&mut self, serial: u64, guess: Identity) {
-        if let Some(dialog) = self.repos.identity.as_mut().filter(|d| d.serial == serial) {
-            dialog.guessed(guess);
-        }
-    }
-
     /// A key while the dialog has the keyboard.
     pub fn identity_key(
         &mut self,
@@ -285,12 +329,7 @@ impl Gerdr {
     pub fn apply_identity(&mut self, outcome: IdentityOutcome) {
         match outcome {
             IdentityOutcome::Cancel => {
-                if let Some(dialog) = self.repos.identity.take() {
-                    let who = dialog.who();
-                    if !(who.name.is_empty() && who.email.is_empty()) || !dialog.global {
-                        self.repos.identity_draft = Some((who, dialog.global));
-                    }
-                }
+                self.repos.drop_identity();
                 self.refresh_pointer_focus();
             }
             IdentityOutcome::Save { who, global } => {
@@ -351,31 +390,7 @@ impl Gerdr {
         let Some(dialog) = self.repos.identity.as_mut() else {
             return;
         };
-        if dialog.saving {
-            return;
-        }
-        let layout = chrome::identity_layout(size, dialog.error.is_some());
-        let outcome = match layout.hit(pos) {
-            Some(IdentityHit::Button(IDENTITY_SAVE)) => dialog.save(),
-            Some(IdentityHit::Button(_)) => Some(IdentityOutcome::Cancel),
-            Some(IdentityHit::Name) => {
-                dialog.focus = IdentityFocus::Name;
-                None
-            }
-            Some(IdentityHit::Email) => {
-                dialog.focus = IdentityFocus::Email;
-                None
-            }
-            Some(IdentityHit::Scope(global)) => {
-                dialog.focus = IdentityFocus::Scope;
-                dialog.global = global;
-                None
-            }
-            // Off it, it stays: a click away never throws what was typed
-            // away.
-            None => None,
-        };
-        if let Some(outcome) = outcome {
+        if let Some(outcome) = dialog.click(size, pos) {
             self.apply_identity(outcome);
         }
     }
@@ -486,6 +501,74 @@ mod tests {
         d.email.set("o@c.at");
         d.saving = true;
         assert_eq!(press(&mut d, Keysym::Return), None);
+    }
+
+    #[test]
+    fn a_click_focuses_a_field_switches_the_scope_or_presses_a_button() {
+        let size = Size::from((1600, 1000));
+        let layout = chrome::identity_layout(size, false);
+        let at = |r: chrome::Rect| Point::from(((r.loc.x + 1) as f64, (r.loc.y + 1) as f64));
+        let mut d = dialog();
+        assert_eq!(d.click(size, at(layout.email)), None);
+        assert_eq!(d.focus, IdentityFocus::Email);
+        assert_eq!(d.click(size, at(layout.scope[1])), None);
+        assert_eq!((d.focus, d.global), (IdentityFocus::Scope, false));
+        assert_eq!(d.click(size, Point::from((0.0, 0.0))), None);
+        let cancel = layout.buttons[1 - IDENTITY_SAVE];
+        assert_eq!(d.click(size, at(cancel)), Some(IdentityOutcome::Cancel));
+        d.saving = true;
+        assert_eq!(d.click(size, at(cancel)), None);
+    }
+
+    #[test]
+    fn the_repositories_keep_the_dialog_its_guess_and_what_was_typed() {
+        use crate::repos::{Batch, BatchKind, RepoRun, Repos};
+        let run = |root: &str, failure| RepoRun {
+            job: crate::repos::Job {
+                root: root.into(),
+                files: Vec::new(),
+            },
+            root: root.into(),
+            before: None,
+            after: None,
+            state: RunState::Failed {
+                failure,
+                why: String::new(),
+            },
+            log: Vec::new(),
+            since: None,
+        };
+        let mut repos = Repos::default();
+        assert!(!repos.identity_failed());
+        repos.batch = Some(Batch {
+            id: 7,
+            kind: BatchKind::Fetch,
+            runs: vec![run("/a", Failure::Rejected)],
+            started: std::time::SystemTime::UNIX_EPOCH,
+            stopping: false,
+        });
+        assert!(!repos.identity_failed());
+        (repos.batch.as_mut().unwrap().runs).push(run("/b", Failure::Identity));
+        assert!(repos.identity_failed());
+
+        repos.identity = Some(dialog());
+        let guess = || Identity {
+            name: "Octo Cat".into(),
+            email: "o@c.at".into(),
+        };
+        // An older opening's guess is stale.
+        repos.identity_guess(2, guess());
+        assert_eq!(&*repos.identity.as_ref().unwrap().name, "");
+        repos.identity_guess(1, guess());
+        assert_eq!(&*repos.identity.as_ref().unwrap().name, "Octo Cat");
+        repos.drop_identity();
+        assert!(repos.identity.is_none());
+        assert_eq!(repos.identity_draft, Some((guess(), true)));
+        // Nothing typed and every repository: nothing to keep.
+        repos.identity_draft = None;
+        repos.identity = Some(dialog());
+        repos.drop_identity();
+        assert_eq!(repos.identity_draft, None);
     }
 
     #[test]

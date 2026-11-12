@@ -2224,6 +2224,44 @@ pub(crate) struct DiffClick {
     pub(crate) ctrl: bool,
 }
 
+impl crate::repos::Repos {
+    /// The reviews of worktrees' diffs: read when first wanted, those of
+    /// worktrees gone, on another branch or too old dropped.
+    fn worktree_reviews(&mut self, ui: &mut crate::toast::Ui) -> &mut crate::review::Worktrees {
+        if self.worktree_reviews.is_none() {
+            let mut reviews = crate::review::load_worktrees(None);
+            if reviews.prune(crate::clock::now_secs(), Path::is_dir) {
+                save_worktree_reviews(ui, &reviews);
+            }
+            self.worktree_reviews = Some(reviews);
+        }
+        self.worktree_reviews.get_or_insert_default()
+    }
+
+    /// Drop the reviews of the worktrees at `paths`, deleted.
+    pub(crate) fn forget_worktree_reviews(&mut self, ui: &mut crate::toast::Ui, paths: &[PathBuf]) {
+        let reviews = self.worktree_reviews(ui);
+        let mut gone = false;
+        for path in paths {
+            gone |= reviews.forget(path);
+        }
+        if gone {
+            save_worktree_reviews(ui, reviews);
+        }
+    }
+}
+
+/// Write the worktrees' reviews, saying so when that fails.
+fn save_worktree_reviews(ui: &mut crate::toast::Ui, reviews: &crate::review::Worktrees) {
+    if let Err(err) = crate::review::save_worktrees(None, reviews) {
+        tracing::warn!("saving the worktrees' reviews: {err}");
+        ui.toast(
+            format!("Couldn't save the review: {err}"),
+            crate::toast::Level::Error,
+        );
+    }
+}
+
 impl crate::Gerdr {
     /// The diff on show: the keys, clicks and views of the panel act on
     /// it.
@@ -2307,7 +2345,7 @@ impl crate::Gerdr {
             self.repos.kept = Some((self.project.clone(), panel));
         }
         self.repos.close_worktree();
-        let review = self.worktree_reviews().get(&root, branch.as_deref());
+        let review = (self.repos.worktree_reviews(&mut ui!(self))).get(&root, branch.as_deref());
         let mut wd = WorktreeDiff::new(root, label, branch, target, workspace, review);
         wd.home = home;
         self.repos.worktree = Some(wd);
@@ -2353,30 +2391,6 @@ impl crate::Gerdr {
         self.refresh_pointer_focus();
     }
 
-    /// The reviews of worktrees' diffs: read when first wanted, those of
-    /// worktrees gone, on another branch or too old dropped.
-    fn worktree_reviews(&mut self) -> &mut crate::review::Worktrees {
-        if self.repos.worktree_reviews.is_none() {
-            let mut reviews = crate::review::load_worktrees(None);
-            if reviews.prune(crate::clock::now_secs(), Path::is_dir) {
-                self.save_worktree_reviews(&reviews);
-            }
-            self.repos.worktree_reviews = Some(reviews);
-        }
-        self.repos.worktree_reviews.get_or_insert_default()
-    }
-
-    /// Write the worktrees' reviews, saying so when that fails.
-    fn save_worktree_reviews(&mut self, reviews: &crate::review::Worktrees) {
-        if let Err(err) = crate::review::save_worktrees(None, reviews) {
-            tracing::warn!("saving the worktrees' reviews: {err}");
-            self.toast(
-                format!("Couldn't save the review: {err}"),
-                crate::toast::Level::Error,
-            );
-        }
-    }
-
     /// Save the worktree diff's review, if it changed: with the others,
     /// pruned; a file under review's in its own file.
     pub(crate) fn worktree_save_review(&mut self) {
@@ -2398,24 +2412,11 @@ impl crate::Gerdr {
         wd.diff.review_dirty = false;
         let (root, branch, review) = (wd.root.clone(), wd.branch.clone(), wd.diff.review.clone());
         let now = crate::clock::now_secs();
-        let reviews = self.worktree_reviews();
+        let mut ui = ui!(self);
+        let reviews = self.repos.worktree_reviews(&mut ui);
         reviews.put(&root, branch.as_deref(), &review, now);
         reviews.prune(now, Path::is_dir);
-        let reviews = reviews.clone();
-        self.save_worktree_reviews(&reviews);
-    }
-
-    /// Drop the reviews of the worktrees at `paths`, deleted.
-    pub(crate) fn forget_worktree_reviews(&mut self, paths: &[PathBuf]) {
-        let reviews = self.worktree_reviews();
-        let mut gone = false;
-        for path in paths {
-            gone |= reviews.forget(path);
-        }
-        if gone {
-            let reviews = reviews.clone();
-            self.save_worktree_reviews(&reviews);
-        }
+        save_worktree_reviews(&mut ui, reviews);
     }
 
     /// Close the worktree's diff, back to the worktrees popup; a

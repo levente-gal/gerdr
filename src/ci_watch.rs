@@ -48,7 +48,7 @@ impl Gerdr {
             .loop_handle
             .insert_source(Timer::immediate(), move |_, _, state| {
                 state.refresh_ci();
-                TimeoutAction::ToDuration(state.ci_interval())
+                TimeoutAction::ToDuration(state.ci.interval())
             });
         if let Err(err) = read
             .map_err(|e| e.to_string())
@@ -58,46 +58,13 @@ impl Gerdr {
         }
     }
 
-    /// How long until the CI is read again.
-    fn ci_interval(&self) -> Duration {
-        if self.ci.repos.values().any(RepoCi::busy) {
-            ci::BUSY_INTERVAL
-        } else {
-            ci::IDLE_INTERVAL
-        }
-    }
-
-    /// The repositories the shown project's workspaces are in, by root.
-    fn ci_roots(&self) -> Vec<PathBuf> {
-        let mut roots: Vec<PathBuf> = self
-            .workspaces
-            .iter()
-            .filter_map(|ws| self.git.status.get(&ws.dir)?.root.clone())
-            .collect();
-        roots.sort();
-        roots.dedup();
-        roots
-    }
-
     /// Read the CI now, off the event loop; once the round under way is
     /// done, if there is one.
     pub fn refresh_ci(&mut self) {
-        let Some(tx) = self.ci.sender.clone() else {
+        let roots = self.git.roots(&self.workspaces);
+        let Some(tx) = self.ci.start(roots.clone()) else {
             return;
         };
-        if self.ci.pending {
-            self.ci.again = true;
-            return;
-        }
-        let roots = self.ci_roots();
-        self.ci.asked = roots.clone();
-        if roots.is_empty() {
-            self.ci.repos.clear();
-            // Nothing to read: nothing failed to be.
-            crate::problems::clear(ci::CI_PROBLEMS);
-            return;
-        }
-        self.ci.pending = true;
         ci::read_all(roots, self.projects.ci_watched.clone(), move |read| {
             let _ = tx.send(read);
         });
@@ -106,57 +73,23 @@ impl Gerdr {
     /// The Git status was read again: a repository the CI wasn't read for
     /// (a workspace opened, another project shown) is read now.
     pub fn ci_roots_changed(&mut self) {
-        if self.ci_roots() != self.ci.asked {
+        if self.git.roots(&self.workspaces) != self.ci.asked {
             self.refresh_ci();
         }
     }
 
-    /// Take a round's CI in. A repository that couldn't be read keeps what
-    /// was last read of it, with why (see `ci::unread`), unless it isn't
-    /// asked about any more. Watched
-    /// pull requests found closed are watched no more. Rows that finished
-    /// are notified of.
+    /// Take a round's CI in (see `CiWatch::take`). Watched pull requests
+    /// found closed are watched no more. Rows that finished are notified
+    /// of.
     fn ci_read(&mut self, read: CiRead) {
-        let asked: HashSet<&PathBuf> = self.ci.asked.iter().collect();
-        let mut ci: HashMap<PathBuf, RepoCi> = HashMap::new();
-        for (root, result) in read {
-            if !asked.contains(&root) {
-                continue;
-            }
-            match result {
-                Ok(repo) => {
-                    ci.insert(root, repo);
-                }
-                Err(err) => {
-                    tracing::debug!("ci of {}: {err}", root.display());
-                    if let Some(repo) = ci::unread(&root, self.ci.repos.remove(&root), err) {
-                        ci.insert(root, repo);
-                    }
-                }
-            }
-        }
+        let (closed, news) = self.ci.take(read);
         let mut unwatched = false;
-        for repo in ci.values() {
-            let key = ci::key(&repo.host, &repo.slug);
-            for n in &repo.closed {
-                unwatched |= self.unwatch_pr(&key, *n);
-            }
+        for (key, n) in closed {
+            unwatched |= self.unwatch_pr(&key, n);
         }
         if unwatched {
             self.projects.save();
         }
-        let repos: Vec<&RepoCi> = ci.values().collect();
-        let news = ci::ci_news(&self.ci.states, &repos);
-        self.ci.states = repos
-            .iter()
-            .flat_map(|repo| {
-                let key = ci::key(&repo.host, &repo.slug);
-                repo.rows
-                    .iter()
-                    .map(move |row| ((key.clone(), row.subject.clone()), row.state))
-            })
-            .collect();
-        self.ci.repos = ci;
         if let Some(notifier) = self.notices.notifier.as_mut() {
             for news in news {
                 notifier.send(
@@ -262,12 +195,7 @@ impl Gerdr {
         if self.unwatch_pr(key, n) {
             self.projects.save();
         }
-        for repo in self.ci.repos.values_mut() {
-            if ci::key(&repo.host, &repo.slug) == key {
-                repo.rows
-                    .retain(|row| !(row.watched && row.subject == Subject::Pr(n)));
-            }
-        }
+        self.ci.drop_watched(key, n);
     }
 
     /// Forget pull request `n` of repository `key` as watched, saying
@@ -368,17 +296,8 @@ impl Gerdr {
         if let Some((_, repo)) = self.ci_of(ws) {
             return Some(repo.web_url());
         }
-        let root = self
-            .git
-            .status
-            .get(&ws.dir)
-            .and_then(|g| g.root.clone())
-            .unwrap_or_else(|| ws.dir.clone());
-        self.git
-            .repo_pages
-            .entry(root)
-            .or_insert_with_key(|dir| git::web_url(dir))
-            .clone()
+        let dir = ws.dir.clone();
+        self.git.repo_page(&dir)
     }
 
     /// Show the page a CI notification links to, in a workspace of its
@@ -399,6 +318,117 @@ impl Gerdr {
             Some(w) => self.open_page(w, link),
             None => self.show_notice("No workspace of that repository is open".into()),
         }
+    }
+}
+
+impl crate::state::CiWatch {
+    /// How long until the CI is read again.
+    fn interval(&self) -> Duration {
+        if self.repos.values().any(RepoCi::busy) {
+            ci::BUSY_INTERVAL
+        } else {
+            ci::IDLE_INTERVAL
+        }
+    }
+
+    /// A round of reading the CI of `roots` is wanted: where to hand it,
+    /// unless there is nowhere, one is under way (then another is wanted
+    /// once it is done), or there is nothing to read.
+    fn start(&mut self, roots: Vec<PathBuf>) -> Option<channel::Sender<CiRead>> {
+        let tx = self.sender.clone()?;
+        if self.pending {
+            self.again = true;
+            return None;
+        }
+        self.asked = roots;
+        if self.asked.is_empty() {
+            self.repos.clear();
+            // Nothing to read: nothing failed to be.
+            crate::problems::clear(ci::CI_PROBLEMS);
+            return None;
+        }
+        self.pending = true;
+        Some(tx)
+    }
+
+    /// Take a round's CI in. A repository that couldn't be read keeps what
+    /// was last read of it, with why (see `ci::unread`), unless it isn't
+    /// asked about any more. Gives the watched pull requests found closed,
+    /// by their repository's key, and the rows that finished.
+    fn take(&mut self, read: CiRead) -> (Vec<(String, u64)>, Vec<ci::CiNews>) {
+        let asked: HashSet<&PathBuf> = self.asked.iter().collect();
+        let mut ci: HashMap<PathBuf, RepoCi> = HashMap::new();
+        for (root, result) in read {
+            if !asked.contains(&root) {
+                continue;
+            }
+            match result {
+                Ok(repo) => {
+                    ci.insert(root, repo);
+                }
+                Err(err) => {
+                    tracing::debug!("ci of {}: {err}", root.display());
+                    if let Some(repo) = ci::unread(&root, self.repos.remove(&root), err) {
+                        ci.insert(root, repo);
+                    }
+                }
+            }
+        }
+        let closed = (ci.values())
+            .flat_map(|repo| {
+                let key = ci::key(&repo.host, &repo.slug);
+                repo.closed.iter().map(move |n| (key.clone(), *n))
+            })
+            .collect();
+        let repos: Vec<&RepoCi> = ci.values().collect();
+        let news = ci::ci_news(&self.states, &repos);
+        self.states = repos
+            .iter()
+            .flat_map(|repo| {
+                let key = ci::key(&repo.host, &repo.slug);
+                repo.rows
+                    .iter()
+                    .map(move |row| ((key.clone(), row.subject.clone()), row.state))
+            })
+            .collect();
+        self.repos = ci;
+        (closed, news)
+    }
+
+    /// Pull request `n` of repository `key` is watched no more: its chip
+    /// goes right away.
+    fn drop_watched(&mut self, key: &str, n: u64) {
+        for repo in self.repos.values_mut() {
+            if ci::key(&repo.host, &repo.slug) == key {
+                repo.rows
+                    .retain(|row| !(row.watched && row.subject == Subject::Pr(n)));
+            }
+        }
+    }
+}
+
+impl crate::state::GitWatch {
+    /// The repositories `workspaces` are in, by root.
+    fn roots(&self, workspaces: &[Workspace]) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> = workspaces
+            .iter()
+            .filter_map(|ws| self.status.get(&ws.dir)?.root.clone())
+            .collect();
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
+    /// The web page of the repository the workspace folder `dir` is in,
+    /// from its remote (remembered).
+    fn repo_page(&mut self, dir: &Path) -> Option<String> {
+        let root = (self.status.get(dir))
+            .and_then(|g| g.root.clone())
+            .unwrap_or_else(|| dir.to_path_buf());
+        self.repo_pages
+            .entry(root)
+            .or_insert_with_key(|dir| git::web_url(dir))
+            .clone()
     }
 }
 
@@ -451,7 +481,13 @@ pub fn ci_state_word(state: CiState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::repo_home;
+    use super::*;
+    use crate::{
+        WorkspaceKind,
+        ci::{CiRow, Group},
+        git::GitStatus,
+        state::{CiWatch, GitWatch},
+    };
 
     #[test]
     fn a_page_is_of_the_repository_its_path_starts_with() {
@@ -461,5 +497,134 @@ mod tests {
         assert_eq!(repo_home("https://github.com/cli/cli"), home);
         assert_eq!(repo_home("https://github.com/cli"), None);
         assert_eq!(repo_home("https://github.com/cli/"), None);
+    }
+
+    fn repo(slug: &str, rows: Vec<CiRow>, closed: Vec<u64>) -> RepoCi {
+        RepoCi {
+            slug: slug.into(),
+            host: "github.com".into(),
+            rows,
+            other_prs: 0,
+            closed,
+            error: None,
+        }
+    }
+
+    fn row(subject: Subject, state: CiState, watched: bool) -> CiRow {
+        CiRow {
+            subject,
+            title: None,
+            head: None,
+            state,
+            checks: Vec::new(),
+            link: String::new(),
+            group: Group::Branch,
+            watched,
+        }
+    }
+
+    #[test]
+    fn a_round_starts_only_when_none_is_under_way_and_there_is_something_to_read() {
+        let mut ci = CiWatch::default();
+        assert!(ci.start(vec!["/a".into()]).is_none());
+        let (tx, _rx) = channel::channel();
+        ci.sender = Some(tx);
+        assert!(ci.start(vec!["/a".into()]).is_some());
+        assert!(ci.pending && !ci.again);
+        assert_eq!(ci.asked, [PathBuf::from("/a")]);
+        // Under way: another is wanted once it is done.
+        assert!(ci.start(vec!["/b".into()]).is_none());
+        assert!(ci.again);
+        assert_eq!(ci.asked, [PathBuf::from("/a")]);
+        // Nothing to read: what was read goes.
+        ci.pending = false;
+        ci.repos
+            .insert("/a".into(), repo("o/a", Vec::new(), Vec::new()));
+        assert!(ci.start(Vec::new()).is_none());
+        assert!(ci.repos.is_empty() && !ci.pending);
+    }
+
+    #[test]
+    fn a_round_keeps_what_was_asked_and_says_what_closed_and_finished() {
+        let mut ci = CiWatch {
+            asked: vec!["/a".into(), "/b".into()],
+            ..CiWatch::default()
+        };
+        let running = row(Subject::Branch("main".into()), CiState::Running, false);
+        ci.repos
+            .insert("/b".into(), repo("o/b", Vec::new(), Vec::new()));
+        let read = vec![
+            ("/a".into(), Ok(repo("o/a", vec![running], vec![7]))),
+            ("/b".into(), Err("offline".into())),
+            ("/c".into(), Ok(repo("o/c", Vec::new(), Vec::new()))),
+        ];
+        let (closed, news) = ci.take(read);
+        assert_eq!(closed, [("github.com/o/a".to_owned(), 7)]);
+        assert!(news.is_empty());
+        assert_eq!(ci.repos.len(), 2);
+        // Not read, it keeps what it had, with why.
+        assert_eq!(ci.repos[Path::new("/b")].error.as_deref(), Some("offline"));
+        assert_eq!(ci.interval(), ci::BUSY_INTERVAL);
+        let key = ("github.com/o/a".to_owned(), Subject::Branch("main".into()));
+        assert_eq!(ci.states.get(&key), Some(&CiState::Running));
+
+        let passed = row(Subject::Branch("main".into()), CiState::Passed, false);
+        let read = vec![("/a".into(), Ok(repo("o/a", vec![passed], Vec::new())))];
+        let (closed, news) = ci.take(read);
+        assert!(closed.is_empty());
+        assert_eq!(news.len(), 1);
+        assert_eq!(ci.interval(), ci::IDLE_INTERVAL);
+    }
+
+    #[test]
+    fn a_pull_request_unwatched_loses_its_chip_only_in_its_repository() {
+        let mut ci = CiWatch::default();
+        let rows = || {
+            vec![
+                row(Subject::Pr(3), CiState::Passed, true),
+                row(Subject::Pr(4), CiState::Passed, true),
+            ]
+        };
+        ci.repos
+            .insert("/a".into(), repo("o/a", rows(), Vec::new()));
+        ci.repos
+            .insert("/b".into(), repo("o/b", rows(), Vec::new()));
+        ci.drop_watched("github.com/o/a", 3);
+        assert_eq!(ci.repos[Path::new("/a")].rows.len(), 1);
+        assert_eq!(ci.repos[Path::new("/b")].rows.len(), 2);
+    }
+
+    #[test]
+    fn the_roots_are_the_workspaces_repositories_once_each() {
+        let mut git = GitWatch::default();
+        let status = |root: &str| GitStatus {
+            root: Some(root.into()),
+            ..GitStatus::default()
+        };
+        git.status.insert("/r2/src".into(), status("/r2"));
+        git.status.insert("/r2".into(), status("/r2"));
+        git.status.insert("/r1".into(), status("/r1"));
+        let ws = |dir: &str| Workspace::new(dir.into(), WorkspaceKind::Terminal);
+        let workspaces = [ws("/r2/src"), ws("/r1"), ws("/r2"), ws("/none")];
+        let roots = git.roots(&workspaces);
+        assert_eq!(roots, [PathBuf::from("/r1"), PathBuf::from("/r2")]);
+    }
+
+    #[test]
+    fn a_repository_page_is_remembered_by_its_root() {
+        let mut git = GitWatch::default();
+        git.status.insert(
+            "/r/src".into(),
+            GitStatus {
+                root: Some("/r".into()),
+                ..GitStatus::default()
+            },
+        );
+        let page = Some("https://github.com/o/r".to_owned());
+        git.repo_pages.insert("/r".into(), page.clone());
+        git.repo_pages.insert("/plain".into(), None);
+        assert_eq!(git.repo_page(Path::new("/r/src")), page);
+        // Outside a repository read, the folder stands for it.
+        assert_eq!(git.repo_page(Path::new("/plain")), None);
     }
 }
