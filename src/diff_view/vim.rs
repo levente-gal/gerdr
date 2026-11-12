@@ -758,13 +758,12 @@ impl DiffView {
     /// The caret put where it was to go, when this diff read of the
     /// repository at `root` for Git status read `generation` is the one.
     pub(super) fn caret_placed(&mut self, root: &std::path::Path, generation: u64, ctx: &Ctx) {
-        let Some(after) = self.caret_after.as_ref() else {
+        let Some(after) = self
+            .caret_after
+            .take_if(|after| after.root == root && generation > after.generation)
+        else {
             return;
         };
-        if after.root != root || generation <= after.generation {
-            return;
-        }
-        let after = self.caret_after.take().unwrap();
         let Some(head) = self.header_row(&after.root, Some(&after.path)) else {
             return;
         };

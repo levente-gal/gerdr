@@ -517,11 +517,11 @@ pub fn merged(dir: &Path, rev: &str, also: &[&str]) -> bool {
     targets.extend(also.iter().map(|t| t.to_string()));
     targets.iter().filter(|t| t.as_str() != rev).any(|target| {
         let key = (target.clone(), rev.to_owned());
-        if let Some(&known) = seen.lock().unwrap().get(&key) {
+        if let Some(&known) = seen.lock().expect("seen lock poisoned").get(&key) {
             return known;
         }
         let merged = merged_into(dir, target, rev);
-        seen.lock().unwrap().insert(key, merged);
+        seen.lock().expect("seen lock poisoned").insert(key, merged);
         merged
     })
 }

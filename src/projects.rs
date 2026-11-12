@@ -1206,7 +1206,7 @@ impl Project {
         (1..)
             .map(|n| format!("g{n}"))
             .find(|id| self.workspaces.iter().all(|r| r.id != *id))
-            .unwrap()
+            .expect("only finitely many ids are taken")
     }
 
     /// Its record of herdr workspace `herdr_id`.

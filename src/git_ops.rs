@@ -379,7 +379,10 @@ impl Drain {
                     loop {
                         match pipe.read(&mut chunk) {
                             Ok(0) => break,
-                            Ok(n) => read.lock().unwrap().extend_from_slice(&chunk[..n]),
+                            Ok(n) => read
+                                .lock()
+                                .expect("read lock poisoned")
+                                .extend_from_slice(&chunk[..n]),
                             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
                             Err(_) => break,
                         }
@@ -393,7 +396,7 @@ impl Drain {
     /// What was read, once the pipe is closed or after `GRACE`.
     fn finish(self) -> String {
         let _ = self.done.recv_timeout(GRACE);
-        String::from_utf8_lossy(&self.read.lock().unwrap()).into_owned()
+        String::from_utf8_lossy(&self.read.lock().expect("read lock poisoned")).into_owned()
     }
 }
 

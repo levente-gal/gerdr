@@ -1579,7 +1579,7 @@ impl Gerdr {
             return;
         };
         let layout = chrome::repos_layout(&view, self.repos_rect());
-        let pos = self.seat.get_pointer().unwrap().current_location();
+        let pos = self.pointer().current_location();
         let over_detail = layout.detail.to_f64().contains(pos);
         let over_menu = layout
             .branch_menu

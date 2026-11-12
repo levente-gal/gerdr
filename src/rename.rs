@@ -84,7 +84,7 @@ impl Gerdr {
         };
         let scale = self.scale();
         let at = self.chrome.caret_at(&field, pos.x, scale);
-        let extend = self.seat.get_keyboard().unwrap().modifier_state().shift;
+        let extend = self.keyboard().modifier_state().shift;
         if let Some(rename) = self.rename.as_mut() {
             rename.field.click(at, extend, self.press_count);
         }

@@ -7465,7 +7465,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         |_, display, state| {
             // Safety: the display is never dropped while the loop runs.
-            unsafe { display.get_mut().dispatch_clients(state).unwrap() };
+            if let Err(err) = unsafe { display.get_mut().dispatch_clients(state) } {
+                tracing::warn!("dispatching Wayland clients: {err}");
+            }
             Ok(PostAction::Continue)
         },
     )?;
@@ -7493,7 +7495,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let view = state.chrome_view();
                 let clear_color = state.theme().clear_color();
                 {
-                    let (renderer, mut framebuffer) = state.backend.bind().unwrap();
+                    let Ok((renderer, mut framebuffer)) = state.backend.bind() else {
+                        tracing::warn!("the window can't be drawn to: frame skipped");
+                        return;
+                    };
                     let chrome = state.chrome.elements(renderer, view);
                     let _ = smithay::desktop::space::render_output::<
                         _,

@@ -1,0 +1,2 @@
+# Tests may unwrap: a panic there fails only the test.
+allow-unwrap-in-tests = true
