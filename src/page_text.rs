@@ -13,6 +13,7 @@ use std::time::Instant;
 use crate::{
     Gerdr, chrome,
     chrome::{FeatureTabHit, TabArea, TabColumn, TextPick, TextSpot},
+    key_table::{self, Binding},
     scrollback::Grain,
 };
 
@@ -54,6 +55,93 @@ fn copied_note(text: &str) -> String {
         n @ 2.. => format!("Copied {n} lines"),
         _ => "Copied 1 line".into(),
     }
+}
+
+/// What a key does to the text selected on the page (`PICK_KEYS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PickKey {
+    Copy,
+    /// Let it go.
+    Unselect,
+    /// Search the criteria for it, going to the place found after it, or
+    /// (`true`) before it.
+    Star(bool),
+}
+
+/// The page as the keys of its text read it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PickCtx {
+    /// Text is selected.
+    pub picked: bool,
+    /// Manual test's criteria show, to search.
+    pub criteria: bool,
+}
+
+/// The keys of the text selected on the feature tab's page; `*` and `#`
+/// search the criteria with nothing selected too.
+pub(crate) const PICK_KEYS: &[Binding<PickCtx, PickKey>] = &[
+    Binding {
+        chord: "Ctrl+C",
+        does: |c| c.picked.then_some(PickKey::Copy),
+        footer: true,
+        f1: "copy the text selected with the pointer",
+    },
+    Binding {
+        chord: "y",
+        does: |c| c.picked.then_some(PickKey::Copy),
+        footer: true,
+        f1: "copy it, as Ctrl+C",
+    },
+    Binding {
+        chord: "*",
+        does: |c| c.criteria.then_some(PickKey::Star(false)),
+        footer: true,
+        f1: "search for the text selected, else the word under the pointer",
+    },
+    Binding {
+        chord: "#",
+        does: |c| c.criteria.then_some(PickKey::Star(true)),
+        footer: true,
+        f1: "the same, going to the place found before it",
+    },
+    Binding {
+        chord: "Esc",
+        does: |c| c.picked.then_some(PickKey::Unselect),
+        footer: true,
+        f1: "let the selection go",
+    },
+];
+
+/// The footer's hints for text selected on the page, `criteria` showing
+/// or not: "Ctrl+C / y" copy, "* / #" search it, Esc unselect.
+#[allow(dead_code)] // The feature tab's footer (features.rs) is to call it.
+pub(crate) fn pick_hints(criteria: bool) -> Vec<(String, String)> {
+    let ctx = PickCtx {
+        picked: true,
+        criteria,
+    };
+    let label = |k: &PickKey| match k {
+        PickKey::Copy => "copy",
+        PickKey::Unselect => "unselect",
+        PickKey::Star(_) => "search it",
+    };
+    paired(key_table::hints(PICK_KEYS, &ctx, |k| label(k).to_owned()))
+}
+
+/// `hints` with each run of keys doing the same, by their words, as one
+/// hint of their keys ("Ctrl+C / y"), as the footer lists them.
+pub(crate) fn paired(hints: Vec<(&'static str, String)>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (key, what) in hints {
+        match out.last_mut() {
+            Some((keys, said)) if *said == what => {
+                keys.push_str(" / ");
+                keys.push_str(key);
+            }
+            _ => out.push((key.to_owned(), what)),
+        }
+    }
+    out
 }
 
 impl Gerdr {
@@ -226,30 +314,43 @@ impl Gerdr {
         if panel.note.is_some() || typing || panel.keys {
             return false;
         }
-        let bare = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
-        let ctrl = mods.ctrl && !(mods.alt || mods.logo || mods.shift);
         let had = panel.pick.is_some();
         let picked = self.picked_page_text();
-        if let Some(text) = &picked {
-            let copy = (ctrl && matches!(sym, Keysym::c | Keysym::C)) || (bare && sym == Keysym::y);
-            if copy {
-                let note = copied_note(text);
-                self.copy_text(text.clone());
-                self.show_success(note);
+        if picked.is_none()
+            && had
+            && let Some(panel) = self.features.panel.as_mut()
+        {
+            // Its page changed under it.
+            panel.pick = None;
+        }
+        let ctx = PickCtx {
+            picked: picked.is_some(),
+            criteria: self.criteria_search_shows(),
+        };
+        match key_table::press(PICK_KEYS, &ctx, mods, sym) {
+            Some(PickKey::Copy) => {
+                if let Some(text) = &picked {
+                    let note = copied_note(text);
+                    self.copy_text(text.clone());
+                    self.show_success(note);
+                }
                 return true;
             }
-            if bare && sym == Keysym::Escape {
+            Some(PickKey::Unselect) => {
                 if let Some(panel) = self.features.panel.as_mut() {
                     panel.pick = None;
                 }
                 self.sync_feature_page();
                 return true;
             }
-        } else if had && let Some(panel) = self.features.panel.as_mut() {
-            // Its page changed under it.
-            panel.pick = None;
+            Some(PickKey::Star(back)) => return self.star_criteria(back, picked),
+            None => {}
         }
-        let star = [sym, typed].iter().any(|k| matches!(*k, Keysym::asterisk | Keysym::KP_Multiply));
+        // The keypad's `*`, and a `*` or `#` typed with AltGr, which no
+        // chord names: matched on what they type.
+        let star = [sym, typed]
+            .iter()
+            .any(|k| matches!(*k, Keysym::asterisk | Keysym::KP_Multiply));
         let hash = [sym, typed].contains(&Keysym::numbersign);
         if (star || hash) && !(mods.ctrl || mods.alt || mods.logo) {
             return self.star_criteria(hash, picked);
@@ -378,5 +479,36 @@ mod tests {
         assert!(key("*").is_some() && key("#").is_some());
         assert_eq!(key("n"), Some((false, Keysym::n)));
         assert!(key("N").is_some());
+    }
+
+    #[test]
+    fn the_selections_keys_are_one_table_its_footer_reads() {
+        let ctxs: Vec<PickCtx> = [(false, false), (false, true), (true, false), (true, true)]
+            .into_iter()
+            .map(|(picked, criteria)| PickCtx { picked, criteria })
+            .collect();
+        key_table::check(PICK_KEYS, &ctxs);
+        let said = |hints: Vec<(String, String)>| -> Vec<String> {
+            hints.into_iter().map(|(k, w)| format!("{k} {w}")).collect()
+        };
+        assert_eq!(
+            said(pick_hints(true)),
+            ["Ctrl+C / y copy", "* / # search it", "Esc unselect"]
+        );
+        assert_eq!(said(pick_hints(false)), ["Ctrl+C / y copy", "Esc unselect"]);
+        // `*` and `#` as a press gives them on a US layout: Shift and the
+        // digit's key (K8); with nothing selected they still search.
+        let shift = ModifiersState {
+            shift: true,
+            ..Default::default()
+        };
+        let star = key_table::press(PICK_KEYS, &ctxs[1], &shift, Keysym::_8);
+        assert_eq!(star, Some(PickKey::Star(false)));
+        let hash = key_table::press(PICK_KEYS, &ctxs[1], &shift, Keysym::_3);
+        assert_eq!(hash, Some(PickKey::Star(true)));
+        assert_eq!(
+            key_table::press(PICK_KEYS, &ctxs[0], &shift, Keysym::_8),
+            None
+        );
     }
 }
