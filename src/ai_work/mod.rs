@@ -613,6 +613,69 @@ impl Live {
             let _ = jobs.send(job);
         }
     }
+
+    /// The AI work's tasks: a backfill or a rescan under way, and the AI
+    /// work coming from other machines.
+    pub(crate) fn tasks(&self) -> Vec<crate::tasks::Task> {
+        let mut tasks: Vec<crate::tasks::Task> = (self.pulls.iter())
+            .map(|((project, slug), pull)| {
+                let stopping = pull.stop.load(Ordering::Relaxed);
+                crate::tasks::Task {
+                    title: format!(
+                        "Bringing the AI work of \u{201c}{}\u{201d} from {}",
+                        pull.title, pull.from
+                    ),
+                    chip: "ai work".to_owned(),
+                    detail: match stopping {
+                        true => "Stopping".to_owned(),
+                        false => "Its chats, prompts and stats, kept there".to_owned(),
+                    },
+                    dot: crate::chrome::Dot::Working,
+                    actions: match stopping {
+                        true => Vec::new(),
+                        false => vec![(
+                            "Stop",
+                            crate::menu::MenuAction::StopAiWorkPull(project.clone(), slug.clone()),
+                        )],
+                    },
+                }
+            })
+            .collect();
+        let Some(busy) = self.busy else {
+            return tasks;
+        };
+        let (title, detail, done, total) = match busy {
+            Busy::Backfill { done, total } => (
+                "Keeping earlier AI work",
+                "Once per feature: its record, prompts, files and the chats still there",
+                done,
+                total,
+            ),
+            Busy::Rescan { done, total } => (
+                "Drawing the AI work's stats again",
+                "From the files kept of each feature",
+                done,
+                total,
+            ),
+        };
+        let stopping = self.stopping;
+        let detail = match stopping {
+            true => "Stopping".to_owned(),
+            false => detail.to_owned(),
+        };
+        let actions = match stopping {
+            true => Vec::new(),
+            false => vec![("Stop", crate::menu::MenuAction::StopAiWork)],
+        };
+        tasks.push(crate::tasks::Task {
+            title: format!("{title} ({done} of {total})"),
+            chip: "ai work".to_owned(),
+            detail,
+            dot: crate::chrome::Dot::Working,
+            actions,
+        });
+        tasks
+    }
 }
 
 /// The problems the thread says go under this source. The writes on the
@@ -716,69 +779,6 @@ impl Gerdr {
             self.ai_work.send(thread::Job::Backfill { features });
         }
     }
-
-    /// The AI work's tasks: a backfill or a rescan under way, and the AI
-    /// work coming from other machines.
-    pub(crate) fn ai_work_tasks(&self) -> Vec<crate::tasks::Task> {
-        let mut tasks: Vec<crate::tasks::Task> = (self.ai_work.pulls.iter())
-            .map(|((project, slug), pull)| {
-                let stopping = pull.stop.load(Ordering::Relaxed);
-                crate::tasks::Task {
-                    title: format!(
-                        "Bringing the AI work of \u{201c}{}\u{201d} from {}",
-                        pull.title, pull.from
-                    ),
-                    chip: "ai work".to_owned(),
-                    detail: match stopping {
-                        true => "Stopping".to_owned(),
-                        false => "Its chats, prompts and stats, kept there".to_owned(),
-                    },
-                    dot: crate::chrome::Dot::Working,
-                    actions: match stopping {
-                        true => Vec::new(),
-                        false => vec![(
-                            "Stop",
-                            crate::menu::MenuAction::StopAiWorkPull(project.clone(), slug.clone()),
-                        )],
-                    },
-                }
-            })
-            .collect();
-        let Some(busy) = self.ai_work.busy else {
-            return tasks;
-        };
-        let (title, detail, done, total) = match busy {
-            Busy::Backfill { done, total } => (
-                "Keeping earlier AI work",
-                "Once per feature: its record, prompts, files and the chats still there",
-                done,
-                total,
-            ),
-            Busy::Rescan { done, total } => (
-                "Drawing the AI work's stats again",
-                "From the files kept of each feature",
-                done,
-                total,
-            ),
-        };
-        let stopping = self.ai_work.stopping;
-        let detail = match stopping {
-            true => "Stopping".to_owned(),
-            false => detail.to_owned(),
-        };
-        let actions = match stopping {
-            true => Vec::new(),
-            false => vec![("Stop", crate::menu::MenuAction::StopAiWork)],
-        };
-        tasks.push(crate::tasks::Task {
-            title: format!("{title} ({done} of {total})"),
-            chip: "ai work".to_owned(),
-            detail,
-            dot: crate::chrome::Dot::Working,
-            actions,
-        });
-        tasks
-    }
 }
 
 #[cfg(test)]
@@ -845,5 +845,20 @@ mod tests {
             "\"opencode\""
         );
         assert_eq!(AgentKind::OpenCode.name(), "opencode");
+    }
+
+    #[test]
+    fn tasks_say_the_work_under_way() {
+        let mut live = Live::off();
+        assert!(live.tasks().is_empty());
+        live.busy = Some(Busy::Backfill { done: 1, total: 3 });
+        let tasks = live.tasks();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Keeping earlier AI work (1 of 3)");
+        assert_eq!(tasks[0].actions.len(), 1);
+        live.stopping = true;
+        let tasks = live.tasks();
+        assert_eq!(tasks[0].detail, "Stopping");
+        assert!(tasks[0].actions.is_empty());
     }
 }

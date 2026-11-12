@@ -308,6 +308,7 @@ pub struct Web {
 }
 
 /// Cursor agent chats read from Cursor's database.
+#[derive(Default)]
 pub struct CursorWatch {
     /// What gerdr knows of its Cursor's chats (see `cursor_agents`).
     pub reads: cursor_agents::Chats,

@@ -1140,7 +1140,28 @@ pub fn install_hooks(home: &Path) -> Result<(), String> {
         .map_err(|err| format!("{}: {err}", path.display()))
 }
 
+impl crate::state::CursorWatch {
+    /// Ask for Cursor's database to be read now.
+    pub(crate) fn read_db(&self, projects: &crate::projects::Store) {
+        if let Some(poke) = &self.poke {
+            let _ = poke.send(projects.cursor_history.ids());
+        }
+    }
+
+    /// Stop hearing Cursor's hooks: gerdr quits.
+    pub fn close_socket(&mut self) {
+        if let Some(path) = self.socket.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 impl crate::Gerdr {
+    /// Stop hearing Cursor's hooks: gerdr quits.
+    pub fn close_cursor_socket(&mut self) {
+        self.cursor.close_socket();
+    }
+
     /// Follow what gerdr's Cursor's chats do: read its database off the
     /// event loop, hear its hooks, and look again every `DB_INTERVAL`, for
     /// a hook's word gets old.
@@ -1210,7 +1231,7 @@ impl crate::Gerdr {
                     state.cursor.reads.hear(event);
                 }
                 state.cursor_changed();
-                state.read_cursor_db();
+                state.cursor.read_db(&state.projects);
                 Ok(PostAction::Continue)
             })
             .inspect_err(|err| tracing::warn!("cursor's hooks: {err}"))
@@ -1241,17 +1262,10 @@ impl crate::Gerdr {
         self.notify_agents();
     }
 
-    /// Ask for Cursor's database to be read now.
-    fn read_cursor_db(&self) {
-        if let Some(poke) = &self.cursor.poke {
-            let _ = poke.send(self.projects.cursor_history.ids());
-        }
-    }
-
     /// Save what changed in the history and read the chats it keeps.
     fn cursor_history_changed(&mut self) {
         self.projects.save();
-        self.read_cursor_db();
+        self.cursor.read_db(&self.projects);
     }
 
     /// Delete Cursor chat `id` from gerdr: its card goes, until the chat
@@ -1274,13 +1288,6 @@ impl crate::Gerdr {
         }
         self.cursor_history_changed();
         self.cursor_changed();
-    }
-
-    /// Stop hearing Cursor's hooks: gerdr quits.
-    pub fn close_cursor_socket(&mut self) {
-        if let Some(path) = self.cursor.socket.take() {
-            let _ = std::fs::remove_file(path);
-        }
     }
 
     /// The workspace of the shown project Cursor chat `chat` goes under
@@ -2195,5 +2202,36 @@ mod tests {
             ..written
         };
         assert!(!history.hides(&again, None));
+    }
+
+    #[test]
+    fn closing_the_socket_removes_its_file_once() {
+        let dir = std::env::temp_dir().join(format!("gerdr-cursor-sock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hooks.sock");
+        std::fs::write(&path, "").unwrap();
+        let mut watch = crate::state::CursorWatch {
+            socket: Some(path.clone()),
+            ..Default::default()
+        };
+        watch.close_socket();
+        assert!(!path.exists());
+        assert_eq!(watch.socket, None);
+        watch.close_socket();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reading_the_database_asks_with_the_history_kept() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watch = crate::state::CursorWatch {
+            poke: Some(tx),
+            ..Default::default()
+        };
+        let projects = crate::projects::Store::default();
+        watch.read_db(&projects);
+        assert_eq!(rx.try_recv(), Ok(projects.cursor_history.ids()));
+        // Without a reader nothing is asked.
+        crate::state::CursorWatch::default().read_db(&projects);
     }
 }

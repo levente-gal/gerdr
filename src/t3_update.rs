@@ -538,7 +538,36 @@ pub(crate) fn is_t3(pid: u32) -> bool {
     })
 }
 
+impl crate::t3_agents::T3 {
+    /// What gerdr reads of T3 Code now.
+    fn reading(&self) -> Reading {
+        Reading {
+            version: self
+                .server
+                .as_ref()
+                .and_then(|s| s.version.clone())
+                .or_else(|| self.updates.pin.clone()),
+            migration: self.migration,
+            reads: self.source == Source::Database,
+        }
+    }
+
+    /// How many of T3 Code's threads work or wait for the user.
+    pub(crate) fn busy(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|r| matches!(r.status(), AgentStatus::Working | AgentStatus::Blocked))
+            .count()
+    }
+}
+
 impl crate::Gerdr {
+    /// How many of T3 Code's threads work or wait for the user (see
+    /// `T3::busy`).
+    pub(crate) fn t3_busy(&self) -> usize {
+        self.t3.busy()
+    }
+
     /// Look whether a check for a newer T3 Code is due every `LOOK_EVERY`,
     /// from `FIRST_LOOK` on.
     pub fn watch_t3_updates(&mut self) {
@@ -560,27 +589,13 @@ impl crate::Gerdr {
         }
     }
 
-    /// What gerdr reads of T3 Code now.
-    fn t3_reading(&self) -> Reading {
-        Reading {
-            version: self
-                .t3
-                .server
-                .as_ref()
-                .and_then(|s| s.version.clone())
-                .or_else(|| self.t3.updates.pin.clone()),
-            migration: self.t3.migration,
-            reads: self.t3.source == Source::Database,
-        }
-    }
-
     /// Look for a newer T3 Code off the event loop, and take it if it fits
     /// (see `look`); `asked`: by the user, who hears what came of it.
     pub fn check_t3(&mut self, asked: bool) {
         let Some(home) = self.t3.home.clone() else {
             return;
         };
-        let reading = self.t3_reading();
+        let reading = self.t3.reading();
         self.off_loop_t3(asked, move || look(&home, &reading));
     }
 
@@ -632,7 +647,7 @@ impl crate::Gerdr {
             }
             Ok(Found::Busy) => {}
             Ok(Found::Current(newest)) => {
-                let running = self.t3_reading().version;
+                let running = self.t3.reading().version;
                 if running.is_some_and(|v| v != newest) && asked {
                     // Pinned back on purpose: the newest is there to take.
                     let text = format!("T3 Code {newest} is out");
@@ -726,15 +741,6 @@ impl crate::Gerdr {
         self.show_success(text.to_owned());
     }
 
-    /// How many of T3 Code's threads work or wait for the user.
-    pub(crate) fn t3_busy(&self) -> usize {
-        self.t3
-            .rows
-            .iter()
-            .filter(|r| matches!(r.status(), AgentStatus::Working | AgentStatus::Blocked))
-            .count()
-    }
-
     /// Run T3 Code at downloaded version `version` from now on: restart the
     /// server at it, once its threads are idle (or, `asked`, after asking).
     fn switch_t3(&mut self, version: String, asked: bool) {
@@ -752,7 +758,7 @@ impl crate::Gerdr {
             return;
         }
         self.t3.restart_at = Some(version.clone());
-        match self.t3_busy() {
+        match self.t3.busy() {
             0 => self.restart_t3(),
             busy if asked => self.ask_restart_t3(version, busy),
             _ => {
@@ -765,7 +771,7 @@ impl crate::Gerdr {
     /// Restart the server at the version waiting, if any, once no thread
     /// works or waits.
     pub fn t3_maybe_restart(&mut self) {
-        if self.t3.restart_at.is_some() && self.t3.alive && self.t3_busy() == 0 {
+        if self.t3.restart_at.is_some() && self.t3.alive && self.t3.busy() == 0 {
             self.restart_t3();
         }
     }
@@ -948,5 +954,39 @@ mod tests {
     #[ignore = "downloads T3 Code"]
     fn newest_nightly_fits() {
         try_newest("nightly");
+    }
+
+    #[test]
+    fn busy_counts_the_threads_working_or_waiting() {
+        let row = |run: &str, pending: i64| crate::t3_agents::ThreadRow {
+            run: Some(run.into()),
+            pending,
+            ..Default::default()
+        };
+        let mut t3 = crate::t3_agents::T3::default();
+        t3.rows = vec![row("running", 0), row("idle", 1), row("idle", 0)];
+        assert_eq!(t3.busy(), 2);
+        assert_eq!(crate::t3_agents::T3::default().busy(), 0);
+    }
+
+    #[test]
+    fn reading_takes_the_pin_without_a_server() {
+        let mut t3 = crate::t3_agents::T3::default();
+        t3.updates.pin = Some("0.0.9".into());
+        t3.migration = Some(12);
+        let reading = t3.reading();
+        assert_eq!(reading.version.as_deref(), Some("0.0.9"));
+        assert_eq!(reading.migration, Some(12));
+        assert!(reading.reads);
+        t3.server = Some(crate::t3_agents::Server {
+            origin: "http://127.0.0.1:3773".into(),
+            pid: 1,
+            version: Some("0.1.0".into()),
+            environment: None,
+        });
+        t3.source = Source::Cli("old".into());
+        let reading = t3.reading();
+        assert_eq!(reading.version.as_deref(), Some("0.1.0"));
+        assert!(!reading.reads);
     }
 }

@@ -26,7 +26,7 @@
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
-    utils::{Logical, Point},
+    utils::{Logical, Point, Size},
 };
 
 use crate::{
@@ -216,6 +216,43 @@ impl RestartDialog {
         self.top = self.top.saturating_add_signed(by).min(most);
         self.cursor = self.cursor.clamp(self.top, self.top + fit.max(1) - 1);
     }
+
+    /// The dialog laid out on an output of `size`.
+    fn layout(&self, size: Size<i32, Logical>) -> chrome::RestartLayout {
+        chrome::restart_layout(size, self.rows.len(), self.asks.action())
+    }
+
+    /// How many rows the dialog shows at once on an output of `size`.
+    fn fit(&self, size: Size<i32, Logical>) -> usize {
+        self.layout(size).rows.len()
+    }
+
+    /// A left click at `pos` on an output of `size`: off the dialog it
+    /// cancels, on a button presses it, on a row checks or unchecks it.
+    fn click(&mut self, size: Size<i32, Logical>, pos: Point<f64, Logical>) -> Option<Outcome> {
+        let layout = self.layout(size);
+        match restart_hit(&layout, self.top, pos) {
+            Some(RestartHit::Button(button)) => Some(self.press(button)),
+            Some(RestartHit::Row(row)) => {
+                self.cursor = row;
+                self.toggle(row);
+                None
+            }
+            None if layout.panel.to_f64().contains(pos) => None,
+            None => Some(Outcome::Cancel),
+        }
+    }
+
+    /// The pointer moved to `pos`, on an output of `size`.
+    fn hover_at(&mut self, size: Size<i32, Logical>, pos: Point<f64, Logical>) {
+        self.hover = restart_hit(&self.layout(size), self.top, pos);
+    }
+
+    /// What the pointer can press, on an output of `size`.
+    fn controls(&self, size: Size<i32, Logical>) -> Vec<chrome::Rect> {
+        let layout = self.layout(size);
+        layout.rows.into_iter().chain(layout.buttons).collect()
+    }
 }
 
 /// What the restart dialog says of the rows it doesn't show: `top` above
@@ -345,9 +382,7 @@ impl Gerdr {
         let Some(dialog) = &self.overlays.restart else {
             return 0;
         };
-        chrome::restart_layout(self.output_size(), dialog.rows.len(), dialog.asks.action())
-            .rows
-            .len()
+        dialog.fit(self.output_size())
     }
 
     /// Do what the restart dialog asked: keep the choices and go on with
@@ -414,18 +449,7 @@ impl Gerdr {
         let Some(dialog) = self.overlays.restart.as_mut() else {
             return false;
         };
-        let layout = chrome::restart_layout(size, dialog.rows.len(), dialog.asks.action());
-        let outcome = match restart_hit(&layout, dialog.top, pos) {
-            Some(RestartHit::Button(button)) => Some(dialog.press(button)),
-            Some(RestartHit::Row(row)) => {
-                dialog.cursor = row;
-                dialog.toggle(row);
-                None
-            }
-            None if layout.panel.to_f64().contains(pos) => None,
-            None => Some(Outcome::Cancel),
-        };
-        if let Some(outcome) = outcome {
+        if let Some(outcome) = dialog.click(size, pos) {
             self.apply_restart(outcome);
         }
         true
@@ -435,8 +459,7 @@ impl Gerdr {
     pub fn restart_hover(&mut self, pos: Point<f64, Logical>) {
         let size = self.output_size();
         if let Some(dialog) = self.overlays.restart.as_mut() {
-            let layout = chrome::restart_layout(size, dialog.rows.len(), dialog.asks.action());
-            dialog.hover = restart_hit(&layout, dialog.top, pos);
+            dialog.hover_at(size, pos);
         }
     }
 
@@ -446,9 +469,7 @@ impl Gerdr {
         let Some(dialog) = &self.overlays.restart else {
             return Vec::new();
         };
-        let layout =
-            chrome::restart_layout(self.output_size(), dialog.rows.len(), dialog.asks.action());
-        layout.rows.into_iter().chain(layout.buttons).collect()
+        dialog.controls(self.output_size())
     }
 
     pub fn restart_view(&self) -> Option<RestartView> {
@@ -639,5 +660,22 @@ mod tests {
         press(&mut d, Keysym::Tab);
         assert_eq!(press(&mut d, Keysym::Return), Some(Outcome::Cancel));
         assert_eq!(press(&mut d, Keysym::Escape), Some(Outcome::Cancel));
+    }
+
+    #[test]
+    fn clicks_off_the_dialog_cancel_and_on_a_row_toggle_it() {
+        let size = Size::from((1600, 1000));
+        let mut d = dialog(3);
+        assert_eq!(d.fit(size), 3);
+        assert_eq!(d.click(size, (1.0, 1.0).into()), Some(Outcome::Cancel));
+        let controls = d.controls(size);
+        assert_eq!(controls.len(), 3 + 2);
+        let row = controls[1].to_f64();
+        let pos = row.loc + row.size.downscale(2.0).to_point();
+        assert_eq!(d.click(size, pos), None);
+        assert!(!d.rows[1].checked);
+        assert_eq!(d.cursor, 1);
+        d.hover_at(size, pos);
+        assert_eq!(d.hover, Some(RestartHit::Row(1)));
     }
 }

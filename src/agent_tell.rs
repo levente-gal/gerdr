@@ -31,6 +31,11 @@ pub(crate) struct Told {
 }
 
 impl Gerdr {
+    /// `told` didn't reach the agent `via`: `why` (see `Live::told_failed`).
+    pub(crate) fn told_failed(&self, told: &Told, via: Via, why: &str) {
+        self.ai_work.told_failed(told, via, why);
+    }
+
     /// Type `line` into the agent of `stage` of feature `slug`, for `kind`.
     /// It goes as it does today: a nudge straight to where the agent is; a
     /// prompt to its tab while it waits for one; anything else only once
@@ -79,7 +84,7 @@ impl Gerdr {
             text: line.to_owned(),
         };
         let sent = self.send_told(run, &told);
-        self.keep_told(&told, via(run, stage, kind), &sent);
+        self.ai_work.keep_told(&told, via(run, stage, kind), &sent);
         sent
     }
 
@@ -136,11 +141,13 @@ impl Gerdr {
         }
         herdr.send_agent_line(pane, &told.text)
     }
+}
 
+impl ai_work::Live {
     /// Keep `told`, gone `via`, with its feature's AI work: what it was and
     /// the files it names, or why it couldn't go.
     fn keep_told(&self, told: &Told, via: Via, sent: &Result<(), String>) {
-        let Some(dir) = self.ai_work.dir(&told.project, &told.slug) else {
+        let Some(dir) = self.dir(&told.project, &told.slug) else {
             return;
         };
         let event = match sent {
@@ -156,7 +163,7 @@ impl Gerdr {
 
     /// `told`, which went at once, didn't reach the agent `via`: `why`.
     pub(crate) fn told_failed(&self, told: &Told, via: Via, why: &str) {
-        if let Some(dir) = self.ai_work.dir(&told.project, &told.slug) {
+        if let Some(dir) = self.dir(&told.project, &told.slug) {
             self.keep_told_line(told, &dir, failed_event(told, via, why, true));
         }
     }
@@ -169,7 +176,7 @@ impl Gerdr {
         match ai_work::write::append(dir, &Line::now(event)) {
             Ok(()) => {
                 crate::problems::clear_at("ai-work", &at);
-                self.ai_work.send(ai_work::thread::Job::Index {
+                self.send(ai_work::thread::Job::Index {
                     project: told.project.clone(),
                     slug: told.slug.clone(),
                 });

@@ -83,7 +83,6 @@ fn forget() {
     }
 }
 
-
 /// The last line of the log at `path` that says something.
 pub fn last_log_line(path: &std::path::Path) -> Option<String> {
     let text = std::fs::read(path).ok()?;
@@ -145,19 +144,26 @@ fn runs(target: i32, server: Option<&Server>) -> bool {
     }
 }
 
-impl Gerdr {
+impl crate::t3_agents::T3 {
     /// Whether T3 Code's server runs, wherever it was started.
+    pub fn runs(&self) -> bool {
+        self.alive || started().is_some()
+    }
+}
+
+impl Gerdr {
+    /// Whether T3 Code's server runs (see `T3::runs`).
     pub fn t3_runs(&self) -> bool {
-        self.t3.alive || started().is_some()
+        self.t3.runs()
     }
 
     /// Start T3 Code's server in the background, at `port` if any (where a
     /// restarted one ran), unless one runs.
     pub fn spawn_t3(&mut self, port: Option<u16>) {
-        if self.t3_runs() {
+        if self.t3.runs() {
             return self.toast("T3 Code is running".to_owned(), Level::Info);
         }
-        let command = self.t3_command(port);
+        let command = self.t3.command(port);
         let log_path = launch::log_path(LOG);
         let Some(mut log) = launch::append_log(&log_path) else {
             let text = "T3 Code can't start: its log can't be written".to_owned();

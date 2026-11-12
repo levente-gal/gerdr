@@ -16,7 +16,7 @@ use serde_json::Value;
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
     reexports::calloop::channel,
-    utils::{Logical, Point, Rectangle},
+    utils::{Logical, Point, Rectangle, Size},
 };
 
 use crate::{
@@ -630,6 +630,46 @@ impl StatsPanel {
         } else if self.selected >= self.first + page {
             self.settle(self.first + page - 1, false, page, now);
         }
+    }
+
+    /// Put the list where its scrollbar's thumb was dragged: `pos` rows
+    /// (in pixels) down, `page` rows shown.
+    pub fn scroll_to(&mut self, pos: f64, page: usize, now: u64) {
+        let row = (pos / chrome::STATS_ROW as f64).round() as isize;
+        let by = row - self.first as isize;
+        self.scroll_by(by, page, now);
+    }
+
+    /// The pointer moved to `pos`, on an output of `size`: what it is over
+    /// lights up, and the Back and delete buttons say their keys.
+    pub fn hover_at(
+        &mut self,
+        pos: Point<f64, Logical>,
+        size: Size<i32, Logical>,
+        now: u64,
+    ) -> Option<Tooltip> {
+        let view = self.view(now);
+        let layout = chrome::stats_layout(&view, size);
+        let hit = chrome::stats_hit(&view, &layout, pos);
+        self.hover = hit;
+        match hit? {
+            StatsHit::Back => Some(Tooltip::new("Back to the list", layout.back?).key("Esc")),
+            StatsHit::Delete(i) => {
+                let rect = layout.deletes.iter().find(|(k, _)| *k == i)?.1;
+                Some(Tooltip::new("Delete its AI work", rect).key("Shift+Del"))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a control of the panel is at `pos`, on an output of `size`.
+    pub fn control_at(&self, pos: Point<f64, Logical>, size: Size<i32, Logical>, now: u64) -> bool {
+        let view = self.view(now);
+        let layout = chrome::stats_layout(&view, size);
+        !matches!(
+            chrome::stats_hit(&view, &layout, pos),
+            None | Some(StatsHit::Panel | StatsHit::Query)
+        )
     }
 
     /// Show tab `tab`, its list from the top.
@@ -1847,30 +1887,17 @@ impl Gerdr {
     /// The pointer moved while the panel is open: what it is over lights
     /// up, and the Back button says its key.
     pub(crate) fn ai_stats_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
-        let view = self.ai_stats_view()?;
-        let layout = chrome::stats_layout(&view, self.output_size());
-        let hit = chrome::stats_hit(&view, &layout, pos);
-        self.overlays.ai_stats.as_mut()?.hover = hit;
-        match hit? {
-            StatsHit::Back => Some(Tooltip::new("Back to the list", layout.back?).key("Esc")),
-            StatsHit::Delete(i) => {
-                let rect = layout.deletes.iter().find(|(k, _)| *k == i)?.1;
-                Some(Tooltip::new("Delete its AI work", rect).key("Shift+Del"))
-            }
-            _ => None,
-        }
+        let size = self.output_size();
+        let panel = self.overlays.ai_stats.as_mut()?;
+        panel.hover_at(pos, size, crate::clock::now_secs())
     }
 
     /// Whether a control of the panel is at `pos`: the pointer is a hand
     /// over it.
     pub(crate) fn ai_stats_control_at(&self, pos: Point<f64, Logical>) -> bool {
-        self.ai_stats_view().is_some_and(|view| {
-            let layout = chrome::stats_layout(&view, self.output_size());
-            !matches!(
-                chrome::stats_hit(&view, &layout, pos),
-                None | Some(StatsHit::Panel | StatsHit::Query)
-            )
-        })
+        let size = self.output_size();
+        (self.overlays.ai_stats.as_ref())
+            .is_some_and(|panel| panel.control_at(pos, size, crate::clock::now_secs()))
     }
 
     /// The wheel or the touchpad moved the panel's list.
@@ -1890,9 +1917,7 @@ impl Gerdr {
     pub(crate) fn ai_stats_scroll_to(&mut self, pos: f64) {
         let page = self.ai_stats_page();
         if let Some(panel) = self.overlays.ai_stats.as_mut() {
-            let row = (pos / chrome::STATS_ROW as f64).round() as isize;
-            let by = row - panel.first as isize;
-            panel.scroll_by(by, page, crate::clock::now_secs());
+            panel.scroll_to(pos, page, crate::clock::now_secs());
         }
     }
 
@@ -2646,5 +2671,33 @@ mod tests {
             ),
             "assistant: [shell] bash -lc ls"
         );
+    }
+
+    #[test]
+    fn the_thumb_drag_scrolls_to_its_row() {
+        let mut panel = panel(|scope| {
+            let mut v = view(scope);
+            let row = v.features[1].clone();
+            v.features = (0..30)
+                .map(|i| stats::FeatureRow {
+                    slug: format!("f{i}"),
+                    ..row.clone()
+                })
+                .collect();
+            Some(Ok(v))
+        });
+        panel.scroll_to(12.0 * chrome::STATS_ROW as f64, 10, NOW);
+        assert_eq!(panel.first, 12);
+        panel.scroll_to(0.4 * chrome::STATS_ROW as f64, 10, NOW);
+        assert_eq!(panel.first, 0);
+    }
+
+    #[test]
+    fn hovering_off_the_panel_lights_nothing() {
+        let mut panel = loaded();
+        let size = Size::from((1600, 1000));
+        assert!(panel.hover_at((0.0, 0.0).into(), size, NOW).is_none());
+        assert_eq!(panel.hover, None);
+        assert!(!panel.control_at((0.0, 0.0).into(), size, NOW));
     }
 }

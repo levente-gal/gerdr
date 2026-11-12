@@ -81,7 +81,103 @@ impl Parts {
     }
 }
 
+impl crate::inbox::Inbox {
+    /// The shown project's inbox file, loaded if it isn't yet (or another
+    /// project's is); `None` without a project.
+    fn file_mut(&mut self, project: Option<&str>) -> Option<&mut InboxFile> {
+        let id = project?.to_owned();
+        if self.store.as_ref().is_none_or(|(p, _)| *p != id) {
+            let file = inbox_store::load(None, &id);
+            self.store = Some((id, file));
+        }
+        self.store.as_mut().map(|(_, file)| file)
+    }
+
+    /// The shown project's inbox file, if loaded.
+    fn file(&self, project: Option<&str>) -> Option<&InboxFile> {
+        let (id, file) = self.store.as_ref()?;
+        (Some(id.as_str()) == project).then_some(file)
+    }
+
+    /// Save the shown project's inbox file, its stale triage pruned.
+    fn save_file(&mut self) {
+        let Some((id, file)) = self.store.as_mut() else {
+            return;
+        };
+        inbox_store::prune(file, crate::clock::now_secs());
+        if let Err(err) = inbox_store::save(None, id, file) {
+            tracing::warn!("inbox of {id}: {err}");
+        }
+    }
+
+    /// Move the inbox panel's list on to `now` if it moves on its own;
+    /// whether it still moves (see `Scroll::moving`).
+    pub fn scroll_tick(&mut self, now: Instant) -> bool {
+        match self.panel.as_mut() {
+            Some(panel) => panel.tick(now),
+            None => false,
+        }
+    }
+
+    /// The toast's "Undo" after a dismiss or snooze: list items `ids` of
+    /// project `project` (by id) again. After a todo was marked done, it
+    /// isn't any more. The project needn't be the shown one any more: the
+    /// file loaded is changed if it is that project's, else that project's
+    /// is loaded, changed and saved on its own.
+    pub fn restore_todos(&mut self, project: &str, ids: &[String]) {
+        self.change_file_of(project, |file| {
+            // Every one, not only up to the first changed.
+            ids.iter().filter(|id| restore(file, id)).count() > 0
+        });
+    }
+
+    /// The toast's "Undo" after a todo was deleted: put `todo` back in
+    /// project `project`'s file at index `at` (or last, if there are fewer
+    /// now), triaged as it was. Not if one of its id was written since.
+    pub fn undelete_todo(&mut self, project: &str, todo: Todo, at: usize, triage: Option<Triage>) {
+        self.change_file_of(project, |file| undelete(file, todo, at, triage));
+    }
+
+    /// Change project `project`'s inbox file (by id) with `change`, and
+    /// save it if `change` says it changed. The project needn't be the
+    /// shown one: the file loaded is changed if it is that project's, else
+    /// that project's is loaded, changed and saved on its own.
+    fn change_file_of(&mut self, project: &str, change: impl FnOnce(&mut InboxFile) -> bool) {
+        match self.store.as_mut() {
+            Some((p, file)) if p == project => {
+                if change(file) {
+                    self.save_file();
+                }
+            }
+            _ => {
+                let mut file = inbox_store::load(None, project);
+                if change(&mut file)
+                    && let Err(err) = inbox_store::save(None, project, &file)
+                {
+                    tracing::warn!("inbox of {project}: {err}");
+                }
+            }
+        }
+    }
+}
+
 impl Gerdr {
+    /// Move the inbox panel's list on to `now` (see `Inbox::scroll_tick`).
+    pub fn inbox_scroll_tick(&mut self, now: Instant) -> bool {
+        self.inbox.scroll_tick(now)
+    }
+
+    /// Restore triage of `ids` in project `project` (see
+    /// `Inbox::restore_todos`).
+    pub fn inbox_restore(&mut self, project: &str, ids: &[String]) {
+        self.inbox.restore_todos(project, ids);
+    }
+
+    /// Put a deleted todo back (see `Inbox::undelete_todo`).
+    pub fn inbox_undelete(&mut self, project: &str, todo: Todo, at: usize, triage: Option<Triage>) {
+        self.inbox.undelete_todo(project, todo, at, triage);
+    }
+
     /// Open the inbox panel, the first item of section `focus` selected
     /// (else the first item).
     pub fn open_inbox(&mut self, focus: Option<Section>) {
@@ -117,28 +213,11 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
-    /// The shown project's inbox file, loaded if it isn't yet (or another
-    /// project's is); `None` without a project.
-    fn inbox_file_mut(&mut self) -> Option<&mut InboxFile> {
-        let id = self.project.clone()?;
-        if self.inbox.store.as_ref().is_none_or(|(p, _)| *p != id) {
-            let file = inbox_store::load(None, &id);
-            self.inbox.store = Some((id, file));
-        }
-        self.inbox.store.as_mut().map(|(_, file)| file)
-    }
-
-    /// The shown project's inbox file, if loaded.
-    fn inbox_file(&self) -> Option<&InboxFile> {
-        let (id, file) = self.inbox.store.as_ref()?;
-        (Some(id) == self.project.as_ref()).then_some(file)
-    }
-
     /// Whether the inbox has the agent of card `view` dismissed or snoozed
     /// at `now` (seconds), as it is now: the sidebar's "Needs you" list
     /// leaves it out too.
     pub(crate) fn inbox_hides_agent(&self, view: &AgentView, now: u64) -> bool {
-        let Some(file) = self.inbox_file() else {
+        let Some(file) = self.inbox.file(self.project.as_deref()) else {
             return false;
         };
         inbox_sources::agent_fingerprint(
@@ -156,18 +235,7 @@ impl Gerdr {
     /// Load the shown project's inbox file, so what it hides is hidden
     /// from the sidebar too before the inbox is first opened.
     pub(crate) fn load_inbox(&mut self) {
-        self.inbox_file_mut();
-    }
-
-    /// Save the shown project's inbox file, its stale triage pruned.
-    fn save_inbox(&mut self) {
-        let Some((id, file)) = self.inbox.store.as_mut() else {
-            return;
-        };
-        inbox_store::prune(file, crate::clock::now_secs());
-        if let Err(err) = inbox_store::save(None, id, file) {
-            tracing::warn!("inbox of {id}: {err}");
-        }
+        self.inbox.file_mut(self.project.as_deref());
     }
 
     /// Mark the triage of the items still there as seen, so they aren't
@@ -180,7 +248,7 @@ impl Gerdr {
             .into_iter()
             .map(|i| i.id.0)
             .collect();
-        let Some(file) = self.inbox_file_mut() else {
+        let Some(file) = self.inbox.file_mut(self.project.as_deref()) else {
             return;
         };
         let before = file.triage.len();
@@ -193,7 +261,7 @@ impl Gerdr {
         }
         inbox_store::prune(file, now);
         if changed || file.triage.len() != before {
-            self.save_inbox();
+            self.inbox.save_file();
         }
     }
 
@@ -267,7 +335,7 @@ impl Gerdr {
             ci: &self.ci.repos,
             issues: &self.inbox.issues,
             tickets: self.ticket_repos(),
-            store: self.inbox_file(),
+            store: self.inbox.file(self.project.as_deref()),
             pane_text: &self.inbox.pane_text,
             service_errors: &service_errors,
             ignored_errors: &ignored_errors,
@@ -281,7 +349,10 @@ impl Gerdr {
     /// `inbox::counted`), hidden ones left out, from the sidebar's
     /// `workspaces` and their `agents`.
     pub fn inbox_count(&self, workspaces: &[WorkspaceView], agents: &[Vec<AgentView>]) -> usize {
-        let triage = self.inbox_file().map(|file| &file.triage);
+        let triage = self
+            .inbox
+            .file(self.project.as_deref())
+            .map(|file| &file.triage);
         let now = crate::clock::now_secs();
         self.inbox_items(workspaces, agents)
             .iter()
@@ -320,7 +391,8 @@ impl Gerdr {
         Parts {
             items: self.inbox_items(workspaces, agents),
             triage: self
-                .inbox_file()
+                .inbox
+                .file(self.project.as_deref())
                 .map(|file| file.triage.clone())
                 .unwrap_or_default(),
             names: self.workspaces.iter().map(|ws| ws.name.clone()).collect(),
@@ -440,15 +512,6 @@ impl Gerdr {
         }
     }
 
-    /// Move the inbox panel's list on to `now` if it moves on its own;
-    /// whether it still moves (see `Scroll::moving`).
-    pub fn inbox_scroll_tick(&mut self, now: Instant) -> bool {
-        match self.inbox.panel.as_mut() {
-            Some(panel) => panel.tick(now),
-            None => false,
-        }
-    }
-
     /// What the inbox panel shows, while it is open.
     pub fn inbox_view(&self) -> Option<InboxView> {
         self.inbox.panel.as_ref()?;
@@ -492,7 +555,7 @@ impl Gerdr {
             Outcome::Notice(text) => self.show_notice(text),
             Outcome::Restore(id) => {
                 if let Some(project) = self.project.clone() {
-                    self.inbox_restore(&project, &[id.0]);
+                    self.inbox.restore_todos(&project, &[id.0]);
                 }
             }
             Outcome::DismissAll(ids) => self.inbox_dismiss_all(&ids),
@@ -529,7 +592,7 @@ impl Gerdr {
                     _ => (None, "Dismissed until it changes"),
                 };
                 let unsee = self.see_inbox_service(&item);
-                let Some(file) = self.inbox_file_mut() else {
+                let Some(file) = self.inbox.file_mut(self.project.as_deref()) else {
                     return;
                 };
                 let triage = Triage {
@@ -538,20 +601,20 @@ impl Gerdr {
                     seen: now,
                 };
                 file.triage.insert(id.0.clone(), triage);
-                self.save_inbox();
+                self.inbox.save_file();
                 self.toast_undo(format!("{text}: {}", item.title), vec![id.0.clone()], unsee);
             }
             ItemAction::Restore => {}
             ItemAction::Done => {
                 let Some(todo) = todo else { return };
-                let Some(file) = self.inbox_file_mut() else {
+                let Some(file) = self.inbox.file_mut(self.project.as_deref()) else {
                     return;
                 };
                 let Some(found) = file.todos.iter_mut().find(|t| t.id == todo) else {
                     return;
                 };
                 found.done = Some(now);
-                self.save_inbox();
+                self.inbox.save_file();
                 self.toast_undo(
                     format!("Done: {}", item.title),
                     vec![id.0.clone()],
@@ -560,7 +623,7 @@ impl Gerdr {
             }
             ItemAction::Delete => {
                 let Some(todo) = todo else { return };
-                let Some(file) = self.inbox_file_mut() else {
+                let Some(file) = self.inbox.file_mut(self.project.as_deref()) else {
                     return;
                 };
                 let Some(at) = file.todos.iter().position(|t| t.id == todo) else {
@@ -568,7 +631,7 @@ impl Gerdr {
                 };
                 let todo = file.todos.remove(at);
                 let triage = file.triage.remove(&id.0);
-                self.save_inbox();
+                self.inbox.save_file();
                 let text = format!("Deleted: {}", item.title);
                 let Some(project) = self.project.clone() else {
                     return self.toast(text, Level::Success);
@@ -692,7 +755,7 @@ impl Gerdr {
             unsee.extend(self.see_inbox_service(item));
         }
         let now = crate::clock::now_secs();
-        let Some(file) = self.inbox_file_mut() else {
+        let Some(file) = self.inbox.file_mut(self.project.as_deref()) else {
             return;
         };
         for item in &items {
@@ -703,7 +766,7 @@ impl Gerdr {
             };
             file.triage.insert(item.id.0.clone(), triage);
         }
-        self.save_inbox();
+        self.inbox.save_file();
         let text = format!(
             "Dismissed {} items in {} until they change",
             items.len(),
@@ -773,7 +836,7 @@ impl Gerdr {
             .and_then(|w| self.workspaces.get(w))
             .map(|ws| ws.record.clone());
         let now = crate::clock::now_secs();
-        let Some(file) = self.inbox_file_mut() else {
+        let Some(file) = self.inbox.file_mut(self.project.as_deref()) else {
             return self.show_notice("Todos are kept per project: open one first".into());
         };
         match id.and_then(|id| file.todos.iter().position(|t| t.id == id)) {
@@ -792,7 +855,7 @@ impl Gerdr {
                 });
             }
         }
-        self.save_inbox();
+        self.inbox.save_file();
     }
 
     /// Add `repo` to the shown project's ticket repositories, saved, and
@@ -819,47 +882,6 @@ impl Gerdr {
         self.projects.save();
         self.show_notice(format!("Reading the tickets of {name}"));
         self.refresh_issues();
-    }
-
-    /// The toast's "Undo" after a dismiss or snooze: list items `ids` of
-    /// project `project` (by id) again. After a todo was marked done, it
-    /// isn't any more. The project needn't be the shown one any more: the
-    /// file loaded is changed if it is that project's, else that project's
-    /// is loaded, changed and saved on its own.
-    pub fn inbox_restore(&mut self, project: &str, ids: &[String]) {
-        self.change_inbox_of(project, |file| {
-            // Every one, not only up to the first changed.
-            ids.iter().filter(|id| restore(file, id)).count() > 0
-        });
-    }
-
-    /// The toast's "Undo" after a todo was deleted: put `todo` back in
-    /// project `project`'s file at index `at` (or last, if there are fewer
-    /// now), triaged as it was. Not if one of its id was written since.
-    pub fn inbox_undelete(&mut self, project: &str, todo: Todo, at: usize, triage: Option<Triage>) {
-        self.change_inbox_of(project, |file| undelete(file, todo, at, triage));
-    }
-
-    /// Change project `project`'s inbox file (by id) with `change`, and
-    /// save it if `change` says it changed. The project needn't be the
-    /// shown one: the file loaded is changed if it is that project's, else
-    /// that project's is loaded, changed and saved on its own.
-    fn change_inbox_of(&mut self, project: &str, change: impl FnOnce(&mut InboxFile) -> bool) {
-        match self.inbox.store.as_mut() {
-            Some((p, file)) if p == project => {
-                if change(file) {
-                    self.save_inbox();
-                }
-            }
-            _ => {
-                let mut file = inbox_store::load(None, project);
-                if change(&mut file)
-                    && let Err(err) = inbox_store::save(None, project, &file)
-                {
-                    tracing::warn!("inbox of {project}: {err}");
-                }
-            }
-        }
     }
 
     /// Read the issues assigned to the user now and then, off the event
@@ -896,7 +918,7 @@ impl Gerdr {
     fn inbox_tick(&mut self) {
         // The tab strip's count leaves out what the shown project's file
         // hides: have it loaded.
-        self.inbox_file_mut();
+        self.inbox.file_mut(self.project.as_deref());
         let open = self.inbox.is_open();
         if self.issues_due(if open { ISSUES_OPEN } else { ISSUES_CLOSED }) {
             self.refresh_issues();
@@ -1160,5 +1182,34 @@ mod tests {
         assert!(!undelete(&mut file, todo("t2"), 0, None));
         assert!(undelete(&mut file, todo("t4"), 9, None));
         assert_eq!(file.todos.last().map(|t| t.id.0.as_str()), Some("t4"));
+    }
+
+    #[test]
+    fn the_loaded_file_is_the_shown_projects_only() {
+        let mut inbox = crate::inbox::Inbox::default();
+        assert!(inbox.file(Some("p1")).is_none());
+        assert!(inbox.file_mut(None).is_none());
+        inbox.store = Some(("p1".into(), InboxFile::default()));
+        assert!(inbox.file(Some("p1")).is_some());
+        assert!(inbox.file(Some("p2")).is_none());
+        assert!(inbox.file(None).is_none());
+        assert!(inbox.file_mut(Some("p1")).is_some());
+        // Closed, the list doesn't move.
+        assert!(!inbox.scroll_tick(Instant::now()));
+    }
+
+    #[test]
+    fn a_change_to_the_loaded_file_left_unchanged_is_not_saved() {
+        let mut inbox = crate::inbox::Inbox {
+            store: Some(("p1".into(), InboxFile::default())),
+            ..Default::default()
+        };
+        let mut seen = false;
+        inbox.change_file_of("p1", |file| {
+            seen = true;
+            assert_eq!(*file, InboxFile::default());
+            false
+        });
+        assert!(seen);
     }
 }

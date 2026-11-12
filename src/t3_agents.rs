@@ -1273,9 +1273,92 @@ impl T3 {
         }
         told
     }
+
+    /// What T3 Code thread `id` does, if known, and whether it is still
+    /// there. Its row gone means so only when the database was read; the
+    /// server's list leaves out what isn't a workspace's. With the server
+    /// down nothing is known of what it does.
+    pub(crate) fn thread_state(&self, id: &str) -> (Option<AgentStatus>, bool) {
+        let all = threads(&self.rows, self.alive);
+        match all.into_iter().find(|t| t.row.id == id) {
+            Some(thread) => (self.alive.then_some(thread.status), true),
+            None => (None, !self.read || self.source != Source::Database),
+        }
+    }
+
+    /// Whether T3 Code has no projects at all, as its database says.
+    fn has_no_projects(&self) -> bool {
+        let home = self.home.as_deref();
+        home.and_then(project_count) == Some(0)
+    }
+
+    /// Let go of a project filter the app didn't take: it does now, or
+    /// another version runs.
+    fn forget_unscoped(&mut self) {
+        self.unscoped_in = None;
+        // A workspace without projects is told of once still.
+        self.unscoped.retain(|reason| reason == "no-match");
+        crate::problems::clear(FILTER_PROBLEMS);
+    }
+
+    /// Say that gerdr shows T3 Code's threads with basic status only,
+    /// offering the version pinned if that one is read in full.
+    fn reads_in_part(&self, ui: &mut crate::toast::Ui) {
+        let running = self.server.as_ref().and_then(|s| s.version.clone());
+        // Short, as a toast is; the launcher's "Update T3 Code" says more.
+        let text = "T3 Code changed, so gerdr shows only basic status for its threads".to_owned();
+        let updates = crate::t3_update::Updates::load();
+        let back = updates.pin.filter(|pin| {
+            Some(pin) != running.as_ref()
+                && matches!(
+                    updates.verdicts.get(pin),
+                    Some(crate::t3_update::Verdict::Fits { .. })
+                )
+        });
+        let action = back.map(|pin| {
+            let label = format!("Go back to {pin}");
+            (label, crate::menu::MenuAction::UpdateT3(Some(pin)))
+        });
+        ui.toast_with(text, crate::toast::Level::Warning, action);
+    }
+
+    /// Whether a draft can be opened in T3 Code's app; offering to start
+    /// its server, and why not, when one can't.
+    pub(crate) fn can_draft(&self, ui: &mut crate::toast::Ui) -> Result<(), String> {
+        if self.server.is_some() && self.alive {
+            return Ok(());
+        }
+        let action = ("Start".to_owned(), crate::menu::MenuAction::StartT3);
+        let text = "T3 Code's server isn't running".to_owned();
+        ui.toast_with(text.clone(), crate::toast::Level::Warning, Some(action));
+        Err(text)
+    }
+
+    /// The command starting T3 Code's server, at `port` if any (see
+    /// `Start::command`), without opening a browser: gerdr shows its app.
+    pub fn command(&self, port: Option<u16>) -> String {
+        let pin = crate::t3_update::Updates::load().pin;
+        let start = Start {
+            home: self.home.as_deref(),
+            pin: pin.as_deref(),
+            port,
+        };
+        format!("{} --no-browser", start.command(crate::desktop::installed))
+    }
 }
 
 impl crate::Gerdr {
+    /// What T3 Code thread `id` does (see `T3::thread_state`).
+    pub(crate) fn t3_thread_state(&self, id: &str) -> (Option<AgentStatus>, bool) {
+        self.t3.thread_state(id)
+    }
+
+    /// Whether a draft can be opened in T3 Code's app (see `T3::can_draft`).
+    pub(crate) fn t3_can_draft(&mut self) -> Result<(), String> {
+        let mut ui = ui!(self);
+        self.t3.can_draft(&mut ui)
+    }
+
     /// Follow T3 Code's threads, if it ran here: read its database off the
     /// event loop, and where its server runs every `SERVER_INTERVAL`.
     pub fn watch_t3_agents(&mut self) {
@@ -1317,7 +1400,7 @@ impl crate::Gerdr {
                 let version = server.as_ref().and_then(|s| s.version.as_ref());
                 let broken = state.t3.unscoped_in.as_ref().map(|(v, _)| v.as_ref());
                 if broken.is_some_and(|v| v != version) {
-                    state.t3_forget_unscoped();
+                    state.t3.forget_unscoped();
                 }
                 state.t3.server = server;
                 state.t3.alive = alive;
@@ -1365,30 +1448,10 @@ impl crate::Gerdr {
         self.t3.migration = snapshot.migration;
         if partial && was == Source::Database && !self.t3.told_partial {
             self.t3.told_partial = true;
-            self.t3_reads_in_part();
+            let mut ui = ui!(self);
+            self.t3.reads_in_part(&mut ui);
         }
         self.t3_changed();
-    }
-
-    /// Say that gerdr shows T3 Code's threads with basic status only,
-    /// offering the version pinned if that one is read in full.
-    fn t3_reads_in_part(&mut self) {
-        let running = self.t3.server.as_ref().and_then(|s| s.version.clone());
-        // Short, as a toast is; the launcher's "Update T3 Code" says more.
-        let text = "T3 Code changed, so gerdr shows only basic status for its threads".to_owned();
-        let updates = crate::t3_update::Updates::load();
-        let back = updates.pin.filter(|pin| {
-            Some(pin) != running.as_ref()
-                && matches!(
-                    updates.verdicts.get(pin),
-                    Some(crate::t3_update::Verdict::Fits { .. })
-                )
-        });
-        let action = back.map(|pin| {
-            let label = format!("Go back to {pin}");
-            (label, crate::menu::MenuAction::UpdateT3(Some(pin)))
-        });
-        self.toast_with(text, crate::toast::Level::Warning, action);
     }
 
     /// Take in what T3 Code's threads do now, and notify of what is news.
@@ -1798,22 +1861,7 @@ impl crate::Gerdr {
             return;
         }
         tracing::info!("t3 code: project filter set in web pane {pane}");
-        self.t3_forget_unscoped();
-    }
-
-    /// Let go of a project filter the app didn't take: it does now, or
-    /// another version runs.
-    fn t3_forget_unscoped(&mut self) {
-        self.t3.unscoped_in = None;
-        // A workspace without projects is told of once still.
-        self.t3.unscoped.retain(|reason| reason == "no-match");
-        crate::problems::clear(FILTER_PROBLEMS);
-    }
-
-    /// Whether T3 Code has no projects at all, as its database says.
-    fn t3_has_no_projects(&self) -> bool {
-        let home = self.t3.home.as_deref();
-        home.and_then(project_count) == Some(0)
+        self.t3.forget_unscoped();
     }
 
     /// T3 Code's app in web pane `pane` didn't take its project filter,
@@ -1827,7 +1875,7 @@ impl crate::Gerdr {
             return;
         }
         // An app without projects shows no list of them.
-        let reason = if reason == "no-groups" && self.t3_has_no_projects() {
+        let reason = if reason == "no-groups" && self.t3.has_no_projects() {
             "no-match"
         } else {
             reason
@@ -1961,30 +2009,6 @@ impl crate::Gerdr {
             };
             let _ = tx.send((dir, done));
         });
-    }
-
-    /// What T3 Code thread `id` does, if known, and whether it is still
-    /// there. Its row gone means so only when the database was read; the
-    /// server's list leaves out what isn't a workspace's. With the server
-    /// down nothing is known of what it does.
-    pub(crate) fn t3_thread_state(&self, id: &str) -> (Option<AgentStatus>, bool) {
-        let all = threads(&self.t3.rows, self.t3.alive);
-        match all.into_iter().find(|t| t.row.id == id) {
-            Some(thread) => (self.t3.alive.then_some(thread.status), true),
-            None => (None, !self.t3.read || self.t3.source != Source::Database),
-        }
-    }
-
-    /// Whether a draft can be opened in T3 Code's app; offering to start
-    /// its server, and why not, when one can't.
-    pub(crate) fn t3_can_draft(&mut self) -> Result<(), String> {
-        if self.t3.server.is_some() && self.t3.alive {
-            return Ok(());
-        }
-        let action = ("Start".to_owned(), crate::menu::MenuAction::StartT3);
-        let text = "T3 Code's server isn't running".to_owned();
-        self.toast_with(text.clone(), crate::toast::Level::Warning, Some(action));
-        Err(text)
     }
 
     /// `stage`'s agent of feature `slug` (`title`) got a run in T3 Code,
@@ -2156,7 +2180,8 @@ impl crate::Gerdr {
         if let Err(why) = result {
             tracing::warn!("t3 code: sending thread {thread} a message: {why}");
             if let Some(told) = told {
-                self.told_failed(&told, crate::ai_work::Via::T3, &why);
+                self.ai_work
+                    .told_failed(&told, crate::ai_work::Via::T3, &why);
             }
             self.show_error(format!("Couldn't message T3 Code's thread: {why}"));
         }
@@ -2432,18 +2457,6 @@ impl crate::Gerdr {
                 self.go_in_web_app(pane, &target);
             }
         }
-    }
-
-    /// The command starting T3 Code's server, at `port` if any (see
-    /// `Start::command`), without opening a browser: gerdr shows its app.
-    pub fn t3_command(&self, port: Option<u16>) -> String {
-        let pin = crate::t3_update::Updates::load().pin;
-        let start = Start {
-            home: self.t3.home.as_deref(),
-            pin: pin.as_deref(),
-            port,
-        };
-        format!("{} --no-browser", start.command(crate::desktop::installed))
     }
 }
 
@@ -3167,5 +3180,42 @@ mod tests {
         let moved = at_origin(link, "http://api.localhost:3773");
         assert_eq!(moved, "http://api.localhost:3773/pair#token=abc");
         assert_eq!(at_origin("not a link", "http://a:1"), "not a link");
+    }
+
+    #[test]
+    fn a_thread_is_there_until_the_database_says_it_is_gone() {
+        let mut t3 = T3::default();
+        // Nothing read yet: a thread is taken to be there, doing nothing known.
+        assert_eq!(t3.thread_state("a"), (None, true));
+        t3.read = true;
+        assert_eq!(t3.thread_state("a"), (None, false));
+        t3.source = Source::Cli("no database".into());
+        assert_eq!(t3.thread_state("a"), (None, true));
+        t3.source = Source::Database;
+        t3.rows = vec![ThreadRow {
+            run: Some("running".into()),
+            ..row("a")
+        }];
+        assert_eq!(t3.thread_state("a"), (None, true));
+        t3.alive = true;
+        assert_eq!(t3.thread_state("a"), (Some(AgentStatus::Working), true));
+    }
+
+    #[test]
+    fn forgetting_a_filter_keeps_only_the_word_of_no_projects() {
+        let mut t3 = T3 {
+            unscoped_in: Some((None, "no-groups".into())),
+            ..T3::default()
+        };
+        t3.unscoped.insert("no-groups".into());
+        t3.unscoped.insert("no-match".into());
+        t3.forget_unscoped();
+        assert_eq!(t3.unscoped_in, None);
+        assert_eq!(t3.unscoped, HashSet::from(["no-match".to_owned()]));
+    }
+
+    #[test]
+    fn without_a_home_t3_has_no_count_of_projects() {
+        assert!(!T3::default().has_no_projects());
     }
 }
