@@ -568,7 +568,14 @@ impl Gerdr {
         if let Some(review) = f.review.as_mut() {
             review.posts = !on;
         }
-        let text = match on {
+        // Findings wanted hold AI review up only while they are fixed here:
+        // done, it opens again for them to be sent; at it, it goes on.
+        let now = feature::now();
+        let back = on && f.findings_wait_again(now);
+        let goes_on = !on
+            && f.current() == Some(Stage::AiReview)
+            && f.review.as_ref().is_some_and(|r| r.open() == 0);
+        let mut text = match on {
             true => format!(
                 "Fixing #{number} here: its fixes go to an agent, and Push… on Ship sends them to {head_ref}"
             ),
@@ -576,9 +583,18 @@ impl Gerdr {
                 format!("#{number} is commented on again: what its review wants goes to GitHub")
             }
         };
-        f.log(feature::now(), text.clone());
+        if back {
+            text.push_str(", and AI review is open again for its findings to fix");
+        }
+        f.log(now, text.clone());
         self.save_feature(project, slug);
         self.show_success(text);
+        if back {
+            self.feature_cursor_to_current_of(project, slug);
+        }
+        if goes_on {
+            self.read_and_tick(project, slug, Stage::AiReview);
+        }
         // Trusted now: it can be set up for the agent and its checks.
         if on
             && self

@@ -329,6 +329,15 @@ impl Feature {
     pub fn posts_review(&self) -> bool {
         self.pulls().iter().any(|p| !p.works_here())
     }
+
+    /// Fix here… was switched on: findings wanted hold AI review up again
+    /// (as comments for GitHub they didn't), so done, it opens again for
+    /// them to be sent. Whether it did.
+    pub fn findings_wait_again(&mut self, now: u64) -> bool {
+        self.review.as_ref().is_some_and(|r| r.open() > 0)
+            && self.is_done(Stage::AiReview)
+            && self.untick(Stage::AiReview, now)
+    }
 }
 
 impl Feature {
@@ -1034,6 +1043,36 @@ mod tests {
         );
         pull.cross_repo = false;
         assert_eq!(pull.push_remote("whatever").as_deref(), Some("origin"));
+    }
+
+    #[test]
+    fn fixing_here_opens_ai_review_for_its_wanted_findings() {
+        use crate::feature::review_import::{AiReview, Finding, FindingState};
+        let pull = details_of(view("bob", false), "github.com", "o/r", "ann").pull;
+        let mut f = Feature {
+            kind: Kind::PrReview(vec![pull]),
+            ..Feature::default()
+        };
+        while f.current().is_some_and(|at| at <= Stage::AiReview) {
+            f.tick(0, "gerdr", None);
+        }
+        let wanted = Finding {
+            state: FindingState::Fix,
+            ..Finding::default()
+        };
+        f.review = Some(AiReview {
+            posts: true,
+            findings: vec![wanted],
+            ..AiReview::default()
+        });
+        // To comment on GitHub, it holds nothing up.
+        assert!(!f.findings_wait_again(1));
+        assert_eq!(f.current(), Some(Stage::CodeReview));
+        f.pulls_mut()[0].fix_here = true;
+        f.review.as_mut().unwrap().posts = false;
+        assert!(f.findings_wait_again(1));
+        assert_eq!(f.current(), Some(Stage::AiReview));
+        assert!(!f.findings_wait_again(2));
     }
 
     #[test]

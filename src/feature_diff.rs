@@ -254,6 +254,8 @@ struct Standing {
     closed: bool,
     ready: bool,
     round: Option<(FixPhase, String)>,
+    /// `Feature::posts_review`: Fix here… changes it under an open diff.
+    posts: bool,
 }
 
 impl Standing {
@@ -266,6 +268,7 @@ impl Standing {
             closed: feature.status != Status::Open || feature.writer.is_some(),
             ready: feature.review.is_some() && run.is_some_and(|r| r.ready.is_some()),
             round: (feature.fix_round.as_ref()).map(|round| (round.phase, round.line())),
+            posts: feature.posts_review(),
         }
     }
 }
@@ -575,6 +578,7 @@ impl FeatureOf {
         self.closed = standing.closed;
         self.ready = standing.ready;
         self.round = standing.round;
+        self.posts = standing.posts;
     }
 
     /// The repository at `root`.
@@ -1387,7 +1391,7 @@ impl Gerdr {
             sent_notes: Vec::new(),
             span: None,
             since: false,
-            posts: feature.posts_review(),
+            posts: standing.posts,
         };
         let root = feature.root.clone();
         // A Zed opened from it goes to the feature's own workspace.
