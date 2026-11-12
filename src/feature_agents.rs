@@ -1314,6 +1314,18 @@ fn doc_word(stage: Stage) -> &'static str {
     }
 }
 
+impl crate::features::Features {
+    /// The agent that waited on `stage` of feature `slug` is at work: its
+    /// watch starts again, keeping the milestone it goes on from.
+    pub(crate) fn watch_its_work(&mut self, project: &str, slug: &str, stage: Stage) {
+        let key = (project.to_owned(), slug.to_owned(), stage);
+        match self.agents.remove(&key).and_then(after_waiting) {
+            Some(watch) => self.agents.insert(key, watch),
+            None => None,
+        };
+    }
+}
+
 impl Gerdr {
     /// Note in feature `slug`'s history, once, that run `n` of `stage`'s agent
     /// left its tab: where AI work's stats end the run, not when the next
@@ -1669,7 +1681,9 @@ impl Gerdr {
             .agents
             .remove(&(project.to_owned(), slug.to_owned(), stage));
         if stage == Stage::Build {
-            self.fixing_moved(project, slug, agents::AgentKey::Herdr(pane));
+            self.features
+                .build
+                .fixing_moved(project, slug, agents::AgentKey::Herdr(pane));
         }
         self.show_success(sent_text(&agent, stage, model.as_deref()));
         self.show_agent_asking(project, slug, stage);
@@ -1751,7 +1765,7 @@ impl Gerdr {
         r.started = now;
         f.log(now, format!("{} prompt sent to {agent}", stage.label()));
         self.save_feature(project, slug);
-        self.watch_its_work(project, slug, stage);
+        self.features.watch_its_work(project, slug, stage);
         self.show_success(format!("Sent the prompt to {agent}"));
     }
 
@@ -2407,7 +2421,7 @@ impl Gerdr {
         );
         f.log(feature::now(), what);
         self.save_feature(project, slug);
-        self.watch_its_work(project, slug, stage);
+        self.features.watch_its_work(project, slug, stage);
     }
 
     /// See what became of the lines typed to agents: one left in its input
@@ -2436,16 +2450,6 @@ impl Gerdr {
                 "An agent in {place} didn't take the line typed to it: press Enter in its tab"
             ));
         }
-    }
-
-    /// The agent that waited on `stage` of feature `slug` is at work: its
-    /// watch starts again, keeping the milestone it goes on from.
-    fn watch_its_work(&mut self, project: &str, slug: &str, stage: Stage) {
-        let key = (project.to_owned(), slug.to_owned(), stage);
-        match self.features.agents.remove(&key).and_then(after_waiting) {
-            Some(watch) => self.features.agents.insert(key, watch),
-            None => None,
-        };
     }
 
     /// What agent `key` does, if known, and whether it is still there.
@@ -4845,5 +4849,25 @@ mod tests {
         let unlit = [chip("a", false, true), chip("b", false, false)];
         assert_eq!(name(&unlit).as_deref(), Some("b"));
         assert_eq!(next_chip(&[]), None);
+    }
+
+    #[test]
+    fn features_keep_a_waiting_watch_only_with_where_it_went_on() {
+        let mut features = crate::features::Features::default();
+        let key = ("p".to_owned(), "s".to_owned(), Stage::Build);
+        features.watch_its_work("p", "s", Stage::Build);
+        assert!(features.agents.is_empty());
+        features.agents.insert(key.clone(), Watch::of(3));
+        features.watch_its_work("p", "s", Stage::Build);
+        assert!(features.agents.is_empty(), "nothing worth keeping");
+        let waiting = Watch {
+            went_on: Some(2),
+            worked: true,
+            ..Watch::of(3)
+        };
+        features.agents.insert(key.clone(), waiting);
+        features.watch_its_work("p", "s", Stage::Build);
+        let watch = &features.agents[&key];
+        assert_eq!((watch.n, watch.went_on, watch.worked), (3, Some(2), false));
     }
 }

@@ -143,6 +143,26 @@ pub(crate) fn paired(hints: Vec<(&'static str, String)>) -> Vec<(String, String)
     out
 }
 
+impl crate::features::Features {
+    /// Whether a press on the page's text is held, selecting.
+    pub(crate) fn picking_page_text(&self) -> bool {
+        self.panel.as_ref().is_some_and(|p| p.picking)
+    }
+
+    /// The press selecting the page's text is let go: a click that went
+    /// nowhere selects nothing.
+    pub(crate) fn release_page_text(&mut self) {
+        if let Some(panel) = self.panel.as_mut()
+            && panel.picking
+        {
+            (panel.picking, panel.pick_edge) = (false, None);
+            if panel.pick.as_ref().is_some_and(|p| p.anchor == p.cursor) {
+                (panel.pick, panel.pick_by) = (None, None);
+            }
+        }
+    }
+}
+
 impl Gerdr {
     /// The text selected on the feature tab's page, while the page still
     /// says what it did when selected.
@@ -216,9 +236,9 @@ impl Gerdr {
         self.sync_feature_page();
     }
 
-    /// Whether a press on the page's text is held, selecting.
+    /// See `Features::picking_page_text`.
     pub(crate) fn picking_page_text(&self) -> bool {
-        self.features.panel.as_ref().is_some_and(|p| p.picking)
+        self.features.picking_page_text()
     }
 
     /// The pointer moved to `pos` holding a press on the page's text: the
@@ -255,7 +275,7 @@ impl Gerdr {
     /// top or bottom scrolls it on that way, moving or not, faster the
     /// further past, and the selection with it. Whether it is past.
     pub(crate) fn page_text_edge_tick(&mut self, now: Instant) -> bool {
-        if !self.picking_page_text() {
+        if !self.features.picking_page_text() {
             return false;
         }
         let Some((_, layout)) = self.feature_tab_parts() else {
@@ -290,17 +310,9 @@ impl Gerdr {
         edge != 0.0
     }
 
-    /// The press selecting the page's text is let go: a click that went
-    /// nowhere selects nothing.
+    /// See `Features::release_page_text`.
     pub(crate) fn release_page_text(&mut self) {
-        if let Some(panel) = self.features.panel.as_mut()
-            && panel.picking
-        {
-            (panel.picking, panel.pick_edge) = (false, None);
-            if panel.pick.as_ref().is_some_and(|p| p.anchor == p.cursor) {
-                (panel.pick, panel.pick_by) = (None, None);
-            }
-        }
+        self.features.release_page_text()
     }
 
     /// A key for the text selected on the feature tab's page: Ctrl+C and
@@ -515,5 +527,35 @@ mod tests {
             key_table::press(PICK_KEYS, &ctxs[0], &shift, Keysym::_8),
             None
         );
+    }
+
+    #[test]
+    fn features_let_go_of_the_page_text() {
+        let mut features = crate::features::Features::default();
+        features.release_page_text();
+        assert!(!features.picking_page_text());
+        let spot = |ch| TextSpot { line: 0, ch };
+        let pick = |cursor| TextPick {
+            anchor: spot(0),
+            cursor: spot(cursor),
+            said: Default::default(),
+        };
+        features.panel = Some(crate::features::FeaturePanel {
+            picking: true,
+            pick: Some(pick(3)),
+            ..Default::default()
+        });
+        assert!(features.picking_page_text());
+        features.release_page_text();
+        let panel = features.panel.as_ref().unwrap();
+        assert!(
+            !panel.picking && panel.pick.is_some(),
+            "a drag keeps what it picked"
+        );
+        // A click that went nowhere picks nothing.
+        features.panel.as_mut().unwrap().picking = true;
+        features.panel.as_mut().unwrap().pick = Some(pick(0));
+        features.release_page_text();
+        assert!(features.panel.as_ref().unwrap().pick.is_none());
     }
 }

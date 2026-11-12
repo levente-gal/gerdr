@@ -273,6 +273,25 @@ fn host_and_port(command: &str) -> Option<(&str, Option<u16>)> {
     Some((host, port.map_or(Some(usual), |p| p.parse().ok())))
 }
 
+impl crate::machines::Machines {
+    /// Who started a stack another gerdr left, and when it was last there.
+    pub(crate) fn left_from_text(&self, from: &LeftFrom, now: u64) -> String {
+        let name = if from.id.is_empty() {
+            "an older gerdr".to_owned()
+        } else if let Some(name) = self.names.get(&from.id) {
+            name.clone()
+        } else if !from.name.is_empty() {
+            from.name.clone()
+        } else {
+            "another gerdr".to_owned()
+        };
+        match from.seen {
+            Some(at) => format!("{name}, last there {}", crate::clock::ago(now, at)),
+            None => name,
+        }
+    }
+}
+
 impl Gerdr {
     /// The sandbox running for a page `command` opened from folder `dir`: the
     /// namespace to open it in and the browser profile for it.
@@ -1133,7 +1152,9 @@ impl Gerdr {
                     day => format!("started {day}"),
                 };
                 detail.push(match &left.from {
-                    Some(from) => format!("{started} by {}", self.left_from_text(from, now)),
+                    Some(from) => {
+                        format!("{started} by {}", self.machines.left_from_text(from, now))
+                    }
                     None => started,
                 });
                 crate::tasks::Task {
@@ -1148,23 +1169,6 @@ impl Gerdr {
                 }
             })
             .collect()
-    }
-
-    /// Who started a stack another gerdr left, and when it was last there.
-    fn left_from_text(&self, from: &LeftFrom, now: u64) -> String {
-        let name = if from.id.is_empty() {
-            "an older gerdr".to_owned()
-        } else if let Some(name) = self.machines.names.get(&from.id) {
-            name.clone()
-        } else if !from.name.is_empty() {
-            from.name.clone()
-        } else {
-            "another gerdr".to_owned()
-        };
-        match from.seen {
-            Some(at) => format!("{name}, last there {}", crate::clock::ago(now, at)),
-            None => name,
-        }
     }
 
     /// `stacks`, each saying where it is if that's not here.
@@ -1685,5 +1689,32 @@ mod tests {
         assert_eq!(main_folder(&root, "api"), Some(single.clone()));
         assert_eq!(main_folder(&root, "web"), None);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn machines_name_who_left_a_stack() {
+        let mut machines = crate::machines::Machines::default();
+        let from = |id: &str, name: &str, seen| LeftFrom {
+            id: id.into(),
+            name: name.into(),
+            seen,
+        };
+        assert_eq!(
+            machines.left_from_text(&from("", "x", None), 0),
+            "an older gerdr"
+        );
+        assert_eq!(
+            machines.left_from_text(&from("m1", "", None), 0),
+            "another gerdr"
+        );
+        assert_eq!(
+            machines.left_from_text(&from("m1", "Desk", Some(700)), 1000),
+            "Desk, last there 5m ago"
+        );
+        machines.names.insert("m1".into(), "Laptop".into());
+        assert_eq!(
+            machines.left_from_text(&from("m1", "Desk", None), 0),
+            "Laptop"
+        );
     }
 }

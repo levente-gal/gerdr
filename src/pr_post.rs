@@ -38,7 +38,7 @@ impl Gerdr {
     fn submit_items(&self, f: &Feature) -> Vec<pr_submit::Item> {
         let data = store::dir(None, &f.project, &f.slug);
         let own = review::load_file(&data.join(COMMENTS));
-        let criteria = self.criteria(&f.project, &f.slug).to_vec();
+        let criteria = self.features.criteria(&f.project, &f.slug).to_vec();
         let unsent = manual::unsent(f.manual.as_ref(), &criteria);
         pr_submit::items(f, &own, &unsent)
     }
@@ -268,7 +268,7 @@ impl Gerdr {
                 ));
             }
         }
-        let criteria = self.criteria(project, slug).to_vec();
+        let criteria = self.features.criteria(project, slug).to_vec();
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
