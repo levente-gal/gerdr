@@ -1868,7 +1868,7 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return false;
         };
-        if let Some(why) = crate::stage_lock::authors_stage(&feature, stage) {
+        if let Some(why) = crate::stage_lock::authors_agent(&feature, stage, extra) {
             self.show_warning(why);
             return false;
         }
