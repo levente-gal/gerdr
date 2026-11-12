@@ -415,6 +415,34 @@ fn git_run(dir: &Path, args: &[&str]) -> Result<String, String> {
     })
 }
 
+/// A git of `args` in `dir`, on gerdr's own settings: never prompting, no
+/// `GIT_DIR`-style variables of a caller in the way, and no optional locks,
+/// so a read never takes index.lock from the user or an agent. A command
+/// that must take that lock (a commit, a checkout) removes
+/// `GIT_OPTIONAL_LOCKS` itself.
+pub fn command(dir: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("LC_ALL", "C")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR");
+    #[cfg(test)]
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t");
+    cmd
+}
+
 /// What `git args` prints in `dir`; `None` when it fails or without git.
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")

@@ -2258,30 +2258,10 @@ fn git_within(dir: &Path, args: &[&str], limit: Duration) -> Result<String, Stri
     }
 }
 
-/// A git of `args` in `dir`, on its own settings: never prompting, nothing
-/// of the git that runs gerdr's.
+/// A git of `args` in `dir`, on its own settings (`git::command`): a
+/// probe's `git status` must never take index.lock from an agent.
 fn git_command(dir: &Path, args: &[&str]) -> Command {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("LC_ALL", "C")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_EDITOR", "true")
-        // A probe's `git status` must never take index.lock from an agent.
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_COMMON_DIR");
-    #[cfg(test)]
-    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t");
-    cmd
+    crate::git::command(dir, args)
 }
 
 /// Why a git of `args` failed, from what it printed on `stderr`.
