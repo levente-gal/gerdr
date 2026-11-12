@@ -66,7 +66,10 @@ use smithay::{
     utils::{Logical, Point},
 };
 
+mod keys;
 mod review_page;
+
+use keys::{AgentChoices, keys_page, ship_keys, submit_key, tab_hints};
 
 use review_page::{
     is_review_stage, review_kept, review_page_actions, review_page_sections, want_all_outcome,
@@ -5504,7 +5507,8 @@ impl FeaturePanel {
         )
     }
 
-    /// Handle a key over `feature`, one of `slugs` listed.
+    /// Handle a key over `feature`, one of `slugs` listed: what the first
+    /// row of `keys::chain` that is it and is offered does.
     #[allow(clippy::too_many_arguments)]
     fn key(
         &mut self,
@@ -5517,138 +5521,47 @@ impl FeaturePanel {
         ships: &[ShipRow],
         notes: &[Comment],
     ) -> Option<PanelOutcome> {
-        let entries = repo_entries(feature, &self.sources, self.expanded);
-        let repos = entries.len();
-        self.repo = self.repo.min(repos.saturating_sub(1));
-        if repos == 0 && self.focus == TabArea::Repos {
-            self.focus = TabArea::Stages;
-        }
-        let entry = entries.get(self.repo).copied();
         let armed = self.armed.take();
-        use crate::manual_test::Outcome;
         // The pick no longer holds once the feature moved on.
         if self.stage.is_some() && self.picked_at != feature.current() {
             self.unpick();
         }
         let stage = self.page_stage(feature);
-        // The review on the page has the cards' place, and its own keys.
-        let cards = match crate::feature_diff::review_page(self, feature) {
-            true => Vec::new(),
-            false => review_cards(feature, stage, notes),
+        let (settled, key) = {
+            let t = keys::TabCtx::new(
+                self,
+                feature,
+                stage,
+                slugs,
+                ctx,
+                plan,
+                ships,
+                notes,
+                armed.clone(),
+            );
+            // The keys list: F1 or Esc puts it away, as does any other key
+            // (it does nothing else then).
+            let key = match self.keys {
+                true => Some(keys::TabKey::Swallow),
+                false => t.press(mods, sym),
+            };
+            let settled = (t.focus, t.repo, t.finding, t.repos, t.carded);
+            (settled, key)
         };
-        let checks = check_entries(feature, stage, plan);
-        let criteria = match tries_criteria(feature, stage) {
-            true => ctx.criteria,
-            false => 0,
-        };
-        // Marked off it too, they wait for it: only at it do they move it on.
-        let marking = match marks_criteria(feature, stage) {
-            true => ctx.criteria,
-            false => 0,
-        };
-        // The user's comments come after the brief's criteria.
-        let first_comment = marking.saturating_sub(ctx.manual.comments());
-        let comment_at = |i: usize| (i >= first_comment && i < marking).then_some(i);
-        let shown = match shows_criteria(feature, stage) {
-            true => ctx.criteria,
-            false => 0,
-        };
-        let ships = if stage == Stage::Ship { ships } else { &[] };
-        let carded = cards.len() + checks.len() + shown + ships.len();
-        self.finding = self.finding.min(carded.saturating_sub(1));
-        if self.focus == TabArea::Findings && (carded == 0 || self.expanded) {
-            self.focus = TabArea::Stages;
-        }
-        let on = cards.get(self.finding).copied();
-        let card = on.and_then(ReviewCard::item);
-        let diff_note = on.and_then(ReviewCard::diff_note);
-        let ctrl = mods.ctrl && !mods.alt && !mods.logo;
-        let plain = !(mods.ctrl || mods.alt || mods.logo);
-        let bare = plain && !mods.shift;
-        let refused = match diff_note {
-            Some(c) => why_not_edit_note(feature, stage, c),
-            None => why_not_decide(feature, stage),
-        };
-        // The keys list: F1 or Esc puts it away, as does any other key
-        // (it does nothing else then).
+        let (focus, repo, finding, repos, carded) = settled;
+        (self.focus, self.repo, self.finding) = (focus, repo, finding);
         if self.keys {
             self.keys = false;
             return None;
         }
-        if sym == Keysym::F1 && bare {
-            self.keys = true;
-            return None;
-        }
-        // Esc folds the rows first, and steps back as ever after that.
-        if sym == Keysym::Escape && bare && self.expanded {
-            self.toggle_repos();
-            return None;
-        }
-        // On the rows Left and Right go through the row's buttons.
-        if plain && self.expanded && self.focus == TabArea::Repos {
-            let back = match sym {
-                Keysym::Left | Keysym::KP_Left => Some(true),
-                Keysym::Right | Keysym::KP_Right => Some(false),
-                _ => None,
-            };
-            if let (Some(back), Some(entry)) = (back, entry) {
-                self.pick_button(feature, entry, back);
-                return None;
-            }
-        }
-        // A criterion opens to its steps and folds to its line, as a tree's
-        // rows do; with Alt, all of them, those passed or those read.
-        if shown > 0 && self.focus == TabArea::Findings && bare {
-            match sym {
-                Keysym::Left | Keysym::KP_Left => {
-                    return Some(PanelOutcome::FoldCriterion(self.finding, false));
-                }
-                Keysym::Right | Keysym::KP_Right => {
-                    return Some(PanelOutcome::FoldCriterion(self.finding, true));
-                }
-                _ => {}
-            }
-        }
-        // So does a review card.
-        if on.is_some() && self.focus == TabArea::Findings && bare {
-            match sym {
-                Keysym::Left | Keysym::KP_Left => {
-                    return Some(PanelOutcome::FoldCard(self.finding, false));
-                }
-                Keysym::Right | Keysym::KP_Right => {
-                    return Some(PanelOutcome::FoldCard(self.finding, true));
-                }
-                _ => {}
-            }
-        }
-        if shown > 0 && self.focus != TabArea::Repos && mods.alt && !(mods.ctrl || mods.logo) {
-            use crate::feature::manual::FoldScope;
-            let fold = match sym {
-                Keysym::Left | Keysym::KP_Left if !mods.shift => Some((FoldScope::All, false)),
-                Keysym::Right | Keysym::KP_Right if !mods.shift => Some((FoldScope::All, true)),
-                Keysym::d | Keysym::D => Some((FoldScope::Done, mods.shift)),
-                Keysym::s | Keysym::S => Some((FoldScope::Seen, mods.shift)),
-                _ => None,
-            };
-            if let Some((scope, open)) = fold {
-                return Some(PanelOutcome::FoldCriteria(scope, open));
-            }
-        }
-        let step = match sym {
-            Keysym::Up | Keysym::KP_Up | Keysym::Left | Keysym::KP_Left if plain => {
-                Some(Step::Back)
-            }
-            Keysym::Down | Keysym::KP_Down | Keysym::Right | Keysym::KP_Right if plain => {
-                Some(Step::On)
-            }
-            Keysym::k | Keysym::K if ctrl && !mods.shift => Some(Step::Back),
-            Keysym::j | Keysym::J if ctrl && !mods.shift => Some(Step::On),
-            Keysym::Home | Keysym::KP_Home if plain => Some(Step::First),
-            Keysym::End | Keysym::KP_End if plain => Some(Step::Last),
-            _ => None,
-        };
-        if let Some(step) = step {
-            match self.focus {
+        use keys::TabKey;
+        match key? {
+            TabKey::Out(outcome) => return Some(outcome),
+            TabKey::Swallow => {}
+            TabKey::ShowKeys => self.keys = true,
+            TabKey::FoldRepos => self.toggle_repos(),
+            TabKey::PickButton(entry, back) => self.pick_button(feature, entry, back),
+            TabKey::Step(step) => match self.focus {
                 TabArea::Stages => {
                     let at = stage_index(stage);
                     let to = step.from(at, Stage::ALL.len() - 1);
@@ -5664,525 +5577,38 @@ impl FeaturePanel {
                 TabArea::Findings => {
                     self.finding = step.from(self.finding, carded.saturating_sub(1));
                 }
+            },
+            TabKey::Focus(to) => self.focus = to,
+            TabKey::Arm(key) => self.armed = Some(key),
+            TabKey::Card(key) => {
+                let cards = keys::page_cards(self, feature, stage, notes);
+                let refused = card_refused(feature, stage, &cards, self.finding);
+                return self.card_key(key, &cards, refused, armed.as_deref());
             }
-            return None;
-        }
-        let row = match (self.focus, entry) {
-            (TabArea::Stages | TabArea::Findings, _) => PanelRow::Stage(stage),
-            (TabArea::Repos, Some(RepoEntry::Held(i))) => PanelRow::Repo(i),
-            (TabArea::Repos, _) => PanelRow::Other,
-        };
-        match sym {
-            Keysym::Tab | Keysym::ISO_Left_Tab if plain => {
-                let mut stops = vec![TabArea::Stages];
-                if carded > 0 && !self.expanded {
-                    stops.push(TabArea::Findings);
-                }
-                if repos > 0 {
-                    stops.push(TabArea::Repos);
-                }
-                let at = stops.iter().position(|s| *s == self.focus).unwrap_or(0);
-                let back = mods.shift || sym == Keysym::ISO_Left_Tab;
-                let by = if back { stops.len() - 1 } else { 1 };
-                self.focus = stops[(at + by) % stops.len()];
-            }
-            // A tick box or choice of the Ship page with the keyboard; Enter
-            // still presses the page's button.
-            Keysym::space if bare && self.focus == TabArea::Findings && !ships.is_empty() => {
-                return ships.get(self.finding).map(ShipRow::outcome);
-            }
-            Keysym::Return | Keysym::KP_Enter
-                if bare && self.focus == TabArea::Findings && !ships.is_empty() =>
-            {
-                return page_enter(feature, stage, ctx);
-            }
-            // A criterion's card with the keyboard; a comment's the same,
-            // done for passed, and Del deletes it, the first press arming it
-            // (checklist C4).
-            Keysym::space | Keysym::Return | Keysym::KP_Enter
-                if bare && self.focus == TabArea::Findings && marking > 0 =>
-            {
-                return Some(PanelOutcome::Manual(Outcome::Toggle(self.finding)));
-            }
-            Keysym::f if bare && self.focus == TabArea::Findings && marking > 0 => {
-                return Some(PanelOutcome::Manual(match comment_at(self.finding) {
-                    Some(_) => Outcome::Fail(self.finding, String::new()),
-                    None => Outcome::Write(self.finding),
-                }));
-            }
-            Keysym::e | Keysym::E
-                if ctrl
-                    && !mods.shift
-                    && self.focus == TabArea::Findings
-                    && comment_at(self.finding).is_some() =>
-            {
-                return Some(PanelOutcome::Manual(Outcome::EditComment(self.finding)));
-            }
-            Keysym::Delete | Keysym::KP_Delete
-                if bare && self.focus == TabArea::Findings && marking > 0 =>
-            {
-                let Some(at) = comment_at(self.finding) else {
-                    return Some(PanelOutcome::Manual(Outcome::Clear(self.finding)));
-                };
-                let key = format!("comment:{at}");
-                if armed.as_ref() != Some(&key) {
-                    self.armed = Some(key);
-                    return None;
-                }
-                return Some(PanelOutcome::Manual(Outcome::DeleteComment(self.finding)));
-            }
-            // From anywhere on the page. Reopen and a fix plan's keys are
-            // for when it has one: then these are not its keys.
-            // With failures or comments to send, Ctrl+Enter makes their
-            // fixes, as on AI review's and Verify's pages.
-            Keysym::Return | Keysym::KP_Enter
-                if ctrl
-                    && criteria > 0
-                    && self.focus != TabArea::Repos
-                    && fix_round_on(feature, stage).is_none() =>
-            {
-                // The user's comments go through a plan: Ctrl+Enter never plans.
-                if !mods.shift && manual_sends(feature, ctx) && manual_own_words(ctx).is_some() {
-                    return Some(PanelOutcome::FindingRefused(PLAN_FIRST));
-                }
-                return Some(PanelOutcome::Manual(match mods.shift {
-                    true => Outcome::SendFailures,
-                    false if manual_sends(feature, ctx) => Outcome::MakeFixes,
-                    false => Outcome::MarkPassed,
-                }));
-            }
-            // A check's card with the keyboard.
-            Keysym::Return | Keysym::KP_Enter
-                if plain && self.focus == TabArea::Findings && !checks.is_empty() =>
-            {
-                let row = checks.get(self.finding)?.row?;
-                return Some(PanelOutcome::ShowCheck(row));
-            }
-            Keysym::r if bare && self.focus == TabArea::Findings && !checks.is_empty() => {
-                let check = checks.get(self.finding).filter(|c| !c.skipped)?;
-                return Some(PanelOutcome::RerunCheck(check.row?));
-            }
-            Keysym::s if bare && self.focus == TabArea::Findings && !checks.is_empty() => {
-                let row = checks.get(self.finding)?.row?;
-                // One that ended has nothing left to stop, one told already
-                // ends by itself.
-                let check = check_rows(feature, stage).get(row)?;
-                let goes = check.outcome.is_none() && !check.stopping;
-                return goes.then_some(PanelOutcome::StopCheck(row));
-            }
-            Keysym::space if bare && self.focus == TabArea::Findings && !checks.is_empty() => {
-                let check = checks.get(self.finding)?;
-                return skip_action(feature, stage, check, ctx).map(|(_, outcome)| outcome);
-            }
-            // All of them, from anywhere on the page.
-            Keysym::r | Keysym::R
-                if plain
-                    && mods.shift
-                    && self.focus != TabArea::Repos
-                    && has_failed_checks(feature, stage) =>
-            {
-                return Some(PanelOutcome::RunFailed);
-            }
-            // A review at its head: the project's checks, here.
-            Keysym::r | Keysym::R
-                if plain
-                    && mods.shift
-                    && self.focus != TabArea::Repos
-                    && stage == Stage::Verify
-                    && ctx.on_head
-                    && ctx.checks
-                    && feature.current() == Some(Stage::Verify) =>
-            {
-                return Some(PanelOutcome::RunChecks);
-            }
-            Keysym::s | Keysym::S
-                if plain
-                    && mods.shift
-                    && self.focus != TabArea::Repos
-                    && stage == Stage::Verify
-                    && can_stop_checks(feature) =>
-            {
-                return Some(PanelOutcome::StopChecks);
-            }
-            Keysym::f | Keysym::F if plain && mods.shift && offers_fix_all(feature, stage) => {
-                return Some(want_all_outcome(stage));
-            }
-            Keysym::_1 | Keysym::KP_1 | Keysym::_2 | Keysym::KP_2
-                if mods.alt
-                    && !(mods.ctrl || mods.shift || mods.logo)
-                    && stage == Stage::CodeReview
-                    && crate::feature_diff::review_views(feature) =>
-            {
-                return Some(PanelOutcome::ReviewView(match sym {
-                    Keysym::_1 | Keysym::KP_1 => chrome::ReviewView::Code,
-                    _ => chrome::ReviewView::Fixes,
-                }));
-            }
-            // The card with the keyboard: the diff's keys for a finding.
-            Keysym::e | Keysym::E
-                if mods.alt
-                    && !(mods.ctrl || mods.shift || mods.logo)
-                    && !self.expanded
-                    && (earlier_reviews(feature, stage).next().is_some()
-                        || folds_round_cards(feature, stage)) =>
-            {
-                self.toggle_rounds(feature, stage);
-                return None;
-            }
-            Keysym::f | Keysym::F
-                if bare && self.focus == TabArea::Findings && diff_note.is_some() =>
-            {
-                return Some(PanelOutcome::FindingRefused(
-                    match diff_note.is_some_and(|c| c.flag.is_some()) {
-                        true => SENT_NOTE,
-                        false => DIFF_NOTE,
-                    },
-                ));
-            }
-            Keysym::f | Keysym::F if bare && self.focus == TabArea::Findings => {
-                return self.card_key(CardKey::F, &cards, refused, armed.as_deref());
-            }
-            Keysym::e | Keysym::E
-                if ctrl
-                    && !mods.shift
-                    && self.focus == TabArea::Findings
-                    && diff_note.is_some() =>
-            {
-                let c = diff_note?;
-                return Some(match refused {
-                    Some(why) => PanelOutcome::FindingRefused(why),
-                    None => PanelOutcome::EditDiffNote(c.clone()),
-                });
-            }
-            Keysym::c | Keysym::C
-                if bare && self.focus == TabArea::Findings && diff_note.is_some() =>
-            {
-                let c = diff_note?;
-                return Some(match refused {
-                    Some(why) => PanelOutcome::FindingRefused(why),
-                    None => PanelOutcome::EditDiffNote(c.clone()),
-                });
-            }
-            Keysym::Delete | Keysym::KP_Delete
-                if bare && self.focus == TabArea::Findings && diff_note.is_some() =>
-            {
-                let c = diff_note?;
-                if let Some(why) = refused {
-                    return Some(PanelOutcome::FindingRefused(why));
-                }
-                // The first press arms it (checklist C4): the next card takes
-                // its place, so a press too many would hit that one.
-                let key = format!("note:{}:{}", note_id(c), c.text);
-                if armed.as_ref() != Some(&key) {
-                    self.armed = Some(key);
-                    return None;
-                }
-                return Some(PanelOutcome::DeleteDiffNote(c.clone()));
-            }
-            Keysym::Return | Keysym::KP_Enter
-                if plain && self.focus == TabArea::Findings && diff_note.is_some() =>
-            {
-                let c = diff_note?;
-                return Some(match (crate::review::is_general(c), refused) {
-                    (true, Some(why)) => PanelOutcome::FindingRefused(why),
-                    (true, None) => PanelOutcome::EditDiffNote(c.clone()),
-                    (false, _) => PanelOutcome::ShowDiffNote(c.clone()),
-                });
-            }
-            // An item's card: the same keys for either kind (`card_key`).
-            Keysym::e | Keysym::E if ctrl && !mods.shift && self.focus == TabArea::Findings => {
-                return self.card_key(CardKey::CtrlE, &cards, refused, armed.as_deref());
-            }
-            Keysym::c | Keysym::C
-                if bare && self.focus == TabArea::Findings && card.is_some_and(|i| !i.yours()) =>
-            {
-                return self.card_key(CardKey::C, &cards, refused, armed.as_deref());
-            }
-            Keysym::Delete | Keysym::KP_Delete
-                if plain && mods.shift && self.focus == TabArea::Findings && card.is_some() =>
-            {
-                return self.card_key(CardKey::ShiftDel, &cards, refused, armed.as_deref());
-            }
-            Keysym::Delete | Keysym::KP_Delete if bare && self.focus == TabArea::Findings => {
-                return self.card_key(CardKey::Del, &cards, refused, armed.as_deref());
-            }
-            Keysym::Return | Keysym::KP_Enter if plain && self.focus == TabArea::Findings => {
-                return self.card_key(CardKey::Enter, &cards, refused, armed.as_deref());
-            }
-            Keysym::c | Keysym::C
-                if bare && self.focus != TabArea::Repos && can_add_comment(feature, stage) =>
-            {
-                return Some(PanelOutcome::AddComment);
-            }
-            // Plan review's suggestions decided, off the repositories as well:
-            // the final plan, or the plan as it is (it says how many are left
-            // while some are); Ctrl+Shift+Enter asks the reviewer. Before
-            // Reopen's: the stage is current.
-            Keysym::Return | Keysym::KP_Enter
-                if ctrl
-                    && self.focus != TabArea::Repos
-                    && plan_review_open(feature, stage)
-                    && crate::feature_plan_review::deciding(feature).is_some() =>
-            {
-                return Some(match mods.shift {
-                    true => PanelOutcome::AskReviewer,
-                    false => PanelOutcome::WriteFinalPlan,
-                });
-            }
-            // AI review's fixes, off the repositories as well: Ctrl+Enter makes
-            // them while no plan is needed, Ctrl+Shift+Enter always plans
-            // them first, as on every page.
-            Keysym::Return | Keysym::KP_Enter
-                if ctrl
-                    && self.focus != TabArea::Repos
-                    && sends_findings(feature, stage, ctx).is_some() =>
-            {
-                return match mods.shift {
-                    true => Some(PanelOutcome::SendFixes),
-                    false => (sends_findings(feature, stage, ctx))
-                        .filter(|o| *o == PanelOutcome::MakeFindingFixes)
-                        .or(Some(PanelOutcome::FindingRefused(PLAN_FIRST))),
-                };
-            }
-            // Verify's, the same way, off its check cards too.
-            Keysym::Return | Keysym::KP_Enter
-                if ctrl && self.focus != TabArea::Repos && verify_sends(feature, stage) =>
-            {
-                return Some(match mods.shift {
-                    true => PanelOutcome::PlanFixes,
-                    false => PanelOutcome::MakeVerifyFixes,
-                });
-            }
-            // A locked stage's is refused when done, saying why; any other
-            // stage has nothing to reopen.
-            Keysym::Return | Keysym::KP_Enter
-                if ctrl
-                    && mods.shift
-                    && (self.focus == TabArea::Stages
-                        || (self.focus == TabArea::Findings && shown > 0 && criteria == 0)) =>
-            {
-                return (stage_mark(feature, stage) == StageMark::Done)
-                    .then_some(PanelOutcome::Untick(stage));
-            }
-            // The file's review has it too.
-            Keysym::Return | Keysym::KP_Enter
-                if ctrl
-                    && (self.focus == TabArea::Stages
-                        || self.focus == TabArea::Findings && criteria > 0)
-                    && fix_round_on(feature, stage).is_some_and(FixRound::can_make_fixes) =>
-            {
-                return Some(PanelOutcome::MakeFixes);
-            }
-            // The gate passes from any focus on the page, cards included.
-            Keysym::Return | Keysym::KP_Enter
-                if ctrl && !mods.shift && approves_doc(feature, stage, ctx) =>
-            {
-                return Some(PanelOutcome::ApproveDoc(stage));
-            }
-            // Written, but not read yet: say why it can't be approved.
-            Keysym::Return | Keysym::KP_Enter
-                if ctrl && !mods.shift && doc_unread(feature, stage, ctx) =>
-            {
-                return Some(PanelOutcome::FindingRefused(DOC_UNREAD));
-            }
-            // With a fix plan under way a criterion's card has no use for it.
-            Keysym::Return | Keysym::KP_Enter
-                if ctrl && self.focus == TabArea::Findings && criteria > 0 =>
-            {
-                return None;
-            }
-            Keysym::Return | Keysym::KP_Enter => {
-                if self.focus == TabArea::Stages {
-                    return page_enter(feature, stage, ctx);
-                }
-                if !self.expanded {
-                    self.toggle_repos();
-                    return None;
-                }
-                let picked = entry.and_then(|e| {
-                    let mut buttons = entry_buttons(feature, &self.sources, e);
-                    let at = self.picked(feature, e)?;
-                    (at < buttons.len()).then(|| buttons.swap_remove(at).1)
-                });
-                return picked.or_else(|| row_action(feature, row, ctx));
-            }
-            Keysym::Prior | Keysym::KP_Prior | Keysym::Next | Keysym::KP_Next
-                if ctrl && !mods.shift =>
-            {
-                let back = matches!(sym, Keysym::Prior | Keysym::KP_Prior);
-                return switch(slugs, &self.slug, back).map(PanelOutcome::Show);
-            }
-            Keysym::w | Keysym::W
-                if mods.alt && !ctrl && !mods.shift && feature.pull().is_some_and(|p| !p.own()) =>
-            {
-                return Some(PanelOutcome::FixHere);
-            }
-            Keysym::n | Keysym::N if mods.alt && !ctrl && !mods.shift && changes_pulls(feature) => {
-                return Some(PanelOutcome::EditPulls);
-            }
-            Keysym::o | Keysym::O if ctrl && mods.shift => {
-                return row_page(feature, row)
-                    .or_else(|| {
-                        opens_fix_plan(feature, stage).then_some(PanelOutcome::ReviewFixPlan)
-                    })
-                    .or_else(|| feature.pull().map(|p| PanelOutcome::OpenPr(p.url.clone())));
-            }
-            // A suggestion's card opens the code it cites.
-            Keysym::o | Keysym::O
-                if ctrl
-                    && self.focus == TabArea::Findings
-                    && card.is_some_and(|i| i.of() == ItemOf::Suggestion) =>
-            {
+            TabKey::CardOpen => {
+                let cards = keys::page_cards(self, feature, stage, notes);
+                let refused = card_refused(feature, stage, &cards, self.finding);
                 let open = self.card_key(CardKey::CtrlO, &cards, refused, armed.as_deref());
                 return open.or_else(|| Some(PanelOutcome::Open(feature.dir.clone())));
             }
-            Keysym::o | Keysym::O if ctrl => return Some(PanelOutcome::Open(feature.dir.clone())),
-            Keysym::c | Keysym::C if ctrl => return Some(PanelOutcome::CopyPath),
-            Keysym::r | Keysym::R if ctrl && mods.shift => {
-                return agent_key(feature, stage, ctx).map(|(_, outcome)| outcome);
-            }
-            Keysym::r | Keysym::R if ctrl => {
-                return fresh_stage(feature, row)
-                    .map(|stage| PanelOutcome::StartAgent(stage, true));
-            }
-            Keysym::n | Keysym::N if ctrl => return Some(PanelOutcome::New),
-            Keysym::a | Keysym::A if ctrl && mods.shift && needs(stage).is_some() => {
-                return Some(PanelOutcome::CycleAgent(stage));
-            }
-            Keysym::a | Keysym::A
-                if mods.alt
-                    && mods.shift
-                    && !(mods.ctrl || mods.logo)
-                    && needs(stage).is_some() =>
-            {
-                return Some(PanelOutcome::PickModel(stage));
-            }
-            Keysym::w | Keysym::W if ctrl && mods.shift && takes_a_place(stage) => {
-                return Some(PanelOutcome::CycleMachine(stage));
-            }
-            Keysym::q | Keysym::Q if ctrl && mods.shift && stops_on_machine(feature, stage) => {
-                return Some(PanelOutcome::StopOnMachine(stage));
-            }
-            // Ctrl+Shift+T shows its terminals there, where this would stop it.
-            Keysym::q | Keysym::Q
-                if ctrl
-                    && mods.shift
-                    && offers_sandbox(feature, stage)
-                    && sandbox_elsewhere(feature)
-                    && (ctx.sandbox_busy || sandbox_alive(feature)) =>
-            {
-                return Some(PanelOutcome::StopSandbox);
-            }
-            Keysym::e | Keysym::E
-                if ctrl
-                    && mods.shift
-                    && feature.writer.is_some()
-                    && feature.status == Status::Open =>
-            {
-                return Some(PanelOutcome::TakeOver);
-            }
-            Keysym::e | Keysym::E if ctrl && mods.shift && hands_back(feature) => {
-                return Some(PanelOutcome::HandBack);
-            }
-            Keysym::b | Keysym::B if ctrl && mods.shift && milestone_switch(feature, stage) => {
-                return Some(PanelOutcome::FreshMilestones(!feature.fresh_milestones));
-            }
-            Keysym::l | Keysym::L if ctrl && mods.shift => self.toggle_repos(),
-            Keysym::u | Keysym::U if ctrl && mods.shift && offers_setup(feature, stage) => {
-                return Some(PanelOutcome::SetUp);
-            }
-            Keysym::i | Keysym::I if ctrl && mods.shift && offers_setup_log(feature, stage) => {
-                return Some(PanelOutcome::SetupLog);
-            }
-            Keysym::e | Keysym::E
-                if ctrl
-                    && !mods.shift
-                    && (offers_setup(feature, stage) || offers_sandbox(feature, stage)) =>
-            {
-                return Some(PanelOutcome::EditCommands(commands_tab(stage)));
-            }
-            Keysym::t | Keysym::T if ctrl && mods.shift && offers_sandbox(feature, stage) => {
-                if sandbox_elsewhere(feature) && sandbox_alive(feature) {
-                    return Some(PanelOutcome::ShowSandbox);
-                }
-                let running = ctx.sandbox_busy || sandbox_alive(feature);
-                return Some(match running {
-                    true => PanelOutcome::StopSandbox,
-                    false => PanelOutcome::StartSandbox,
-                });
-            }
-            Keysym::y | Keysym::Y
-                if ctrl
-                    && mods.shift
-                    && offers_sandbox(feature, stage)
-                    && sandbox_alive(feature) =>
-            {
-                return Some(PanelOutcome::OpenSandbox);
-            }
-            Keysym::y | Keysym::Y
-                if mods.alt
-                    && !(mods.ctrl || mods.shift || mods.logo)
-                    && offers_sandbox(feature, stage)
-                    && sandbox_alive(feature)
-                    && sandbox_pages(feature).len() > 1 =>
-            {
-                return Some(PanelOutcome::NextSandboxPage);
-            }
-            Keysym::n | Keysym::N
-                if ctrl
-                    && mods.shift
-                    && offers_sandbox(feature, stage)
-                    && sandbox_alive(feature)
-                    && !sandbox_elsewhere(feature) =>
-            {
-                return Some(PanelOutcome::SandboxLan);
-            }
-            Keysym::g | Keysym::G
-                if ctrl
-                    && mods.shift
-                    && offers_sandbox(feature, stage)
-                    && sandbox_alive(feature) =>
-            {
-                return Some(PanelOutcome::RestartSandbox);
-            }
-            Keysym::x | Keysym::X if ctrl && mods.shift && offers_sandbox(feature, stage) => {
-                match (sandbox_alive(feature), feature.sandbox.is_some()) {
-                    (true, _) => return Some(PanelOutcome::ResetSandbox),
-                    (false, true) if !ctx.sandbox_busy => {
-                        return Some(PanelOutcome::RemoveSandbox);
-                    }
-                    _ => {}
-                }
-            }
-            Keysym::k | Keysym::K if ctrl && mods.shift && plan_review_open(feature, stage) => {
-                return Some(PanelOutcome::SkipPlanReview);
-            }
-            Keysym::d | Keysym::D
-                if ctrl
-                    && mods.shift
-                    && plan_review_open(feature, stage)
-                    && feature.plan_review.as_ref().is_some_and(|r| r.writing) =>
-            {
-                return Some(PanelOutcome::ChangeDecisions);
-            }
-            Keysym::Delete | Keysym::KP_Delete if ctrl && mods.shift => {
-                if fix_round_on(feature, stage).is_some_and(FixRound::can_drop) {
-                    return Some(PanelOutcome::DropFixPlan);
-                }
-                return start_over_stage(feature, stage, ctx).map(PanelOutcome::StartOver);
-            }
-            Keysym::Delete | Keysym::KP_Delete if bare && self.focus == TabArea::Repos => {
-                return self.delete_row(feature, entry?, armed);
-            }
-            // Never a bare Del: one slip of the focus would abandon it.
-            Keysym::Delete | Keysym::KP_Delete
-                if mods.alt && mods.shift && !(mods.ctrl || mods.logo) =>
-            {
-                return Some(PanelOutcome::Remove);
-            }
-            _ => {}
+            TabKey::ToggleRounds => self.toggle_rounds(feature, stage),
+            TabKey::DeleteRow(entry) => return self.delete_row(feature, entry, armed),
         }
         None
+    }
+}
+
+/// Why `stage`'s page of `feature` can't decide the card at `at` of
+/// `cards`, or edit the comment it is.
+fn card_refused(
+    feature: &Feature,
+    stage: Stage,
+    cards: &[ReviewCard],
+    at: usize,
+) -> Option<&'static str> {
+    match cards.get(at).copied().and_then(ReviewCard::diff_note) {
+        Some(c) => why_not_edit_note(feature, stage, c),
+        None => why_not_decide(feature, stage),
     }
 }
 
@@ -6980,25 +6406,6 @@ fn can_set_up(feature: &Feature, ctx: RowCtx) -> bool {
 /// once one started.
 fn offers_setup_log(feature: &Feature, stage: Stage) -> bool {
     offers_setup(feature, stage) && feature.setup.is_some()
-}
-
-/// The key of the `⋯` menu's feature row `i`: `FEATURE_BUTTONS`, then the
-/// one removing it, shown at the row's right.
-fn header_key(i: usize) -> Option<&'static str> {
-    ["Ctrl+O", "Ctrl+C", "Prefix, then U", "Ctrl+N", REMOVE_KEY]
-        .get(i)
-        .copied()
-}
-/// The key of the `⋯` menu's row for a page button `in_menu` puts there,
-/// shown at its right as the feature rows show theirs.
-fn menu_key(outcome: &PanelOutcome) -> Option<&'static str> {
-    match outcome {
-        PanelOutcome::StartOver(_) => Some(START_OVER_KEY),
-        PanelOutcome::SetUp => Some("Ctrl+Shift+U"),
-        PanelOutcome::EditCommands(_) => Some("Ctrl+E"),
-        PanelOutcome::ResetSandbox | PanelOutcome::RemoveSandbox => Some("Ctrl+Shift+X"),
-        _ => None,
-    }
 }
 
 /// The repository `rows` on from `at`, of `len`: it stops at the ends.
@@ -9955,49 +9362,37 @@ impl Gerdr {
         if self.criteria_search_key(mods, sym, typed) {
             return None;
         }
-        // F10 (Shift+F10, the Menu key) opens the `⋯` menu, its first row
-        // picked: the arrows, Enter and Esc go on in it.
-        let menu_key =
-            matches!(sym, Keysym::F10 | Keysym::Menu) && !(mods.ctrl || mods.alt || mods.logo);
-        if menu_key && let Some(feature) = self.panel_feature().cloned() {
-            let ctx = self.row_ctx(&feature);
-            self.open_feature_menu(&feature, ctx);
-            if let Some(menu) = self.context_menu.as_mut() {
-                menu.step_to_end(false);
-            }
-            return None;
-        }
-        let plain = !(mods.ctrl || mods.shift || mods.alt || mods.logo);
-        // On the rail over the review, Tab and Down go back to it: the page
-        // has nothing else to go to.
-        let tabs = matches!(sym, Keysym::Tab | Keysym::ISO_Left_Tab)
-            && !(mods.ctrl || mods.alt || mods.logo);
-        let down = matches!(sym, Keysym::Down | Keysym::KP_Down) && plain;
-        if (tabs || down) && self.inline_wd().is_some() {
-            if let Some(panel) = self.features.panel.as_mut() {
-                panel.rail_keys = false;
-            }
-            return None;
-        }
-        let page = match sym {
-            Keysym::Page_Up | Keysym::KP_Page_Up if plain => Some(-1.0),
-            Keysym::Page_Down | Keysym::KP_Page_Down if plain => Some(1.0),
-            _ => None,
+        let pre = keys::PreCtx {
+            feature: self.panel_feature().is_some(),
+            inline: self.inline_wd().is_some(),
+            keys: (self.features.panel.as_ref()).is_some_and(|p| p.keys),
         };
-        if let Some(sign) = page {
-            self.page_feature_tab(sign);
-            return None;
-        }
-        // Up and Down scroll the keys list a notch.
-        let keys = (self.features.panel.as_ref()).is_some_and(|p| p.keys);
-        let notch = match sym {
-            Keysym::Up | Keysym::KP_Up if plain => Some(-1.0),
-            Keysym::Down | Keysym::KP_Down if plain => Some(1.0),
-            _ => None,
-        };
-        if let Some(sign) = notch.filter(|_| keys) {
-            self.feature_panel_scroll_page(Motion::Notches(sign));
-            return None;
+        match keys::pre_key(&pre, mods, sym) {
+            // Its first row picked: the arrows, Enter and Esc go on in it.
+            Some(keys::PreKey::Menu) => {
+                let feature = self.panel_feature().cloned()?;
+                let ctx = self.row_ctx(&feature);
+                self.open_feature_menu(&feature, ctx);
+                if let Some(menu) = self.context_menu.as_mut() {
+                    menu.step_to_end(false);
+                }
+                return None;
+            }
+            Some(keys::PreKey::Rail) => {
+                if let Some(panel) = self.features.panel.as_mut() {
+                    panel.rail_keys = false;
+                }
+                return None;
+            }
+            Some(keys::PreKey::Page(up)) => {
+                self.page_feature_tab(if up { -1.0 } else { 1.0 });
+                return None;
+            }
+            Some(keys::PreKey::Notch(up)) => {
+                self.feature_panel_scroll_page(Motion::Notches(if up { -1.0 } else { 1.0 }));
+                return None;
+            }
+            None => {}
         }
         let panel = self.features.panel.as_ref()?;
         let slugs = self.listed_slugs(&panel.project);
@@ -10018,9 +9413,9 @@ impl Gerdr {
             }
         } else if !quiet && on.page_stage(&feature) == Stage::Ship {
             let repo = ship_row_repo(on, &ships);
-            let keys = ship_keys(&feature, ctx, probe, repo.as_deref());
-            if let Some(key) = keys.into_iter().find(|k| k.pressed(mods, sym)) {
-                return Some(key.outcome);
+            let ship = keys::ShipCtx::new(&feature, ctx, probe, repo.as_deref());
+            if let Some(outcome) = crate::key_table::press(keys::SHIP_KEYS, &ship, mods, sym) {
+                return Some(outcome);
             }
         }
         let notes = notes_of(probe).to_vec();
@@ -12022,6 +11417,32 @@ impl Gerdr {
 
     /// The header's `⋯` menu: the page's rare buttons (`StagePage::menu`), then
     /// what acts on the feature as a whole, removing it last.
+    /// The key of the `⋯` menu's row asking `outcome`, shown at its right:
+    /// the tab's key asking it now, as on the rail.
+    fn menu_chord(
+        &self,
+        feature: &Feature,
+        ctx: RowCtx,
+        outcome: &PanelOutcome,
+    ) -> Option<&'static str> {
+        if *outcome == PanelOutcome::Stats {
+            // The prefix's key (`keys::ACTIONS`), not the tab's.
+            return Some("Prefix, then U");
+        }
+        let panel = self.features.panel.as_ref()?;
+        let slugs = self.listed_slugs(&panel.project);
+        let plan = self.planned_checks(feature);
+        let key = (feature.project.clone(), feature.slug.clone());
+        let probe = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
+        let ships = ship_rows(feature, probe);
+        let stage = panel.page_stage(feature);
+        let notes = notes_of(probe);
+        let t = keys::TabCtx::new(
+            panel, feature, stage, &slugs, ctx, &plan, &ships, notes, None,
+        );
+        t.on_rail().chord_of(outcome)
+    }
+
     fn open_feature_menu(&mut self, feature: &Feature, ctx: RowCtx) {
         use crate::menu::{MenuAction, MenuItem, MenuSpec};
         let Some((view, layout)) = self.feature_tab_parts() else {
@@ -12038,6 +11459,7 @@ impl Gerdr {
         let actions = stage.map_or_else(Vec::new, |stage| {
             self.page_button_actions(feature, stage, ctx)
         });
+        let menu_key = |outcome: &PanelOutcome| self.menu_chord(feature, ctx, outcome);
         for i in &view.page.menu {
             if let (Some(b), Some((_, outcome))) = (view.page.buttons.get(*i), actions.get(*i)) {
                 let on = b.style != ButtonStyle::Off;
@@ -12064,8 +11486,9 @@ impl Gerdr {
                 if (i == 0 && !items.is_empty()) || i == last {
                     items.push(MenuItem::note(""));
                 }
+                let key = menu_key(&o);
                 let mut row = item(label, o);
-                if let Some(key) = header_key(i) {
+                if let Some(key) = key {
                     row = row.hint(key);
                 }
                 // Abandon loses work; removing a shipped feature's
@@ -15852,25 +15275,6 @@ struct ShipKey {
     outcome: PanelOutcome,
 }
 
-impl ShipKey {
-    /// Whether the key `mods` and `sym` (its own symbol) is this one.
-    fn pressed(&self, mods: &ModifiersState, sym: Keysym) -> bool {
-        let Some((want, key)) = crate::keys::hint_key(self.chord) else {
-            return false;
-        };
-        let sym = match sym {
-            Keysym::KP_Delete => Keysym::Delete,
-            Keysym::KP_Enter => Keysym::Return,
-            sym => sym,
-        };
-        want.ctrl == mods.ctrl
-            && want.shift == mods.shift
-            && want.alt == mods.alt
-            && !mods.logo
-            && sym == key
-    }
-}
-
 /// The repository of Ship's row the keyboard is on, if it is one's.
 fn ship_row_repo(panel: &FeaturePanel, ships: &[ShipRow]) -> Option<String> {
     if panel.focus != TabArea::Findings {
@@ -15899,112 +15303,6 @@ fn ship_outcome_repo(feature: &Feature, outcome: &PanelOutcome) -> Option<String
     }
 }
 
-/// The keys of Ship's page's buttons, in the footer's order.
-const SHIP_CHORDS: [&str; 8] = [
-    "Ctrl+M",
-    "Ctrl+Shift+M",
-    "Alt+M",
-    "Ctrl+Shift+O",
-    "Ctrl+Shift+Del",
-    "Alt+Z",
-    "Ctrl+R",
-    "Ctrl+E",
-];
-
-/// Whether `chord` of Ship's page presses a button asking `outcome`.
-fn ship_chord_does(chord: &str, outcome: &PanelOutcome) -> bool {
-    use feature::UpdateWay::{Merge, Rebase};
-    match chord {
-        "Ctrl+M" => matches!(
-            outcome,
-            PanelOutcome::UpdateBase(_, Merge) | PanelOutcome::ResolveConflicts(_, false)
-        ),
-        "Ctrl+Shift+M" => matches!(outcome, PanelOutcome::UpdateBase(_, Rebase)),
-        "Alt+M" => matches!(outcome, PanelOutcome::ResolveConflicts(_, true)),
-        "Ctrl+Shift+O" => matches!(
-            outcome,
-            PanelOutcome::ReviewConflictPlan | PanelOutcome::OpenPr(_)
-        ),
-        "Ctrl+Shift+Del" => matches!(outcome, PanelOutcome::StopResolving),
-        "Alt+Z" => matches!(
-            outcome,
-            PanelOutcome::UndoShip(..) | PanelOutcome::UndoAfter(_)
-        ),
-        "Ctrl+R" => matches!(outcome, PanelOutcome::WriteSummary),
-        "Ctrl+E" => matches!(outcome, PanelOutcome::EditSummary),
-        _ => false,
-    }
-}
-
-/// The keys of the buttons Ship's page offers now, as `ctx` and `probe` have
-/// it. One acting on a repository goes by the repository of the row the
-/// keyboard is on, `repo`; with none, by the first that offers it: the
-/// latest step to undo, the card's way to take its base in.
-fn ship_keys(
-    feature: &Feature,
-    ctx: RowCtx,
-    probe: Option<&Probe>,
-    repo: Option<&str>,
-) -> Vec<ShipKey> {
-    let mut offered = page_actions(feature, Stage::Ship, ctx);
-    offered.retain(|(_, o)| !undoes_merged(o, probe));
-    offered.extend(ship_base_actions(feature, probe));
-    let find = |want: &dyn Fn(&PanelOutcome) -> bool| {
-        (offered.iter())
-            .filter(|(_, o)| want(o))
-            .find(|(_, o)| match (repo, ship_outcome_repo(feature, o)) {
-                (Some(on), Some(of)) => on == of,
-                // On a repository, Alt+Z undoes its step, not what followed.
-                (Some(_), None) => !matches!(o, PanelOutcome::UndoAfter(_)),
-                _ => true,
-            })
-            .cloned()
-    };
-    let mut keys = Vec::new();
-    for chord in SHIP_CHORDS {
-        // A plan to review comes before a pull request to open.
-        let found = match chord {
-            "Ctrl+Shift+O" => find(&|o| matches!(o, PanelOutcome::ReviewConflictPlan))
-                .or_else(|| find(&|o| ship_chord_does(chord, o))),
-            _ => find(&|o| ship_chord_does(chord, o)),
-        };
-        let Some((button, outcome)) = found else {
-            continue;
-        };
-        // The hint says what the button says, so the two can't drift.
-        let what = lower_first(&button.label);
-        keys.push(ShipKey {
-            chord,
-            what,
-            outcome,
-        });
-    }
-    keys
-}
-
-/// What a key does on Ship's page of `feature`, a pull request's review:
-/// Ctrl+Enter approves someone else's, Ctrl+Shift+Enter requests changes,
-/// Ctrl+E edits the review's text. Enter is the page's primary, as on any.
-fn submit_key(feature: &Feature, mods: &ModifiersState, sym: Keysym) -> Option<PanelOutcome> {
-    use feature::pr_submit::Event;
-    let pull = feature.pull()?;
-    if feature.status != Status::Open || feature.current() != Some(Stage::Ship) {
-        return None;
-    }
-    match sym {
-        Keysym::Return | Keysym::KP_Enter if mods.ctrl && !mods.alt && !pull.mine => {
-            Some(PanelOutcome::SubmitReview(match mods.shift {
-                true => Event::RequestChanges,
-                false => Event::Approve,
-            }))
-        }
-        Keysym::e | Keysym::E if mods.ctrl && !mods.shift && !mods.alt => {
-            Some(PanelOutcome::EditSummary)
-        }
-        _ => None,
-    }
-}
-
 /// `hints` with the keys of Ship's buttons in, before F1, in place of any
 /// the page had on the same chord.
 fn with_ship_hints(
@@ -16020,24 +15318,13 @@ fn with_ship_hints(
         return hints;
     }
     // A pull request's review submits instead: its own keys.
-    if let Some(pull) = feature.pull() {
-        if feature.status != Status::Open || feature.current() != Some(Stage::Ship) {
-            return hints;
-        }
-        let mut keys = Vec::new();
-        if !pull.mine {
-            keys.push(("Ctrl+Enter".to_owned(), "approve\u{2026}".to_owned()));
-            keys.push((
-                "Ctrl+Shift+Enter".to_owned(),
-                "request changes\u{2026}".to_owned(),
-            ));
-        }
-        keys.push(("Ctrl+E".to_owned(), "edit text".to_owned()));
+    if feature.pull().is_some() {
+        let keys = crate::key_table::hints(keys::SUBMIT_KEYS, feature, keys::submit_said);
         hints.retain(|(chord, _)| !keys.iter().any(|(k, _)| k == chord));
         let at = (hints.iter())
             .position(|(chord, _)| chord == "F1")
             .unwrap_or(hints.len());
-        hints.splice(at..at, keys);
+        hints.splice(at..at, keys.into_iter().map(|(k, w)| (k.to_owned(), w)));
         return hints;
     }
     let repo = ship_row_repo(panel, ships);
@@ -17086,405 +16373,6 @@ fn activity(feature: &Feature, now: u64) -> Vec<ActivityRow> {
         .collect()
 }
 
-/// Every key the feature tab takes, by where it works, as F1 lists them:
-/// (heading, [(keys, what they do)]).
-const TAB_KEYS: [(&str, &[(&str, &str)]); 7] = [
-    (
-        "Stages",
-        &[
-            ("Left / Right", "previous or next stage"),
-            ("Up / Down", "previous or next stage"),
-            ("Ctrl+K / Ctrl+J", "previous or next stage"),
-            ("Home / End", "first or last stage"),
-            (
-                "Enter",
-                "the page's main button; on a done stage, go to the current one",
-            ),
-            (
-                "Ctrl+Shift+Enter",
-                "reopen a done stage, unless it is locked",
-            ),
-            (
-                "Ctrl+Shift+Del",
-                "start the current stage over, or drop its fix plan, after asking (not Discover: Ctrl+R starts its agent afresh)",
-            ),
-            (
-                "Ctrl+Enter",
-                "approve a brief or plan ready for review; make the fixes of a fix plan ready for review, or again once its agent stopped with fixes left; at AI review, make the findings' fixes when nothing you wrote needs a plan; at Verify, make its failures' fixes; at Manual test, make the fixes of its failures, or mark it passed with none (Ctrl+Shift+Enter always plans fixes first); at Plan review, write the final plan or use the plan as it is once every suggestion is decided (Ctrl+Shift+Enter asks the reviewer)",
-            ),
-            (
-                "Alt+W",
-                "reviewing someone else's pull request: fix it here and push the fixes from Ship, asking first, or comment on it again",
-            ),
-            (
-                "Alt+N",
-                "reviewing pull requests: add those of other repositories, or leave some out, in the review dialog",
-            ),
-            (
-                "Ctrl+Enter / Ctrl+Shift+Enter",
-                "reviewing someone else's pull request, on Ship's page: approve it, or request changes, after asking (Enter comments, or approves with nothing to post; Ctrl+E edits the review's text)",
-            ),
-            (
-                "Ctrl+Shift+O",
-                "Verify's evidence, or a fix plan already sent; else, reviewing a pull request, its page on GitHub",
-            ),
-            ("Tab", "Verify: to the checks, then Up / Down through them"),
-            ("Enter", "a check: show its terminal"),
-            ("r / s", "a check: run it again, stop it"),
-            ("Space", "a check: skip it, or stop skipping it"),
-            (
-                "Shift+R / Shift+S",
-                "Verify: run the failed ones, stop all; reviewing a pull request at its head, run the checks here",
-            ),
-            (
-                "Alt+E",
-                "Verify: fold the fix round cards, or open them all",
-            ),
-            (
-                "Ctrl+Shift+U",
-                "copy what the worktrees lack: Build and Verify",
-            ),
-            (
-                "Ctrl+Shift+I",
-                "what the setup runs and printed: Build and Verify",
-            ),
-            (
-                "Ctrl+E",
-                "edit the project's commands: Build, Verify, Manual test",
-            ),
-            (
-                "Ctrl+Shift+T",
-                "Manual test: start or stop the sandbox, or show its terminals if on another machine (Ctrl+Shift+Q stops it there)",
-            ),
-            ("Ctrl+Shift+Y", "Manual test: open the sandbox's app"),
-            (
-                "Alt+Y",
-                "Manual test: open the sandbox's next page, as the buttons after Open app do",
-            ),
-            (
-                "Ctrl+Shift+N",
-                "Manual test: open the sandbox to your network, for a phone, or close it",
-            ),
-            ("Ctrl+Shift+G", "Manual test: restart the sandbox"),
-            (
-                "Ctrl+Shift+X",
-                "Manual test: reset the sandbox's data, or remove it once stopped",
-            ),
-            ("Ctrl+R", "start the stage's agent afresh"),
-            ("Ctrl+Shift+R", "show the stage's agent, or resume its chat"),
-            ("Ctrl+Shift+A", "pick the stage's next agent"),
-            (
-                "Ctrl+Shift+W",
-                "pick the machine the stage's next agent or check run goes on",
-            ),
-            ("Ctrl+Shift+Q", "stop the stage's agent on another machine"),
-            (
-                "Ctrl+Shift+E",
-                "make a feature another machine writes this machine's, or hand one back to the machine it came from",
-            ),
-            ("Alt+Shift+A", "pick the model of the stage's agent"),
-            (
-                "Ctrl+Shift+B",
-                "Build: one agent, or a fresh agent per milestone",
-            ),
-            ("Ctrl+Shift+K", "skip Plan review"),
-            (
-                "Alt+E",
-                "Discover, Plan: fold the draft cards, or open them all",
-            ),
-            ("Ctrl+Shift+D", "change the decisions on a final plan"),
-            (
-                "Ctrl+M",
-                "Ship: merge the base into the selected repository's branch; with conflicts, have an agent resolve them, as planned once a plan is written",
-            ),
-            (
-                "Ctrl+Shift+M",
-                "Ship: rebase the selected repository's branch onto its base",
-            ),
-            (
-                "Alt+M",
-                "Ship: have an agent plan how to resolve the conflicts first",
-            ),
-            (
-                "Ctrl+Shift+O",
-                "Ship: review the plan of a resolution, or open the selected repository's pull request",
-            ),
-            (
-                "Ctrl+Shift+Del",
-                "Ship: stop an agent's merge and abort it, after asking",
-            ),
-            (
-                "Alt+Z",
-                "Ship: undo the selected repository's last step, after asking; off the rows, the latest, or what followed shipping",
-            ),
-            ("Ctrl+R", "Ship: write the summary again"),
-            ("Ctrl+E", "Ship: edit the summary"),
-        ],
-    ),
-    (
-        "Manual test's criteria",
-        &[
-            (
-                "Tab",
-                "to the criteria; Enter on the page goes to the first not tried",
-            ),
-            ("Up / Down", "previous or next criterion"),
-            ("Home / End", "first or last criterion"),
-            (
-                "Left / Right",
-                "fold it to its line, or open it to its steps",
-            ),
-            ("Alt+Left / Alt+Right", "fold all, or open all"),
-            ("Alt+D / Alt+Shift+D", "fold those passed, or open them"),
-            ("Alt+S / Alt+Shift+S", "fold those seen, or open them"),
-            ("Alt+E", "fold the fix round cards, or open them all"),
-            (
-                "/ or Ctrl+F",
-                "search them: only those saying it show, open; Enter goes to them",
-            ),
-            (
-                "n / Shift+N",
-                "go to the next place found, or the one before",
-            ),
-            (
-                "* / #",
-                "search for the text selected, else the word under the pointer",
-            ),
-            ("Esc", "clear the search, then close it"),
-            ("Ctrl+C / y", "copy the text selected with the pointer"),
-            ("Space / Enter", "mark it passed, or not; passed, it folds"),
-            ("f", "mark it failed, saying what went wrong, or edit that"),
-            ("Shift+Enter", "writing what went wrong: start a new line"),
-            ("Del", "clear its result"),
-            ("Ctrl+Enter", "mark Manual test passed"),
-            ("Ctrl+Shift+Enter", "plan the fixes of the failures"),
-        ],
-    ),
-    (
-        "AI review's findings",
-        &[
-            ("Up / Down", "previous or next finding"),
-            (
-                "Left / Right",
-                "fold the card to its line, or open it (also its chevron)",
-            ),
-            ("Home / End", "first or last finding"),
-            ("Ctrl+Shift+Enter", "plan the fixes of the findings first"),
-            ("f", "fix the finding, or take that back"),
-            (
-                "c",
-                "write or edit your comment on it; off the cards, add a comment of your own",
-            ),
-            ("Shift+Enter", "writing your comment: start a new line"),
-            ("Shift+Del", "delete your comment on it"),
-            ("Ctrl+E", "edit its fix, or a comment of your own"),
-            (
-                "Del",
-                "dismiss it, saying why, or reopen it; a comment of your own: press twice to delete",
-            ),
-            ("Enter", "show it in the diff"),
-            (
-                "Alt+E",
-                "fold the earlier reviews and the fix round cards, or open them all",
-            ),
-        ],
-    ),
-    (
-        "Plan review's suggestions",
-        &[
-            (
-                "Tab",
-                "to the suggestions; Enter on the page shows them in the plan",
-            ),
-            ("Up / Down", "previous or next suggestion"),
-            (
-                "Left / Right",
-                "fold the card to its line, or open it (also its chevron)",
-            ),
-            ("Home / End", "first or last suggestion"),
-            (
-                "f",
-                "accept it, or take that back; a question with no answer takes one first",
-            ),
-            (
-                "c",
-                "write or edit your comment on it, a question's answer; off the cards, add a suggestion of your own",
-            ),
-            ("Shift+Enter", "writing your comment: start a new line"),
-            ("Shift+Del", "delete your comment on it"),
-            ("Ctrl+E", "edit its change, or a suggestion of your own"),
-            (
-                "Del",
-                "reject it, saying why, or reopen it; a suggestion of your own: press twice to delete",
-            ),
-            ("Enter", "show it in the plan"),
-            ("Ctrl+O", "open the code it cites"),
-            ("Shift+F", "accept all open"),
-            (
-                "Ctrl+Enter",
-                "write the final plan, or use the plan as it is, once none is left to decide",
-            ),
-            ("Ctrl+Shift+Enter", "ask the reviewer about your comments"),
-        ],
-    ),
-    (
-        "Code review",
-        &[
-            (
-                "Alt+1 / Alt+2",
-                "show the code, or the fixes the comments asked for",
-            ),
-            ("Up / Down", "fixes: previous or next comment"),
-            ("Enter", "fixes: show the comment in the diff"),
-            ("c / Del", "fixes: edit or delete a comment not sent yet"),
-            ("c", "fixes: off the cards, add a comment of your own"),
-            ("Alt+E", "fixes: fold the fix round cards, or open them all"),
-        ],
-    ),
-    (
-        "Repositories",
-        &[
-            ("Up / Down", "previous or next repository"),
-            (
-                "Left / Right",
-                "previous or next repository; with all shown, the row's button",
-            ),
-            ("Ctrl+K / Ctrl+J", "previous or next repository"),
-            ("Home / End", "first or last repository"),
-            (
-                "Enter",
-                "show all repositories; with all shown, press the row's button",
-            ),
-            ("Esc", "hide them again"),
-            ("Ctrl+Shift+O", "open its pull request"),
-        ],
-    ),
-    (
-        "Anywhere on the tab",
-        &[
-            (
-                "Tab / Shift+Tab",
-                "stages, findings, suggestions, checks, criteria or repositories",
-            ),
-            ("PgUp / PgDn", "scroll the page"),
-            ("Ctrl+PgUp / Ctrl+PgDn", "previous or next feature"),
-            ("Ctrl+O", "open a tab in the feature's folder"),
-            ("Ctrl+C", "copy the feature's path"),
-            ("Prefix, then U", "show the feature's AI work stats"),
-            ("Ctrl+N", "new feature"),
-            ("Ctrl+Shift+L", "show or hide all repositories"),
-            (
-                "F10",
-                "open the \u{22ef} menu: Start over, Set up again, Commands, Abandon and more",
-            ),
-            (
-                "Del",
-                "on a repository of several, remove it (one on the branch asks, others press \
-                 twice); on a card, what the card says; never the feature",
-            ),
-            (
-                "Alt+Shift+Del",
-                "abandon the feature, or remove its worktrees once done, after asking",
-            ),
-            (
-                "Esc",
-                "writing a note or comment on a card: leave it unsaved, kept as a draft for \
-                 that card's next one",
-            ),
-            ("Ctrl+Shift+Del", "writing one: discard it"),
-            ("F1", "list these keys; Esc goes back to the page"),
-        ],
-    ),
-];
-
-/// The page listing every key of the tab (F1), in place of a stage's.
-fn keys_page() -> StagePage {
-    let sections = TAB_KEYS
-        .iter()
-        .map(|(label, keys)| {
-            let rows = (keys.iter())
-                // A key column: the page lays "key\twhat" out that way.
-                .map(|(k, what)| line(format!("{k}\t{what}"), CheckTone::Note))
-                .collect();
-            lines(label, rows)
-        })
-        .collect();
-    StagePage {
-        primary: None,
-        menu: Vec::new(),
-        title: "Keys".to_owned(),
-        about: "Every key of the feature tab. Esc goes back to the page.".to_owned(),
-        status: None,
-        buttons: Vec::new(),
-        sections,
-    }
-}
-
-/// The feature tab's key hints over `feature`, one of `slugs`, as `panel`
-/// has the keyboard on `stage`'s page.
-/// What can be picked of a stage's next agent, for the feature tab's footer.
-#[derive(Clone, Copy, Default)]
-struct AgentChoices<'a> {
-    picks: &'a [AgentChip],
-    /// Its model too.
-    model: bool,
-    /// The machine it runs on too.
-    place: bool,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn tab_hints(
-    panel: &FeaturePanel,
-    feature: &Feature,
-    stage: Stage,
-    slugs: &[String],
-    ctx: RowCtx,
-    choices: AgentChoices,
-    plan: &[PlannedCheck],
-    ships: &[ShipRow],
-    notes: &[Comment],
-) -> Vec<(String, String)> {
-    let mut hints = writers_tab_hints(
-        panel, feature, stage, slugs, ctx, choices, plan, ships, notes,
-    );
-    // Text selected on the page goes first: what it is for is copying.
-    let typing = panel.search.as_ref().is_some_and(|s| s.typing);
-    let picked = panel.pick.as_ref().is_some_and(|p| p.anchor != p.cursor);
-    if picked && !panel.keys && panel.note.is_none() && !typing {
-        let mut picked = vec![("Ctrl+C / y".to_owned(), "copy".to_owned())];
-        if shows_criteria(feature, stage) {
-            picked.push(("* / #".to_owned(), "search it".to_owned()));
-        }
-        picked.push(("Esc".to_owned(), "unselect".to_owned()));
-        hints.retain(|(k, _)| k != "Esc");
-        hints.splice(0..0, picked);
-    }
-    if stage == Stage::CodeReview
-        && !panel.keys
-        && panel.note.is_none()
-        && crate::feature_diff::review_views(feature)
-    {
-        hints.push(("Alt+1".to_owned(), "code review".to_owned()));
-    }
-    if feature.writer.is_some() {
-        for (key, what) in &mut hints {
-            // Enter goes by the page's own action, which only reads a file there.
-            if key == "Enter"
-                && let Some(rest) = what.strip_prefix("review ")
-            {
-                *what = format!("open {rest}");
-            }
-        }
-        if feature.status == Status::Open && !panel.keys && panel.note.is_none() {
-            hints.push(("Ctrl+Shift+E".to_owned(), "take over".to_owned()));
-        }
-    }
-    if hands_back(feature) && !panel.keys && panel.note.is_none() {
-        hints.push(("Ctrl+Shift+E".to_owned(), "hand back".to_owned()));
-    }
-    hints
-}
-
 /// What fold button `i` of `page` does, with its key; none for another.
 fn fold_tip(page: &chrome::StagePage, i: usize) -> Option<String> {
     let word = page.sections.iter().find_map(|s| match s {
@@ -17512,19 +16400,6 @@ fn fold_tip(page: &chrome::StagePage, i: usize) -> Option<String> {
     Some(format!("{verb} {what} ({key})"))
 }
 
-/// The hints of the criteria's search: `/` opens it; open, `n` / `N` go
-/// through what it found, and Esc clears it, then closes it.
-fn search_hints(panel: &FeaturePanel) -> Vec<(String, String)> {
-    let hints: &[(&str, &str)] = match &panel.search {
-        None => &[("/", "search")],
-        Some(s) if s.query.is_empty() => &[("Esc", "close search")],
-        Some(_) => &[("n / N", "next / previous match"), ("Esc", "clear search")],
-    };
-    (hints.iter())
-        .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
-        .collect()
-}
-
 /// The kind of item `stage`'s page has as cards: Plan review's
 /// suggestions, else findings.
 fn stage_items(stage: Stage) -> ItemOf {
@@ -17534,523 +16409,9 @@ fn stage_items(stage: Stage) -> ItemOf {
     }
 }
 
-/// The keys of Plan review's page of `feature` while its suggestions are
-/// decided: going on once none is left, and asking the reviewer about the
-/// notes on them.
-fn plan_review_hints(feature: &Feature, stage: Stage) -> Vec<(String, String)> {
-    let Some(review) = (crate::feature_plan_review::deciding(feature))
-        .filter(|_| plan_review_open(feature, stage))
-    else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if review.open() == 0 {
-        let go_on = match review.any_accepted() {
-            true => "write final plan",
-            false => "use the plan as it is",
-        };
-        out.push(("Ctrl+Enter".to_owned(), go_on.to_owned()));
-    }
-    if !feature::plan_review::notes(review).is_empty() {
-        out.push(("Ctrl+Shift+Enter".to_owned(), "ask reviewer".to_owned()));
-    }
-    out
-}
-
-/// `tab_hints` on the machine writing `feature`.
-#[allow(clippy::too_many_arguments)]
-fn writers_tab_hints(
-    panel: &FeaturePanel,
-    feature: &Feature,
-    stage: Stage,
-    _slugs: &[String],
-    ctx: RowCtx,
-    choices: AgentChoices,
-    plan: &[PlannedCheck],
-    ships: &[ShipRow],
-    notes: &[Comment],
-) -> Vec<(String, String)> {
-    let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
-    if panel.keys {
-        return vec![hint("Esc", "back"), hint("F1", "hide the keys")];
-    }
-    // A key doing what a page button does says what the button says, so the
-    // two can't drift; `action_hint` for one with no button.
-    let offered = page_actions(feature, stage, ctx);
-    let said = |outcome: &PanelOutcome| -> String {
-        (offered.iter()).find(|(_, o)| o == outcome).map_or_else(
-            || action_hint(outcome).to_owned(),
-            |(b, _)| lower_first(&b.label),
-        )
-    };
-    if let Some((on, field)) = &panel.note {
-        let empty = field.trim().is_empty();
-        // Esc never saves: what is written waits as a draft.
-        let esc = if empty { "cancel" } else { "keep draft" };
-        // Emptied, a finding's comment goes; a question's answer can accept
-        // it once saved.
-        let enter = match (on, empty) {
-            (CardNote::Item { .. }, true) => "delete".to_owned(),
-            (
-                CardNote::Item {
-                    of, accept: true, ..
-                },
-                false,
-            ) => words(*of).save_want.to_lowercase(),
-            _ => "save".to_owned(),
-        };
-        let mut hints = vec![hint("Enter", &enter), hint("Shift+Enter", "new line")];
-        if !empty {
-            hints.push(hint(crate::text_field::DISCARD_KEY, "discard"));
-        }
-        hints.push(hint("Esc", esc));
-        return hints;
-    }
-    let searching = (panel.search.as_ref()).filter(|s| s.typing && shows_criteria(feature, stage));
-    if let Some(search) = searching {
-        let esc = if search.query.is_empty() {
-            "close"
-        } else {
-            "clear"
-        };
-        return vec![hint("Enter", "to the criteria"), hint("Esc", esc)];
-    }
-    let mut hints = Vec::new();
-    let entries = repo_entries(feature, &panel.sources, panel.expanded);
-    let repos = !entries.is_empty();
-    let entry = (entries
-        .get(panel.repo.min(entries.len().saturating_sub(1)))
-        .copied())
-    .filter(|_| panel.focus == TabArea::Repos);
-    match panel.focus {
-        TabArea::Repos if repos => {
-            let row = match entry {
-                Some(RepoEntry::Held(i)) => PanelRow::Repo(i),
-                _ => PanelRow::Other,
-            };
-            let buttons = entry.map_or(Vec::new(), |e| entry_buttons(feature, &panel.sources, e));
-            if panel.expanded {
-                hints.push(hint("Up / Down", "repository"));
-                if !buttons.is_empty() {
-                    hints.push(hint("Left / Right", "button"));
-                }
-                let picked = entry.and_then(|e| panel.picked(feature, e));
-                let enter = match picked.and_then(|at| buttons.get(at)) {
-                    Some((label, _)) => format!("{} button", label.to_lowercase()),
-                    None => row_hint(feature, row, ctx).to_owned(),
-                };
-                if !enter.is_empty() {
-                    hints.push(hint("Enter", &enter));
-                }
-                hints.push(hint("Esc", "hide them"));
-            } else {
-                hints.push(hint("Left / Right", "repository"));
-                hints.push(hint("Enter", "show all"));
-            }
-            hints.push(hint("Tab", "stages"));
-            if row_page(feature, row).is_some() {
-                hints.push(hint("Ctrl+Shift+O", "open PR"));
-            }
-            let removable = match entry {
-                Some(RepoEntry::Held(i)) => feature.many_repos() && repo_removable(feature, i),
-                Some(RepoEntry::Context(_)) => linkable(feature),
-                _ => false,
-            };
-            if removable {
-                hints.push(if panel.armed.is_some() {
-                    hint("Del", "again to remove")
-                } else {
-                    hint("Del", "remove repository")
-                });
-            }
-        }
-        TabArea::Findings if stage == Stage::Ship && !ships.is_empty() => {
-            hints.push(hint("Up / Down", "row"));
-            // A route row goes to its next way, named as its button is.
-            let space = match ships.get(panel.finding) {
-                Some(ShipRow::Route { route, .. }) => {
-                    let next = (Route::ALL.iter()).position(|r| *r == route.next());
-                    next.map_or("tick".to_owned(), |i| chrome::SHIP_ROUTES[i].to_lowercase())
-                }
-                _ => "tick".to_owned(),
-            };
-            hints.push(hint("Space", &space));
-            let enter = match page_enter(feature, stage, ctx) {
-                Some(PanelOutcome::NotYet(_)) | None => "",
-                Some(action) => action_hint(&action),
-            };
-            if !enter.is_empty() {
-                hints.push(hint("Enter", enter));
-            }
-            hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
-        }
-        TabArea::Findings if marks_criteria(feature, stage) && ctx.criteria > 0 => {
-            let first_comment = ctx.criteria.saturating_sub(ctx.manual.comments());
-            let comment = panel.finding >= first_comment;
-            hints.push(hint("Up / Down", "criterion"));
-            hints.push(hint("Left / Right", "fold / open"));
-            if comment {
-                hints.push(hint("Space", "done"));
-                hints.push(hint("f", "not done"));
-                hints.push(hint("Ctrl+E", "edit\u{2026}"));
-                hints.push(match panel.armed.is_some() {
-                    true => hint("Del", "again to delete"),
-                    false => hint("Del", "delete"),
-                });
-            } else {
-                hints.push(hint("Space", "pass"));
-                hints.push(hint("f", "fail\u{2026}"));
-                hints.push(hint("Del", "clear"));
-            }
-            hints.push(hint("c", "add comment\u{2026}"));
-            hints.extend(search_hints(panel));
-            hints.extend(manual_gate_hints(feature, stage, ctx, &said));
-            let row = PanelRow::Stage(stage);
-            if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
-                hints.push(hint(REOPEN_KEY, &said(&PanelOutcome::Untick(stage))));
-            }
-            hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
-        }
-        TabArea::Findings if shows_criteria(feature, stage) && ctx.criteria > 0 => {
-            hints.push(hint("Up / Down", "criterion"));
-            hints.push(hint("Left / Right", "fold / open"));
-            hints.extend(search_hints(panel));
-            let row = PanelRow::Stage(stage);
-            if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
-                hints.push(hint(REOPEN_KEY, "reopen"));
-            }
-            hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
-        }
-        TabArea::Findings if !check_entries(feature, stage, plan).is_empty() => {
-            let entries = check_entries(feature, stage, plan);
-            let entry = &entries[panel.finding.min(entries.len() - 1)];
-            let row = entry.row.and_then(|i| check_rows(feature, stage).get(i));
-            hints.push(hint("Up / Down", "check"));
-            if row.is_some_and(|row| row.pane.is_some()) {
-                hints.push(hint("Enter", "show terminal"));
-            }
-            let running = checks_running(feature);
-            if running && row.is_some_and(|row| row.outcome.is_none() && !row.stopping) {
-                hints.push(hint("s", "stop"));
-            }
-            let going = checks_going(feature, ctx);
-            if !going && feature.current() == Some(stage) && row.is_some() && !entry.skipped {
-                hints.push(hint("r", "run again"));
-            }
-            if let Some((label, _)) = skip_action(feature, stage, entry, ctx) {
-                hints.push(hint("Space", &label.to_lowercase()));
-            }
-            if has_failed_checks(feature, stage) && !going {
-                hints.push(hint("Shift+R", "run failed"));
-            }
-            if can_stop_checks(feature) {
-                hints.push(hint("Shift+S", "stop all"));
-            }
-            hints.extend(send_hints(feature, stage, ctx, &said));
-            hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
-        }
-        TabArea::Findings => {
-            let on = (review_cards(feature, stage, notes).get(panel.finding)).copied();
-            let item = on.and_then(ReviewCard::item);
-            let diff_note = on.and_then(ReviewCard::diff_note);
-            let w = words(item.map_or(stage_items(stage), Item::of));
-            let low = |text: &str| text.to_lowercase();
-            // Named by the card with the keyboard: Build's and Code review's
-            // are comments.
-            let noun = match on {
-                Some(ReviewCard::DiffNote(_)) => "comment",
-                Some(ReviewCard::Item(_)) => w.item,
-                None => "card",
-            };
-            hints.push(hint("Up / Down", noun));
-            if on.is_some() {
-                hints.push(hint("Left / Right", "fold / open"));
-            }
-            let decides = can_decide(feature, stage);
-            let del = match panel.armed {
-                Some(_) => hint("Del", "again to delete"),
-                None => hint("Del", "delete"),
-            };
-            let edits = diff_note.is_some_and(|c| can_edit_note(feature, stage, c));
-            if edits {
-                hints.push(hint("c", "edit\u{2026}"));
-                hints.push(del);
-            }
-            if let Some(c) = diff_note {
-                match (crate::review::is_general(c), edits) {
-                    (false, _) => hints.push(hint("Enter", "show in diff")),
-                    (true, true) => hints.push(hint("Enter", "edit\u{2026}")),
-                    (true, false) => {}
-                }
-            }
-            if let Some(i) = item {
-                let page = CardPage {
-                    decides,
-                    posts: feature.posts_review(),
-                };
-                hints.extend(item_hints(i, page, panel.armed.is_some()));
-            }
-            // Off a reviewer's card, `c` adds a comment of the user's own.
-            if decides && diff_note.is_none() && item.is_none_or(Item::yours) {
-                hints.push(hint("c", &words(stage_items(stage)).add_own.to_lowercase()));
-            }
-            if offers_fix_all(feature, stage) {
-                hints.push(hint("Shift+F", &low(w.want_all)));
-            }
-            hints.extend(send_hints(feature, stage, ctx, &said));
-            hints.extend(plan_review_hints(feature, stage));
-            // The gate passes off the cards too, unless a send has the key.
-            let gated = hints.iter().any(|(k, _)| k == "Ctrl+Enter");
-            if !gated && approves_doc(feature, stage, ctx) {
-                hints.push(hint("Ctrl+Enter", &said(&PanelOutcome::ApproveDoc(stage))));
-            }
-            hints.extend(fold_hint(feature, stage));
-            hints.push(hint("Tab", if repos { "repositories" } else { "stages" }));
-        }
-        _ => {
-            let row = PanelRow::Stage(stage);
-            hints.push(hint("Left / Right", "stage"));
-            let going = verify_going(feature, stage, ctx);
-            let enter = match page_enter(feature, stage, ctx) {
-                Some(PanelOutcome::NotYet(_)) | None => None,
-                // It only says they run.
-                Some(PanelOutcome::RunChecks) if going => None,
-                Some(action) => Some(said(&action)).filter(|w| !w.is_empty()),
-            };
-            if let Some(enter) = enter {
-                hints.push(hint("Enter", &enter));
-            }
-            if offers_fix_all(feature, stage) {
-                let all = words(stage_items(stage)).want_all.to_lowercase();
-                hints.push(hint("Shift+F", &all));
-            }
-            hints.extend(send_hints(feature, stage, ctx, &said));
-            if shows_criteria(feature, stage) && ctx.criteria > 0 {
-                hints.extend(manual_gate_hints(feature, stage, ctx, &said));
-            }
-            hints.extend(plan_review_hints(feature, stage));
-            if plan_review_open(feature, stage) {
-                hints.push(hint("Ctrl+Shift+K", &said(&PanelOutcome::SkipPlanReview)));
-                if feature.plan_review.as_ref().is_some_and(|r| r.writing) {
-                    let back = said(&PanelOutcome::ChangeDecisions);
-                    hints.push(hint("Ctrl+Shift+D", &back));
-                }
-            }
-            hints.extend(fold_hint(feature, stage));
-            if matches!(row_action(feature, row, ctx), Some(PanelOutcome::Untick(_))) {
-                hints.push(hint(REOPEN_KEY, &said(&PanelOutcome::Untick(stage))));
-            }
-            if let Some(round) = fix_round_on(feature, stage) {
-                if round.phase == FixPhase::Ready && !going {
-                    hints.push(hint("Ctrl+Enter", &said(&PanelOutcome::MakeFixes)));
-                }
-                if round.fixes_stopped() && !going {
-                    hints.push(hint("Ctrl+Enter", "make fixes again"));
-                }
-                if round.can_drop() {
-                    hints.push(hint(START_OVER_KEY, &said(&PanelOutcome::DropFixPlan)));
-                }
-            }
-            if approves_doc(feature, stage, ctx) {
-                hints.push(hint("Ctrl+Enter", &said(&PanelOutcome::ApproveDoc(stage))));
-            }
-            if can_decide(feature, stage) {
-                hints.push(hint("c", &words(stage_items(stage)).add_own.to_lowercase()));
-            }
-            if has_failed_checks(feature, stage) && feature.current() == Some(stage) && !going {
-                hints.push(hint("Shift+R", "run failed"));
-            } else if stage == Stage::Verify
-                && ctx.on_head
-                && ctx.checks
-                && feature.current() == Some(stage)
-                && !going
-            {
-                hints.push(hint("Shift+R", "run here"));
-            }
-            if stage == Stage::Verify && can_stop_checks(feature) {
-                hints.push(hint("Shift+S", "stop all"));
-            }
-            if stage == Stage::Ship && !ships.is_empty() && !panel.expanded {
-                hints.push(hint("Tab", "steps"));
-            } else if !review_cards(feature, stage, notes).is_empty() && !panel.expanded {
-                hints.push(hint("Tab", words(stage_items(stage)).items));
-            } else if !check_entries(feature, stage, plan).is_empty() && !panel.expanded {
-                hints.push(hint("Tab", "checks"));
-            } else if shows_criteria(feature, stage) && ctx.criteria > 0 && !panel.expanded {
-                hints.push(hint("Tab", "criteria"));
-            } else if repos {
-                hints.push(hint("Tab", "repositories"));
-            }
-            if let Some(page) = row_page(feature, row) {
-                hints.push(hint("Ctrl+Shift+O", &said(&page)));
-            } else if opens_fix_plan(feature, stage) {
-                hints.push(hint("Ctrl+Shift+O", "fix plan"));
-            } else if feature.pull().is_some() {
-                hints.push(hint("Ctrl+Shift+O", "pull request"));
-            }
-            if let Some(pull) = feature
-                .pull()
-                .filter(|p| !p.own() && feature.status == Status::Open)
-            {
-                let what = if pull.fix_here {
-                    "comment instead"
-                } else {
-                    "fix here\u{2026}"
-                };
-                hints.push(hint("Alt+W", what));
-            }
-            if changes_pulls(feature) {
-                hints.push(hint("Alt+N", "pull requests\u{2026}"));
-            }
-            let commands = said(&PanelOutcome::EditCommands(commands_tab(stage)));
-            if offers_setup(feature, stage) {
-                if can_set_up(feature, ctx) {
-                    hints.push(hint("Ctrl+Shift+U", &said(&PanelOutcome::SetUp)));
-                }
-                if offers_setup_log(feature, stage) {
-                    hints.push(hint("Ctrl+Shift+I", &said(&PanelOutcome::SetupLog)));
-                }
-                hints.push(hint("Ctrl+E", &commands));
-            }
-            if offers_sandbox(feature, stage) {
-                if ctx.sandbox_busy {
-                    hints.push(hint("Ctrl+Shift+T", "stop"));
-                } else if sandbox_alive(feature) {
-                    hints.push(hint("Ctrl+Shift+Y", "open app"));
-                    if sandbox_pages(feature).len() > 1 {
-                        hints.push(hint("Alt+Y", "next page"));
-                    }
-                    if sandbox_elsewhere(feature) {
-                        hints.push(hint("Ctrl+Shift+T", "show terminals"));
-                    } else {
-                        let lan = match ctx.lan_open {
-                            true => "close to network",
-                            false => "open to network\u{2026}",
-                        };
-                        hints.push(hint("Ctrl+Shift+N", lan));
-                    }
-                    hints.push(hint("Ctrl+Shift+G", "restart"));
-                    hints.push(hint("Ctrl+Shift+X", "reset data\u{2026}"));
-                    let stop = match sandbox_elsewhere(feature) {
-                        true => "Ctrl+Shift+Q",
-                        false => "Ctrl+Shift+T",
-                    };
-                    hints.push(hint(stop, "stop\u{2026}"));
-                } else {
-                    hints.push(hint("Ctrl+Shift+T", "start sandbox\u{2026}"));
-                    if feature.sandbox.is_some() {
-                        hints.push(hint("Ctrl+Shift+X", "remove sandbox\u{2026}"));
-                    }
-                }
-                if !offers_setup(feature, stage) {
-                    hints.push(hint("Ctrl+E", &commands));
-                }
-            }
-            if let Some(fresh) = fresh_stage(feature, row) {
-                hints.push(hint(
-                    "Ctrl+R",
-                    &said(&PanelOutcome::StartAgent(fresh, true)),
-                ));
-            }
-            if let Some(over) = start_over_stage(feature, stage, ctx) {
-                hints.push(hint(START_OVER_KEY, &said(&PanelOutcome::StartOver(over))));
-            }
-            if let Some((label, outcome)) = agent_key(feature, stage, ctx)
-                && page_enter(feature, stage, ctx).as_ref() != Some(&outcome)
-            {
-                hints.push(hint("Ctrl+Shift+R", &label.to_lowercase()));
-            }
-            if choices.picks.iter().filter(|c| !c.off).count() > 1 {
-                hints.push(hint("Ctrl+Shift+A", "pick agent"));
-            }
-            if choices.model {
-                hints.push(hint(MODEL_KEY, "pick model"));
-            }
-            if choices.place {
-                hints.push(hint("Ctrl+Shift+W", "pick machine"));
-            }
-            if stops_on_machine(feature, stage) {
-                hints.push(hint("Ctrl+Shift+Q", "stop agent"));
-            }
-            if milestone_switch(feature, stage) {
-                let what = match feature.fresh_milestones {
-                    true => "one agent",
-                    false => "agent per milestone",
-                };
-                hints.push(hint("Ctrl+Shift+B", what));
-            }
-        }
-    }
-    // What the header and the strip's buttons do (Open tab, Copy path, New
-    // feature..., the other features, all repositories, Abandon) is in their
-    // tooltips and F1: the footer keeps to the page and what has the keys.
-    // A key the footer gives to a gate (Ctrl+Enter, Ctrl+Shift+Enter) isn't
-    // given again on Enter.
-    let gates: Vec<String> = (hints.iter())
-        .filter(|(k, _)| k == "Ctrl+Enter" || k == "Ctrl+Shift+Enter")
-        .map(|(_, w)| w.clone())
-        .collect();
-    hints.retain(|(k, w)| k != "Enter" || !gates.contains(w));
-    hints.push(hint(MENU_KEY, "more actions"));
-    hints.push(hint("F1", "keys"));
-    hints
-}
-
 /// The key opening the feature tab's `⋯` menu (Shift+F10 and the Menu key
 /// too, as a context menu's).
 pub(crate) const MENU_KEY: &str = "F10";
-
-/// Manual test's gate on `stage`'s page of `feature`, where its criteria
-/// are tried: Ctrl+Enter makes the fixes (or marks it passed with none to
-/// send), Ctrl+Shift+Enter plans them. Said as the page's buttons say it.
-fn manual_gate_hints(
-    feature: &Feature,
-    stage: Stage,
-    ctx: RowCtx,
-    said: &dyn Fn(&PanelOutcome) -> String,
-) -> Vec<(String, String)> {
-    use crate::manual_test::Outcome;
-    if !tries_criteria(feature, stage) || fix_round_on(feature, stage).is_some() {
-        return Vec::new();
-    }
-    let gate = match manual_sends(feature, ctx) {
-        // The user's own words need a plan: no Make fixes key.
-        true if manual_own_words(ctx).is_some() => None,
-        true => Some(Outcome::MakeFixes),
-        false => Some(Outcome::MarkPassed),
-    };
-    let gate = gate.map(|g| ("Ctrl+Enter".to_owned(), said(&PanelOutcome::Manual(g))));
-    let send = (
-        "Ctrl+Shift+Enter".to_owned(),
-        said(&PanelOutcome::Manual(Outcome::SendFailures)),
-    );
-    gate.into_iter().chain(std::iter::once(send)).collect()
-}
-
-/// What sends `stage`'s findings or failures of `feature` to be fixed:
-/// Ctrl+Enter makes the fixes when no plan is needed, Ctrl+Shift+Enter
-/// always plans them first.
-fn send_hints(
-    feature: &Feature,
-    stage: Stage,
-    ctx: RowCtx,
-    said: &dyn Fn(&PanelOutcome) -> String,
-) -> Vec<(String, String)> {
-    let (make, plan) = if verify_sends(feature, stage) {
-        (Some(PanelOutcome::MakeVerifyFixes), PanelOutcome::PlanFixes)
-    } else if let Some(send) = sends_findings(feature, stage, ctx) {
-        let make = (send == PanelOutcome::MakeFindingFixes).then_some(send);
-        (make, PanelOutcome::SendFixes)
-    } else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    if let Some(make) = make {
-        out.push(("Ctrl+Enter".to_owned(), said(&make)));
-    }
-    out.push(("Ctrl+Shift+Enter".to_owned(), said(&plan)));
-    out
-}
 
 /// Alt+E on `stage`'s page of `feature`, named by what it folds: the
 /// history (earlier reviews and fix rounds over), the drafts (Discover,
@@ -18962,6 +17323,208 @@ pub(crate) mod tests {
             ..SandboxRun::default()
         });
         f
+    }
+
+    /// The footer's hints of `panel` over `f` on `stage`, as `ctx` has it.
+    fn hints_at(
+        panel: &FeaturePanel,
+        f: &Feature,
+        stage: Stage,
+        ctx: RowCtx,
+    ) -> Vec<(String, String)> {
+        let choices = AgentChoices::default();
+        tab_hints(panel, f, stage, &[], ctx, choices, &[], &[], &[])
+    }
+
+    /// The hints of `chord` among `hints`.
+    fn hints_of<'h>(hints: &'h [(String, String)], chord: &str) -> Vec<&'h str> {
+        (hints.iter())
+            .filter(|(k, _)| k == chord)
+            .map(|(_, w)| w.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn the_sandbox_keys_hint_what_their_handler_does() {
+        // Being stopped, running on a worker: Ctrl+Shift+T shows its
+        // terminals there, and says so.
+        let mut f = sandbox_elsewhere(true);
+        f.writer = None;
+        f.sandbox.as_mut().unwrap().machine = Some("w1".into());
+        let busy = RowCtx {
+            sandbox_busy: true,
+            ..RowCtx::default()
+        };
+        let mut panel = FeaturePanel::default();
+        let hints = hints_at(&panel, &f, Stage::ManualTest, busy);
+        assert_eq!(
+            hints_of(&hints, "Ctrl+Shift+T"),
+            ["show terminals"],
+            "{hints:?}"
+        );
+        let (mods, sym) = crate::keys::hint_key("Ctrl+Shift+T").unwrap();
+        let pressed = panel.key(&mods, sym, &f, &[], busy, &[], &[], &[]);
+        assert_eq!(pressed, Some(PanelOutcome::ShowSandbox));
+        // An agent there too: Ctrl+Shift+Q stops the agent, as pressed, and
+        // is hinted once.
+        f.runs.insert(
+            Stage::ManualTest,
+            feature::agents::StageRun {
+                n: 1,
+                agent: "Claude Code".into(),
+                pane: Some("m/w1:p1".into()),
+                machine: Some("w1".into()),
+                ..Default::default()
+            },
+        );
+        let ctx = RowCtx::default();
+        let hints = hints_at(&panel, &f, Stage::ManualTest, ctx);
+        assert_eq!(
+            hints_of(&hints, "Ctrl+Shift+Q"),
+            ["stop agent"],
+            "{hints:?}"
+        );
+        let (mods, sym) = crate::keys::hint_key("Ctrl+Shift+Q").unwrap();
+        let pressed = panel.key(&mods, sym, &f, &[], ctx, &[], &[], &[]);
+        assert_eq!(
+            pressed,
+            Some(PanelOutcome::StopOnMachine(Stage::ManualTest))
+        );
+    }
+
+    #[test]
+    fn alt_e_is_hinted_only_while_it_folds() {
+        let f = history_feature();
+        let mut panel = FeaturePanel::default();
+        panel.pick(&f, Stage::AiReview);
+        let ctx = RowCtx::default();
+        assert_eq!(
+            hints_of(&hints_at(&panel, &f, Stage::AiReview, ctx), "Alt+E"),
+            ["history"]
+        );
+        // With all repositories shown it does nothing: no hint.
+        panel.expanded = true;
+        let hints = hints_at(&panel, &f, Stage::AiReview, ctx);
+        assert!(hints_of(&hints, "Alt+E").is_empty(), "{hints:?}");
+    }
+
+    #[test]
+    fn the_review_views_hint_the_key_to_the_other_one() {
+        let at = stage_index(Stage::CodeReview);
+        let f = feature("c", vec![repo("api", true)], at);
+        assert!(crate::feature_diff::review_views(&f));
+        let mut panel = FeaturePanel {
+            review_view: Some(chrome::ReviewView::Fixes),
+            ..FeaturePanel::default()
+        };
+        let ctx = RowCtx::default();
+        let hints = hints_at(&panel, &f, Stage::CodeReview, ctx);
+        assert_eq!(hints_of(&hints, "Alt+1"), ["code review"], "{hints:?}");
+        assert!(hints_of(&hints, "Alt+2").is_empty(), "{hints:?}");
+        panel.review_view = Some(chrome::ReviewView::Code);
+        let hints = hints_at(&panel, &f, Stage::CodeReview, ctx);
+        assert_eq!(hints_of(&hints, "Alt+2"), ["fixes"], "{hints:?}");
+        assert!(hints_of(&hints, "Alt+1").is_empty(), "{hints:?}");
+    }
+
+    #[test]
+    fn keys_hinted_from_before_the_panel_come_from_their_handlers_rows() {
+        // F10 is `feature_panel_key`'s: hinted by its row, pressed by it.
+        let f = feature("b", vec![repo("api", true)], 3);
+        let hints = hints_at(&FeaturePanel::default(), &f, Stage::Plan, RowCtx::default());
+        assert_eq!(hints_of(&hints, MENU_KEY), ["more actions"]);
+        let pre = keys::PreCtx {
+            feature: true,
+            inline: false,
+            keys: false,
+        };
+        for chord in [MENU_KEY, "Shift+F10"] {
+            let (mods, sym) = crate::keys::hint_key(chord).unwrap();
+            assert_eq!(keys::pre_key(&pre, &mods, sym), Some(keys::PreKey::Menu));
+        }
+        let (mods, sym) = crate::keys::hint_key("Page_Down").unwrap();
+        assert_eq!(
+            keys::pre_key(&pre, &mods, sym),
+            Some(keys::PreKey::Page(false))
+        );
+        crate::key_table::check(keys::PRE_KEYS, &[pre]);
+    }
+
+    #[test]
+    fn keys_taken_with_a_modifier_more_still_work_unhinted() {
+        let f = feature("b", vec![repo("api", true), repo("web", false)], 3);
+        let mut panel = FeaturePanel {
+            slug: "b".into(),
+            ..FeaturePanel::default()
+        };
+        let with = |chord: &str| crate::keys::hint_key(chord).unwrap();
+        // Shift with the arrows moves as without.
+        assert_eq!(press(&mut panel, &f, with("Shift+Down")), None);
+        assert_eq!(panel.stage, Some(Stage::ALL[4]));
+        assert_eq!(press(&mut panel, &f, with("Shift+Up")), None);
+        assert_eq!(panel.stage, Some(Stage::ALL[3]));
+        // Enter with a modifier no gate takes is the page's Enter.
+        let enter = press(&mut panel, &f, key(Keysym::Return));
+        assert_eq!(press(&mut panel, &f, with("Shift+Enter")), enter);
+        assert_eq!(press(&mut panel, &f, with("Alt+Enter")), enter);
+        assert_eq!(
+            press(&mut panel, &f, with("Ctrl+Shift+C")),
+            Some(PanelOutcome::CopyPath)
+        );
+        // No sandbox to open to the network: Ctrl+Shift+N is a new feature.
+        assert_eq!(
+            press(&mut panel, &f, with("Ctrl+Shift+N")),
+            Some(PanelOutcome::New)
+        );
+        let hints = hints_at(&panel, &f, Stage::Plan, RowCtx::default());
+        for alias in ["Shift+Enter", "Alt+Enter", "Ctrl+Shift+C", "Shift+Down"] {
+            assert!(hints_of(&hints, alias).is_empty(), "{alias}: {hints:?}");
+        }
+    }
+
+    #[test]
+    fn each_table_of_the_tab_hints_what_it_presses() {
+        let slugs = vec!["a".to_owned(), "b".to_owned()];
+        let mut tabs: Vec<FeaturePanel> = Vec::new();
+        for focus in [TabArea::Stages, TabArea::Repos, TabArea::Findings] {
+            for expanded in [false, true] {
+                tabs.push(FeaturePanel {
+                    slug: "b".into(),
+                    focus,
+                    expanded,
+                    ..FeaturePanel::default()
+                });
+            }
+        }
+        for at in [
+            3,
+            stage_index(Stage::Verify),
+            stage_index(Stage::ManualTest),
+        ] {
+            let f = feature("b", vec![repo("api", true), repo("web", false)], at);
+            for stage in Stage::ALL {
+                let ctxs: Vec<keys::TabCtx> = (tabs.iter())
+                    .map(|p| {
+                        keys::TabCtx::new(
+                            p,
+                            &f,
+                            stage,
+                            &slugs,
+                            RowCtx::default(),
+                            &[],
+                            &[],
+                            &[],
+                            None,
+                        )
+                    })
+                    .collect();
+                for link in keys::chain() {
+                    if let keys::Link::Rows(_, rows) = link {
+                        crate::key_table::check(rows, &ctxs);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -26592,7 +25155,20 @@ pub(crate) mod tests {
             page.menu
         );
         // Each of the menu's rows from the page shows its key.
-        assert!((page.menu.iter()).all(|&b| menu_key(&actions[b].1).is_some()));
+        let panel = FeaturePanel::default();
+        let tab = keys::TabCtx::new(
+            &panel,
+            &f,
+            Stage::Build,
+            &[],
+            state.ctx,
+            &[],
+            &[],
+            &[],
+            None,
+        );
+        let tab = tab.on_rail();
+        assert!((page.menu.iter()).all(|&b| tab.chord_of(&actions[b].1).is_some()));
         assert_eq!(
             page.sections.last(),
             Some(&lines(
@@ -27949,7 +26525,7 @@ pub(crate) mod tests {
                 ..ModifiersState::default()
             };
             (keys.iter())
-                .find(|k| k.pressed(&mods, sym))
+                .find(|k| crate::key_table::is(k.chord, &mods, sym))
                 .map(|k| k.chord)
         };
         assert_eq!(pressed(true, false, false, Keysym::m), Some("Ctrl+M"));

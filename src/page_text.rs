@@ -114,7 +114,6 @@ pub(crate) const PICK_KEYS: &[Binding<PickCtx, PickKey>] = &[
 
 /// The footer's hints for text selected on the page, `criteria` showing
 /// or not: "Ctrl+C / y" copy, "* / #" search it, Esc unselect.
-#[allow(dead_code)] // The feature tab's footer (features.rs) is to call it.
 pub(crate) fn pick_hints(criteria: bool) -> Vec<(String, String)> {
     let ctx = PickCtx {
         picked: true,
