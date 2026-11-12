@@ -387,10 +387,10 @@ fn default_branch(
 
 /// What `git args` prints in `dir`, or what it says went wrong.
 fn git_run(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
+    // Its callers remove worktrees, delete branches and switch: writers
+    // that must take index.lock.
+    let out = command(dir, args)
+        .env_remove("GIT_OPTIONAL_LOCKS")
         .stdin(Stdio::null())
         .output()
         .map_err(|err| format!("git: {err}"))?;
@@ -445,13 +445,9 @@ pub fn command(dir: &Path, args: &[&str]) -> Command {
 
 /// What `git args` prints in `dir`; `None` when it fails or without git.
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        // Leave index.lock alone, so a refresh never gets in the way of the
-        // user's own git commands.
-        .arg("--no-optional-locks")
-        .args(args)
+    // `command` leaves index.lock alone, so a refresh never gets in the
+    // way of the user's own git commands.
+    let out = command(dir, args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -871,10 +867,7 @@ pub fn read_all(
 /// The web page of the repository `dir` is in: its `origin` remote's, as
 /// an https address; `None` without one or without git.
 pub fn web_url(dir: &Path) -> Option<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["remote", "get-url", "origin"])
+    let out = command(dir, &["remote", "get-url", "origin"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -1023,7 +1016,6 @@ mod tests {
     };
     use std::{
         path::{Path, PathBuf},
-        process::Command,
         sync::atomic::{AtomicUsize, Ordering},
     };
 
@@ -1055,17 +1047,8 @@ mod tests {
         /// Run git in `dir` like `git`, for a command meant to stop on a
         /// conflict: whether it went through.
         fn try_git(&self, dir: &Path, args: &[&str]) -> bool {
-            Command::new("git")
-                .arg("-C")
-                .arg(dir)
-                .args(args)
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_AUTHOR_NAME", "t")
-                .env("GIT_AUTHOR_EMAIL", "t@t")
-                .env("GIT_COMMITTER_NAME", "t")
-                .env("GIT_COMMITTER_EMAIL", "t@t")
-                .env("GIT_EDITOR", "true")
+            super::command(dir, args)
+                .env_remove("GIT_OPTIONAL_LOCKS")
                 .output()
                 .unwrap()
                 .status
@@ -1751,5 +1734,15 @@ mod tests {
         repo.git(&table, &["remote", "set-head", "origin", "-a"]);
         assert!(table.join(".git/reftable").is_dir());
         assert_eq!(default(&table).as_deref(), Some("main"));
+    }
+
+    /// Every git of gerdr's runs without optional locks and with no
+    /// `GIT_DIR` of a caller (a git hook's, say) pointing it elsewhere.
+    #[test]
+    fn command_sets_its_env() {
+        let cmd = super::command(Path::new("/"), &["status"]);
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(envs.contains(&("GIT_OPTIONAL_LOCKS".as_ref(), Some("0".as_ref()))));
+        assert!(envs.contains(&("GIT_DIR".as_ref(), None)));
     }
 }

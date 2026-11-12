@@ -911,13 +911,10 @@ impl Reach {
     }
 
     fn git(&self, dir: &Path) -> Command {
-        let mut git = Command::new("git");
-        for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"] {
-            git.env_remove(var);
-        }
-        git.env("GIT_SSH_COMMAND", self.ssh_line())
-            .arg("-C")
-            .arg(dir);
+        let mut git = crate::git::command(dir, &[]);
+        // Some of them merge: those take index.lock.
+        git.env_remove("GIT_OPTIONAL_LOCKS")
+            .env("GIT_SSH_COMMAND", self.ssh_line());
         git
     }
 
