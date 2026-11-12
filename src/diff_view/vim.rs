@@ -20,11 +20,58 @@ use std::{
 
 use smithay::input::keyboard::{Keysym, ModifiersState};
 
-use super::{Ctx, DiffRow, DiffView, NOWHERE, Outcome, RowKey};
+use super::{Ctx, DiffKey, DiffRow, DiffView, NOWHERE, Outcome, RowKey};
 use crate::{
+    chrome::ReposButton,
     diff::LineKind,
     diff_edit::{self, Cut, FileEdit, Put, Register, Spot},
+    key_table::{self, Binding},
+    repos::key,
 };
+
+/// Vim's keys with a row: those with a button and Ctrl's. The rest are
+/// what is typed (vim's symbols, K8), counts and keys that take more than
+/// one (`dw`, `gg`), matched in `vim_key`; F1 lists those as text
+/// (`super::VIM_F1`).
+pub(super) const VIM_KEYS: &[Binding<(), DiffKey>] = &[
+    key!(
+        "]",
+        DiffKey::Button(ReposButton::NextComment),
+        "in the diff, go to the next or the previous finding or comment"
+    ),
+    key!(
+        "[",
+        DiffKey::Button(ReposButton::PrevComment),
+        "in the diff, go to the next or the previous finding or comment"
+    ),
+    key!(
+        "Ctrl+C",
+        DiffKey::Button(ReposButton::CopyLines),
+        "in the diff, copy what the cursor is on: the selection, a line, a file's path, a hunk"
+    ),
+    key!(
+        "Shift+R",
+        DiffKey::Button(ReposButton::Restore),
+        "in the diff, restore the change at the caret or the lines selected"
+    ),
+    key!(
+        "Ctrl+R",
+        DiffKey::Redo,
+        "in the diff, do the edit undone again"
+    ),
+];
+
+/// The row of `VIM_KEYS` the key is. Without Ctrl, it is what it types,
+/// as vim's keys are: `]` wherever the layout has it, a capital as Shift
+/// and its letter.
+fn vim_row(mods: &ModifiersState, sym: Keysym, typed: Keysym) -> Option<DiffKey> {
+    if mods.ctrl {
+        return key_table::press(VIM_KEYS, &(), mods, sym);
+    }
+    let shift = typed.key_char().is_some_and(|c| c.is_ascii_uppercase());
+    let mods = ModifiersState { shift, ..*mods };
+    key_table::press(VIM_KEYS, &(), &mods, typed)
+}
 
 /// The most a count goes to.
 const MOST: usize = 9999;
@@ -98,16 +145,13 @@ impl DiffView {
         // page down and up.
         let only_ctrl = mods.ctrl && !(mods.shift || mods.alt || mods.logo);
         if only_ctrl {
+            if let Some(key) = vim_row(mods, sym, typed) {
+                self.pending = Pending::default();
+                return Some(self.vim_do(key, 1, ctx));
+            }
+            // Vim's half pages: F1 lists them with `gg`.
             let half = (ctx.page.max(2) / 2) as i64;
             let by = match sym {
-                Keysym::r | Keysym::R => {
-                    self.pending = Pending::default();
-                    return Some(Some(Outcome::RedoCut(self.cursor_file())));
-                }
-                Keysym::c | Keysym::C => {
-                    self.pending = Pending::default();
-                    return Some(Some(self.copy_here()));
-                }
                 Keysym::d | Keysym::D => half,
                 Keysym::u | Keysym::U => -half,
                 _ => 0,
@@ -161,6 +205,9 @@ impl DiffView {
                 Op::Yank => self.yank_motion(sym, typed, count),
             });
         }
+        if let Some(key) = vim_row(mods, sym, typed) {
+            return Some(self.vim_do(key, count, ctx));
+        }
         let selecting = self.selecting();
         let outcome = match typed {
             Keysym::v => {
@@ -205,13 +252,6 @@ impl DiffView {
                 }
                 None
             }
-            // The next comment or finding, or the one before.
-            Keysym::bracketright | Keysym::bracketleft => {
-                self.leave_visual();
-                let by = if typed == Keysym::bracketright { 1 } else { -1 };
-                let went = (0..count).fold(false, |_, _| self.jump_comment(by, ctx));
-                (!went).then_some(Outcome::Notice(super::NO_COMMENTS))
-            }
             Keysym::Y => self.yank_motion(Keysym::y, Keysym::y, count),
             Keysym::p | Keysym::P => {
                 self.leave_visual();
@@ -220,7 +260,6 @@ impl DiffView {
             Keysym::x => self.cut_along(|col, _| col..col + count),
             Keysym::X => self.cut_along(|col, _| col.saturating_sub(count)..col),
             Keysym::D => self.cut_along(|col, len| col..len),
-            Keysym::R => self.restore_here(),
             Keysym::u => Some(Outcome::UndoCut(self.cursor_file())),
             Keysym::U => Some(Outcome::RedoCut(self.cursor_file())),
             // A count before a motion: the motion as many times.
@@ -233,6 +272,24 @@ impl DiffView {
             _ => return None,
         };
         Some(outcome)
+    }
+
+    /// Do `key`, a row of `VIM_KEYS`, `count` times where that counts.
+    fn vim_do(&mut self, key: DiffKey, count: usize, ctx: &Ctx) -> Option<Outcome> {
+        use ReposButton as B;
+        match key {
+            // The next comment or finding, or the one before.
+            DiffKey::Button(button @ (B::NextComment | B::PrevComment)) => {
+                self.leave_visual();
+                let by = if button == B::NextComment { 1 } else { -1 };
+                let went = (0..count).fold(false, |_, _| self.jump_comment(by, ctx));
+                (!went).then_some(Outcome::Notice(super::NO_COMMENTS))
+            }
+            DiffKey::Button(B::Restore) => self.restore_here(),
+            DiffKey::Button(B::CopyLines) => Some(self.copy_here()),
+            DiffKey::Redo => Some(Outcome::RedoCut(self.cursor_file())),
+            _ => None,
+        }
     }
 
     /// The cursor on diff row `to` (the nearest it stops on), as a move

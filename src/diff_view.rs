@@ -32,6 +32,8 @@ use crate::{
     feature::review_items::{self, ItemOf},
     find,
     git::Change,
+    key_table::{self, Binding},
+    repos::{key, unpad},
     review::{self, Comment, Quoted, Review},
     scroll::{Bounds, Scroll},
     text_field::{Edit, TextField},
@@ -52,7 +54,6 @@ pub(crate) const NOWHERE: &str = "Move the cursor to a line first";
 pub const SENT_COMMENT: &str = "That comment went to the Build agent to fix";
 /// The button showing the commit a comment's fix was made in, and its key.
 pub const SHOW_FIX: &str = "Show fix";
-pub const SHOW_FIX_KEY: &str = "Shift+O";
 /// Why Shift+O does nothing: the cursor isn't on a comment whose fix is made.
 pub const NO_FIX_COMMIT: &str = "Move the cursor to a comment whose fix is made first";
 /// Why `f` does nothing on a comment of the user's own.
@@ -627,6 +628,232 @@ fn key_name(button: ReposButton) -> &'static str {
     crate::repos::key_name(button)
 }
 
+/// A key of the diff's tables. Their rows don't ask where it stands: the
+/// handler passes the key on when it can't be done there (a finding's
+/// keys off one), as `repos::key_name` reads them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiffKey {
+    /// What the button does.
+    Button(ReposButton),
+    /// Check the file at the cursor, or uncheck it.
+    Check,
+    /// Open the code at the cursor in Zed.
+    Open,
+    /// Delete the comment at the cursor, or dismiss the finding.
+    Delete,
+    /// Fix the finding at the cursor, or take that back.
+    Fix,
+    /// Show the commit the comment's fix was made in.
+    FixCommit,
+    /// The file after (1) or before (-1).
+    File(i64),
+    /// Do the edit undone again.
+    Redo,
+    /// A new line in the comment being written.
+    NewLine,
+    /// Put the comment being written away as a draft.
+    Keep,
+    /// Throw the comment being written away.
+    Discard,
+}
+
+/// The diff's keys while it has the keyboard, after the cursor's moves
+/// (`detail_press`). Rows saying the same are one line on F1.
+const DIFF_KEYS: &[Binding<(), DiffKey>] = &[
+    key!(
+        "Alt+Up",
+        DiffKey::File(-1),
+        "in the diff, the file before or after"
+    ),
+    key!(
+        "Alt+Down",
+        DiffKey::File(1),
+        "in the diff, the file before or after"
+    ),
+    key!(
+        "c",
+        DiffKey::Button(ReposButton::Comment),
+        "in the diff, comment on the lines (on a file's header, the file) or edit the comment; delete it"
+    ),
+    key!(
+        "Del",
+        DiffKey::Delete,
+        "in the diff, comment on the lines (on a file's header, the file) or edit the comment; delete it"
+    ),
+    key!(
+        "Enter",
+        DiffKey::Open,
+        "in the diff, open the code in Zed at the caret; on a file's name, the file"
+    ),
+];
+
+/// The diff's keys whose words F1 takes from its host, as they mean more
+/// there (`detail_press`): checking a file in the repositories panel marks
+/// it viewed in a code review; a finding is a feature's
+/// (`FeatureOf::keys`), a page a file under review's.
+const HOST_KEYS: &[Binding<(), DiffKey>] = &[
+    key!(
+        "Space",
+        DiffKey::Check,
+        "in the diff, check the file, or not"
+    ),
+    key!(
+        "f",
+        DiffKey::Fix,
+        "in the diff, fix the finding, or take that back"
+    ),
+    key!(
+        "Shift+O",
+        DiffKey::FixCommit,
+        "in the diff, on a comment whose fix is made, show its commit"
+    ),
+    key!(
+        "Shift+E",
+        DiffKey::Button(ReposButton::EditFix),
+        "in the diff, on a finding, edit its fix"
+    ),
+    key!(
+        "Shift+C",
+        DiffKey::Button(ReposButton::CommentFile),
+        "in the diff, on a page, comment on the whole file"
+    ),
+];
+
+/// The keys of the comment being written (`editor_key`).
+const EDITOR_KEYS: &[Binding<(), DiffKey>] = &[
+    key!(
+        "Enter",
+        DiffKey::Button(ReposButton::SaveComment),
+        "in a comment, save it"
+    ),
+    key!(
+        "Ctrl+Enter",
+        DiffKey::Button(ReposButton::SaveComment),
+        "in a comment, save it"
+    ),
+    key!("Shift+Enter", DiffKey::NewLine, "in a comment, a new line"),
+    key!(
+        "Esc",
+        DiffKey::Keep,
+        "in a comment, keep it as a draft, unsaved"
+    ),
+    key!(
+        "Ctrl+Shift+Del",
+        DiffKey::Discard,
+        "in a comment, discard it"
+    ),
+];
+
+/// Where the diff's search opens from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Find {
+    /// From anywhere in the host.
+    Anywhere,
+    /// With the diff's keys.
+    Here,
+}
+
+/// The keys opening the diff's search (`any_key`); `/` is taken as typed.
+pub(crate) const FIND_KEYS: &[Binding<(), Find>] = &[
+    key!(
+        "Ctrl+F",
+        Find::Here,
+        "in the diff, find its lines, paths, hunks; capitals match case (Ctrl+Shift+F from anywhere)"
+    ),
+    key!(
+        "Ctrl+Shift+F",
+        Find::Anywhere,
+        "in the diff, find from anywhere"
+    ),
+];
+
+/// The diff's keys no row's chord names, as F1 lists them: what is typed
+/// (`/`, vim's symbols, K8), what takes more than one key (`gg`, `dw`),
+/// and the moves (the pages, the keypad's).
+const TYPED_F1: &[(&str, &str)] = &[
+    (
+        "c / Del Del",
+        "in the diff, comment on the lines (on a file's header, the file) or edit the comment; delete it",
+    ),
+    (
+        "g Space / Ctrl+click",
+        "in the diff, open the code in Zed at the caret; on a file's name, the file",
+    ),
+    (
+        "/",
+        "in the diff, find its lines, paths, hunks; capitals match case (Ctrl+Shift+F from anywhere)",
+    ),
+];
+
+/// The search's and vim's, after the find keys.
+const VIM_F1: &[(&str, &str)] = &[
+    (
+        "Enter / Shift+Enter",
+        "in the search, the next place, the one before",
+    ),
+    (
+        "n / N, F3 / Shift+F3",
+        "the next place found, the one before",
+    ),
+    (
+        "h j k l w b e 0 ^ $",
+        "in the diff, move the caret, as in vim",
+    ),
+    (
+        "gg G { } Ctrl+U Ctrl+D",
+        "in the diff, the top, the end, the hunk before or after, half a page",
+    ),
+    ("* / #", "find the word at the caret, back for #"),
+    (
+        "x X D dd dw de d$ 3dd",
+        "in the diff, delete from the file, as in vim",
+    ),
+    (
+        "v / V, then d",
+        "select by chars, by lines; delete it from the file",
+    ),
+    (
+        "yy yw y$ Y, p / P",
+        "in the diff, yank (and copy); paste after, before",
+    ),
+    ("u / U", "undo the last edit to this file, do it again"),
+];
+
+/// The rest, after vim's own keys.
+const MORE_F1: &[(&str, &str)] = &[
+    ("PgUp / PgDn", "a page of lines"),
+    ("Right click", "the actions, on a line or anywhere"),
+];
+
+/// The diff's keys as the keys sheet (F1) lists them, before its host's.
+pub(crate) fn help_rows() -> Vec<(&'static str, &'static str)> {
+    use key_table::f1_rows as rows;
+    (rows(DIFF_KEYS).into_iter())
+        .chain(TYPED_F1.iter().copied())
+        .chain(rows(FIND_KEYS))
+        .chain(rows(EDITOR_KEYS))
+        .chain(VIM_F1.iter().copied())
+        .chain(rows(vim::VIM_KEYS))
+        .chain(MORE_F1.iter().copied())
+        .collect()
+}
+
+/// The key pressing `button` in the diff, if one of its rows does.
+pub(crate) fn key_of(button: ReposButton) -> Option<&'static str> {
+    let of = |table| crate::repos::chord_of(table, DiffKey::Button(button));
+    of(DIFF_KEYS)
+        .or_else(|| of(HOST_KEYS))
+        .or_else(|| of(vim::VIM_KEYS))
+        .or_else(|| of(EDITOR_KEYS))
+}
+
+/// The chord of the diff's row doing `key`.
+fn chord(key: DiffKey) -> &'static str {
+    (crate::repos::chord_of(DIFF_KEYS, key))
+        .or_else(|| crate::repos::chord_of(HOST_KEYS, key))
+        .unwrap_or_default()
+}
+
 /// What the checkout at `root` is called: its section's label, else its
 /// folder's name.
 fn label_of(root: &Path, ctx: &Ctx) -> String {
@@ -710,9 +937,10 @@ fn in_part(range: &Range<usize>, part: &Range<usize>) -> Option<Range<usize>> {
     (start < end).then(|| start - part.start..end - part.start)
 }
 
-/// Whether `sym` with `mods` is Ctrl+Shift+C, copying the review.
+/// Whether `sym` with `mods` is Ctrl+Shift+C, copying the review: the
+/// panel's key for it.
 fn copy_key(mods: &ModifiersState, sym: Keysym) -> bool {
-    mods.ctrl && mods.shift && !(mods.alt || mods.logo) && matches!(sym, Keysym::c | Keysym::C)
+    key_table::is(key_name(ReposButton::CopyReview), mods, sym)
 }
 
 /// Whether `path` is in folder `dir`.
@@ -2239,32 +2467,23 @@ impl DiffView {
         typed: Keysym,
         ctx: &Ctx,
     ) -> Option<Outcome> {
-        let others = mods.alt || mods.logo;
-        let plain = !(mods.ctrl || mods.shift || others);
-        let only_ctrl = mods.ctrl && !(mods.shift || others);
-        let only_shift = mods.shift && !(mods.ctrl || others);
         if copy_key(mods, sym) {
             return self.copy(ctx);
         }
-        let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
-        if enter && (plain || only_ctrl) {
-            self.submit_comment(ctx);
-            return None;
+        let key = key_table::press(EDITOR_KEYS, &(), mods, sym);
+        match key {
+            Some(DiffKey::Button(_)) => self.submit_comment(ctx),
+            Some(DiffKey::Keep) => self.park_comment(ctx),
+            Some(DiffKey::Discard) => self.discard_comment(ctx),
+            _ => {}
         }
-        if sym == Keysym::Escape && plain {
-            self.park_comment(ctx);
-            return None;
-        }
-        if matches!(sym, Keysym::Delete | Keysym::KP_Delete) && crate::text_field::discard_key(mods)
-        {
-            self.discard_comment(ctx);
+        if key.is_some_and(|key| key != DiffKey::NewLine) {
             return None;
         }
         let field = &mut self.editing.as_mut()?.field;
-        let edit = if enter && only_shift {
-            field.newline()
-        } else {
-            field.key(mods, sym, typed)
+        let edit = match key {
+            Some(_) => field.newline(),
+            None => field.key(mods, sym, typed),
         };
         match edit {
             Edit::Changed => {
@@ -3004,27 +3223,35 @@ impl DiffView {
             FindingState::Fix if flag.yours => vec![
                 Hint {
                     label: words.edit_own.into(),
-                    ..keyed(B::Comment, "c")
+                    ..keyed(B::Comment, chord(DiffKey::Button(B::Comment)))
                 },
                 Hint {
                     label: "Delete".into(),
-                    ..keyed(B::DismissFinding, "Del")
+                    ..keyed(B::DismissFinding, chord(DiffKey::Delete))
                 },
             ],
             _ if flag.yours => Vec::new(),
             // A question is accepted by answering it.
-            FindingState::Open if flag.unanswered => vec![keyed(B::DismissFinding, "Del")],
+            FindingState::Open if flag.unanswered => {
+                vec![keyed(B::DismissFinding, chord(DiffKey::Delete))]
+            }
             FindingState::Open => {
-                vec![keyed(B::FixFinding, "f"), keyed(B::DismissFinding, "Del")]
+                vec![
+                    keyed(B::FixFinding, chord(DiffKey::Fix)),
+                    keyed(B::DismissFinding, chord(DiffKey::Delete)),
+                ]
             }
             FindingState::Fix => {
                 vec![
-                    keyed(B::ReopenFinding, "f"),
-                    keyed(B::DismissFinding, "Del"),
+                    keyed(B::ReopenFinding, chord(DiffKey::Fix)),
+                    keyed(B::DismissFinding, chord(DiffKey::Delete)),
                 ]
             }
             FindingState::Dismissed => {
-                vec![keyed(B::FixFinding, "f"), keyed(B::ReopenFinding, "Del")]
+                vec![
+                    keyed(B::FixFinding, chord(DiffKey::Fix)),
+                    keyed(B::ReopenFinding, chord(DiffKey::Delete)),
+                ]
             }
             FindingState::Sent | FindingState::Fixed | FindingState::Posted => Vec::new(),
         };
@@ -3038,14 +3265,14 @@ impl DiffView {
                     (true, true) => "Edit answer".into(),
                     (true, false) => "Edit comment".into(),
                 },
-                ..keyed(B::Comment, "c")
+                ..keyed(B::Comment, chord(DiffKey::Button(B::Comment)))
             });
             // A dismissed finding's fix waits for it to be reopened.
             let fix = review_items::editable(flag.of, &flag.id, flag.state)
                 .is_ok()
                 .then(|| Hint {
                     label: words.edit.into(),
-                    ..keyed(B::EditFix, "Shift+E")
+                    ..keyed(B::EditFix, chord(DiffKey::Button(B::EditFix)))
                 });
             comment.into_iter().chain(fix)
         });
@@ -3057,7 +3284,7 @@ impl DiffView {
         if flag.fixed_in.is_some() {
             want.push(Hint {
                 label: SHOW_FIX.into(),
-                ..keyed(B::ShowCommit, SHOW_FIX_KEY)
+                ..keyed(B::ShowCommit, chord(DiffKey::FixCommit))
             });
         }
         want.into_iter()
@@ -3496,9 +3723,10 @@ impl DiffView {
     ) -> Option<Option<Outcome>> {
         let page = ctx.page.max(1);
         let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
-        let alt = mods.alt && !(mods.ctrl || mods.logo || mods.shift);
         let shift = mods.shift && !(mods.ctrl || mods.alt || mods.logo);
         let only_ctrl = mods.ctrl && !(mods.alt || mods.logo || mods.shift);
+        // The cursor's moves, the keypad's too: F1 says them with its
+        // host's (`repos::MOVES_F1`) and as `MORE_F1`.
         let by = match sym {
             // Ctrl+J and Ctrl+K move as Down and Up do, in every list.
             Keysym::j | Keysym::J if only_ctrl => 1,
@@ -3522,57 +3750,47 @@ impl DiffView {
         if self.caret_key(mods, sym, typed, ctx) {
             return Some(None);
         }
-        match sym {
-            Keysym::Down | Keysym::KP_Down if alt => self.jump_file(1, ctx),
-            Keysym::Up | Keysym::KP_Up if alt => self.jump_file(-1, ctx),
-            Keysym::space if plain => {
+        use ReposButton as B;
+        let key = (key_table::press(DIFF_KEYS, &(), mods, unpad(sym)))
+            .or_else(|| key_table::press(HOST_KEYS, &(), mods, sym));
+        match key {
+            Some(DiffKey::File(by)) => self.jump_file(by, ctx),
+            Some(DiffKey::Check) => {
                 let head = self.current_file(page);
                 return Some(head.and_then(|head| self.toggle_diff_file(head, ctx)));
             }
-            Keysym::Left | Keysym::KP_Left | Keysym::Right | Keysym::KP_Right if plain => {
-                let fold = matches!(sym, Keysym::Left | Keysym::KP_Left);
-                // A page has no header to find it again by.
-                if !self.plain
-                    && let Some(head) = self.current_file(page)
-                {
-                    self.fold_diff_file(head, fold, ctx);
-                }
-            }
-            Keysym::Return | Keysym::KP_Enter if plain => {
+            Some(DiffKey::Open) => {
                 let r = self.open_target(page)?;
                 if self.show_whole(r, ctx) {
                     return Some(None);
                 }
                 return Some(self.open_diff_row(r));
             }
-            Keysym::c if plain && ctx.read_only => return Some(Some(Outcome::Notice(READ_ONLY))),
-            Keysym::c if plain => self.comment_here(ctx),
-            // Shift+letter comes as the letter's own sym: `typed` has the capital.
-            Keysym::c | Keysym::C
-                if self.plain && mods.shift && !(mods.ctrl || mods.alt || mods.logo) =>
-            {
-                if ctx.read_only {
-                    return Some(Some(Outcome::Notice(READ_ONLY)));
-                }
-                self.comment_file(ctx);
+            Some(DiffKey::Button(B::Comment)) if ctx.read_only => {
+                return Some(Some(Outcome::Notice(READ_ONLY)));
             }
-            Keysym::Delete | Keysym::KP_Delete if plain => {
+            Some(DiffKey::Button(B::Comment)) => self.comment_here(ctx),
+            // A whole file's comment is a page's.
+            Some(DiffKey::Button(B::CommentFile)) if self.plain && ctx.read_only => {
+                return Some(Some(Outcome::Notice(READ_ONLY)));
+            }
+            Some(DiffKey::Button(B::CommentFile)) if self.plain => self.comment_file(ctx),
+            Some(DiffKey::Delete) => {
                 if !self.dismiss_finding(ctx) {
                     self.delete_comment(ctx);
                 }
-                return Some(None);
             }
-            Keysym::f if plain => {
-                if !self.fix_finding() {
-                    return None;
-                }
-            }
-            Keysym::o | Keysym::O if mods.shift && !(mods.ctrl || mods.alt || mods.logo) => {
-                return Some(Some(self.fix_commit()));
-            }
-            Keysym::e | Keysym::E if mods.shift && !(mods.ctrl || mods.alt || mods.logo) => {
-                if !self.edit_fix() {
-                    return None;
+            Some(DiffKey::Fix) if self.fix_finding() => {}
+            Some(DiffKey::FixCommit) => return Some(Some(self.fix_commit())),
+            Some(DiffKey::Button(B::EditFix)) if self.edit_fix() => {}
+            // The arrows fold the file, off a line (`caret_key` moved on
+            // one).
+            None if plain && matches!(unpad(sym), Keysym::Left | Keysym::Right) => {
+                // A page has no header to find it again by.
+                if !self.plain
+                    && let Some(head) = self.current_file(page)
+                {
+                    self.fold_diff_file(head, unpad(sym) == Keysym::Left, ctx);
                 }
             }
             _ => return None,
@@ -3855,10 +4073,8 @@ impl DiffView {
         }
         // Ctrl+Shift+F from anywhere; Ctrl+F with the diff's keys.
         let in_diff = ctx.keys == Keys::Diff;
-        if mods.ctrl
-            && (mods.shift || in_diff)
-            && !(mods.alt || mods.logo)
-            && matches!(sym, Keysym::f | Keysym::F)
+        if let Some(from) = key_table::press(FIND_KEYS, &(), mods, sym)
+            && (from == Find::Anywhere || in_diff)
         {
             self.open_search(ctx);
             return Some(None);
@@ -4114,5 +4330,23 @@ impl DiffView {
         let b = self.scroll_bounds(ctx);
         self.scroll.jump(pos.clamp(0.0, b.max.max(0.0)));
         self.take_slack(ctx.page);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn its_key_tables_hold_together() {
+        key_table::check(DIFF_KEYS, &[()]);
+        key_table::check(HOST_KEYS, &[()]);
+        key_table::check(EDITOR_KEYS, &[()]);
+        key_table::check(FIND_KEYS, &[()]);
+        key_table::check(vim::VIM_KEYS, &[()]);
+        // The keys a finding's buttons show are the rows'.
+        assert_eq!(chord(DiffKey::Fix), "f");
+        assert_eq!(chord(DiffKey::Delete), "Del");
+        assert_eq!(chord(DiffKey::FixCommit), "Shift+O");
     }
 }

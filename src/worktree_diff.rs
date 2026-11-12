@@ -47,11 +47,12 @@ use crate::{
     feature::review_items::ItemOf,
     feature::{Stage, Standing},
     feature_diff::{FeatureOf, Role},
-    file_tree::{Asked, FileTree},
+    file_tree::{self, Asked, FileTree, ListKey},
     git::Change,
     git_ops::Since,
+    key_table::{self, Binding},
     md_preview::PREVIEW_KEY,
-    repos::{Grouping, diff_help_lines, help_title, key_name, scroll_lines, sheet_step},
+    repos::{Grouping, f1_lines, help_title, key, key_name, scroll_lines, sheet_step, unpad},
     review::Review,
     scroll::Motion,
 };
@@ -219,6 +220,315 @@ pub const APPROVE_KEY: &str = "Ctrl+Enter";
 pub const SEND_BACK_KEY: &str = "Ctrl+Shift+Enter";
 /// The key going to the next file not viewed in a feature's code review.
 pub const NEXT_UNVIEWED_KEY: &str = "Alt+Shift+Down / Up";
+
+/// What a key of its own does (`WorktreeDiff::key`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WtKey {
+    Help,
+    GoOn,
+    Reopen,
+    Approve,
+    SendBack,
+    /// A feature's button.
+    Feature(ReposButton),
+    /// All changes, or those since the last review.
+    Scope,
+    Clear,
+    /// The next of Preview, Review and Split.
+    Mode,
+    /// The next file not viewed, or the one before.
+    Unviewed(bool),
+    /// The diff's, said here as it is on this page: passed on to it.
+    Diff,
+}
+
+/// Whether `w` shows a file under review still open to its decision.
+fn deciding(w: &WorktreeDiff) -> bool {
+    w.doc.is_some() && !w.closed() && !w.evidence()
+}
+
+/// Its keys before the diff's, while no comment or search has them (but
+/// F1). Rows of a chord go by what it shows, the first offered winning;
+/// those with words are F1's (`offered_f1`), a feature's are its own
+/// (`FeatureOf::keys`).
+const KEYS: &[Binding<WorktreeDiff, WtKey>] = &[
+    Binding {
+        chord: "F1",
+        does: |w| w.feature.is_none().then_some(WtKey::Help),
+        footer: true,
+        f1: "list the keys",
+    },
+    Binding {
+        chord: "F1",
+        does: |_| Some(WtKey::Help),
+        footer: true,
+        f1: "",
+    },
+    Binding {
+        chord: PREVIEW_KEY,
+        does: |w| (w.closed() || w.evidence()).then_some(WtKey::Mode),
+        footer: false,
+        f1: "go to the next of Preview, Review and Split",
+    },
+    Binding {
+        chord: PREVIEW_KEY,
+        does: |w| (w.doc.is_some() && w.suggestions().is_none()).then_some(WtKey::Mode),
+        footer: false,
+        f1: "go between Review and Split",
+    },
+    Binding {
+        chord: PREVIEW_KEY,
+        does: |w| w.doc.is_some().then_some(WtKey::Mode),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: APPROVE_KEY,
+        does: |w| (w.closed() && !w.evidence()).then_some(WtKey::GoOn),
+        footer: true,
+        f1: "go to the stage the feature is at",
+    },
+    Binding {
+        chord: APPROVE_KEY,
+        does: |w| w.closed().then_some(WtKey::GoOn),
+        footer: true,
+        f1: "",
+    },
+    // Evidence's refuse, unsaid.
+    Binding {
+        chord: APPROVE_KEY,
+        does: |w| w.evidence().then_some(WtKey::Approve),
+        footer: true,
+        f1: "",
+    },
+    Binding {
+        chord: APPROVE_KEY,
+        does: |w| (w.doc.is_some() && w.suggestions().is_some()).then_some(WtKey::Approve),
+        footer: true,
+        f1: "write the final plan from what you decided",
+    },
+    Binding {
+        chord: APPROVE_KEY,
+        does: |w| (w.doc.is_some() && w.fix_plan()).then_some(WtKey::Approve),
+        footer: true,
+        f1: "make the fixes as the file says",
+    },
+    Binding {
+        chord: APPROVE_KEY,
+        does: |w| w.doc.is_some().then_some(WtKey::Approve),
+        footer: true,
+        f1: "approve the file as it is",
+    },
+    Binding {
+        chord: APPROVE_KEY,
+        does: |w| {
+            let fe = w.feature.as_ref()?;
+            Some(WtKey::Feature(match fe.role() {
+                Role::Deciding => fe.deciding_button(false, w.diff.review.own()),
+                Role::Done => ReposButton::GoOn,
+                Role::Round(FixPhase::Ready) => ReposButton::ReviewFixPlan,
+                _ => ReposButton::Approve,
+            }))
+        },
+        footer: true,
+        f1: "",
+    },
+    Binding {
+        chord: SEND_BACK_KEY,
+        does: |w| (w.closed() && !w.evidence()).then_some(WtKey::Reopen),
+        footer: true,
+        f1: "reopen the file, unless it is locked",
+    },
+    Binding {
+        chord: SEND_BACK_KEY,
+        does: |w| w.closed().then_some(WtKey::Reopen),
+        footer: true,
+        f1: "",
+    },
+    // Evidence's refuse, unsaid.
+    Binding {
+        chord: SEND_BACK_KEY,
+        does: |w| w.evidence().then_some(WtKey::SendBack),
+        footer: true,
+        f1: "",
+    },
+    Binding {
+        chord: SEND_BACK_KEY,
+        does: |w| (w.doc.is_some() && w.suggestions().is_some()).then_some(WtKey::SendBack),
+        footer: true,
+        f1: "ask the reviewer about your comments",
+    },
+    Binding {
+        chord: SEND_BACK_KEY,
+        does: |w| w.doc.is_some().then_some(WtKey::SendBack),
+        footer: true,
+        f1: "send it back to its agent with the comments",
+    },
+    Binding {
+        chord: SEND_BACK_KEY,
+        does: |w| {
+            let fe = w.feature.as_ref()?;
+            Some(WtKey::Feature(match fe.role() {
+                Role::Deciding => fe.deciding_button(true, w.diff.review.own()),
+                Role::Done => ReposButton::Reopen,
+                _ => ReposButton::PlanFixes,
+            }))
+        },
+        footer: true,
+        f1: "",
+    },
+    Binding {
+        chord: "Shift+C",
+        does: |w| {
+            w.feature
+                .is_some()
+                .then_some(WtKey::Feature(ReposButton::AddComment))
+        },
+        footer: true,
+        f1: "",
+    },
+    // The diff's comment on the whole page.
+    Binding {
+        chord: "Shift+C",
+        does: |w| (deciding(w) && w.suggestions().is_none()).then_some(WtKey::Diff),
+        footer: false,
+        f1: "in the review, comment on the whole file",
+    },
+    Binding {
+        chord: "Shift+F",
+        does: |w| (w.feature.is_some()).then_some(WtKey::Feature(ReposButton::FixAllFindings)),
+        footer: true,
+        f1: "mark every undecided finding to fix",
+    },
+    Binding {
+        chord: "Shift+A",
+        does: |w| w.feature.is_some().then_some(WtKey::Scope),
+        footer: true,
+        f1: "all changes, or only those since your last review",
+    },
+    // The diff's keys on a suggestion.
+    Binding {
+        chord: "f",
+        does: |w| (deciding(w) && w.suggestions().is_some()).then_some(WtKey::Diff),
+        footer: false,
+        f1: "accept the suggestion, or take that back",
+    },
+    Binding {
+        chord: "Del",
+        does: |w| (deciding(w) && w.suggestions().is_some()).then_some(WtKey::Diff),
+        footer: false,
+        f1: "reject it, saying why, or reopen it",
+    },
+    Binding {
+        chord: "Shift+E",
+        does: |w| (deciding(w) && w.suggestions().is_some()).then_some(WtKey::Diff),
+        footer: false,
+        f1: "write its change in your own words",
+    },
+    Binding {
+        chord: crate::repos::CLEAR_REVIEW_KEY,
+        does: |w| (w.diff.review.own() > 0).then_some(WtKey::Clear),
+        footer: true,
+        f1: "delete your comments, asking first (Clear review)",
+    },
+    Binding {
+        chord: "Alt+Shift+Down",
+        does: |w| w.feature.is_some().then_some(WtKey::Unviewed(true)),
+        footer: true,
+        f1: "go to the next or the previous file not viewed",
+    },
+    Binding {
+        chord: "Alt+Shift+Up",
+        does: |w| w.feature.is_some().then_some(WtKey::Unviewed(false)),
+        footer: true,
+        f1: "go to the next or the previous file not viewed",
+    },
+    // The diff's copy, of what this diff's comments are.
+    Binding {
+        chord: "Ctrl+Shift+C",
+        does: |w| (!(w.closed() || w.evidence())).then_some(WtKey::Diff),
+        footer: true,
+        f1: "copy the review comments for an AI agent",
+    },
+];
+
+/// Esc, once the diff didn't take it (`WorktreeDiff::key`).
+const CLOSE_KEYS: &[Binding<WorktreeDiff, ()>] = &[
+    Binding {
+        chord: "Esc",
+        does: |w| w.feature.is_some().then_some(()),
+        footer: true,
+        f1: "",
+    },
+    Binding {
+        chord: "Esc",
+        does: |w| w.doc.is_some().then_some(()),
+        footer: true,
+        f1: "back to the feature",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(()),
+        footer: true,
+        f1: "close the diff, back to the worktrees",
+    },
+];
+
+/// The words of the rows of `table` offered now, in its order.
+fn offered_f1<'a, A>(
+    table: &'a [Binding<WorktreeDiff, A>],
+    w: &'a WorktreeDiff,
+) -> impl Iterator<Item = (&'static str, &'static str)> + 'a {
+    // A chord's first row offered is the one it presses.
+    (table.iter().enumerate())
+        .filter(move |(i, b)| {
+            (b.does)(w).is_some()
+                && !table[..*i]
+                    .iter()
+                    .any(|o| o.chord == b.chord && (o.does)(w).is_some())
+        })
+        .map(|(_, b)| (b.chord, b.f1))
+        .filter(|(_, f1)| !f1.is_empty())
+}
+
+/// A key of the file list's toolbar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ToolKey {
+    /// Between the list and the diff.
+    Focus,
+    Grouping,
+    Tool(TreeTool),
+}
+
+/// The file list's keys, while it shows, with either of it and the diff
+/// (`tree_key`).
+const TREE_KEYS: &[Binding<(), ToolKey>] = &[
+    key!(
+        "Tab",
+        ToolKey::Focus,
+        "go between the file list and the diff"
+    ),
+    key!(
+        "Shift+Tab",
+        ToolKey::Focus,
+        "go between the file list and the diff"
+    ),
+    key!(
+        "Alt+F",
+        ToolKey::Grouping,
+        "list the files flat, or by folder"
+    ),
+    key!(
+        "Alt+Left",
+        ToolKey::Tool(TreeTool::Collapse),
+        "fold or unfold the whole file list"
+    ),
+    key!(
+        "Alt+Right",
+        ToolKey::Tool(TreeTool::Expand),
+        "fold or unfold the whole file list"
+    ),
+];
 
 /// The commit a diff shows (`WorktreeDiff::commit`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -553,27 +863,21 @@ impl WorktreeDiff {
         if !self.tree_shows(env) {
             return None;
         }
-        let alt = mods.alt && !(mods.ctrl || mods.shift || mods.logo);
-        match sym {
-            Keysym::Tab | Keysym::ISO_Left_Tab if !(mods.ctrl || mods.alt || mods.logo) => {
+        match key_table::press(TREE_KEYS, &(), mods, unpad(sym)) {
+            Some(ToolKey::Focus) => {
                 let tree = self.tree.as_mut()?;
                 tree.focused = !tree.focused;
                 return Some(None);
             }
-            Keysym::f | Keysym::F if alt => {
+            Some(ToolKey::Grouping) => {
                 let tool = match self.tree.as_ref()?.grouping {
                     Grouping::List => TreeTool::Folders,
                     Grouping::Folders => TreeTool::List,
                 };
                 return Some(self.tree_tool(tool, env));
             }
-            Keysym::Left | Keysym::KP_Left if alt => {
-                return Some(self.tree_tool(TreeTool::Collapse, env));
-            }
-            Keysym::Right | Keysym::KP_Right if alt => {
-                return Some(self.tree_tool(TreeTool::Expand, env));
-            }
-            _ => {}
+            Some(ToolKey::Tool(tool)) => return Some(self.tree_tool(tool, env)),
+            None => {}
         }
         let (tree, fe) = (self.tree.as_mut()?, self.feature.as_ref()?);
         if !tree.focused {
@@ -913,7 +1217,15 @@ impl WorktreeDiff {
     fn help_lines(&self) -> Vec<(String, String, crate::chrome::Tone)> {
         // A read-only diff refuses the keys that edit the files.
         let edits = |what: &str| {
-            what.contains("delete from the file") || what.contains("restore the change")
+            [
+                "delete from the file",
+                "delete it from the file",
+                "restore the change",
+                "edit to this file",
+                "edit undone",
+            ]
+            .iter()
+            .any(|edit| what.contains(edit))
         };
         let yank = |what: &str| what.contains("yank");
         // Evidence takes no comments either.
@@ -928,7 +1240,7 @@ impl WorktreeDiff {
         let other_file = |what: &str| what.contains("the file before or after");
         let on_page = self.doc.is_some();
         let flagged = self.suggestions().is_some();
-        let diff = (diff_help_lines().into_iter())
+        let diff = (f1_lines(diff_view::help_rows()).into_iter())
             .filter(|(_, what, _)| {
                 !(read_only && edits(what))
                     && !(locked && edits(what))
@@ -977,86 +1289,31 @@ impl WorktreeDiff {
                 ),
                 false => (key, what, tone),
             });
-        if self.doc.is_none() && self.feature.is_none() {
-            return diff.collect();
-        }
-        let feature_keys;
-        let own: &[(&str, &str)] = match (evidence, &self.feature) {
-            (_, Some(fe)) => {
-                feature_keys = fe.keys(self.diff.review.own());
-                &feature_keys
-            }
-            (false, _) if closed => &[
-                ("Esc", "back to the feature"),
-                ("F1", "list the keys"),
-                (PREVIEW_KEY, "go to the next of Preview, Review and Split"),
-                (APPROVE_KEY, "go to the stage the feature is at"),
-                (SEND_BACK_KEY, "reopen the file, unless it is locked"),
-            ],
-            (true, _) => &[
-                ("Esc", "back to the feature"),
-                ("F1", "list the keys"),
-                (PREVIEW_KEY, "go to the next of Preview, Review and Split"),
-            ],
-            (false, _) if flagged => &[
-                ("Esc", "back to the feature"),
-                ("F1", "list the keys"),
-                (APPROVE_KEY, "write the final plan from what you decided"),
-                (SEND_BACK_KEY, "ask the reviewer about your comments"),
-                ("f", "accept the suggestion, or take that back"),
-                ("Del", "reject it, saying why, or reopen it"),
-                ("Shift+E", "write its change in your own words"),
-            ],
-            (false, _) if self.fix_plan() => &[
-                ("Esc", "back to the feature"),
-                ("F1", "list the keys"),
-                (PREVIEW_KEY, "go between Review and Split"),
-                (APPROVE_KEY, "make the fixes as the file says"),
-                (SEND_BACK_KEY, "send it back to its agent with the comments"),
-                ("Shift+C", "in the review, comment on the whole file"),
-            ],
-            (false, _) => &[
-                ("Esc", "back to the feature"),
-                ("F1", "list the keys"),
-                (PREVIEW_KEY, "go between Review and Split"),
-                (APPROVE_KEY, "approve the file as it is"),
-                (SEND_BACK_KEY, "send it back to its agent with the comments"),
-                ("Shift+C", "in the review, comment on the whole file"),
-            ],
+        // Its own keys as it stands: a feature's say what they do there.
+        let own: Vec<(&str, &str)> = match &self.feature {
+            Some(fe) => (fe.keys(self.diff.review.own()).into_iter())
+                .chain(offered_f1(KEYS, self))
+                .collect(),
+            None => offered_f1(CLOSE_KEYS, self)
+                .chain(offered_f1(KEYS, self))
+                .collect(),
         };
-        let list: &[(&str, &str)] = match self.tree.is_some() {
-            true => &[
-                ("Tab", "go between the file list and the diff"),
-                (
-                    "Space",
-                    "in the file list, mark the line's files viewed, or not",
-                ),
-                (
-                    "Enter",
-                    "in the file list, fold the line, or go to the file's diff",
-                ),
-                ("Alt+F", "list the files flat, or by folder"),
-                ("Alt+Left / Right", "fold or unfold the whole file list"),
-            ],
-            false => &[],
+        let list = match self.tree.is_some() {
+            true => (key_table::f1_rows(TREE_KEYS).into_iter())
+                .chain(key_table::f1_rows(file_tree::KEYS))
+                .collect(),
+            false => Vec::new(),
         };
         let on_page: &[(&str, &str)] = match self.feature.as_ref().is_some_and(|fe| fe.inline) {
+            // The feature tab's keys (`features`).
             true => &[(
                 "Alt+1 / Alt+2",
                 "show the code, or the fixes the comments asked for",
             )],
             false => &[],
         };
-        let list = list.iter().chain(on_page);
-        let own = own.iter().chain(list).map(|(key, what)| {
-            (
-                key.to_string(),
-                what.to_string(),
-                crate::chrome::Tone::Normal,
-            )
-        });
-        // The diff's, but its Esc and F1.
-        own.chain(diff.skip(2)).collect()
+        let own = f1_lines(own.into_iter().chain(list).chain(on_page.iter().copied()));
+        own.into_iter().chain(diff).collect()
     }
 
     /// Call `f` with the diff and its `Ctx`.
@@ -1352,8 +1609,10 @@ impl WorktreeDiff {
             },
             false => hint(ReposButton::Approve, APPROVE_KEY),
         };
-        view.title_buttons
-            .push(hint(ReposButton::CommentFile, "Shift+C"));
+        view.title_buttons.push(hint(
+            ReposButton::CommentFile,
+            key_name(ReposButton::CommentFile),
+        ));
         // The one to press goes rightmost, filled: Send back once a comment
         // is written, else Approve.
         let back = (!stopped).then(|| hint(ReposButton::SendBack, SEND_BACK_KEY));
@@ -1432,75 +1691,28 @@ impl WorktreeDiff {
             }
             return None;
         }
-        let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
-        if sym == Keysym::F1 && plain {
-            self.help = Some(0);
-            return None;
-        }
-        // Approve and Send back, unless a comment or the search has the
-        // keys.
-        let enter = matches!(sym, Keysym::Return | Keysym::KP_Enter);
+        // Unless a comment or the search has the keys: then only F1, the
+        // rest the diff's.
         let typing = self.diff.editing.is_some() || self.diff.search_focused();
-        let keyed = self.doc.is_some();
-        if self.closed() && enter && mods.ctrl && !mods.alt && !mods.logo && !typing {
-            return match mods.shift {
-                false => self.go_on(),
-                true => self.reopen(),
-            };
-        }
-        if keyed && enter && mods.ctrl && !mods.alt && !mods.logo && !typing {
-            return match mods.shift {
-                false => self.approve(),
-                true => self.send_back(env),
-            };
-        }
-        if let Some(fe) = self
-            .feature
-            .as_ref()
-            .filter(|_| !typing && !mods.alt && !mods.logo)
-        {
-            use ReposButton as B;
-            let button = match sym {
-                _ if enter && mods.ctrl => Some(match (mods.shift, fe.role()) {
-                    (shift, Role::Deciding) => fe.deciding_button(shift, self.diff.review.own()),
-                    (false, Role::Done) => B::GoOn,
-                    (true, Role::Done) => B::Reopen,
-                    (true, _) => B::PlanFixes,
-                    (false, Role::Round(FixPhase::Ready)) => B::ReviewFixPlan,
-                    (false, _) => B::Approve,
-                }),
-                Keysym::c | Keysym::C if mods.shift && !mods.ctrl => Some(B::AddComment),
-                Keysym::f | Keysym::F if mods.shift && !mods.ctrl => Some(B::FixAllFindings),
-                Keysym::a | Keysym::A if mods.shift && !mods.ctrl => {
-                    return self.toggle_scope(env);
-                }
-                _ => None,
-            };
-            if let Some(button) = button {
-                return self.feature_press(button, env);
+        let own =
+            key_table::press(KEYS, self, mods, unpad(sym)).filter(|k| *k == WtKey::Help || !typing);
+        match own {
+            Some(WtKey::Help) => {
+                self.help = Some(0);
+                return None;
             }
-        }
-        if !typing && crate::repos::clear_review_key(mods, sym) && self.diff.review.own() > 0 {
-            return self.click(ReposHit::Button(ReposButton::ClearReview), env);
-        }
-        let v = matches!(sym, Keysym::v | Keysym::V);
-        if self.doc.is_some() && v && mods.ctrl && mods.shift && !mods.alt && !mods.logo && !typing
-        {
-            return Some(Done::CycleMode);
-        }
-        // Alt+Shift+Down and Up: the next file not viewed, and the one
-        // before.
-        let up_down = match sym {
-            Keysym::Down | Keysym::KP_Down => Some(1),
-            Keysym::Up | Keysym::KP_Up => Some(-1),
-            _ => None,
-        };
-        if let Some(by) = up_down.filter(|_| self.feature.is_some() && !typing)
-            && mods.alt
-            && mods.shift
-            && !(mods.ctrl || mods.logo)
-        {
-            return self.jump_unviewed(by > 0, env);
+            Some(WtKey::GoOn) => return self.go_on(),
+            Some(WtKey::Reopen) => return self.reopen(),
+            Some(WtKey::Approve) => return self.approve(),
+            Some(WtKey::SendBack) => return self.send_back(env),
+            Some(WtKey::Feature(button)) => return self.feature_press(button, env),
+            Some(WtKey::Scope) => return self.toggle_scope(env),
+            Some(WtKey::Clear) => {
+                return self.click(ReposHit::Button(ReposButton::ClearReview), env);
+            }
+            Some(WtKey::Mode) => return Some(Done::CycleMode),
+            Some(WtKey::Unviewed(next)) => return self.jump_unviewed(next, env),
+            Some(WtKey::Diff) | None => {}
         }
         if !typing && let Some(done) = self.tree_key(mods, sym, env) {
             return done;
@@ -1521,7 +1733,7 @@ impl WorktreeDiff {
         }
         let done = match outcome {
             Some(outcome) => self.doc_outcome(outcome).map(Done::Diff),
-            None => (sym == Keysym::Escape && plain).then_some(Done::Close),
+            None => key_table::press(CLOSE_KEYS, self, mods, sym).map(|_| Done::Close),
         };
         self.asked(done)
     }
@@ -1629,19 +1841,28 @@ impl WorktreeDiff {
                     button => button.label().to_lowercase(),
                 },
                 key: match button {
-                    B::Approve | B::GoOn => APPROVE_KEY,
-                    B::SendBack | B::Reopen => SEND_BACK_KEY,
-                    B::MarkViewed => "Space",
-                    B::NextUnviewed => NEXT_UNVIEWED_KEY,
-                    B::NextComment => "] / [",
+                    B::Approve | B::GoOn => APPROVE_KEY.into(),
+                    B::SendBack | B::Reopen => SEND_BACK_KEY.into(),
+                    // The file list's, and the diff's.
+                    B::MarkViewed => (crate::repos::chord_of(file_tree::KEYS, ListKey::Tick))
+                        .unwrap_or_default()
+                        .into(),
+                    B::NextUnviewed => NEXT_UNVIEWED_KEY.into(),
+                    B::NextComment => {
+                        format!(
+                            "{} / {}",
+                            key_name(B::NextComment),
+                            key_name(B::PrevComment)
+                        )
+                    }
                     button => match self.feature.as_ref() {
                         Some(fe) if !fe.key_of(button, self.diff.review.own()).is_empty() => {
                             fe.key_of(button, self.diff.review.own())
                         }
                         _ => key_name(button),
-                    },
-                }
-                .into(),
+                    }
+                    .into(),
+                },
                 disabled: (feature_hints.iter())
                     .find(|hint| hint.button == button)
                     .and_then(|hint| hint.disabled.clone()),
@@ -2820,6 +3041,22 @@ pub(crate) mod tests {
         let mut wd = wd;
         wd.set_read(Ok((Since::default(), Vec::new())), ENV);
         assert_eq!(texts(&wd), ["No changes since it forked"]);
+    }
+
+    #[test]
+    fn its_key_tables_hold_together() {
+        let all = || {
+            [
+                read(),
+                commit_of_two(),
+                doc(),
+                evidence(),
+                closed_doc(Standing::Approved),
+            ]
+        };
+        key_table::check(KEYS, &all());
+        key_table::check(CLOSE_KEYS, &all());
+        key_table::check(TREE_KEYS, &[()]);
     }
 
     #[test]
