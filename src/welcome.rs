@@ -25,7 +25,7 @@ use crate::{
     chrome::{self, ProjectRow, WelcomeHit, WelcomeView},
     herdr,
     input::Overlay,
-    key_table::{self, Binding},
+    key_table::{self, Binding, alias},
     project_list::{self, scrolled},
     projects,
     text_field::{Edit, TextField},
@@ -98,6 +98,23 @@ const KEYS: &[Binding<KeyCtx, Key>] = &[
         footer: false,
         f1: "",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |_| Some(Key::Esc)),
+    alias("Ctrl+Esc", |_| Some(Key::Esc)),
+    alias("Alt+Esc", |_| Some(Key::Esc)),
+    alias("Shift+Enter", |_| Some(Key::Enter)),
+    alias("Ctrl+Enter", |_| Some(Key::Enter)),
+    alias("Alt+Enter", |_| Some(Key::Enter)),
+    alias("Ctrl+Shift+N", |c| (!c.naming).then_some(Key::New)),
+    alias("Shift+Del", |c| (!c.naming).then_some(Key::Forget)),
+    alias("Ctrl+Del", |c| (!c.naming).then_some(Key::Forget)),
+    alias("Alt+Del", |c| (!c.naming).then_some(Key::Forget)),
+    alias("Shift+Up", |c| (!c.naming).then_some(Key::Up)),
+    alias("Ctrl+Up", |c| (!c.naming).then_some(Key::Up)),
+    alias("Alt+Up", |c| (!c.naming).then_some(Key::Up)),
+    alias("Shift+Down", |c| (!c.naming).then_some(Key::Down)),
+    alias("Ctrl+Down", |c| (!c.naming).then_some(Key::Down)),
+    alias("Alt+Down", |c| (!c.naming).then_some(Key::Down)),
 ];
 
 /// The key hints under the button, `naming` a new project or not, opened

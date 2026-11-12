@@ -36,7 +36,7 @@ use crate::{
     git::{self, Untracked, Worktree},
     git_ops::Turn,
     input::Overlay,
-    key_table::{self, Binding},
+    key_table::{self, Binding, alias},
     menu::MenuAction,
     paths,
     scroll::{Bounds, Motion, Scroll},
@@ -203,6 +203,20 @@ const KEYS: &[Binding<KeyCtx, Key>] = &[
         footer: true,
         f1: "",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |c| {
+        Some(if c.query { Key::Clear } else { Key::Close })
+    }),
+    alias("Ctrl+Esc", |c| {
+        Some(if c.query { Key::Clear } else { Key::Close })
+    }),
+    alias("Alt+Esc", |c| c.query.then_some(Key::Clear)),
+    alias("Shift+Enter", |_| Some(Key::Diff)),
+    alias("Ctrl+Enter", |_| Some(Key::Diff)),
+    alias("Ctrl+Shift+D", |_| Some(Key::Diff)),
+    alias("Ctrl+Shift+O", |_| Some(Key::Open)),
+    alias("Ctrl+Shift+C", |_| Some(Key::Copy)),
+    alias("Ctrl+Shift+R", |_| Some(Key::Refresh)),
 ];
 
 /// The popup's state: what is selected and scrolled to, by path, as the

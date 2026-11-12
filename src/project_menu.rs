@@ -32,7 +32,7 @@ use crate::{
     },
     fuzzy, home_dir, hooks,
     input::Overlay,
-    key_table::{self, Binding},
+    key_table::{self, Binding, alias},
     paths::{display, tilde},
     project_list::{self, PATH_CHARS, RowTops},
     scroll::{Bounds, Motion, Scroll},
@@ -1461,6 +1461,23 @@ const MENU_KEYS: &[Binding<(), Key>] = &[
         footer: true,
         f1: "Take back a Delete, clear the query, then close",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |_| Some(Key::Esc)),
+    alias("Ctrl+Esc", |_| Some(Key::Esc)),
+    alias("Alt+Esc", |_| Some(Key::Esc)),
+    alias("Shift+Enter", |_| Some(Key::Enter)),
+    alias("Ctrl+Enter", |_| Some(Key::Enter)),
+    alias("Alt+Enter", |_| Some(Key::Enter)),
+    alias("Ctrl+Shift+N", |_| Some(Key::New)),
+    alias("Alt+F2", |_| Some(Key::Rename)),
+    alias("Alt+Shift+F2", |_| Some(Key::ChangeId)),
+    alias("Ctrl+Shift+R", |_| Some(Key::Refresh)),
+    alias("Ctrl+Shift+Q", |_| Some(Key::Stop)),
+    alias("Ctrl+Shift+E", |_| Some(Key::Commands)),
+    alias("Ctrl+Shift+O", |_| Some(Key::ProjectFile)),
+    alias("Shift+Del", |_| Some(Key::Forget)),
+    alias("Ctrl+Del", |_| Some(Key::Forget)),
+    alias("Alt+Del", |_| Some(Key::Forget)),
 ];
 
 /// The keys while a project is renamed, past what its field takes.
@@ -1477,6 +1494,13 @@ const RENAME_KEYS: &[Binding<(), Key>] = &[
         footer: true,
         f1: "Leave it as it was",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |_| Some(Key::Esc)),
+    alias("Ctrl+Esc", |_| Some(Key::Esc)),
+    alias("Alt+Esc", |_| Some(Key::Esc)),
+    alias("Shift+Enter", |_| Some(Key::Enter)),
+    alias("Ctrl+Enter", |_| Some(Key::Enter)),
+    alias("Alt+Enter", |_| Some(Key::Enter)),
 ];
 
 /// The new project form's keys, past what its fields take; the
@@ -1513,6 +1537,18 @@ const FORM_KEYS: &[Binding<(), Key>] = &[
         footer: true,
         f1: "Close the suggestions, then back",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |_| Some(Key::Esc)),
+    alias("Ctrl+Esc", |_| Some(Key::Esc)),
+    alias("Alt+Esc", |_| Some(Key::Esc)),
+    alias("Shift+Enter", |_| Some(Key::Enter)),
+    alias("Ctrl+Enter", |_| Some(Key::Enter)),
+    alias("Alt+Enter", |_| Some(Key::Enter)),
+    alias("Ctrl+Tab", |_| Some(Key::Next { back: false })),
+    alias("Alt+Tab", |_| Some(Key::Next { back: false })),
+    alias("Ctrl+Shift+Tab", |_| Some(Key::Next { back: true })),
+    alias("Alt+Shift+Tab", |_| Some(Key::Next { back: true })),
+    alias("Ctrl+Shift+O", |_| Some(Key::Browse)),
 ];
 
 /// The commands form's keys, past what its fields take.
@@ -1541,6 +1577,17 @@ const SETTINGS_KEYS: &[Binding<(), Key>] = &[
         footer: true,
         f1: "Back, unsaved",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |_| Some(Key::Esc)),
+    alias("Ctrl+Esc", |_| Some(Key::Esc)),
+    alias("Alt+Esc", |_| Some(Key::Esc)),
+    alias("Shift+Enter", |_| Some(Key::Enter)),
+    alias("Ctrl+Enter", |_| Some(Key::Enter)),
+    alias("Alt+Enter", |_| Some(Key::Enter)),
+    alias("Ctrl+Tab", |_| Some(Key::Next { back: false })),
+    alias("Alt+Tab", |_| Some(Key::Next { back: false })),
+    alias("Ctrl+Shift+Tab", |_| Some(Key::Next { back: true })),
+    alias("Alt+Shift+Tab", |_| Some(Key::Next { back: true })),
 ];
 
 impl Gerdr {

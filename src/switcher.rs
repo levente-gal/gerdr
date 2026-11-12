@@ -51,7 +51,7 @@ use crate::{
     feature_agents::ModelSlot,
     fuzzy, git, home_dir,
     input::Overlay,
-    key_table::{self, Binding},
+    key_table::{self, Binding, alias},
     launch::{self, Place},
     paths::tilde,
     profile_import,
@@ -409,6 +409,18 @@ const KEYS: &[Binding<KeyCtx, Key>] = &[
         footer: true,
         f1: "Clear the query, then close",
     },
+    // Aliases: presses the panel took before its keys were a table.
+    alias("Shift+Esc", |_| Some(Key::Esc)),
+    alias("Ctrl+Esc", |_| Some(Key::Esc)),
+    alias("Alt+Esc", |_| Some(Key::Esc)),
+    alias("Shift+Enter", |_| Some(Key::Pick(None))),
+    alias("Ctrl+Enter", |_| Some(Key::Pick(None))),
+    alias("Alt+Shift+Enter", |_| Some(Key::Pick(Some(Place::Tab)))),
+    alias("Ctrl+Alt+Enter", |_| Some(Key::Pick(Some(Place::Tab)))),
+    alias("Ctrl+Tab", |c| c.chips.then_some(Key::Category(1))),
+    alias("Alt+Tab", |c| c.chips.then_some(Key::Category(1))),
+    alias("Ctrl+Shift+Tab", |c| c.chips.then_some(Key::Category(-1))),
+    alias("Alt+Shift+Tab", |c| c.chips.then_some(Key::Category(-1))),
 ];
 
 impl Switcher {
