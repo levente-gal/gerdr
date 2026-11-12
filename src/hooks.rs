@@ -128,8 +128,9 @@ pub fn run(line: &str, dir: &Path, log: &Path, timeout: Duration) -> Result<(), 
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
             Ok(None) => {
-                // Safety: signals the process group it leads.
-                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                use crate::process;
+                process::kill_group(process::group_of(&child), libc::SIGKILL);
+                // Only reaping: it was just killed.
                 let _ = child.wait();
                 return Err(format!("timed out after {}s", timeout.as_secs()));
             }
@@ -140,12 +141,7 @@ pub fn run(line: &str, dir: &Path, log: &Path, timeout: Duration) -> Result<(), 
         return Ok(());
     }
     let written = std::fs::read_to_string(log).unwrap_or_default();
-    Err(last_line(&written).map_or_else(|| status.to_string(), str::to_owned))
-}
-
-/// The last line of `text` with something on it.
-fn last_line(text: &str) -> Option<&str> {
-    text.lines().map(str::trim).rfind(|line| !line.is_empty())
+    Err(crate::text::last_line(&written).map_or_else(|| status.to_string(), str::to_owned))
 }
 
 /// Run project `id`'s `hook`, `line`, in `dir` on a thread of its own; `tx`

@@ -868,12 +868,9 @@ fn signal(herdr: &mut Herdr, pane_id: &str, phase: Phase, group: i32) {
         Phase::Terminate => libc::SIGTERM,
         Phase::Kill => libc::SIGKILL,
     };
-    // Never gerdr's nor init's group: `seen` only gives one that isn't the
-    // pane's shell's.
-    if group > 1 {
-        // Safety: sends a signal only.
-        unsafe { libc::kill(-group, signal) };
-    }
+    // `seen` only gives a group that isn't the pane's shell's; `kill_group`
+    // refuses gerdr's and init's.
+    crate::process::kill_group(group, signal);
 }
 
 impl Gerdr {

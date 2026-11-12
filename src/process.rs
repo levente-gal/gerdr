@@ -54,6 +54,20 @@ pub fn kill_group(group: i32, signal: i32) -> bool {
     unsafe { libc::kill(-group, signal) == 0 }
 }
 
+/// Send `signal` to process `pid` alone. Pids that `kill` would read as a
+/// group (0, and those past `i32::MAX`), init's and gerdr's own are refused.
+/// Whether it was sent.
+pub fn kill_pid(pid: u32, signal: i32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid <= 1 || pid as u32 == std::process::id() {
+        return false;
+    }
+    // Safety: kill takes no pointers; a pid already gone is ESRCH.
+    unsafe { libc::kill(pid, signal) == 0 }
+}
+
 /// The process group `child` leads, started with `process_group(0)`.
 pub fn group_of(child: &Child) -> i32 {
     i32::try_from(child.id()).unwrap_or(0)
@@ -81,6 +95,14 @@ mod tests {
     use super::*;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
+
+    #[test]
+    fn a_running_process_has_a_start_time() {
+        let me = std::process::id();
+        assert!(start_time(me).is_some());
+        assert_eq!(start_time(me), start_time(me));
+        assert_eq!(start_time(u32::MAX), None);
+    }
 
     #[test]
     fn a_process_runs_until_reaped() {
@@ -114,5 +136,20 @@ mod tests {
         assert!(!kill_group(-1, 0));
         // Safety: getpgrp takes nothing.
         assert!(!kill_group(unsafe { libc::getpgrp() }, 0));
+    }
+
+    #[test]
+    fn kill_pid_refuses_groups_init_and_itself() {
+        assert!(!kill_pid(0, 0));
+        assert!(!kill_pid(1, 0));
+        assert!(!kill_pid(u32::MAX, 0));
+        assert!(!kill_pid(std::process::id(), 0));
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("sleep runs");
+        assert!(kill_pid(child.id(), libc::SIGKILL));
+        let _ = child.wait();
     }
 }

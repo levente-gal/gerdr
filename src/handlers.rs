@@ -65,7 +65,10 @@ impl CompositorHandler for Gerdr {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        &client
+            .get_data::<ClientState>()
+            .expect("every client is inserted with a ClientState")
+            .compositor_state
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -93,16 +96,16 @@ impl CompositorHandler for Gerdr {
         if let Some(window) = self
             .unplaced
             .iter()
-            .find(|w| w.toplevel().unwrap().wl_surface() == surface)
+            .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
             .cloned()
         {
             let (app_id, configured) = with_states(surface, |states| {
                 let data = states
                     .data_map
                     .get::<XdgToplevelSurfaceData>()
-                    .unwrap()
+                    .expect("an unplaced window is an xdg toplevel")
                     .lock()
-                    .unwrap();
+                    .expect("toplevel data lock poisoned");
                 (
                     data.app_id.clone().unwrap_or_default(),
                     data.initial_configure_sent,
@@ -110,8 +113,9 @@ impl CompositorHandler for Gerdr {
             });
             if !configured {
                 self.place(window.clone(), &app_id);
-                let toplevel = window.toplevel().unwrap();
-                if !toplevel.is_initial_configure_sent() {
+                if let Some(toplevel) = window.toplevel()
+                    && !toplevel.is_initial_configure_sent()
+                {
                     toplevel.send_configure();
                 }
             }

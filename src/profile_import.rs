@@ -321,17 +321,8 @@ fn lock_holder(dir: &Path) -> Option<u32> {
 
 /// When process `pid` started, from `/proc`.
 fn started(pid: u32) -> Option<SystemTime> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // Its name, in parentheses, may hold spaces: the fields after it
-    // start at the 3rd, and the start time is the 22nd, in clock ticks
-    // since boot.
-    let ticks: u64 = stat
-        .rsplit_once(')')?
-        .1
-        .split_whitespace()
-        .nth(22 - 3)?
-        .parse()
-        .ok()?;
+    // In clock ticks since boot.
+    let ticks = crate::process::start_time(pid)?;
     let booted: u64 = std::fs::read_to_string("/proc/stat")
         .ok()?
         .lines()
