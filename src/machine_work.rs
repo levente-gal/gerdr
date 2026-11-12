@@ -48,8 +48,9 @@ use crate::{
     feature_agents::WatchKey,
     herdr::{AgentStatus, Herdr},
     machine_load::{LEAST_BUSY, Load},
-    machines::{LinkInfo, LinkState},
+    machines::{LinkInfo, LinkState, Machines},
     prepare,
+    projects::Store,
 };
 
 /// How often a machine is asked how busy it is and how its sandboxes stand.
@@ -840,7 +841,158 @@ pub enum Placed {
     Away(String),
 }
 
+impl Machines {
+    pub(crate) fn work_of(&self, id: &str) -> Option<&Work> {
+        (self.links.values())
+            .filter_map(|link| link.work.as_ref())
+            .find(|work| work.id == id)
+    }
+
+    /// How to reach machine `id`, and its folders, for a thread of its own
+    /// that copies AI work from there: none while its link is down.
+    pub(crate) fn archive_reach(&self, machine_id: &str) -> Option<(Reach, Side)> {
+        let work = self.work_of(machine_id)?;
+        Some((work.reach(), work.side()))
+    }
+
+    fn work_of_mut(&mut self, id: &str) -> Option<&mut Work> {
+        (self.links.values_mut())
+            .filter_map(|link| link.work.as_mut())
+            .find(|work| work.id == id)
+    }
+
+    /// Whether machine `id` is one saved in the settings, connected or not.
+    pub(crate) fn machine_saved(&self, id: &str) -> bool {
+        (self.names.get(id)).is_some_and(|name| self.saved.contains_key(name))
+    }
+
+    /// What the user calls machine `id`.
+    /// This one is "this machine", whatever others call it.
+    pub(crate) fn machine_name(&self, id: &str) -> String {
+        if Gerdr::is_this_machine(id) {
+            return "this machine".to_owned();
+        }
+        match self.names.get(id) {
+            Some(name) => name.clone(),
+            None => "another machine".to_owned(),
+        }
+    }
+
+    /// Whether a line typed to `pane` on a machine may not be taken yet.
+    pub(crate) fn machine_line_pending(&self, pane: &str) -> bool {
+        (self.lines.get(pane)).is_some_and(|at| at.elapsed() < LINE_PENDING)
+    }
+
+    /// Whether local pane `pane` only shows something on another machine:
+    /// closing it ends the view, and nothing runs that would be lost.
+    pub(crate) fn is_machine_view(&self, pane: &str) -> bool {
+        self.views.values().any(|view| view == pane)
+    }
+
+    /// Whether `stage`'s agent of feature `slug` is on its way up there.
+    pub(crate) fn starting_on_machine(&self, project: &str, slug: &str, stage: Stage) -> bool {
+        (self.starting).contains_key(&(project.to_owned(), slug.to_owned(), stage))
+    }
+
+    /// What keeps work from coming back goes on the "!" badge.
+    fn report_work_troubles(&self) {
+        let mut texts: Vec<String> = (self.troubles.iter())
+            .map(|((_, slug), text)| format!("Feature {slug}: {text}"))
+            .collect();
+        texts.sort();
+        crate::problems::set("machine work", texts);
+    }
+
+    /// Whether what machine `id`'s agent of feature `slug` did before `since`
+    /// is here. Not yet, it is brought back as soon as can be.
+    pub(crate) fn machine_pulled_since(
+        &self,
+        id: &str,
+        (project, slug): (&str, &str),
+        since: Instant,
+    ) -> bool {
+        let Some(work) = self.work_of(id) else {
+            return false;
+        };
+        let key = (project.to_owned(), slug.to_owned());
+        let here = work.pulled.get(&key).is_some_and(|began| *began >= since);
+        if !here {
+            work.shared.pull_now.store(true, Ordering::Relaxed);
+        }
+        here
+    }
+
+    /// `reading` of feature `slug`, with the changes left uncommitted on
+    /// machines: they aren't in the code here, and they count as if they were.
+    pub(crate) fn machine_dirt(&self, project: &str, slug: &str) -> Vec<String> {
+        let key = (project.to_owned(), slug.to_owned());
+        let dirt = (self.links.values())
+            .filter_map(|link| link.work.as_ref())
+            .filter_map(|work| work.dirty.get(&key));
+        let mut keys: Vec<String> = dirt.flatten().cloned().collect();
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
+    /// Where the project's file has `stage` run: `HERE`, a machine's id if it
+    /// is up, or nothing known.
+    fn default_place(&self, projects: &Store, feature: &Feature, stage: Stage) -> String {
+        let project = projects.project(&feature.project);
+        let Some(name) = project.and_then(|p| p.workflow.machines.get(&stage)) else {
+            return HERE.to_owned();
+        };
+        if name == LEAST_BUSY {
+            return LEAST_BUSY.to_owned();
+        }
+        (self.links.get(name))
+            .and_then(|link| link.work.as_ref())
+            .map_or_else(String::new, |work| work.id.clone())
+    }
+}
+
 impl Gerdr {
+    pub(crate) fn work_of(&self, id: &str) -> Option<&Work> {
+        self.machines.work_of(id)
+    }
+
+    pub(crate) fn archive_reach(&self, machine_id: &str) -> Option<(Reach, Side)> {
+        self.machines.archive_reach(machine_id)
+    }
+
+    pub(crate) fn machine_saved(&self, id: &str) -> bool {
+        self.machines.machine_saved(id)
+    }
+
+    pub(crate) fn machine_name(&self, id: &str) -> String {
+        self.machines.machine_name(id)
+    }
+
+    pub(crate) fn machine_line_pending(&self, pane: &str) -> bool {
+        self.machines.machine_line_pending(pane)
+    }
+
+    pub(crate) fn is_machine_view(&self, pane: &str) -> bool {
+        self.machines.is_machine_view(pane)
+    }
+
+    pub(crate) fn starting_on_machine(&self, project: &str, slug: &str, stage: Stage) -> bool {
+        self.machines.starting_on_machine(project, slug, stage)
+    }
+
+    pub(crate) fn machine_pulled_since(
+        machines: &Machines,
+        id: &str,
+        key: (&str, &str),
+        since: Instant,
+    ) -> bool {
+        machines.machine_pulled_since(id, key, since)
+    }
+
+    pub(crate) fn machine_dirt(&self, project: &str, slug: &str) -> Vec<String> {
+        self.machines.machine_dirt(project, slug)
+    }
+
     /// Where the threads of links say things; set up the first time.
     pub(crate) fn work_sender(&mut self) -> Option<WorkTx> {
         if self.machines.work_tx.is_none() {
@@ -899,42 +1051,6 @@ impl Gerdr {
         }
     }
 
-    pub(crate) fn work_of(&self, id: &str) -> Option<&Work> {
-        (self.machines.links.values())
-            .filter_map(|link| link.work.as_ref())
-            .find(|work| work.id == id)
-    }
-
-    /// How to reach machine `id`, and its folders, for a thread of its own
-    /// that copies AI work from there: none while its link is down.
-    pub(crate) fn archive_reach(&self, machine_id: &str) -> Option<(Reach, Side)> {
-        let work = self.work_of(machine_id)?;
-        Some((work.reach(), work.side()))
-    }
-
-    fn work_of_mut(&mut self, id: &str) -> Option<&mut Work> {
-        (self.machines.links.values_mut())
-            .filter_map(|link| link.work.as_mut())
-            .find(|work| work.id == id)
-    }
-
-    /// Whether machine `id` is one saved in the settings, connected or not.
-    pub(crate) fn machine_saved(&self, id: &str) -> bool {
-        (self.machines.names.get(id)).is_some_and(|name| self.machines.saved.contains_key(name))
-    }
-
-    /// What the user calls machine `id`.
-    /// This one is "this machine", whatever others call it.
-    pub(crate) fn machine_name(&self, id: &str) -> String {
-        if Self::is_this_machine(id) {
-            return "this machine".to_owned();
-        }
-        match self.machines.names.get(id) {
-            Some(name) => name.clone(),
-            None => "another machine".to_owned(),
-        }
-    }
-
     /// Whether herdr pane `pane` is still there. On another machine, unless
     /// told otherwise by a list of its panes: what can't be reached isn't gone.
     pub(crate) fn pane_there(&self, pane: &str) -> bool {
@@ -944,7 +1060,8 @@ impl Gerdr {
         let Some((id, bare)) = split_pane(pane) else {
             return self.herdr_pane_place(pane).is_some();
         };
-        (self.work_of(id).and_then(|w| w.panes.as_ref())).is_none_or(|p| p.contains_key(bare))
+        (self.machines.work_of(id).and_then(|w| w.panes.as_ref()))
+            .is_none_or(|p| p.contains_key(bare))
     }
 
     /// What's known of pane `pane` on another machine, unless it is here.
@@ -954,13 +1071,13 @@ impl Gerdr {
             return Some(state);
         }
         let (id, bare) = split_pane(pane)?;
-        let Some(panes) = self.work_of(id).and_then(|w| w.panes.as_ref()) else {
+        let Some(panes) = self.machines.work_of(id).and_then(|w| w.panes.as_ref()) else {
             return Some((Some(AgentStatus::Unknown), true));
         };
         let key = self
             .owner_of_pane(pane)
             .map(|f| (f.project.clone(), f.slug.clone()));
-        let settling = (self.work_of(id).zip(key.as_ref()))
+        let settling = (self.machines.work_of(id).zip(key.as_ref()))
             .is_some_and(|(work, key)| work.settling(bare, key, Instant::now()));
         Some(match panes.get(bare) {
             Some(_) if settling => (Some(AgentStatus::Working), true),
@@ -975,8 +1092,9 @@ impl Gerdr {
         if let Some(out) = self.seen_out_of_reach(pane) {
             return out;
         }
-        split_pane(pane)
-            .is_some_and(|(id, _)| (self.work_of(id).and_then(|w| w.panes.as_ref())).is_none())
+        split_pane(pane).is_some_and(|(id, _)| {
+            (self.machines.work_of(id).and_then(|w| w.panes.as_ref())).is_none()
+        })
     }
 
     /// The socket to ask about `pane` on, and what it is called there.
@@ -991,21 +1109,16 @@ impl Gerdr {
                 if (self.features.seen.get(pane)).is_some_and(|seen| seen.session.is_some()) {
                     return None;
                 }
-                let work = self.work_of(id)?;
+                let work = self.machines.work_of(id)?;
                 Some((work.info.socket.clone(), bare.to_owned()))
             }
         }
     }
 
-    /// Whether a line typed to `pane` on a machine may not be taken yet.
-    pub(crate) fn machine_line_pending(&self, pane: &str) -> bool {
-        (self.machines.lines.get(pane)).is_some_and(|at| at.elapsed() < LINE_PENDING)
-    }
-
     /// This machine's folders and the ones of machine `id`, for `feature`.
     pub(crate) fn machine_paths(&self, id: &str, feature: Option<&Feature>) -> Option<Paths> {
-        let work = self.work_of(id)?;
-        let name = self.machine_name(id);
+        let work = self.machines.work_of(id)?;
+        let name = self.machines.machine_name(id);
         let here = Side {
             home: crate::home_dir()?.to_string_lossy().into_owned(),
             data: crate::projects::data_dir().to_string_lossy().into_owned(),
@@ -1039,8 +1152,8 @@ impl Gerdr {
     /// comes later, as a warning.
     pub(crate) fn tell_machine_pane(&mut self, pane: &str, told: &Told) -> Result<(), String> {
         let (id, bare) = split_pane(pane).ok_or_else(|| String::from("no such pane"))?;
-        let name = self.machine_name(id);
-        let Some(work) = self.work_of(id) else {
+        let name = self.machines.machine_name(id);
+        let Some(work) = self.machines.work_of(id) else {
             return Err(format!("{name} can't be reached"));
         };
         let Some(feature) = self.owner_of_pane(pane) else {
@@ -1071,7 +1184,7 @@ impl Gerdr {
         let Some((id, bare)) = split_pane(pane) else {
             return;
         };
-        let sent = (self.work_of(id)).is_some_and(|work| {
+        let sent = (self.machines.work_of(id)).is_some_and(|work| {
             work.jobs
                 .send(Job::Close {
                     pane: bare.to_owned(),
@@ -1079,7 +1192,7 @@ impl Gerdr {
                 .is_ok()
         });
         if !sent {
-            let name = self.machine_name(id);
+            let name = self.machines.machine_name(id);
             tracing::warn!("{name} is out of reach: pane {bare} stays there");
             self.show_warning(format!(
                 "{name} can't be reached: what ran there keeps running"
@@ -1126,12 +1239,12 @@ impl Gerdr {
             let job = self
                 .forget_script(&id, feature)
                 .map(|script| Job::Forget { script });
-            let sent =
-                (job.zip(self.work_of(&id))).is_some_and(|(job, w)| w.jobs.send(job).is_ok());
+            let sent = (job.zip(self.machines.work_of(&id)))
+                .is_some_and(|(job, w)| w.jobs.send(job).is_ok());
             // What's kept for a sandbox there takes this along once that's back.
             let waits = crate::machine_sandbox::left_file(&id, &feature.project, &feature.slug);
             if !sent && !waits.exists() {
-                let name = self.machine_name(&id);
+                let name = self.machines.machine_name(&id);
                 tracing::warn!("{name} is out of reach: {} stays there", feature.slug);
                 self.show_warning(format!(
                     "{name} can't be reached: this feature's copy stays there"
@@ -1158,7 +1271,7 @@ impl Gerdr {
         let Some((id, bare)) = split_pane(pane) else {
             return false;
         };
-        let name = self.machine_name(id);
+        let name = self.machines.machine_name(id);
         if let Some(view) = self.machines.views.get(pane).cloned() {
             let open = self.herdr_pane_place(&view).is_some();
             if open && self.pane_bar_content(&view).status.runs() {
@@ -1167,7 +1280,7 @@ impl Gerdr {
             // Its connection dropped, or another took the terminal: a new
             // view takes the old one's place.
             self.machines.views.remove(pane);
-            if open && self.work_of(id).is_some() {
+            if open && self.machines.work_of(id).is_some() {
                 self.close_herdr_pane(&view);
             }
         }
@@ -1178,7 +1291,7 @@ impl Gerdr {
                 return false;
             }
             None => {
-                let Some(work) = self.work_of(id) else {
+                let Some(work) = self.machines.work_of(id) else {
                     self.show_warning(format!(
                         "{name} can't be reached: what runs there keeps running"
                     ));
@@ -1219,19 +1332,13 @@ impl Gerdr {
         true
     }
 
-    /// Whether local pane `pane` only shows something on another machine:
-    /// closing it ends the view, and nothing runs that would be lost.
-    pub(crate) fn is_machine_view(&self, pane: &str) -> bool {
-        self.machines.views.values().any(|view| view == pane)
-    }
-
     /// Start `job` on machine `id`. The run waits meanwhile: `machine_started`
     /// says what came of it.
     pub(crate) fn start_on_machine(&mut self, id: &str, job: StartJob) {
-        let name = self.machine_name(id);
+        let name = self.machines.machine_name(id);
         let key: WatchKey = (job.project.clone(), job.slug.clone(), job.stage);
         let (project, slug, stage) = (job.project.clone(), job.slug.clone(), job.stage);
-        let sent = (self.work_of(id))
+        let sent = (self.machines.work_of(id))
             .is_some_and(|work| work.jobs.send(Job::Start(Box::new(job))).is_ok());
         if sent {
             self.machines.starting.insert(key, id.to_owned());
@@ -1247,21 +1354,16 @@ impl Gerdr {
         ));
     }
 
-    /// Whether `stage`'s agent of feature `slug` is on its way up there.
-    pub(crate) fn starting_on_machine(&self, project: &str, slug: &str, stage: Stage) -> bool {
-        (self.machines.starting).contains_key(&(project.to_owned(), slug.to_owned(), stage))
-    }
-
     /// The agents on their way up on a machine whose link has gone won't get
     /// there: their runs wait for Start agent.
     pub(crate) fn starts_lost(&mut self) {
         let lost: Vec<(WatchKey, String)> = (self.machines.starting.iter())
-            .filter(|(_, id)| self.work_of(id).is_none())
+            .filter(|(_, id)| self.machines.work_of(id).is_none())
             .map(|(key, id)| (key.clone(), id.clone()))
             .collect();
         for (key, id) in lost {
             self.machines.starting.remove(&key);
-            let name = self.machine_name(&id);
+            let name = self.machines.machine_name(&id);
             let stage = key.2.label();
             tracing::warn!("{}/{}: lost {name} while starting {stage}", key.0, key.1);
             self.show_warning(format!(
@@ -1274,16 +1376,16 @@ impl Gerdr {
     fn work_event(&mut self, id: &str, event: WorkEvent) {
         match event {
             WorkEvent::Panes(panes) => {
-                if let Some(work) = self.work_of_mut(id) {
+                if let Some(work) = self.machines.work_of_mut(id) {
                     work.listed(panes, Instant::now());
                 }
             }
             WorkEvent::Looked { load, sandboxes } => {
-                if let Some(work) = self.work_of_mut(id) {
+                if let Some(work) = self.machines.work_of_mut(id) {
                     work.load = load;
                 }
-                self.machine_seen(id);
-                self.sandboxes_looked(id, sandboxes);
+                self.machines.machine_seen(id);
+                self.machines.sandboxes_looked(id, sandboxes);
             }
             WorkEvent::Started {
                 project,
@@ -1299,7 +1401,7 @@ impl Gerdr {
                 quit,
                 told,
             } => {
-                let name = self.machine_name(id);
+                let name = self.machines.machine_name(id);
                 tracing::warn!("telling pane {pane} on {name}: {why}");
                 self.told_failed(&told, crate::ai_work::Via::Machine, &why);
                 let then = if quit {
@@ -1330,22 +1432,22 @@ impl Gerdr {
                 }
             }
             WorkEvent::ViewTrouble(why) => {
-                let name = self.machine_name(id);
+                let name = self.machines.machine_name(id);
                 tracing::warn!("machine {name}: {why}");
                 let text = crate::machine_views::view_trouble_text(&name, &why);
                 self.report_problem("machine features", text);
             }
             WorkEvent::ViewTroubleOver(why) => {
-                let name = self.machine_name(id);
+                let name = self.machines.machine_name(id);
                 let text = crate::machine_views::view_trouble_text(&name, &why);
                 crate::problems::forget("machine features", &text);
             }
             WorkEvent::NotForgotten(why) => {
-                let name = self.machine_name(id);
+                let name = self.machines.machine_name(id);
                 self.show_warning(format!("A removed feature's copy stayed on {name}: {why}"));
             }
             WorkEvent::LineIgnored(pane) => {
-                let name = self.machine_name(id);
+                let name = self.machines.machine_name(id);
                 tracing::warn!("pane {pane} on {name} never took the line typed to it");
                 self.show_warning(format!(
                     "An agent on {name} didn't take the line typed to it: Show agent, then press Enter"
@@ -1369,8 +1471,8 @@ impl Gerdr {
                         self.machines.troubles.remove(&key);
                     }
                 }
-                self.report_work_troubles();
-                if let Some(work) = self.work_of_mut(id) {
+                self.machines.report_work_troubles();
+                if let Some(work) = self.machines.work_of_mut(id) {
                     work.dirty.insert(key.clone(), dirty);
                     // Nothing can be decided on code that couldn't come back.
                     if trouble.is_none() {
@@ -1378,20 +1480,11 @@ impl Gerdr {
                     }
                 }
                 if !told && let Some(text) = trouble {
-                    let name = self.machine_name(id);
+                    let name = self.machines.machine_name(id);
                     self.show_warning(format!("Work on {name} can't come back: {text}"));
                 }
             }
         }
-    }
-
-    /// What keeps work from coming back goes on the "!" badge.
-    fn report_work_troubles(&self) {
-        let mut texts: Vec<String> = (self.machines.troubles.iter())
-            .map(|((_, slug), text)| format!("Feature {slug}: {text}"))
-            .collect();
-        texts.sort();
-        crate::problems::set("machine work", texts);
     }
 
     /// Stop `stage`'s agent on another machine of feature `slug`, asking
@@ -1406,7 +1499,7 @@ impl Gerdr {
         if !self.run_at_work(run) {
             return self.stop_on_machine(project, slug, stage);
         }
-        let name = self.machine_name(&id);
+        let name = self.machines.machine_name(&id);
         self.ask(
             format!("Stop {}?", run.agent),
             format!("It is working on {name}: stopping it there ends what it is doing"),
@@ -1422,8 +1515,8 @@ impl Gerdr {
         let Some((id, pane)) = run.and_then(|r| Some((r.machine.clone()?, r.pane.clone()?))) else {
             return;
         };
-        if self.work_of(&id).is_none() {
-            let name = self.machine_name(&id);
+        if self.machines.work_of(&id).is_none() {
+            let name = self.machines.machine_name(&id);
             return self.show_warning(format!(
                 "{name} can't be reached: its agent keeps running there"
             ));
@@ -1450,7 +1543,7 @@ impl Gerdr {
         let body = match run.machine.as_deref() {
             Some(id) => format!(
                 "The one on {} is working: the new one takes its place and it stops",
-                self.machine_name(id)
+                self.machines.machine_name(id)
             ),
             None => "The one working now stops and its tab closes: the new one takes its place"
                 .to_owned(),
@@ -1477,7 +1570,7 @@ impl Gerdr {
         let key = (project.to_owned(), slug.to_owned(), stage);
         // Said already if its link went first: it is only that coming back.
         let awaited = self.machines.starting.remove(&key).is_some();
-        let name = self.machine_name(id);
+        let name = self.machines.machine_name(id);
         let run = self.feature(project, slug).and_then(|f| f.runs.get(&stage));
         let wanted = run.is_some_and(|r| r.n == n && r.machine.as_deref() == Some(id));
         let agent = run.map_or_else(String::new, |r| r.agent.clone());
@@ -1510,7 +1603,7 @@ impl Gerdr {
             Ok(found) => found,
         };
         // There by now, whatever the last list of its panes said.
-        if let Some(panes) = self.work_of_mut(id).and_then(|w| w.panes.as_mut()) {
+        if let Some(panes) = self.machines.work_of_mut(id).and_then(|w| w.panes.as_mut()) {
             let status = None;
             panes.insert(pane.clone(), Listed { terminal, status });
         }
@@ -1568,7 +1661,8 @@ impl Gerdr {
     /// more until it is told to, and a file taken away here must not come
     /// back from there.
     pub(crate) fn machine_work_tick(&mut self) {
-        self.reach_tick();
+        let mut ui = ui!(self);
+        self.machines.reach_tick(&mut ui);
         self.publish_live();
         // Asked over another machine's link to this one: this one may have none.
         self.lease_tick();
@@ -1615,7 +1709,7 @@ impl Gerdr {
         let before = self.machines.troubles.len();
         self.machines.troubles.retain(|key, _| coming(key));
         if self.machines.troubles.len() != before {
-            self.report_work_troubles();
+            self.machines.report_work_troubles();
         }
         for work in (self.machines.links.values()).filter_map(|link| link.work.as_ref()) {
             if let Ok(mut mine) = work.shared.pulls.lock() {
@@ -1629,41 +1723,6 @@ impl Gerdr {
             self.stage_run_state(run).0,
             Some(AgentStatus::Working | AgentStatus::Blocked)
         )
-    }
-
-    /// Whether what machine `id`'s agent of feature `slug` did before `since`
-    /// is here. Not yet, it is brought back as soon as can be.
-    pub(crate) fn machine_pulled_since(
-        machines: &crate::machines::Machines,
-        id: &str,
-        (project, slug): (&str, &str),
-        since: Instant,
-    ) -> bool {
-        let work = (machines.links.values())
-            .filter_map(|link| link.work.as_ref())
-            .find(|work| work.id == id);
-        let Some(work) = work else {
-            return false;
-        };
-        let key = (project.to_owned(), slug.to_owned());
-        let here = work.pulled.get(&key).is_some_and(|began| *began >= since);
-        if !here {
-            work.shared.pull_now.store(true, Ordering::Relaxed);
-        }
-        here
-    }
-
-    /// `reading` of feature `slug`, with the changes left uncommitted on
-    /// machines: they aren't in the code here, and they count as if they were.
-    pub(crate) fn machine_dirt(&self, project: &str, slug: &str) -> Vec<String> {
-        let key = (project.to_owned(), slug.to_owned());
-        let dirt = (self.machines.links.values())
-            .filter_map(|link| link.work.as_ref())
-            .filter_map(|work| work.dirty.get(&key));
-        let mut keys: Vec<String> = dirt.flatten().cloned().collect();
-        keys.sort();
-        keys.dedup();
-        keys
     }
 
     /// Where `stage`'s next agent of `feature` is to run, by its pick or else
@@ -1683,9 +1742,9 @@ impl Gerdr {
             if Self::is_this_machine(id) {
                 return Placed::Here;
             }
-            return match self.work_of(id) {
+            return match self.machines.work_of(id) {
                 Some(_) => Placed::There(id.to_owned()),
-                None => Placed::Away(self.machine_name(id)),
+                None => Placed::Away(self.machines.machine_name(id)),
             };
         }
         let project = self.projects.project(&feature.project);
@@ -1697,7 +1756,7 @@ impl Gerdr {
             _ => None,
         });
         match up {
-            Some(id) if self.work_of(&id).is_some() => Placed::There(id),
+            Some(id) if self.machines.work_of(&id).is_some() => Placed::There(id),
             _ => Placed::Away(name.clone()),
         }
     }
@@ -1729,7 +1788,7 @@ impl Gerdr {
         }
         Some(match self.placed(feature, stage) {
             Placed::Here => "Runs here".to_owned(),
-            Placed::There(id) => format!("Runs on {}", self.machine_name(&id)),
+            Placed::There(id) => format!("Runs on {}", self.machines.machine_name(&id)),
             Placed::Away(name) => format!("Runs on {name}: away"),
         })
     }
@@ -1750,7 +1809,7 @@ impl Gerdr {
             && let Some(run) = &feature.sandbox
         {
             let on = run.machine.as_deref().map_or("here".to_owned(), |id| {
-                format!("on {}", self.machine_name(id))
+                format!("on {}", self.machines.machine_name(id))
             });
             return self.show_warning(format!(
                 "Its sandbox is {on}, and its data with it: remove it to start one elsewhere"
@@ -1765,7 +1824,7 @@ impl Gerdr {
         }
         let mut ids: Vec<(String, String)> = (self.machines.links.values())
             .filter_map(|link| link.work.as_ref())
-            .map(|work| (self.machine_name(&work.id), work.id.clone()))
+            .map(|work| (self.machines.machine_name(&work.id), work.id.clone()))
             .collect();
         ids.sort();
         let mut order = vec![HERE.to_owned()];
@@ -1786,7 +1845,7 @@ impl Gerdr {
         let at = order.iter().position(|id| *id == now);
         let next = at.map_or(0, |i| (i + 1) % order.len());
         let next = order[next].clone();
-        let name = self.machine_name(&next);
+        let name = self.machines.machine_name(&next);
         let stays = (feature.runs.get(&stage))
             .filter(|r| r.live())
             .is_some_and(|r| r.machine.as_deref().unwrap_or(HERE) != next);
@@ -1796,7 +1855,7 @@ impl Gerdr {
         f.stage_machines.insert(stage, next.clone());
         self.save_feature(project, slug);
         if let Some(f) = self.feature(project, slug)
-            && self.default_place(f, stage) == next
+            && self.machines.default_place(&self.projects, f, stage) == next
         {
             let f = self.feature_mut(project, slug);
             f.map(|f| f.stage_machines.remove(&stage));
@@ -1814,21 +1873,6 @@ impl Gerdr {
         }
     }
 
-    /// Where the project's file has `stage` run: `HERE`, a machine's id if it
-    /// is up, or nothing known.
-    fn default_place(&self, feature: &Feature, stage: Stage) -> String {
-        let project = self.projects.project(&feature.project);
-        let Some(name) = project.and_then(|p| p.workflow.machines.get(&stage)) else {
-            return HERE.to_owned();
-        };
-        if name == LEAST_BUSY {
-            return LEAST_BUSY.to_owned();
-        }
-        (self.machines.links.get(name))
-            .and_then(|link| link.work.as_ref())
-            .map_or_else(String::new, |work| work.id.clone())
-    }
-
     /// What `feature`'s card and page say of where its current agent runs:
     /// the words, and whether they say all there is to say of it.
     pub(crate) fn machine_line(&self, feature: &Feature, stage: Stage) -> Option<(String, bool)> {
@@ -1838,11 +1882,11 @@ impl Gerdr {
             if !crate::feature_checks::checks_running(feature) {
                 return None;
             }
-            let name = self.machine_name(id);
+            let name = self.machines.machine_name(id);
             // Seen from elsewhere, what its writer says is all there is to ask.
             let reached = match feature.writer.as_deref() {
-                Some(writer) => self.work_of(writer).is_some(),
-                None => self.work_of(id).is_some_and(|w| w.panes.is_some()),
+                Some(writer) => self.machines.work_of(writer).is_some(),
+                None => self.machines.work_of(id).is_some_and(|w| w.panes.is_some()),
             };
             return Some(match reached {
                 true => (format!("on {name}"), false),
@@ -1852,8 +1896,13 @@ impl Gerdr {
         let run = feature.runs.get(&stage)?;
         let id = run.machine.as_deref()?;
         // Seen from elsewhere, what its writer says is all there is to ask.
-        let name = self.machine_name(feature.writer.as_deref().unwrap_or(id));
-        if self.starting_on_machine(&feature.project, &feature.slug, stage) {
+        let name = self
+            .machines
+            .machine_name(feature.writer.as_deref().unwrap_or(id));
+        if self
+            .machines
+            .starting_on_machine(&feature.project, &feature.slug, stage)
+        {
             return Some((format!("starting on {name}\u{2026}"), true));
         }
         let pane = run.pane.as_deref()?;
@@ -1864,7 +1913,7 @@ impl Gerdr {
         if feature.writer.as_deref() == Some(id) {
             return None;
         }
-        Some((format!("on {}", self.machine_name(id)), false))
+        Some((format!("on {}", self.machines.machine_name(id)), false))
     }
 
     /// The data folder there and the feature's own, to go with a `StartJob`.
@@ -2071,5 +2120,68 @@ mod tests {
         let taken = format!("printf %s desk > '{views}/w1_t1'; false");
         assert_eq!(run(&taken), (Some(1), "\nOpened on desk.\n".to_owned()));
         let _ = std::fs::remove_dir_all(&views);
+    }
+
+    fn with_work() -> Machines {
+        let mut machines = Machines::default();
+        let mut work = work();
+        work.dirty
+            .insert(("p".into(), "f".into()), vec!["b".into(), "a".into()]);
+        machines.links.insert(
+            "box".into(),
+            crate::machines::Link::for_test(LinkState::Off, Some(work)),
+        );
+        machines.names.insert("m".into(), "box".into());
+        machines
+    }
+
+    #[test]
+    fn a_machine_is_found_by_its_id_and_called_by_its_name() {
+        let mut machines = with_work();
+        assert!(machines.work_of("m").is_some());
+        assert!(machines.work_of("n").is_none());
+        assert!(machines.archive_reach("m").is_some());
+        assert_eq!(machines.machine_name("m"), "box");
+        assert_eq!(machines.machine_name("n"), "another machine");
+        assert!(!machines.machine_saved("m"));
+        machines.saved.insert("box".into(), "me@box".into());
+        assert!(machines.machine_saved("m"));
+        assert_eq!(machines.machine_dirt("p", "f"), ["a", "b"]);
+        assert!(machines.machine_dirt("p", "g").is_empty());
+        machines.machine_seen("m");
+        assert!(machines.links["box"].last_seen.is_some());
+    }
+
+    #[test]
+    fn work_not_back_yet_is_asked_for_at_once() {
+        let mut machines = with_work();
+        let since = Instant::now();
+        assert!(!machines.machine_pulled_since("n", ("p", "f"), since));
+        assert!(!machines.machine_pulled_since("m", ("p", "f"), since));
+        let work = machines.work_of_mut("m").unwrap();
+        assert!(work.shared.pull_now.load(Ordering::Relaxed));
+        work.pulled.insert(("p".into(), "f".into()), since);
+        assert!(machines.machine_pulled_since("m", ("p", "f"), since));
+    }
+
+    #[test]
+    fn what_starts_shows_and_is_typed_there_is_kept_by_its_key() {
+        let mut machines = Machines::default();
+        let key = ("p".to_owned(), "f".to_owned(), Stage::Build);
+        machines.starting.insert(key, "m".into());
+        assert!(machines.starting_on_machine("p", "f", Stage::Build));
+        assert!(!machines.starting_on_machine("p", "f", Stage::Plan));
+        machines.views.insert("m/w1".into(), "local".into());
+        assert!(machines.is_machine_view("local"));
+        assert!(!machines.is_machine_view("m/w1"));
+        machines.lines.insert("m/w1".into(), Instant::now());
+        assert!(machines.machine_line_pending("m/w1"));
+        assert!(!machines.machine_line_pending("m/w2"));
+        let feature = Feature {
+            project: "p".into(),
+            ..Feature::default()
+        };
+        let place = machines.default_place(&Store::default(), &feature, Stage::Build);
+        assert_eq!(place, HERE);
     }
 }

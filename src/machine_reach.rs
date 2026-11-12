@@ -174,8 +174,8 @@ fn mark_told(dir: &Path, id: &str) {
 
 /// The ids of the machines this gerdr connected to: those connected now, and
 /// those it ever kept anything of.
-fn known_ids(gerdr: &Gerdr) -> Vec<String> {
-    let mut ids: Vec<String> = gerdr.machines.names.keys().cloned().collect();
+fn known_ids(machines: &crate::machines::Machines) -> Vec<String> {
+    let mut ids: Vec<String> = machines.names.keys().cloned().collect();
     if let Ok(entries) = std::fs::read_dir(crate::projects::data_dir().join("machines")) {
         ids.extend((entries.flatten()).filter_map(|e| e.file_name().to_str().map(str::to_owned)));
     }
@@ -207,14 +207,14 @@ fn offer_text(reached: &Reached) -> String {
     format!("{name} connected to this machine: add it here too, to see its features")
 }
 
-impl Gerdr {
+impl crate::machines::Machines {
     /// Now and then: offer to add each gerdr that reached this machine and that
     /// this one doesn't know, once.
-    pub(crate) fn reach_tick(&mut self) {
-        if (self.machines.reach_looked).is_some_and(|at| at.elapsed() < LOOK_EVERY) {
+    pub(crate) fn reach_tick(&mut self, ui: &mut crate::toast::Ui) {
+        if (self.reach_looked).is_some_and(|at| at.elapsed() < LOOK_EVERY) {
             return;
         }
-        self.machines.reach_looked = Some(Instant::now());
+        self.reach_looked = Some(Instant::now());
         let dir = dir_here();
         let found = read_dir(&dir);
         if found.is_empty() {
@@ -228,14 +228,16 @@ impl Gerdr {
                 target: reached.target(),
                 name: reached.name.clone(),
             };
-            self.toast_with(
+            ui.toast_with(
                 offer_text(&reached),
                 crate::toast::Level::Info,
                 Some(("Add\u{2026}".to_owned(), action)),
             );
         }
     }
+}
 
+impl Gerdr {
     /// The Add button of that toast: the connect dialog, filled in.
     pub(crate) fn add_machine_from(&mut self, target: String, name: String) {
         if self.machines.dialog.is_none() {

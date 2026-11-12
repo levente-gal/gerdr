@@ -1246,6 +1246,34 @@ impl MachinesPanel {
     }
 }
 
+impl crate::machines::Machines {
+    /// The ids machine `name` is known by: the one it said, connected, then
+    /// those it said before.
+    pub(crate) fn machine_ids(&self, projects: &crate::projects::Store, name: &str) -> Vec<String> {
+        let mut ids = Vec::new();
+        let link = self.links.get(name);
+        if let Some(work) = link.and_then(|l| l.work.as_ref()) {
+            ids.push(work.id.clone());
+        } else if let Some(LinkState::Up(info)) = link.map(|l| &l.state) {
+            ids.push(info.site.id.clone());
+        }
+        let mut known: Vec<&String> = (self.names.iter())
+            .filter(|(id, called)| *called == name && !ids.contains(id))
+            .map(|(id, _)| id)
+            .collect();
+        known.sort();
+        ids.extend(known.into_iter().cloned());
+        // And those it answered as before, kept while it is away.
+        for id in projects.machine_ids.get(name).into_iter().flatten() {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        ids.retain(|id| !id.is_empty());
+        ids
+    }
+}
+
 impl Gerdr {
     /// Open the machines panel, on the machine of name `on` if given.
     /// The other panels close: it would cover them.
@@ -1283,32 +1311,6 @@ impl Gerdr {
         self.stop_edit_try();
         self.overlays.machines_panel = None;
         self.refresh_pointer_focus();
-    }
-
-    /// The ids machine `name` is known by: the one it said, connected, then
-    /// those it said before.
-    pub(crate) fn machine_ids(&self, name: &str) -> Vec<String> {
-        let mut ids = Vec::new();
-        let link = self.machines.links.get(name);
-        if let Some(work) = link.and_then(|l| l.work.as_ref()) {
-            ids.push(work.id.clone());
-        } else if let Some(LinkState::Up(info)) = link.map(|l| &l.state) {
-            ids.push(info.site.id.clone());
-        }
-        let mut known: Vec<&String> = (self.machines.names.iter())
-            .filter(|(id, called)| *called == name && !ids.contains(id))
-            .map(|(id, _)| id)
-            .collect();
-        known.sort();
-        ids.extend(known.into_iter().cloned());
-        // And those it answered as before, kept while it is away.
-        for id in self.projects.machine_ids.get(name).into_iter().flatten() {
-            if !ids.contains(id) {
-                ids.push(id.clone());
-            }
-        }
-        ids.retain(|id| !id.is_empty());
-        ids
     }
 
     /// What of this gerdr's features runs on the machine of `ids`, and what
@@ -1450,8 +1452,8 @@ impl Gerdr {
         let dot = row.dot;
         let link = self.machines.links.get(&name);
         let state = link.map(|l| &l.state);
-        let ids = self.machine_ids(&name);
-        let same = self.same_machines_as(&name);
+        let ids = self.machines.machine_ids(&self.projects, &name);
+        let same = self.machines.same_machines_as(&self.projects, &name);
         let mut facts = machine_facts(
             &target,
             state,
@@ -1530,7 +1532,7 @@ impl Gerdr {
         let mut content = self.machines_content(selected);
         let form = (panel.edit.as_ref()).filter(|f| content.name(selected) == Some(&f.machine));
         if let (Some(form), Some(detail)) = (form, content.detail.as_mut()) {
-            let trying = self.edit_try().filter(|t| t.name == form.machine);
+            let trying = self.machines.edit_try().filter(|t| t.name == form.machine);
             let (view, edit) = edit_parts(form, trying.map(|t| t.progress.as_str()));
             detail.edit = Some(view);
             content.edit = Some(edit);
@@ -1784,7 +1786,7 @@ impl Gerdr {
                 self.run_fix(fix);
             }
             // The list waits while it is tried, as the fields do.
-            Press::AddAddress | Press::RemoveAddress(_) if self.edit_try().is_some() => {}
+            Press::AddAddress | Press::RemoveAddress(_) if self.machines.edit_try().is_some() => {}
             Press::AddAddress => {
                 if let Some(panel) = self.overlays.machines_panel.as_mut() {
                     panel.add_address();
@@ -1948,7 +1950,7 @@ impl Gerdr {
     /// The edit form's focused field, for the pointer and pastes; none while
     /// the form is shut or its address is tried.
     pub(crate) fn machines_panel_field_mut(&mut self) -> Option<&mut crate::text_field::TextField> {
-        if self.edit_try().is_some() {
+        if self.machines.edit_try().is_some() {
             return None;
         }
         let panel = self.overlays.machines_panel.as_mut()?;
@@ -2738,5 +2740,22 @@ mod tests {
         panel.merged("b", 0, (10, 3));
         assert!(panel.edit.is_none() && panel.drafts.is_empty());
         assert_eq!((panel.selected, panel.focus), (0, MachinesFocus::List));
+    }
+
+    #[test]
+    fn a_machine_is_known_by_the_ids_it_said_and_shares_them() {
+        let mut machines = crate::machines::Machines::default();
+        machines.saved.insert("box".into(), "me@box".into());
+        machines.saved.insert("old".into(), "me@old".into());
+        machines.names.insert("b".into(), "box".into());
+        machines.names.insert("a".into(), "box".into());
+        let mut projects = crate::projects::Store::default();
+        projects
+            .machine_ids
+            .insert("box".into(), vec!["a".into(), "c".into(), String::new()]);
+        projects.machine_ids.insert("old".into(), vec!["c".into()]);
+        assert_eq!(machines.machine_ids(&projects, "box"), ["a", "b", "c"]);
+        assert_eq!(machines.same_machines_as(&projects, "box"), ["old"]);
+        assert!(machines.machine_ids(&projects, "vm").is_empty());
     }
 }

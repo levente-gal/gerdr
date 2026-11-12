@@ -300,7 +300,9 @@ impl Gerdr {
             if self.machines.repos_looked.get(&key) == Some(&asked) {
                 continue;
             }
-            let (Some(work), Some(paths)) = (self.work_of(&id), self.machine_paths(&id, None)) else {
+            let (Some(work), Some(paths)) =
+                (self.machines.work_of(&id), self.machine_paths(&id, None))
+            else {
                 continue;
             };
             let look = Look {
@@ -322,8 +324,13 @@ impl Gerdr {
 
     /// A look for the project's repositories on machine `id` ended: what it
     /// paired goes into the project's file, and the user hears of it.
-    pub(crate) fn same_repos_found(&mut self, id: &str, project: &str, result: Result<Paired, String>) {
-        let name = self.machine_name(id);
+    pub(crate) fn same_repos_found(
+        &mut self,
+        id: &str,
+        project: &str,
+        result: Result<Paired, String>,
+    ) {
+        let name = self.machines.machine_name(id);
         let paired = match result {
             Ok(paired) => paired,
             Err(why) => {
@@ -331,8 +338,12 @@ impl Gerdr {
                 return;
             }
         };
-        let home_here = crate::home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
-        let home_there = (self.work_of(id)).map(|w| w.info.site.home.clone()).unwrap_or_default();
+        let home_here = crate::home_dir()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let home_there = (self.machines.work_of(id))
+            .map(|w| w.info.site.home.clone())
+            .unwrap_or_default();
         let known = (self.projects.project(project))
             .and_then(|p| p.workflow.machine_folders.get(&name))
             .cloned()
