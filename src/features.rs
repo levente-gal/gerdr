@@ -4612,7 +4612,7 @@ fn ship_step_row(
             Some(pr) => format!("Keep its pull request open: {}", pr_tail(&pr.url)),
             None => format!("Open a pull request into {base}"),
         },
-        ShipStep::Merge => format!("Merge into {base} in {}", tilde(&repo.main)),
+        ShipStep::Merge => format!("Merge into {base} in {}", short_folder(&repo.main)),
         ShipStep::PushBase => format!("Push {base} to origin"),
     };
     let why = repo.why_not(step);
@@ -7030,9 +7030,15 @@ fn pick_feature(slugs: &[String], open: Option<&str>, last: Option<&str>) -> Opt
         .or_else(|| slugs.last().cloned())
 }
 
-/// A folder as the chrome shows it, from the home folder as `~`.
-pub(crate) fn tilde(path: &Path) -> String {
+/// A folder as the chrome shows it, from the home folder as `~` and cut to
+/// 60 characters in the middle (not `paths::tilde`, which never cuts).
+pub(crate) fn short_folder(path: &Path) -> String {
     paths::display(path, home_dir().as_deref(), 60)
+}
+
+/// `short_folder`, by its old name for `feature_graph`.
+pub(crate) fn tilde(path: &Path) -> String {
+    short_folder(path)
 }
 
 /// What a done stage's row says of its mark.
@@ -7702,7 +7708,7 @@ impl Gerdr {
                 Ok(Some(exclude)) => self.show_success(format!(
                     "Added /{} to {}",
                     layout::DOCS_LINK,
-                    tilde(&exclude)
+                    short_folder(&exclude)
                 )),
                 Err(why) => {
                     tracing::warn!("linking the stage files of {title}: {why}");
@@ -10351,14 +10357,14 @@ impl Gerdr {
             PanelOutcome::DropContext(key) => self.drop_context_repo(&project, &slug, &key),
             PanelOutcome::Open(dir) => {
                 if !dir.exists() {
-                    return self.show_error(format!("{} is gone", tilde(&dir)));
+                    return self.show_error(format!("{} is gone", short_folder(&dir)));
                 }
                 self.open_feature_project_tab(&project, &slug, &dir);
             }
             PanelOutcome::CopyPath => {
                 if let Some(dir) = self.feature(&project, &slug).map(|f| f.dir.clone()) {
                     self.copy_text(dir.display().to_string());
-                    self.show_success(format!("Copied {}", tilde(&dir)));
+                    self.show_success(format!("Copied {}", short_folder(&dir)));
                 }
             }
             PanelOutcome::Remove => self.check_remove_feature(&project, &slug),
@@ -10565,7 +10571,10 @@ impl Gerdr {
                 .map(|r| r.worktree.as_path());
             folders.chain(worktrees).find_map(|dir| {
                 let user = self.folder_in_use(dir)?;
-                Some(format!("{} has {user} in it; close it first", tilde(dir)))
+                Some(format!(
+                    "{} has {user} in it; close it first",
+                    short_folder(dir)
+                ))
             })
         };
         match why {
@@ -10929,7 +10938,7 @@ impl Gerdr {
         if !dir.exists() {
             return self.show_error(format!(
                 "Couldn't ship \u{201c}{title}\u{201d}: {} is gone",
-                tilde(&dir)
+                short_folder(&dir)
             ));
         }
         // In its own workspace; another project's feature can't open one.
@@ -12761,7 +12770,7 @@ pub(crate) fn created_text(title: &str, root: &Path, ignores: &[PathBuf]) -> Str
         .iter()
         .map(|p| {
             p.strip_prefix(root)
-                .map_or_else(|_| tilde(p), |r| r.display().to_string())
+                .map_or_else(|_| short_folder(p), |r| r.display().to_string())
         })
         .collect();
     format!(
@@ -12779,7 +12788,7 @@ fn cursor_freed_text(root: &Path) -> String {
         layout::FEATURES_DIR,
         layout::CURSOR_DENY,
         layout::CURSOR_INDEX,
-        tilde(root)
+        short_folder(root)
     )
 }
 
@@ -12794,7 +12803,7 @@ fn linked_text(title: &str, names: &[String], root: &Path, ignores: &[PathBuf]) 
         .iter()
         .map(|p| {
             p.strip_prefix(root)
-                .map_or_else(|_| tilde(p), |r| r.display().to_string())
+                .map_or_else(|_| short_folder(p), |r| r.display().to_string())
         })
         .collect();
     format!(
@@ -12942,9 +12951,9 @@ fn new_feature_view(dialog: &NewFeatureDialog, project: String) -> NewFeatureVie
     let found = |root: &Root| {
         let n = root.repos.len();
         if root.multi {
-            format!("In {} \u{b7} {n} repositories", tilde(&root.path))
+            format!("In {} \u{b7} {n} repositories", short_folder(&root.path))
         } else {
-            format!("In {}", tilde(&root.path))
+            format!("In {}", short_folder(&root.path))
         }
     };
     let chosen = dialog.choosing.as_ref().map(|c| &c.repo);
@@ -15217,6 +15226,7 @@ pub(crate) fn round_state_words(round: &FixRound, now: u64) -> String {
 }
 
 /// How long from `from` to `to`, in a few words: "12 min", "1 h 5 min".
+/// Not `clock::took` ("2m 5s") on purpose: a feature's times read in minutes.
 fn took(from: u64, to: u64) -> String {
     let mins = to.saturating_sub(from).div_ceil(60);
     match (mins / 60, mins % 60) {
@@ -18093,7 +18103,7 @@ fn repo_row(
         RepoEntry::Context(i) => {
             if let Some(repo) = feature.context.get(i) {
                 row.name = state.names.label_of(repo.project.as_deref(), &repo.name);
-                row.line = tilde(&repo.main);
+                row.line = short_folder(&repo.main);
                 row.kind = RepoKind::Context;
                 row.remove = linkable(feature);
             }
@@ -18352,7 +18362,7 @@ fn tab_view(
     let mut sub = format!(
         "{} \u{b7} {} \u{b7} started {}",
         feature.slug,
-        tilde(&feature.dir),
+        short_folder(&feature.dir),
         projects::ago(now, feature.created)
     );
     if feature.status == Status::Done {
@@ -19326,7 +19336,10 @@ pub(crate) mod tests {
         let view = new_feature_view(&d, "Acme".into());
         assert_eq!(view.link, chrome::LINK_BUTTON[1]);
         let places: Vec<&str> = view.repos.iter().map(|r| r.place.as_str()).collect();
-        let found = format!("In {} \u{b7} 2 repositories", tilde(Path::new("/work")));
+        let found = format!(
+            "In {} \u{b7} 2 repositories",
+            short_folder(Path::new("/work"))
+        );
         assert_eq!(places, [found.as_str(), "can't link: no git repository"]);
         assert!(view.repos[1].fixed, "a project not found can't be picked");
         d.toggle(1);

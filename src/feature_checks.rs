@@ -286,7 +286,7 @@ impl Gerdr {
         }
         for i in std::mem::take(&mut pending) {
             let script = verify::script(dir, i, &rows[i], slug);
-            match std::fs::write(verify::script_path(dir, i), script) {
+            match crate::projects::write_atomic(&verify::script_path(dir, i), script.as_bytes()) {
                 Ok(()) => pending.push(i),
                 Err(err) => refuse(rows, &[i], format!("couldn't write its script: {err}")),
             }

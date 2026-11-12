@@ -23,7 +23,7 @@ use crate::{
         fix_round::{self, Asked, Compact, FixPhase, FixRound, Fixes, GiveBack, Plan, VerifyFix},
         store,
     },
-    feature_agents::{stamp, vars},
+    feature_agents::{stamp, vars, write_prompt},
     feature_build::FRESH_BUILD_AGENT,
     herdr::AgentStatus,
     prompts, review,
@@ -169,7 +169,7 @@ impl Gerdr {
             return false;
         }
         let path = fix_round::path(&store::dir(None, project, slug));
-        if let Err(err) = std::fs::write(&path, plan) {
+        if let Err(err) = crate::projects::write_atomic(&path, plan.as_bytes()) {
             tracing::warn!("writing {}: {err}", path.display());
             self.show_error(format!("Couldn't write {}: {err}", fix_round::FILE));
             return false;
@@ -670,7 +670,7 @@ impl Gerdr {
         ) {
             let tidy = fix_round::without_added_milestones(&log, planned);
             if tidy != log
-                && let Err(err) = std::fs::write(&path, tidy)
+                && let Err(err) = crate::projects::write_atomic(&path, tidy.as_bytes())
             {
                 tracing::warn!("writing {}: {err}", path.display());
                 self.show_error(format!("Couldn't tidy {}: {err}", path.display()));
@@ -781,19 +781,17 @@ impl Gerdr {
         let data = store::dir(None, project, slug);
         let plan = fix_round::path(&data).display().to_string();
         let back = round.sent_back + 1;
-        let file = data
-            .join("prompts")
-            .join(format!("fix-plan-{}-back-{back}.md", round.n));
         let comments = format!(
             "{comments}\n\nThe user may have edited the file: read it again and keep their edits.\n"
         );
-        let shown = file.display().to_string();
-        let written = std::fs::create_dir_all(data.join("prompts"))
-            .and_then(|()| std::fs::write(&file, &comments));
-        if let Err(err) = written {
-            tracing::warn!("writing {shown}: {err}");
-            return self.show_error(format!("Couldn't write {shown}: {err}"));
-        }
+        let name = format!("fix-plan-{}-back-{back}.md", round.n);
+        let shown = match write_prompt(&data, &name, &comments) {
+            Ok(file) => file.display().to_string(),
+            Err(why) => {
+                tracing::warn!("{why}");
+                return self.show_error(why);
+            }
+        };
         let names = self.projects.names(&feature);
         let mut values = vars(&feature, &names, &data, Stage::Build);
         values.insert("artifact.path".into(), plan.clone());
@@ -979,7 +977,7 @@ impl Gerdr {
         let path = build_log(&store::dir(None, project, slug));
         let unticked = std::fs::read_to_string(&path)
             .map(|log| fix_round::untick(&log, n))
-            .and_then(|log| std::fs::write(&path, log));
+            .and_then(|log| crate::projects::write_atomic(&path, log.as_bytes()));
         if let Err(err) = unticked {
             tracing::warn!("unticking round {n} in {}: {err}", path.display());
             self.show_error(format!(
@@ -1239,7 +1237,7 @@ impl Gerdr {
         };
         let tidy = fix_round::without_unticked(&log, n);
         if tidy != log
-            && let Err(err) = std::fs::write(&path, tidy)
+            && let Err(err) = crate::projects::write_atomic(&path, tidy.as_bytes())
         {
             tracing::warn!("writing {}: {err}", path.display());
             self.show_error(format!("Couldn't tidy {}: {err}", path.display()));
@@ -1376,7 +1374,7 @@ fn write_items(data: &Path, n: u32, items: &[String]) -> Result<(), String> {
     if with == log {
         return Ok(());
     }
-    std::fs::write(&path, with).map_err(|err| err.to_string())
+    crate::projects::write_atomic(&path, with.as_bytes()).map_err(|err| err.to_string())
 }
 
 /// How the fixes of a round go to the Build agent (`Gerdr::fixes_go`).

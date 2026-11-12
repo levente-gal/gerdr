@@ -463,12 +463,13 @@ fn version(hash: u64) -> String {
     format!("{}.{}.{}.{}", part(48), part(32), part(16), part(0))
 }
 
-/// Write `contents` to `path` unless it holds them already.
+/// Write `contents` to `path` unless it holds them already: through a
+/// temporary file, so a browser starting meanwhile never reads half of it.
 fn write_if_changed(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     if std::fs::read(path).is_ok_and(|old| old == contents) {
         return Ok(());
     }
-    std::fs::write(path, contents)
+    crate::projects::write_atomic(path, contents)
 }
 
 /// Write the extension into browser profile `profile`, with the host it

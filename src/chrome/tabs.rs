@@ -85,7 +85,7 @@ impl TabView {
         let title = label
             .map(str::to_owned)
             .or_else(|| focused.and_then(|p| foreground_program(p, agents)))
-            .or_else(|| focused.and_then(folder_name))
+            .or_else(|| focused.and_then(pane_folder))
             .or_else(|| window_title(window))
             .unwrap_or_else(|| "terminal".into());
         let status = (tab.agent_status != AgentStatus::Unknown).then_some(tab.agent_status);
@@ -217,7 +217,7 @@ fn program_name(process: &Process) -> String {
 }
 
 /// The name of the folder pane `p` is in: "~" for home.
-fn folder_name(p: &PaneState) -> Option<String> {
+fn pane_folder(p: &PaneState) -> Option<String> {
     let path = p.cwd.as_deref().or(p.foreground_cwd.as_deref())?;
     if crate::home_dir().is_some_and(|home| home == path) {
         return Some("~".into());

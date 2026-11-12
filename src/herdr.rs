@@ -188,12 +188,7 @@ pub fn server_log() -> PathBuf {
 
 /// The last line with anything on it in `log`, if any.
 fn last_line(log: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(log).ok()?;
-    text.lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_owned)
+    crate::text::last_line(&std::fs::read_to_string(log).ok()?).map(str::to_owned)
 }
 
 /// The server log, open for appending; started over once too big.
