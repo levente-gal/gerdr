@@ -449,6 +449,18 @@ pub(crate) const SEARCH_KEYS: &[Binding<SearchCtx, SearchKey>] = &[
         f1: "",
     },
     Binding {
+        chord: "Shift+/",
+        does: SearchCtx::opens,
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Super+/",
+        does: SearchCtx::opens,
+        footer: false,
+        f1: "",
+    },
+    Binding {
         chord: "Ctrl+F",
         does: |c| match c.typing {
             true => Some(SearchKey::Hold),
@@ -555,6 +567,18 @@ pub(crate) const NOTE_KEYS: &[Binding<NoteCtx, NoteKey>] = &[
         f1: "save it, as Enter",
     },
     Binding {
+        chord: "Alt+Enter",
+        does: |_| Some(NoteKey::Save),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+Shift+Enter",
+        does: |_| Some(NoteKey::Save),
+        footer: false,
+        f1: "",
+    },
+    Binding {
         chord: "Shift+Enter",
         does: |_| Some(NoteKey::Newline),
         footer: true,
@@ -577,6 +601,24 @@ pub(crate) const NOTE_KEYS: &[Binding<NoteCtx, NoteKey>] = &[
         does: |_| Some(NoteKey::Park),
         footer: true,
         f1: "leave it unsaved, kept as a draft for the card's next one",
+    },
+    Binding {
+        chord: "Shift+Esc",
+        does: |_| Some(NoteKey::Park),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+Esc",
+        does: |_| Some(NoteKey::Park),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Alt+Esc",
+        does: |_| Some(NoteKey::Park),
+        footer: false,
+        f1: "",
     },
 ];
 
@@ -1767,6 +1809,8 @@ mod tests {
         let [closed, typing, _, open, found, _] = searches().try_into().unwrap();
         assert_eq!(press(closed, true, "/"), None);
         assert_eq!(press(typing, false, "/"), None);
+        let closed = searches().swap_remove(0);
+        assert_eq!(press(closed, false, "Super+/"), Some(SearchKey::Open));
         assert_eq!(press(open, false, "Ctrl+F"), Some(SearchKey::Type));
         assert_eq!(press(found, false, "Shift+N"), Some(SearchKey::Next(true)));
     }
@@ -1808,6 +1852,17 @@ mod tests {
             key_table::press(NOTE_KEYS, &ctxs[0], &mods, sym),
             Some(NoteKey::Save)
         );
+        for (chord, want) in [
+            ("Alt+Enter", NoteKey::Save),
+            ("Ctrl+Shift+Enter", NoteKey::Save),
+            ("Ctrl+Esc", NoteKey::Park),
+        ] {
+            let (mods, sym) = crate::keys::hint_key(chord).unwrap();
+            assert_eq!(
+                key_table::press(NOTE_KEYS, &ctxs[0], &mods, sym),
+                Some(want)
+            );
+        }
         let (mods, sym) = crate::keys::hint_key("Ctrl+Shift+Del").unwrap();
         assert_eq!(
             key_table::press(NOTE_KEYS, &ctxs[0], &mods, sym),
