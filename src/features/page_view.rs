@@ -1210,12 +1210,20 @@ pub(super) fn tab_view(
             .then(|| {
                 let files = review_files(feature, state);
                 let (next, buttons) = review_toolbar(panel, feature, files, state.ctx);
+                // The code's view hides the fixes' card: its chips go on
+                // the bar, by its buttons.
+                let code = crate::feature_diff::review_page(panel, feature);
                 chrome::ReviewSwitch {
                     view: panel.review_view_of(feature),
                     files,
                     fixes: fixes_word(feature, notes_of(state.probe)),
                     next,
                     buttons,
+                    picks: match code {
+                        true => state.fix_picks.clone(),
+                        false => Vec::new(),
+                    },
+                    model: state.fix_model.clone().filter(|_| code),
                 }
             });
     let test_strip = (!panel.keys && shows_criteria(feature, stage))

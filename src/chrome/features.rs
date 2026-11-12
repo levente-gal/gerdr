@@ -721,6 +721,11 @@ pub struct ReviewSwitch {
     pub next: Option<(String, bool)>,
     /// The review's actions, from the left: on the code's view alone.
     pub buttons: Vec<ReviewButton>,
+    /// The chips picking the agent fixes go to, and what its model's
+    /// button says, left of `buttons`: on the code's view, where the fixes'
+    /// card doesn't show.
+    pub picks: Vec<AgentChip>,
+    pub model: Option<String>,
 }
 
 /// An action on Code review's line: what the review's own title row has in
@@ -1629,6 +1634,22 @@ impl FeatureTabLayout {
             }
             if let Some(i) = (spots.buttons.iter()).position(|b| b.as_ref().is_some_and(on)) {
                 return Some(FeatureTabHit::ReviewButton(i));
+            }
+            // The fixes' agent, as its card on the fixes' view has it.
+            let chips = spots
+                .picks
+                .as_ref()
+                .map_or(&[][..], |(_, chips)| chips.as_slice());
+            if let Some(i) = chips.iter().position(on) {
+                let off = (view.review_switch.as_ref())
+                    .is_some_and(|s| s.picks.get(i).is_some_and(|c| c.off));
+                return Some(match off {
+                    true => FeatureTabHit::AgentPickOff(Stage::Build, i),
+                    false => FeatureTabHit::AgentPick(Stage::Build, i),
+                });
+            }
+            if spots.model.as_ref().is_some_and(on) {
+                return Some(FeatureTabHit::AgentModel(Stage::Build));
             }
         }
         if on(&self.repos_toggle) {
@@ -4577,6 +4598,10 @@ pub struct ReviewSwitchSpots {
     /// Where each of `ReviewSwitch::buttons` goes; none for one the row has
     /// no room for, the leftmost going first.
     pub buttons: Vec<Option<Rect>>,
+    /// `ReviewSwitch::picks`' outline and chips, and its model's button,
+    /// left of the buttons while there is room.
+    pub picks: Option<(Rect, Vec<Rect>)>,
+    pub model: Option<Rect>,
 }
 
 /// Where `switch` goes in the row at `(x, y)`, `width` wide: the choice at its
@@ -4623,8 +4648,32 @@ fn review_switch_spots(
             buttons[dropped + i] = Some(rect);
         }
     }
+    // The fixes' agent before them, its model's button nearest: logos alone
+    // where names don't fit, none where those don't either.
+    let (mut picks, mut model) = (None, None);
+    if let (Some(first), false) = (buttons.iter().flatten().next(), switch.picks.is_empty()) {
+        let from = row.loc.x + if bar.is_some() { 0 } else { least + left_min };
+        let mut to = first.loc.x - COLUMN_GAP;
+        let model_w = switch.model.as_deref().map(agent_model_width);
+        if let Some(w) = model_w.filter(|w| to - w - COLUMN_GAP >= from) {
+            let rect = Rectangle::new((to - w, by).into(), (w, ROW_BUTTON).into());
+            model = Some(rect);
+            to = rect.loc.x - COLUMN_GAP;
+        }
+        let names: Vec<&str> = switch.picks.iter().map(|c| c.name.as_str()).collect();
+        let want = agent_picks_width(&names).min(to - from);
+        if want >= PICK_CHIP * names.len() as i32 + 2 * PICK_TRACK_PAD {
+            let ty = row.loc.y + (row.size.h - PICK_TRACK) / 2;
+            picks = Some(agent_pick_rects(&names, to - want, ty, want));
+        } else {
+            model = None;
+        }
+    }
     let end = match buttons.iter().flatten().next().filter(|_| bar.is_none()) {
-        Some(first) => first.loc.x - COLUMN_GAP,
+        Some(first) => {
+            let left = picks.as_ref().map(|(track, _)| track.loc.x);
+            left.unwrap_or(first.loc.x) - COLUMN_GAP
+        }
         None => end,
     };
     let width = end - x;
@@ -4663,6 +4712,8 @@ fn review_switch_spots(
         left,
         full,
         buttons,
+        picks,
+        model,
     }
 }
 
@@ -5731,7 +5782,10 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         }
         TabSlice::Bar => match hit {
             H::PageButton(i) => on_bar(&view.page, *i),
-            H::ReviewButton(_) => view.review_page,
+            H::ReviewButton(_)
+            | H::AgentPick(Stage::Build, _)
+            | H::AgentPickOff(Stage::Build, _)
+            | H::AgentModel(Stage::Build) => view.review_page,
             _ => false,
         },
         TabSlice::Column(TabColumn::Repos) => {
@@ -6873,6 +6927,17 @@ impl Painter {
             };
             let lit = view.hover == Some(FeatureTabHit::ReviewButton(i));
             self.button(c, &b.label, *rect, (lit, false), b.style, scale, p);
+        }
+        if let Some((track, chips)) = &spots.picks {
+            let hover = match view.hover {
+                Some(FeatureTabHit::AgentPick(Stage::Build, i)) => Some(i),
+                _ => None,
+            };
+            self.agent_chips(c, *track, chips, &switch.picks, hover, scale, p);
+        }
+        if let (Some(rect), Some(label)) = (spots.model, &switch.model) {
+            let lit = view.hover == Some(FeatureTabHit::AgentModel(Stage::Build));
+            self.button(c, label, rect, (lit, false), ButtonStyle::Plain, scale, p);
         }
     }
 
@@ -9167,6 +9232,8 @@ mod tests {
                 key: String::new(),
                 disabled: None,
             }],
+            picks: Vec::new(),
+            model: None,
         });
         let l = tab_at(&view, 1180);
         let spots = l.review_switch.as_ref().unwrap();
@@ -9181,6 +9248,43 @@ mod tests {
             l.hit(&view, centre(approve)),
             Some(FeatureTabHit::ReviewButton(0))
         );
+        // The agent fixes go to, left of the buttons, as on the fixes' view.
+        let chip = |name: &str, lit, off| AgentChip {
+            icon: crate::agent_icons::AgentIcon::from_agent(name),
+            name: name.into(),
+            lit,
+            off,
+        };
+        let switch = view.review_switch.as_mut().unwrap();
+        switch.picks = vec![
+            chip("Claude Code", true, false),
+            chip("Cursor", false, true),
+        ];
+        switch.model = Some("Model: default".into());
+        for w in [1180, 860] {
+            let l = tab_at(&view, w);
+            let spots = l.review_switch.as_ref().unwrap();
+            let approve = spots.buttons[0].expect("room for it");
+            let (track, chips) = spots.picks.clone().expect("room for the chips");
+            let model = spots.model.expect("room for the model");
+            assert!(l.page_bar.contains_rect(track), "{w}");
+            assert!(track.loc.x + track.size.w <= model.loc.x, "{w}");
+            assert!(model.loc.x + model.size.w <= approve.loc.x, "{w}");
+            let bar_title = l.bar_title.loc.x + l.bar_title.size.w;
+            assert!(track.loc.x >= bar_title, "{w}");
+            assert_eq!(
+                l.hit(&view, centre(chips[0])),
+                Some(FeatureTabHit::AgentPick(Stage::Build, 0))
+            );
+            assert_eq!(
+                l.hit(&view, centre(chips[1])),
+                Some(FeatureTabHit::AgentPickOff(Stage::Build, 1))
+            );
+            assert_eq!(
+                l.hit(&view, centre(model)),
+                Some(FeatureTabHit::AgentModel(Stage::Build))
+            );
+        }
     }
 
     /// The viewed stage stands on a band in `selected` with the accent's

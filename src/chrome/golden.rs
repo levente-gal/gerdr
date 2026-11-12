@@ -4515,6 +4515,8 @@ fn review_switch(view: super::ReviewView) -> super::ReviewSwitch {
         fixes: "1 of 2 made".into(),
         next: None,
         buttons: Vec::new(),
+        picks: Vec::new(),
+        model: None,
     }
 }
 
@@ -4553,6 +4555,18 @@ fn feature_tab_review_code() -> super::FeatureTabView {
     ));
     let why = Some("5 files not viewed: api/src/a.rs, api/src/b.rs, web/c.ts, …");
     switch.buttons = review_buttons(ButtonStyle::Off, ButtonStyle::Off, why);
+    // The agent fixes go to, on the bar by the buttons.
+    switch.picks = ["Claude Code", "Cursor"]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| super::AgentChip {
+            icon: crate::agent_icons::AgentIcon::from_agent(name),
+            name: (*name).into(),
+            lit: i == 0,
+            off: false,
+        })
+        .collect();
+    switch.model = Some("Model: default".into());
     view.review_switch = Some(switch);
     view
 }
@@ -8255,38 +8269,38 @@ const REVIEW_VIEWS: [&str; 6] = [
 const GOLDEN_REVIEW_VIEWS: [[u64; 6]; 4] = [
     // Dark at 1
     [
-        0xba59dd8cbfab5890, // tab_review_code_1180
+        0x9bfd1ade3adf9551, // tab_review_code_1180
         0x795d004b54bc9490, // tab_review_fixes_1180
         0x5496e8a5b3e3b293, // tab_review_fixes_860
         0x5ed58a7ba18caeaf, // tab_review_ready_1180
-        0xd0a01c2c52bad37d, // tab_review_code_860
+        0x634a80ae4a98da47, // tab_review_code_860
         0x893e925fe84c46c1, // tab_review_done_1180
     ],
     // Dark at 2
     [
-        0xb8d61211300cbfff, // tab_review_code_1180
+        0xe2e393600b85eb26, // tab_review_code_1180
         0xbf1e5135cf5ab523, // tab_review_fixes_1180
         0x962c444d5ea96f02, // tab_review_fixes_860
         0xd475051687f82429, // tab_review_ready_1180
-        0x935009bd10190ccc, // tab_review_code_860
+        0x7039e2c7a0ca4801, // tab_review_code_860
         0xd4dd47652d903066, // tab_review_done_1180
     ],
     // Light at 1
     [
-        0x471ec7c1890e1b00, // tab_review_code_1180
+        0x075604863dfd314e, // tab_review_code_1180
         0x546128c37ce3ca39, // tab_review_fixes_1180
         0xf7b772f01c719eb5, // tab_review_fixes_860
         0xf0427d38941dfdfd, // tab_review_ready_1180
-        0xbf6f190b8695034c, // tab_review_code_860
+        0xb513ff6383ff482a, // tab_review_code_860
         0x821cb33370946e06, // tab_review_done_1180
     ],
     // Light at 2
     [
-        0xf91393fda7d4c9f9, // tab_review_code_1180
+        0x1a9f2655bfeee258, // tab_review_code_1180
         0x751bff939f28396b, // tab_review_fixes_1180
         0xa8965d25c926c903, // tab_review_fixes_860
         0x90bbc2d6710d5129, // tab_review_ready_1180
-        0x8ba88b1751805e3c, // tab_review_code_860
+        0xcf2e0056ecbc4d83, // tab_review_code_860
         0x6d6602bad127abdb, // tab_review_done_1180
     ],
 ];

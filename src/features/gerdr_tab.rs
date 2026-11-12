@@ -702,9 +702,20 @@ impl Gerdr {
             }
             // Logos alone: their names.
             FeatureTabHit::AgentPick(stage, i) | FeatureTabHit::AgentPickOff(stage, i) => {
-                let (_, _, chips) = layout.agent_picks.iter().find(|(s, ..)| *s == stage)?;
-                let mut spot = *chips.get(i)?;
-                spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                // On Code review's bar, unscrolled; else on the page.
+                let on_bar = (layout.review_switch.as_ref())
+                    .and_then(|s| s.picks.as_ref())
+                    .filter(|_| stage == Stage::Build && view.review_page);
+                let spot = match on_bar {
+                    Some((_, chips)) => *chips.get(i)?,
+                    None => {
+                        let (_, _, chips) =
+                            layout.agent_picks.iter().find(|(s, ..)| *s == stage)?;
+                        let mut spot = *chips.get(i)?;
+                        spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                        spot
+                    }
+                };
                 let chip = view.agent_chip(stage, i)?;
                 let text = match chip.off {
                     true => format!("{} built the code, so it can't review it", chip.name),
@@ -713,8 +724,18 @@ impl Gerdr {
                 Some(Tooltip::new(&text, spot))
             }
             FeatureTabHit::AgentModel(stage) => {
-                let (_, mut spot) = *layout.agent_model.iter().find(|(s, _)| *s == stage)?;
-                spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                let on_bar = (layout.review_switch.as_ref())
+                    .and_then(|s| s.model)
+                    .filter(|_| stage == Stage::Build && view.review_page);
+                let spot = match on_bar {
+                    Some(spot) => spot,
+                    None => {
+                        let (_, mut spot) =
+                            *layout.agent_model.iter().find(|(s, _)| *s == stage)?;
+                        spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                        spot
+                    }
+                };
                 // Its key acts on this card, or on it from the findings.
                 let feature = self.features.panel_feature()?;
                 let page = self.features.panel.as_ref()?.page_stage(feature);
