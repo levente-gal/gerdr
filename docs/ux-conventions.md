@@ -355,9 +355,14 @@ press and drag pick whole rows and a double click opens the line in Zed.
   are on the rail.
 - One scrollbar (`chrome/thumb.rs`), one button painter
   (`Painter::button`), one query field with the magnifier.
-- A feature page has one filled primary button, in the tab's header at its
-  right end, whatever card it acts on (`StagePage::primary`); a card's own
-  (a finding's, a round's, a repository's on Ship) stays on it. The rare
+- A feature page has one filled primary button, at the right end of the
+  page's bar, whatever card it acts on (`StagePage::primary`). The bar
+  (`FeatureTabLayout::page_bar`) is the row right over the page with the
+  stage's title and the buttons no card holds; it doesn't scroll, and Code
+  review's page under the rail has it too, with the review's buttons. A
+  card's own primary (a finding's, a round's, a repository's on Ship) shows
+  on the bar, filled, and on its card, plain. While a note is written, Save
+  is the primary. The rare
   ones (Start over…, Set up again, Commands…, a sandbox's Reset data… and
   Remove sandbox…, and the feature's Open tab, Copy path, Stats, New
   feature…, Abandon) are rows of the header's `⋯` menu (`StagePage::menu`,
@@ -406,8 +411,8 @@ press and drag pick whole rows and a double click opens the line in Zed.
   too), and folds to its line once decided, whatever the decision, so what
   is left to decide stands out; selected, it opens. Its first button is the
   decision (Fix, Accept; Reopen once decided, the one word for taking any
-  decision back), filled on the selected card, the page's one primary while
-  the keyboard is on the cards. The same order holds on a flag in the plan
+  decision back), the page's one primary while the keyboard is on the
+  cards: filled on the page's bar, plain on the selected card. The same order holds on a flag in the plan
   or the diff: decision, comment, edit, refuse. Pressing a card's button
   selects the card. A card the latest run raised, past the first, says so:
   "new in run 2", "changed in run 2", "raised again in run 2". The user's
@@ -431,7 +436,7 @@ press and drag pick whole rows and a double click opens the line in Zed.
 - A file's toolbar under review has its one filled button rightmost: Send
   back once a comment is written, else Approve (on a fix plan: Make fixes).
   The diff's title buttons carry their `ButtonStyle`, set where the view is
-  made (`chrome::mark_primary`), not guessed by the painter. Code review's line over the
+  made (`chrome::mark_primary`), not guessed by the painter. Code review's bar over the
   page does the same: Plan fixes past a greyed Approve while comments wait.
 - A diff's line actions sit right after the line's text, and over several
   lines say how many ("Copy 17 lines"). A decided finding or suggestion in a

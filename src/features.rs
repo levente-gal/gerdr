@@ -3102,6 +3102,20 @@ fn stage_actions(
     out
 }
 
+/// Makes button `i` of a page's `buttons` its one `primary`: the only filled
+/// one, on the page's bar.
+pub(crate) fn fill_only(buttons: &mut [PageButton], primary: &mut Option<usize>, i: usize) {
+    for button in buttons.iter_mut() {
+        if button.style == ButtonStyle::Primary {
+            button.style = ButtonStyle::Plain;
+        }
+    }
+    if let Some(button) = buttons.get_mut(i) {
+        button.style = ButtonStyle::Primary;
+        *primary = Some(i);
+    }
+}
+
 /// The buttons of the note or comment being written on a card, last of the
 /// page's: Save and Discard, as a comment on a line of the diff has. None
 /// while none is written.
@@ -12183,8 +12197,8 @@ impl Gerdr {
                         spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
                         spot
                     }
-                    // The primary, in the header: not scrolled.
-                    None => layout.primary?,
+                    // On the page's bar: not scrolled.
+                    None => (layout.bar_buttons.iter().find(|(b, _)| *b == i))?.1,
                 };
                 Some(Tooltip::new(&text, spot))
             }
@@ -14214,7 +14228,7 @@ fn pull_tip(feature: &Feature, stage: Stage, page: &chrome::StagePage, i: usize)
             if name.starts_with("Pull request #") && buttons.contains(&i))
     });
     let label = page.buttons.get(i)?.label.as_str();
-    // The card's primary (moving to the new head, finishing) is the header's.
+    // The card's primary (moving to the new head, finishing) is the page bar's.
     let primary = page.primary == Some(i) && matches!(label, UPDATE_HEAD | "Finish\u{2026}");
     if !held && !primary {
         return None;
@@ -16696,10 +16710,11 @@ fn in_menu(button: &PageButton, outcome: &PanelOutcome) -> bool {
     }
 }
 
-/// Where `page`'s buttons go: its one primary to the tab's header, unless a
-/// card of its own holds it (a finding's, a round's, a repository's on Ship),
-/// the rare ones (`StagePage::menu`) off the page; and each row of buttons
-/// in one style: a quiet one beside outlined ones is outlined too.
+/// Where `page`'s buttons go: its one primary to the page's bar (a card of
+/// its own holding it, a finding's, a round's, a repository's on Ship, keeps
+/// it too, drawn plain), the rare ones (`StagePage::menu`) off the page; and
+/// each row of buttons in one style: a quiet one beside outlined ones is
+/// outlined too.
 pub(crate) fn place_buttons(page: &mut StagePage) {
     let menu = page.menu.clone();
     let local: Vec<usize> = (page.sections.iter())
@@ -16712,19 +16727,17 @@ pub(crate) fn place_buttons(page: &mut StagePage) {
             _ => Vec::new(),
         })
         .collect();
-    // A card holding the one primary keeps it: then no other is filled.
-    let carded = (local.iter())
-        .any(|i| (page.buttons.get(*i)).is_some_and(|b| b.style == ButtonStyle::Primary));
-    if carded {
-        for (i, b) in page.buttons.iter_mut().enumerate() {
-            if b.style == ButtonStyle::Primary && !local.contains(&i) {
-                b.style = ButtonStyle::Plain;
-            }
+    // A card's own comes before the stage's; and one only is filled.
+    let filled = |i: &usize| {
+        !menu.contains(i) && (page.buttons.get(*i)).is_some_and(|b| b.style == ButtonStyle::Primary)
+    };
+    page.primary = (local.iter().copied().find(|i| filled(i)))
+        .or_else(|| (0..page.buttons.len()).find(|i| filled(i)));
+    for (i, b) in page.buttons.iter_mut().enumerate() {
+        if b.style == ButtonStyle::Primary && page.primary != Some(i) {
+            b.style = ButtonStyle::Plain;
         }
     }
-    page.primary = (page.buttons.iter().enumerate())
-        .find(|(i, b)| b.style == ButtonStyle::Primary && !menu.contains(i) && !local.contains(i))
-        .map(|(i, _)| i);
     let gone = |i: &usize| menu.contains(i) || page.primary == Some(*i);
     let mut rows: Vec<Vec<usize>> = Vec::new();
     for section in &mut page.sections {
@@ -16767,7 +16780,7 @@ pub(crate) fn place_buttons(page: &mut StagePage) {
             _ => Vec::new(),
         })
         .collect();
-    // What no card holds goes at the title's right: a row of its own.
+    // What no card holds goes at the title's right, on the page's bar: a row of its own.
     rows.push(
         (0..page.buttons.len())
             .filter(|i| !gone(i) && !held.contains(i) && !held_ship.contains(i))
@@ -18259,15 +18272,9 @@ fn tab_view(
                     .get(b)
                     .is_some_and(|button| wants(&button.label))
             {
-                for button in &mut page.buttons {
-                    if button.style == ButtonStyle::Primary {
-                        button.style = ButtonStyle::Plain;
-                    }
-                }
-                page.buttons[b].style = ButtonStyle::Primary;
-                // The card holds it: the header has none, and what it had
-                // goes back to the title's row.
-                page.primary = None;
+                // The page's bar shows it, and what it had goes back among
+                // the bar's plain ones.
+                fill_only(&mut page.buttons, &mut page.primary, b);
             }
             if panel.armed.is_some() {
                 "Press Del again".clone_into(&mut card.state);
@@ -18339,6 +18346,10 @@ fn tab_view(
                 }
             }
         }
+    }
+    // Save is what to press next while a note is written.
+    if let Some(save) = note_buttons(&page.buttons).last().copied() {
+        fill_only(&mut page.buttons, &mut page.primary, save);
     }
     // A finished feature's code isn't read (`ship::probe_finished`).
     let read = state.probe.filter(|_| feature.status == Status::Open);
@@ -20560,7 +20571,7 @@ pub(crate) mod tests {
         let (shown, node) = card(&f, at_rest);
         let (status, _, buttons) = shown.unwrap();
         assert!(status.starts_with("Build agent \u{b7} your turn"));
-        // Send prompt, the primary, is in the header.
+        // Send prompt, the primary, is on the page's bar.
         assert_eq!(buttons, ["Show Build agent"]);
         assert_eq!(node, (NodeMark::Waiting, "waiting to send".to_owned()));
         assert_eq!(
@@ -22608,6 +22619,13 @@ pub(crate) mod tests {
             .map(|i| actions[*i].0.label.as_str())
             .collect();
         assert_eq!(held, ["Review", "Make fixes", "Drop plan\u{2026}"]);
+        // Review, the round's primary, is the page's one: on its bar, filled,
+        // and still on its card.
+        let primary = page.primary.expect("the round's");
+        assert_eq!(actions[primary].0.label, "Review");
+        assert!(card.buttons.contains(&primary));
+        let filled = |b: &&PageButton| b.style == ButtonStyle::Primary;
+        assert_eq!(page.buttons.iter().filter(filled).count(), 1);
 
         let planning = in_round(f.clone(), Stage::Verify, FixPhase::Planning);
         let shown = labels_of(&planning);
@@ -26494,7 +26512,7 @@ pub(crate) mod tests {
                 PageSection::MilestoneMode { fresh: false }
             ]
         );
-        // Show agent, the primary, is in the header; the rare ones in `⋯`.
+        // Show agent, the primary, is on the page's bar; the rare ones in `⋯`.
         assert_eq!(
             (page.primary, page.menu.as_slice()),
             (Some(0), &[2, 3, 4][..])
@@ -26529,7 +26547,7 @@ pub(crate) mod tests {
         let PageSection::Agent { buttons, .. } = &page.sections[0] else {
             panic!("the agent's card first");
         };
-        // Continue, the primary, is in the header; Show agent on the card.
+        // Continue, the primary, is on the page's bar; Show agent on the card.
         assert_eq!(page.primary, Some(0));
         assert_eq!(buttons[..1], [1], "Show agent");
         let node = rail_node(&f, Stage::Build, &state, 2_000);
@@ -26728,7 +26746,7 @@ pub(crate) mod tests {
             }
         ));
         // Show agent and Restart are its card's, Start over the `⋯` menu's,
-        // Review, the primary, the header's.
+        // Review, the primary, the bar's.
         let PageSection::Agent { buttons, .. } = &page.sections[0] else {
             panic!("the agent's card first");
         };
@@ -26917,7 +26935,7 @@ pub(crate) mod tests {
         let on_card: Vec<&str> = (held.unwrap().iter())
             .map(|i| actions[*i].0.label.as_str())
             .collect();
-        // Review, the primary, is in the header.
+        // Review, the primary, is on the page's bar.
         assert_eq!(on_card, ["Approve"]);
         assert_eq!(
             page.primary.map(|i| actions[i].0.label.as_str()),
@@ -28371,7 +28389,7 @@ pub(crate) mod tests {
             .filter(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Plan))
             .count();
         assert_eq!(reviews, 1);
-        // The primary Review goes to the header, Approve stays on the card.
+        // The primary Review goes to the page's bar, Approve stays on the card.
         let held = actions
             .iter()
             .position(|(_, o)| *o == PanelOutcome::OpenDoc(Stage::Plan))
@@ -29739,7 +29757,7 @@ mod pr_page_tests {
             "{}",
             state.text
         );
-        // Update to new head, the primary, is in the header.
+        // Update to new head, the primary, is on the page's bar.
         assert_eq!(buttons, vec![FIX_HERE, EDIT_PULLS, OPEN_PULL]);
         assert_eq!(page.primary, Some(0));
         assert_eq!(page.buttons[0].label, UPDATE_HEAD);
@@ -29772,7 +29790,7 @@ mod pr_page_tests {
         let page = page_of(&f, Stage::Verify);
         let (state, buttons) = card(&page);
         assert!(state.text.starts_with("merged on GitHub"), "{}", state.text);
-        // Finish, the primary, is in the header.
+        // Finish, the primary, is on the page's bar.
         assert_eq!(buttons, vec![OPEN_PULL]);
         let primary = page.primary.map(|i| page.buttons[i].label.as_str());
         assert_eq!(primary, Some("Finish\u{2026}"));

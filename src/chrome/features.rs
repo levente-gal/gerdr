@@ -1238,9 +1238,9 @@ pub struct StagePage {
     pub status: Option<CheckLine>,
     pub buttons: Vec<PageButton>,
     pub sections: Vec<PageSection>,
-    /// The page's one primary button, by its index in `buttons`: drawn in the
-    /// tab's header at its right end, whatever card it acts on, so the next
-    /// step is always in one place.
+    /// The page's one primary button, by its index in `buttons`: drawn at
+    /// the right end of the page's bar, whatever card it acts on, so the next
+    /// step is always in one place. A card holding it shows it too, plain.
     pub primary: Option<usize>,
     /// The indices in `buttons` of the rare ones ("Start over…", "Set up
     /// again", "Commands…"): rows of the header's `⋯` menu, not on the page.
@@ -1424,9 +1424,16 @@ pub struct FeatureTabLayout {
     pub switch: Option<(Rect, Rect, Rect)>,
     /// The header's `⋯` button, when it has a menu to open.
     pub buttons: Vec<Rect>,
-    /// The page's primary button (`StagePage::primary`), at the header's
-    /// right end: not scrolled.
-    pub primary: Option<Rect>,
+    /// The page's bar over its columns (over the review, with
+    /// `FeatureTabView::review_page`): its title, and its buttons at the
+    /// right. Not scrolled.
+    pub page_bar: Rect,
+    /// The page's title, on its bar.
+    pub bar_title: Rect,
+    /// The page's buttons on its bar, each with its index in
+    /// `StagePage::buttons`: those no card holds, then its primary
+    /// (`StagePage::primary`) rightmost.
+    pub bar_buttons: Vec<(usize, Rect)>,
     /// The header's buttons show only their icons: the tab is narrow.
     pub compact: bool,
     /// Each stage's node, with its label and line under it: what a click
@@ -1553,8 +1560,8 @@ impl FeatureTabLayout {
         if let Some(b) = self.buttons.iter().position(on) {
             return Some(FeatureTabHit::Button(b));
         }
-        if self.primary.as_ref().is_some_and(on) {
-            return header_primary(view).map(FeatureTabHit::PageButton);
+        if let Some((i, _)) = self.bar_buttons.iter().find(|(_, r)| on(r)) {
+            return Some(FeatureTabHit::PageButton(*i));
         }
         for (i, spots) in self.running.iter().enumerate() {
             if let Some(b) = spots.buttons.iter().position(on) {
@@ -2022,6 +2029,8 @@ const SMALL_LINE: i32 = Font::Small.size() as i32 + LINE_LEAD;
 pub(crate) const BODY_LINE: i32 = Font::Body.size() as i32 + LINE_LEAD;
 /// How high a stage page's title is.
 const TITLE_LINE: i32 = BODY_LINE + 6;
+/// How high the page's bar is: its title's line.
+const PAGE_BAR: i32 = TITLE_LINE;
 const TAIL_LINE: i32 = Font::Small.size() as i32 + TAIL_LEAD;
 /// The gap between the parts of a page.
 const PAGE_GAP: i32 = 16;
@@ -4134,20 +4143,9 @@ struct AgentChoiceSpots {
     model: Option<Rect>,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn page_stack(
-    view: &FeatureTabView,
-    s: &mut Stack,
-    buttons: &mut [Option<Rect>],
-    choices: &mut AgentChoiceSpots,
-    milestone_mode: &mut Option<(Rect, [Rect; 2])>,
-    ship: &mut ShipSpots,
-    finding_cards: &mut Vec<Rect>,
-    activity: bool,
-) {
-    let page = &view.page;
-    // What acts on the stage as a whole: what no card holds. At the title's
-    // right if it fits, else in rows of their own further down.
+/// The buttons of `page` that act on the stage as a whole: those no card
+/// holds, its primary and its `⋯` rows apart. A filled one goes last.
+fn free_buttons(page: &StagePage) -> Vec<usize> {
     let held: Vec<usize> = page
         .sections
         .iter()
@@ -4167,46 +4165,69 @@ fn page_stack(
             _ => Vec::new(),
         })
         .collect();
-    // The primary is in the header, the rare ones in its `⋯` menu.
     let mut free: Vec<usize> = (0..page.buttons.len())
         .filter(|i| !held.contains(i) && page.primary != Some(*i) && !page.menu.contains(i))
         .collect();
-    // The primary goes rightmost, as in dialogs.
     free.sort_by_key(|&i| page.buttons[i].style == ButtonStyle::Primary);
-    let widths: Vec<i32> = (free.iter())
+    free
+}
+
+/// How wide the title of `page` is on its bar.
+fn bar_title_width(page: &StagePage) -> i32 {
+    measure_bold(&page.title, Font::Heading.size())
+        .unwrap_or_else(|| width_of(&page.title, Font::Heading.size()))
+        .ceil() as i32
+}
+
+/// The buttons of the page on its bar `width` wide, left to right: the free
+/// ones (`free_buttons`) if they all fit beside the title, then its primary,
+/// which always shows. And whether the free ones are there: else they go in
+/// rows in the page's column. None on Code review's page under the rail,
+/// whose bar has the review's own.
+fn bar_row(view: &FeatureTabView, width: i32) -> (Vec<usize>, bool) {
+    if view.review_page {
+        return (Vec::new(), true);
+    }
+    let page = &view.page;
+    let primary = page.primary.filter(|i| *i < page.buttons.len());
+    let mut row = free_buttons(page);
+    row.extend(primary);
+    let widths: Vec<i32> = (row.iter())
         .map(|i| button_width(&page.buttons[*i].label))
         .collect();
-    let (left, right) = (s.x, s.x + s.w);
-    let title_w = measure_bold(&page.title, Font::Heading.size())
-        .unwrap_or_else(|| width_of(&page.title, Font::Heading.size()))
-        .ceil() as i32;
-    let beside = row_width(&widths) <= s.w - title_w - PAGE_GAP;
-    if beside {
-        let y = s.y + (TITLE_LINE - ROW_BUTTON) / 2;
-        for (i, (x, _)) in free.iter().zip(rows_from_right(&widths, left, right)) {
-            let w = button_width(&page.buttons[*i].label);
-            let rect = Rectangle::new((x, y).into(), (w, ROW_BUTTON).into());
-            buttons[*i] = Some(rect);
-            s.pieces.push((rect, Piece::Button(*i)));
-        }
+    match row_width(&widths) <= width - bar_title_width(page) - PAGE_GAP {
+        true => (row, true),
+        false => (primary.into_iter().collect(), false),
     }
-    s.put(
-        TITLE_LINE,
-        Piece::Text {
-            text: page.title.clone(),
-            font: Font::Heading,
-            ink: Ink::Text,
-            bold: true,
-        },
-    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn page_stack(
+    view: &FeatureTabView,
+    s: &mut Stack,
+    buttons: &mut [Option<Rect>],
+    choices: &mut AgentChoiceSpots,
+    milestone_mode: &mut Option<(Rect, [Rect; 2])>,
+    ship: &mut ShipSpots,
+    finding_cards: &mut Vec<Rect>,
+    activity: bool,
+    free_on_bar: bool,
+) {
+    let page = &view.page;
+    // The title is on the page's bar, with what acts on the stage as a
+    // whole; what of that the bar has no room for, in rows of its own here.
     s.text(&page.about, Font::Small, Ink::Muted, SMALL_LINE);
     if let Some(status) = &page.status {
         s.y += 4;
         s.text(&status.text, Font::Body, Ink::Tone(status.tone), BODY_LINE);
     }
-    if !beside {
+    if !free_on_bar {
+        let free = free_buttons(page);
+        let widths: Vec<i32> = (free.iter())
+            .map(|i| button_width(&page.buttons[*i].label))
+            .collect();
         s.y += 10;
-        let placed = rows_from_right(&widths, left, right);
+        let placed = rows_from_right(&widths, s.x, s.x + s.w);
         for (i, (x, row)) in free.iter().zip(&placed) {
             let w = button_width(&page.buttons[*i].label);
             let y = s.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
@@ -4515,33 +4536,48 @@ pub struct ReviewSwitchSpots {
 /// Where `switch` goes in the row at `(x, y)`, `width` wide: the choice at its
 /// left, its figures cut if they wouldn't fit, then the bar and what is left,
 /// the buttons at the right.
-fn review_switch_spots(switch: &ReviewSwitch, x: i32, y: i32, width: i32) -> ReviewSwitchSpots {
+fn review_switch_spots(
+    switch: &ReviewSwitch,
+    x: i32,
+    y: i32,
+    width: i32,
+    bar: Option<Rect>,
+) -> ReviewSwitchSpots {
     let measure = |label: &str| width_of(label, SMALL_FONT_SIZE).ceil() as i32 + 2 * CHIP_PAD;
     let [code, fixes] = switch.labels();
     let widths = [measure(&code), measure(&fixes)];
     let h = REVIEW_SWITCH_H;
     // The buttons first: the least of the switch and its words is all they
     // leave. The rightmost, the one to press next, stays longest.
-    let least = measure("Code review") + measure("Fixes") + 2 * PICK_TRACK_PAD + COLUMN_GAP;
+    // On the page's bar (`bar`, what its title leaves of it), all of it is
+    // theirs.
+    let least = match bar {
+        Some(_) => 0,
+        None => measure("Code review") + measure("Fixes") + 2 * PICK_TRACK_PAD + COLUMN_GAP,
+    };
+    let row = bar.unwrap_or_else(|| Rectangle::new((x, y).into(), (width, h).into()));
+    let room = row.size.w;
     let mut sizes: Vec<i32> = (switch.buttons.iter())
         .map(|b| button_width(&b.label))
         .collect();
     let mut dropped = 0;
-    while sizes.len() > 1 && row_width(&sizes) > width - least - REVIEW_LEFT_MIN {
+    let left_min = if bar.is_some() { 0 } else { REVIEW_LEFT_MIN };
+    while sizes.len() > 1 && row_width(&sizes) > room - least - left_min {
         sizes.remove(0);
         dropped += 1;
     }
-    let fits = !sizes.is_empty() && row_width(&sizes) <= width - least;
+    let fits = !sizes.is_empty() && row_width(&sizes) <= room - least;
     let end = x + width;
     let mut buttons = vec![None; switch.buttons.len()];
-    let by = y + (h - ROW_BUTTON) / 2;
+    let by = row.loc.y + (row.size.h - ROW_BUTTON) / 2;
     if fits {
-        for (i, (bx, _)) in rows_from_right(&sizes, x, end).into_iter().enumerate() {
+        let placed = rows_from_right(&sizes, row.loc.x, row.loc.x + row.size.w);
+        for (i, (bx, _)) in placed.into_iter().enumerate() {
             let rect = Rectangle::new((bx, by).into(), (sizes[i], ROW_BUTTON).into());
             buttons[dropped + i] = Some(rect);
         }
     }
-    let end = match buttons.iter().flatten().next() {
+    let end = match buttons.iter().flatten().next().filter(|_| bar.is_none()) {
         Some(first) => first.loc.x - COLUMN_GAP,
         None => end,
     };
@@ -4644,14 +4680,6 @@ pub fn feature_toast_floor(view: &FeatureTabView, frame: Rect) -> Rect {
     }
 }
 
-/// The page's primary button the header shows, if any: not on Code review's
-/// page under the rail, whose line has its own.
-fn header_primary(view: &FeatureTabView) -> Option<usize> {
-    view.page
-        .primary
-        .filter(|i| *i < view.page.buttons.len() && !view.review_page)
-}
-
 /// Whether the header has a `⋯` menu: the feature's own rows, or the page's
 /// rare buttons.
 pub fn has_menu(view: &FeatureTabView) -> bool {
@@ -4668,16 +4696,11 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let top = frame.loc.y + TAB_PAD;
     let header_h = TAB_TITLE + TAB_SUB;
 
-    // The header's buttons from the right: the page's primary last, as in
-    // a dialog, the `⋯` menu left of it, then the switch left of them.
+    // The header's buttons from the right: the `⋯` menu, then the switch
+    // left of it. The page's primary is on the page's bar.
     let compact = width < COMPACT_BUTTONS_BELOW;
     let by = top + (header_h - TAB_BUTTON) / 2;
     let mut bx = right;
-    let primary = header_primary(view).map(|i| {
-        let w = button_width(&view.page.buttons[i].label);
-        bx -= w + QUIT_BUTTON_GAP;
-        Rectangle::new((bx + QUIT_BUTTON_GAP, by).into(), (w, TAB_BUTTON).into())
-    });
     let mut buttons = Vec::new();
     if has_menu(view) {
         bx -= TAB_BUTTON;
@@ -4741,17 +4764,29 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let rule_end = rail_top + rail_h + RAIL_GAP + 1;
     let (running_card, running, running_more) = running_spots(view, x, rule_end + RUN_BELOW, inner);
     let rule_end = rule_end + running_card.map_or(0, |c| c.size.h + 2 * RUN_BELOW);
-    let review_switch = view
-        .review_switch
-        .as_ref()
-        .map(|switch| review_switch_spots(switch, x, rule_end + REVIEW_SWITCH_GAP, inner));
-    let test_strip = (view.test_strip.as_ref())
-        .filter(|_| review_switch.is_none())
-        .map(|_| test_strip_spots(x, rule_end + REVIEW_SWITCH_GAP, inner));
-    let rule_end = match review_switch.is_some() || test_strip.is_some() {
+    let row_top = rule_end;
+    let rule_end = match view.review_switch.is_some() || view.test_strip.is_some() {
         true => rule_end + 2 * REVIEW_SWITCH_GAP + REVIEW_SWITCH_H,
         false => rule_end,
     };
+    // The page's bar: its title, then its buttons from the right, the one
+    // to press next last. Right over the page: under the switch on Code
+    // review's page under the rail, whose own buttons it has, else under
+    // the repositories.
+    let title_w = bar_title_width(&view.page).min(inner);
+    let bar_at = |y: i32| Rectangle::new((x, y).into(), (inner, PAGE_BAR).into());
+    let review_bar = view.review_page.then(|| bar_at(rule_end));
+    let review_switch = view.review_switch.as_ref().map(|switch| {
+        let buttons = review_bar.map(|bar| {
+            let from = (x + title_w + PAGE_GAP).min(right);
+            Rectangle::new((from, bar.loc.y).into(), (right - from, PAGE_BAR).into())
+        });
+        review_switch_spots(switch, x, row_top + REVIEW_SWITCH_GAP, inner, buttons)
+    });
+    let test_strip = (view.test_strip.as_ref())
+        .filter(|_| review_switch.is_none())
+        .map(|_| test_strip_spots(x, row_top + REVIEW_SWITCH_GAP, inner));
+    let rule_end = rule_end + review_bar.map_or(0, |_| PAGE_BAR + REVIEW_SWITCH_GAP);
     let review = view.review_page.then(|| {
         Rectangle::new(
             (frame.loc.x, rule_end).into(),
@@ -4879,6 +4914,33 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
         body_top += h + COLUMN_GAP;
         card
     });
+    let page_bar = review_bar.unwrap_or_else(|| {
+        // Close over its page: it is the page's.
+        let bar = bar_at(body_top);
+        body_top += PAGE_BAR + REVIEW_SWITCH_GAP;
+        bar
+    });
+    let (bar_row, free_on_bar) = bar_row(view, inner);
+    let widths: Vec<i32> = (bar_row.iter())
+        .map(|i| button_width(&view.page.buttons[*i].label))
+        .collect();
+    let bar_y = page_bar.loc.y + (PAGE_BAR - ROW_BUTTON) / 2;
+    let bar_buttons = (bar_row.iter().zip(&widths))
+        .zip(rows_from_right(&widths, x, right))
+        .map(|((i, w), (bx, _))| {
+            (
+                *i,
+                Rectangle::new((bx, bar_y).into(), (*w, ROW_BUTTON).into()),
+            )
+        })
+        .collect::<Vec<(usize, Rect)>>();
+    // The title ends before the first button: cut short, never under it.
+    let first = (bar_buttons.first().map(|(_, r)| r.loc.x)).or_else(|| {
+        let spots = review_switch.as_ref().filter(|_| view.review_page)?;
+        spots.buttons.iter().flatten().next().map(|r| r.loc.x)
+    });
+    let title_room = first.map_or(inner, |bx| bx - PAGE_GAP - x).max(1);
+    let bar_title = Rectangle::new(page_bar.loc, (title_w.min(title_room), PAGE_BAR).into());
     let col_h = (bottom - body_top).max(0);
     let card = |cx: i32, w: i32| Rectangle::new((cx, body_top).into(), (w, col_h).into());
     let mut columns = [None; 3];
@@ -4929,6 +4991,7 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
                 &mut ship,
                 &mut finding_cards,
                 columns[TabColumn::Activity as usize].is_none(),
+                free_on_bar,
             ),
             TabColumn::Activity => {
                 s.caption("Activity");
@@ -4951,7 +5014,9 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
         sub,
         switch,
         buttons,
-        primary,
+        page_bar,
+        bar_title,
+        bar_buttons,
         compact,
         nodes,
         columns,
@@ -5504,6 +5569,8 @@ pub(super) enum TabSlice {
     /// The header, the rail and its rule, and a narrow tab's strip of
     /// repository chips: from the tab's top to the columns.
     Head,
+    /// The page's bar: its title and its buttons, over its columns.
+    Bar,
     /// A column's contents, unscrolled: scrolling it moves its buffer. A
     /// very long column's buffer holds only what shows (see `TALL_COLUMN`).
     Column(TabColumn),
@@ -5530,6 +5597,7 @@ impl FeatureTabLayout {
                     (self.frame.size.w, bottom - self.frame.loc.y).into(),
                 ))
             }
+            TabSlice::Bar => Some(self.page_bar),
             TabSlice::Hints => Some(self.hints),
             TabSlice::Column(column) => {
                 let place = self.columns[column as usize]?;
@@ -5550,6 +5618,12 @@ impl FeatureTabLayout {
             }
         }
     }
+}
+
+/// Whether button `i` of `page` may show on its bar: its primary, or one no
+/// card holds.
+fn on_bar(page: &StagePage, i: usize) -> bool {
+    page.primary == Some(i) || free_buttons(page).contains(&i)
 }
 
 /// `view` with only what `slice` draws from it kept (and the rest
@@ -5613,8 +5687,12 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
                     | H::Running(_)
                     | H::RunningButton(..)
             ) || strip && matches!(hit, H::Repo(_) | H::MoreRepos(_))
-                || matches!(hit, H::PageButton(i) if header_primary(view) == Some(*i))
         }
+        TabSlice::Bar => match hit {
+            H::PageButton(i) => on_bar(&view.page, *i),
+            H::ReviewButton(_) => view.review_page,
+            _ => false,
+        },
         TabSlice::Column(TabColumn::Repos) => {
             matches!(hit, H::Repo(_) | H::RepoButton(..) | H::RepoRemove(_))
         }
@@ -5646,16 +5724,27 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
             v.test_strip = view.test_strip.clone();
             v.running = view.running.clone();
             v.running_more = view.running_more;
-            // The header's primary and `⋯`: a card taking the primary
-            // clears it there.
-            v.page.primary = header_primary(view);
-            v.page.buttons = (v.page.primary.and_then(|i| view.page.buttons.get(i)))
-                .cloned()
-                .into_iter()
-                .collect();
             v.page.menu = view.page.menu.clone();
             if strip {
                 repos(&mut v);
+            }
+        }
+        TabSlice::Bar => {
+            v.page.title = view.page.title.clone();
+            v.page.primary = view.page.primary;
+            // Only what may show on it: a card's own buttons don't draw it
+            // again.
+            v.page.buttons = (view.page.buttons.iter().enumerate())
+                .map(|(i, b)| match on_bar(&view.page, i) {
+                    true => b.clone(),
+                    false => PageButton {
+                        label: String::new(),
+                        style: ButtonStyle::Plain,
+                    },
+                })
+                .collect();
+            if view.review_page {
+                v.review_switch = view.review_switch.clone();
             }
         }
         TabSlice::Column(TabColumn::Repos) => {
@@ -5945,6 +6034,7 @@ type ThumbKey = (Size<i32, Logical>, super::Theme, f64);
 pub(super) struct FeatureTabLayers {
     overlay: super::Overlay<BackKey>,
     head: super::Cached<SliceKey>,
+    bar: super::Cached<SliceKey>,
     columns: [super::Cached<SliceKey>; 3],
     /// The page column's bands (see `PageBand`).
     bands: super::layers::RowCache<BandKey>,
@@ -5992,6 +6082,7 @@ impl FeatureTabLayers {
             .map(|l| ((output, l.columns, theme, scale), area.loc, output));
         let drawn = &self.drawn;
         let epoch = *self.epoch.get_or_insert(now);
+        let bar = &mut self.bar;
         let (head, columns, bands, hints, thumbs, glow) = (
             &mut self.head,
             &mut self.columns,
@@ -6136,6 +6227,7 @@ impl FeatureTabLayers {
             }
             bands.sweep();
             parts.extend(slice(hints, TabSlice::Hints, 0.0));
+            parts.extend(slice(bar, TabSlice::Bar, 0.0));
             parts.extend(slice(head, TabSlice::Head, 0.0));
             parts
         };
@@ -6442,6 +6534,10 @@ impl Painter {
                 c.fill(0, 0, c.w, c.h, p.background);
                 self.tab_head(&mut c, view, &l, scale, p);
             }
+            TabSlice::Bar => {
+                c.fill(0, 0, c.w, c.h, p.background);
+                self.tab_bar(&mut c, view, &l, scale, p);
+            }
             TabSlice::Column(column) => {
                 c.fill(0, 0, c.w, c.h, p.panel);
                 let tall = Rectangle::from_size(region.size);
@@ -6616,6 +6712,61 @@ impl Painter {
         }
     }
 
+    /// The page's bar on `c`: its title, then its buttons, or the review's
+    /// on Code review's page under the rail.
+    fn tab_bar(
+        &self,
+        c: &mut Canvas,
+        view: &FeatureTabView,
+        l: &FeatureTabLayout,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (x, end) = phys(l.bar_title, scale);
+        let size = Font::Heading.size();
+        let line = band(l.bar_title, scale);
+        self.bold_text(c, &view.page.title, size, x, end, line, scale, p.text);
+        for (i, rect) in &l.bar_buttons {
+            let Some(button) = view.page.buttons.get(*i) else {
+                continue;
+            };
+            let lit = view.hover == Some(FeatureTabHit::PageButton(*i));
+            self.button(
+                c,
+                &button.label,
+                *rect,
+                (lit, false),
+                button.style,
+                scale,
+                p,
+            );
+        }
+        if view.review_page {
+            self.review_buttons(c, view, l, scale, p);
+        }
+    }
+
+    /// The buttons of Code review's line, where `l` put them.
+    fn review_buttons(
+        &self,
+        c: &mut Canvas,
+        view: &FeatureTabView,
+        l: &FeatureTabLayout,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (Some(switch), Some(spots)) = (&view.review_switch, &l.review_switch) else {
+            return;
+        };
+        for (i, (b, rect)) in switch.buttons.iter().zip(&spots.buttons).enumerate() {
+            let Some(rect) = rect else {
+                continue;
+            };
+            let lit = view.hover == Some(FeatureTabHit::ReviewButton(i));
+            self.button(c, &b.label, *rect, (lit, false), b.style, scale, p);
+        }
+    }
+
     /// The tab's header, rail, the rule under it and, on a narrow tab, the
     /// strip of repository chips, on `c`.
     fn tab_head(
@@ -6674,9 +6825,6 @@ impl Painter {
             let hovered = view.hover == Some(FeatureTabHit::Button(i));
             self.button(c, "", *rect, (hovered, false), ButtonStyle::Plain, scale, p);
             icon_sdf(c, *rect, scale, p.text, |x, y| ellipsis(x, y, s));
-        }
-        if let (Some(rect), Some(i)) = (l.primary, header_primary(view)) {
-            self.page_button(c, view, i, rect, scale, p);
         }
 
         self.running_card(c, view, l, scale, p);
@@ -7047,12 +7195,9 @@ impl Painter {
             (labels[1], spots.segments[1]),
         ];
         self.segmented(c, spots.track, &labelled, on, hover, scale, p);
-        for (i, (b, rect)) in switch.buttons.iter().zip(&spots.buttons).enumerate() {
-            let Some(rect) = rect else {
-                continue;
-            };
-            let lit = view.hover == Some(FeatureTabHit::ReviewButton(i));
-            self.button(c, &b.label, *rect, (lit, false), b.style, scale, p);
+        // Under the rail, the page's bar has them.
+        if !view.review_page {
+            self.review_buttons(c, view, l, scale, p);
         }
         if let Some(files) = switch.files.filter(|files| files.total > 0)
             && let Some(bar) = spots.bar
@@ -8069,7 +8214,8 @@ impl Painter {
         self.mono_text(c, text, Font::Small.size(), from, to, b, scale, p.text);
     }
 
-    /// The page's button `i` in `rect`.
+    /// The page's button `i` in `rect`, on a card or in the page's column:
+    /// plain there if it is the page's primary, filled on its bar only.
     fn page_button(
         &self,
         c: &mut Canvas,
@@ -8083,15 +8229,11 @@ impl Painter {
             return;
         };
         let hovered = view.hover == Some(FeatureTabHit::PageButton(i));
-        self.button(
-            c,
-            &button.label,
-            rect,
-            (hovered, false),
-            button.style,
-            scale,
-            p,
-        );
+        let style = match view.page.primary == Some(i) {
+            true => ButtonStyle::Plain,
+            false => button.style,
+        };
+        self.button(c, &button.label, rect, (hovered, false), style, scale, p);
     }
 
     /// The button picking an agent's model: its label from the left, as it
@@ -8926,6 +9068,32 @@ mod tests {
             l.hit(&view, centre(l.nodes[2])),
             Some(FeatureTabHit::Node(2))
         );
+        // Its page has its bar too, between the switch and the review, with
+        // the review's buttons: not on the switch's row.
+        view.review_switch = Some(ReviewSwitch {
+            view: ReviewView::Code,
+            files: None,
+            fixes: String::new(),
+            next: None,
+            buttons: vec![ReviewButton {
+                button: crate::chrome::ReposButton::Approve,
+                label: "Approve".into(),
+                style: ButtonStyle::Primary,
+                key: String::new(),
+                disabled: None,
+            }],
+        });
+        let l = tab_at(&view, 1180);
+        let spots = l.review_switch.as_ref().unwrap();
+        let approve = spots.buttons[0].expect("room for it");
+        assert!(l.page_bar.contains_rect(approve));
+        assert!(l.page_bar.loc.y >= spots.track.loc.y + spots.track.size.h);
+        assert!(l.review.unwrap().loc.y >= l.page_bar.loc.y + l.page_bar.size.h);
+        assert!(l.bar_buttons.is_empty());
+        assert_eq!(
+            l.hit(&view, centre(approve)),
+            Some(FeatureTabHit::ReviewButton(0))
+        );
     }
 
     /// The viewed stage stands on a band in `selected` with the accent's
@@ -9005,14 +9173,13 @@ mod tests {
         let activity = l.columns[TabColumn::Activity as usize].unwrap();
         assert_eq!(card.size.w, l.strip.size.w);
         assert!(card.loc.y >= l.strip.loc.y + l.strip.size.h);
-        assert!(page.loc.y >= card.loc.y + card.size.h);
+        // The page's bar stays right over the page, under the card.
+        assert!(l.page_bar.loc.y >= card.loc.y + card.size.h);
+        assert!(page.loc.y >= l.page_bar.loc.y + l.page_bar.size.h);
         assert_eq!(page.loc.y, activity.loc.y);
-        // Folded, the page starts where the card did.
+        // Folded, the bar starts where the card did.
         let folded = tab_at(&tab_view(), 1920);
-        assert_eq!(
-            folded.columns[TabColumn::Page as usize].unwrap().loc.y,
-            card.loc.y
-        );
+        assert_eq!(folded.page_bar.loc.y, card.loc.y);
         // The rows don't chip: the strip only holds its toggle.
         assert!(l.more_repos.is_empty());
         assert_eq!(
@@ -9121,22 +9288,35 @@ mod tests {
         seen.remove = "";
         seen.page.menu.clear();
         assert!(tab_at(&seen, 1920).buttons.is_empty());
-        // The page's primary sits in the header, right of the menu.
+        // The page's primary sits last on the page's bar, over its column,
+        // and stays there however far the page is scrolled.
         let mut lead = view.clone();
         lead.page.primary = Some(0);
         let led = tab_at(&lead, 1920);
-        let primary = led.primary.expect("in the header");
-        assert!(primary.loc.x > led.buttons[0].loc.x);
+        let (i, primary) = *led.bar_buttons.last().expect("on the bar");
+        assert_eq!(i, 0);
+        assert!(led.page_bar.contains_rect(primary));
+        let page = led.columns[TabColumn::Page as usize].unwrap();
+        assert!(led.page_bar.loc.y + led.page_bar.size.h <= page.loc.y);
+        assert!(led.page_bar.loc.y > led.strip.loc.y);
+        assert!(led.bar_title.loc.x + led.bar_title.size.w < primary.loc.x);
         assert!(led.page_buttons[0].is_none(), "not on the page too");
         assert_eq!(
             hit(&led, &lead, primary),
             Some(FeatureTabHit::PageButton(0))
         );
+        lead.scroll[TabColumn::Page as usize] = 4000.0;
+        assert_eq!(tab_at(&lead, 1920).bar_buttons, led.bar_buttons);
+        assert_eq!(
+            hit(&tab_at(&lead, 1920), &lead, primary),
+            Some(FeatureTabHit::PageButton(0))
+        );
         for (i, n) in l.nodes.iter().enumerate() {
             assert_eq!(hit(&l, &view, *n), Some(FeatureTabHit::Node(i)));
         }
-        let first = l.page_buttons[0].unwrap();
-        assert_eq!(hit(&l, &view, first), Some(FeatureTabHit::PageButton(0)));
+        // What no card holds is on the bar too.
+        let (i, first) = l.bar_buttons[0];
+        assert_eq!(hit(&l, &view, first), Some(FeatureTabHit::PageButton(i)));
         let (i, spot) = l.hint_spots[0];
         assert_eq!(hit(&l, &view, spot), Some(FeatureTabHit::Hint(i)));
         let page = l.columns[TabColumn::Page as usize].unwrap();
@@ -9151,14 +9331,15 @@ mod tests {
             Some(FeatureTabHit::Tab)
         );
         assert_eq!(l.hit(&view, (-4, 4).into()), None);
-        // Scrolled, the page's button sits higher by as much.
-        view.scroll[TabColumn::Page as usize] = 20.0;
-        let lifted = (centre(first).x, centre(first).y - 20).into();
-        assert_eq!(l.hit(&view, lifted), Some(FeatureTabHit::PageButton(0)));
         // The Show agent button in the agent card counts as the page's too.
-        view.scroll = [0.0; 3];
         let agent = l.page_buttons[2].unwrap();
         assert_eq!(hit(&l, &view, agent), Some(FeatureTabHit::PageButton(2)));
+        // Scrolled, a card's button sits higher by as much; the bar's stays.
+        view.scroll[TabColumn::Page as usize] = 20.0;
+        let lifted = (centre(agent).x, centre(agent).y - 20).into();
+        assert_eq!(l.hit(&view, lifted), Some(FeatureTabHit::PageButton(2)));
+        assert_eq!(hit(&l, &view, first), Some(FeatureTabHit::PageButton(i)));
+        view.scroll = [0.0; 3];
     }
 
     #[test]
@@ -9699,19 +9880,18 @@ mod tests {
             );
             (layers.drawn.get() - before, parts)
         };
-        // The head, the hints, the activity and each band of the page that
-        // shows, then the ground once it starts to show.
+        // The head, the page's bar, the hints, the activity and each band of
+        // the page that shows, then the ground once it starts to show.
         let bands = shown_bands(&view, area, 0.0);
         assert!(bands > 1);
-        assert_eq!(step(&mut layers, &view, 0).0, 3 + bands);
+        assert_eq!(step(&mut layers, &view, 0).0, 4 + bands);
         assert_eq!(step(&mut layers, &view, 1).0, 1);
         assert_eq!(step(&mut layers, &view, 2).0, 0);
-        // The band with the button, then the head; the band as it was
-        // without the hover is kept.
+        // The bar with the button; then the head, and the bar without it.
         view.hover = Some(FeatureTabHit::PageButton(0));
         assert_eq!(step(&mut layers, &view, 2).0, 1);
         view.hover = Some(FeatureTabHit::Node(3));
-        assert_eq!(step(&mut layers, &view, 3).0, 1);
+        assert_eq!(step(&mut layers, &view, 3).0, 2);
         view.hover = Some(FeatureTabHit::Column(TabColumn::Page));
         assert_eq!(step(&mut layers, &view, 4).0, 1);
         let (_, at_top) = step(&mut layers, &view, 5);
@@ -10107,21 +10287,24 @@ mod tests {
         assert!(texts.last().is_some_and(|t| t.ends_with("end")));
     }
 
-    /// A card taking the page's primary (keys on the review cards) clears
-    /// the header's: the head is drawn again, not left with a stale one.
+    /// A card taking the page's primary (keys on the review cards) changes
+    /// the bar's: the bar is drawn again, not left with a stale one, and the
+    /// head is left as it is.
     #[test]
-    fn the_head_is_drawn_again_when_its_primary_goes() {
+    fn the_bar_is_drawn_again_when_its_primary_goes() {
         let mut view = super::super::golden::feature_tab();
         view.page.buttons = vec![PageButton {
             label: "Review in plan".into(),
             style: ButtonStyle::Primary,
         }];
         view.page.primary = Some(0);
-        let with = slice_view(&view, TabSlice::Head);
+        let with = slice_view(&view, TabSlice::Bar);
+        let head = slice_view(&view, TabSlice::Head);
         assert_eq!(with.page.primary, Some(0));
         view.page.primary = None;
         view.page.buttons[0].style = ButtonStyle::Plain;
-        assert!(slice_view(&view, TabSlice::Head) != with);
+        assert!(slice_view(&view, TabSlice::Bar) != with);
+        assert!(slice_view(&view, TabSlice::Head) == head);
     }
 
     #[test]
@@ -10613,23 +10796,20 @@ mod tests {
     }
 
     #[test]
-    fn a_stages_own_buttons_end_its_titles_line_and_leave_when_they_dont_fit() {
-        let title_row = |view: &FeatureTabView, width: i32| {
-            let l = tab_at(view, width);
-            let (title, _) = l.pieces[TabColumn::Page as usize][..]
-                .iter()
-                .find(|(_, p)| matches!(p, Piece::Text { bold: true, .. }))
-                .expect("a title");
-            let title = *title;
-            let free = l.page_buttons[0].expect("placed");
-            (title, free)
-        };
+    fn a_stages_own_buttons_end_its_bar_and_leave_when_they_dont_fit() {
         let view = tab_view();
-        let (title, free) = title_row(&view, 1180);
-        assert!(free.loc.y >= title.loc.y);
-        assert!(free.loc.y + free.size.h <= title.loc.y + title.size.h);
-        assert_eq!(free.loc.x + free.size.w, title.loc.x + title.size.w);
-        // Too many for the title's line: below what the page says, at its end.
+        let l = tab_at(&view, 1180);
+        let (i, free) = *l.bar_buttons.last().expect("on the bar");
+        assert_eq!(i, 0);
+        assert!(l.page_bar.contains_rect(free));
+        assert_eq!(
+            free.loc.x + free.size.w,
+            l.page_bar.loc.x + l.page_bar.size.w
+        );
+        assert!(l.bar_title.loc.x + l.bar_title.size.w < free.loc.x);
+        assert!(l.page_buttons[0].is_none(), "not in the column too");
+        // Too many for the bar: in the page's column, at its end; the primary
+        // alone stays on the bar.
         let mut many = tab_view();
         many.page.buttons = (0..12)
             .map(|i| PageButton {
@@ -10637,8 +10817,14 @@ mod tests {
                 style: ButtonStyle::Plain,
             })
             .collect();
-        let (title, first) = title_row(&many, 1180);
-        assert!(first.loc.y >= title.loc.y + title.size.h);
+        many.page.buttons[11].style = ButtonStyle::Primary;
+        many.page.primary = Some(11);
+        let l = tab_at(&many, 600);
+        assert_eq!(l.bar_buttons.len(), 1);
+        assert_eq!(l.bar_buttons[0].0, 11);
+        let first = l.page_buttons[0].expect("placed");
+        assert!(first.loc.y >= l.page_bar.loc.y + l.page_bar.size.h);
+        assert!(l.page_buttons[11].is_none());
     }
 
     #[test]
