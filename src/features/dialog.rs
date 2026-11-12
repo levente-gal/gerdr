@@ -317,7 +317,7 @@ impl NewFeatureDialog {
             .take_if(|_| (review.pulls.values()).all(|e| e.list.is_some()))
         {
             review.note = Some(format!(
-                "#{number} of {slug} isn't open in this project's repositories"
+                "#{number} of {slug} isn't in this project's repositories"
             ));
         }
         let Some(entry) = review.pulls.get(key) else {

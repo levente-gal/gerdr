@@ -779,8 +779,13 @@ struct ListView {
 }
 
 /// The open pull requests of the repository whose main worktree is `main`,
-/// the user's own first, then the newest; at most 100.
-pub fn open_pulls(main: &Path) -> Result<Vec<OpenPull>, String> {
+/// the user's own first, then the newest; at most 100. Pull request
+/// `wanted` (host, slug, number) of this repository comes last when the
+/// list lacks it: closed, or past the 100.
+pub fn open_pulls(
+    main: &Path,
+    wanted: Option<&(String, String, u64)>,
+) -> Result<Vec<OpenPull>, String> {
     let (host, slug) = (crate::git::web_url(main).as_deref())
         .and_then(crate::ci::github_repository)
         .ok_or_else(|| "its origin isn't on GitHub".to_owned())?;
@@ -794,7 +799,44 @@ pub fn open_pulls(main: &Path) -> Result<Vec<OpenPull>, String> {
         tracing::warn!("couldn't tell who is signed in to {host}: {err}");
         String::new()
     });
-    Ok(listed_pulls(listed, &me))
+    let mut pulls = listed_pulls(listed, &me);
+    if let Some(number) = unlisted_wanted(&pulls, wanted, &host, &slug) {
+        match read(main, &host, &slug, number) {
+            Ok(details) => pulls.push(listed_from(details)),
+            Err(err) => tracing::warn!("reading #{number} of {slug}: {err}"),
+        }
+    }
+    Ok(pulls)
+}
+
+/// The number of `wanted` when it is of repository `slug` of `host` and
+/// `pulls` lacks it.
+fn unlisted_wanted(
+    pulls: &[OpenPull],
+    wanted: Option<&(String, String, u64)>,
+    host: &str,
+    slug: &str,
+) -> Option<u64> {
+    let (h, s, number) = wanted?;
+    let ours = h.eq_ignore_ascii_case(host) && s.eq_ignore_ascii_case(slug);
+    (ours && !pulls.iter().any(|p| p.number == *number)).then_some(*number)
+}
+
+/// A pull request `read` found as a listed one; one not open says so in
+/// its title.
+fn listed_from(d: Details) -> OpenPull {
+    OpenPull {
+        number: d.pull.number,
+        title: match d.is_open() {
+            true => d.pull.title,
+            false => format!("{} ({})", d.pull.title, d.state.to_lowercase()),
+        },
+        head_ref: d.pull.head_ref,
+        author: d.pull.author,
+        draft: d.draft,
+        url: d.pull.url,
+        mine: d.pull.mine,
+    }
 }
 
 /// `listed`, the user being `me`, in `open_pulls`' order.
@@ -1197,6 +1239,34 @@ mod tests {
         assert_eq!(order, vec![(5, true), (9, false), (3, false)]);
         assert_eq!(all[2].title, "Old");
         assert!(all[1].draft);
+    }
+
+    #[test]
+    fn a_wanted_pull_request_the_list_lacks_is_read() {
+        let listed = |n: u64| OpenPull {
+            number: n,
+            ..Default::default()
+        };
+        let pulls = [listed(3)];
+        let wanted = |n: u64| ("GitHub.com".to_owned(), "O/R".to_owned(), n);
+        let lacks = |w: Option<&(String, String, u64)>, slug: &str| {
+            unlisted_wanted(&pulls, w, "github.com", slug)
+        };
+        assert_eq!(lacks(Some(&wanted(12)), "o/r"), Some(12));
+        assert_eq!(lacks(Some(&wanted(3)), "o/r"), None);
+        assert_eq!(lacks(Some(&wanted(12)), "o/other"), None);
+        assert_eq!(lacks(None, "o/r"), None);
+        let read = |state: &str| Details {
+            pull: PullRef {
+                number: 12,
+                title: "Fix".into(),
+                ..Default::default()
+            },
+            state: state.into(),
+            ..Default::default()
+        };
+        assert_eq!(listed_from(read("OPEN")).title, "Fix");
+        assert_eq!(listed_from(read("MERGED")).title, "Fix (merged)");
     }
 
     #[test]

@@ -374,10 +374,12 @@ impl Gerdr {
             return;
         };
         let serial = dialog.serial;
+        let wanted = dialog.review.as_ref().and_then(|r| r.wanted.clone());
         for (repo, main) in dialog.unlisted() {
+            let wanted = wanted.clone();
             self.feature_work(None, move |_| Done::OpenPulls {
                 serial,
-                result: feature::pr::open_pulls(&main),
+                result: feature::pr::open_pulls(&main, wanted.as_ref()),
                 repo,
             });
         }

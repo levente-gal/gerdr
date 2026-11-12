@@ -100,7 +100,7 @@ fn a_wanted_pull_request_no_repository_lists_is_said() {
     d.pulls_listed(&(None, "web".into()), Err("offline".into()));
     assert_eq!(
         new_feature_view(&d, "Acme".into()).root,
-        "#12 of o/r isn't open in this project's repositories"
+        "#12 of o/r isn't in this project's repositories"
     );
 }
 
