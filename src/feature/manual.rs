@@ -712,9 +712,9 @@ fn shots_markdown(k: &Check) -> String {
 /// when the user wants them made with none of the agent's (see
 /// `review_import::fixes_plan`).
 pub fn fixes_plan(test: Option<&ManualTest>, criteria: &[Criterion], title: &str) -> String {
-    let mut md = format!(
-        "# Fix plan of \u{201c}{title}\u{201d}\n\ngerdr wrote this from the manual test: the user wants these made as they say, so no plan was asked for. Find each one's cause in the code before you change it.\n\n## {}\n",
-        super::fix_round::FIXES
+    let mut md = super::fix_round::header(
+        title,
+        "the manual test: the user wants these made as they say, so no plan was asked for. Find each one's cause in the code before you change it.",
     );
     let flat = super::review_import::no_headings;
     for (c, k) in unsent(test, criteria) {

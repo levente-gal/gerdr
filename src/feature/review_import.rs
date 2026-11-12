@@ -34,7 +34,7 @@
 //! holds once no finding is `Open`, `Fix` or `Sent`.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -45,6 +45,7 @@ use super::{
     Feature,
     layout::{base_ref, git},
     patch::{self, Reading},
+    review_items::{RunItem, merge_run},
 };
 
 /// The file the reviewer writes, in the feature data dir.
@@ -573,44 +574,32 @@ pub fn import(
     repos: &[(String, PathBuf)],
     diff: &Diff,
 ) -> Imported {
-    let mut out = Imported::default();
     // Before this run rewrites them: what the user saw.
     let mut kept: Vec<Finding> = match run > review.n {
         true => review.shown().into_iter().cloned().collect(),
         false => Vec::new(),
     };
-    let before = review.findings.len();
-    let mut raised: BTreeSet<String> = BTreeSet::new();
-    let mut k = 0;
-    for raw in raws {
-        let (repo, file) = place(raw.repo, &raw.file, repos);
+    let mut fixed = 0;
+    let raws = raws.into_iter().map(|mut raw| {
+        let (repo, file) = place(raw.repo.take(), &raw.file, repos);
         let at = placed(diff, &repo, &file, raw.line);
-        let earlier = raw
-            .id
-            .as_ref()
-            .filter(|id| !raised.contains(*id))
-            .and_then(|id| review.findings[..before].iter().position(|f| f.id == *id))
-            .or_else(|| {
-                (review.findings[..before].iter()).position(|f| {
-                    !raised.contains(&f.id) && same_finding(f, &repo, &file, &raw.title)
+        (raw, repo, file, at)
+    });
+    let merged = merge_run(
+        &mut review.findings,
+        run,
+        raws,
+        |earlier, (raw, repo, file, _), raised| {
+            (raw.id.as_ref())
+                .filter(|id| !raised.contains(*id))
+                .and_then(|id| earlier.iter().position(|f| f.id == *id))
+                .or_else(|| {
+                    earlier.iter().position(|f| {
+                        !raised.contains(&f.id) && same_finding(f, repo, file, &raw.title)
+                    })
                 })
-            });
-        if let Some(i) = earlier {
-            let f = &mut review.findings[i];
-            raised.insert(f.id.clone());
-            f.state = match f.state {
-                FindingState::Sent | FindingState::Fixed => FindingState::Open,
-                state => state,
-            };
-        }
-        // The user's own words, and what went to GitHub, stay: the
-        // reviewer's go in as a new finding below.
-        let earlier = earlier.filter(|i| {
-            let f = &review.findings[*i];
-            !f.yours && f.state != FindingState::Posted
-        });
-        if let Some(i) = earlier {
-            let f = &mut review.findings[i];
+        },
+        |f, (raw, repo, file, at)| {
             f.changed = (f.title.trim(), f.body.trim(), f.fix.trim())
                 != (raw.title.trim(), raw.body.trim(), raw.fix.trim());
             f.severity = raw.severity;
@@ -618,17 +607,8 @@ pub fn import(
             (f.title, f.body, f.fix) = (raw.title, raw.body, raw.fix);
             f.run = run;
             f.placed = at;
-            out.again += 1;
-            continue;
-        }
-        let id = loop {
-            k += 1;
-            let id = format!("r{run}-{k}");
-            if review.finding(&id).is_none() {
-                break id;
-            }
-        };
-        review.findings.push(Finding {
+        },
+        |id, (raw, repo, file, at)| Finding {
             id,
             severity: raw.severity,
             repo,
@@ -641,17 +621,22 @@ pub fn import(
             run,
             placed: at,
             ..Finding::default()
-        });
-        out.new += 1;
-    }
-    for f in &mut review.findings[..before] {
-        if f.state == FindingState::Sent && !raised.contains(&f.id) {
-            f.state = FindingState::Fixed;
-            out.fixed += 1;
-        }
-    }
+        },
+        // One raised again, the user's own too, is open again if it was sent
+        // or fixed; one sent and not raised again is fixed.
+        |f, raised| {
+            f.state = match (f.state, raised) {
+                (FindingState::Sent | FindingState::Fixed, true) => FindingState::Open,
+                (FindingState::Sent, false) => {
+                    fixed += 1;
+                    FindingState::Fixed
+                }
+                (state, _) => state,
+            };
+        },
+    );
     for f in &mut kept {
-        if f.state == FindingState::Sent && !raised.contains(&f.id) {
+        if f.state == FindingState::Sent && !merged.raised.contains(&f.id) {
             f.state = FindingState::Fixed;
         }
     }
@@ -662,7 +647,21 @@ pub fn import(
         });
     }
     review.n = run;
-    out
+    Imported {
+        new: merged.new,
+        again: merged.again,
+        fixed,
+    }
+}
+
+impl RunItem for Finding {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn own(&self) -> bool {
+        self.yours || self.state == FindingState::Posted
+    }
 }
 
 /// Decide finding `id` of `review`: what it is now, in words for the
@@ -963,9 +962,9 @@ pub(crate) fn no_headings(text: &str) -> String {
 /// nothing needs an agent's plan (`needs_plan`): `fix_round::missing` passes
 /// it, and each finding is one thing to tick.
 pub fn fixes_plan(review: &AiReview, title: &str, multi: bool) -> String {
-    let mut md = format!(
-        "# Fix plan of \u{201c}{title}\u{201d}\n\ngerdr wrote this from AI review's findings: the user takes them as they are, with no comment of their own, so no plan was asked for. Find each one's cause in the code before you change it.\n\n## {}\n",
-        super::fix_round::FIXES
+    let mut md = super::fix_round::header(
+        title,
+        "AI review's findings: the user takes them as they are, with no comment of their own, so no plan was asked for. Find each one's cause in the code before you change it.",
     );
     for f in to_fix(review) {
         md.push_str(&format!("\n### {}: {}\n\n", f.id, f.title));

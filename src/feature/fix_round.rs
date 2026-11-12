@@ -50,6 +50,14 @@ pub const FILE: &str = "fix-plan.md";
 pub const COMMENTS: &str = "fix-plan-comments.json";
 /// The section a plan must have, and not leave empty.
 pub const FIXES: &str = "Fixes";
+
+/// The head of a fix plan gerdr writes itself for feature `title`, up to its
+/// empty `FIXES` section: `from` says what it was written from and where to
+/// look ("gerdr wrote this from …").
+pub fn header(title: &str, from: &str) -> String {
+    format!("# Fix plan of \u{201c}{title}\u{201d}\n\ngerdr wrote this from {from}\n\n## {FIXES}\n")
+}
+
 /// How a round stands once every fix of it is ticked in the build log.
 pub const SENT: &str = "fixes made";
 /// How long an agent told to compact may show no work: a chat too short to
