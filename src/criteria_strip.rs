@@ -224,7 +224,8 @@ const STRIP_STATES: [StripCtx; 3] = [
 ];
 
 /// The strip's keys on a criterion; its tooltips say them. Up / Down and
-/// Ctrl+PgUp / Ctrl+PgDn step through the criteria after it.
+/// Ctrl+PgUp / Ctrl+PgDn step through the criteria after it. Aliases
+/// (no footer, no F1) keep the presses that worked before the table.
 const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
     Binding {
         chord: "Space",
@@ -268,10 +269,34 @@ const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
         f1: "give the keys back to the app",
     },
     Binding {
+        chord: "Shift+Esc",
+        does: |_| Some(StripKey::Close),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+Esc",
+        does: |_| Some(StripKey::Close),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Alt+Esc",
+        does: |_| Some(StripKey::Close),
+        footer: false,
+        f1: "",
+    },
+    Binding {
         chord: "Ctrl+O",
         does: |_| Some(StripKey::OnPage),
         footer: true,
         f1: "show it on Manual test's page",
+    },
+    Binding {
+        chord: "Ctrl+Super+O",
+        does: |_| Some(StripKey::OnPage),
+        footer: false,
+        f1: "",
     },
     Binding {
         chord: "Alt+Down",
@@ -280,10 +305,22 @@ const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
         f1: "fold the strip to a chip",
     },
     Binding {
+        chord: "Alt+Shift+Down",
+        does: |_| Some(StripKey::Fold),
+        footer: false,
+        f1: "",
+    },
+    Binding {
         chord: "Alt+C",
         does: |_| Some(StripKey::Shot),
         footer: true,
         f1: "add a screenshot of the page to the note",
+    },
+    Binding {
+        chord: "Alt+Super+C",
+        does: |_| Some(StripKey::Shot),
+        footer: false,
+        f1: "",
     },
 ];
 
@@ -319,6 +356,12 @@ const NOTE_KEYS: &[Binding<(), StripKey>] = &[
         does: |_| Some(StripKey::Shot),
         footer: true,
         f1: "add a screenshot of the page to the note",
+    },
+    Binding {
+        chord: "Alt+Super+C",
+        does: |_| Some(StripKey::Shot),
+        footer: false,
+        f1: "",
     },
 ];
 
@@ -1071,6 +1114,16 @@ mod tests {
         // A press gives `f` and `c` as their own symbols, no Shift (K8).
         let bare = ModifiersState::default();
         assert!(key_table::press(STRIP_KEYS, untried, &bare, Keysym::c).is_some());
+        // Presses that worked before the table still do.
+        assert_eq!(press(untried, "Shift+Esc"), Some(StripKey::Close));
+        assert_eq!(press(untried, "Alt+Shift+Down"), Some(StripKey::Fold));
+        assert_eq!(press(untried, "Ctrl+Super+O"), Some(StripKey::OnPage));
+        let alt = ModifiersState {
+            alt: true,
+            ..Default::default()
+        };
+        let kp = key_table::press(STRIP_KEYS, untried, &alt, Keysym::KP_Down);
+        assert_eq!(kp, Some(StripKey::Fold));
         assert_eq!(strip_chord(&StripKey::AddComment), "C");
         assert_eq!(strip_chord(&StripKey::Fold), "Alt+Down");
         assert_eq!(
