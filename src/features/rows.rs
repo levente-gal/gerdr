@@ -1869,7 +1869,8 @@ pub(super) fn recap_card(feature: &Feature, state: &PanelState, now: u64) -> chr
     ));
     let mut stages = Vec::new();
     let mut since = feature.created;
-    for stage in Stage::ALL.into_iter().filter(|s| *s != Stage::Ship) {
+    // Those it went through: a review's before Verify were marked, not run.
+    for stage in (feature.stages().iter().copied()).filter(|s| *s != Stage::Ship) {
         let Some(mark) = feature.marks.get(&stage) else {
             continue;
         };
@@ -1895,7 +1896,11 @@ pub(super) fn recap_card(feature: &Feature, state: &PanelState, now: u64) -> chr
         since = since.max(mark.at);
         stages.push((stage.label().to_owned(), said.join(" \u{b7} ")));
     }
-    let (summary, summary_note) = recap_summary(feature, probe);
+    // A review's text is the user's, under Submit: no summary of an agent's.
+    let (summary, summary_note) = match feature.pull() {
+        Some(_) => (Vec::new(), None),
+        None => recap_summary(feature, probe),
+    };
     chrome::RecapCard {
         summary,
         summary_note,

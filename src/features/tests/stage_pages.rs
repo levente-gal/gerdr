@@ -2181,3 +2181,26 @@ fn discover_and_plan_list_their_drafts_as_cards() {
     panel.toggle_rounds(&f, stage);
     assert_eq!(panel.fix_rounds_flipped, BTreeSet::from([2]));
 }
+
+/// A pull request's review has its recap on Ship too: the stages it went
+/// through, from Verify on, and no summary, as its text is the user's.
+#[test]
+fn a_review_recaps_its_own_stages_on_ship() {
+    let mut f = feature("pr-12", vec![repo("api", true)], Stage::ALL.len() - 1);
+    f.kind = feature::Kind::PrReview(vec![feature::pr::PullRef {
+        repo: "api".into(),
+        number: 12,
+        url: "https://github.com/o/r/pull/12".into(),
+        ..Default::default()
+    }]);
+    let state = PanelState::default();
+    let page = stage_page(&f, Stage::Ship, &state, &[], 2_060);
+    let Some(PageSection::Recap(recap)) = (page.sections.iter())
+        .find(|s| matches!(s, PageSection::Recap(_)))
+    else {
+        panic!("no recap: {:?}", page.sections);
+    };
+    let names: Vec<&str> = recap.stages.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["Verify", "AI review", "Code review", "Manual test"]);
+    assert!(recap.summary.is_empty() && recap.summary_note.is_none());
+}

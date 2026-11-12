@@ -262,6 +262,7 @@ pub(super) fn stage_page(
             }
             Stage::Ship if feature.pull().is_some() => {
                 sections.extend(card());
+                sections.push(PageSection::Recap(recap_card(feature, state, now)));
                 sections.extend(submit_sections(feature, state, actions, now));
                 sections.extend(shipped_after_group(feature, actions, now));
             }
