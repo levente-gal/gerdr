@@ -105,17 +105,35 @@ pub struct WelcomeLayout {
     pub bar: Rect,
 }
 
-/// Where the welcome screen's parts go on an output of `size` with `rows`
-/// projects in view: a column centred on it, its middle at
-/// `WELCOME_MIDDLE` of the height as far as it fits, the quit bar at the
-/// bottom. While `naming`, the name field takes the button's place, as wide
-/// as the column. With a `note`, it sits between the button and the hints.
-pub fn welcome_layout(
-    size: Size<i32, Logical>,
-    rows: usize,
-    naming: bool,
-    note: bool,
-) -> WelcomeLayout {
+/// What the welcome screen makes room for.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WelcomeParts {
+    /// The projects in view.
+    pub rows: usize,
+    /// The name field takes the button's place.
+    pub naming: bool,
+    /// A note sits under the button.
+    pub note: bool,
+}
+
+impl WelcomeParts {
+    /// What `view` shows.
+    pub fn of(view: &WelcomeView) -> Self {
+        Self {
+            rows: view.rows.len(),
+            naming: view.naming.is_some(),
+            note: view.note.is_some(),
+        }
+    }
+}
+
+/// Where the welcome screen's parts go on an output of `size` with
+/// `parts`: a column centred on it, its middle at `WELCOME_MIDDLE` of the
+/// height as far as it fits, the quit bar at the bottom. While naming, the
+/// name field takes the button's place, as wide as the column. With a
+/// note, it sits between the button and the hints.
+pub fn welcome_layout(size: Size<i32, Logical>, parts: WelcomeParts) -> WelcomeLayout {
+    let WelcomeParts { rows, naming, note } = parts;
     let w = WELCOME_WIDTH.min(size.w - 2 * HELP_MARGIN).max(1);
     let x = (size.w - w) / 2;
     let rect = |y: i32, h: i32| Rectangle::new((x, y).into(), (w, h).into());
@@ -208,12 +226,7 @@ pub fn welcome_hint(
     size: Size<i32, Logical>,
     pos: Point<f64, Logical>,
 ) -> Option<WelcomeHit> {
-    let layout = welcome_layout(
-        size,
-        view.rows.len(),
-        view.naming.is_some(),
-        view.note.is_some(),
-    );
+    let layout = welcome_layout(size, WelcomeParts::of(view));
     let (hints, quit) = hint_layout(view, &layout);
     if let Some(i) = hint_at(&welcome_hints(view), &hints, pos) {
         return Some(WelcomeHit::Hint(i));
@@ -283,7 +296,7 @@ pub fn welcome_field(
     scale: f64,
 ) -> Option<FieldSpot> {
     let line = view.naming.clone()?;
-    let area = welcome_layout(size, view.rows.len(), true, view.note.is_some()).button;
+    let area = welcome_layout(size, WelcomeParts::of(view)).button;
     Some(FieldSpot {
         size: FONT_SIZE,
         area,
@@ -318,12 +331,7 @@ impl Painter {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         c.fill(0, 0, c.w, c.h, p.tab_active);
-        let layout = welcome_layout(
-            size,
-            view.rows.len(),
-            view.naming.is_some(),
-            view.note.is_some(),
-        );
+        let layout = welcome_layout(size, WelcomeParts::of(view));
 
         self.centered(
             &mut c,
@@ -571,14 +579,24 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{
-        HINTS_GAP, ListBar, ProjectRow, WELCOME_CARD, WELCOME_CARD_GAP, WelcomeHit, WelcomeView,
-        running_label, welcome_label, welcome_layout, welcome_mark, welcome_page, welcome_thumb,
+        HINTS_GAP, ListBar, ProjectRow, WELCOME_CARD, WELCOME_CARD_GAP, WelcomeHit, WelcomeParts,
+        WelcomeView, running_label, welcome_label, welcome_layout, welcome_mark, welcome_page,
+        welcome_thumb,
     };
     use crate::chrome::{
         Painter, QuitHit, QuitRow, QuitView, Rect, TabStripView, TabView, Theme, ThemeMode, inside,
     };
     use crate::text_field::Line;
     use smithay::utils::{Logical, Size};
+
+    /// What a welcome screen with `rows` projects in view and nothing else
+    /// makes room for.
+    fn parts(rows: usize) -> WelcomeParts {
+        WelcomeParts {
+            rows,
+            ..WelcomeParts::default()
+        }
+    }
 
     fn row(name: &str, running: Option<bool>, current: bool) -> ProjectRow {
         ProjectRow {
@@ -619,7 +637,7 @@ mod tests {
 
     #[test]
     fn a_cards_mark_is_on_it_and_says_whether_it_runs() {
-        let layout = welcome_layout((1280, 800).into(), 3, false, false);
+        let layout = welcome_layout((1280, 800).into(), parts(3));
         for row in &layout.rows {
             let mark = welcome_mark(*row);
             assert!(inside(*row, mark));
@@ -635,7 +653,7 @@ mod tests {
             let output = Rect::from_size(size);
             let rows = welcome_page(size);
             for (naming, note) in [(false, false), (true, true), (false, true)] {
-                let l = welcome_layout(size, rows, naming, note);
+                let l = welcome_layout(size, WelcomeParts { rows, naming, note });
                 for part in [
                     l.greeting, l.subtitle, l.label, l.list, l.button, l.note, l.hints, l.bar,
                 ] {
@@ -665,7 +683,7 @@ mod tests {
     #[test]
     fn the_label_is_centred_in_the_column() {
         let size: Size<i32, Logical> = (1920, 1080).into();
-        let l = welcome_layout(size, 3, false, false);
+        let l = welcome_layout(size, parts(3));
         assert_eq!(l.label.loc.x, 1920 - (l.label.loc.x + l.label.size.w));
         assert_eq!(
             (l.label.loc.x, l.label.size.w),
@@ -683,13 +701,19 @@ mod tests {
     #[test]
     fn the_hints_sit_a_gap_under_the_button_or_its_note() {
         let size: Size<i32, Logical> = (1280, 800).into();
-        let plain = welcome_layout(size, 2, false, false);
+        let plain = welcome_layout(size, parts(2));
         assert_eq!(plain.note.size.h, 0);
         assert_eq!(
             plain.hints.loc.y,
             plain.button.loc.y + plain.button.size.h + HINTS_GAP
         );
-        let noted = welcome_layout(size, 2, false, true);
+        let noted = welcome_layout(
+            size,
+            WelcomeParts {
+                note: true,
+                ..parts(2)
+            },
+        );
         assert!(noted.note.size.h > 0);
         assert!(noted.note.loc.y > noted.button.loc.y + noted.button.size.h);
         assert_eq!(
@@ -705,7 +729,7 @@ mod tests {
     #[test]
     fn welcome_layout_without_rows_keeps_the_label() {
         let size: Size<i32, Logical> = (800, 600).into();
-        let l = welcome_layout(size, 0, false, false);
+        let l = welcome_layout(size, parts(0));
         assert!(l.rows.is_empty());
         assert_eq!(l.list.size.h, 0);
         assert!(l.label.size.h > 0);
@@ -715,9 +739,23 @@ mod tests {
     #[test]
     fn naming_widens_the_button_to_the_column() {
         let size: Size<i32, Logical> = (1920, 1080).into();
-        let button = welcome_layout(size, 3, false, false).button;
-        let field = welcome_layout(size, 3, true, false).button;
-        let list = welcome_layout(size, 3, true, false).list;
+        let button = welcome_layout(size, parts(3)).button;
+        let field = welcome_layout(
+            size,
+            WelcomeParts {
+                naming: true,
+                ..parts(3)
+            },
+        )
+        .button;
+        let list = welcome_layout(
+            size,
+            WelcomeParts {
+                naming: true,
+                ..parts(3)
+            },
+        )
+        .list;
         assert!(field.size.w > button.size.w);
         assert_eq!((field.loc.x, field.size.w), (list.loc.x, list.size.w));
         assert_eq!(field.loc.y, button.loc.y);
@@ -796,7 +834,13 @@ mod tests {
     #[test]
     fn the_scrollbar_stands_right_of_the_cards_while_not_all_show() {
         let mut v = view();
-        let layout = welcome_layout((1280, 800).into(), v.rows.len(), false, true);
+        let layout = welcome_layout(
+            (1280, 800).into(),
+            WelcomeParts {
+                note: true,
+                ..parts(v.rows.len())
+            },
+        );
         assert_eq!(welcome_thumb(&v, &layout), None);
         v.scroll = Some(ListBar {
             down: 6.0,

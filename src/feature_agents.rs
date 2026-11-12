@@ -262,6 +262,15 @@ enum Verdict {
     Blocked(String),
 }
 
+/// What a run was asked, as `judge` needs it.
+#[derive(Clone, Copy, Debug, Default)]
+struct Asked {
+    /// A chat: its file comes when the user and it agree, not as it rests.
+    chat: bool,
+    /// It was told once already that its file isn't right.
+    nudged: bool,
+}
+
 /// Judge a run: `status` is herdr's for its pane (`None`: herdr doesn't
 /// list it), `alive` whether its pane is still there.
 fn judge(
@@ -269,10 +278,10 @@ fn judge(
     status: Option<AgentStatus>,
     alive: bool,
     file: &File,
-    discover: bool,
-    nudged: bool,
+    asked: Asked,
     now: Instant,
 ) -> Verdict {
+    let Asked { chat, nudged } = asked;
     match file {
         File::Bad(_, lacks) => watch.missing = lacks.clone(),
         _ => watch.missing.clear(),
@@ -307,7 +316,7 @@ fn judge(
         return match file {
             File::Good(_) | File::Partial(..) | File::Blocked(..) => Verdict::Wait,
             // A chat: the brief comes when the user and it agree.
-            File::Absent | File::Old if discover => Verdict::Wait,
+            File::Absent | File::Old if chat => Verdict::Wait,
             File::Bad(..) if nudged => Verdict::StillBad,
             _ if nudged => Verdict::Wait,
             File::Absent | File::Old => Verdict::Nudge { absent: true },
@@ -2271,9 +2280,11 @@ impl Gerdr {
                 status,
                 alive,
                 &file,
-                // Asked about its suggestions, it may only answer: a chat.
-                stage == Stage::Discover || deciding.is_some(),
-                run.nudged,
+                Asked {
+                    // Asked about its suggestions, it may only answer: a chat.
+                    chat: stage == Stage::Discover || deciding.is_some(),
+                    nudged: run.nudged,
+                },
                 now,
             );
             // Done on another machine, it is judged on all it did: nothing is
@@ -2637,7 +2648,7 @@ impl Gerdr {
                 };
             }
             if !matches!(
-                judge(watch, status, alive, &file, false, false, now),
+                judge(watch, status, alive, &file, Asked::default(), now),
                 Verdict::Nudge { .. }
             ) {
                 continue;
@@ -3238,6 +3249,20 @@ mod tests {
     use super::*;
     use crate::feature::fix_round::FixRound;
 
+    /// A run asked nothing special, one that is a chat, one told once.
+    const PLAIN: Asked = Asked {
+        chat: false,
+        nudged: false,
+    };
+    const CHAT: Asked = Asked {
+        chat: true,
+        nudged: false,
+    };
+    const NUDGED: Asked = Asked {
+        chat: false,
+        nudged: true,
+    };
+
     #[test]
     fn an_agent_waiting_for_its_prompt_is_a_gate_while_its_tab_is_there() {
         let mut f = crate::features::tests::feature(
@@ -3770,39 +3795,15 @@ mod tests {
         let mut w = watch();
         // Idle before it worked: still starting.
         assert_eq!(
-            judge(
-                &mut w,
-                Some(AgentStatus::Idle),
-                true,
-                &good,
-                false,
-                false,
-                t
-            ),
+            judge(&mut w, Some(AgentStatus::Idle), true, &good, PLAIN, t),
             Verdict::Wait
         );
         assert_eq!(
-            judge(
-                &mut w,
-                Some(AgentStatus::Working),
-                true,
-                &good,
-                false,
-                false,
-                t
-            ),
+            judge(&mut w, Some(AgentStatus::Working), true, &good, PLAIN, t),
             Verdict::Wait
         );
         assert_eq!(
-            judge(
-                &mut w,
-                Some(AgentStatus::Done),
-                true,
-                &good,
-                false,
-                false,
-                t
-            ),
+            judge(&mut w, Some(AgentStatus::Done), true, &good, PLAIN, t),
             Verdict::Ready((5, 9))
         );
     }
@@ -3813,34 +3814,34 @@ mod tests {
         let mut w = watch();
         w.worked = true;
         let idle = Some(AgentStatus::Idle);
-        judge(&mut w, idle, true, &File::Absent, false, false, t);
+        judge(&mut w, idle, true, &File::Absent, PLAIN, t);
         let t = t + REST;
         assert_eq!(
-            judge(&mut w, idle, true, &File::Absent, false, false, t),
+            judge(&mut w, idle, true, &File::Absent, PLAIN, t),
             Verdict::Nudge { absent: true }
         );
         assert_eq!(
-            judge(&mut w, idle, true, &File::Absent, false, true, t),
+            judge(&mut w, idle, true, &File::Absent, NUDGED, t),
             Verdict::Wait
         );
         let bad = File::Bad((1, 1), vec!["no Outcome section".into()]);
         assert_eq!(
-            judge(&mut w, idle, true, &bad, true, false, t),
+            judge(&mut w, idle, true, &bad, CHAT, t),
             Verdict::Nudge { absent: false }
         );
         assert_eq!(w.missing, vec!["no Outcome section".to_owned()]);
         // Told once, it may rest on a file still bad: that is for the user.
         assert_eq!(
-            judge(&mut w, idle, true, &bad, false, true, t),
+            judge(&mut w, idle, true, &bad, NUDGED, t),
             Verdict::StillBad
         );
         // A Discover chat without its brief yet is left to talk.
         assert_eq!(
-            judge(&mut w, idle, true, &File::Absent, true, false, t),
+            judge(&mut w, idle, true, &File::Absent, CHAT, t),
             Verdict::Wait
         );
         assert_eq!(
-            judge(&mut w, idle, true, &File::Old, true, false, t),
+            judge(&mut w, idle, true, &File::Old, CHAT, t),
             Verdict::Wait
         );
     }
@@ -3880,8 +3881,7 @@ mod tests {
         let t = Instant::now();
         let mut w = watch();
         let (idle, working) = (Some(AgentStatus::Idle), Some(AgentStatus::Working));
-        let mut at =
-            |status, since| judge(&mut w, status, true, &File::Absent, false, false, since);
+        let mut at = |status, since| judge(&mut w, status, true, &File::Absent, PLAIN, since);
         // Starting up, it reads as working, then at rest, then gets its prompt.
         assert_eq!(at(working, t), Verdict::Wait);
         assert_eq!(at(idle, t + REST / 2), Verdict::Wait);
@@ -3897,10 +3897,7 @@ mod tests {
         let mut w = watch();
         let idle = Some(AgentStatus::Idle);
         let good = File::Good((5, 9));
-        assert_eq!(
-            judge(&mut w, idle, true, &good, false, false, t),
-            Verdict::Wait
-        );
+        assert_eq!(judge(&mut w, idle, true, &good, PLAIN, t), Verdict::Wait);
         // Meanwhile gerdr, not the user, is what it waits on.
         assert!(w.reads() && !w.worked);
         let line = agent_line(&run(None), Stage::Plan, idle, Some(&w), 5_000);
@@ -3908,7 +3905,7 @@ mod tests {
         // Read in, its file is the user's: gerdr reads no more.
         assert!(!gerdr_reads(Some(&w), &run(Some(4_000))));
         assert_eq!(
-            judge(&mut w, idle, true, &good, false, false, t + STABLE),
+            judge(&mut w, idle, true, &good, PLAIN, t + STABLE),
             Verdict::Ready((5, 9))
         );
     }
@@ -3918,18 +3915,15 @@ mod tests {
         let t = Instant::now();
         let mut w = watch();
         let good = File::Good((5, 9));
+        assert_eq!(judge(&mut w, None, true, &good, PLAIN, t), Verdict::Wait);
         assert_eq!(
-            judge(&mut w, None, true, &good, false, false, t),
-            Verdict::Wait
-        );
-        assert_eq!(
-            judge(&mut w, None, true, &good, false, false, t + STABLE / 2),
+            judge(&mut w, None, true, &good, PLAIN, t + STABLE / 2),
             Verdict::Wait
         );
         // It changed: the wait starts again.
         let newer = File::Good((6, 9));
         assert_eq!(
-            judge(&mut w, None, true, &newer, false, false, t + STABLE),
+            judge(&mut w, None, true, &newer, PLAIN, t + STABLE),
             Verdict::Wait
         );
         assert_eq!(
@@ -3938,8 +3932,7 @@ mod tests {
                 Some(AgentStatus::Unknown),
                 true,
                 &newer,
-                false,
-                false,
+                PLAIN,
                 t + STABLE * 2
             ),
             Verdict::Ready((6, 9))
@@ -3951,18 +3944,18 @@ mod tests {
         let t = Instant::now();
         let mut w = watch();
         assert_eq!(
-            judge(&mut w, None, false, &File::Absent, false, false, t),
+            judge(&mut w, None, false, &File::Absent, PLAIN, t),
             Verdict::Wait
         );
         assert_eq!(
-            judge(&mut w, None, false, &File::Absent, false, false, t + STABLE),
+            judge(&mut w, None, false, &File::Absent, PLAIN, t + STABLE),
             Verdict::Gone
         );
         let mut w = watch();
         let good = File::Good((1, 2));
-        judge(&mut w, None, false, &good, false, false, t);
+        judge(&mut w, None, false, &good, PLAIN, t);
         assert_eq!(
-            judge(&mut w, None, false, &good, false, false, t + STABLE),
+            judge(&mut w, None, false, &good, PLAIN, t + STABLE),
             Verdict::Ready((1, 2))
         );
     }
@@ -4236,17 +4229,14 @@ mod tests {
         let mut w = Watch::of(1);
         let idle = Some(AgentStatus::Idle);
         // Not worked yet: nothing is decided.
-        assert_eq!(
-            judge(&mut w, idle, true, &blocked, false, false, t),
-            Verdict::Wait
-        );
+        assert_eq!(judge(&mut w, idle, true, &blocked, PLAIN, t), Verdict::Wait);
         let working = Some(AgentStatus::Working);
         assert_eq!(
-            judge(&mut w, working, true, &blocked, false, false, t),
+            judge(&mut w, working, true, &blocked, PLAIN, t),
             Verdict::Wait
         );
         assert_eq!(
-            judge(&mut w, idle, true, &blocked, false, false, t),
+            judge(&mut w, idle, true, &blocked, PLAIN, t),
             Verdict::Blocked("no such table".into())
         );
     }
@@ -4283,54 +4273,32 @@ mod tests {
         let mut w = watch();
         let idle = Some(AgentStatus::Idle);
         // Not before it worked.
+        assert_eq!(judge(&mut w, idle, true, &partial, PLAIN, t), Verdict::Wait);
         assert_eq!(
-            judge(&mut w, idle, true, &partial, false, false, t),
-            Verdict::Wait
-        );
-        assert_eq!(
-            judge(
-                &mut w,
-                Some(AgentStatus::Working),
-                true,
-                &partial,
-                false,
-                false,
-                t
-            ),
+            judge(&mut w, Some(AgentStatus::Working), true, &partial, PLAIN, t),
             Verdict::Wait
         );
         let stop = Verdict::Stop { done: 2, total: 4 };
-        assert_eq!(judge(&mut w, idle, true, &partial, false, false, t), stop);
+        assert_eq!(judge(&mut w, idle, true, &partial, PLAIN, t), stop);
         // A stop isn't a nudge, nudged before or not.
-        assert_eq!(judge(&mut w, idle, true, &partial, false, true, t), stop);
+        assert_eq!(judge(&mut w, idle, true, &partial, NUDGED, t), stop);
         assert!(w.missing.is_empty());
         // herdr doesn't know it: once the log stays as it is.
         let mut w = watch();
+        assert_eq!(judge(&mut w, None, true, &partial, PLAIN, t), Verdict::Wait);
         assert_eq!(
-            judge(&mut w, None, true, &partial, false, false, t),
+            judge(&mut w, None, true, &partial, PLAIN, t + STABLE),
             Verdict::Wait
         );
         assert_eq!(
-            judge(&mut w, None, true, &partial, false, false, t + STABLE),
-            Verdict::Wait
-        );
-        assert_eq!(
-            judge(
-                &mut w,
-                None,
-                true,
-                &partial,
-                false,
-                false,
-                t + MILESTONE_QUIET
-            ),
+            judge(&mut w, None, true, &partial, PLAIN, t + MILESTONE_QUIET),
             stop
         );
         // Its tab gone: stopped there too.
         let mut w = watch();
-        judge(&mut w, None, false, &partial, false, false, t);
+        judge(&mut w, None, false, &partial, PLAIN, t);
         assert_eq!(
-            judge(&mut w, None, false, &partial, false, false, t + STABLE),
+            judge(&mut w, None, false, &partial, PLAIN, t + STABLE),
             stop
         );
     }
@@ -4354,16 +4322,16 @@ mod tests {
             ..watch()
         };
         let partial = File::Partial((5, 9), 2, 4);
-        judge(&mut w, None, true, &partial, false, false, t);
+        judge(&mut w, None, true, &partial, PLAIN, t);
         assert_eq!(
-            judge(&mut w, None, true, &partial, false, false, t + STABLE * 3),
+            judge(&mut w, None, true, &partial, PLAIN, t + STABLE * 3),
             Verdict::Wait
         );
         // The next one ticked: quiet counts from there.
         let next = File::Partial((6, 9), 3, 4);
-        judge(&mut w, None, true, &next, false, false, t + STABLE * 3);
+        judge(&mut w, None, true, &next, PLAIN, t + STABLE * 3);
         assert_eq!(
-            judge(&mut w, None, true, &next, false, false, t + MILESTONE_QUIET),
+            judge(&mut w, None, true, &next, PLAIN, t + MILESTONE_QUIET),
             Verdict::Wait
         );
         assert_eq!(
@@ -4372,8 +4340,7 @@ mod tests {
                 None,
                 true,
                 &next,
-                false,
-                false,
+                PLAIN,
                 t + STABLE * 3 + MILESTONE_QUIET
             ),
             Verdict::Stop { done: 3, total: 4 }
@@ -4385,15 +4352,7 @@ mod tests {
             ..watch()
         };
         assert_eq!(
-            judge(
-                &mut w,
-                Some(AgentStatus::Idle),
-                true,
-                &partial,
-                false,
-                false,
-                t
-            ),
+            judge(&mut w, Some(AgentStatus::Idle), true, &partial, PLAIN, t),
             Verdict::Stop { done: 2, total: 4 }
         );
     }
@@ -4403,7 +4362,7 @@ mod tests {
         let t = Instant::now();
         let partial = File::Partial((5, 9), 2, 4);
         let stop = Verdict::Stop { done: 2, total: 4 };
-        let at = |w: &mut Watch, status, now| judge(w, status, true, &partial, false, false, now);
+        let at = |w: &mut Watch, status, now| judge(w, status, true, &partial, PLAIN, now);
         // herdr can't read it: the quiet log was its rest, on every tick.
         let mut w = watch();
         at(&mut w, None, t);

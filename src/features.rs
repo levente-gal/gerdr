@@ -76,8 +76,8 @@ use crate::feature::manual::Verdict;
 use crate::machine_work::takes_a_place;
 use crate::manual_test::Row;
 pub(crate) use crate::review_cards::{
-    CardId, CardKey, Item, ItemAct, ReviewCard, SUGGESTIONS_WRITING, can_decide, card_key,
-    card_tag, item_buttons, item_card, item_hints, items, items_count, next_open_card,
+    CardId, CardKey, CardPage, Item, ItemAct, ReviewCard, SUGGESTIONS_WRITING, can_decide,
+    card_key, card_tag, item_buttons, item_card, item_hints, items, items_count, next_open_card,
     note_actions, offers_fix_all, outcome_note, review_cards, why_not_decide,
 };
 use crate::{
@@ -2915,7 +2915,7 @@ fn review_actions(feature: &Feature, stage: Stage) -> Vec<(PageButton, PanelOutc
         )
     });
     let posts = feature.posts_review();
-    (cards.flat_map(|item| item_buttons(item, decides, posts)))
+    (cards.flat_map(|item| item_buttons(item, CardPage { decides, posts })))
         .chain(shows)
         .collect()
 }
@@ -7064,6 +7064,24 @@ fn snapshot(dir: &Path, feature: &Feature) -> std::io::Result<ai_work::BlobRef> 
     ai_work::blobs::put(dir, &record)
 }
 
+/// How `Gerdr::remove_feature` takes a feature's worktrees away.
+#[derive(Clone, Copy, Debug)]
+pub struct FeatureRemoval {
+    /// Mark the feature abandoned after.
+    pub abandon: bool,
+    /// Remove them with what they lose.
+    pub force: bool,
+}
+
+/// How `Gerdr::remove_repos` takes repositories out of a feature.
+#[derive(Clone, Copy, Debug)]
+pub struct RepoRemoval {
+    /// Remove their worktrees and branches with what they lose.
+    pub force: bool,
+    /// Agents go on reading their main checkouts.
+    pub to_context: bool,
+}
+
 impl Gerdr {
     // ------------------------------------------------------------ state
 
@@ -7961,7 +7979,13 @@ impl Gerdr {
             } => {
                 self.unbusy(&project, &slug, Job::Losses);
                 match losses.is_empty() {
-                    true => self.remove_feature(&project, &slug, false, false),
+                    true => {
+                        let how = FeatureRemoval {
+                            abandon: false,
+                            force: false,
+                        };
+                        self.remove_feature(&project, &slug, how)
+                    }
                     false => self.ask_remove_feature(project, slug, losses),
                 }
             }
@@ -10634,7 +10658,11 @@ impl Gerdr {
             return;
         };
         if !removal_asks(feature, &keys, &losses) {
-            return self.remove_repos(&project, &slug, &keys, false, to_context);
+            let how = RepoRemoval {
+                force: false,
+                to_context,
+            };
+            return self.remove_repos(&project, &slug, &keys, how);
         }
         let named: Vec<String> = (keys.iter()).map(|k| self.repo_label(feature, k)).collect();
         let named = named.join(", ");
@@ -10661,17 +10689,11 @@ impl Gerdr {
         );
     }
 
-    /// Take repositories `keys` out of feature `slug` off the thread: their
-    /// worktrees and branches go (`force`: with what they lose), and with
-    /// `to_context` agents go on reading their main checkouts.
-    pub fn remove_repos(
-        &mut self,
-        project: &str,
-        slug: &str,
-        keys: &[String],
-        force: bool,
-        to_context: bool,
-    ) {
+    /// Take repositories `keys` out of feature `slug` off the thread, as
+    /// `how` says: their worktrees and branches go, and agents may go on
+    /// reading their main checkouts.
+    pub fn remove_repos(&mut self, project: &str, slug: &str, keys: &[String], how: RepoRemoval) {
+        let RepoRemoval { force, to_context } = how;
         if !self.may_remove_repos(project, slug, keys, to_context) {
             return;
         }
@@ -11382,9 +11404,10 @@ impl Gerdr {
         self.ask_remove_worktrees(question, body, go, then);
     }
 
-    /// Remove feature `slug`'s worktrees off the thread (`force`: with
-    /// what they lose), then mark it abandoned if `abandon`.
-    pub fn remove_feature(&mut self, project: &str, slug: &str, abandon: bool, force: bool) {
+    /// Remove feature `slug`'s worktrees off the thread as `how` says: with
+    /// what they lose or not, then marking it abandoned or not.
+    pub fn remove_feature(&mut self, project: &str, slug: &str, how: FeatureRemoval) {
+        let FeatureRemoval { abandon, force } = how;
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
@@ -11576,7 +11599,8 @@ impl Gerdr {
                 match part {
                     chrome::SearchPart::Close => self.close_criteria_search(),
                     chrome::SearchPart::Prev | chrome::SearchPart::Next => {
-                        self.go_to_match(part == chrome::SearchPart::Prev, false);
+                        let back = part == chrome::SearchPart::Prev;
+                        self.go_to_match(back, crate::manual_test::MatchFrom::Here);
                     }
                     _ => self.open_criteria_search(),
                 }
@@ -11588,7 +11612,7 @@ impl Gerdr {
                     .and_then(|(view, _)| Some(view.review_switch?.buttons.get(i)?.button));
                 if let Some(button) = button {
                     let hit = chrome::ReposHit::Button(button);
-                    self.worktree_diff_hit(hit, false, false, false);
+                    self.worktree_diff_hit(hit, crate::worktree_diff::DiffClick::default());
                 }
                 return;
             }
@@ -12538,8 +12562,9 @@ impl Gerdr {
         };
         let gate = crate::feature_agents::gate_of(f, |_| manual).is_some();
         let busy = mine().next().is_some();
+        let hold = CardHold { gate, busy };
         let back = rework(f, ctx);
-        let (stage, text, tone) = card_status(f, &line, gate, busy, back, feature::now());
+        let (stage, text, tone) = card_status(f, &line, hold, back, feature::now());
         // What another machine writes says which, first as the end may not fit.
         let text = match f.writer.as_deref() {
             Some(id) => format!("{}: {text}", self.machine_name(id)),
@@ -13502,8 +13527,7 @@ impl<'a> From<&PanelState<'a>> for LineState<'a> {
 fn card_status(
     feature: &Feature,
     state: &LineState,
-    gate: bool,
-    busy: bool,
+    hold: CardHold,
     back: Option<Rework>,
     now: u64,
 ) -> (Option<Stage>, String, chrome::CardTone) {
@@ -13529,7 +13553,7 @@ fn card_status(
     }
     let stage = feature.current();
     let line = card_line(feature, stage, state, now);
-    (stage, line, card_tone(feature, stage, state, gate, busy))
+    (stage, line, card_tone(feature, stage, state, hold))
 }
 
 /// A card's line for `feature` at `stage`: the stage and how it stands,
@@ -13551,15 +13575,23 @@ fn card_line(feature: &Feature, stage: Option<Stage>, state: &LineState, now: u6
     format!("{} \u{b7} {what}", stage.label())
 }
 
-/// How `feature` at `stage` stands, for its card; `gate`: a gate holds it,
-/// `busy`: a job of it runs.
+/// What holds `feature` or keeps it busy, for its card's tone.
+#[derive(Clone, Copy, Debug, Default)]
+struct CardHold {
+    /// A gate holds it.
+    gate: bool,
+    /// A job of it runs.
+    busy: bool,
+}
+
+/// How `feature` at `stage` stands, for its card, as `hold` says.
 fn card_tone(
     feature: &Feature,
     stage: Option<Stage>,
     state: &LineState,
-    gate: bool,
-    busy: bool,
+    hold: CardHold,
 ) -> chrome::CardTone {
+    let CardHold { gate, busy } = hold;
     let run = stage.and_then(|stage| feature.runs.get(&stage));
     let failed =
         |stage| stage_failed(feature, stage, state.probe) || agent_failed(feature, stage, state);
@@ -17752,12 +17784,11 @@ fn writers_tab_hints(
                 }
             }
             if let Some(i) = item {
-                hints.extend(item_hints(
-                    i,
+                let page = CardPage {
                     decides,
-                    panel.armed.is_some(),
-                    feature.posts_review(),
-                ));
+                    posts: feature.posts_review(),
+                };
+                hints.extend(item_hints(i, page, panel.armed.is_some()));
             }
             // Off a reviewer's card, `c` adds a comment of the user's own.
             if decides && diff_note.is_none() && item.is_none_or(Item::yours) {
@@ -28061,7 +28092,7 @@ pub(crate) mod tests {
             passed: Some(false),
             ..Default::default()
         });
-        let status = |back| card_status(&f, &state, false, false, back, 0);
+        let status = |back| card_status(&f, &state, CardHold::default(), back, 0);
         let runs = status(Some(Rework::Runs(Dot::Working)));
         assert_eq!(runs.0, Some(Stage::Build));
         assert_eq!(runs.1, "Build \u{b7} working again");
@@ -28077,7 +28108,7 @@ pub(crate) mod tests {
         let state = LineState::from(&PanelState::default());
         let verify = feature("d", vec![repo("api", true)], stage_index(Stage::Verify));
         let mut f = in_round(verify, Stage::Verify, FixPhase::Fixing);
-        let status = |f: &Feature| card_status(f, &state, false, false, None, 0).1;
+        let status = |f: &Feature| card_status(f, &state, CardHold::default(), None, 0).1;
         assert_eq!(status(&f), "Verify \u{b7} making fixes");
         // Its first commit has Build to do again: the rail's node is Build's.
         f.untick(Stage::Build, 5);
@@ -28112,7 +28143,7 @@ pub(crate) mod tests {
             ..LineState::from(&PanelState::default())
         };
         assert_eq!(current_line(&f, Stage::Plan, &state, 0), "failed");
-        let tone = card_tone(&f, Some(Stage::Plan), &state, false, false);
+        let tone = card_tone(&f, Some(Stage::Plan), &state, CardHold::default());
         assert_eq!(tone, chrome::CardTone::Failed);
         let ctx = RowCtx::default();
         assert_eq!(node_mark(&f, Stage::Plan, ctx, &state), NodeMark::Failed);
@@ -28146,7 +28177,7 @@ pub(crate) mod tests {
         use chrome::CardTone::{Failed, Idle, Waits, Working};
         let state = LineState::from(&PanelState::default());
         let f = feature("d", vec![repo("api", true)], 2);
-        let tone = |gate, busy| card_tone(&f, Some(Stage::Build), &state, gate, busy);
+        let tone = |gate, busy| card_tone(&f, Some(Stage::Build), &state, CardHold { gate, busy });
         assert_eq!(tone(false, false), Idle);
         assert_eq!(tone(false, true), Working);
         assert_eq!(tone(true, true), Waits);
@@ -28155,8 +28186,12 @@ pub(crate) mod tests {
             passed: Some(false),
             ..Default::default()
         });
+        let hold = CardHold {
+            gate: true,
+            busy: true,
+        };
         assert_eq!(
-            card_tone(&verify, Some(Stage::Verify), &state, true, true),
+            card_tone(&verify, Some(Stage::Verify), &state, hold),
             Failed
         );
     }
@@ -29920,7 +29955,11 @@ mod pr_page_tests {
         assert_eq!(f.review.as_ref().unwrap().open(), 1);
         let items = items(&f, Stage::AiReview);
         let open = items.iter().find(|i| i.id() == "r1-1").copied().unwrap();
-        let labels: Vec<String> = (item_buttons(open, true, true).into_iter())
+        let page = CardPage {
+            decides: true,
+            posts: true,
+        };
+        let labels: Vec<String> = (item_buttons(open, page).into_iter())
             .map(|(b, _)| b.label)
             .collect();
         assert!(labels.contains(&"Comment".to_owned()), "{labels:?}");

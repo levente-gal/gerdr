@@ -422,7 +422,12 @@ impl Gerdr {
                 };
                 let watch = self.features.build.fix_watches.entry(key).or_default();
                 let since = watch.since.elapsed();
-                match fix_round::compact_next(watch.worked, status, alive, since) {
+                let seen = fix_round::Seen {
+                    worked: watch.worked,
+                    status,
+                    alive,
+                };
+                match fix_round::compact_next(seen, since) {
                     Compact::Wait => {}
                     Compact::Worked => watch.worked = true,
                     Compact::Go if round.phase == FixPhase::Compacting => {
@@ -456,7 +461,12 @@ impl Gerdr {
                 let watch = self.features.build.fix_watches.entry(key).or_default();
                 let since = watch.since.elapsed();
                 let refused = watch.refused;
-                match fix_round::plan_next(watch.worked, status, alive, since, written) {
+                let seen = fix_round::Seen {
+                    worked: watch.worked,
+                    status,
+                    alive,
+                };
+                match fix_round::plan_next(seen, since, written) {
                     Plan::Wait => {}
                     Plan::Worked => {
                         watch.worked = true;
@@ -568,7 +578,7 @@ impl Gerdr {
             1 => "1 fix".to_owned(),
             n => format!("{n} fixes"),
         };
-        match fix_round::fixes_next(status, alive, rested, left.len(), blocked.is_some(), told) {
+        match fix_round::fixes_next(status, alive, rested, left.len(), blocked.as_deref(), told) {
             Fixes::Wait => {}
             Fixes::Worked => {
                 let watch = (self.features.build.fix_watches)

@@ -1085,7 +1085,12 @@ impl Gerdr {
         let shift = mods.is_some_and(|m| m.shift);
         let ctrl = mods.is_some_and(|m| m.ctrl && !m.shift);
         if self.wd().is_some() {
-            return self.worktree_diff_hit(hit, double, shift, ctrl);
+            let click = crate::worktree_diff::DiffClick {
+                double,
+                shift,
+                ctrl,
+            };
+            return self.worktree_diff_hit(hit, click);
         }
         let count = self.press_count.max(1);
         let page = self.repos_page();

@@ -1605,7 +1605,7 @@ impl Panel {
         if mods.alt || mods.logo {
             return None;
         }
-        let (ctrl, shift) = (mods.ctrl, mods.shift);
+        let ctrl = mods.ctrl;
         // What changes the list, rather than act on its selection.
         match sym {
             Keysym::Tab | Keysym::ISO_Left_Tab if !ctrl && list.active.is_some() => {
@@ -1617,24 +1617,24 @@ impl Panel {
             Keysym::r | Keysym::R if ctrl => return Some(Outcome::Refresh),
             _ => {
                 let listed = self.listed(list);
-                return self.list_key(ctrl, shift, sym, listed, armed, list);
+                return self.list_key(mods, sym, listed, armed, list);
             }
         }
         self.refilter(list);
         None
     }
 
-    /// A key for the list in `listed`, with Ctrl and Shift as said;
-    /// `armed`, the item a first Delete was on.
+    /// A key for the list in `listed`, with Ctrl and Shift as `mods` says
+    /// (no Alt or Logo); `armed`, the item a first Delete was on.
     fn list_key(
         &mut self,
-        ctrl: bool,
-        shift: bool,
+        mods: &ModifiersState,
         sym: Keysym,
         listed: Listed,
         armed: Option<ItemId>,
         list: &Listing,
     ) -> Option<Outcome> {
+        let (ctrl, shift) = (mods.ctrl, mods.shift);
         let page = list.page;
         self.settle(&listed, page);
         let k = self.current(&listed.items);

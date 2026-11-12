@@ -1994,6 +1994,15 @@ fn ctx<'a>(
     }
 }
 
+/// How a click on the worktree's diff came.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DiffClick {
+    /// The second of a double click.
+    pub(crate) double: bool,
+    pub(crate) shift: bool,
+    pub(crate) ctrl: bool,
+}
+
 impl crate::Gerdr {
     /// The diff on show: the keys, clicks and views of the panel act on
     /// it.
@@ -2541,17 +2550,15 @@ impl crate::Gerdr {
         self.worktree_done(done)
     }
 
-    /// A click on `hit` in the worktree's diff, the second of a double
-    /// click when `double`: the press, held, drags the cursor's range.
-    /// With Shift it reaches the range there; with Ctrl it opens the code
-    /// there in Zed.
-    pub(crate) fn worktree_diff_hit(
-        &mut self,
-        hit: ReposHit,
-        double: bool,
-        shift: bool,
-        ctrl: bool,
-    ) {
+    /// A `click` on `hit` in the worktree's diff: the press, held, drags
+    /// the cursor's range. With Shift it reaches the range there; with
+    /// Ctrl it opens the code there in Zed.
+    pub(crate) fn worktree_diff_hit(&mut self, hit: ReposHit, click: DiffClick) {
+        let DiffClick {
+            double,
+            shift,
+            ctrl,
+        } = click;
         let env = self.worktree_env();
         let count = self.press_count.max(1);
         let Some(wd) = self.wd_mut() else {

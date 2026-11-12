@@ -201,14 +201,19 @@ pub fn detail_share(mode: DocMode, wide: bool, split: f64) -> f64 {
     }
 }
 
-/// The switch of `file`'s tab: Split only on an output `wide` enough, and
-/// what needs the page off `without_page`. None with nothing to go to.
-pub fn mode_switch(
-    file: DocFile,
-    mode: DocMode,
-    wide: bool,
-    without_page: bool,
-) -> Option<ModeSwitch> {
+/// What a file's tab has to show its mode switch in.
+#[derive(Clone, Copy, Debug)]
+pub struct ModeRoom {
+    /// The output is wide enough for Split.
+    pub wide: bool,
+    /// The page can't be had: what needs it is off.
+    pub without_page: bool,
+}
+
+/// The switch of `file`'s tab: Split only on an output wide enough, and
+/// what needs the page off without it. None with nothing to go to.
+pub fn mode_switch(file: DocFile, mode: DocMode, room: ModeRoom) -> Option<ModeSwitch> {
+    let ModeRoom { wide, without_page } = room;
     let shown = (DocMode::choices(file).iter().copied())
         .filter(|m| wide || *m != DocMode::Split || mode == DocMode::Split);
     let shown: Vec<DocMode> = shown.collect();
@@ -278,7 +283,8 @@ impl Gerdr {
         let wide = self.doc_wide();
         view.flat = true;
         view.detail_share = detail_share(tab.mode, wide, self.previews.share);
-        view.modes = mode_switch(file, tab.mode, wide, tab.no_browser);
+        let without_page = tab.no_browser;
+        view.modes = mode_switch(file, tab.mode, ModeRoom { wide, without_page });
         if tab.mode == DocMode::Preview {
             view.detail = DetailView::default();
             (view.hints)
@@ -858,35 +864,50 @@ mod tests {
         assert_eq!(detail_share(DocMode::Split, false, 0.4), 1.0);
     }
 
+    /// An output wide enough for Split, one too narrow, and a wide one
+    /// without the page.
+    const WIDE: ModeRoom = ModeRoom {
+        wide: true,
+        without_page: false,
+    };
+    const NARROW: ModeRoom = ModeRoom {
+        wide: false,
+        without_page: false,
+    };
+    const NO_PAGE: ModeRoom = ModeRoom {
+        wide: true,
+        without_page: true,
+    };
+
     #[test]
     fn the_switch_says_what_can_be_had() {
         let evidence = DocFile::Evidence;
-        let wide = mode_switch(evidence, DocMode::Review, true, false).unwrap();
+        let wide = mode_switch(evidence, DocMode::Review, WIDE).unwrap();
         assert_eq!(wide.labels, ["Preview", "Review", "Split"]);
         assert_eq!(wide.on, 1);
         assert!(wide.off.is_empty());
         // No room for Split, unless it is what shows.
-        let narrow = mode_switch(evidence, DocMode::Preview, false, false).unwrap();
+        let narrow = mode_switch(evidence, DocMode::Preview, NARROW).unwrap();
         assert_eq!(narrow.labels, ["Preview", "Review"]);
-        let still = mode_switch(evidence, DocMode::Split, false, false).unwrap();
+        let still = mode_switch(evidence, DocMode::Split, NARROW).unwrap();
         assert_eq!(still.on, 2);
         // Without the extension only the review is there.
-        let off = mode_switch(evidence, DocMode::Review, true, true).unwrap();
+        let off = mode_switch(evidence, DocMode::Review, NO_PAGE).unwrap();
         assert_eq!(off.off, [0, 2]);
     }
 
     #[test]
     fn a_stage_files_switch_has_only_review_and_split() {
         let brief = DocFile::Stage(Stage::Discover);
-        let wide = mode_switch(brief, DocMode::Review, true, false).unwrap();
+        let wide = mode_switch(brief, DocMode::Review, WIDE).unwrap();
         assert_eq!(wide.labels, ["Review", "Split"]);
         assert_eq!(wide.on, 0);
-        let off = mode_switch(brief, DocMode::Review, true, true).unwrap();
+        let off = mode_switch(brief, DocMode::Review, NO_PAGE).unwrap();
         assert_eq!(off.off, [1]);
         // Nothing to go to, so no switch.
-        assert_eq!(mode_switch(brief, DocMode::Review, false, false), None);
+        assert_eq!(mode_switch(brief, DocMode::Review, NARROW), None);
         // Split showing when the output narrowed: the way back stays.
-        let still = mode_switch(brief, DocMode::Split, false, false).unwrap();
+        let still = mode_switch(brief, DocMode::Split, NARROW).unwrap();
         assert_eq!(still.labels, ["Review", "Split"]);
     }
 

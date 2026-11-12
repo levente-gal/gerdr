@@ -327,9 +327,9 @@ fn running_leader(info: &ProcessInfo) -> Option<&Process> {
     (!prepare::is_interactive_shell(leader)).then_some(leader)
 }
 
-/// What a job's bar says it is doing.
-fn phase_label(rerun: bool, phase: Option<Phase>, restarted: bool) -> &'static str {
-    match (restarted, rerun, phase) {
+/// What `job`'s bar says it is doing, `rerun` as last loaded.
+fn phase_label(job: &Job, rerun: bool) -> &'static str {
+    match (job.restarted.is_some(), rerun, job.phase) {
         (true, ..) => "restarting…",
         (false, _, Some(Phase::Terminate)) => "terminating…",
         (false, _, Some(Phase::Kill)) => "killing…",
@@ -350,7 +350,7 @@ pub fn bar_content(
         let settling = job.restarted.is_some();
         return BarContent {
             label: job.command.clone(),
-            note: Some(phase_label(rerun, job.phase, settling)),
+            note: Some(phase_label(job, rerun)),
             status: BarStatus::Working,
             can_restart: !settling && !rerun && job.can_rerun,
             can_stop: !settling && rerun,

@@ -360,7 +360,13 @@ impl Gerdr {
                 }
             }
             Overlay::Welcome => {
-                let layout = chrome::welcome_layout(self.output_size(), 2, false, false);
+                let layout = chrome::welcome_layout(
+                    self.output_size(),
+                    chrome::WelcomeParts {
+                        rows: 2,
+                        ..chrome::WelcomeParts::default()
+                    },
+                );
                 let rows = self.motion_rows(motion, row_pitch(&layout.rows));
                 if rows != 0 {
                     self.welcome_scroll(rows);

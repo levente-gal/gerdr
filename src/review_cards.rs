@@ -11,7 +11,7 @@ use crate::{
         Feature, Stage, Status,
         plan_review::{Kind, Placed, Source, State, Suggestion},
         review_import::{self, Decision, Finding as ReviewFinding, FindingState, Severity},
-        review_items::{self, ItemOf, Standing, words, words_in},
+        review_items::{self, ItemOf, Standing, Words, words, words_in},
     },
     features::{PanelOutcome, can_edit_note, shown_notes, stage_mark},
     review::Comment,
@@ -307,15 +307,20 @@ pub(crate) fn delete_own_outcome(item: Item) -> PanelOutcome {
     }
 }
 
-/// The buttons on `item`'s card: what can be decided of it while its stage
-/// is `current`, and showing it where it is when it has a place; in the
-/// words of a review that `posts` to GitHub when it does.
-pub(crate) fn item_buttons(
-    item: Item,
-    current: bool,
-    posts: bool,
-) -> Vec<(PageButton, PanelOutcome)> {
-    let w = words_in(item.of(), posts);
+/// The page an item's card is on, as its buttons and hints need it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CardPage {
+    /// Its stage can decide items now.
+    pub(crate) decides: bool,
+    /// Its review posts to GitHub (`Feature::posts_review`): its words.
+    pub(crate) posts: bool,
+}
+
+/// The buttons on `item`'s card: what can be decided of it while its
+/// `page` decides, and showing it where it is when it has a place; in the
+/// words of a review that posts to GitHub when it does.
+pub(crate) fn item_buttons(item: Item, page: CardPage) -> Vec<(PageButton, PanelOutcome)> {
+    let w = words_in(item.of(), page.posts);
     let button = |label: &str, style| PageButton {
         label: label.to_owned(),
         style,
@@ -328,7 +333,7 @@ pub(crate) fn item_buttons(
     // A question is accepted by answering it.
     let unanswered = item.suggestion().is_some_and(Suggestion::unanswered);
     let question = item.suggestion().is_some_and(|s| s.kind == Kind::Question);
-    if current {
+    if page.decides {
         match standing {
             FindingState::Open if unanswered => {
                 out.push((plain(w.want), act(ItemAct::Answer)));
@@ -388,15 +393,11 @@ pub(crate) fn item_buttons(
 
 /// The footer's hints for `item`'s card with the keyboard, key and what it
 /// does, in the words of its kind (`card_key` says what each does);
-/// `decides` while its stage can decide, `armed` while a first Del armed
+/// deciding while its `page` decides, `armed` while a first Del armed
 /// it. The page's own keys (Up / Down, `c` off the card, wanting all) are
-/// the page's. A review that `posts` to GitHub has its words.
-pub(crate) fn item_hints(
-    item: Item,
-    decides: bool,
-    armed: bool,
-    posts: bool,
-) -> Vec<(String, String)> {
+/// the page's. A review that posts to GitHub has its words.
+pub(crate) fn item_hints(item: Item, page: CardPage, armed: bool) -> Vec<(String, String)> {
+    let CardPage { decides, posts } = page;
     let w = words_in(item.of(), posts);
     let lower = |text: &str| text.to_lowercase();
     let mut out: Vec<(String, String)> = Vec::new();
@@ -512,7 +513,7 @@ pub(crate) fn item_card(
 ) -> FindingCard {
     let tag = item_tag(item);
     let mut card = match item {
-        Item::Finding(f) => finding_card(f, multi, posts),
+        Item::Finding(f) => finding_card(f, multi, words_in(ItemOf::Finding, posts)),
         Item::Suggestion(s) => suggestion_card(s),
     };
     card.tag = tag;
@@ -530,13 +531,14 @@ pub(crate) fn item_card(
     card
 }
 
-/// The card of finding `f`, its tag and buttons left to `item_card`; of a
-/// review that `posts` to GitHub, one wanted is to comment.
-fn finding_card(f: &ReviewFinding, multi: bool, posts: bool) -> FindingCard {
+/// The card of finding `f`, its tag and buttons left to `item_card`, in
+/// the words `w` of its review: of one that posts to GitHub, one wanted is
+/// to comment.
+fn finding_card(f: &ReviewFinding, multi: bool, w: &Words) -> FindingCard {
     // The plan's phase is the feature's: `page_card` says "in fix plan".
     let state = match f.state {
         FindingState::Open => "to decide".to_owned(),
-        FindingState::Fix => words_in(ItemOf::Finding, posts).wanted.to_owned(),
+        FindingState::Fix => w.wanted.to_owned(),
         FindingState::Sent => review_import::sent_word(f.made, false).to_owned(),
         FindingState::Fixed => "fixed".to_owned(),
         FindingState::Dismissed => format!("dismissed: {}", f.reason),
@@ -963,6 +965,14 @@ mod tests {
     use super::*;
     use crate::feature::plan_review::{Kind, State};
 
+    /// The page of a review that doesn't post to GitHub, deciding or not.
+    fn page(decides: bool) -> CardPage {
+        CardPage {
+            decides,
+            posts: false,
+        }
+    }
+
     fn finding(id: &str, state: FindingState, yours: bool) -> ReviewFinding {
         ReviewFinding {
             id: id.into(),
@@ -987,7 +997,7 @@ mod tests {
     }
 
     fn labels(item: Item) -> Vec<String> {
-        (item_buttons(item, true, false).into_iter())
+        (item_buttons(item, page(true)).into_iter())
             .map(|(b, _)| b.label)
             .collect()
     }
@@ -1030,16 +1040,17 @@ mod tests {
     #[test]
     fn a_suggestions_buttons_say_what_it_is() {
         let s = suggestion("r1-1", State::Open, Source::Reviewer);
-        let outcomes: Vec<PanelOutcome> = (item_buttons(Item::Suggestion(&s), true, false).into_iter())
-            .map(|(_, o)| o)
-            .collect();
+        let outcomes: Vec<PanelOutcome> = (item_buttons(Item::Suggestion(&s), page(true))
+            .into_iter())
+        .map(|(_, o)| o)
+        .collect();
         assert_eq!(
             outcomes[0],
             PanelOutcome::OnSuggestion("r1-1".into(), ItemAct::Decide(Decision::Fix))
         );
         assert!((outcomes.iter()).all(|o| outcome_item(o) == Some((ItemOf::Suggestion, "r1-1"))));
         let f = finding("r1-1", FindingState::Open, false);
-        let first = item_buttons(Item::Finding(&f), true, false).remove(0).1;
+        let first = item_buttons(Item::Finding(&f), page(true)).remove(0).1;
         assert_eq!(outcome_item(&first), Some((ItemOf::Finding, "r1-1")));
     }
 
@@ -1167,7 +1178,7 @@ mod tests {
     }
 
     fn outcomes(item: Item) -> Vec<(String, PanelOutcome)> {
-        (item_buttons(item, true, false).into_iter())
+        (item_buttons(item, page(true)).into_iter())
             .map(|(b, o)| (b.label, o))
             .collect()
     }
@@ -1321,7 +1332,7 @@ mod tests {
             ]
         );
         // Not decidable: only reading.
-        let only: Vec<String> = (item_buttons(Item::Suggestion(&s), false, false).into_iter())
+        let only: Vec<String> = (item_buttons(Item::Suggestion(&s), page(false)).into_iter())
             .map(|(b, _)| b.label)
             .collect();
         assert_eq!(only, ["Open code", "Show in plan"]);
@@ -1387,7 +1398,7 @@ mod tests {
     fn a_rejected_suggestion_folds_and_its_comment_holds_its_buttons() {
         let mut s = suggestion("r1-1", State::Rejected, Source::Reviewer);
         s.note = "Later".into();
-        let actions = item_buttons(Item::Suggestion(&s), true, false);
+        let actions = item_buttons(Item::Suggestion(&s), page(true));
         let card = item_card(Item::Suggestion(&s), false, &actions, false);
         assert_eq!(card.state, "rejected: Not needed \u{b7} commented");
         assert!(card.collapsed && card.faded);
@@ -1438,10 +1449,10 @@ mod tests {
         for s in &all {
             let item = Item::Suggestion(s);
             for decides in [true, false] {
-                for (b, _) in item_buttons(item, decides, false) {
+                for (b, _) in item_buttons(item, page(decides)) {
                     assert!(!bad(&b.label), "{}", b.label);
                 }
-                for (_, what) in item_hints(item, decides, false, false) {
+                for (_, what) in item_hints(item, page(decides), false) {
                     assert!(!bad(&what), "{what}");
                 }
             }
@@ -1578,7 +1589,7 @@ mod tests {
     #[test]
     fn the_hints_speak_the_kinds_words() {
         let hints = |item: Item, decides, armed| -> Vec<String> {
-            (item_hints(item, decides, armed, false).into_iter())
+            (item_hints(item, page(decides), armed).into_iter())
                 .map(|(k, what)| format!("{k} {what}"))
                 .collect()
         };

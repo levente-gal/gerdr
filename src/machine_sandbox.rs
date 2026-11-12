@@ -830,9 +830,12 @@ impl Gerdr {
     pub(crate) fn set_up_there_first(&mut self, feature: &Feature, id: &str) -> bool {
         let (project, slug) = (feature.project.as_str(), feature.slug.as_str());
         let key = (project.to_owned(), slug.to_owned());
-        let running = self.setting_up(project, slug);
-        let has = crate::feature::setup::has_work(feature);
-        let first = crate::feature_build::setup_first(has, crate::feature::setup::standing(feature, Some(id)), running, false);
+        let now = crate::feature_build::SetupNow {
+            has_commands: crate::feature::setup::has_work(feature),
+            run: crate::feature::setup::standing(feature, Some(id)),
+            running: self.setting_up(project, slug),
+        };
+        let first = crate::feature_build::setup_first(now, false);
         let waits = match first {
             crate::feature_build::SetupFirst::No => false,
             crate::feature_build::SetupFirst::Wait => true,

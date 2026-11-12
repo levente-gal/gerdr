@@ -38,6 +38,7 @@ use crate::{
     chrome::{CommandsTab, Dot},
     feature::{
         self, Feature, Stage, Status,
+        fix_round::Seen,
         patch::{self, Reading},
         setup::{self, SetupRun},
         store,
@@ -118,17 +119,26 @@ pub(crate) enum SetupFirst {
     Run,
 }
 
+/// A feature's setup as a Build agent starting finds it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SetupNow<'a> {
+    /// The project gives the feature setup commands.
+    pub(crate) has_commands: bool,
+    /// Where its last run stands.
+    pub(crate) run: Option<&'a SetupRun>,
+    /// It runs now.
+    pub(crate) running: bool,
+}
+
 /// Whether a Build agent starting (`fresh`: Ctrl+R, or the first) waits
-/// for the setup: `has_commands` whether the project gives the feature
-/// any, `setup` where it stands, `running` whether it runs now. One never
-/// run, or cut short by gerdr quitting, runs first; a failed one runs
-/// again on a fresh start.
-pub(crate) fn setup_first(
-    has_commands: bool,
-    setup: Option<&SetupRun>,
-    running: bool,
-    fresh: bool,
-) -> SetupFirst {
+/// for the setup, as it is `now`. One never run, or cut short by gerdr
+/// quitting, runs first; a failed one runs again on a fresh start.
+pub(crate) fn setup_first(now: SetupNow, fresh: bool) -> SetupFirst {
+    let SetupNow {
+        has_commands,
+        run: setup,
+        running,
+    } = now;
     if !has_commands {
         return SetupFirst::No;
     }
@@ -207,9 +217,13 @@ enum FixingNext {
     Probe,
 }
 
-/// What the fixing agent (`worked` since it was sent them) comes to with
-/// herdr's `status` for its pane, its pane there (`alive`) or not.
-fn fixing_next(worked: bool, status: Option<AgentStatus>, alive: bool) -> FixingNext {
+/// What the fixing agent comes to as `seen` since it was sent them.
+fn fixing_next(seen: Seen) -> FixingNext {
+    let Seen {
+        worked,
+        status,
+        alive,
+    } = seen;
     match status {
         Some(AgentStatus::Working | AgentStatus::Blocked) => FixingNext::Worked,
         Some(AgentStatus::Idle | AgentStatus::Done) if worked => FixingNext::Probe,
@@ -351,10 +365,13 @@ impl Gerdr {
             Placed::There(id) => Some(id),
             Placed::Away(_) => return false,
         };
-        let has = setup::has_work(feature);
         let key = (project.to_owned(), slug.to_owned());
-        let running = self.features.build.setting_up.contains(&key);
-        let first = setup_first(has, setup::standing(feature, place.as_deref()), running, fresh);
+        let now = SetupNow {
+            has_commands: setup::has_work(feature),
+            run: setup::standing(feature, place.as_deref()),
+            running: self.features.build.setting_up.contains(&key),
+        };
+        let first = setup_first(now, fresh);
         let title = feature.title.clone();
         if first == SetupFirst::No {
             return false;
@@ -1032,9 +1049,12 @@ impl Gerdr {
         }
         // The checks need what the setup copies. A feature made before it
         // copied anything hasn't had one. Each machine has its own worktrees.
-        let setting_up = self.features.build.setting_up.contains(&key);
-        let has = setup::has_work(&feature);
-        let first = setup_first(has, setup::standing(&feature, machine.as_deref()), setting_up, false);
+        let now = SetupNow {
+            has_commands: setup::has_work(&feature),
+            run: setup::standing(&feature, machine.as_deref()),
+            running: self.features.build.setting_up.contains(&key),
+        };
+        let first = setup_first(now, false);
         let waits = match first {
             SetupFirst::No => false,
             SetupFirst::Wait => true,
@@ -1282,7 +1302,12 @@ impl Gerdr {
             // took the line. Reading its code tells either way, and a fix
             // round must not wait on it for good.
             let lost = !fixing.worked && fixing.since.elapsed() >= FIXING_STARTS;
-            match fixing_next(fixing.worked, status, alive) {
+            let seen = Seen {
+                worked: fixing.worked,
+                status,
+                alive,
+            };
+            match fixing_next(seen) {
                 FixingNext::Wait if lost => {
                     self.features.build.fixing.remove(&key);
                     self.probe_feature(project, slug);
@@ -1353,26 +1378,26 @@ mod tests {
             failed: Some("api: `npm ci` exited with 1".into()),
             ..done.clone()
         };
-        assert_eq!(setup_first(false, None, false, false), SetupFirst::No);
-        assert_eq!(setup_first(true, None, false, false), SetupFirst::Run);
+        // A project with setup commands, its setup run `run` and `running`.
+        let with = |run, running| SetupNow {
+            has_commands: true,
+            run,
+            running,
+        };
+        let without = SetupNow {
+            has_commands: false,
+            ..with(None, false)
+        };
+        assert_eq!(setup_first(without, false), SetupFirst::No);
+        assert_eq!(setup_first(with(None, false), false), SetupFirst::Run);
         // Cut short by gerdr quitting.
-        assert_eq!(
-            setup_first(true, Some(&started), false, false),
-            SetupFirst::Run
-        );
-        assert_eq!(
-            setup_first(true, Some(&started), true, false),
-            SetupFirst::Wait
-        );
-        assert_eq!(setup_first(true, Some(&done), false, true), SetupFirst::No);
-        assert_eq!(
-            setup_first(true, Some(&failed), false, false),
-            SetupFirst::No
-        );
-        assert_eq!(
-            setup_first(true, Some(&failed), false, true),
-            SetupFirst::Run
-        );
+        let started = Some(&started);
+        assert_eq!(setup_first(with(started, false), false), SetupFirst::Run);
+        assert_eq!(setup_first(with(started, true), false), SetupFirst::Wait);
+        assert_eq!(setup_first(with(Some(&done), false), true), SetupFirst::No);
+        let failed = with(Some(&failed), false);
+        assert_eq!(setup_first(failed, false), SetupFirst::No);
+        assert_eq!(setup_first(failed, true), SetupFirst::Run);
     }
 
     fn reading(dirty: &[&str], stray: &[&str], commits: &[(&str, usize)]) -> Reading {
@@ -1422,17 +1447,25 @@ mod tests {
         assert!(refuse(&mut w, (2, 1), "uncommitted changes in api".into()));
     }
 
+    fn seen(worked: bool, status: Option<AgentStatus>, alive: bool) -> Seen {
+        Seen {
+            worked,
+            status,
+            alive,
+        }
+    }
+
     #[test]
     fn a_fixing_agent_is_probed_once_it_worked_and_rests() {
         let idle = Some(AgentStatus::Idle);
-        assert_eq!(fixing_next(false, idle, true), FixingNext::Wait);
+        assert_eq!(fixing_next(seen(false, idle, true)), FixingNext::Wait);
         assert_eq!(
-            fixing_next(false, Some(AgentStatus::Working), true),
+            fixing_next(seen(false, Some(AgentStatus::Working), true)),
             FixingNext::Worked
         );
-        assert_eq!(fixing_next(true, idle, true), FixingNext::Probe);
-        assert_eq!(fixing_next(true, None, true), FixingNext::Wait);
-        assert_eq!(fixing_next(false, None, false), FixingNext::Probe);
+        assert_eq!(fixing_next(seen(true, idle, true)), FixingNext::Probe);
+        assert_eq!(fixing_next(seen(true, None, true)), FixingNext::Wait);
+        assert_eq!(fixing_next(seen(false, None, false)), FixingNext::Probe);
     }
 
     fn mark(patch: &str) -> Mark {
