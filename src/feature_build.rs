@@ -240,8 +240,8 @@ fn set_checks(project: &str, slug: &str) -> (String, MenuAction) {
 /// written is one more thing that failed.
 pub(crate) fn write_evidence(feature: &Feature, data: &Path, mut evidence: Evidence) -> Evidence {
     let path = data.join(verify::EVIDENCE);
-    let written = std::fs::create_dir_all(data)
-        .and_then(|()| std::fs::write(&path, verify::markdown(feature, &evidence)));
+    let written =
+        crate::projects::write_atomic(&path, verify::markdown(feature, &evidence).as_bytes());
     if let Err(err) = written {
         tracing::warn!("writing {}: {err}", path.display());
         evidence

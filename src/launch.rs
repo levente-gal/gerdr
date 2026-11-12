@@ -1081,7 +1081,10 @@ fn link_vs_code_shared(shared: &Path, dir: &Path) -> std::io::Result<()> {
     for own in VS_CODE_OWN_STATE {
         fields.remove(*own);
     }
-    std::fs::write(state, serde_json::Value::Object(fields).to_string())
+    crate::projects::write_atomic(
+        &state,
+        serde_json::Value::Object(fields).to_string().as_bytes(),
+    )
 }
 
 /// What a browser's new profile leaves out of the copy of gerdr's shared
@@ -1611,10 +1614,7 @@ pub fn remember(command: &str) {
     commands.insert(0, command.to_owned());
     commands.truncate(HISTORY_LEN);
     let path = history_file();
-    let written = path
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(&path, commands.join("\n") + "\n"));
+    let written = crate::projects::write_atomic(&path, (commands.join("\n") + "\n").as_bytes());
     if let Err(err) = written {
         tracing::warn!("saving {}: {err}", path.display());
     }

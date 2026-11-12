@@ -442,7 +442,7 @@ pub(crate) fn brief_drops(project: &str, slug: &str, urls: &[String]) {
         }
     }
     if text != had
-        && let Err(err) = std::fs::write(&brief, text)
+        && let Err(err) = crate::projects::write_atomic(&brief, text.as_bytes())
     {
         tracing::warn!("taking pull requests out of {}: {err}", brief.display());
     }
@@ -580,8 +580,7 @@ fn make_review(
     let made_data = !data.exists();
     let brief = feature::artifacts::path(&data, feature::Stage::Discover)
         .unwrap_or_else(|| data.join("brief.md"));
-    std::fs::create_dir_all(&data)
-        .and_then(|()| std::fs::write(&brief, pr::briefs(&all)))
+    crate::projects::write_atomic(&brief, pr::briefs(&all).as_bytes())
         .map_err(|err| format!("couldn't write its brief {}: {err}", brief.display()))?;
     let (created, made) = match layout::create_review(root, &of(None), &linked, feature_slug) {
         Ok(created) => created,

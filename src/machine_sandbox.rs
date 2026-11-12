@@ -428,10 +428,7 @@ fn left_records(id: &str) -> Vec<(std::path::PathBuf, Feature)> {
 /// Keep `feature` at `file`, for what it left to go later.
 fn keep_left(file: &std::path::Path, feature: &Feature) -> Result<(), String> {
     let text = serde_json::to_vec(feature).map_err(|err| err.to_string())?;
-    if let Some(parent) = file.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-    std::fs::write(file, text).map_err(|err| err.to_string())
+    crate::projects::write_atomic(file, &text).map_err(|err| err.to_string())
 }
 
 /// Taking down the sandbox of a feature that is removed, off the UI thread.

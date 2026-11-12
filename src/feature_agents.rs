@@ -1911,9 +1911,6 @@ impl Gerdr {
         let data = store::dir(None, project, slug);
         let last = feature.runs.get(&stage);
         let n = feature.next_run(stage);
-        let prompt = data
-            .join("prompts")
-            .join(format!("{}-{n}.md", stage_key(stage)));
         let mut values = vars(&feature, &names, &data, stage);
         if stage == Stage::AiReview {
             values.extend(crate::feature_review::review_vars(&feature));
@@ -1958,14 +1955,15 @@ impl Gerdr {
                 None => text,
             },
         };
-        let written = std::fs::create_dir_all(data.join("prompts"))
-            .and_then(|()| std::fs::write(&prompt, text));
-        if let Err(err) = written {
-            tracing::warn!("writing {}: {err}", prompt.display());
-            self.show_error(format!("Couldn't write {}: {err}", prompt.display()));
-            self.log_not_started(project, slug, stage, "its prompt couldn't be written");
-            return false;
-        }
+        let prompt = match write_prompt(&data, &format!("{}-{n}.md", stage_key(stage)), &text) {
+            Ok(prompt) => prompt,
+            Err(why) => {
+                tracing::warn!("{why}");
+                self.show_error(why);
+                self.log_not_started(project, slug, stage, "its prompt couldn't be written");
+                return false;
+            }
+        };
         // A new tab's agent is told as it starts. One already waiting is told
         // once its run is new; checks running on the code hold off both.
         let refused = self.checks_refusal(project, slug);
@@ -3022,16 +3020,12 @@ impl Gerdr {
         let data = store::dir(None, project, slug);
         let comments = with_edits_told(comments, &data, stage);
         let back = run.sent_back + 1;
-        let file =
-            data.join("prompts")
-                .join(format!("{}-{}-back-{back}.md", stage_key(stage), run.n));
+        let name = format!("{}-{}-back-{back}.md", stage_key(stage), run.n);
         let alive = run.pane.as_deref().is_some_and(|p| self.pane_there(p));
         let mut sent = Err(String::from(crate::feature_build::TAB_GONE));
         if alive {
-            sent = std::fs::create_dir_all(data.join("prompts"))
-                .and_then(|()| std::fs::write(&file, &comments))
-                .map_err(|e| format!("writing {}: {e}", file.display()))
-                .and_then(|()| {
+            sent = write_prompt(&data, &name, &comments)
+                .and_then(|file| {
                     let names = self.projects.names(&feature);
                     let mut values = vars(&feature, &names, &data, stage);
                     values.insert("comments".into(), comments.clone());
@@ -3082,6 +3076,16 @@ impl Gerdr {
             }
         }
     }
+}
+
+/// Write prompt `text` as `<data>/prompts/<name>`, through a temporary
+/// file so an agent never reads half of it; the file, or why not as the
+/// error shown to the user.
+pub(crate) fn write_prompt(data: &Path, name: &str, text: &str) -> Result<PathBuf, String> {
+    let path = data.join("prompts").join(name);
+    crate::projects::write_atomic(&path, text.as_bytes())
+        .map_err(|err| format!("Couldn't write {}: {err}", path.display()))?;
+    Ok(path)
 }
 
 /// `comments` sending `stage`'s file back, told too when the user edited

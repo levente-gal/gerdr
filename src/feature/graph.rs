@@ -354,7 +354,7 @@ fn write_build_options(folder: &Folder) -> Result<(), String> {
         std::fs::create_dir_all(out)
             .map_err(|err| format!("couldn't make {}: {err}", shown(out)))?;
     }
-    std::fs::write(&path, Value::Object(options).to_string())
+    crate::projects::write_atomic(&path, Value::Object(options).to_string().as_bytes())
         .map_err(|err| format!("couldn't write {}: {err}", shown(&path)))
 }
 
