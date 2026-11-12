@@ -11,6 +11,7 @@ use std::{
 };
 
 use super::{Feature, KeptHead, Link, Repo, hook, pr::PullRef};
+use crate::paths::folder_name;
 
 /// The folder features' worktrees go in, under a root.
 pub const FEATURES_DIR: &str = ".features";
@@ -1296,7 +1297,7 @@ fn keep_out(root: &Root) -> Result<Vec<PathBuf>, String> {
             add_line(&text, ".features/")
         };
         let Some(new) = new else { continue };
-        match std::fs::write(&path, new) {
+        match crate::projects::write_atomic(&path, new.as_bytes()) {
             Ok(()) => changed.push(path),
             Err(err) => tracing::warn!("writing {}: {err}", path.display()),
         }
@@ -1321,7 +1322,8 @@ fn cursor_index_rule(root: &Path) -> Result<Option<PathBuf>, String> {
     let Some(text) = add_line(&text, ".features/") else {
         return Ok(None);
     };
-    std::fs::write(&file, text).map_err(|err| format!("couldn't write {}: {err}", shown(&file)))?;
+    crate::projects::write_atomic(&file, text.as_bytes())
+        .map_err(|err| format!("couldn't write {}: {err}", shown(&file)))?;
     Ok(Some(file))
 }
 
@@ -1340,7 +1342,8 @@ pub fn free_for_cursor(root: &Path) -> Result<bool, String> {
     };
     // In this order: Cursor never gets to index the folder between the two.
     cursor_index_rule(root)?;
-    std::fs::write(&file, text).map_err(|err| format!("couldn't write {}: {err}", shown(&file)))?;
+    crate::projects::write_atomic(&file, text.as_bytes())
+        .map_err(|err| format!("couldn't write {}: {err}", shown(&file)))?;
     Ok(true)
 }
 
@@ -1376,7 +1379,7 @@ pub(super) fn exclude_line(repo: &Path, line: &str) -> Result<Option<PathBuf>, S
         std::fs::create_dir_all(info)
             .map_err(|err| format!("couldn't make {}: {err}", shown(info)))?;
     }
-    std::fs::write(&exclude, text)
+    crate::projects::write_atomic(&exclude, text.as_bytes())
         .map_err(|err| format!("couldn't write {}: {err}", shown(&exclude)))?;
     Ok(Some(exclude))
 }
@@ -2190,14 +2193,6 @@ fn clear_dir(dir: &Path, force: bool) -> Result<(), String> {
 /// `path` as the user reads it: `~/…` under the home folder.
 pub(super) fn shown(path: &Path) -> String {
     crate::paths::tilde(path, crate::home_dir().as_deref())
-}
-
-/// A folder's last name.
-fn folder_name(path: &Path) -> String {
-    path.file_name().map_or_else(
-        || path.display().to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    )
 }
 
 /// What `git -C dir args` prints, or why it failed: never prompting, with

@@ -389,7 +389,8 @@ fn end_inside(holder: &Proc) {
             .filter(|pid| fs::read_link(format!("/proc/{pid}/ns/net")).ok().as_ref() == Some(&net))
             .collect()
     };
-    for pid in inside() {
+    // Never init or a whole group: a pid of 0 or 1 would be one of those.
+    for pid in inside().into_iter().filter(|pid| *pid > 1) {
         // SAFETY: a plain signal; a process gone meanwhile is ESRCH.
         unsafe { libc::kill(pid, libc::SIGTERM) };
     }
@@ -589,7 +590,8 @@ impl Host {
         let parent = path.parent().unwrap_or(path);
         self.make_dir(parent)?;
         let Self::There(reach) = self else {
-            return fs::write(path, text).map_err(|e| format!("couldn't write {shown}: {e}"));
+            return crate::projects::write_atomic(path, text.as_bytes())
+                .map_err(|e| format!("couldn't write {shown}: {e}"));
         };
         let script = format!(
             "cat > {} <<'GERDR_SANDBOX_FILE'\n{text}\nGERDR_SANDBOX_FILE\n",
@@ -629,9 +631,7 @@ impl Host {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
                 (path.parent().unwrap_or(path), name.unwrap_or_default())
             };
-            let tracked = Command::new("git")
-                .args(["ls-files", "--", &name])
-                .current_dir(dir)
+            let tracked = crate::git::command(dir, &["ls-files", "--", &name])
                 .stderr(Stdio::null())
                 .output();
             return matches!(tracked, Ok(out) if out.status.success() && !out.stdout.is_empty());
@@ -796,7 +796,7 @@ impl Proc {
     }
 
     fn kill(&self) {
-        if self.alive() {
+        if self.pid > 1 && self.alive() {
             // SAFETY: a plain signal to the process `alive` just told from any
             // later one with this pid.
             unsafe { libc::kill(self.pid, libc::SIGTERM) };
@@ -933,10 +933,9 @@ fn output(
 
 /// The end of `text` as the reason for a failure, or `otherwise` when empty.
 fn last_lines(text: &str, otherwise: &str) -> String {
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    match lines.len() {
-        0 => otherwise.to_owned(),
-        n => lines[n.saturating_sub(3)..].join(" "),
+    match crate::text::last_lines(text, 3) {
+        lines if lines.is_empty() => otherwise.to_owned(),
+        lines => lines.join(" "),
     }
 }
 
