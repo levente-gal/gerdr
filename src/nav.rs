@@ -327,14 +327,6 @@ impl Gerdr {
         true
     }
 
-    /// Take the history kept in the store, as gerdr starts: its tabs are
-    /// all parked (a `Tab::id` of an earlier run means nothing now).
-    pub fn restore_nav(&mut self) {
-        let mut nav = self.projects.nav.clone();
-        nav.rebind(|v| matches!(v, Visit::Parked { .. }).then(|| v.clone()));
-        self.nav.history = nav.restored();
-    }
-
     /// Tab `id` of `project`, the shown one, parked; `None` if it is gone.
     fn park(&self, project: &str, id: u64) -> Option<Visit> {
         let (w, t) = self.tab_place(id)?;
@@ -353,5 +345,15 @@ impl Gerdr {
             index,
             label: visited_label(&ws.name, t, &title),
         })
+    }
+}
+
+impl crate::state::Nav {
+    /// Take the history kept in the store (`kept`), as gerdr starts: its tabs are
+    /// all parked (a `Tab::id` of an earlier run means nothing now).
+    pub fn restore_nav(&mut self, kept: &NavHistory<Visit>) {
+        let mut nav = kept.clone();
+        nav.rebind(|v| matches!(v, Visit::Parked { .. }).then(|| v.clone()));
+        self.history = nav.restored();
     }
 }

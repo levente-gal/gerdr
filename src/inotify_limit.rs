@@ -198,7 +198,7 @@ impl Gerdr {
     /// and what `[terminal]` says of its config file.
     pub(crate) fn terminal_options(&self) -> Vec<String> {
         terminal_options(
-            self.theme().palette().alacritty_options(),
+            self.settings.theme().palette().alacritty_options(),
             self.settings.live_config_reload,
         )
     }

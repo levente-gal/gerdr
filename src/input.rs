@@ -371,7 +371,7 @@ impl Gerdr {
                         // its tooltip.
                         if state.grabbing_overlay().is_some() {
                             state.hover.tooltip.hide();
-                            state.drop_agent_strip();
+                            state.hover.drop_agent_strip();
                         }
                         // A dialog takes every key.
                         if let Some(dialog) = top.filter(|o| o.is_dialog()) {
@@ -399,7 +399,7 @@ impl Gerdr {
                                 state.repeat_key(code, *mods, sym, typed, took);
                                 return FilterResult::Intercept(out);
                             }
-                            let out = state.dialog_key(dialog, mods, sym, handle.modified_sym());
+                            let out = state.dialog_key(dialog, mods, sym);
                             return FilterResult::Intercept(out);
                         }
                         // A name being typed takes every key, repeating
@@ -504,7 +504,7 @@ impl Gerdr {
                         // leaves a mode there.
                         if sym == Keysym::Escape {
                             state.hover.tooltip.hide();
-                            state.drop_agent_strip();
+                            state.hover.drop_agent_strip();
                             state.hover.help_pinned = false;
                         }
                         // What it interrupts stopped on purpose.
@@ -535,7 +535,7 @@ impl Gerdr {
                     self.mouse.field_drag = false;
                     self.mouse.repos_rows_drag = false;
                     self.mouse.repos_editor_drag = false;
-                    self.scrollback_release();
+                    self.overlays.scrollback_release();
                     self.release_page_text();
                     if self.mouse.thumb_drag.take().is_some() {
                         return;
@@ -600,7 +600,7 @@ impl Gerdr {
                 }
                 if state == ButtonState::Pressed && !pointer.is_grabbed() {
                     let button = event.button_code();
-                    self.mouse.press_count = self.count_press(location, button);
+                    self.mouse.press_count = self.mouse.count_press(location, button);
                     self.mouse.field_scroll_due = true;
                     let taken = self.press(location, button);
                     self.mouse.last_press = Some((Instant::now(), location, button));
@@ -731,7 +731,7 @@ impl Gerdr {
         let (x, y) = (location.x as i32, location.y as i32);
         if matches!(button, BTN_SIDE | BTN_EXTRA)
             && (x < self.sidebar_width
-                || y < self.tab_strip_height()
+                || y < self.settings.tab_strip_height()
                 || self.on_footer(location)
                 || self.pane_bar_at(location).is_some())
         {
@@ -763,7 +763,7 @@ impl Gerdr {
             return true;
         }
         // A second click on a workspace row or a tab renames it.
-        if button == BTN_LEFT && self.is_double(location) {
+        if button == BTN_LEFT && self.mouse.is_double(location) {
             let regions = self.regions_at(location);
             let target = match self.region_hit(location, &regions) {
                 RegionHit::Workspace(w) => Some(RenameTarget::Workspace(w)),
@@ -787,12 +787,12 @@ impl Gerdr {
                 _ => self.sidebar_press(x, y, button),
             }
             // What the press opened over the sidebar closes its strip.
-            if self.sidebar_covered() {
-                self.drop_agent_strip();
+            if self.overlays.sidebar_covered() {
+                self.hover.drop_agent_strip();
             }
             return true;
         }
-        if y < self.tab_strip_height() {
+        if y < self.settings.tab_strip_height() {
             match button {
                 BTN_RIGHT => {
                     if let Some(spec) = self.tab_strip_menu(location) {
@@ -806,7 +806,7 @@ impl Gerdr {
         if let Some((id, hit)) = self.pane_bar_at(location) {
             match button {
                 // A second click on its label zooms the pane, or unzooms it.
-                BTN_LEFT if hit == BarHit::Label && self.is_double(location) => {
+                BTN_LEFT if hit == BarHit::Label && self.mouse.is_double(location) => {
                     self.zoom_pane(id);
                 }
                 BTN_LEFT => {
@@ -975,7 +975,7 @@ impl Gerdr {
                 let layout = chrome::worktrees_layout(&view, output);
                 layout.entries.iter().any(|(rect, _)| on(rect))
             }),
-            O::Switcher => self.switcher_view().is_some_and(|switcher| {
+            O::Switcher => self.overlays.switcher_view().is_some_and(|switcher| {
                 let layout = chrome::switcher_geometry(&switcher, self.content_rect());
                 layout.rows.iter().chain(&layout.chips).any(on)
             }),
@@ -1002,14 +1002,18 @@ impl Gerdr {
         dialog: overlay::Overlay,
         mods: &ModifiersState,
         sym: Keysym,
-        typed: Keysym,
     ) -> Option<Intercepted> {
         use crate::overlay::Overlay as O;
         match dialog {
-            O::Quit => self.quit_key(mods, sym, typed).map(Intercepted::Quit),
+            O::Quit => self
+                .overlays
+                .quit
+                .as_mut()?
+                .key(mods, sym)
+                .map(Intercepted::Quit),
             O::Restart => self.restart_key(mods, sym).map(Intercepted::Restart),
             O::Checkout => self.checkout_key(mods, sym).map(Intercepted::Checkout),
-            O::Confirm => self.confirm_key(mods, sym).map(Intercepted::Confirm),
+            O::Confirm => (self.overlays.confirm.as_mut()?.key(sym)).map(Intercepted::Confirm),
             _ => None,
         }
     }
@@ -1086,7 +1090,7 @@ impl Gerdr {
         }
         if pos.x < self.sidebar_width as f64 {
             regions.sidebar = Some(self.sidebar_layout());
-        } else if pos.y < self.tab_strip_height() as f64 {
+        } else if pos.y < self.settings.tab_strip_height() as f64 {
             regions.strip = Some(self.tab_strip_view());
         }
         regions
@@ -1128,7 +1132,7 @@ impl Gerdr {
             };
         }
         // The tab strip: the tabs, the "+", the chips and the theme switch.
-        if pos.y < self.tab_strip_height() as f64 {
+        if pos.y < self.settings.tab_strip_height() as f64 {
             let hit = match &regions.strip {
                 Some(view) => self.tab_strip_hit_at(view, pos),
                 None => self.tab_strip_hit_at(&self.tab_strip_view(), pos),
@@ -1150,15 +1154,9 @@ impl Gerdr {
         RegionHit::Nothing
     }
 
-    /// Whether a press at `pos` now, after the last one, makes a double
-    /// click: soon after it, close to it, and with the left button.
+    /// See `Mouse::is_double` (here for `repo_batches`).
     pub fn is_double(&self, pos: Point<f64, Logical>) -> bool {
-        self.mouse.last_press.is_some_and(|(when, from, button)| {
-            button == BTN_LEFT
-                && when.elapsed() < MULTI_CLICK
-                && (from.x - pos.x).abs() < MULTI_CLICK_SLOP
-                && (from.y - pos.y).abs() < MULTI_CLICK_SLOP
-        })
+        self.mouse.is_double(pos)
     }
 
     /// Start holding the active workspace's row, the active tab or a pane,
@@ -1197,7 +1195,7 @@ impl Gerdr {
         if self.mouse.repos_rows_drag || self.mouse.repos_editor_drag {
             self.repos_drag_rows(pos);
         }
-        if self.scrollback_dragging() {
+        if self.overlays.scrollback_dragging() {
             self.scrollback_drag(pos);
         }
         if self.picking_page_text() {
@@ -1512,7 +1510,7 @@ impl Gerdr {
             Overlay::AiStats => chrome::stats_field(&self.ai_stats_view()?, size, scale),
             Overlay::Scrollback => chrome::scrollback_field(&self.scrollback_view()?, scale),
             Overlay::Switcher(_) => Some(chrome::switcher_field(
-                &self.switcher_view()?,
+                &self.overlays.switcher_view()?,
                 self.content_rect(),
                 scale,
             )),
@@ -1632,23 +1630,6 @@ impl Gerdr {
             field.click(at, extend, count);
         }
         self.mouse.field_drag = count == 1;
-    }
-
-    /// How many left presses in a row the one at `pos` is, a moment apart
-    /// and in about one place: the second selects a word in a text field,
-    /// the third all of it.
-    fn count_press(&self, pos: Point<f64, Logical>, button: u32) -> u32 {
-        match self.mouse.last_press {
-            Some((when, from, b))
-                if b == button
-                    && when.elapsed() < MULTI_CLICK
-                    && (from.x - pos.x).abs() < MULTI_CLICK_SLOP
-                    && (from.y - pos.y).abs() < MULTI_CLICK_SLOP =>
-            {
-                self.mouse.press_count + 1
-            }
-            _ => 1,
-        }
     }
 
     /// The text field a held press drags in, as the pointer at `pos` finds
@@ -1907,9 +1888,55 @@ impl Gerdr {
     }
 }
 
+impl crate::state::Mouse {
+    /// Whether a press at `pos` now, after the last one, makes a double
+    /// click: soon after it, close to it, and with the left button.
+    pub fn is_double(&self, pos: Point<f64, Logical>) -> bool {
+        self.last_press.is_some_and(|(when, from, button)| {
+            button == BTN_LEFT
+                && when.elapsed() < MULTI_CLICK
+                && (from.x - pos.x).abs() < MULTI_CLICK_SLOP
+                && (from.y - pos.y).abs() < MULTI_CLICK_SLOP
+        })
+    }
+    /// How many left presses in a row the one at `pos` is, a moment apart
+    /// and in about one place: the second selects a word in a text field,
+    /// the third all of it.
+    fn count_press(&self, pos: Point<f64, Logical>, button: u32) -> u32 {
+        match self.last_press {
+            Some((when, from, b))
+                if b == button
+                    && when.elapsed() < MULTI_CLICK
+                    && (from.x - pos.x).abs() < MULTI_CLICK_SLOP
+                    && (from.y - pos.y).abs() < MULTI_CLICK_SLOP =>
+            {
+                self.press_count + 1
+            }
+            _ => 1,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presses_count_on_while_close_and_soon_with_one_button() {
+        let mut mouse = crate::state::Mouse::default();
+        let at: Point<f64, Logical> = (10.0, 10.0).into();
+        assert!(!mouse.is_double(at));
+        assert_eq!(mouse.count_press(at, BTN_LEFT), 1);
+        mouse.last_press = Some((Instant::now(), at, BTN_LEFT));
+        mouse.press_count = 2;
+        assert!(mouse.is_double(at));
+        assert_eq!(mouse.count_press(at, BTN_LEFT), 3);
+        // Another button, or far off, starts again.
+        assert_eq!(mouse.count_press(at, BTN_LEFT + 1), 1);
+        let far: Point<f64, Logical> = (10.0 + MULTI_CLICK_SLOP + 1.0, 10.0).into();
+        assert!(!mouse.is_double(far));
+        assert_eq!(mouse.count_press(far, BTN_LEFT), 1);
+    }
 
     #[test]
     fn over_the_welcome_screen_the_prefix_only_acts_on_gerdr() {

@@ -317,21 +317,9 @@ impl Gerdr {
         }
     }
 
-    /// Whether something covers the sidebar, taking the pointer from it.
-    pub(crate) fn sidebar_covered(&self) -> bool {
-        self.overlays.quit.is_some()
-            || self.overlays.restart.is_some()
-            || self.overlays.checkout.is_some()
-            || self.overlays.confirm.is_some()
-            || self.overlays.welcome.is_some()
-            || self.overlays.project_menu.is_some()
-            || self.overlays.switcher.is_some()
-            || self.overlays.context_menu.is_some()
-    }
-
     /// What is under the pointer in the sidebar, if it is free and there.
     fn sidebar_hit(&self, layout: &SidebarLayout, pos: Point<f64, Logical>) -> Option<SidebarHit> {
-        if self.sidebar_covered() || pos.x >= self.sidebar_width as f64 {
+        if self.overlays.sidebar_covered() || pos.x >= self.sidebar_width as f64 {
             return None;
         }
         // Nothing lights up while a scrollbar's thumb is held.
@@ -580,7 +568,7 @@ impl Gerdr {
     /// from its AI button, in the sidebar laid out as `layout`, unless
     /// something covers the sidebar.
     fn strip_bridge(&self, layout: &SidebarLayout, pos: Point<f64, Logical>) -> Option<usize> {
-        if self.sidebar_covered() || pos.x >= self.sidebar_width as f64 {
+        if self.overlays.sidebar_covered() || pos.x >= self.sidebar_width as f64 {
             return None;
         }
         layout.strip_bridge_at(pos)
@@ -598,14 +586,6 @@ impl Gerdr {
         }
     }
 
-    /// Close the strip of agents and stop waiting to open one: on a press
-    /// or a key, as the tooltip hides.
-    pub(crate) fn drop_agent_strip(&mut self) {
-        self.hover.strip = None;
-        self.hover.strip_record = None;
-        self.hover.strip_due = None;
-    }
-
     /// Show the strip of agents on workspace `open`'s header (none when
     /// `None`), looking for the installed agents again as it opens.
     fn set_agent_strip(&mut self, open: Option<usize>) {
@@ -616,16 +596,6 @@ impl Gerdr {
         self.hover.strip_record = open
             .and_then(|i| self.workspaces.get(i))
             .map(|ws| ws.record.clone());
-    }
-
-    /// The agent in slot `k` of workspace `i`'s strip, as `layout` has
-    /// it; `None` on the ellipsis standing for those that don't fit.
-    fn picked_agent(&self, layout: &SidebarLayout, i: usize, k: usize) -> Option<&CliAgent> {
-        let slots = layout.rows.get(i)?.pick_slots();
-        if self.launcher.cli_agents.len() > slots && k + 1 == slots {
-            return None;
-        }
-        self.launcher.cli_agents.get(k)
     }
 
     /// The menu listing the Cursor chats of workspace `w` its rows leave
@@ -676,7 +646,9 @@ impl Gerdr {
             return;
         };
         match (hit, button) {
-            (SidebarHit::Plus, BTN_LEFT) => self.open_menu(self.sidebar_plus_menu(&layout)),
+            (SidebarHit::Plus, BTN_LEFT) => {
+                self.open_menu(self.key_state.sidebar_plus_menu(&layout))
+            }
             (SidebarHit::Repos, BTN_LEFT) => self.open_repos(),
             (SidebarHit::Header, BTN_LEFT) => {
                 if self.project.is_some() {
@@ -754,10 +726,12 @@ impl Gerdr {
             (SidebarHit::Close(i), BTN_LEFT) => self.close_workspace(i),
             (SidebarHit::Restart(i), BTN_LEFT) => self.restart_workspace(i),
             (SidebarHit::NewAgent(i), BTN_LEFT) => self.open_agent_picker(i),
-            (SidebarHit::PickAgent(i, k), BTN_LEFT) => match self.picked_agent(&layout, i, k) {
-                Some(agent) => self.start_agent(i, &agent.clone()),
-                None => self.open_agent_picker(i),
-            },
+            (SidebarHit::PickAgent(i, k), BTN_LEFT) => {
+                match self.launcher.picked_agent(&layout, i, k) {
+                    Some(agent) => self.start_agent(i, &agent.clone()),
+                    None => self.open_agent_picker(i),
+                }
+            }
             (SidebarHit::Worktrees(i), BTN_LEFT) => {
                 let dir = self.workspaces.get(i).map(|ws| ws.dir.clone());
                 self.open_worktrees(dir);
@@ -902,7 +876,7 @@ impl Gerdr {
                 // picker, for the shown workspace only, and starts none.
                 // The picker the "More agents…" slot opens is the same,
                 // on the shown workspace's strip.
-                Some(match self.picked_agent(layout, i, k) {
+                Some(match self.launcher.picked_agent(layout, i, k) {
                     Some(agent) => {
                         let tip = Tooltip::new(&format!("New {} agent", agent.name), rect);
                         let field = match agent.command() {
@@ -1216,7 +1190,7 @@ impl Gerdr {
         let layout = self.sidebar_layout();
         let at = Rect::new((pos.x as i32, pos.y as i32).into(), (0, 0).into());
         match layout.hit(pos)? {
-            SidebarHit::Plus => Some(self.sidebar_plus_menu(&layout)),
+            SidebarHit::Plus => Some(self.key_state.sidebar_plus_menu(&layout)),
             SidebarHit::Header => Some(MenuSpec {
                 anchor: at,
                 items: vec![
@@ -1378,13 +1352,15 @@ impl Gerdr {
             }
         }
     }
+}
 
+impl crate::state::KeyState {
     /// The menu under the header's "+": the workspaces it can add, each
     /// saying what it opens (a project holds the workspaces; see
     /// `docs/ux-conventions.md`), and the inbox, with the keys that do the
     /// same.
     pub(crate) fn sidebar_plus_menu(&self, layout: &SidebarLayout) -> MenuSpec {
-        let help = self.key_state.keymap.help();
+        let help = self.keymap.help();
         let hinted = |item: MenuItem, action: Action| match help.key_of(action, 0) {
             Some(key) => item.hint(&key),
             None => item,
@@ -1412,9 +1388,70 @@ impl Gerdr {
     }
 }
 
+impl crate::state::Launcher {
+    /// The agent in slot `k` of workspace `i`'s strip, as `layout` has
+    /// it; `None` on the ellipsis standing for those that don't fit.
+    fn picked_agent(&self, layout: &SidebarLayout, i: usize, k: usize) -> Option<&CliAgent> {
+        let slots = layout.rows.get(i)?.pick_slots();
+        if self.cli_agents.len() > slots && k + 1 == slots {
+            return None;
+        }
+        self.cli_agents.get(k)
+    }
+}
+
+impl crate::state::Hover {
+    /// Close the strip of agents and stop waiting to open one: on a press
+    /// or a key, as the tooltip hides.
+    pub(crate) fn drop_agent_strip(&mut self) {
+        self.strip = None;
+        self.strip_record = None;
+        self.strip_due = None;
+    }
+}
+
+impl crate::state::Overlays {
+    /// Whether something covers the sidebar, taking the pointer from it.
+    pub(crate) fn sidebar_covered(&self) -> bool {
+        self.quit.is_some()
+            || self.restart.is_some()
+            || self.checkout.is_some()
+            || self.confirm.is_some()
+            || self.welcome.is_some()
+            || self.project_menu.is_some()
+            || self.switcher.is_some()
+            || self.context_menu.is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
+
+    #[test]
+    fn a_menu_covers_the_sidebar_and_dropping_the_strip_forgets_it() {
+        use crate::menu::{ContextMenu, MenuSpec};
+        let mut overlays = crate::state::Overlays::default();
+        assert!(!overlays.sidebar_covered());
+        let spec = MenuSpec {
+            anchor: crate::chrome::Rect::new((0, 0).into(), (10, 10).into()),
+            items: Vec::new(),
+        };
+        overlays.context_menu = Some(ContextMenu::new(spec, (800, 600).into()));
+        assert!(overlays.sidebar_covered());
+
+        let mut hover = crate::state::Hover {
+            strip: Some(1),
+            strip_record: Some("r".into()),
+            strip_due: Some((1, Instant::now())),
+            ..Default::default()
+        };
+        hover.drop_agent_strip();
+        assert_eq!(
+            (hover.strip, hover.strip_record, hover.strip_due),
+            (None, None, None)
+        );
+    }
 
     use super::{STRIP_DELAY, SidebarHit, VenvSetting, strip_after, workspace_tooltip};
 

@@ -325,7 +325,11 @@ impl Gerdr {
             Overlay::ProjectCommands => self.commands_hover(pos),
             Overlay::Features => return self.feature_panel_hover(pos),
             Overlay::Doc => return self.repos_hover(pos),
-            Overlay::ContextMenu => self.menu_motion(pos),
+            Overlay::ContextMenu => {
+                if let Some(menu) = self.overlays.context_menu.as_mut() {
+                    menu.motion(pos);
+                }
+            }
             Overlay::Welcome => return self.welcome_hover(pos),
             Overlay::ProjectMenu => return self.project_menu_hover(pos),
             Overlay::Worktrees => return self.worktrees_hover(pos),

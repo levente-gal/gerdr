@@ -529,7 +529,7 @@ impl Gerdr {
         if let Err(why) = self.can_change_id(id, new) {
             return self.show_warning(why);
         }
-        if !self.session_runs(id) && keep::app_names(id).is_empty() {
+        if !self.life.session_runs(&self.projects, id) && keep::app_names(id).is_empty() {
             return self.change_project_id_now(id, new);
         }
         self.ask(
@@ -591,7 +591,7 @@ impl Gerdr {
         if let Err(why) = self.can_change_id(id, new) {
             return self.show_warning(why);
         }
-        if self.session_runs(id) || !keep::app_names(id).is_empty() {
+        if self.life.session_runs(&self.projects, id) || !keep::app_names(id).is_empty() {
             return self.show_warning(format!("Stop {name} first: it still runs"));
         }
         let data = crate::projects::data_dir();

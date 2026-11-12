@@ -1047,6 +1047,11 @@ fn project_file_items(current: Option<&str>, home: Option<&Path>) -> Vec<Item> {
 }
 
 impl Gerdr {
+    /// See `Overlays::model_picker_open` (here for `stage_models`).
+    pub(crate) fn model_picker_open(&self) -> bool {
+        self.overlays.model_picker_open()
+    }
+
     /// Close what the switcher opens in place of, as the other popups do
     /// when they open: one popup at a time, no key repeating into it, no
     /// menu or tooltip left over it.
@@ -1068,7 +1073,7 @@ impl Gerdr {
         let mut switcher = Switcher::new(self.switcher_items(), false, Place::Split);
         switcher.set_room(self.switcher_room());
         self.overlays.switcher = Some(switcher);
-        self.query_zoxide();
+        self.launcher.query_zoxide();
     }
 
     /// Open the switcher on the shown project's feature rows (New feature,
@@ -1149,11 +1154,6 @@ impl Gerdr {
         switcher.select(&now);
         switcher.set_room(self.switcher_room());
         self.overlays.switcher = Some(switcher);
-    }
-
-    /// Whether the picker of a stage's model is open.
-    pub(crate) fn model_picker_open(&self) -> bool {
-        (self.overlays.switcher.as_ref()).is_some_and(|s| s.model_slot.is_some())
     }
 
     /// Bring the open picker of a stage's model up to date, after a read of
@@ -1251,17 +1251,17 @@ impl Gerdr {
                 .or_insert_with_key(|dir| git::web_url(dir));
         }
         let mut switcher = Switcher::new(Vec::new(), true, place);
-        switcher.icons = self.program_icons();
+        switcher.icons = self.launcher.program_icons();
         switcher.set_items(self.run_items());
         switcher.set_room(self.switcher_room());
         self.overlays.switcher = Some(switcher);
-        self.scan_installed_apps();
+        self.launcher.scan_installed_apps();
     }
 
     /// Bring the open run prompt's items up to date.
     pub fn refresh_run_prompt(&mut self) {
         if let Some(mut switcher) = self.overlays.switcher.take_if(|s| s.run) {
-            switcher.icons = self.program_icons();
+            switcher.icons = self.launcher.program_icons();
             switcher.set_items(self.run_items());
             self.overlays.switcher = Some(switcher);
         }
@@ -1272,7 +1272,7 @@ impl Gerdr {
     /// commands typed before, then the inbox, the rows importing other
     /// apps' profiles and the project file's commands.
     fn run_items(&self) -> Vec<Item> {
-        let icons = self.program_icons();
+        let icons = self.launcher.program_icons();
         let page = self
             .workspace()
             .and_then(|ws| self.git.repo_pages.get(&ws.dir).cloned().flatten());
@@ -1524,7 +1524,7 @@ impl Gerdr {
     /// The pointer moved to `pos` while the switcher is open: the row under
     /// it lights up.
     pub fn switcher_motion(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
-        let view = self.switcher_view()?;
+        let view = self.overlays.switcher_view()?;
         let layout = chrome::switcher_geometry(&view, self.content_rect());
         let hover = chrome::switcher_row_at(&layout, pos);
         let chip = layout
@@ -1564,22 +1564,6 @@ impl Gerdr {
             let text = format!("Agent {}", status_label(status));
             Tooltip::new(&text, icon)
         })
-    }
-
-    /// The installed apps' icons, by the program each starts.
-    fn program_icons(&self) -> HashMap<String, AppIcon> {
-        let mut icons = HashMap::new();
-        for app in &self.launcher.installed {
-            if let (Some(icon), Some(program)) = (&app.icon, launch::program_name(&app.command)) {
-                icons.entry(program).or_insert_with(|| icon.clone());
-            }
-        }
-        icons
-    }
-
-    /// The switcher's rows, while it is open.
-    pub fn switcher_view(&self) -> Option<SwitcherView> {
-        Some(self.overlays.switcher.as_ref()?.view())
     }
 
     /// Bring the open switcher's items up to date.
@@ -1660,7 +1644,7 @@ impl Gerdr {
     /// that.
     pub fn switcher_click(&mut self, pos: Point<f64, Logical>) {
         // A key hint: its key, pressed.
-        if let Some(view) = self.switcher_view() {
+        if let Some(view) = self.overlays.switcher_view() {
             let layout = chrome::switcher_geometry(&view, self.content_rect());
             if let (Some(i), Some(switcher)) = (
                 chrome::switcher_hint(&view, &layout, pos),
@@ -1848,7 +1832,7 @@ impl Gerdr {
     /// The apps named in the config file, with the icons of the installed
     /// apps they start.
     fn app_items(&self) -> Vec<Item> {
-        let icons = self.program_icons();
+        let icons = self.launcher.program_icons();
         self.launcher
             .apps
             .iter()
@@ -1988,20 +1972,43 @@ impl Gerdr {
         match inserted {
             Ok(_) => {
                 self.launcher.zoxide = Some(tx);
-                self.query_zoxide();
+                self.launcher.query_zoxide();
             }
             Err(err) => tracing::warn!("zoxide: {err}"),
         }
     }
+}
 
+impl crate::state::Launcher {
+    /// The installed apps' icons, by the program each starts.
+    fn program_icons(&self) -> HashMap<String, AppIcon> {
+        let mut icons = HashMap::new();
+        for app in &self.installed {
+            if let (Some(icon), Some(program)) = (&app.icon, launch::program_name(&app.command)) {
+                icons.entry(program).or_insert_with(|| icon.clone());
+            }
+        }
+        icons
+    }
     /// Read zoxide's folders again, off the event loop, into `recent_dirs`.
     pub fn query_zoxide(&self) {
-        let Some(tx) = self.launcher.zoxide.clone() else {
+        let Some(tx) = self.zoxide.clone() else {
             return;
         };
         std::thread::spawn(move || {
             let _ = tx.send(zoxide_dirs());
         });
+    }
+}
+
+impl crate::state::Overlays {
+    /// Whether the picker of a stage's model is open.
+    pub(crate) fn model_picker_open(&self) -> bool {
+        (self.switcher.as_ref()).is_some_and(|s| s.model_slot.is_some())
+    }
+    /// The switcher's rows, while it is open.
+    pub fn switcher_view(&self) -> Option<SwitcherView> {
+        Some(self.switcher.as_ref()?.view())
     }
 }
 
@@ -2048,6 +2055,17 @@ pub fn remember(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_overlays_show_no_switcher_and_no_model_picker() {
+        let overlays = crate::state::Overlays::default();
+        assert!(!overlays.model_picker_open());
+        assert!(overlays.switcher_view().is_none());
+        let launcher = crate::state::Launcher::default();
+        assert!(launcher.program_icons().is_empty());
+        // Without a sender, zoxide isn't asked.
+        launcher.query_zoxide();
+    }
 
     #[test]
     fn the_key_table_agrees_with_itself() {

@@ -275,11 +275,6 @@ impl Gerdr {
         self.sync_preview_marks();
     }
 
-    /// `pane`'s tab closed.
-    pub(crate) fn preview_closed(&mut self, pane: u32) {
-        self.web.previews.shown.remove(&pane);
-    }
-
     /// Send every preview whose file, theme or review changed again; the
     /// previews of panes gone are dropped.
     pub fn refresh_previews(&mut self) {
@@ -301,7 +296,7 @@ impl Gerdr {
         let file = preview.file.clone();
         let name = file.file_name().unwrap_or(file.as_os_str());
         let name = name.to_string_lossy().into_owned();
-        let dark = self.theme() == Theme::Dark;
+        let dark = self.settings.theme() == Theme::Dark;
         let mut shown = Shown::of(&file, &name, dark);
         shown.marks = self.review_marks(&file).map(|(_, m)| m).unwrap_or_default();
         let marks = marks_hash(&shown.marks);
@@ -372,6 +367,13 @@ impl Gerdr {
             })?;
             Some((w, t))
         })
+    }
+}
+
+impl crate::state::Web {
+    /// `pane`'s tab closed.
+    pub(crate) fn preview_closed(&mut self, pane: u32) {
+        self.previews.shown.remove(&pane);
     }
 }
 

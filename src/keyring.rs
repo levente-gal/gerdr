@@ -348,7 +348,7 @@ impl Gerdr {
         let mut dropped = false;
         for (w, t, pane, command) in held {
             let pid = self.start_app(w, t, &command, None);
-            let kept = self.is_kept(pid);
+            let kept = self.keep.is_kept(pid);
             let tab = &mut self.workspaces[w].tabs[t];
             let Some(i) = tab.expected.iter().position(|e| e.pane == pane) else {
                 continue;
