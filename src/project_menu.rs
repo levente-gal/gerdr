@@ -32,6 +32,7 @@ use crate::{
     },
     fuzzy, home_dir, hooks,
     input::Overlay,
+    key_table::{self, Binding},
     paths::{display, tilde},
     project_list::{self, PATH_CHARS, RowTops},
     scroll::{Bounds, Motion, Scroll},
@@ -376,10 +377,9 @@ impl ProjectMenu {
             Edit::Moved => return None,
             Edit::Ignored => {}
         }
-        let ctrl = mods.ctrl;
         let page = self.whole().count().max(1) as isize;
-        match sym {
-            Keysym::Escape => {
+        match key_table::press(MENU_KEYS, &(), mods, sym) {
+            Some(Key::Esc) => {
                 if armed.is_some() {
                     // Esc took back the Delete.
                 } else if !self.query.is_empty() {
@@ -389,15 +389,26 @@ impl ProjectMenu {
                     return Some(Outcome::Closed);
                 }
             }
-            Keysym::Return | Keysym::KP_Enter => return self.enter(self.selected),
-            Keysym::n if ctrl => self.open_form(),
-            Keysym::F2 if !ctrl && mods.shift => self.start_renaming(self.selected, Renamed::Id),
-            Keysym::F2 if !ctrl => self.start_renaming(self.selected, Renamed::Name),
-            Keysym::r if ctrl => return Some(Outcome::Refresh),
-            Keysym::q if ctrl => return self.stop(self.selected),
-            Keysym::e if ctrl => return self.edit_settings(self.selected),
-            Keysym::o if ctrl => return self.project_file(self.selected),
-            Keysym::Delete | Keysym::KP_Delete => return self.forget(self.selected, armed),
+            Some(Key::Enter) => return self.enter(self.selected),
+            Some(Key::New) => self.open_form(),
+            Some(Key::ChangeId) => self.start_renaming(self.selected, Renamed::Id),
+            Some(Key::Rename) => self.start_renaming(self.selected, Renamed::Name),
+            Some(Key::Refresh) => return Some(Outcome::Refresh),
+            Some(Key::Stop) => return self.stop(self.selected),
+            Some(Key::Commands) => return self.edit_settings(self.selected),
+            Some(Key::ProjectFile) => return self.project_file(self.selected),
+            Some(Key::Forget) => return self.forget(self.selected, armed),
+            Some(_) => {}
+            None => return self.move_key(mods, sym, page),
+        }
+        None
+    }
+
+    /// A key no row of `MENU_KEYS` took: moving the selection through
+    /// `page` rows, and Alt+1..9 switching to a recent project.
+    fn move_key(&mut self, mods: &ModifiersState, sym: Keysym, page: isize) -> Option<Outcome> {
+        let ctrl = mods.ctrl;
+        match sym {
             Keysym::Up | Keysym::KP_Up => self.step(-1),
             Keysym::Down | Keysym::KP_Down => self.step(1),
             Keysym::k if ctrl => self.step(-1),
@@ -418,9 +429,9 @@ impl ProjectMenu {
     /// A key while a project is being renamed.
     fn rename_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym) -> Option<Outcome> {
         let renaming = self.renaming.as_mut()?;
-        match sym {
-            Keysym::Escape => self.renaming = None,
-            Keysym::Return | Keysym::KP_Enter if renaming.what == Renamed::Id => {
+        match key_table::press(RENAME_KEYS, &(), mods, sym) {
+            Some(Key::Esc) => self.renaming = None,
+            Some(Key::Enter) if renaming.what == Renamed::Id => {
                 let new = renaming.name.trim();
                 if new == renaming.id {
                     self.renaming = None;
@@ -439,7 +450,7 @@ impl ProjectMenu {
                 let Renaming { id, name, .. } = self.renaming.take()?;
                 return Some(Outcome::ChangeId(id, name.trim().to_owned()));
             }
-            Keysym::Return | Keysym::KP_Enter => {
+            Some(_) => {
                 let name = renaming.name.trim();
                 let taken = self.projects.iter().any(|(p, row)| {
                     *p != renaming.id && row.name.to_lowercase() == name.to_lowercase()
@@ -455,7 +466,7 @@ impl ProjectMenu {
                     return Some(Outcome::Rename(id, name.to_owned()));
                 }
             }
-            _ => {
+            None => {
                 renaming.name.key(mods, sym, typed);
             }
         }
@@ -607,9 +618,9 @@ impl ProjectMenu {
     ) -> Option<Outcome> {
         let settings = self.settings.as_mut()?;
         let form = settings;
-        match sym {
-            Keysym::Escape => self.settings = None,
-            Keysym::Tab | Keysym::ISO_Left_Tab => {
+        match key_table::press(SETTINGS_KEYS, &(), mods, sym) {
+            Some(Key::Esc) => self.settings = None,
+            Some(Key::Next { back }) => {
                 const ORDER: [SettingsField; 5] = [
                     SettingsField::Before,
                     SettingsField::After,
@@ -617,17 +628,15 @@ impl ProjectMenu {
                     SettingsField::Run,
                     SettingsField::Save,
                 ];
-                let back =
-                    sym == Keysym::ISO_Left_Tab || typed == Keysym::ISO_Left_Tab || mods.shift;
                 let at = ORDER.iter().position(|f| *f == form.focus).unwrap_or(0);
                 let step = if back { ORDER.len() - 1 } else { 1 };
                 form.focus = ORDER[(at + step) % ORDER.len()];
             }
-            Keysym::Return | Keysym::KP_Enter => {
+            Some(_) => {
                 let field = form.focus;
                 return self.press_setting(field);
             }
-            _ => match form.focus {
+            None => match form.focus {
                 SettingsField::Before => {
                     form.before.key(mods, sym, typed);
                 }
@@ -895,21 +904,21 @@ impl ProjectMenu {
     fn form_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym) -> Option<Outcome> {
         let form = self.form.as_mut()?;
         let ctrl = mods.ctrl;
-        match sym {
-            Keysym::Escape => {
+        match key_table::press(FORM_KEYS, &(), mods, sym) {
+            Some(Key::Esc) => {
                 if form.suggestions.is_empty() {
                     self.form = None;
                 } else {
                     form.close_suggestions();
                 }
+                return None;
             }
-            Keysym::o if ctrl => return Some(Outcome::Browse(form.start(self.home.as_deref()))),
-            Keysym::Tab | Keysym::ISO_Left_Tab => {
-                let back =
-                    sym == Keysym::ISO_Left_Tab || typed == Keysym::ISO_Left_Tab || mods.shift;
+            Some(Key::Browse) => return Some(Outcome::Browse(form.start(self.home.as_deref()))),
+            Some(Key::Next { back }) => {
                 form.tab(back);
+                return None;
             }
-            Keysym::Return | Keysym::KP_Enter => {
+            Some(_) => {
                 if let Some(s) = form.suggestion {
                     form.take_suggestion(s, self.home.as_deref());
                     return None;
@@ -923,6 +932,9 @@ impl ProjectMenu {
                     _ => self.create(),
                 };
             }
+            None => {}
+        }
+        match sym {
             Keysym::Up | Keysym::KP_Up if !form.suggestions.is_empty() => {
                 form.suggestion = form.suggestion.and_then(|s| s.checked_sub(1));
             }
@@ -1060,12 +1072,12 @@ impl ProjectMenu {
                 hover,
                 form: Some(form.view()),
                 settings: None,
-                hints: hints(&[
-                    ("Tab", "next"),
-                    ("Ctrl+O", "browse"),
-                    ("Enter", "create"),
-                    ("Esc", "back"),
-                ]),
+                hints: hints(FORM_KEYS, |key| match key {
+                    Key::Next { .. } => "next",
+                    Key::Browse => "browse",
+                    Key::Enter => "create",
+                    _ => "back",
+                }),
                 hover_alpha,
                 part: 0.0,
                 bar: None,
@@ -1079,7 +1091,11 @@ impl ProjectMenu {
                 hover,
                 form: None,
                 settings: Some(settings.view()),
-                hints: hints(&[("Tab", "next"), ("Enter", "save"), ("Esc", "back")]),
+                hints: hints(SETTINGS_KEYS, |key| match key {
+                    Key::Next { .. } => "next",
+                    Key::Enter => "save",
+                    _ => "back",
+                }),
                 hover_alpha,
                 part: 0.0,
                 bar: None,
@@ -1144,23 +1160,26 @@ impl ProjectMenu {
                 Renamed::Name => "save",
                 Renamed::Id => "change id",
             };
-            hints(&[("Enter", enter), ("Esc", "cancel")])
+            hints(RENAME_KEYS, |key| match key {
+                Key::Enter => enter,
+                _ => "cancel",
+            })
         } else {
             let (del, esc) = match (&self.confirm_forget, self.query.is_empty()) {
                 (Some(_), _) => ("again to forget", "cancel"),
                 (None, true) => ("forget", "close"),
                 (None, false) => ("forget", "clear"),
             };
-            hints(&[
-                ("Enter", "open"),
-                ("Ctrl+N", "new"),
-                ("F2", "rename"),
-                ("Ctrl+E", "commands"),
-                ("Ctrl+O", "project file"),
-                ("Ctrl+Q", "stop"),
-                ("Del", del),
-                ("Esc", esc),
-            ])
+            hints(MENU_KEYS, |key| match key {
+                Key::Enter => "open",
+                Key::New => "new",
+                Key::Rename => "rename",
+                Key::Commands => "commands",
+                Key::ProjectFile => "project file",
+                Key::Stop => "stop",
+                Key::Forget => del,
+                _ => esc,
+            })
         };
         ProjectMenuView {
             query: self.query.line(),
@@ -1351,13 +1370,178 @@ fn best_dirs<'a>(
         .collect()
 }
 
-/// The footer's hints, owned.
-fn hints(hints: &[(&str, &str)]) -> Vec<(String, String)> {
-    hints
-        .iter()
-        .map(|(key, label)| ((*key).to_owned(), (*label).to_owned()))
+/// What a key of the menu does (see `MENU_KEYS` and the forms' tables).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Key {
+    /// Enter: open the project, save, create or press the focused button.
+    Enter,
+    New,
+    Rename,
+    ChangeId,
+    Commands,
+    ProjectFile,
+    Stop,
+    Forget,
+    Refresh,
+    /// To the next field, or with `back` the one before.
+    Next {
+        back: bool,
+    },
+    Browse,
+    Esc,
+}
+
+/// Each key of `table` as the footer hints it, with `label`'s words.
+fn hints<A>(table: &[Binding<(), A>], label: impl Fn(&A) -> &'static str) -> Vec<(String, String)> {
+    (key_table::hints(table, &(), |a| label(a).to_owned()).into_iter())
+        .map(|(k, w)| (k.to_owned(), w))
         .collect()
 }
+
+/// The list's keys, in the footer's order: the handler and the footer read
+/// them. Moving the selection and Alt+1..9 stay `ProjectMenu::key`'s.
+const MENU_KEYS: &[Binding<(), Key>] = &[
+    Binding {
+        chord: "Enter",
+        does: |_| Some(Key::Enter),
+        footer: true,
+        f1: "Open the project",
+    },
+    Binding {
+        chord: "Ctrl+N",
+        does: |_| Some(Key::New),
+        footer: true,
+        f1: "A new project",
+    },
+    Binding {
+        chord: "F2",
+        does: |_| Some(Key::Rename),
+        footer: true,
+        f1: "Rename the project",
+    },
+    Binding {
+        chord: "Shift+F2",
+        does: |_| Some(Key::ChangeId),
+        footer: false,
+        f1: "Change its id",
+    },
+    Binding {
+        chord: "Ctrl+E",
+        does: |_| Some(Key::Commands),
+        footer: true,
+        f1: "Its commands",
+    },
+    Binding {
+        chord: "Ctrl+O",
+        does: |_| Some(Key::ProjectFile),
+        footer: true,
+        f1: "Open its project file",
+    },
+    Binding {
+        chord: "Ctrl+Q",
+        does: |_| Some(Key::Stop),
+        footer: true,
+        f1: "Stop it",
+    },
+    Binding {
+        chord: "Del",
+        does: |_| Some(Key::Forget),
+        footer: true,
+        f1: "Forget it, pressed twice",
+    },
+    Binding {
+        chord: "Ctrl+R",
+        does: |_| Some(Key::Refresh),
+        footer: false,
+        f1: "Read the projects again",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(Key::Esc),
+        footer: true,
+        f1: "Take back a Delete, clear the query, then close",
+    },
+];
+
+/// The keys while a project is renamed, past what its field takes.
+const RENAME_KEYS: &[Binding<(), Key>] = &[
+    Binding {
+        chord: "Enter",
+        does: |_| Some(Key::Enter),
+        footer: true,
+        f1: "Save the name or id",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(Key::Esc),
+        footer: true,
+        f1: "Leave it as it was",
+    },
+];
+
+/// The new project form's keys, past what its fields take; the
+/// suggestions' Up / Down and the kind's Left / Right / Space stay
+/// `form_key`'s.
+const FORM_KEYS: &[Binding<(), Key>] = &[
+    Binding {
+        chord: "Tab",
+        does: |_| Some(Key::Next { back: false }),
+        footer: true,
+        f1: "The next field, or the one before",
+    },
+    Binding {
+        chord: "Shift+Tab",
+        does: |_| Some(Key::Next { back: true }),
+        footer: false,
+        f1: "The next field, or the one before",
+    },
+    Binding {
+        chord: "Ctrl+O",
+        does: |_| Some(Key::Browse),
+        footer: true,
+        f1: "Pick the folder",
+    },
+    Binding {
+        chord: "Enter",
+        does: |_| Some(Key::Enter),
+        footer: true,
+        f1: "Create it, or press the focused button",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(Key::Esc),
+        footer: true,
+        f1: "Close the suggestions, then back",
+    },
+];
+
+/// The commands form's keys, past what its fields take.
+const SETTINGS_KEYS: &[Binding<(), Key>] = &[
+    Binding {
+        chord: "Tab",
+        does: |_| Some(Key::Next { back: false }),
+        footer: true,
+        f1: "The next field, or the one before",
+    },
+    Binding {
+        chord: "Shift+Tab",
+        does: |_| Some(Key::Next { back: true }),
+        footer: false,
+        f1: "The next field, or the one before",
+    },
+    Binding {
+        chord: "Enter",
+        does: |_| Some(Key::Enter),
+        footer: true,
+        f1: "Save, or press the focused button",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(Key::Esc),
+        footer: true,
+        f1: "Back, unsaved",
+    },
+];
 
 impl Gerdr {
     /// Open the project menu, and find out which projects' sessions run.
@@ -1625,6 +1809,14 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_key_tables_agree_with_themselves() {
+        key_table::check(MENU_KEYS, &[()]);
+        key_table::check(RENAME_KEYS, &[()]);
+        key_table::check(FORM_KEYS, &[()]);
+        key_table::check(SETTINGS_KEYS, &[()]);
+    }
 
     /// A home folder that has a `src` folder in it.
     fn home() -> PathBuf {

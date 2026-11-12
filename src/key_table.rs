@@ -20,7 +20,9 @@ pub struct Binding<C, A> {
     /// and in menus (checklist K3, K7).
     pub footer: bool,
     /// Its words on F1; empty to leave it off, for a chord another row of the
-    /// same words already lists there.
+    /// same words already lists there. A row with no F1 words and no footer
+    /// hint is an alias: a press the panel took before its keys were a table
+    /// (Shift+Esc for Esc, say), kept so that it still works, never shown.
     pub f1: &'static str,
 }
 
@@ -30,9 +32,11 @@ pub fn is(chord: &str, mods: &ModifiersState, sym: Keysym) -> bool {
     let Some((want, key)) = crate::keys::hint_key(chord) else {
         return false;
     };
+    // ISO_Left_Tab is Shift+Tab, as some layouts give it without Shift.
+    let shift = mods.shift || sym == Keysym::ISO_Left_Tab;
     want.ctrl == mods.ctrl
         && want.alt == mods.alt
-        && want.shift == mods.shift
+        && want.shift == shift
         && want.logo == mods.logo
         && same_key(sym, key)
 }
@@ -43,6 +47,14 @@ fn same_key(pressed: Keysym, key: Keysym) -> bool {
         Keysym::KP_Enter => Keysym::Return,
         Keysym::KP_Delete => Keysym::Delete,
         Keysym::ISO_Left_Tab => Keysym::Tab,
+        Keysym::KP_Up => Keysym::Up,
+        Keysym::KP_Down => Keysym::Down,
+        Keysym::KP_Left => Keysym::Left,
+        Keysym::KP_Right => Keysym::Right,
+        Keysym::KP_Home => Keysym::Home,
+        Keysym::KP_End => Keysym::End,
+        Keysym::KP_Page_Up => Keysym::Page_Up,
+        Keysym::KP_Page_Down => Keysym::Page_Down,
         sym => match sym.key_char() {
             Some(c) if c.is_ascii_uppercase() => {
                 Keysym::from_char(c.to_ascii_lowercase())
@@ -94,15 +106,35 @@ pub fn f1_rows<C, A>(table: &[Binding<C, A>]) -> Vec<(&'static str, &'static str
         .collect()
 }
 
+/// `rows` (chord, words) with each run of rows saying the same words as
+/// one row, its chords joined as "Up / Down": how F1 lists a pair, and a
+/// footer offers a choice ("Esc / Q").
+pub fn joined<W: AsRef<str>>(
+    rows: impl IntoIterator<Item = (&'static str, W)>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (chord, words) in rows {
+        match out.last_mut() {
+            Some((keys, said)) if said == words.as_ref() => {
+                keys.push_str(" / ");
+                keys.push_str(chord);
+            }
+            _ => out.push((chord.to_owned(), words.as_ref().to_owned())),
+        }
+    }
+    out
+}
+
 /// For tests of a panel: over every context in `ctxs`, each footer hint
 /// presses a row that is offered, every chord parses, and every chord in
-/// the table has an F1 row. Panics naming what is wrong.
+/// the table but an alias's has an F1 row. Panics naming what is wrong.
 #[cfg(test)]
 pub fn check<C, A>(table: &[Binding<C, A>], ctxs: &[C]) {
     for b in table {
         assert!(crate::keys::hint_key(b.chord).is_some(), "{} doesn't parse", b.chord);
+        let alias = !b.footer && b.f1.is_empty();
         assert!(
-            table.iter().any(|o| o.chord == b.chord && !o.f1.is_empty()),
+            alias || table.iter().any(|o| o.chord == b.chord && !o.f1.is_empty()),
             "{} is on no F1 row",
             b.chord
         );

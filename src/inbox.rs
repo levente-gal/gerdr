@@ -53,6 +53,7 @@ use crate::{
     herdr::AgentStatus,
     inbox_store::{InboxFile, TodoId, Triage},
     issues::{IssueSource, IssuesRead, IssuesState, TicketRepo},
+    key_table::{self, Binding},
     scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, TextField},
 };
@@ -923,6 +924,225 @@ fn action_hint(action: ItemAction) -> (&'static str, &'static str) {
     }
 }
 
+/// What a key of the list does (see `LIST_KEYS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListKey {
+    /// Do what the selected item's button does.
+    Act(ItemAction),
+    DismissAll,
+    NewTodo,
+    AddTickets,
+    /// Fold the ignored errors, or list them (Alt+I).
+    Fold,
+    /// The hidden items, or back to the list (Alt+H).
+    Hidden,
+    Refresh,
+    /// This workspace's items, or all workspaces'.
+    Scope,
+    Esc,
+}
+
+/// What the list's keys read of the panel now (see `Inbox::list_ctx`).
+struct ListCtx {
+    /// What the selected item offers.
+    actions: Vec<ItemAction>,
+    /// Whether its group's items can all be dismissed.
+    dismiss_all: bool,
+    /// Whether a folding group's label is listed.
+    folds: bool,
+    /// Whether there is a workspace to scope to.
+    active: bool,
+}
+
+impl ListCtx {
+    fn has(&self, action: ItemAction) -> Option<ListKey> {
+        self.actions
+            .contains(&action)
+            .then_some(ListKey::Act(action))
+    }
+}
+
+/// The list's keys, in the footer's order: the handler and the footer
+/// read them. Moving the selection stays `Inbox::list_move`'s.
+const LIST_KEYS: &[Binding<ListCtx, ListKey>] = {
+    use ItemAction as A;
+    &[
+        Binding {
+            chord: "Enter",
+            does: |c| c.has(A::GoTo),
+            footer: true,
+            f1: "Go to the selected item",
+        },
+        Binding {
+            chord: "Del",
+            does: |c| delete_action(&c.actions).map(ListKey::Act),
+            footer: true,
+            f1: "Dismiss, restore, mark done or forget it",
+        },
+        Binding {
+            chord: "Ctrl+Del",
+            does: |c| c.dismiss_all.then_some(ListKey::DismissAll),
+            footer: true,
+            f1: "Dismiss all of its group",
+        },
+        Binding {
+            chord: "Ctrl+H",
+            does: |c| c.has(A::Snooze),
+            footer: true,
+            f1: "Snooze it",
+        },
+        Binding {
+            chord: "Ctrl+Shift+H",
+            does: |c| c.has(A::SnoozeLong),
+            footer: true,
+            f1: "Snooze it till tomorrow",
+        },
+        Binding {
+            chord: "Ctrl+E",
+            does: |c| c.has(A::Edit),
+            footer: true,
+            f1: "Edit the todo",
+        },
+        Binding {
+            chord: "Shift+Del",
+            does: |c| c.has(A::Delete),
+            footer: true,
+            f1: "Delete the todo",
+        },
+        // One key both ways: the item has one of them.
+        Binding {
+            chord: "Ctrl+I",
+            does: |c| c.has(A::Ignore).or_else(|| c.has(A::Unignore)),
+            footer: true,
+            f1: "Ignore the error, or stop ignoring it",
+        },
+        Binding {
+            chord: "Ctrl+O",
+            does: |c| c.has(A::OpenLink),
+            footer: true,
+            f1: "Open its link",
+        },
+        Binding {
+            chord: "Ctrl+Shift+O",
+            does: |c| c.has(A::Review),
+            footer: false,
+            f1: "Review the pull request in gerdr",
+        },
+        Binding {
+            chord: "Ctrl+C",
+            does: |c| c.has(A::CopyLink),
+            footer: true,
+            f1: "Copy its link",
+        },
+        Binding {
+            chord: "Ctrl+N",
+            does: |_| Some(ListKey::NewTodo),
+            footer: true,
+            f1: "Write a new todo",
+        },
+        Binding {
+            chord: "Ctrl+T",
+            does: |_| Some(ListKey::AddTickets),
+            footer: true,
+            f1: "Add a ticket repository",
+        },
+        // Hinted while a folding group is listed.
+        Binding {
+            chord: "Alt+I",
+            does: |c| c.folds.then_some(ListKey::Fold),
+            footer: true,
+            f1: "Show or hide the ignored errors",
+        },
+        Binding {
+            chord: "Alt+I",
+            does: |_| Some(ListKey::Fold),
+            footer: false,
+            f1: "",
+        },
+        Binding {
+            chord: "Alt+H",
+            does: |_| Some(ListKey::Hidden),
+            footer: true,
+            f1: "The hidden items, or back to the list",
+        },
+        Binding {
+            chord: "Ctrl+R",
+            does: |_| Some(ListKey::Refresh),
+            footer: true,
+            f1: "Read it all again",
+        },
+        Binding {
+            chord: "Tab",
+            does: |c| c.active.then_some(ListKey::Scope),
+            footer: true,
+            f1: "This workspace's items, or all workspaces'",
+        },
+        Binding {
+            chord: "Shift+Tab",
+            does: |c| c.active.then_some(ListKey::Scope),
+            footer: false,
+            f1: "This workspace's items, or all workspaces'",
+        },
+        Binding {
+            chord: "Esc",
+            does: |_| Some(ListKey::Esc),
+            footer: true,
+            f1: "Clear the filter, back from the hidden ones, then close",
+        },
+    ]
+};
+
+/// What a key does while a todo or a ticket repository is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComposeKey {
+    Save,
+    Workspace { back: bool },
+    Back,
+}
+
+/// What the writing's keys read: whether it is a ticket repository, and
+/// whether there are workspaces to link a todo to.
+struct ComposeCtx {
+    tickets: bool,
+    workspaces: bool,
+}
+
+/// The keys while a todo or a ticket repository is written, past what its
+/// field takes.
+const COMPOSE_KEYS: &[Binding<ComposeCtx, ComposeKey>] = &[
+    Binding {
+        chord: "Enter",
+        does: |_| Some(ComposeKey::Save),
+        footer: true,
+        f1: "Save it",
+    },
+    // Hinted while there is a workspace to link.
+    Binding {
+        chord: "Tab",
+        does: |c| (!c.tickets && c.workspaces).then_some(ComposeKey::Workspace { back: false }),
+        footer: true,
+        f1: "Link the todo to the next workspace, or the one before",
+    },
+    Binding {
+        chord: "Tab",
+        does: |c| (!c.tickets).then_some(ComposeKey::Workspace { back: false }),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Shift+Tab",
+        does: |c| (!c.tickets).then_some(ComposeKey::Workspace { back: true }),
+        footer: false,
+        f1: "Link the todo to the next workspace, or the one before",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(ComposeKey::Back),
+        footer: true,
+        f1: "Back to the list, the writing kept",
+    },
+];
+
 /// A pane's last lines as last read, for an agent's detail.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneText {
@@ -1531,9 +1751,13 @@ impl Panel {
         if compose.text.key(mods, sym, typed) != Edit::Ignored || mods.alt || mods.logo {
             return None;
         }
-        match sym {
-            Keysym::Escape => self.set_aside(),
-            Keysym::Return | Keysym::KP_Enter if !mods.ctrl => {
+        let ctx = ComposeCtx {
+            tickets: compose.tickets,
+            workspaces: !list.workspaces.is_empty(),
+        };
+        match key_table::press(COMPOSE_KEYS, &ctx, mods, sym)? {
+            ComposeKey::Back => self.set_aside(),
+            ComposeKey::Save => {
                 let compose = self.compose.take()?;
                 let text = compose.text.trim().to_owned();
                 if compose.tickets && !text.is_empty() {
@@ -1557,11 +1781,10 @@ impl Panel {
                     });
                 }
             }
-            Keysym::Tab | Keysym::ISO_Left_Tab if !mods.ctrl && !compose.tickets => {
-                let back = mods.shift || sym == Keysym::ISO_Left_Tab;
+            ComposeKey::Workspace { back } => {
+                let compose = self.compose.as_mut()?;
                 compose.workspace = cycle(compose.workspace, list.workspaces.len(), back);
             }
-            _ => {}
         }
         None
     }
@@ -1592,53 +1815,60 @@ impl Panel {
             }
             Edit::Moved => return None,
         }
-        let alt_only = mods.alt && !(mods.ctrl || mods.shift || mods.logo);
-        if alt_only && matches!(sym, Keysym::h | Keysym::H) {
-            self.show_hidden = !self.show_hidden;
-            self.refilter(list);
-            return None;
-        }
-        if alt_only && matches!(sym, Keysym::i | Keysym::I) {
-            self.toggle_folded(list);
-            return None;
-        }
-        if mods.alt || mods.logo {
-            return None;
-        }
-        let ctrl = mods.ctrl;
+        let listed = self.listed(list);
+        let Some(key) = key_table::press(LIST_KEYS, &self.list_ctx(&listed, list), mods, sym)
+        else {
+            if mods.alt || mods.logo {
+                return None;
+            }
+            return self.list_move(sym, mods, &listed, list);
+        };
         // What changes the list, rather than act on its selection.
-        match sym {
-            Keysym::Tab | Keysym::ISO_Left_Tab if !ctrl && list.active.is_some() => {
-                self.all = !self.all;
+        match key {
+            ListKey::Hidden => self.show_hidden = !self.show_hidden,
+            ListKey::Fold => {
+                self.toggle_folded(list);
+                return None;
             }
-            Keysym::Escape if !self.query.is_empty() => self.query.clear(),
-            Keysym::Escape if self.show_hidden => self.show_hidden = false,
-            Keysym::Escape => return Some(Outcome::Close),
-            Keysym::r | Keysym::R if ctrl => return Some(Outcome::Refresh),
-            _ => {
-                let listed = self.listed(list);
-                return self.list_key(mods, sym, listed, armed, list);
-            }
+            ListKey::Scope => self.all = !self.all,
+            ListKey::Esc if !self.query.is_empty() => self.query.clear(),
+            ListKey::Esc if self.show_hidden => self.show_hidden = false,
+            ListKey::Esc => return Some(Outcome::Close),
+            ListKey::Refresh => return Some(Outcome::Refresh),
+            _ => return self.list_key(key, listed, armed, list),
         }
         self.refilter(list);
         None
     }
 
-    /// A key for the list in `listed`, with Ctrl and Shift as `mods` says
-    /// (no Alt or Logo); `armed`, the item a first Delete was on.
-    fn list_key(
+    /// What the list's keys read of the panel, over `list` as `listed`.
+    fn list_ctx(&self, listed: &Listed, list: &Listing) -> ListCtx {
+        let item = self.current(&listed.items).map(|k| &listed.items[k]);
+        ListCtx {
+            actions: item
+                .map(|i| actions(i, self.show_hidden))
+                .unwrap_or_default(),
+            dismiss_all: item.is_some_and(|i| self.dismisses_all(i.section, 1)),
+            folds: (listed.rows.iter())
+                .any(|e| matches!(e, Entry::Label(s, n, _) if s.folds() && *n > 0)),
+            active: list.active.is_some(),
+        }
+    }
+
+    /// A key moving the selection over `list` as `listed`, with Ctrl and
+    /// Shift as `mods` says (no Alt or Logo): plain moves, no rows of
+    /// `LIST_KEYS`.
+    fn list_move(
         &mut self,
-        mods: &ModifiersState,
         sym: Keysym,
-        listed: Listed,
-        armed: Option<ItemId>,
+        mods: &ModifiersState,
+        listed: &Listed,
         list: &Listing,
     ) -> Option<Outcome> {
         let (ctrl, shift) = (mods.ctrl, mods.shift);
         let page = list.page;
-        self.settle(&listed, page);
+        self.settle(listed, page);
         let k = self.current(&listed.items);
-        let item = k.map(|k| &listed.items[k]);
         let step = |by: isize| {
             let n = listed.items.len() as isize;
             match k {
@@ -1659,41 +1889,32 @@ impl Panel {
             Keysym::End | Keysym::KP_End => step(isize::MAX / 2),
             _ => None,
         };
-        if let Some(to) = to {
-            self.select(&listed, to, page, None);
-            return None;
-        }
-        let action = match sym {
-            Keysym::n | Keysym::N if ctrl => {
+        self.select(listed, to?, page, None);
+        None
+    }
+
+    /// Do `key` to the list in `listed`; `armed`, the item a first Delete
+    /// was on.
+    fn list_key(
+        &mut self,
+        key: ListKey,
+        listed: Listed,
+        armed: Option<ItemId>,
+        list: &Listing,
+    ) -> Option<Outcome> {
+        self.settle(&listed, list.page);
+        let item = self.current(&listed.items).map(|k| &listed.items[k]);
+        let action = match key {
+            ListKey::NewTodo => {
                 self.write(item, list);
                 return None;
             }
-            Keysym::t | Keysym::T if ctrl => {
+            ListKey::AddTickets => {
                 self.write_tickets();
                 return None;
             }
-            Keysym::Return | Keysym::KP_Enter if !ctrl => ItemAction::GoTo,
-            // Shift changes the symbol: match both cases.
-            Keysym::h | Keysym::H if ctrl && shift => ItemAction::SnoozeLong,
-            Keysym::h | Keysym::H if ctrl => ItemAction::Snooze,
-            Keysym::e | Keysym::E if ctrl => ItemAction::Edit,
-            Keysym::o | Keysym::O if ctrl && shift => ItemAction::Review,
-            Keysym::o | Keysym::O if ctrl => ItemAction::OpenLink,
-            Keysym::c | Keysym::C if ctrl => ItemAction::CopyLink,
-            // One key both ways: the item has one of them.
-            Keysym::i | Keysym::I if ctrl && !shift => {
-                let can = actions(item?, self.show_hidden);
-                [ItemAction::Ignore, ItemAction::Unignore]
-                    .into_iter()
-                    .find(|a| can.contains(a))?
-            }
-            Keysym::Delete | Keysym::KP_Delete if ctrl && !shift => {
-                return self.dismiss_all(&listed, item?.section);
-            }
-            Keysym::Delete | Keysym::KP_Delete if !ctrl && shift => ItemAction::Delete,
-            Keysym::Delete | Keysym::KP_Delete if !ctrl => {
-                delete_action(&actions(item?, self.show_hidden))?
-            }
+            ListKey::DismissAll => return self.dismiss_all(&listed, item?.section),
+            ListKey::Act(action) => action,
             _ => return None,
         };
         let item = item?.clone();
@@ -1840,96 +2061,49 @@ impl Panel {
         moving
     }
 
-    /// The footer's hints, for what is selected (`actions`, an item of
-    /// `section`) over `list`; `folds`, whether a folding section's label
-    /// is listed.
-    fn hints(
-        &self,
-        actions: &[ItemAction],
-        section: Option<Section>,
-        folds: bool,
-        list: &Listing,
-    ) -> Vec<(String, String)> {
-        let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
+    /// The footer's hints, for what the list's keys read (`ctx`), over
+    /// `list`.
+    fn hints(&self, ctx: &ListCtx, list: &Listing) -> Vec<(String, String)> {
         if let Some(compose) = &self.compose {
-            let mut hints = vec![hint("Enter", if compose.tickets { "add" } else { "save" })];
-            if !compose.tickets && !list.workspaces.is_empty() {
-                hints.push(hint("Tab", "link a workspace"));
+            let ctx = ComposeCtx {
+                tickets: compose.tickets,
+                workspaces: !list.workspaces.is_empty(),
+            };
+            let label = |key: &ComposeKey| {
+                match key {
+                    ComposeKey::Save if compose.tickets => "add",
+                    ComposeKey::Save => "save",
+                    ComposeKey::Workspace { .. } => "link a workspace",
+                    ComposeKey::Back => "back",
+                }
+                .to_owned()
+            };
+            return (key_table::hints(COMPOSE_KEYS, &ctx, label).into_iter())
+                .map(|(k, w)| (k.to_owned(), w))
+                .collect();
+        }
+        let label = |key: &ListKey| {
+            match key {
+                ListKey::Act(action) => action_hint(*action).1,
+                ListKey::DismissAll => "dismiss all",
+                ListKey::NewTodo => "new todo",
+                ListKey::AddTickets => "add ticket repo",
+                ListKey::Fold if self.show_folded => "hide ignored",
+                ListKey::Fold => "show ignored",
+                ListKey::Hidden if self.show_hidden => "back to the list",
+                ListKey::Hidden => "hidden ones",
+                ListKey::Refresh => "refresh",
+                ListKey::Scope if self.all => "this workspace",
+                ListKey::Scope => "all workspaces",
+                ListKey::Esc if !self.query.is_empty() => "clear",
+                ListKey::Esc if self.show_hidden => "back",
+                ListKey::Esc => "close",
             }
-            hints.push(hint("Esc", "back"));
-            return hints;
-        }
-        use ItemAction as A;
-        let mut hints: Vec<_> = [
-            A::GoTo,
-            A::Restore,
-            A::Done,
-            A::Dismiss,
-            A::Forget,
-            A::Snooze,
-            A::SnoozeLong,
-            A::Edit,
-            A::Delete,
-            A::Unignore,
-            A::Ignore,
-            A::OpenLink,
-            A::CopyLink,
-        ]
-        .into_iter()
-        .filter(|a| actions.contains(a))
-        // Delete does one of them.
-        .filter(|a| {
-            !matches!(a, A::Restore | A::Done | A::Dismiss | A::Forget)
-                || delete_action(actions) == Some(*a)
-        })
-        .map(|a| {
-            let (k, what) = action_hint(a);
-            hint(k, what)
-        })
-        .collect();
-        if section.is_some_and(|s| self.dismisses_all(s, 1)) {
-            let at = hints
-                .iter()
-                .position(|(k, _)| k == "Del")
-                .map_or(0, |k| k + 1);
-            hints.insert(at, hint("Ctrl+Del", "dismiss all"));
-        }
-        hints.push(hint("Ctrl+N", "new todo"));
-        hints.push(hint("Ctrl+T", "add ticket repo"));
-        if folds {
-            let what = if self.show_folded {
-                "hide ignored"
-            } else {
-                "show ignored"
-            };
-            hints.push(hint("Alt+I", what));
-        }
-        hints.push(hint(
-            "Alt+H",
-            if self.show_hidden {
-                "back to the list"
-            } else {
-                "hidden ones"
-            },
-        ));
-        hints.push(hint("Ctrl+R", "refresh"));
-        if list.active.is_some() {
-            let scope = if self.all {
-                "this workspace"
-            } else {
-                "all workspaces"
-            };
-            hints.push(hint("Tab", scope));
-        }
-        let esc = if !self.query.is_empty() {
-            "clear"
-        } else if self.show_hidden {
-            "back"
-        } else {
-            "close"
+            .to_owned()
         };
-        hints.push(hint("Esc", esc));
-        hints
+        (key_table::hints(LIST_KEYS, ctx, label).into_iter())
+            .map(|(k, w)| (k.to_owned(), w))
+            .collect()
     }
 
     /// What the panel shows of `list`.
@@ -2022,15 +2196,7 @@ impl Panel {
             None if self.show_hidden => "Filter the hidden items…",
             None => "Filter the inbox…",
         };
-        let mut hints = self.hints(
-            &item_actions,
-            selected.map(|k| listed.items[k].section),
-            listed
-                .rows
-                .iter()
-                .any(|e| matches!(e, Entry::Label(s, n, _) if s.folds() && *n > 0)),
-            list,
-        );
+        let mut hints = self.hints(&self.list_ctx(&listed, list), list);
         // A key the detail's buttons show says what its button says, so the
         // two can't drift ("Open" on a gate, "Tomorrow").
         let buttons = detail.as_ref().map_or(&[][..], |d| d.buttons.as_slice());
@@ -3188,6 +3354,42 @@ mod tests {
             InboxRow::Item(_) => true,
         }));
         assert_eq!(panel.click(InboxHit::Button(0, 0), &list), None);
+    }
+
+    #[test]
+    fn the_key_tables_agree_with_themselves() {
+        let sets = [
+            vec![],
+            vec![
+                A::GoTo,
+                A::Dismiss,
+                A::Snooze,
+                A::SnoozeLong,
+                A::OpenLink,
+                A::CopyLink,
+            ],
+            vec![A::GoTo, A::Edit, A::Delete, A::Done],
+            vec![A::GoTo, A::Unignore, A::Forget, A::Review],
+            vec![A::Restore, A::Ignore],
+        ];
+        let mut ctxs = Vec::new();
+        for actions in sets {
+            for flag in [false, true] {
+                ctxs.push(ListCtx {
+                    actions: actions.clone(),
+                    dismiss_all: flag,
+                    folds: flag,
+                    active: !flag,
+                });
+            }
+        }
+        key_table::check(LIST_KEYS, &ctxs);
+        let compose = [(false, false), (false, true), (true, false), (true, true)];
+        let compose = compose.map(|(tickets, workspaces)| ComposeCtx {
+            tickets,
+            workspaces,
+        });
+        key_table::check(COMPOSE_KEYS, &compose);
     }
 
     #[test]

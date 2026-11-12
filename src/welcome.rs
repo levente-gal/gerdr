@@ -25,11 +25,98 @@ use crate::{
     chrome::{self, ProjectRow, WelcomeHit, WelcomeView},
     herdr,
     input::Overlay,
+    key_table::{self, Binding},
     project_list::{self, scrolled},
     projects,
     text_field::{Edit, TextField},
     tooltip::Tooltip,
 };
+
+/// What a key of the welcome screen does (see `KEYS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Key {
+    Up,
+    Down,
+    /// Open the project selected, or create the one named.
+    Enter,
+    New,
+    Forget,
+    Esc,
+}
+
+/// What the keys read of the screen: whether a new project is named, and
+/// whether it was opened over a project.
+struct KeyCtx {
+    naming: bool,
+    in_app: bool,
+}
+
+/// The welcome screen's keys, in the footer's order: the handler and the
+/// hints under its button read them. The pages and Tab stay `Welcome::key`'s.
+/// Arrows, Ctrl+N and Del don't leave the name.
+const KEYS: &[Binding<KeyCtx, Key>] = &[
+    Binding {
+        chord: "Up",
+        does: |c| (!c.naming).then_some(Key::Up),
+        footer: true,
+        f1: "Select a project",
+    },
+    Binding {
+        chord: "Down",
+        does: |c| (!c.naming).then_some(Key::Down),
+        footer: true,
+        f1: "Select a project",
+    },
+    Binding {
+        chord: "Enter",
+        does: |_| Some(Key::Enter),
+        footer: true,
+        f1: "Open it, or create the one named",
+    },
+    Binding {
+        chord: "Ctrl+N",
+        does: |c| (!c.naming).then_some(Key::New),
+        footer: true,
+        f1: "A new project",
+    },
+    Binding {
+        chord: "Del",
+        does: |c| (!c.naming).then_some(Key::Forget),
+        footer: true,
+        f1: "Forget it, pressed twice",
+    },
+    // Hinted where it goes somewhere; else it clears the query.
+    Binding {
+        chord: "Esc",
+        does: |c| (c.naming || c.in_app).then_some(Key::Esc),
+        footer: true,
+        f1: "Leave the name, clear the query, then back",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(Key::Esc),
+        footer: false,
+        f1: "",
+    },
+];
+
+/// The key hints under the button, `naming` a new project or not, opened
+/// over a project (`in_app`) or not.
+pub(crate) fn hints(naming: bool, in_app: bool) -> Vec<(String, String)> {
+    let label = |key: &Key| {
+        match key {
+            Key::Up | Key::Down => "select",
+            Key::Enter if naming => "create",
+            Key::Enter => "open",
+            Key::New => "new",
+            Key::Forget => "forget",
+            Key::Esc if naming => "cancel",
+            Key::Esc => "back",
+        }
+        .to_owned()
+    };
+    key_table::joined(key_table::hints(KEYS, &KeyCtx { naming, in_app }, label))
+}
 
 /// The welcome screen's state, while it is shown.
 #[derive(Debug, Default)]
@@ -133,7 +220,6 @@ impl Welcome {
         if sym.is_modifier_key() {
             return None;
         }
-        let ctrl = mods.ctrl;
         // Any key but Delete again takes back a first Delete.
         let armed = self.confirm_forget.take();
         // The field typed in takes the keys that edit it first: the new
@@ -150,8 +236,13 @@ impl Welcome {
             Edit::Changed | Edit::Moved => return None,
             Edit::Ignored => {}
         }
-        match sym {
-            Keysym::Escape => {
+        let ctx = KeyCtx {
+            naming: self.naming.is_some(),
+            in_app: self.in_app,
+        };
+        let key = key_table::press(KEYS, &ctx, mods, sym);
+        match key {
+            Some(Key::Esc) => {
                 if self.naming.is_some() {
                     self.naming = None;
                 } else if armed.is_some() {
@@ -162,7 +253,7 @@ impl Welcome {
                     return Some(Outcome::Closed);
                 }
             }
-            Keysym::Return | Keysym::KP_Enter => match &self.naming {
+            Some(Key::Enter) => match &self.naming {
                 Some(name) => {
                     let name = name.trim();
                     if !name.is_empty() {
@@ -174,12 +265,8 @@ impl Welcome {
                     None => self.start_naming(),
                 },
             },
-            Keysym::n if ctrl => {
-                if self.naming.is_none() {
-                    self.start_naming();
-                }
-            }
-            Keysym::Delete | Keysym::KP_Delete if self.naming.is_none() => {
+            Some(Key::New) => self.start_naming(),
+            Some(Key::Forget) => {
                 let &(m, _) = self.selected.and_then(|i| self.matches.get(i))?;
                 let (id, row) = &self.projects[m];
                 if row.current {
@@ -190,16 +277,24 @@ impl Welcome {
                     self.confirm_forget = Some(id.clone());
                 }
             }
+            Some(Key::Up) => self.step(-1, page),
+            Some(Key::Down) => self.step(1, page),
+            None => self.move_key(sym, page),
+        }
+        None
+    }
+
+    /// A key no row of `KEYS` took: the pages, and Tab to the button; `page`
+    /// rows shown. Not while a new project is named.
+    fn move_key(&mut self, sym: Keysym, page: usize) {
+        match sym {
             // Arrows and Tab don't leave the name.
             _ if self.naming.is_some() => {}
-            Keysym::Up | Keysym::KP_Up => self.step(-1, page),
-            Keysym::Down | Keysym::KP_Down => self.step(1, page),
             Keysym::Page_Up | Keysym::KP_Page_Up => self.step(-(page.max(1) as isize), page),
             Keysym::Page_Down | Keysym::KP_Page_Down => self.step(page.max(1) as isize, page),
             Keysym::Tab | Keysym::ISO_Left_Tab => self.toggle_button(page),
             _ => {}
         }
-        None
     }
 
     /// The text field a click can go in: the new project's name, while
@@ -414,7 +509,7 @@ impl Gerdr {
         // A key hint: its key, pressed.
         match self.welcome_hint(pos) {
             Some((WelcomeHit::Hint(i), view)) => {
-                let keys = chrome::welcome_hints(&view)[i].0;
+                let keys = &chrome::welcome_hints(&view)[i].0;
                 self.press_hint(Overlay::Welcome, keys, pos);
                 return true;
             }
@@ -579,6 +674,19 @@ fn welcome_hit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_key_table_agrees_with_itself() {
+        let ctxs = [(false, false), (false, true), (true, false), (true, true)];
+        key_table::check(
+            KEYS,
+            &ctxs.map(|(naming, in_app)| KeyCtx { naming, in_app }),
+        );
+        assert_eq!(
+            hints(false, true)[0],
+            ("Up / Down".to_owned(), "select".to_owned())
+        );
+    }
 
     fn row(name: &str, detail: &str) -> ProjectRow {
         ProjectRow {
