@@ -6,7 +6,7 @@ use super::{
     Palette, ROW_RADIUS, Rect, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, SUBTITLE_HEIGHT, Thumb,
     WELCOME_BUTTON, WELCOME_BUTTON_WIDTH, WELCOME_GAP, WELCOME_LABEL, WELCOME_MIDDLE, WELCOME_ROW,
     WELCOME_ROWS, WELCOME_WIDTH, band, coverage, field_text, focus_ring, gutter_track, hint_at,
-    hint_spots, icon_sdf, mix, phys, physical, plus, rect_px,
+    hint_spots, hint_strs, icon_sdf, mix, phys, physical, plus, rect_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -190,27 +190,15 @@ pub fn welcome_layout(size: Size<i32, Logical>, parts: WelcomeParts) -> WelcomeL
 }
 
 /// The key hints under the welcome screen's button for `view`.
-pub fn welcome_hints(view: &WelcomeView) -> Vec<(&'static str, &'static str)> {
-    if view.naming.is_some() {
-        return vec![("Enter", "create"), ("Esc", "cancel")];
-    }
-    let mut hints = vec![
-        ("Up / Down", "select"),
-        ("Enter", "open"),
-        ("Ctrl+N", "new"),
-        ("Del", "forget"),
-    ];
-    if view.in_app {
-        hints.push(("Esc", "back"));
-    }
-    hints
+pub fn welcome_hints(view: &WelcomeView) -> Vec<(String, String)> {
+    crate::welcome::hints(view.naming.is_some(), view.in_app)
 }
 
 /// The key hints of the welcome screen showing `view` with its parts
 /// where `layout` has them: those under the button by index into
 /// `welcome_hints`, and the quit bar's.
 fn hint_layout(view: &WelcomeView, layout: &WelcomeLayout) -> (Vec<(usize, Rect)>, Option<Rect>) {
-    let hints = hint_spots(&welcome_hints(view), layout.hints);
+    let hints = hint_spots(&hint_strs(&welcome_hints(view)), layout.hints);
     let quit = view.quit_keys.as_deref().and_then(|keys| {
         hint_spots(&[(keys, "quit")], layout.bar)
             .first()
@@ -228,7 +216,7 @@ pub fn welcome_hint(
 ) -> Option<WelcomeHit> {
     let layout = welcome_layout(size, WelcomeParts::of(view));
     let (hints, quit) = hint_layout(view, &layout);
-    if let Some(i) = hint_at(&welcome_hints(view), &hints, pos) {
+    if let Some(i) = hint_at(&hint_strs(&welcome_hints(view)), &hints, pos) {
         return Some(WelcomeHit::Hint(i));
     }
     quit.filter(|r| r.to_f64().contains(pos))
@@ -445,7 +433,14 @@ impl Painter {
             Some(WelcomeHit::Hint(i)) => Some(i),
             _ => None,
         };
-        self.hints(&mut c, &welcome_hints(view), &spots, hover, scale, p);
+        self.hints(
+            &mut c,
+            &hint_strs(&welcome_hints(view)),
+            &spots,
+            hover,
+            scale,
+            p,
+        );
         if let (Some(keys), Some(quit)) = (&view.quit_keys, quit) {
             let hover = (view.hover == Some(WelcomeHit::Quit)).then_some(0);
             self.hints(&mut c, &[(keys, "quit")], &[(0, quit)], hover, scale, p);

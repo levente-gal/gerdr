@@ -19,12 +19,43 @@ use crate::{
     Gerdr,
     chrome::{self, CheckoutRow, CheckoutView},
     git::{self, Untracked},
+    key_table::{self, Binding},
 };
 
 /// Leave behind, after Cancel.
 const LEAVE: usize = 1;
 /// Bring along, the last.
 const BRING: usize = 2;
+
+/// The keys the dialog takes besides its buttons, which press them, by
+/// whether Bring along can be pressed: the handler and the keys shown by
+/// the buttons read them.
+const KEYS: &[Binding<bool, usize>] = &[
+    Binding {
+        chord: "B",
+        does: |can_bring| can_bring.then_some(BRING),
+        footer: true,
+        f1: "Bring the untracked files along",
+    },
+    Binding {
+        chord: "L",
+        does: |_| Some(LEAVE),
+        footer: true,
+        f1: "Leave them behind",
+    },
+];
+
+/// The keys shown beside the buttons, Bring along pressable (`can_bring`)
+/// or not.
+pub(crate) fn keys(can_bring: bool) -> Vec<(String, String)> {
+    let label = |button: &usize| match *button {
+        BRING => "bring".to_owned(),
+        _ => "leave".to_owned(),
+    };
+    (key_table::hints(KEYS, &can_bring, label).into_iter())
+        .map(|(k, w)| (k.to_owned(), w))
+        .collect()
+}
 
 /// The checkout dialog's state, while it is open.
 #[derive(Debug)]
@@ -81,15 +112,15 @@ impl CheckoutDialog {
 
     /// Handle a key: `sym` is the key's own symbol.
     fn key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
-        let plain = !(mods.ctrl || mods.alt || mods.logo);
+        if let Some(button) = key_table::press(KEYS, &self.can_bring(), mods, sym) {
+            return self.press(button);
+        }
         match sym {
             Keysym::Escape => return Some(Outcome::Cancel),
             Keysym::Return | Keysym::KP_Enter => return self.press(self.selected),
             Keysym::Left | Keysym::KP_Left | Keysym::ISO_Left_Tab => self.step(-1),
             Keysym::Tab if mods.shift => self.step(-1),
             Keysym::Right | Keysym::KP_Right | Keysym::Tab => self.step(1),
-            Keysym::b | Keysym::B if plain => return self.press(BRING),
-            Keysym::l | Keysym::L if plain => return self.press(LEAVE),
             _ => {}
         }
         None
@@ -250,6 +281,12 @@ mod tests {
 
     fn press(dialog: &mut CheckoutDialog, sym: Keysym) -> Option<Outcome> {
         dialog.key(&ModifiersState::default(), sym)
+    }
+
+    #[test]
+    fn the_key_table_agrees_with_itself() {
+        key_table::check(KEYS, &[true, false]);
+        assert_eq!(keys(false), [("L".to_owned(), "leave".to_owned())]);
     }
 
     #[test]

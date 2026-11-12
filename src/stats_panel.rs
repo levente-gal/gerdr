@@ -31,6 +31,7 @@ use crate::{
     features::Done,
     input::Overlay,
     clock::ago,
+    key_table::{self, Binding},
     scrollback::{Scrollback, Source},
     text_field::{Edit, PASTE, TextField},
     toast::ToastHit,
@@ -40,29 +41,212 @@ use crate::{
 /// The tabs, in the order the segmented control shows them.
 const TABS: [Tab; 3] = [Tab::Features, Tab::Agents, Tab::Checks];
 
-/// Every key the panel takes, as F1 lists them.
-pub(crate) const KEYS: &[(&str, &str)] = &[
-    ("Up / Down", "Move the selection"),
-    ("Ctrl+J / Ctrl+K", "Move the selection down or up"),
-    ("PgUp / PgDn", "Move a page up or down"),
-    ("Home / End", "Go to the first or last row"),
-    (
-        "Tab / Shift+Tab",
-        "Go between the tabs, the scope and the list",
-    ),
-    ("Left / Right", "Pick the tab or the scope that has focus"),
-    ("Ctrl+PgUp / Ctrl+PgDn", "Go to the previous or next tab"),
-    ("Enter", "Show the feature's stages, runs and fix rounds"),
-    (
-        "Shift+Del",
-        "Delete the feature's AI work kept, after asking (its only record: never a bare Del)",
-    ),
-    ("Ctrl+F / /", "Search the rows"),
-    ("Ctrl+O", "Open the run's transcript or the check's log"),
-    ("Ctrl+C", "Copy the row"),
-    ("Ctrl+R", "Draw the stats again from the kept files"),
-    ("Esc", "Clear the search, go back, then close"),
-    ("F1", "List these keys"),
+/// What a key of the panel does (see `KEYS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Key {
+    /// Move the selection by rows, or by pages.
+    Step(isize),
+    Page(isize),
+    First,
+    Last,
+    /// The next focus area, or the one before.
+    Focus {
+        back: bool,
+    },
+    /// The tab or scope that has focus, before or after.
+    Pick(isize),
+    Tab(isize),
+    Enter,
+    Delete,
+    Search,
+    Open,
+    Copy,
+    Rebuild,
+    Keys,
+    Esc,
+}
+
+/// What the keys read of the panel now (see `StatsPanel::key_ctx`).
+struct KeyCtx {
+    searching: bool,
+    /// The search's field has text selected.
+    query_selected: bool,
+    on_list: bool,
+    line: Option<Line>,
+}
+
+/// The panel's keys: the handler, the footer and F1 read them.
+const KEYS: &[Binding<KeyCtx, Key>] = &[
+    Binding {
+        chord: "Up",
+        does: |_| Some(Key::Step(-1)),
+        footer: false,
+        f1: "Move the selection",
+    },
+    Binding {
+        chord: "Down",
+        does: |_| Some(Key::Step(1)),
+        footer: false,
+        f1: "Move the selection",
+    },
+    Binding {
+        chord: "Ctrl+J",
+        does: |_| Some(Key::Step(1)),
+        footer: false,
+        f1: "Move the selection down or up",
+    },
+    Binding {
+        chord: "Ctrl+K",
+        does: |_| Some(Key::Step(-1)),
+        footer: false,
+        f1: "Move the selection down or up",
+    },
+    Binding {
+        chord: "PgUp",
+        does: |_| Some(Key::Page(-1)),
+        footer: false,
+        f1: "Move a page up or down",
+    },
+    Binding {
+        chord: "PgDn",
+        does: |_| Some(Key::Page(1)),
+        footer: false,
+        f1: "Move a page up or down",
+    },
+    Binding {
+        chord: "Home",
+        does: |_| Some(Key::First),
+        footer: false,
+        f1: "Go to the first or last row",
+    },
+    Binding {
+        chord: "End",
+        does: |_| Some(Key::Last),
+        footer: false,
+        f1: "Go to the first or last row",
+    },
+    Binding {
+        chord: "Tab",
+        does: |_| Some(Key::Focus { back: false }),
+        footer: true,
+        f1: "Go between the tabs, the scope and the list",
+    },
+    Binding {
+        chord: "Shift+Tab",
+        does: |_| Some(Key::Focus { back: true }),
+        footer: false,
+        f1: "Go between the tabs, the scope and the list",
+    },
+    Binding {
+        chord: "Left",
+        does: |c| (!c.on_list && !c.searching).then_some(Key::Pick(-1)),
+        footer: false,
+        f1: "Pick the tab or the scope that has focus",
+    },
+    Binding {
+        chord: "Right",
+        does: |c| (!c.on_list && !c.searching).then_some(Key::Pick(1)),
+        footer: false,
+        f1: "Pick the tab or the scope that has focus",
+    },
+    Binding {
+        chord: "Ctrl+PgUp",
+        does: |_| Some(Key::Tab(-1)),
+        footer: false,
+        f1: "Go to the previous or next tab",
+    },
+    Binding {
+        chord: "Ctrl+PgDn",
+        does: |_| Some(Key::Tab(1)),
+        footer: false,
+        f1: "Go to the previous or next tab",
+    },
+    // Hinted on a feature; on any other row it gives the list the keys.
+    Binding {
+        chord: "Enter",
+        does: |c| c.line.as_ref()?.drill.as_ref().map(|_| Key::Enter),
+        footer: true,
+        f1: "Show the feature's stages, runs and fix rounds",
+    },
+    Binding {
+        chord: "Enter",
+        does: |_| Some(Key::Enter),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+O",
+        does: |c| c.line.as_ref()?.open.as_ref().map(|_| Key::Open),
+        footer: true,
+        f1: "Open the run's transcript or the check's log",
+    },
+    Binding {
+        chord: "Ctrl+O",
+        does: |_| Some(Key::Open),
+        footer: false,
+        f1: "",
+    },
+    // Searching, Del edits the query. Shift with it: a bare Del, a focus
+    // slip, never reaches a feature's only record.
+    Binding {
+        chord: "Shift+Del",
+        does: |c| {
+            let kept = c.line.as_ref()?.delete.as_ref();
+            (kept.is_some() && !c.searching).then_some(Key::Delete)
+        },
+        footer: true,
+        f1: "Delete the feature's AI work kept, after asking (its only record: never a bare Del)",
+    },
+    Binding {
+        chord: "Shift+Del",
+        does: |c| (!c.searching).then_some(Key::Delete),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+F",
+        does: |_| Some(Key::Search),
+        footer: true,
+        f1: "Search the rows",
+    },
+    // Searching, `/` is typed into the query.
+    Binding {
+        chord: "/",
+        does: |c| (!c.searching).then_some(Key::Search),
+        footer: false,
+        f1: "Search the rows",
+    },
+    // What is selected in the query copies from there.
+    Binding {
+        chord: "Ctrl+C",
+        does: |c| (c.line.is_some() && !(c.searching && c.query_selected)).then_some(Key::Copy),
+        footer: true,
+        f1: "Copy the row",
+    },
+    Binding {
+        chord: "Ctrl+C",
+        does: |c| (!(c.searching && c.query_selected)).then_some(Key::Copy),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+R",
+        does: |_| Some(Key::Rebuild),
+        footer: true,
+        f1: "Draw the stats again from the kept files",
+    },
+    Binding {
+        chord: "F1",
+        does: |_| Some(Key::Keys),
+        footer: true,
+        f1: "List these keys",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(Key::Esc),
+        footer: true,
+        f1: "Clear the search, go back, then close",
+    },
 ];
 
 /// What the panel asks of gerdr, once a key or a click is taken.
@@ -523,8 +707,6 @@ impl StatsPanel {
         now: u64,
     ) -> Option<Outcome> {
         let bare = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
-        // Ctrl alone: Ctrl+Shift+O and the like are no keys of the panel's.
-        let ctrl = mods.ctrl && !(mods.alt || mods.logo || mods.shift);
         // The keys listed take only what closes them.
         if self.keys {
             if bare && matches!(sym, Keysym::Escape | Keysym::F1 | Keysym::Return) {
@@ -533,12 +715,15 @@ impl StatsPanel {
             return None;
         }
         let page = page.max(1);
-        match sym {
-            Keysym::F1 if bare => {
+        let Some(key) = key_table::press(KEYS, &self.key_ctx(now), mods, sym) else {
+            return self.type_key(mods, sym, typed, page, now);
+        };
+        match key {
+            Key::Keys => {
                 self.keys = true;
                 return None;
             }
-            Keysym::Escape => {
+            Key::Esc => {
                 if !self.query.is_empty() {
                     self.query.clear();
                     self.settle(0, true, page, now);
@@ -553,30 +738,23 @@ impl StatsPanel {
                 }
                 return None;
             }
-            Keysym::Tab | Keysym::ISO_Left_Tab if !mods.ctrl => {
-                let back = mods.shift || typed == Keysym::ISO_Left_Tab;
+            Key::Focus { back } => {
                 self.searching = false;
                 self.focus = self.focus_step(back);
                 return None;
             }
-            Keysym::Page_Up | Keysym::KP_Page_Up if ctrl => return self.step_tab(-1),
-            Keysym::Page_Down | Keysym::KP_Page_Down if ctrl => return self.step_tab(1),
-            Keysym::Up | Keysym::KP_Up => self.step(-1, page, now),
-            Keysym::Down | Keysym::KP_Down => self.step(1, page, now),
-            Keysym::k if ctrl => self.step(-1, page, now),
-            Keysym::j if ctrl => self.step(1, page, now),
-            Keysym::Page_Up | Keysym::KP_Page_Up => self.step(-(page as isize), page, now),
-            Keysym::Page_Down | Keysym::KP_Page_Down => self.step(page as isize, page, now),
-            Keysym::Home | Keysym::KP_Home => self.settle(0, true, page, now),
-            Keysym::End | Keysym::KP_End => self.settle(usize::MAX, false, page, now),
-            Keysym::Left | Keysym::Right if self.focus != StatsFocus::List && !self.searching => {
-                let by = if sym == Keysym::Left { -1 } else { 1 };
+            Key::Tab(by) => return self.step_tab(by),
+            Key::Step(by) => self.step(by, page, now),
+            Key::Page(by) => self.step(by * page as isize, page, now),
+            Key::First => self.settle(0, true, page, now),
+            Key::Last => self.settle(usize::MAX, false, page, now),
+            Key::Pick(by) => {
                 return match self.focus {
                     StatsFocus::Tabs => self.step_tab(by),
                     _ => self.show_all(by > 0),
                 };
             }
-            Keysym::Return | Keysym::KP_Enter => {
+            Key::Enter => {
                 if self.focus != StatsFocus::List {
                     self.focus = StatsFocus::List;
                     return None;
@@ -588,34 +766,38 @@ impl StatsPanel {
                 }
                 return self.drill(now);
             }
-            Keysym::f if ctrl => {
+            Key::Search => {
                 self.searching = true;
                 return None;
             }
-            Keysym::o if ctrl => return Some(self.open(now)),
-            // Searching, Del edits the query. Shift with it: a bare Del, a
-            // focus slip, never reaches a feature's only record.
-            Keysym::Delete | Keysym::KP_Delete
-                if mods.shift && !(mods.ctrl || mods.alt || mods.logo) && !self.searching =>
-            {
+            Key::Open => return Some(self.open(now)),
+            Key::Delete => {
                 let kept = self.selected_line(now).and_then(|l| l.delete);
                 return kept.map(Outcome::Delete);
             }
-            Keysym::r if ctrl => return Some(Outcome::Rebuild),
-            // What is selected in the query copies from there.
-            Keysym::c if ctrl && !(self.searching && !self.query.line().selection().is_empty()) => {
+            Key::Rebuild => return Some(Outcome::Rebuild),
+            Key::Copy => {
                 let line = self.selected_line(now);
                 return line.map(|l| Outcome::Copy(l.cells.join("\t")));
             }
-            _ => return self.type_key(mods, sym, typed, page, now),
         }
         // A key that moves the list gives it the keys.
         self.focus = StatsFocus::List;
         None
     }
 
-    /// A key no other way took: `/` starts a search, which takes what is
-    /// typed while it has the keys.
+    /// What the keys read of the panel at `now`.
+    fn key_ctx(&self, now: u64) -> KeyCtx {
+        KeyCtx {
+            searching: self.searching,
+            query_selected: !self.query.line().selection().is_empty(),
+            on_list: self.focus == StatsFocus::List,
+            line: self.selected_line(now),
+        }
+    }
+
+    /// A key no other way took: the search takes what is typed while it
+    /// has the keys.
     fn type_key(
         &mut self,
         mods: &ModifiersState,
@@ -624,10 +806,6 @@ impl StatsPanel {
         page: usize,
         now: u64,
     ) -> Option<Outcome> {
-        if !self.searching && !mods.ctrl && (sym == Keysym::slash || typed == Keysym::slash) {
-            self.searching = true;
-            return None;
-        }
         // Text pasted starts a search with it.
         if sym == PASTE {
             self.searching = true;
@@ -697,27 +875,23 @@ impl StatsPanel {
 
     /// The footer's hints, by what the selected row offers.
     fn hints(&self, now: u64) -> Vec<(String, String)> {
-        let line = self.selected_line(now);
-        let mut hints: Vec<(&str, &str)> = vec![("Tab", "focus")];
-        if line.as_ref().is_some_and(|l| l.drill.is_some()) {
-            hints.push(("Enter", "details"));
-        }
-        if line.as_ref().is_some_and(|l| l.open.is_some()) {
-            hints.push(("Ctrl+O", "open"));
-        }
-        if line.as_ref().is_some_and(|l| l.delete.is_some()) {
-            hints.push(("Shift+Del", "delete\u{2026}"));
-        }
-        hints.push(("Ctrl+F", "search"));
-        if line.is_some() {
-            hints.push(("Ctrl+C", "copy"));
-        }
-        hints.push(("Ctrl+R", "rebuild"));
-        hints.push(("F1", "keys"));
-        hints.push(("Esc", self.esc_word()));
-        hints
-            .into_iter()
-            .map(|(k, w)| (k.to_owned(), w.to_owned()))
+        let label = |key: &Key| {
+            match key {
+                Key::Focus { .. } => "focus",
+                Key::Enter => "details",
+                Key::Open => "open",
+                Key::Delete => "delete\u{2026}",
+                Key::Search => "search",
+                Key::Copy => "copy",
+                Key::Rebuild => "rebuild",
+                Key::Keys => "keys",
+                Key::Esc => self.esc_word(),
+                _ => "",
+            }
+            .to_owned()
+        };
+        (key_table::hints(KEYS, &self.key_ctx(now), label).into_iter())
+            .map(|(k, w)| (k.to_owned(), w))
             .collect()
     }
 
@@ -779,10 +953,7 @@ impl StatsPanel {
             note: self.note(now),
             hints: self.hints(now),
             keys: match self.keys {
-                true => KEYS
-                    .iter()
-                    .map(|(k, w)| ((*k).to_owned(), (*w).to_owned()))
-                    .collect(),
+                true => key_table::joined(key_table::f1_rows(KEYS)),
                 false => Vec::new(),
             },
             hover: self.hover,
@@ -2163,7 +2334,7 @@ mod tests {
         let mut panel = loaded();
         key(&mut panel, Keysym::F1);
         assert!(panel.keys);
-        assert_eq!(panel.view(NOW).keys.len(), KEYS.len());
+        assert_eq!(panel.view(NOW).keys.len(), 15);
         assert_eq!(key(&mut panel, Keysym::Down), None);
         assert_eq!(panel.selected, 0);
         assert_eq!(key(&mut panel, Keysym::Escape), None);
@@ -2208,6 +2379,38 @@ mod tests {
             let out = panel.key(&m, sym, sym, 10, NOW);
             assert!(out.is_some() || format!("{panel:?}") != before, "{keys}");
         }
+    }
+
+    #[test]
+    fn the_key_table_agrees_with_itself() {
+        let line = |drill: bool, open: bool, delete: bool| {
+            let mut l = Line::row(0, vec!["a".into()]);
+            l.drill = drill.then(|| ("gerdr".into(), "stats".into()));
+            l.open = open.then(|| (PathBuf::from("/x"), "log".into()));
+            l.delete = delete.then(kept_alpha);
+            Some(l)
+        };
+        let mut ctxs = Vec::new();
+        for searching in [false, true] {
+            for on_list in [false, true] {
+                for l in [None, line(true, false, true), line(false, true, false)] {
+                    ctxs.push(KeyCtx {
+                        searching,
+                        query_selected: searching,
+                        on_list,
+                        line: l,
+                    });
+                }
+            }
+        }
+        key_table::check(KEYS, &ctxs);
+        // F1 lists pairs on one row, as it did.
+        let f1 = key_table::joined(key_table::f1_rows(KEYS));
+        assert_eq!(
+            f1[0],
+            ("Up / Down".to_owned(), "Move the selection".to_owned())
+        );
+        assert!(f1.iter().any(|(k, _)| k == "Ctrl+F / /"));
     }
 
     #[test]

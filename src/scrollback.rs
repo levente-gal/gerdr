@@ -35,9 +35,299 @@ use smithay::{
 use crate::{
     chrome::{self, ScrollbackHit, SearchBar, SearchPart},
     find,
+    key_table::{self, Binding},
     scroll::{Bounds, Motion, Scroll},
     text_field::{Edit, TextField},
 };
+
+/// What a key of the viewer does (see `KEYS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Key {
+    OpenFind,
+    /// The next place found, or with `back` the one before.
+    Find {
+        back: bool,
+    },
+    /// The keyboard to the search, or back to the text.
+    ToggleFind,
+    ClearFind,
+    CloseFind,
+    ClearSelection,
+    Close,
+    /// Copy the selection; and close (Enter), or leave `v` (Y).
+    Copy,
+    CopyClose,
+    Yank,
+    Reload,
+    SelectAll,
+    Visual(Grain),
+    Keys,
+}
+
+/// What the viewer's keys read of it now (see `Scrollback::key_ctx`).
+pub(crate) struct KeyCtx {
+    /// Whether the rows past the search's own are offered: not while its
+    /// field, with the keyboard, is still to have the key.
+    pub view: bool,
+    /// Whether the search has the keyboard, while it is open.
+    pub find: Option<bool>,
+    pub find_empty: bool,
+    pub selected: bool,
+    pub visual: bool,
+    pub pane: bool,
+}
+
+impl KeyCtx {
+    /// Neither the search open nor anything selected.
+    fn idle(&self) -> bool {
+        self.find.is_none() && !self.selected && !self.visual
+    }
+}
+
+/// The viewer's keys, the search's first: the handler, the footer and F1
+/// read them. The caret's and the pages' keys stay `Scrollback::motion`'s.
+pub(crate) const KEYS: &[Binding<KeyCtx, Key>] = &[
+    Binding {
+        chord: "Enter",
+        does: |c| (c.find == Some(true)).then_some(Key::Find { back: false }),
+        footer: true,
+        f1: "Go to the next place found, or the one before",
+    },
+    Binding {
+        chord: "Shift+Enter",
+        does: |c| (c.find == Some(true)).then_some(Key::Find { back: true }),
+        footer: true,
+        f1: "Go to the next place found, or the one before",
+    },
+    Binding {
+        chord: "N",
+        does: |c| (c.find == Some(false)).then_some(Key::Find { back: false }),
+        footer: true,
+        f1: "Go to the next place or the one before, from the text",
+    },
+    Binding {
+        chord: "Shift+N",
+        does: |c| (c.find == Some(false)).then_some(Key::Find { back: true }),
+        footer: true,
+        f1: "Go to the next place or the one before, from the text",
+    },
+    Binding {
+        chord: "F3",
+        does: |c| c.find.map(|_| Key::Find { back: false }),
+        footer: false,
+        f1: "Go to the next place or the one before, from either",
+    },
+    Binding {
+        chord: "Shift+F3",
+        does: |c| c.find.map(|_| Key::Find { back: true }),
+        footer: false,
+        f1: "Go to the next place or the one before, from either",
+    },
+    // Hinted while selecting; it copies whatever is selected.
+    Binding {
+        chord: "Y",
+        does: |c| (c.view && c.visual && c.find.is_none()).then_some(Key::Yank),
+        footer: true,
+        f1: "Copy the selection",
+    },
+    Binding {
+        chord: "Y",
+        does: |c| c.view.then_some(Key::Yank),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+C",
+        does: |c| {
+            let hinted = c.find == Some(false) || (c.find.is_none() && c.selected && !c.visual);
+            (c.view && hinted).then_some(Key::Copy)
+        },
+        footer: true,
+        f1: "Copy the selection",
+    },
+    Binding {
+        chord: "Ctrl+C",
+        does: |c| c.view.then_some(Key::Copy),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+Shift+C",
+        does: |c| c.view.then_some(Key::Copy),
+        footer: false,
+        f1: "Copy the selection",
+    },
+    Binding {
+        chord: "Enter",
+        does: |c| {
+            let hinted = c.find.is_none() && (c.visual || c.selected);
+            (c.view && hinted).then_some(Key::CopyClose)
+        },
+        footer: true,
+        f1: "Copy the selection and close",
+    },
+    Binding {
+        chord: "Enter",
+        does: |c| c.view.then_some(Key::CopyClose),
+        footer: false,
+        f1: "",
+    },
+    // Hinted beside the selection's keys; idle, beside Esc.
+    Binding {
+        chord: "Q",
+        does: |c| (c.view && c.find.is_none() && c.selected && !c.visual).then_some(Key::Close),
+        footer: true,
+        f1: "",
+    },
+    Binding {
+        chord: "V",
+        does: |c| (c.view && c.idle()).then_some(Key::Visual(Grain::Char)),
+        footer: true,
+        f1: "Select from the caret, by characters or by lines",
+    },
+    Binding {
+        chord: "V",
+        does: |c| c.view.then_some(Key::Visual(Grain::Char)),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Shift+V",
+        does: |c| c.view.then_some(Key::Visual(Grain::Line)),
+        footer: false,
+        f1: "Select from the caret, by characters or by lines",
+    },
+    Binding {
+        chord: "Ctrl+A",
+        does: |c| (c.view && c.idle() && !c.pane).then_some(Key::SelectAll),
+        footer: true,
+        f1: "Select all",
+    },
+    Binding {
+        chord: "Ctrl+A",
+        does: |c| c.view.then_some(Key::SelectAll),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "/",
+        does: |c| c.idle().then_some(Key::OpenFind),
+        footer: true,
+        f1: "Find",
+    },
+    // Typed into the search's field, it is the field's.
+    Binding {
+        chord: "/",
+        does: |c| (c.find != Some(true)).then_some(Key::OpenFind),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Ctrl+F",
+        does: |_| Some(Key::OpenFind),
+        footer: false,
+        f1: "Find",
+    },
+    Binding {
+        chord: "Ctrl+R",
+        does: |c| (c.view && c.idle() && c.pane).then_some(Key::Reload),
+        footer: true,
+        f1: "Read the output again",
+    },
+    Binding {
+        chord: "Ctrl+R",
+        does: |c| c.view.then_some(Key::Reload),
+        footer: false,
+        f1: "",
+    },
+    Binding {
+        chord: "Tab",
+        does: |c| c.find.map(|_| Key::ToggleFind),
+        footer: true,
+        f1: "Move between the search and the text",
+    },
+    Binding {
+        chord: "Shift+Tab",
+        does: |c| c.find.map(|_| Key::ToggleFind),
+        footer: false,
+        f1: "Move between the search and the text",
+    },
+    Binding {
+        chord: "F1",
+        does: |_| Some(Key::Keys),
+        footer: true,
+        f1: "List these keys",
+    },
+    // What is typed in the search, the search, the selection (a search
+    // not focused leaves that first), then the viewer.
+    Binding {
+        chord: "Esc",
+        does: |c| (c.find == Some(true) && !c.find_empty).then_some(Key::ClearFind),
+        footer: true,
+        f1: "Clear the selection or the search, then close",
+    },
+    Binding {
+        chord: "Esc",
+        does: |c| {
+            let selection_first = c.find == Some(false) && c.selected;
+            (c.find.is_some() && !selection_first).then_some(Key::CloseFind)
+        },
+        footer: true,
+        f1: "",
+    },
+    Binding {
+        chord: "Esc",
+        does: |c| (c.view && (c.visual || c.selected)).then_some(Key::ClearSelection),
+        footer: true,
+        f1: "",
+    },
+    Binding {
+        chord: "Esc",
+        does: |c| c.view.then_some(Key::Close),
+        footer: true,
+        f1: "",
+    },
+    Binding {
+        chord: "Q",
+        does: |c| (c.view && c.idle()).then_some(Key::Close),
+        footer: true,
+        f1: "Close",
+    },
+    Binding {
+        chord: "Q",
+        does: |c| c.view.then_some(Key::Close),
+        footer: false,
+        f1: "",
+    },
+];
+
+/// The keys while the viewer's keys are listed: they close the list.
+pub(crate) const SHEET_KEYS: &[Binding<(), ()>] = &[
+    Binding {
+        chord: "Esc",
+        does: |_| Some(()),
+        footer: true,
+        f1: "Close the keys",
+    },
+    Binding {
+        chord: "F1",
+        does: |_| Some(()),
+        footer: false,
+        f1: "Close the keys",
+    },
+    Binding {
+        chord: "Q",
+        does: |_| Some(()),
+        footer: false,
+        f1: "Close the keys",
+    },
+    Binding {
+        chord: "Enter",
+        does: |_| Some(()),
+        footer: false,
+        f1: "Close the keys",
+    },
+];
 
 /// Rows a notch of the wheel scrolls.
 const NOTCH_ROWS: f64 = 3.0;
@@ -770,6 +1060,19 @@ impl Scrollback {
         });
     }
 
+    /// What the keys read of the viewer now; `view`, whether the rows
+    /// past the search's own are offered (see `KeyCtx`).
+    pub(crate) fn key_ctx(&self, view: bool) -> KeyCtx {
+        KeyCtx {
+            view,
+            find: self.find.as_ref().map(|f| f.focused),
+            find_empty: self.find_empty(),
+            selected: self.has_selection(),
+            visual: self.visual.is_some(),
+            pane: self.pane().is_some(),
+        }
+    }
+
     /// Take a key, `typed` with Shift and the layout applied, with the
     /// list as `fit` lays it out. The search takes it first.
     pub fn key(
@@ -780,57 +1083,76 @@ impl Scrollback {
         now: Instant,
         fit: Fit,
     ) -> Option<Outcome> {
-        let bare = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
         // The keys listed take only those that close them.
         if self.keys {
-            let closes = matches!(
-                sym,
-                Keysym::Escape | Keysym::F1 | Keysym::q | Keysym::Return | Keysym::KP_Enter
-            );
-            if closes && bare {
+            if key_table::press(SHEET_KEYS, &(), mods, sym).is_some() {
                 self.keys = false;
             }
             return None;
         }
-        if sym == Keysym::F1 && bare {
-            self.keys = true;
-            return None;
+        // The search's field, with the keyboard, takes what its rows don't
+        // before the viewer does.
+        let focused = self.find_focused();
+        let mut key = key_table::press(KEYS, &self.key_ctx(!focused), mods, sym);
+        if key.is_none() && focused {
+            if self.field_key(mods, sym, typed, fit) {
+                return None;
+            }
+            key = key_table::press(KEYS, &self.key_ctx(true), mods, sym);
         }
-        if self.find_key(mods, sym, typed, fit) {
-            return None;
+        match key {
+            Some(key) => self.do_key(key, fit),
+            None => self.motion(mods, sym, typed, now, fit),
         }
+    }
+
+    /// Do what `key` does, with the list as `fit` lays it out.
+    fn do_key(&mut self, key: Key, fit: Fit) -> Option<Outcome> {
         let copy = |close| match (self.selected_text(), self.selected_lines()) {
             (Some(text), Some(lines)) => Outcome::Copy { text, lines, close },
             _ if close => Outcome::Close,
             _ => Outcome::NothingSelected,
         };
-        let page = fit.page.max(1) as f64;
-        let ctrl = mods.ctrl && !(mods.alt || mods.logo);
-        let plain = !(mods.ctrl || mods.alt || mods.logo);
-        match sym {
-            // Out of `v` first, the selection gone; a selection made
-            // with the pointer goes before the viewer does too.
-            Keysym::Escape if plain && (self.visual.is_some() || self.has_selection()) => {
+        match key {
+            Key::Keys => self.keys = true,
+            Key::OpenFind => self.open_find(fit),
+            Key::Find { back } => self.step_find(if back { -1 } else { 1 }, fit),
+            Key::ToggleFind => {
+                if let Some(find) = self.find.as_mut() {
+                    find.focused = !find.focused;
+                    if find.focused {
+                        find.field.select_all();
+                    }
+                }
+            }
+            Key::ClearFind => {
+                if let Some(find) = self.find.as_mut() {
+                    find.field.set("");
+                    find.whole = false;
+                }
+                self.find_hits();
+            }
+            Key::CloseFind => self.close_find(),
+            // Out of `v` first, the selection gone; a selection made with
+            // the pointer goes before the viewer does too.
+            Key::ClearSelection => {
                 self.visual = None;
                 self.selection = None;
-                return None;
             }
-            Keysym::Escape | Keysym::q if !mods.ctrl => return Some(Outcome::Close),
-            Keysym::Return | Keysym::KP_Enter => return Some(copy(true)),
-            Keysym::r | Keysym::R if ctrl => return Some(Outcome::Reload),
-            Keysym::c if mods.ctrl => return Some(copy(false)),
-            Keysym::y if !mods.ctrl => {
+            Key::Close => return Some(Outcome::Close),
+            Key::CopyClose => return Some(copy(true)),
+            Key::Reload => return Some(Outcome::Reload),
+            Key::Copy => return Some(copy(false)),
+            Key::Yank => {
                 let copied = copy(false);
                 self.visual = None;
                 return Some(copied);
             }
-            Keysym::a if mods.ctrl => {
+            Key::SelectAll => {
                 self.visual = None;
                 self.select_all();
-                return None;
             }
-            Keysym::v | Keysym::V if plain => {
-                let grain = if mods.shift { Grain::Line } else { Grain::Char };
+            Key::Visual(grain) => {
                 if self.visual == Some(grain) {
                     self.visual = None;
                     self.selection = None;
@@ -847,10 +1169,25 @@ impl Scrollback {
                         grain,
                     });
                 }
-                return None;
             }
-            _ => {}
         }
+        None
+    }
+
+    /// A key that moves the caret or pages the list, `typed` with Shift
+    /// and the layout applied: plain motions, kept out of `KEYS` with
+    /// their many forms (F1 lists them from `MOTION_KEYS`).
+    fn motion(
+        &mut self,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+        now: Instant,
+        fit: Fit,
+    ) -> Option<Outcome> {
+        let page = fit.page.max(1) as f64;
+        let ctrl = mods.ctrl && !(mods.alt || mods.logo);
+        let plain = !(mods.ctrl || mods.alt || mods.logo);
         // The pages scroll the list as far as the caret goes.
         let pages = match sym {
             _ if !(plain || ctrl) => None,
@@ -926,66 +1263,13 @@ impl Scrollback {
         None
     }
 
-    /// Whether the search took a key: `/` or Ctrl+F open it (or give it
-    /// the keyboard back), Enter or F3 go to the next place (with Shift
-    /// the one before; `n` and `N` while the list has the keyboard), Esc
-    /// clears what is typed and then closes it (with the list's selection
-    /// gone first), Tab and Shift+Tab move the keyboard between it and
-    /// the list. While it has the keyboard its field takes every other
-    /// key but those that scroll the list and, when it has nothing for
-    /// them, those with Ctrl.
-    fn find_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym, fit: Fit) -> bool {
-        let others = mods.ctrl || mods.alt || mods.logo;
-        let plain = !(others || mods.shift);
-        let only_shift = mods.shift && !others;
-        let focused = self.find_focused();
-        let selected = self.has_selection();
-        let opens = match sym {
-            Keysym::f | Keysym::F => mods.ctrl && !(mods.alt || mods.logo),
-            // Typed into the field, it is the field's.
-            Keysym::slash => plain && !focused,
-            _ => false,
-        };
-        if opens {
-            self.open_find(fit);
-            return true;
-        }
+    /// Whether the search's field, with the keyboard, took a key its
+    /// rows in `KEYS` don't: every key but those that scroll the list and,
+    /// when it has nothing for them, those with Ctrl.
+    fn field_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym, fit: Fit) -> bool {
         let Some(find) = self.find.as_mut() else {
             return false;
         };
-        let next = match sym {
-            Keysym::Return | Keysym::KP_Enter => focused,
-            Keysym::n | Keysym::N => !focused,
-            Keysym::F3 => true,
-            _ => false,
-        };
-        if next && (plain || only_shift) {
-            self.step_find(if mods.shift { -1 } else { 1 }, fit);
-            return true;
-        }
-        match sym {
-            Keysym::Escape if plain && focused && !find.field.line().text.is_empty() => {
-                find.field.set("");
-                find.whole = false;
-                self.find_hits();
-                return true;
-            }
-            // The selection goes first (see `key`).
-            Keysym::Escape if plain && !focused && selected => return false,
-            Keysym::Escape if plain => {
-                self.close_find();
-                return true;
-            }
-            Keysym::Tab | Keysym::ISO_Left_Tab if plain || only_shift => {
-                find.focused = !focused;
-                if find.focused {
-                    find.field.select_all();
-                }
-                return true;
-            }
-            _ if !focused => return false,
-            _ => {}
-        }
         match find.field.key(mods, sym, typed) {
             Edit::Changed => {
                 find.whole = false;
@@ -1558,6 +1842,49 @@ mod tests {
 
     fn rows(s: &Scrollback) -> Vec<&str> {
         (0..s.row_count()).map(|i| s.row_text(i)).collect()
+    }
+
+    #[test]
+    fn the_key_tables_agree_with_themselves() {
+        let mut ctxs = Vec::new();
+        for find in [None, Some(false), Some(true)] {
+            for (selected, visual) in [(false, false), (true, false), (true, true)] {
+                for (find_empty, pane) in [(false, false), (true, true)] {
+                    for view in [false, true] {
+                        ctxs.push(KeyCtx {
+                            view,
+                            find,
+                            find_empty,
+                            selected,
+                            visual,
+                            pane,
+                        });
+                    }
+                }
+            }
+        }
+        key_table::check(KEYS, &ctxs);
+        key_table::check(SHEET_KEYS, &[()]);
+        // A bare q closes, as the footer's "Q" says (K8).
+        let idle = KeyCtx {
+            view: true,
+            find: None,
+            find_empty: true,
+            selected: false,
+            visual: false,
+            pane: true,
+        };
+        let none = ModifiersState::default();
+        assert_eq!(
+            key_table::press(KEYS, &idle, &none, Keysym::q),
+            Some(Key::Close)
+        );
+        let shift = ModifiersState {
+            shift: true,
+            ..none
+        };
+        let v = key_table::press(KEYS, &idle, &shift, Keysym::v);
+        assert_eq!(v, Some(Key::Visual(Grain::Line)));
     }
 
     #[test]

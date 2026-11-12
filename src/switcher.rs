@@ -51,6 +51,7 @@ use crate::{
     feature_agents::ModelSlot,
     fuzzy, git, home_dir,
     input::Overlay,
+    key_table::{self, Binding},
     launch::{self, Place},
     paths::tilde,
     profile_import,
@@ -348,6 +349,68 @@ pub struct Switcher {
     model_hint: &'static str,
 }
 
+/// What a key of the launcher does (see `KEYS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Key {
+    /// Open or run the selected row: where its place says, else where the
+    /// launcher puts it.
+    Pick(Option<Place>),
+    /// The next category chip, or the one before.
+    Category(isize),
+    Esc,
+}
+
+/// What the keys read of the launcher now.
+struct KeyCtx {
+    /// It opens in a split, so Alt+Enter has a new tab to offer.
+    split: bool,
+    /// It shows category chips.
+    chips: bool,
+}
+
+/// The launcher's keys, in the footer's order: the handler and the footer
+/// read them. Moving the selection stays `Switcher::key`'s.
+const KEYS: &[Binding<KeyCtx, Key>] = &[
+    Binding {
+        chord: "Enter",
+        does: |_| Some(Key::Pick(None)),
+        footer: true,
+        f1: "Open the selected row",
+    },
+    // Hinted where it differs from Enter.
+    Binding {
+        chord: "Alt+Enter",
+        does: |c| c.split.then_some(Key::Pick(Some(Place::Tab))),
+        footer: true,
+        f1: "Open it in a new tab",
+    },
+    Binding {
+        chord: "Alt+Enter",
+        does: |_| Some(Key::Pick(Some(Place::Tab))),
+        footer: false,
+        f1: "",
+    },
+    // Tab and Shift+Tab go along the category chips, both ways.
+    Binding {
+        chord: "Tab",
+        does: |c| c.chips.then_some(Key::Category(1)),
+        footer: true,
+        f1: "The next category, or the one before",
+    },
+    Binding {
+        chord: "Shift+Tab",
+        does: |c| c.chips.then_some(Key::Category(-1)),
+        footer: false,
+        f1: "The next category, or the one before",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(Key::Esc),
+        footer: true,
+        f1: "Clear the query, then close",
+    },
+];
+
 impl Switcher {
     /// Stop the list flung; whether it was.
     pub fn stop_fling(&mut self) -> bool {
@@ -581,28 +644,31 @@ impl Switcher {
         }
         let ctrl = mods.ctrl;
         let page = self.shown().map_or(1, |(first, last)| last - first + 1) as isize;
-        match sym {
+        match key_table::press(KEYS, &self.key_ctx(), mods, sym) {
             // Esc clears the query first, then closes.
-            Keysym::Escape if !self.query.is_empty() => {
+            Some(Key::Esc) if !self.query.is_empty() => {
                 self.query.clear();
                 self.refilter();
+                return Outcome::Open;
             }
-            Keysym::Escape => return Outcome::Closed,
-            Keysym::Return | Keysym::KP_Enter => {
+            Some(Key::Esc) => return Outcome::Closed,
+            Some(Key::Pick(place)) => {
                 if let Some(target) = self.picked() {
-                    let place = if mods.alt { Place::Tab } else { self.place };
-                    return Outcome::Picked(target.clone(), place);
+                    return Outcome::Picked(target.clone(), place.unwrap_or(self.place));
                 }
+                return Outcome::Open;
             }
+            Some(Key::Category(by)) => {
+                self.step_category(by);
+                return Outcome::Open;
+            }
+            None => {}
+        }
+        match sym {
             Keysym::Up | Keysym::KP_Up => self.step(-1),
             Keysym::Down | Keysym::KP_Down => self.step(1),
             Keysym::k if ctrl => self.step(-1),
             Keysym::j if ctrl => self.step(1),
-            // Tab and Shift+Tab go along the category chips, both ways.
-            Keysym::Tab | Keysym::ISO_Left_Tab if self.chips() => {
-                let back = mods.shift || sym == Keysym::ISO_Left_Tab;
-                self.step_category(if back { -1 } else { 1 })
-            }
             Keysym::Page_Up | Keysym::KP_Page_Up => self.step(-page),
             Keysym::Page_Down | Keysym::KP_Page_Down => self.step(page),
             _ => {}
@@ -766,31 +832,30 @@ impl Switcher {
         }
     }
 
+    /// What the keys read of it now.
+    fn key_ctx(&self) -> KeyCtx {
+        KeyCtx {
+            split: self.place == Place::Split,
+            chips: self.chips(),
+        }
+    }
+
     /// The footer's key hints: at most `chrome::SWITCHER_HINTS`.
     fn hints(&self) -> Vec<(String, String)> {
-        let enter = match (self.run, &self.model_slot) {
-            (true, _) => "run",
-            (false, Some(_)) => "pick",
-            (false, None) => "open",
+        let label = |key: &Key| {
+            match key {
+                Key::Pick(Some(_)) => "in a new tab",
+                Key::Pick(None) if self.run => "run",
+                Key::Pick(None) if self.model_slot.is_some() => "pick",
+                Key::Pick(None) => "open",
+                Key::Category(_) => "category",
+                Key::Esc if self.query.is_empty() => "close",
+                Key::Esc => "clear",
+            }
+            .to_owned()
         };
-        let mut hints = vec![("Enter", enter)];
-        if self.place == Place::Split {
-            hints.push(("Alt+Enter", "in a new tab"));
-        }
-        if self.chips() {
-            hints.push(("Tab", "category"));
-        }
-        hints.push((
-            "Esc",
-            if self.query.is_empty() {
-                "close"
-            } else {
-                "clear"
-            },
-        ));
-        hints
-            .into_iter()
-            .map(|(keys, what)| (keys.to_owned(), what.to_owned()))
+        (key_table::hints(KEYS, &self.key_ctx(), label).into_iter())
+            .map(|(keys, what)| (keys.to_owned(), what))
             .collect()
     }
 
@@ -1954,6 +2019,12 @@ pub fn remember(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_key_table_agrees_with_itself() {
+        let ctxs = [(false, false), (false, true), (true, false), (true, true)];
+        key_table::check(KEYS, &ctxs.map(|(split, chips)| KeyCtx { split, chips }));
+    }
     use std::time::Duration;
 
     /// How high a list of `rows` rows under one heading is.

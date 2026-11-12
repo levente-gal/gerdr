@@ -36,6 +36,7 @@ use crate::{
     git::{self, Untracked, Worktree},
     git_ops::Turn,
     input::Overlay,
+    key_table::{self, Binding},
     menu::MenuAction,
     paths,
     scroll::{Bounds, Motion, Scroll},
@@ -94,6 +95,115 @@ impl Worktrees {
         self.popup.as_mut().map(|p| &mut p.query)
     }
 }
+
+/// What a key of the popup does (see `KEYS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Key {
+    Diff,
+    Checkout,
+    Merge,
+    Delete,
+    CleanUp,
+    Open,
+    Copy,
+    Refresh,
+    /// This workspace's worktrees, or every repository's.
+    Scope,
+    /// Clear the filter.
+    Clear,
+    Close,
+}
+
+/// What the keys read of the popup: whether it has a repository of its
+/// own to scope to, and whether a filter is typed.
+struct KeyCtx {
+    scope: bool,
+    query: bool,
+}
+
+/// The popup's keys, in the footer's order: the handler and the footer
+/// read them (the filter's Tab and Esc first, in `Popup::filter_key`).
+/// Moving the selection stays `Popup::key`'s.
+const KEYS: &[Binding<KeyCtx, Key>] = &[
+    Binding {
+        chord: "Enter",
+        does: |_| Some(Key::Diff),
+        footer: true,
+        f1: "Its diff",
+    },
+    Binding {
+        chord: "Ctrl+D",
+        does: |_| Some(Key::Diff),
+        footer: false,
+        f1: "Its diff",
+    },
+    Binding {
+        chord: "Ctrl+S",
+        does: |_| Some(Key::Checkout),
+        footer: true,
+        f1: "Check its branch out in main",
+    },
+    Binding {
+        chord: "Ctrl+Shift+S",
+        does: |_| Some(Key::Merge),
+        footer: true,
+        f1: "Squash it into main",
+    },
+    Binding {
+        chord: "Del",
+        does: |_| Some(Key::Delete),
+        footer: true,
+        f1: "Delete it, pressed twice",
+    },
+    Binding {
+        chord: "Shift+Del",
+        does: |_| Some(Key::CleanUp),
+        footer: true,
+        f1: "Delete the merged ones, pressed twice",
+    },
+    Binding {
+        chord: "Ctrl+O",
+        does: |_| Some(Key::Open),
+        footer: true,
+        f1: "Open it in a tab",
+    },
+    Binding {
+        chord: "Ctrl+C",
+        does: |_| Some(Key::Copy),
+        footer: true,
+        f1: "Copy its path",
+    },
+    Binding {
+        chord: "Ctrl+R",
+        does: |_| Some(Key::Refresh),
+        footer: true,
+        f1: "Read them again",
+    },
+    Binding {
+        chord: "Tab",
+        does: |c| c.scope.then_some(Key::Scope),
+        footer: true,
+        f1: "This workspace's worktrees, or every repository's",
+    },
+    Binding {
+        chord: "Shift+Tab",
+        does: |c| c.scope.then_some(Key::Scope),
+        footer: false,
+        f1: "This workspace's worktrees, or every repository's",
+    },
+    Binding {
+        chord: "Esc",
+        does: |c| c.query.then_some(Key::Clear),
+        footer: true,
+        f1: "Clear the filter, then close",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some(Key::Close),
+        footer: true,
+        f1: "",
+    },
+];
 
 /// The popup's state: what is selected and scrolled to, by path, as the
 /// list changes under it with every Git status read.
@@ -533,7 +643,6 @@ impl Popup {
     /// (`Edit::Changed`: the list is to be filtered again). It edits the
     /// query; Tab flips the scope; Esc clears the query.
     fn filter_key(&mut self, mods: &ModifiersState, sym: Keysym, typed: Keysym) -> Option<Edit> {
-        let plain = !(mods.ctrl || mods.alt || mods.logo);
         match self.query.key(mods, sym, typed) {
             Edit::Ignored => {}
             edit => {
@@ -541,14 +650,20 @@ impl Popup {
                 return Some(edit);
             }
         }
-        match sym {
-            Keysym::Tab | Keysym::ISO_Left_Tab if plain && self.focus.is_some() => {
-                self.all = !self.all;
-            }
-            Keysym::Escape if !self.query.is_empty() => self.query.clear(),
+        match key_table::press(KEYS, &self.key_ctx(), mods, sym) {
+            Some(Key::Scope) => self.all = !self.all,
+            Some(Key::Clear) => self.query.clear(),
             _ => return None,
         }
         Some(Edit::Changed)
+    }
+
+    /// What the keys read of the popup now.
+    fn key_ctx(&self) -> KeyCtx {
+        KeyCtx {
+            scope: self.focus.is_some(),
+            query: !self.query.is_empty(),
+        }
     }
 
     /// A key, over `items` in a view of `page` entries; what to do, if
@@ -579,8 +694,29 @@ impl Popup {
         };
         let path =
             |when: fn(&Worktree) -> bool| item.filter(|i| when(&i.wt)).map(|i| i.wt.path.clone());
+        match key_table::press(KEYS, &self.key_ctx(), mods, sym) {
+            Some(Key::Close) => return Some(Outcome::Close),
+            Some(Key::Diff) => return path(|wt| !wt.gone).map(Outcome::Diff),
+            Some(Key::Merge) => return path(can_merge).map(Outcome::Merge),
+            Some(Key::Checkout) => return path(can_checkout).map(Outcome::Checkout),
+            Some(Key::Open) => return path(|wt| !wt.gone).map(Outcome::Open),
+            Some(Key::Copy) => return path(|_| true).map(Outcome::Copy),
+            Some(Key::Refresh) => return Some(Outcome::Refresh),
+            Some(Key::Delete) => return self.delete(item?, armed),
+            Some(Key::CleanUp) => {
+                let main = item?.main.clone();
+                if merged_ones(items, &main).is_empty() {
+                    return None;
+                }
+                if armed == Some(Armed::CleanUp(main.clone())) {
+                    return Some(Outcome::CleanUp(main));
+                }
+                self.armed = Some(Armed::CleanUp(main));
+                return None;
+            }
+            Some(Key::Scope | Key::Clear) | None => {}
+        }
         match sym {
-            Keysym::Escape => return Some(Outcome::Close),
             Keysym::Down | Keysym::KP_Down => {
                 let k = step(1)?;
                 self.select(items, k, page);
@@ -608,31 +744,6 @@ impl Popup {
             Keysym::Home | Keysym::KP_Home if !items.is_empty() => self.select(items, 0, page),
             Keysym::End | Keysym::KP_End if !items.is_empty() => {
                 self.select(items, items.len() - 1, page);
-            }
-            Keysym::Return | Keysym::KP_Enter => {
-                return path(|wt| !wt.gone).map(Outcome::Diff);
-            }
-            Keysym::d | Keysym::D if ctrl => return path(|wt| !wt.gone).map(Outcome::Diff),
-            // Shift changes the symbol: match both cases.
-            Keysym::s | Keysym::S if ctrl && mods.shift => {
-                return path(can_merge).map(Outcome::Merge);
-            }
-            Keysym::s | Keysym::S if ctrl => return path(can_checkout).map(Outcome::Checkout),
-            Keysym::o | Keysym::O if ctrl => return path(|wt| !wt.gone).map(Outcome::Open),
-            Keysym::c | Keysym::C if ctrl => return path(|_| true).map(Outcome::Copy),
-            Keysym::r | Keysym::R if ctrl => return Some(Outcome::Refresh),
-            Keysym::Delete | Keysym::KP_Delete if !ctrl && !mods.shift => {
-                return self.delete(item?, armed);
-            }
-            Keysym::Delete | Keysym::KP_Delete if !ctrl => {
-                let main = item?.main.clone();
-                if merged_ones(items, &main).is_empty() {
-                    return None;
-                }
-                if armed == Some(Armed::CleanUp(main.clone())) {
-                    return Some(Outcome::CleanUp(main));
-                }
-                self.armed = Some(Armed::CleanUp(main));
             }
             _ => {}
         }
@@ -745,33 +856,26 @@ impl Popup {
                 }
             })
             .collect();
-        let hint = |k: &str, what: &str| (k.to_owned(), what.to_owned());
-        let mut hints = vec![
-            hint("Enter", "diff"),
-            hint("Ctrl+S", "check out in main"),
-            hint("Ctrl+Shift+S", "squash into main"),
-            hint("Del", "delete"),
-            hint("Shift+Del", "delete merged"),
-            hint("Ctrl+O", "open in a tab"),
-            hint("Ctrl+C", "copy path"),
-            hint("Ctrl+R", "refresh"),
-        ];
-        if self.focus.is_some() {
-            let scope = if self.all {
-                "this workspace"
-            } else {
-                "all workspaces"
-            };
-            hints.push(hint("Tab", scope));
-        }
-        hints.push(hint(
-            "Esc",
-            if self.query.is_empty() {
-                "close"
-            } else {
-                "clear"
-            },
-        ));
+        let label = |key: &Key| {
+            match key {
+                Key::Diff => "diff",
+                Key::Checkout => "check out in main",
+                Key::Merge => "squash into main",
+                Key::Delete => "delete",
+                Key::CleanUp => "delete merged",
+                Key::Open => "open in a tab",
+                Key::Copy => "copy path",
+                Key::Refresh => "refresh",
+                Key::Scope if self.all => "this workspace",
+                Key::Scope => "all workspaces",
+                Key::Clear => "clear",
+                Key::Close => "close",
+            }
+            .to_owned()
+        };
+        let hints = (key_table::hints(KEYS, &self.key_ctx(), label).into_iter())
+            .map(|(k, w)| (k.to_owned(), w))
+            .collect();
         let empty = if !self.query.is_empty() {
             "No worktrees match"
         } else {
@@ -1468,6 +1572,12 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_key_table_agrees_with_itself() {
+        let ctxs = [(false, false), (false, true), (true, false), (true, true)];
+        key_table::check(KEYS, &ctxs.map(|(scope, query)| KeyCtx { scope, query }));
+    }
 
     fn item(repo: usize, name: &str, main: bool, merged: bool, dirty: bool) -> Item {
         Item {
