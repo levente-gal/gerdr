@@ -1508,6 +1508,9 @@ impl Gerdr {
         let area = (self.features.panel.as_ref())
             .and_then(|panel| panel.review_rect)
             .unwrap_or_else(|| self.content_rect());
+        // The review has no header row there (`ReposView::no_header`).
+        let mut area = area;
+        area.size.h += crate::chrome::REPOS_HEADER;
         self.env_in(area, true)
     }
 
@@ -1516,6 +1519,7 @@ impl Gerdr {
         let wd = self.inline_wd()?;
         let mut view = wd.repos_view(self.inline_env());
         view.flat = true;
+        view.no_header = true;
         // The rail has the keys, or a panel over it does.
         let rail = self.features.panel.as_ref().is_some_and(|p| p.rail_keys);
         view.detail.focused &= !rail && !self.repos.is_open();

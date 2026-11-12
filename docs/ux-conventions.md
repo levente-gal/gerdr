@@ -364,7 +364,11 @@ press and drag pick whole rows and a double click opens the line in Zed.
   page's bar, whatever card it acts on (`StagePage::primary`). The bar
   (`FeatureTabLayout::page_bar`) is the row right over the page with the
   stage's title and the buttons no card holds; it doesn't scroll, and Code
-  review's page under the rail has it too, with the review's buttons. A
+  review's page under the rail has it too, with the review's buttons, and
+  the review has no header row of its own there (`ReposView::no_header`).
+  The bar's buttons change under the pointer as the page goes on: the
+  second press of a double click on another button than the first took
+  is dropped (`other_button_again`). A
   card's own primary (a finding's, a round's, a repository's on Ship) shows
   on the bar, filled, and on its card, plain. While a note is written, Save
   is the primary. The rare
