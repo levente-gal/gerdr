@@ -235,10 +235,10 @@ pub(super) const FORM_BUTTONS: [(&str, i32); 2] = [("Cancel", 84), ("Create & sw
 pub(super) const SETTINGS_BUTTONS: [(&str, i32); 3] =
     [("Cancel", 84), ("Run now", 96), ("Save", 84)];
 
-/// How high a pane's bar is from its pane's top edge: its pill and a
-/// little either side of it, floating over the window. The bar's buttons
-/// are this wide, this far apart and in from its ends.
-pub const PANE_BAR_HEIGHT: i32 = 36;
+/// How high a pane's bar is: the band along its pane's top, over its
+/// window, which starts under it. The bar's buttons are this wide, this
+/// far apart and in from its ends.
+pub const PANE_BAR_HEIGHT: i32 = 28;
 pub(super) const BAR_BUTTON: i32 = 24;
 pub(super) const BAR_BUTTON_GAP: i32 = 2;
 pub(super) const BAR_INSET: i32 = 4;

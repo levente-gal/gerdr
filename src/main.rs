@@ -677,6 +677,16 @@ impl Tab {
         self.panes.iter().any(|p| p.id == id)
     }
 
+    /// Where the window of pane `id` goes in its place `rect`: under its
+    /// bar, which keeps the top of it (see `chrome::pane_bar_rects`).
+    fn window_rect(&self, id: u32, rect: Rectangle<i32, Logical>) -> Rectangle<i32, Logical> {
+        if self.has_bar(id) {
+            chrome::pane_bar_rects(rect).1
+        } else {
+            rect
+        }
+    }
+
     fn window(&self, id: u32) -> Option<&Window> {
         self.panes.iter().find(|p| p.id == id).map(|p| &p.window)
     }
@@ -1530,7 +1540,6 @@ pub struct Gerdr {
     /// How often and recently things were switched to, for ordering lists.
     pub frecency: Frecency,
     /// Where each pane bar stands between hidden and shown.
-    pub bar_states: pane_control::BarStates,
     /// Where a window goes once it has drawn a new size, by its surface:
     /// the size it had when asked, and its place then. A window that is
     /// to move and change size at once (a pane bar taking or giving back
@@ -2691,14 +2700,8 @@ impl Gerdr {
             if let channel::Event::Msg(round) = event
                 && state.herdr.is_some()
             {
-                let rooms = state.pill_rooms();
                 state.herdr_tabs = round.tabs;
                 state.capture_commands();
-                // A command started or ended: its terminal's pill comes or
-                // goes, and with it the room kept for it.
-                if state.pill_rooms() != rooms {
-                    state.arrange();
-                }
                 state.feed_services();
                 state.track_tests();
                 for id in state.projects.take_conflicts() {
@@ -4751,15 +4754,10 @@ impl Gerdr {
         else {
             return;
         };
-        // Down to the bottom of the bar's pill, so the menu opens right
-        // under it.
-        let grip = chrome::pane_bar_rects(rect).0;
-        let pill = self.pane_pill_rect(tab, id, rect);
-        let bottom = (pill.loc.y + pill.size.h).max(grip.loc.y + grip.size.h);
-        let bar = Rectangle::new(grip.loc, (grip.size.w, bottom - grip.loc.y).into());
-        // At the bar's left end, clear of its buttons: on its grip, out
-        // or not.
-        let on = Point::from((bar.loc.x as f64 + 4.0, bar.loc.y as f64 + 1.0));
+        let bar = chrome::pane_bar_rects(rect).0;
+        // On the bar's label, clear of its buttons: in its middle, where
+        // a terminal's command or a web page's address is.
+        let on = bar.to_f64().loc + bar.to_f64().size.downscale(2.0).to_point();
         if let Some(mut spec) = self.pane_bar_menu(on) {
             spec.anchor = Rectangle::new(
                 (bar.loc.x + MENU_KEY_INDENT, bar.loc.y).into(),
@@ -5535,15 +5533,8 @@ impl Gerdr {
         let mut panes = Vec::new();
         for (w, ws) in self.workspaces.iter().enumerate() {
             for (t, tab) in ws.tabs.iter().enumerate() {
-                for (id, mut rect) in tab.shown_rects(area) {
-                    // The window takes its whole place; its bar floats
-                    // over its top. A terminal's pill kept out over what
-                    // runs gets its room, not to cover the first line.
-                    if tab.panes.iter().any(|p| p.id == id && self.pill_room(p)) {
-                        let room = chrome::TERMINAL_PILL_ROOM.min(rect.size.h / 2);
-                        rect.loc.y += room;
-                        rect.size.h -= room;
-                    }
+                for (id, rect) in tab.shown_rects(area) {
+                    let rect = tab.window_rect(id, rect);
                     let Some(window) = tab.window(id).cloned() else {
                         continue;
                     };
@@ -6844,11 +6835,7 @@ impl Gerdr {
                 .shown_rects(area)
                 .into_iter()
                 .find(|(id, _)| *id == focused)?;
-            Some(if tab.has_bar(id) {
-                chrome::pane_bar_rects(rect).1
-            } else {
-                rect
-            })
+            tab.has_bar(id).then_some(rect)
         });
         let placeholders = tab.map_or(Vec::new(), |tab| {
             tab.expected_rects(area)
@@ -7289,7 +7276,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scrolling: false,
         sidebar_shown: None,
         frecency: Frecency::load(),
-        bar_states: pane_control::BarStates::default(),
         pending_place: HashMap::new(),
         socket_name: socket_name.clone(),
         instance_dir,

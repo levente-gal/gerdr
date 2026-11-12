@@ -15,25 +15,18 @@
 //! The steps run on a thread of their own per pane, asking herdr how the
 //! pane is every `POLL`; they report back over a channel to the event loop.
 //!
-//! The bar keeps out of the way of an idle shell: it shows while a job
-//! runs or settles, while a command other than the shell runs in front,
-//! and while the pointer is near the pane's top edge or over the bar (see
-//! `bar_wanted`). Shown or hidden, it takes no room from the window: its
-//! grip (`chrome::PANE_GRIP`) and its pill float over the window's top.
-//! Each bar drops from its grip as it shows, and back as it hides
-//! (`BarStates`). A focus change alone doesn't bring it out: the grip
-//! shows which pane has the focus.
-//!
-//! An app's window and a web page have a bar too, shown and hidden the
-//! same way: an app's with its title, a web page's with its address and
-//! where the page can go. Every bar is there to drag the pane by (see
-//! `pane_drag`), for its menu, and to zoom and close the pane.
+//! Every pane has its bar, always, along its top: its window starts under
+//! it (see `chrome::pane_bar_rects`), so the bar covers nothing of it. A
+//! terminal's says what runs in it; an app's window has its title, a web
+//! page its address and where the page can go. Every bar is there to drag
+//! the pane by (see `pane_drag`), for its menu, and to zoom and close the
+//! pane.
 
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -49,7 +42,6 @@ use smithay::{
 
 use crate::{
     Action, Gerdr, Pane, Tab,
-    anim::{self, Fade},
     chrome::{self, BarButton, BarButtons, BarHit, BarStatus, Help, PaneBarView, Rect},
     cli_agents,
     herdr::{AgentStatus, Herdr, PaneState, Process, ProcessInfo},
@@ -440,156 +432,6 @@ fn web_page(pane: &Pane) -> Option<&str> {
     (pane.herdr.is_none() && crate::is_web_link(url)).then_some(url)
 }
 
-/// What the state of `pane`'s bar is kept by: the herdr pane it shows, for
-/// a terminal, else its own leaf.
-fn bar_key(pane: &Pane) -> String {
-    match &pane.herdr {
-        Some(herdr) => herdr.pane_id.clone(),
-        None => format!("app:{}", pane.id),
-    }
-}
-
-/// Whether a pane's bar shows: while its command is `status` (a job, or
-/// something other than the shell, running), and while the pointer asks
-/// for it (`pointer`, see `chrome::pointer_reveals`). Either way it floats
-/// over the window, so it never resizes or moves one.
-pub fn bar_wanted(status: BarStatus, pointer: bool) -> bool {
-    pointer || status.runs()
-}
-
-/// Where one pane's bar stands between hidden and shown.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct BarState {
-    /// The bar is out (or on its way out).
-    visible: bool,
-    /// The fade it is in, while it still moves.
-    fade: Option<Fade>,
-    /// The pointer is over its pill.
-    lit: bool,
-    /// The fade between not lit and lit it is in, while that moves.
-    lit_fade: Option<Fade>,
-}
-
-/// Where `fade` stands at `now`, or, done or none, where it ends: 1 when
-/// `on`, else 0.
-fn fade_at(fade: Option<Fade>, on: bool, now: Instant) -> f32 {
-    match fade {
-        Some(fade) if !fade.done(now) => fade.value(now),
-        _ if on => 1.0,
-        _ => 0.0,
-    }
-}
-
-impl BarState {
-    /// Its opacity at `now`.
-    fn alpha(&self, now: Instant) -> f32 {
-        fade_at(self.fade, self.visible, now)
-    }
-
-    /// How lit it is at `now`, 0 to 1.
-    fn lit_level(&self, now: Instant) -> f32 {
-        fade_at(self.lit_fade, self.lit, now)
-    }
-
-    /// Start lighting up or going back at `now`, from wherever a fade
-    /// under way had got to.
-    fn light(&mut self, lit: bool, now: Instant) {
-        let from = self.lit_level(now);
-        self.lit = lit;
-        self.lit_fade = Some(Fade::from_value(now, anim::FAST, lit, from));
-    }
-
-    /// Start showing or hiding at `now`, going on from wherever a fade
-    /// under way had got to; at once while nothing is to move (see
-    /// `anim::motion`).
-    fn flip(&mut self, visible: bool, now: Instant) {
-        let from = self.alpha(now);
-        self.visible = visible;
-        let dur = match anim::motion() {
-            anim::Motion::Off => Duration::ZERO,
-            anim::Motion::Full | anim::Motion::Reduced => anim::SLOW,
-        };
-        self.fade = Some(Fade::from_value(now, dur, visible, from));
-    }
-}
-
-/// How a pane's bar is to be drawn right now.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct BarLook {
-    /// The bar is out, or still fading out.
-    pub visible: bool,
-    /// The bar is out and the pointer is over its pill.
-    pub lit: bool,
-    /// How lit it is, 0 to 1, in `anim::quantize` steps: it follows `lit`
-    /// over `anim::FAST`.
-    pub lit_level: f32,
-    /// How far out it is, 0 (its grip) to 1, in `anim::quantize` steps.
-    pub alpha: f32,
-    /// How far it is still under its pane's top edge: 0 out,
-    /// `chrome::BAR_SLIDE` at its grip.
-    pub slide: i32,
-}
-
-/// The show/hide state of every pane's bar, by `bar_key`, moved on
-/// each time the bars are looked at.
-#[derive(Debug, Default)]
-pub struct BarStates(Mutex<HashMap<String, BarState>>);
-
-impl BarStates {
-    /// Pane `key`'s bar at `now`: whether it is wanted given whether it is
-    /// out already (`want`), and whether the pointer is over its pill
-    /// (`over`).
-    pub fn update(
-        &self,
-        key: &str,
-        now: Instant,
-        over: bool,
-        want: impl FnOnce(bool) -> bool,
-    ) -> BarLook {
-        let mut states = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        let state = states.entry(key.to_owned()).or_default();
-        let visible = want(state.visible);
-        if visible != state.visible {
-            state.flip(visible, now);
-        }
-        let lit = visible && over;
-        if lit != state.lit {
-            state.light(lit, now);
-        }
-        if state.lit_fade.is_some_and(|fade| fade.done(now)) {
-            state.lit_fade = None;
-        }
-        if state.fade.is_some_and(|fade| fade.done(now)) {
-            state.fade = None;
-        }
-        let alpha = anim::quantize(state.alpha(now)) as f32 / 16.0;
-        BarLook {
-            visible: state.visible,
-            lit: state.lit,
-            lit_level: anim::quantize(state.lit_level(now)) as f32 / 16.0,
-            alpha,
-            slide: ((1.0 - alpha) * chrome::BAR_SLIDE as f32).round() as i32,
-        }
-    }
-
-    /// Whether pane `key`'s bar is out over its window.
-    pub fn drawn(&self, key: &str) -> bool {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
-            .is_some_and(|state| state.visible)
-    }
-
-    /// Forget every pane but `keep`.
-    pub fn retain(&self, keep: &[String]) {
-        self.0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|key, _| keep.contains(key));
-    }
-}
-
 /// The key for one of the bar's actions, as the help lists it: the first
 /// that runs `action`.
 fn hint_for(help: &Help, action: Action) -> Option<String> {
@@ -902,22 +744,6 @@ impl Gerdr {
         self.running_in(pane)
     }
 
-    /// Whether `pane` is a terminal whose pill stays out over what runs in
-    /// it, so its window starts under the pill (see `TERMINAL_PILL_ROOM`).
-    pub fn pill_room(&self, pane: &Pane) -> bool {
-        pane.herdr.is_some() && self.running_in(pane).is_some()
-    }
-
-    /// The panes of every tab that have that room, to arrange them again
-    /// when it changes.
-    pub fn pill_rooms(&self) -> Vec<u32> {
-        (self.workspaces.iter().flat_map(|ws| &ws.tabs))
-            .flat_map(|tab| &tab.panes)
-            .filter(|pane| self.pill_room(pane))
-            .map(|pane| pane.id)
-            .collect()
-    }
-
     /// What runs in `pane`, as its bar says it, if a command runs there
     /// or is being stopped.
     pub fn running_in(&self, pane: &Pane) -> Option<String> {
@@ -967,72 +793,19 @@ impl Gerdr {
         }
     }
 
-    /// Where the bars stand between hidden and shown.
-    fn bar_states(&self) -> &BarStates {
-        &self.bar_states
-    }
-
-    /// Where the pill of pane `id` of `tab`, placed at `rect`, is when
-    /// out (see `chrome::pane_bar_rect`).
-    pub(crate) fn pane_pill_rect(&self, tab: &Tab, id: u32, rect: Rect) -> Rect {
-        let kind = tab
-            .panes
-            .iter()
-            .find(|p| p.id == id)
-            .map_or(BarButtons::None, |pane| self.pane_bar_of(pane).buttons);
-        chrome::pane_bar_rect(rect, kind)
-    }
-
-    /// Whether the bar of pane `id` of `tab` is out over its window:
-    /// there to see and to click.
-    fn pane_bar_drawn(&self, tab: &Tab, id: u32) -> bool {
-        tab.panes
-            .iter()
-            .find(|p| p.id == id)
-            .is_some_and(|pane| self.bar_states().drawn(&bar_key(pane)))
-    }
-
-    /// The bar keys of every pane in every workspace: the bars whose
-    /// state is kept, shown or not.
-    fn bar_keys(&self) -> Vec<String> {
-        self.workspaces
-            .iter()
-            .flat_map(|ws| ws.tabs.iter())
-            .flat_map(|tab| tab.panes.iter())
-            .map(bar_key)
-            .collect()
-    }
-
-    /// The bars over the active tab's panes, moved on to now:
-    /// a hidden one at rest has no height. The other tabs' bars keep
-    /// their state meanwhile, so coming back moves nothing.
+    /// The bars over the active tab's panes.
     pub fn pane_bar_views(&self) -> Vec<PaneBarView> {
-        let states = self.bar_states();
-        states.retain(&self.bar_keys());
         let Some(tab) = self.tab() else {
             return Vec::new();
         };
-        let now = Instant::now();
-        let pointer = self.pointer;
         let focused = tab.focused_id();
         tab.shown_rects(self.content_rect())
             .into_iter()
             .filter_map(|(id, rect)| {
                 let pane = tab.panes.iter().find(|p| p.id == id)?;
-                let key = bar_key(pane);
                 let content = self.pane_bar_of(pane);
-                let is_focused = focused == Some(id);
-                let kind = content.buttons;
-                // Its grip is drawn always, its pill over it.
-                let full = chrome::pane_bar_rect(rect, kind);
-                let over = full.to_f64().contains(pointer);
-                let look = states.update(&key, now, over, |out| {
-                    let near = chrome::pointer_reveals(rect, kind, out, pointer);
-                    bar_wanted(content.status, near)
-                });
                 Some(PaneBarView {
-                    rect: full,
-                    grip: chrome::pane_bar_rects(rect).0,
+                    rect: chrome::pane_bar_rects(rect).0,
                     label: content.label,
                     note: content.note,
                     status: content.status,
@@ -1042,25 +815,18 @@ impl Gerdr {
                     can_forward: content.can_forward,
                     buttons: content.buttons,
                     zoom: tab.bar_zoom(id),
-                    focused: is_focused,
-                    lit: look.lit,
-                    lit_level: look.lit_level,
+                    focused: focused == Some(id),
                     hover: self
                         .pane_bar_hover
                         .filter(|(hovered, _)| *hovered == id)
                         .map(|(_, button)| button),
-                    visible: look.visible,
-                    // Its pill fades in over its band.
-                    alpha: look.alpha,
-                    slide: look.slide,
                 })
             })
             .collect()
     }
 
-    /// The pane of the active tab whose bar is at `pos`, and what of it.
-    /// A bar's grip is all label, out or not; its pill, while out, has its
-    /// buttons.
+    /// The pane of the active tab whose bar is at `pos`, and what of it:
+    /// one of its buttons, or its label, which is the rest of it.
     pub fn pane_bar_at(&self, pos: Point<f64, Logical>) -> Option<(u32, BarHit)> {
         let tab = self.tab()?;
         tab.shown_rects(self.content_rect())
@@ -1068,14 +834,8 @@ impl Gerdr {
             .find_map(|(id, rect)| {
                 let pane = tab.panes.iter().find(|p| p.id == id)?;
                 let kind = self.pane_bar_of(pane).buttons;
-                let hit = self.pane_bar_drawn(tab, id).then(|| {
-                    let bar = chrome::pane_bar_rect(rect, kind);
-                    chrome::pane_bar_hit(bar, kind, tab.bar_zoom(id), pos)
-                });
-                let band = chrome::pane_bar_rects(rect).0;
-                let hit = hit
-                    .flatten()
-                    .or_else(|| band.to_f64().contains(pos).then_some(BarHit::Label))?;
+                let bar = chrome::pane_bar_rects(rect).0;
+                let hit = chrome::pane_bar_hit(bar, kind, tab.bar_zoom(id), pos)?;
                 Some((id, hit))
             })
     }
@@ -1118,7 +878,7 @@ impl Gerdr {
             .shown_rects(self.content_rect())
             .into_iter()
             .find(|(pane, _)| *pane == id)?;
-        let bar = chrome::pane_bar_rect(rect, kind);
+        let bar = chrome::pane_bar_rects(rect).0;
         let BarHit::Button(button) = hit else {
             // Whether its command runs again after a reboot: what the
             // toggle's toast said, kept in sight.
@@ -1830,7 +1590,6 @@ mod tests {
             assert_eq!(status, BarStatus::Agent(agent));
             // Still something to ask about before closing, in sight.
             assert!(status.runs());
-            assert!(bar_wanted(status, false));
         }
         // Gone or being stopped, the agent's word doesn't count.
         for other in [BarStatus::Idle, BarStatus::Exited, BarStatus::Working] {
@@ -1909,106 +1668,6 @@ mod tests {
         let content = bar_content(None, None, Some(&restarting));
         assert_eq!(content.note, Some("restarting…"));
         assert!(!content.can_restart && !content.can_stop);
-    }
-
-    #[test]
-    fn a_bar_shows_for_a_command_or_the_pointer() {
-        assert!(bar_wanted(BarStatus::Running, false));
-        assert!(bar_wanted(BarStatus::Working, false));
-        assert!(!bar_wanted(BarStatus::Idle, false));
-        assert!(!bar_wanted(BarStatus::Exited, false));
-        assert!(bar_wanted(BarStatus::Idle, true));
-        assert!(bar_wanted(BarStatus::Exited, true));
-        assert!(bar_wanted(BarStatus::Running, true));
-    }
-
-    #[test]
-    fn a_bar_fades_in_when_wanted_and_out_when_not() {
-        let states = BarStates::default();
-        let t0 = Instant::now();
-        let out = |out: bool| out;
-        // Not wanted: hidden from the start, nothing to see.
-        let look = states.update("p1", t0, false, |shown| {
-            assert!(!shown);
-            false
-        });
-        assert_eq!((look.visible, look.alpha), (false, 0.0));
-        assert_eq!(look.slide, chrome::BAR_SLIDE);
-        assert!(!states.drawn("p1"));
-        // Wanted: it starts showing.
-        let look = states.update("p1", t0, false, |_| true);
-        assert!(look.visible && look.alpha == 0.0);
-        assert!(states.drawn("p1"));
-        let look = states.update("p1", t0 + anim::SLOW / 2, false, out);
-        assert!(look.alpha > 0.3 && look.alpha < 0.7, "{}", look.alpha);
-        assert!(look.slide > 0 && look.slide < chrome::BAR_SLIDE);
-        let look = states.update("p1", t0 + anim::SLOW, false, |_| true);
-        assert_eq!((look.alpha, look.slide), (1.0, 0));
-        // Not wanted any more: it fades out.
-        let t1 = t0 + Duration::from_secs(2);
-        let look = states.update("p1", t1, false, |_| false);
-        assert!(!look.visible && look.alpha == 1.0);
-        // On its way out it is not there to click.
-        assert!(!states.drawn("p1"));
-        let look = states.update("p1", t1 + 2 * anim::SLOW, false, |_| false);
-        assert_eq!((look.alpha, look.slide), (0.0, chrome::BAR_SLIDE));
-    }
-
-    #[test]
-    fn a_bar_lights_up_under_the_pointer_over_a_fade() {
-        let states = BarStates::default();
-        let t0 = Instant::now();
-        let look = states.update("p1", t0, false, |_| true);
-        assert_eq!((look.lit, look.lit_level), (false, 0.0));
-        // The pointer comes over its pill: lit at once, its level after.
-        let look = states.update("p1", t0, true, |_| true);
-        assert!(look.lit && look.lit_level == 0.0);
-        let look = states.update("p1", t0 + anim::FAST / 2, true, |_| true);
-        assert!(
-            look.lit_level > 0.2 && look.lit_level < 0.8,
-            "{}",
-            look.lit_level
-        );
-        let look = states.update("p1", t0 + anim::FAST, true, |_| true);
-        assert_eq!(look.lit_level, 1.0);
-        // It leaves: back down over the same while.
-        let t1 = t0 + Duration::from_secs(1);
-        let look = states.update("p1", t1, false, |_| true);
-        assert!(!look.lit && look.lit_level == 1.0);
-        let look = states.update("p1", t1 + anim::FAST, false, |_| true);
-        assert_eq!(look.lit_level, 0.0);
-        // A bar not out isn't lit, the pointer over it or not.
-        let look = states.update("p1", t1 + anim::FAST, true, |_| false);
-        assert!(!look.lit);
-    }
-
-    #[test]
-    fn a_fade_turned_around_goes_on_from_where_it_was() {
-        let states = BarStates::default();
-        let t0 = Instant::now();
-        states.update("p1", t0, false, |_| true);
-        let half = states.update("p1", t0 + anim::SLOW / 2, false, |_| true);
-        let back = states.update("p1", t0 + anim::SLOW / 2, false, |_| false);
-        assert!(!back.visible);
-        assert!(
-            (back.alpha - half.alpha).abs() < 0.1,
-            "{} {}",
-            back.alpha,
-            half.alpha
-        );
-        let gone = states.update("p1", t0 + anim::SLOW, false, |_| false);
-        assert_eq!(gone.alpha, 0.0);
-    }
-
-    #[test]
-    fn forgotten_bars_start_hidden() {
-        let states = BarStates::default();
-        let t0 = Instant::now();
-        states.update("p1", t0, false, |_| true);
-        states.retain(&["p1".into()]);
-        assert!(states.drawn("p1"));
-        states.retain(&[]);
-        assert!(!states.drawn("p1"));
     }
 
     #[test]

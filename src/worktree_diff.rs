@@ -622,7 +622,7 @@ pub type Stamp = Option<(Since, Vec<Option<(u64, SystemTime)>>)>;
 /// The `Stamp` of the worktree at `root` with changes `since`. An
 /// untracked folder counts all it holds; `None` (read again) past
 /// `WALK_MAX` entries in one.
-fn stamp(root: &Path, since: &Since) -> Stamp {
+pub(crate) fn stamp(root: &Path, since: &Since) -> Stamp {
     if !root.join(".git").exists() {
         return None;
     }

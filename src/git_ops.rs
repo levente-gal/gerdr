@@ -812,7 +812,7 @@ fn branch(dir: &Path) -> Option<String> {
 }
 
 /// The commit checked out; `None` before the first.
-fn head_oid(dir: &Path) -> Option<String> {
+pub(crate) fn head_oid(dir: &Path) -> Option<String> {
     query(dir, &["rev-parse", "-q", "--verify", "HEAD^{commit}"]).map(|o| o.trim().to_owned())
 }
 
