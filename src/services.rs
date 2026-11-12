@@ -39,7 +39,7 @@ use crate::{
     config::Services,
     herdr,
     inbox::Section,
-    inbox_sources, inbox_store, project_lock,
+    inbox_sources, project_lock,
     service_errors::ServiceError,
     service_watch::{self, Report, Service},
     test_runs,
@@ -552,7 +552,7 @@ impl Gerdr {
         error: ServiceError,
         said: Option<String>,
     ) {
-        let now = inbox_store::now_secs();
+        let now = crate::clock::now_secs();
         // An error ignored is only counted on its record: no group, no
         // notification.
         if record_ignored(

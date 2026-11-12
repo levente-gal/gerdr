@@ -2128,7 +2128,7 @@ impl crate::Gerdr {
     fn worktree_reviews(&mut self) -> &mut crate::review::Worktrees {
         if self.repos.worktree_reviews.is_none() {
             let mut reviews = crate::review::load_worktrees(None);
-            if reviews.prune(crate::projects::now(), Path::is_dir) {
+            if reviews.prune(crate::clock::now_secs(), Path::is_dir) {
                 self.save_worktree_reviews(&reviews);
             }
             self.repos.worktree_reviews = Some(reviews);
@@ -2167,7 +2167,7 @@ impl crate::Gerdr {
         };
         wd.diff.review_dirty = false;
         let (root, branch, review) = (wd.root.clone(), wd.branch.clone(), wd.diff.review.clone());
-        let now = crate::projects::now();
+        let now = crate::clock::now_secs();
         let reviews = self.worktree_reviews();
         reviews.put(&root, branch.as_deref(), &review, now);
         reviews.prune(now, Path::is_dir);

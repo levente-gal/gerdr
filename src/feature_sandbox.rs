@@ -1075,7 +1075,7 @@ impl Gerdr {
             let others = Others {
                 up: &up,
                 reached: reached.as_deref(),
-                now: crate::machine_reach::now_secs(),
+                now: crate::clock::now_secs(),
             };
             let at = machine.as_deref();
             let stacks = left_behind(found, at, own.as_deref(), &others, |project, slug| {
@@ -1114,7 +1114,7 @@ impl Gerdr {
             Some(id) => self.work_of(id).is_some(),
             None => true,
         });
-        let now = crate::machine_reach::now_secs();
+        let now = crate::clock::now_secs();
         (shown.flat_map(|(_, stacks)| stacks))
             .map(|left| {
                 let slug = (left.feature.split_once('/')).map_or(&*left.feature, |(_, slug)| slug);
@@ -1157,7 +1157,7 @@ impl Gerdr {
             "another gerdr".to_owned()
         };
         match from.seen {
-            Some(at) => format!("{name}, last there {}", crate::projects::ago(now, at)),
+            Some(at) => format!("{name}, last there {}", crate::clock::ago(now, at)),
             None => name,
         }
     }

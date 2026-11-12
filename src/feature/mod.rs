@@ -1703,7 +1703,8 @@ impl PerProject<String> {
     }
 }
 
-pub use crate::projects::now;
+// shortcut: forwarder kept for callers outside dup-clock, inline at merge
+pub use crate::clock::now_secs as now;
 
 #[cfg(test)]
 pub(crate) mod tests {

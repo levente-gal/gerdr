@@ -858,15 +858,6 @@ impl Batch {
     }
 }
 
-/// How long since `then`, at `now`, in words: `12s`, `2m 5s`.
-pub fn took(then: SystemTime, now: SystemTime) -> String {
-    let s = now.duration_since(then).map_or(0, |d| d.as_secs());
-    match s {
-        0..60 => format!("{s}s"),
-        _ => format!("{}m {}s", s / 60, s % 60),
-    }
-}
-
 /// Why a batch over the repositories at `roots` must wait, if one of them
 /// is in a batch still running: which, and where.
 pub fn busy<'a>(roots: impl IntoIterator<Item = &'a Path>, ctx: &Ctx) -> Option<String> {
@@ -1811,17 +1802,6 @@ fn conflicted_files(item: &RepoItem) -> Vec<String> {
         .filter(|c| c.conflicted())
         .map(|c| c.path.clone())
         .collect()
-}
-
-/// How long before `now` `then` was, in its largest unit: `2m`.
-fn ago(then: SystemTime, now: SystemTime) -> String {
-    let s = now.duration_since(then).map_or(0, |d| d.as_secs());
-    match s {
-        0..60 => format!("{s}s"),
-        60..3600 => format!("{}m", s / 60),
-        3600..86400 => format!("{}h", s / 3600),
-        _ => format!("{}d", s / 86400),
-    }
 }
 
 /// Where `head` is, in words: `main at 1a2b3c4`.
@@ -4779,7 +4759,7 @@ impl Panel {
             let run = running.or(ctx.batch).and_then(|b| b.run(&item.root));
             let state = match run.map(|r| (&r.state, r.since)) {
                 Some((RunState::Running(what), Some(since))) => {
-                    LineState::Busy(format!("{what} {}", took(since, ctx.now)))
+                    LineState::Busy(format!("{what} {}", crate::clock::took(ctx.now.duration_since(since).unwrap_or_default())))
                 }
                 Some((RunState::Running(what), None)) => LineState::Busy(what.clone()),
                 Some((RunState::Queued, _)) => LineState::Busy("waiting…".into()),
@@ -4866,7 +4846,7 @@ impl Panel {
             "fetching…".into()
         } else {
             match items.iter().filter_map(|i| i.status.fetched).max() {
-                Some(at) => format!("fetched {} ago", ago(at, ctx.now)),
+                Some(at) => format!("fetched {} ago", crate::clock::age(ctx.now.duration_since(at).unwrap_or_default())),
                 None => "never fetched".into(),
             }
         });
@@ -5295,7 +5275,7 @@ impl Panel {
             let mut buttons = Vec::new();
             // How long it has run, and a button to stop it.
             if !batch.finished() {
-                text = format!("{text} · {}", took(batch.started, ctx.now));
+                text = format!("{text} · {}", crate::clock::took(ctx.now.duration_since(batch.started).unwrap_or_default()));
                 if !batch.stopping {
                     buttons.push(ReposButton::Stop);
                 }
@@ -6320,6 +6300,15 @@ mod tests {
         let view = panel.view("p", &ctx);
         let busy = LineState::Busy("fetching… 1m 15s".into());
         assert_eq!(repo_lines(&view)[2].state, busy);
+        // Past an hour it counts hours, not 120 minutes.
+        let mut hours = b.clone();
+        hours.runs[1].since = Some(UNIX_EPOCH + Duration::from_secs(NOW - 7200));
+        let hours_ctx = super::Ctx {
+            batch: Some(&hours),
+            ..ctx
+        };
+        let busy = LineState::Busy("fetching… 2h 0m".into());
+        assert_eq!(repo_lines(&panel.view("p", &hours_ctx))[2].state, busy);
         // Stopping, it says so, and no button stops it again.
         let mut stopping = long.clone();
         stopping.stopping = true;
@@ -7190,11 +7179,6 @@ mod tests {
         assert_eq!(
             panel.view("gerdr", &ctx).summary,
             "2 dirty · 1 conflict · never fetched"
-        );
-        assert_eq!(ago(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(5)), "5s");
-        assert_eq!(
-            ago(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(2 * 86400)),
-            "2d"
         );
         // The project without a repository.
         let ctx = super::Ctx { items: &[], ..ctx };

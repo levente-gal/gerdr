@@ -630,17 +630,6 @@ fn delete_action(actions: &[ItemAction]) -> Option<ItemAction> {
         .find(|a| actions.contains(a))
 }
 
-/// How long `age` is, in its largest unit: `45s`, `4m`, `2h`, `3d`.
-pub fn age_text(age: Duration) -> String {
-    let s = age.as_secs();
-    match s {
-        0..60 => format!("{s}s"),
-        60..3600 => format!("{}m", s / 60),
-        3600..86400 => format!("{}h", s / 3600),
-        _ => format!("{}d", s / 86400),
-    }
-}
-
 /// How many of a pane's last lines an agent's detail shows.
 const PANE_LINES: usize = 20;
 
@@ -696,7 +685,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
         } => {
             field("Status", chrome::status_meaning(*status).to_owned());
             if let Some(age) = item.age {
-                field("For", age_text(age));
+                field("For", crate::clock::age(age));
             }
             if let Some(model) = model {
                 field("Model", model.clone());
@@ -813,7 +802,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                 "Workspace",
                 workspace.clone().unwrap_or_else(|| "None".to_owned()),
             );
-            field("Written", crate::projects::ago(now, *created));
+            field("Written", crate::clock::ago(now, *created));
             block_title = Some("Todo".to_owned());
             block = text.lines().map(str::to_owned).collect();
         }
@@ -840,9 +829,9 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
             // Both as the same kind of "ago".
             if let Some(age) = item.age {
                 let last = now.saturating_sub(age.as_secs());
-                field("Last", crate::projects::ago(now, last));
+                field("Last", crate::clock::ago(now, last));
             }
-            field("First", crate::projects::ago(now, *first));
+            field("First", crate::clock::ago(now, *first));
             if !lines.is_empty() {
                 let title = if *stopped { "Last output" } else { "Output" };
                 block_title = Some(title.to_owned());
@@ -895,7 +884,7 @@ fn detail_view(item: &InboxItem, actions: &[ItemAction], now: u64) -> InboxDetai
                 K::PrEnded { merged: true } => ("Merged", "Enter opens the review to finish it"),
                 K::PrEnded { merged: false } => ("Closed", "Enter opens the review to finish it"),
             };
-            field(when, crate::projects::ago(now, *since));
+            field(when, crate::clock::ago(now, *since));
             field("Next", next.to_owned());
         }
     }
@@ -1993,7 +1982,7 @@ impl Panel {
                         subtitle,
                         icon: item.icon(),
                         tone: item.tone,
-                        age: item.age.map(age_text).unwrap_or_default(),
+                        age: item.age.map(crate::clock::age).unwrap_or_default(),
                         // An ignored error is listed light, as a hidden one.
                         hidden: self.show_hidden || item.section == Section::Ignored,
                         buttons,
@@ -2021,7 +2010,7 @@ impl Panel {
             let why = match triage.until {
                 Some(until) => {
                     let left = Duration::from_secs(until.saturating_sub(list.now));
-                    format!("snoozed, back in {}", age_text(left))
+                    format!("snoozed, back in {}", crate::clock::age(left))
                 }
                 None => "dismissed until it changes".to_owned(),
             };
@@ -3138,8 +3127,6 @@ mod tests {
                 .fields
                 .contains(&("Ahead".into(), "2 to push".into()))
         );
-        assert_eq!(age_text(Duration::from_secs(4 * 3600 + 5)), "4h");
-        assert_eq!(age_text(Duration::from_secs(3 * 86400)), "3d");
     }
 
     #[test]

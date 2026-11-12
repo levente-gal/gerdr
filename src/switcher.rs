@@ -1399,7 +1399,7 @@ impl Gerdr {
             });
             // The history: what was shipped or abandoned, to bring back.
             if let Some(done) = removed {
-                let when = crate::projects::ago(now, done.at);
+                let when = crate::clock::ago(now, done.at);
                 let (label, detail) = match feature.status {
                     crate::feature::Status::Abandoned => (
                         format!("Restore \u{201c}{}\u{201d}", feature.title),
