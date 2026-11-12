@@ -490,7 +490,6 @@ pub(crate) const SEARCH_KEYS: &[Binding<SearchCtx, SearchKey>] = &[
 
 /// The footer's hints of the criteria's search `search`, as it stands:
 /// its field's while it has the keys, else the page's.
-#[allow(dead_code)] // The feature tab's footer (features.rs) is to call it.
 pub(crate) fn search_hints(search: Option<&Search>) -> Vec<(String, String)> {
     let ctx = SearchCtx::of(search, false);
     let label = |k: &SearchKey| {
@@ -582,7 +581,6 @@ pub(crate) const NOTE_KEYS: &[Binding<NoteCtx, NoteKey>] = &[
 
 /// The footer's hints while the note `on` a card is written, `empty` or
 /// not. Esc never saves: what is written waits as a draft.
-#[allow(dead_code)] // The feature tab's footer (features.rs) is to call it.
 pub(crate) fn note_hints(on: &CardNote, empty: bool) -> Vec<(String, String)> {
     let ctx = NoteCtx::of(on, empty);
     let label = |k: &NoteKey| match k {

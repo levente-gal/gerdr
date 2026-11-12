@@ -575,7 +575,6 @@ pub(crate) const CARD_KEYS: &[Binding<CardCtx, CardKey>] = &[
 
 /// The key pressed on the card `ctx` has, as `card_key` takes it; none
 /// for a key not the card's.
-#[allow(dead_code)] // The feature tab's footer (features.rs) is to call it.
 pub(crate) fn card_key_of(ctx: &CardCtx, mods: &ModifiersState, sym: Keysym) -> Option<CardKey> {
     key_table::press(CARD_KEYS, ctx, mods, sym)
 }
