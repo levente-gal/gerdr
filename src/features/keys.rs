@@ -466,11 +466,24 @@ impl<'a> TabCtx<'a> {
     /// Enter on the repositories: show them all; shown, the row's button
     /// picked, else what the row does.
     fn repos_enter(&self) -> Option<TabKey> {
-        if !self.on_repos() {
-            return None;
+        self.on_repos().then(|| self.rows_enter())
+    }
+
+    /// Enter with a modifier on the page: its main button on the rail, else
+    /// the repositories' Enter, wherever the keyboard is.
+    fn any_enter(&self) -> TabKey {
+        match self.focus {
+            TabArea::Stages => {
+                page_enter(self.feature, self.stage, self.ctx).map_or(TabKey::Swallow, TabKey::Out)
+            }
+            _ => self.rows_enter(),
         }
+    }
+
+    /// The repositories' Enter: show them all; shown, the row's button.
+    fn rows_enter(&self) -> TabKey {
         if !self.panel.expanded {
-            return Some(TabKey::FoldRepos);
+            return TabKey::FoldRepos;
         }
         let (feature, panel) = (self.feature, self.panel);
         let picked = self.entry.and_then(|e| {
@@ -479,7 +492,7 @@ impl<'a> TabCtx<'a> {
             (at < buttons.len()).then(|| buttons.swap_remove(at).1)
         });
         let did = picked.or_else(|| row_action(feature, self.row, self.ctx));
-        Some(did.map_or(TabKey::Swallow, TabKey::Out))
+        did.map_or(TabKey::Swallow, TabKey::Out)
     }
 
     /// Ctrl+Shift+O: the row's page, a fix plan sent, or the pull request.
@@ -509,15 +522,25 @@ impl<'a> TabCtx<'a> {
     pub(super) fn press_chord(&self, chord: &str) -> Option<TabKey> {
         let first = chord.split(" / ").next().unwrap_or(chord);
         let (mods, sym) = crate::keys::hint_key(first)?;
-        self.press(&mods, sym)
+        // A hint is the key as it shows: not an alias's press.
+        self.press_in(&mods, sym, false)
     }
 
     /// What the key `mods` and `sym` does now: the first row of the chain
     /// that is it and is offered.
     pub(super) fn press(&self, mods: &ModifiersState, sym: Keysym) -> Option<TabKey> {
+        self.press_in(mods, sym, true)
+    }
+
+    /// `press`, alias rows too while `aliases`.
+    fn press_in(&self, mods: &ModifiersState, sym: Keysym, aliases: bool) -> Option<TabKey> {
         let (mods, sym) = plain_key(mods, sym);
+        let shown = |b: &&Binding<TabCtx<'a>, TabKey>| aliases || b.footer || !b.f1.is_empty();
         chain().iter().find_map(|link| match link {
-            Link::Rows(_, rows) => key_table::press(rows, self, &mods, sym),
+            Link::Rows(_, rows) => (rows.iter())
+                .filter(shown)
+                .filter(|b| key_table::is(b.chord, &mods, sym))
+                .find_map(|b| (b.does)(self)),
             // The keys of an item's card, as `review_cards` reads them.
             Link::Cards => {
                 let card = self.card_ctx().filter(|_| self.findings())?;
@@ -596,6 +619,20 @@ macro_rules! row {
     };
 }
 
+/// An alias row: a press the old match took too, with a modifier more or
+/// less than its key's own (Shift+Enter for Enter, say), kept so it still
+/// works; never hinted, never on F1.
+macro_rules! alias {
+    ($chord:expr, $does:expr) => {
+        Binding {
+            chord: $chord,
+            does: $does,
+            footer: false,
+            f1: "",
+        }
+    };
+}
+
 /// `outcome`, as a row does it.
 fn out(outcome: PanelOutcome) -> Option<TabKey> {
     Some(TabKey::Out(outcome))
@@ -655,6 +692,21 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                     .step(REPOS, Step::First)),
                 row!("End", "first or last repository", |t| t
                     .step(REPOS, Step::Last)),
+                // With Shift the arrows went the same way, on any area.
+                alias!("Shift+Left", |t| {
+                    let e = t.entry.filter(|_| t.panel.expanded && t.on_repos())?;
+                    Some(TabKey::PickButton(e, true))
+                }),
+                alias!("Shift+Right", |t| {
+                    let e = t.entry.filter(|_| t.panel.expanded && t.on_repos())?;
+                    Some(TabKey::PickButton(e, false))
+                }),
+                alias!("Shift+Left", |_| Some(TabKey::Step(Step::Back))),
+                alias!("Shift+Right", |_| Some(TabKey::Step(Step::On))),
+                alias!("Shift+Up", |_| Some(TabKey::Step(Step::Back))),
+                alias!("Shift+Down", |_| Some(TabKey::Step(Step::On))),
+                alias!("Shift+Home", |_| Some(TabKey::Step(Step::First))),
+                alias!("Shift+End", |_| Some(TabKey::Step(Step::Last))),
                 row!(
                     "Enter",
                     "show all repositories; with all shown, press the row's button",
@@ -926,6 +978,12 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                         row.map_or(TabKey::Swallow, |r| TabKey::Out(PanelOutcome::ShowCheck(r)))
                     })
                 }),
+                alias!("Shift+Enter", |t| {
+                    (t.findings() && !t.checks.is_empty()).then(|| {
+                        let row = t.checks.get(t.finding).and_then(|c| c.row);
+                        row.map_or(TabKey::Swallow, |r| TabKey::Out(PanelOutcome::ShowCheck(r)))
+                    })
+                }),
                 row!("r", "a check: run it again", |t| {
                     (t.findings() && !t.checks.is_empty()).then(|| {
                         let check = t.checks.get(t.finding).filter(|c| !c.skipped);
@@ -1073,6 +1131,14 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                         (false, _) => PanelOutcome::ShowDiffNote(c.clone()),
                     })
                 }),
+                alias!("Shift+Enter", |t| {
+                    let c = t.note().filter(|_| t.findings())?;
+                    out(match (crate::review::is_general(c), t.refused) {
+                        (true, Some(why)) => PanelOutcome::FindingRefused(why),
+                        (true, None) => PanelOutcome::EditDiffNote(c.clone()),
+                        (false, _) => PanelOutcome::ShowDiffNote(c.clone()),
+                    })
+                }),
             ],
         ),
         // An item's card: the same keys for either kind.
@@ -1095,6 +1161,13 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                 row!("Enter", "show it in the diff", |t| t
                     .findings()
                     .then_some(TabKey::Swallow)),
+                // Enter on a card, with Shift as without.
+                alias!("Shift+Enter", |t| {
+                    t.findings().then(|| match t.item() {
+                        Some(_) => TabKey::Card(CardKey::Enter),
+                        None => TabKey::Swallow,
+                    })
+                }),
                 row!("c", "off the cards, add a comment of your own", |t| {
                     let own = t.stage != Stage::PlanReview && t.stage != Stage::CodeReview;
                     (own && t.page() && can_add_comment(t.feature, t.stage))
@@ -1217,6 +1290,12 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                         (on && fixes).then_some(TabKey::Out(PanelOutcome::MakeFixes))
                     }
                 ),
+                alias!("Ctrl+Shift+Enter", |t| {
+                    let on = t.focus == TabArea::Stages || (t.findings() && t.criteria > 0);
+                    let fixes =
+                        fix_round_on(t.feature, t.stage).is_some_and(FixRound::can_make_fixes);
+                    (on && fixes).then_some(TabKey::Out(PanelOutcome::MakeFixes))
+                }),
                 // The gate passes from any focus on the page, cards included.
                 row!(
                     "Ctrl+Enter",
@@ -1461,11 +1540,27 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
         // With a fix plan under way a criterion's card has no use for it.
         Link::Rows(
             CRITERIA,
-            &[row!(
-                "Ctrl+Enter",
-                "mark Manual test passed, or make the fixes of its failures",
-                |t| { (t.findings() && t.criteria > 0).then_some(TabKey::Swallow) }
-            )],
+            &[
+                row!(
+                    "Ctrl+Enter",
+                    "mark Manual test passed, or make the fixes of its failures",
+                    |t| { (t.findings() && t.criteria > 0).then_some(TabKey::Swallow) }
+                ),
+                alias!("Ctrl+Shift+Enter", |t| {
+                    (t.findings() && t.criteria > 0).then_some(TabKey::Swallow)
+                }),
+            ],
+        ),
+        // Enter with a modifier no row above takes: the page's Enter, or
+        // the repositories', as the old match's last arm had it.
+        Link::Rows(
+            STAGES,
+            &[
+                alias!("Shift+Enter", |t| Some(t.any_enter())),
+                alias!("Ctrl+Enter", |t| Some(t.any_enter())),
+                alias!("Alt+Enter", |t| Some(t.any_enter())),
+                alias!("Ctrl+Shift+Enter", |t| Some(t.any_enter())),
+            ],
         ),
         Link::Rows(
             SUGGESTIONS,
@@ -1511,6 +1606,10 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                     PanelOutcome::CopyPath
                 )),
                 row!("Ctrl+N", "new feature", |_| out(PanelOutcome::New)),
+                // Ctrl+C and Ctrl+N took Shift too; Ctrl+Shift+N opens a
+                // running sandbox to the network first, as hinted.
+                alias!("Ctrl+Shift+C", |_| out(PanelOutcome::CopyPath)),
+                alias!("Ctrl+Shift+N", |_| out(PanelOutcome::New)),
                 row!("Ctrl+Shift+L", "show or hide all repositories", |_| Some(
                     TabKey::FoldRepos
                 )),
@@ -2177,6 +2276,7 @@ pub(super) const PRE_KEYS: &[Binding<PreCtx, PreKey>] = &[
         "open the \u{22ef} menu: Start over, Set up again, Commands, Abandon and more",
         |c| c.feature.then_some(PreKey::Menu)
     ),
+    alias!("Shift+Menu", |c| c.feature.then_some(PreKey::Menu)),
     // On the rail over the review, Tab and Down go back to it: the page has
     // nothing else to go to.
     row!("Tab", "on Code review's rail: back to its review", |c| c

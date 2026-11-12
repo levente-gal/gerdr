@@ -17451,6 +17451,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn keys_taken_with_a_modifier_more_still_work_unhinted() {
+        let f = feature("b", vec![repo("api", true), repo("web", false)], 3);
+        let mut panel = FeaturePanel {
+            slug: "b".into(),
+            ..FeaturePanel::default()
+        };
+        let with = |chord: &str| crate::keys::hint_key(chord).unwrap();
+        // Shift with the arrows moves as without.
+        assert_eq!(press(&mut panel, &f, with("Shift+Down")), None);
+        assert_eq!(panel.stage, Some(Stage::ALL[4]));
+        assert_eq!(press(&mut panel, &f, with("Shift+Up")), None);
+        assert_eq!(panel.stage, Some(Stage::ALL[3]));
+        // Enter with a modifier no gate takes is the page's Enter.
+        let enter = press(&mut panel, &f, key(Keysym::Return));
+        assert_eq!(press(&mut panel, &f, with("Shift+Enter")), enter);
+        assert_eq!(press(&mut panel, &f, with("Alt+Enter")), enter);
+        assert_eq!(
+            press(&mut panel, &f, with("Ctrl+Shift+C")),
+            Some(PanelOutcome::CopyPath)
+        );
+        // No sandbox to open to the network: Ctrl+Shift+N is a new feature.
+        assert_eq!(
+            press(&mut panel, &f, with("Ctrl+Shift+N")),
+            Some(PanelOutcome::New)
+        );
+        let hints = hints_at(&panel, &f, Stage::Plan, RowCtx::default());
+        for alias in ["Shift+Enter", "Alt+Enter", "Ctrl+Shift+C", "Shift+Down"] {
+            assert!(hints_of(&hints, alias).is_empty(), "{alias}: {hints:?}");
+        }
+    }
+
+    #[test]
     fn each_table_of_the_tab_hints_what_it_presses() {
         let slugs = vec!["a".to_owned(), "b".to_owned()];
         let mut tabs: Vec<FeaturePanel> = Vec::new();
