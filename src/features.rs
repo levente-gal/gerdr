@@ -12192,13 +12192,17 @@ impl Gerdr {
                         let panel = self.features.panel.as_ref()?;
                         pull_tip(feature, panel.page_stage(feature), &view.page, i)
                     })?;
-                let spot = match layout.page_buttons.get(i).copied().flatten() {
-                    Some(mut spot) => {
+                // On the page's bar, not scrolled; a card may show it too,
+                // so the one under the pointer.
+                let at = pos.to_i32_round();
+                let bar = (layout.bar_buttons.iter()).find(|(b, r)| *b == i && r.contains(at));
+                let spot = match (bar, layout.page_buttons.get(i).copied().flatten()) {
+                    (Some((_, spot)), _) => *spot,
+                    (None, Some(mut spot)) => {
                         spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
                         spot
                     }
-                    // On the page's bar: not scrolled.
-                    None => (layout.bar_buttons.iter().find(|(b, _)| *b == i))?.1,
+                    (None, None) => (layout.bar_buttons.iter().find(|(b, _)| *b == i))?.1,
                 };
                 Some(Tooltip::new(&text, spot))
             }
