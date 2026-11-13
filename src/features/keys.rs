@@ -95,7 +95,7 @@ pub(super) const SHIP_KEYS: &[Binding<ShipCtx, PanelOutcome>] = &[
         chord: "Ctrl+Shift+O",
         // A plan to review comes before a pull request to open.
         does: |c| {
-            c.find(|o| matches!(o, PanelOutcome::ReviewConflictPlan))
+            c.find(|o| matches!(o, PanelOutcome::ReviewConflictPlan(_)))
                 .or_else(|| c.find(|o| matches!(o, PanelOutcome::OpenPr(_))))
         },
         footer: true,
@@ -103,7 +103,7 @@ pub(super) const SHIP_KEYS: &[Binding<ShipCtx, PanelOutcome>] = &[
     },
     Binding {
         chord: "Ctrl+Shift+Del",
-        does: |c| c.find(|o| matches!(o, PanelOutcome::StopResolving)),
+        does: |c| c.find(|o| matches!(o, PanelOutcome::StopResolving(_))),
         footer: true,
         f1: "Ship: stop an agent's merges and abort those not committed, after asking",
     },

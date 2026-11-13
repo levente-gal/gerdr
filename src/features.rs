@@ -1380,10 +1380,12 @@ pub enum PanelOutcome {
     /// base at once: plan their resolution (`.1`), or resolve them. `.0` is
     /// the repository whose card shows the button.
     ResolveConflicts(String, bool),
-    /// Open the plan of the conflicts' resolution.
-    ReviewConflictPlan,
-    /// Stop the conflicts an agent takes on, after asking.
-    StopResolving,
+    /// Open the plan of the conflicts' resolution. `.0` is the repository
+    /// whose card shows the button: each taken on has its own.
+    ReviewConflictPlan(String),
+    /// Stop the conflicts an agent takes on, after asking; `.0` as for
+    /// `ReviewConflictPlan`.
+    StopResolving(String),
     /// Open the feature's summary to edit.
     EditSummary,
     /// Reopen this done stage, once it isn't locked (see

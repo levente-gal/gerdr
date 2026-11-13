@@ -501,12 +501,31 @@ fn ships_buttons_have_keys_that_follow_the_selected_repository() {
         planning: false,
         nudged: false,
     });
+    // Taken on with web too: each card holds its own Stop, as a page's
+    // button shows in one place.
+    let mut both = f.clone();
+    if let Some(r) = both.shipping.resolving.as_mut() {
+        let mut web = r.repos[0].clone();
+        web.repo = "web".into();
+        r.repos.push(web);
+    }
+    let stops: Vec<PanelOutcome> = (cards::ship_base_actions(&both, Some(&p)).into_iter())
+        .map(|(_, o)| o)
+        .filter(|o| matches!(o, PanelOutcome::StopResolving(_)))
+        .collect();
+    assert_eq!(
+        stops,
+        [
+            PanelOutcome::StopResolving("api".into()),
+            PanelOutcome::StopResolving("web".into())
+        ]
+    );
     // Stopped from any row: the take is the page's.
     for row in [None, Some("api"), Some("web")] {
         let keys = ship_keys(&f, ctx, Some(&p), row);
         assert!(
             keys.iter()
-                .any(|k| k.chord == "Ctrl+Shift+Del" && k.outcome == PanelOutcome::StopResolving),
+                .any(|k| k.chord == "Ctrl+Shift+Del" && matches!(k.outcome, PanelOutcome::StopResolving(_))),
             "{row:?}"
         );
     }

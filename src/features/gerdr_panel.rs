@@ -590,8 +590,8 @@ impl Gerdr {
             PanelOutcome::ResolveConflicts(_, planning) => {
                 self.resolve_conflicts(&project, &slug, planning);
             }
-            PanelOutcome::ReviewConflictPlan => self.review_conflict_plan(&project, &slug),
-            PanelOutcome::StopResolving => self.ask_stop_resolving(&project, &slug),
+            PanelOutcome::ReviewConflictPlan(_) => self.review_conflict_plan(&project, &slug),
+            PanelOutcome::StopResolving(_) => self.ask_stop_resolving(&project, &slug),
             PanelOutcome::EditSummary => self.edit_ship_summary(&project, &slug),
             PanelOutcome::PickAgent(stage, name) => {
                 self.pick_stage_agent(&project, &slug, stage, &name);

@@ -1452,24 +1452,27 @@ pub(super) fn ship_base_actions(
         label: label.to_owned(),
         style,
     };
-    // An agent at work on conflicts: its plan, and stopping it.
+    // An agent at work on conflicts: its plan, and stopping it, on each
+    // of their cards (a page's button shows in one place).
     if let Some(r) = feature.shipping.resolving.as_ref() {
         let found = probe.and_then(|p| p.resolution.as_ref());
-        if r.planning && found.is_some_and(|f| f.plan) {
+        let plan = r.planning && found.is_some_and(|f| f.plan);
+        for repo in r.repos.iter().map(|t| &t.repo) {
+            if plan {
+                out.push((
+                    button("Review plan", ButtonStyle::Plain),
+                    PanelOutcome::ReviewConflictPlan(repo.clone()),
+                ));
+                out.push((
+                    button("Resolve as planned", ButtonStyle::Primary),
+                    PanelOutcome::ResolveConflicts(repo.clone(), false),
+                ));
+            }
             out.push((
-                button("Review plan", ButtonStyle::Plain),
-                PanelOutcome::ReviewConflictPlan,
-            ));
-            let first = r.repos.first().map_or_else(String::new, |t| t.repo.clone());
-            out.push((
-                button("Resolve as planned", ButtonStyle::Primary),
-                PanelOutcome::ResolveConflicts(first, false),
+                button("Stop\u{2026}", ButtonStyle::Quiet),
+                PanelOutcome::StopResolving(repo.clone()),
             ));
         }
-        out.push((
-            button("Stop\u{2026}", ButtonStyle::Quiet),
-            PanelOutcome::StopResolving,
-        ));
         return out;
     }
     // Its squash waits for its base to be pulled: that, first.
