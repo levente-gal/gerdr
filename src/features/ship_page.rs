@@ -295,6 +295,49 @@ fn resolving_line(feature: &Feature) -> Option<CheckLine> {
     })
 }
 
+/// How the CI of each base shipping pushed lately stands, a line each, as
+/// `probe` last read it: "api: main at 3f9c2a1 \u{b7} failed: test". Its
+/// buttons, to run what failed again, come with it (`ship_base_actions`).
+pub(super) fn base_ci_lines(probe: Option<&Probe>) -> Vec<CheckLine> {
+    let read = probe.and_then(|p| p.base_ci.as_ref());
+    (read.into_iter().flatten())
+        .map(|(key, ci)| {
+            let sha: String = ci.sha.chars().take(7).collect();
+            let at = format!("{key}: {} at {sha}", ci.base);
+            let checks = match &ci.checks {
+                Ok(checks) => checks,
+                Err(why) => {
+                    let text = format!("{at} \u{b7} couldn't read its CI: {why}");
+                    return line(text, CheckTone::Note);
+                }
+            };
+            let of = |state| checks.iter().filter(move |c| c.state == state);
+            let failed: Vec<&str> = of(crate::ci::CiState::Failed)
+                .map(|c| c.name.as_str())
+                .collect();
+            let (running, passed) = (
+                of(crate::ci::CiState::Running).count(),
+                of(crate::ci::CiState::Passed).count(),
+            );
+            let (said, tone) = match () {
+                _ if !failed.is_empty() => {
+                    (format!("failed: {}", failed.join(", ")), CheckTone::Failed)
+                }
+                _ if running > 0 => (
+                    format!("{} running", count_of(running, "check", "checks")),
+                    CheckTone::Note,
+                ),
+                _ if passed > 0 => (
+                    format!("{} passed", count_of(passed, "check", "checks")),
+                    CheckTone::Ready,
+                ),
+                _ => ("no GitHub Actions run on it".to_owned(), CheckTone::Note),
+            };
+            line(format!("{at} \u{b7} {said}"), tone)
+        })
+        .collect()
+}
+
 /// What a shipped `feature` waits for while its pull requests are open on
 /// GitHub, not merged yet, as `probe` last read them: "pull request open,
 /// not merged yet". None once they all merged, or with none.
@@ -664,7 +707,7 @@ pub(super) fn ship_sections(
         let ci = (pr_state.and_then(|s| s.as_ref().ok()))
             .filter(|_| dot == Dot::Failed)
             .and_then(failed_line);
-        let open = (pr.and_then(|pr| pr.url)).and_then(|url| {
+        let open = (pr.clone().and_then(|pr| pr.url)).and_then(|url| {
             (actions.iter()).position(|(_, o)| *o == PanelOutcome::OpenPr(url.clone()))
         });
         // Taking its base in, then its pull request.
@@ -672,8 +715,9 @@ pub(super) fn ship_sections(
             .filter(|(_, (_, o))| match o {
                 PanelOutcome::UpdateBase(r, _)
                 | PanelOutcome::PullBase(r)
-                | PanelOutcome::FixCi(r, _)
-                | PanelOutcome::RerunShipCi(r) => *r == repo.key,
+                | PanelOutcome::FixCi(r, _) => *r == repo.key,
+                // A base's runs are the Base CI lines'.
+                PanelOutcome::RerunShipCi(r) => *r == repo.key && pr.is_some(),
                 // A take on conflicts under way is its agent's card's.
                 PanelOutcome::ResolveConflicts(r, _) => {
                     feature.shipping.resolving.is_none() && *r == repo.key

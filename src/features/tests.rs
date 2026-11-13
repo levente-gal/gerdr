@@ -318,6 +318,7 @@ fn probe(ship: Option<ShipCheck>) -> Probe {
         prs: None,
         bases: BTreeMap::new(),
         resolution: None,
+        base_ci: None,
         ship,
         merged: false,
         stats: BTreeMap::new(),

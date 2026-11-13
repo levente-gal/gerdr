@@ -240,11 +240,11 @@ impl Gerdr {
             return;
         };
         // Each pull request's runs, in its own repository.
-        let runs: Vec<(u64, String, std::path::PathBuf, Vec<u64>)> = (f.pulls().iter())
+        let runs: Vec<(String, String, std::path::PathBuf, Vec<u64>)> = (f.pulls().iter())
             .filter_map(|p| {
                 let ids = p.checks().map(pr::rerun_ids).unwrap_or_default();
                 let dir = f.repo(&p.repo).or(f.repos.first())?.main.clone();
-                (!ids.is_empty()).then(|| (p.number, p.repo_arg(), dir, ids))
+                (!ids.is_empty()).then(|| (format!("#{}", p.number), p.repo_arg(), dir, ids))
             })
             .collect();
         let Some(pull) = f.pull() else {
@@ -259,17 +259,17 @@ impl Gerdr {
         self.rerun_failed_runs(project, slug, runs);
     }
 
-    /// Run the failed jobs of `runs` again on GitHub, off the thread: each a
-    /// pull request's number, its `--repo`, a folder of its repository, and
-    /// its runs' ids.
+    /// Run the failed jobs of `runs` again on GitHub, off the thread: each
+    /// what ran them as the toast names it ("#12", "main"), its `--repo`, a
+    /// folder of its repository, and its runs' ids.
     pub(crate) fn rerun_failed_runs(
         &mut self,
         project: &str,
         slug: &str,
-        runs: Vec<(u64, String, std::path::PathBuf, Vec<u64>)>,
+        runs: Vec<(String, String, std::path::PathBuf, Vec<u64>)>,
     ) {
         let number = (runs.iter())
-            .map(|(n, ..)| format!("#{n}"))
+            .map(|(n, ..)| n.clone())
             .collect::<Vec<_>>()
             .join(", ");
         let busy = Busy {
@@ -289,7 +289,7 @@ impl Gerdr {
                     let args = ["run", "rerun", &id, "--failed", "--repo", &arg];
                     match feature::ship::run_gh("gh", &dir, &args) {
                         Ok(_) => ran += 1,
-                        Err(why) => failed.push(format!("#{n} run {id}: {why}")),
+                        Err(why) => failed.push(format!("{n} run {id}: {why}")),
                     }
                 }
             }

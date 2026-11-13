@@ -188,15 +188,20 @@ impl Gerdr {
         probed.running = true;
         let now = Instant::now();
         probed.at = Some(now);
-        // Its pull requests, once a while: gh asks GitHub.
-        let read_prs = feature.ships()
-            && (feature.ship_log().iter()).any(|d| d.step == ShipStep::OpenPr)
+        // Its pull requests, and the CI of bases it pushed lately, once a
+        // while: gh asks GitHub.
+        let secs = feature::now();
+        let has_prs =
+            feature.ships() && (feature.ship_log().iter()).any(|d| d.step == ShipStep::OpenPr);
+        let pushed_base = !ship::base_pushes(&feature, secs).is_empty();
+        let due = (has_prs || pushed_base)
             && probed
                 .prs_at
                 .is_none_or(|at| now.duration_since(at) >= PRS_EVERY);
-        if read_prs {
+        if due {
             probed.prs_at = Some(now);
         }
+        let (read_prs, read_base_ci) = (due && has_prs, due && pushed_base);
         let fetch = feature.ships()
             && probed
                 .fetch_at
@@ -216,6 +221,7 @@ impl Gerdr {
                     docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
                     models: feature::agents::read_models(&feature),
                     prs: read_prs.then(|| ship::read_prs(&feature, "gh")),
+                    base_ci: read_base_ci.then(|| ship::read_base_ci(&feature, secs)),
                     bases: match feature.ships() {
                         true => ship::read_bases(&feature, fetch),
                         false => BTreeMap::new(),
@@ -308,6 +314,9 @@ impl Gerdr {
         // Not read this time: as last read.
         if probe.prs.is_none() {
             probe.prs = probed.last.as_ref().and_then(|last| last.prs.clone());
+        }
+        if probe.base_ci.is_none() {
+            probe.base_ci = probed.last.as_ref().and_then(|last| last.base_ci.clone());
         }
         // A finished feature's read is for its tab only, and what it ships
         // more.

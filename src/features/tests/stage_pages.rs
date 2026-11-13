@@ -2513,3 +2513,117 @@ fn keys_what(f: &Feature, ctx: RowCtx, p: &Probe, chord: &str) -> String {
         .find(|k| k.chord == chord)
         .map_or_else(String::new, |k| k.what)
 }
+
+#[test]
+fn a_pushed_bases_ci_shows_on_ship_with_its_failed_runs_to_run_again() {
+    use crate::{
+        ci::CiState,
+        feature::{RepoPlan, ShipDone, pr::CiCheck, ship::BaseCi},
+    };
+    // Shipped by merging and pushing main; its worktrees are gone.
+    let mut f = feature(
+        "s",
+        vec![repo("api", true), repo("web", true)],
+        Stage::ALL.len(),
+    );
+    f.status = Status::Done;
+    for (name, at) in [("api", 1_000), ("web", 1_000)] {
+        f.ship_ran(ShipDone {
+            at,
+            repo: name.into(),
+            step: ShipStep::PushBase,
+            sha: Some(format!("{name}0123456789")),
+            url: None,
+            undone: None,
+        });
+        f.ship_plan
+            .repos
+            .insert(name.into(), RepoPlan::new(Route::Merge));
+    }
+    // Read only while lately pushed.
+    assert_eq!(ship::base_pushes(&f, 2_000).len(), 2);
+    assert!(ship::base_pushes(&f, 1_000 + ship::BASE_CI_FOR + 1).is_empty());
+    let check = |name: &str, state, link: Option<&str>| CiCheck {
+        name: name.into(),
+        state,
+        link: link.map(str::to_owned),
+    };
+    let ci = |sha: &str, checks| BaseCi {
+        base: "main".into(),
+        sha: sha.into(),
+        checks,
+    };
+    let mut p = probe(None);
+    p.base_ci = Some(BTreeMap::from([
+        (
+            "api".to_owned(),
+            ci(
+                "api0123456789",
+                Ok(vec![
+                    check("lint", CiState::Passed, None),
+                    check(
+                        "test",
+                        CiState::Failed,
+                        Some("https://github.com/o/api/actions/runs/5/job/1"),
+                    ),
+                ]),
+            ),
+        ),
+        (
+            "web".to_owned(),
+            ci(
+                "web0123456789",
+                Ok(vec![check("e2e", CiState::Running, None)]),
+            ),
+        ),
+    ]));
+    assert_eq!(
+        base_ci_lines(Some(&p)),
+        [
+            line(
+                "api: main at api0123 \u{b7} failed: test",
+                CheckTone::Failed
+            ),
+            line(
+                "web: main at web0123 \u{b7} 1 check running",
+                CheckTone::Note
+            ),
+        ]
+    );
+    let ctx = RowCtx::default();
+    let keys = ship_keys(&f, ctx, Some(&p), None);
+    let rerun = keys.iter().find(|k| k.chord == "Alt+R").unwrap();
+    assert_eq!(rerun.outcome, PanelOutcome::RerunShipCi("api".into()));
+    assert_eq!(rerun.what, "rerun failed");
+    let state = PanelState {
+        probe: Some(&p),
+        ..PanelState::default()
+    };
+    let mut actions = page_actions(&f, Stage::Ship, ctx);
+    actions.extend(round_plan_actions(&f, Stage::Ship, Some(&p)));
+    let page = stage_page(&f, Stage::Ship, &state, &actions, 2_000);
+    let at = (page.sections.iter())
+        .position(|s| matches!(s, PageSection::Lines { label, .. } if label == "Base CI"))
+        .expect("the Base CI lines");
+    let Some(PageSection::Toolbar { groups }) = page.sections.get(at + 1) else {
+        panic!("no rerun button: {:?}", page.sections);
+    };
+    let labels: Vec<&str> = (groups[0].1.iter())
+        .map(|b| actions[*b].0.label.as_str())
+        .collect();
+    assert_eq!(labels, ["Rerun failed"]);
+    // A read that failed says so, not that nothing ran.
+    p.base_ci = Some(BTreeMap::from([(
+        "api".to_owned(),
+        ci("api0123456789", Err("gh: not signed in".into())),
+    )]));
+    assert_eq!(
+        base_ci_lines(Some(&p))[0].text,
+        "api: main at api0123 \u{b7} couldn't read its CI: gh: not signed in"
+    );
+    assert!(
+        !ship_keys(&f, ctx, Some(&p), None)
+            .iter()
+            .any(|k| k.chord == "Alt+R")
+    );
+}

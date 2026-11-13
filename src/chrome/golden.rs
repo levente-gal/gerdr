@@ -4390,6 +4390,54 @@ fn feature_tab_ship_ci() -> super::FeatureTabView {
     view
 }
 
+/// `feature_tab_ship_live` once web's dev was pushed and its CI failed:
+/// the Base CI lines, and running what failed again.
+fn feature_tab_ship_base_ci() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, Dot, PageButton, PageSection};
+    let mut view = feature_tab_ship_live();
+    (view.page.sections).retain(|s| !matches!(s, PageSection::Recap(_)));
+    let at = view.page.buttons.len();
+    view.page.buttons.push(PageButton {
+        label: "Rerun failed".into(),
+        style: ButtonStyle::Plain,
+    });
+    let web = (view.page.sections.iter())
+        .position(|s| matches!(s, PageSection::ShipGroup(g) if g.head.starts_with("web")));
+    let web = web.unwrap_or(view.page.sections.len() - 1);
+    if let Some(PageSection::ShipGroup(group)) = view.page.sections.get_mut(web) {
+        group.steps[1] = ship_ran("Pushed dev to origin", "5m ago \u{b7} 9e1f0c2");
+        group.selected = None;
+        if let Some(card) = group.card.as_mut() {
+            card.dot = Dot::Done;
+            card.state = tab_line("merged into dev", CheckTone::Ready);
+        }
+    }
+    let lines = vec![
+        tab_line(
+            "web: dev at 9e1f0c2 \u{b7} failed: e2e (chromium), typecheck",
+            CheckTone::Failed,
+        ),
+        tab_line(
+            "api: main at 3f9c2a1 \u{b7} 4 checks passed",
+            CheckTone::Ready,
+        ),
+    ];
+    view.page.sections.insert(
+        web + 1,
+        PageSection::Lines {
+            label: "Base CI".into(),
+            lines,
+        },
+    );
+    view.page.sections.insert(
+        web + 2,
+        PageSection::Toolbar {
+            groups: vec![(String::new(), vec![at])],
+        },
+    );
+    view
+}
+
 /// A done feature, Ship's page shown read-only, with its pull requests.
 fn feature_tab_approved() -> super::FeatureTabView {
     feature_tab_brief(false)
@@ -6089,7 +6137,7 @@ fn placed(mut view: super::FeatureTabView) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 53] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 54] {
     let views = [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -6105,6 +6153,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 53] {
         ("tab_ship_cards", feature_tab_ship_cards()),
         ("tab_ship_conflicts", feature_tab_ship_conflicts()),
         ("tab_ship_ci", feature_tab_ship_ci()),
+        ("tab_ship_base_ci", feature_tab_ship_base_ci()),
         ("tab_ship_after", feature_tab_ship_after()),
         ("tab_done", feature_tab_done()),
         ("tab_later", feature_tab_later()),
@@ -6158,7 +6207,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 53] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 69] = [
+const TAB_SURFACES: [(&str, i32); 70] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -6228,9 +6277,10 @@ const TAB_SURFACES: [(&str, i32); 69] = [
     ("tab_ship_picks", 1180),
     ("tab_ship_picks", 860),
     ("tab_ship_ci", 860),
+    ("tab_ship_base_ci", 1180),
 ];
 
-const FEATURE_TAB: [&str; 69] = [
+const FEATURE_TAB: [&str; 70] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -6300,10 +6350,11 @@ const FEATURE_TAB: [&str; 69] = [
     "tab_ship_picks_1180",
     "tab_ship_picks_860",
     "tab_ship_ci_860",
+    "tab_ship_base_ci_1180",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 69]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
     // Dark at 1
     [
         0x67093ad27ab19c53, // tab_build_860
@@ -6375,6 +6426,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 69]; 4] = [
         0xddb25bbb6a08578d, // tab_ship_picks_1180
         0x83e8ec2642379521, // tab_ship_picks_860
         0x229777bffa2be96d, // tab_ship_ci_860
+        0xab7f57141697e7f1, // tab_ship_base_ci_1180
     ],
     // Dark at 2
     [
@@ -6447,6 +6499,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 69]; 4] = [
         0xb7b376eb6e876146, // tab_ship_picks_1180
         0x57b4940aafa16f64, // tab_ship_picks_860
         0xdf85ef42cc3eca73, // tab_ship_ci_860
+        0xecb6b7ef7f9f21a0, // tab_ship_base_ci_1180
     ],
     // Light at 1
     [
@@ -6519,6 +6572,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 69]; 4] = [
         0xdf91ba3454512187, // tab_ship_picks_1180
         0x6b89864ca4b1fe53, // tab_ship_picks_860
         0x98a83b526c4195a5, // tab_ship_ci_860
+        0x75e938fc240a9fac, // tab_ship_base_ci_1180
     ],
     // Light at 2
     [
@@ -6591,6 +6645,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 69]; 4] = [
         0xe160aa9774f1b69d, // tab_ship_picks_1180
         0x1c435ed0f49a72dc, // tab_ship_picks_860
         0x72555dafe2aa9f4e, // tab_ship_ci_860
+        0x7d59fbae31f17021, // tab_ship_base_ci_1180
     ],
 ];
 

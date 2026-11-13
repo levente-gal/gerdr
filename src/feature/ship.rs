@@ -357,6 +357,61 @@ pub struct Probe {
     pub bases: BTreeMap<String, BaseState>,
     /// How the conflicts its agent takes on stand (`read_resolution`).
     pub resolution: Option<Resolution>,
+    /// The CI of the bases shipping pushed lately, by `Repo::key`, when read
+    /// this time (`read_base_ci`): read as often as `prs`.
+    pub base_ci: Option<BTreeMap<String, BaseCi>>,
+}
+
+/// How long after shipping pushed a base its CI is read: by then it ran.
+pub const BASE_CI_FOR: u64 = 2 * 86_400;
+
+/// The CI of a base shipping pushed: the commit pushed, and its checks as
+/// GitHub Actions ran them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BaseCi {
+    pub base: String,
+    pub sha: String,
+    pub checks: Result<Vec<super::pr::CiCheck>, String>,
+}
+
+/// The last base push of each repository of `feature`, by `Repo::key`, of
+/// those `BASE_CI_FOR` before `now` or later: its base and the commit.
+pub fn base_pushes(feature: &Feature, now: u64) -> BTreeMap<String, (String, String)> {
+    let mut out = BTreeMap::new();
+    for done in feature.ship_log() {
+        let recent = done.at + BASE_CI_FOR >= now;
+        if done.step != ShipStep::PushBase || !recent {
+            continue;
+        }
+        let (Some(sha), Some(repo)) = (done.sha, feature.repo(&done.repo)) else {
+            continue;
+        };
+        out.insert(done.repo, (repo.base.clone(), sha));
+    }
+    out
+}
+
+/// Read the CI of `feature`'s bases pushed lately on GitHub, as of `now`, in
+/// each repository's main checkout: its worktree may be gone.
+pub fn read_base_ci(feature: &Feature, now: u64) -> BTreeMap<String, BaseCi> {
+    (base_pushes(feature, now).into_iter())
+        .filter_map(|(key, (base, sha))| {
+            let dir = &feature.repo(&key)?.main;
+            let checks = crate::ci::commit_checks(dir, &sha).map(|checks| {
+                (checks.into_iter())
+                    .map(|c| super::pr::CiCheck {
+                        name: c.name,
+                        state: c.state,
+                        link: c.link,
+                    })
+                    .collect()
+            });
+            if let Err(why) = &checks {
+                tracing::warn!("reading the CI of {base} at {sha} in {key}: {why}");
+            }
+            Some((key, BaseCi { base, sha, checks }))
+        })
+        .collect()
 }
 
 /// A pull request as GitHub has it now.
@@ -531,6 +586,7 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
         prs: None,
         bases: BTreeMap::new(),
         resolution: None,
+        base_ci: None,
     }
 }
 
@@ -550,6 +606,7 @@ pub fn probe_seen(feature: &Feature) -> Probe {
         prs: None,
         bases: BTreeMap::new(),
         resolution: None,
+        base_ci: None,
     }
 }
 
@@ -572,6 +629,7 @@ pub fn probe_finished(feature: &Feature) -> Probe {
         prs: None,
         bases: BTreeMap::new(),
         resolution: None,
+        base_ci: None,
     }
 }
 

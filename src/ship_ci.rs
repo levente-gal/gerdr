@@ -156,27 +156,45 @@ impl Gerdr {
         }
     }
 
-    /// Run the failed GitHub Actions runs of repository `repo`'s pull
-    /// request of feature `slug` again on GitHub.
+    /// Run the failed GitHub Actions runs of repository `repo` of feature
+    /// `slug` again on GitHub: its pull request's, else those of the base
+    /// shipping pushed.
     pub(crate) fn rerun_ship_ci(&mut self, project: &str, slug: &str, repo: &str) {
-        let Some(f) = (self.ci_failing(project, slug).into_iter()).find(|f| f.repo == repo) else {
+        let pr = (self.ci_failing(project, slug).into_iter()).find(|f| f.repo == repo);
+        let base = (self.features.last_probe(project, slug))
+            .and_then(|p| p.base_ci.as_ref()?.get(repo).cloned());
+        let dir = self
+            .feature(project, slug)
+            .and_then(|f| Some(f.repo(repo)?.main.clone()));
+        let (what, checks, dir) = match (pr, base, dir) {
+            (Some(f), ..) => {
+                let n = f
+                    .url
+                    .trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or_default();
+                (format!("#{n}"), f.checks, f.dir.into())
+            }
+            (None, Some(ci), Some(dir)) => (ci.base, ci.checks.unwrap_or_default(), dir),
+            _ => return self.show_warning(format!("{repo} has no failed check to run again")),
+        };
+        let ids = pr::rerun_ids(&checks);
+        let arg = checks.iter().find_map(|c| repo_arg(c.link.as_deref()?));
+        let Some(arg) = arg.filter(|_| !ids.is_empty()) else {
             return self.show_warning(format!(
-                "{repo}'s pull request has no failed check to run again"
+                "The failed checks of {repo} aren't GitHub Actions runs: run them again where they ran"
             ));
         };
-        let ids = pr::rerun_ids(&f.checks);
-        if ids.is_empty() {
-            return self.show_warning(format!(
-                "The failed checks of {repo}'s pull request aren't GitHub Actions runs: run them again where they ran"
-            ));
-        }
-        // `--repo` as gh takes it: `github.com/acme/api` of its address.
-        let (base, number) = f.url.rsplit_once("/pull/").unwrap_or((&f.url, ""));
-        let arg = base.trim_start_matches("https://").to_owned();
-        let number = number.trim_end_matches('/').parse().unwrap_or_default();
-        let runs = vec![(number, arg, f.dir.into(), ids)];
-        self.rerun_failed_runs(project, slug, runs);
+        self.rerun_failed_runs(project, slug, vec![(what, arg, dir, ids)]);
     }
+}
+
+/// The repository whose Actions run's page `link` is, as gh's `--repo` takes
+/// it: `github.com/acme/api` of `https://github.com/acme/api/actions/runs/7`.
+fn repo_arg(link: &str) -> Option<String> {
+    let (repo, _) = link.split_once("/actions/runs/")?;
+    Some(repo.trim_start_matches("https://").to_owned())
 }
 
 #[cfg(test)]
@@ -230,5 +248,15 @@ mod tests {
         };
         let prs = BTreeMap::from([("api".to_owned(), Ok(merged))]);
         assert!(failing(&f, &prs).is_empty());
+    }
+
+    #[test]
+    fn gh_takes_the_repository_of_an_actions_page() {
+        let arg = |l| repo_arg(l);
+        assert_eq!(
+            arg("https://github.com/o/api/actions/runs/77/job/9").as_deref(),
+            Some("github.com/o/api")
+        );
+        assert_eq!(arg("https://ci.example/5"), None);
     }
 }

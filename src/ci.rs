@@ -925,8 +925,31 @@ fn branch_row(name: &str, runs: &[Run], web: &str) -> Option<CiRow> {
     // Newest first.
     ran.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     let newest = *ran.first()?;
+    let checks = checks_of(
+        ran.into_iter()
+            .filter(|run| run.head_sha == newest.head_sha),
+    );
+    let link = link_of(&checks, CiState::Failed)
+        .or_else(|| link_of(&checks, CiState::Running))
+        .or_else(|| some_text(&newest.url))
+        .unwrap_or_else(|| format!("{web}/actions?query=branch%3A{name}"));
+    Some(CiRow {
+        subject: Subject::Branch(name.to_owned()),
+        title: None,
+        head: None,
+        state: row_state(&checks),
+        link,
+        checks,
+        watched: false,
+        group: Group::Branch,
+    })
+}
+
+/// The checks of `runs`, newest first: each workflow once, its newest run,
+/// by name.
+fn checks_of<'a>(runs: impl Iterator<Item = &'a Run>) -> Vec<Check> {
     let mut checks: Vec<Check> = Vec::new();
-    for run in ran.iter().filter(|run| run.head_sha == newest.head_sha) {
+    for run in runs {
         let name = if run.workflow_name.is_empty() {
             &run.name
         } else {
@@ -942,20 +965,19 @@ fn branch_row(name: &str, runs: &[Run], web: &str) -> Option<CiRow> {
         });
     }
     checks.sort_by(|a, b| a.name.cmp(&b.name));
-    let link = link_of(&checks, CiState::Failed)
-        .or_else(|| link_of(&checks, CiState::Running))
-        .or_else(|| some_text(&newest.url))
-        .unwrap_or_else(|| format!("{web}/actions?query=branch%3A{name}"));
-    Some(CiRow {
-        subject: Subject::Branch(name.to_owned()),
-        title: None,
-        head: None,
-        state: row_state(&checks),
-        link,
-        checks,
-        watched: false,
-        group: Group::Branch,
-    })
+    checks
+}
+
+/// The checks GitHub Actions ran on commit `sha` of the repository checked
+/// out at `root`: each workflow once, its newest run.
+pub fn commit_checks(root: &Path, sha: &str) -> Result<Vec<Check>, String> {
+    let mut runs: Vec<Run> = gh(
+        root,
+        &["run", "list", "--commit", sha, "-L", "50"],
+        RUN_FIELDS,
+    )?;
+    runs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(checks_of(runs.iter()))
 }
 
 /// The row of `pull` on the line of `group`, whose repository's page is

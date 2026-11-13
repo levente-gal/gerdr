@@ -294,6 +294,23 @@ pub(super) fn stage_page(
                 let carded = !cards.is_empty();
                 sections.extend(cards);
                 sections.extend(shipped_after_group(feature, actions, now));
+                // The bases it pushed, CI and all, its worktrees gone or not.
+                let base_ci = base_ci_lines(state.probe);
+                if !base_ci.is_empty() {
+                    sections.push(lines("Base CI", base_ci));
+                    let rerun = (actions.iter().enumerate())
+                        .filter(|(_, (_, o))| {
+                            matches!(o, PanelOutcome::RerunShipCi(r)
+                                if feature.ship_done(r, ShipStep::OpenPr).is_none())
+                        })
+                        .map(|(i, _)| i)
+                        .collect::<Vec<usize>>();
+                    if !rerun.is_empty() {
+                        sections.push(PageSection::Toolbar {
+                            groups: vec![(String::new(), rerun)],
+                        });
+                    }
+                }
                 // Without cards, as once its worktrees are gone, its pull
                 // requests are listed.
                 let prs: Vec<CheckLine> = (feature.shipping.prs.iter())

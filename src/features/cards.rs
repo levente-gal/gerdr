@@ -1509,7 +1509,8 @@ pub(super) fn ship_base_actions(
     feature: &Feature,
     probe: Option<&Probe>,
 ) -> Vec<(PageButton, PanelOutcome)> {
-    let mut out = Vec::new();
+    // The bases it pushed: those, its worktrees gone or not.
+    let mut out = base_ci_actions(probe);
     if !feature.ships() || feature.squash_going() {
         return out;
     }
@@ -1600,6 +1601,37 @@ pub(super) fn ship_base_actions(
     }
     out.extend(ship_ci_actions(feature, probe, repos));
     out
+}
+
+/// The buttons running the failed GitHub Actions runs of the bases shipping
+/// pushed lately again, as `probe` last read them: under the Base CI lines.
+fn base_ci_actions(probe: Option<&Probe>) -> Vec<(PageButton, PanelOutcome)> {
+    let read = probe.and_then(|p| p.base_ci.as_ref());
+    let failing: Vec<&String> = (read.into_iter().flatten())
+        .filter(|(_, ci)| {
+            let checks = ci.checks.as_deref().unwrap_or_default();
+            let failed: Vec<feature::pr::CiCheck> = (checks.iter())
+                .filter(|c| c.state == crate::ci::CiState::Failed)
+                .cloned()
+                .collect();
+            !feature::pr::rerun_ids(&failed).is_empty()
+        })
+        .map(|(key, _)| key)
+        .collect();
+    let one = failing.len() == 1;
+    (failing.into_iter())
+        .map(|key| {
+            let label = match one {
+                true => "Rerun failed".to_owned(),
+                false => format!("Rerun failed in {key}"),
+            };
+            let button = PageButton {
+                label,
+                style: ButtonStyle::Plain,
+            };
+            (button, PanelOutcome::RerunShipCi(key.clone()))
+        })
+        .collect()
 }
 
 /// The buttons of Ship's cards whose pull requests fail checks on GitHub:
