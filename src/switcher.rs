@@ -128,9 +128,10 @@ pub enum Target {
     NewFeature,
     /// The feature panel on the project's features.
     Features,
-    /// The worktrees of the shown project's feature `.0`, removed once it
-    /// shipped, or it abandoned, brought back (see `Gerdr::undo_after_ship`).
-    RestoreWorktrees(String),
+    /// What step `.1` did once the shown project's feature `.0` shipped or
+    /// abandoned, undone: its workspace reopened or its worktrees brought
+    /// back (see `Gerdr::undo_after_ship`).
+    UndoAfter(String, crate::feature::AfterStep),
     /// A model for a feature stage's agent or a new agent, picked (see
     /// `Gerdr::open_model_picker`).
     StageModel(ModelPick),
@@ -192,7 +193,7 @@ impl Target {
             | Target::AiStats
             | Target::NewFeature
             | Target::Features
-            | Target::RestoreWorktrees(_)
+            | Target::UndoAfter(..)
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -228,7 +229,7 @@ impl Target {
             | Target::AiStats
             | Target::NewFeature
             | Target::Features
-            | Target::RestoreWorktrees(_)
+            | Target::UndoAfter(..)
             | Target::Settings
             | Target::ProjectFile(_)
             | Target::ReloadProjects
@@ -1051,7 +1052,7 @@ fn frecency_key(
         | Target::AiStats
         | Target::NewFeature
         | Target::Features
-        | Target::RestoreWorktrees(_)
+        | Target::UndoAfter(..)
         | Target::ImportProfile(_) => return None,
     })
 }
@@ -1161,12 +1162,13 @@ impl Gerdr {
     }
 
     /// Open the switcher on the shown project's feature rows (New feature,
-    /// and the shipped features whose worktrees can come back), when it has
-    /// such a shipped one: what opening its features offers with none open.
+    /// and the shipped features whose workspace or worktrees can come back),
+    /// when it has such a shipped one: what opening its features offers with
+    /// none open.
     /// Whether it opened.
     pub fn open_feature_picker(&mut self) -> bool {
         let items = self.feature_entries();
-        if !(items.iter()).any(|item| matches!(item.target, Target::RestoreWorktrees(_))) {
+        if !(items.iter()).any(|item| matches!(item.target, Target::UndoAfter(..))) {
             return false;
         }
         self.make_room_for_switcher();
@@ -1177,10 +1179,11 @@ impl Gerdr {
     }
 
     /// How many of the shown project's features its history lists: shipped
-    /// or abandoned, with what they had kept to come back.
+    /// or abandoned, with a closed workspace or removed worktrees to come
+    /// back.
     pub fn feature_history_count(&self) -> usize {
         (self.feature_entries().iter())
-            .filter(|item| matches!(item.target, Target::RestoreWorktrees(_)))
+            .filter(|item| matches!(item.target, Target::UndoAfter(..)))
             .count()
     }
 
@@ -1188,7 +1191,7 @@ impl Gerdr {
     /// those shipped or abandoned first to come back; or say it has none.
     pub fn open_feature_history(&mut self) {
         if !self.open_feature_picker() {
-            self.show_notice("No shipped or abandoned feature to bring back".into());
+            self.show_notice("No closed or removed feature to bring back".into());
         }
     }
 
@@ -1523,7 +1526,9 @@ impl Gerdr {
                 Target::Features,
             ));
         }
-        // A shipped feature's worktrees, removed, can come back.
+        // The history: what was shipped or abandoned, to bring back: its
+        // removed worktrees, else its closed workspace.
+        use crate::feature::{AfterStep, Status};
         let now = crate::feature::now();
         let all = self
             .features
@@ -1531,30 +1536,38 @@ impl Gerdr {
             .get(project)
             .map_or(&[][..], Vec::as_slice);
         for feature in all {
-            let removed = (feature.after_done(crate::feature::AfterStep::Remove)).filter(|_| {
-                crate::ship_after::after_refusal(feature, crate::feature::AfterStep::Remove)
-                    .is_none()
+            let undoable = [AfterStep::Remove, AfterStep::Close].into_iter().find_map(|step| {
+                let done = feature.after_done(step)?;
+                let open = step == AfterStep::Close
+                    && self.feature_workspace(project, &feature.slug).is_some();
+                let refused = crate::ship_after::after_refusal(feature, step).is_some();
+                (!open && !refused).then_some((step, done))
             });
-            // The history: what was shipped or abandoned, to bring back.
-            if let Some(done) = removed {
-                let when = crate::clock::ago(now, done.at);
-                let (label, detail) = match feature.status {
-                    crate::feature::Status::Abandoned => (
-                        format!("Restore \u{201c}{}\u{201d}", feature.title),
-                        format!("history \u{b7} abandoned {when}"),
-                    ),
-                    _ => (
-                        format!("Restore the worktrees of \u{201c}{}\u{201d}", feature.title),
-                        format!("history \u{b7} shipped, removed {when}"),
-                    ),
-                };
-                items.push(Item::new(
-                    ItemIcon::Command,
-                    label,
-                    detail,
-                    Target::RestoreWorktrees(feature.slug.clone()),
-                ));
-            }
+            let Some((step, done)) = undoable else {
+                continue;
+            };
+            let when = crate::clock::ago(now, done.at);
+            let title = &feature.title;
+            let (label, detail) = match (step, feature.status) {
+                (AfterStep::Close, _) => (
+                    format!("Reopen \u{201c}{title}\u{201d}"),
+                    format!("history \u{b7} workspace closed {when}"),
+                ),
+                (AfterStep::Remove, Status::Abandoned) => (
+                    format!("Restore \u{201c}{title}\u{201d}"),
+                    format!("history \u{b7} abandoned {when}"),
+                ),
+                (AfterStep::Remove, _) => (
+                    format!("Restore the worktrees of \u{201c}{title}\u{201d}"),
+                    format!("history \u{b7} shipped, removed {when}"),
+                ),
+            };
+            items.push(Item::new(
+                ItemIcon::Command,
+                label,
+                detail,
+                Target::UndoAfter(feature.slug.clone(), step),
+            ));
         }
         items
     }
@@ -1782,9 +1795,9 @@ impl Gerdr {
             Target::AiStats => self.open_ai_stats(),
             Target::NewFeature => self.open_new_feature(None),
             Target::Features => self.open_features(),
-            Target::RestoreWorktrees(slug) => {
+            Target::UndoAfter(slug, step) => {
                 if let Some(project) = self.project.clone() {
-                    self.undo_after_ship(&project, &slug, crate::feature::AfterStep::Remove);
+                    self.undo_after_ship(&project, &slug, step);
                 }
             }
             Target::StageModel(pick) => match pick.of {
