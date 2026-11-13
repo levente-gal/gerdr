@@ -549,7 +549,7 @@ impl Gerdr {
         let Some(w) = self.feature_workspace(project, slug) else {
             return;
         };
-        let tabs = self.kept_tabs(w);
+        let tabs = self.kept_app_tabs(w);
         // From the last: a tab closing at once doesn't move those before it.
         for t in (0..self.workspaces[w].tabs.len()).rev() {
             self.close_tab_in(w, t);
