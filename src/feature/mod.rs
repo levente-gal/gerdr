@@ -277,22 +277,17 @@ pub struct AfterDone {
     pub undone: Option<u64>,
 }
 
-/// An agent at work on the conflicts of taking a repository's base into the
-/// feature's branch: planning how (no merge under way yet), or resolving a
-/// merge gerdr started in the worktree.
+/// An agent at work on the conflicts of taking each conflicting
+/// repository's base into the feature's branch, all at once: planning how
+/// (no merge under way yet), or resolving the merges gerdr started in their
+/// worktrees.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "ResolvingRecord")]
 pub struct Resolving {
     /// When it was asked, unix seconds.
     pub at: u64,
-    /// The repository's `Repo::key`.
-    pub repo: String,
-    /// What is taken in: `origin/main`, and the commit that was.
-    pub onto: String,
-    pub onto_sha: String,
-    /// The branch's HEAD before the merge.
-    pub before: String,
-    /// The files that conflict.
-    pub files: Vec<String>,
+    /// The repositories it takes on, in the feature's order.
+    pub repos: Vec<Taking>,
     /// The agent, as a stage run names it, and its tab's pane.
     pub agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -307,6 +302,71 @@ pub struct Resolving {
     pub nudged: bool,
 }
 
+/// A repository whose conflicts with its base an agent takes on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Taking {
+    /// The repository's `Repo::key`.
+    pub repo: String,
+    /// What is taken in: `origin/main`, and the commit that was.
+    pub onto: String,
+    pub onto_sha: String,
+    /// The branch's HEAD before the merge.
+    pub before: String,
+    /// The files that conflict; none when it merged cleanly.
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
+/// `Resolving` as stored. One from before every conflicting repository was
+/// taken on at once has its one repository's fields at the top.
+#[derive(Deserialize)]
+struct ResolvingRecord {
+    at: u64,
+    #[serde(default)]
+    repos: Vec<Taking>,
+    #[serde(default)]
+    repo: String,
+    #[serde(default)]
+    onto: String,
+    #[serde(default)]
+    onto_sha: String,
+    #[serde(default)]
+    before: String,
+    #[serde(default)]
+    files: Vec<String>,
+    agent: String,
+    #[serde(default)]
+    pane: Option<String>,
+    n: u32,
+    planning: bool,
+    #[serde(default)]
+    nudged: bool,
+}
+
+impl From<ResolvingRecord> for Resolving {
+    fn from(r: ResolvingRecord) -> Self {
+        let mut repos = r.repos;
+        if repos.is_empty() && !r.repo.is_empty() {
+            repos.push(Taking {
+                repo: r.repo,
+                onto: r.onto,
+                onto_sha: r.onto_sha,
+                before: r.before,
+                files: r.files,
+            });
+        }
+        Self {
+            at: r.at,
+            repos,
+            agent: r.agent,
+            pane: r.pane,
+            n: r.n,
+            planning: r.planning,
+            nudged: r.nudged,
+        }
+    }
+}
+
 impl Resolving {
     /// Its plan, in data dir `data`.
     pub fn plan(&self, data: &Path) -> PathBuf {
@@ -316,6 +376,27 @@ impl Resolving {
     /// Where its agent writes what the user must settle, in data dir `data`.
     pub fn questions(&self, data: &Path) -> PathBuf {
         data.join(format!("conflicts-{}-questions.md", self.n))
+    }
+
+    /// The repository `key` if it takes it on.
+    pub fn taking(&self, key: &str) -> Option<&Taking> {
+        self.repos.iter().find(|t| t.repo == key)
+    }
+
+    /// Its repositories, for words: "api, web".
+    pub fn names(&self) -> String {
+        (self.repos.iter())
+            .map(|t| t.repo.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// What they take in: "origin/main", or "their bases" when that differs.
+    pub fn onto(&self) -> String {
+        match self.repos.as_slice() {
+            [first, rest @ ..] if rest.iter().all(|t| t.onto == first.onto) => first.onto.clone(),
+            _ => "their bases".to_owned(),
+        }
     }
 }
 
@@ -2437,5 +2518,24 @@ pub(crate) mod tests {
         bare.context.clear();
         let json = serde_json::to_string(&bare).unwrap();
         assert!(!json.contains("context") && !json.contains("removed"));
+    }
+
+    /// A record of conflicts taken on in one repository, from before all
+    /// were taken on at once, reads as one taking that repository on; one
+    /// written now reads back as it was.
+    #[test]
+    fn an_old_resolving_record_reads_as_one_repository() {
+        let old = r#"{"at":5,"repo":"api","onto":"origin/main","onto_sha":"b","before":"a",
+            "files":["x.rs"],"agent":"claude","n":2,"planning":false}"#;
+        let r: Resolving = serde_json::from_str(old).unwrap();
+        assert_eq!(r.names(), "api");
+        assert_eq!(r.onto(), "origin/main");
+        assert_eq!(
+            r.taking("api").map(|t| t.files.clone()),
+            Some(vec!["x.rs".to_owned()])
+        );
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"repos\":[{\"repo\":\"api\""), "{json}");
+        assert_eq!(serde_json::from_str::<Resolving>(&json).unwrap(), r);
     }
 }

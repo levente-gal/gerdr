@@ -272,11 +272,13 @@ fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
     let mut resolving = f.clone();
     resolving.shipping.resolving = Some(feature::Resolving {
         at: 2_000,
-        repo: "api".into(),
-        onto: "origin/main".into(),
-        onto_sha: "c1".into(),
-        before: "c0".into(),
-        files: vec!["a.py".into()],
+        repos: vec![feature::Taking {
+            repo: "api".into(),
+            onto: "origin/main".into(),
+            onto_sha: "c1".into(),
+            before: "c0".into(),
+            files: vec!["a.py".into()],
+        }],
         agent: "claude".into(),
         pane: None,
         n: 1,

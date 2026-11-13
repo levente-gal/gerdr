@@ -759,12 +759,12 @@ impl Gerdr {
             Done::ConflictsBegun {
                 project,
                 slug,
-                repo,
                 planning,
-                result,
+                begun,
+                failed,
             } => {
                 self.unbusy(&project, &slug, Job::Ship);
-                self.conflicts_begun(&project, &slug, (&repo, planning), result);
+                self.conflicts_begun(&project, &slug, planning, begun, failed);
             }
             Done::ResolvingStopped {
                 project,

@@ -1027,10 +1027,7 @@ fn merge_ends(feature: &Feature, key: &str) -> Result<(PathBuf, String, String, 
 /// worktree, for an agent to resolve what it stops on.
 pub fn begin_conflict_merge(feature: &Feature, key: &str) -> Result<MergeBegun, String> {
     let (dir, onto, onto_sha, before) = merge_ends(feature, key)?;
-    let status = git(&dir, &["status", "--porcelain", "--untracked-files=no"])?;
-    if !status.trim().is_empty() {
-        return Err(format!("{key} has uncommitted changes: commit them first"));
-    }
+    clean_for_merge(&dir, key)?;
     let files = git_ops::begin_merge(&dir, &onto)
         .map_err(|failed| format!("{key}: couldn't merge {onto}: {}", failed.why))?;
     Ok(MergeBegun {
@@ -1039,6 +1036,23 @@ pub fn begin_conflict_merge(feature: &Feature, key: &str) -> Result<MergeBegun, 
         before,
         files,
     })
+}
+
+/// Whether repository `key`'s worktree `dir` can take a merge: nothing
+/// uncommitted in tracked files.
+fn clean_for_merge(dir: &Path, key: &str) -> Result<(), String> {
+    let status = git(dir, &["status", "--porcelain", "--untracked-files=no"])?;
+    match status.trim().is_empty() {
+        true => Ok(()),
+        false => Err(format!("{key} has uncommitted changes: commit them first")),
+    }
+}
+
+/// Whether repository `key` of `feature` can take a merge for an agent to
+/// resolve: checked for each before any begins.
+pub fn conflict_merge_ready(feature: &Feature, key: &str) -> Result<(), String> {
+    let (dir, ..) = merge_ends(feature, key)?;
+    clean_for_merge(&dir, key)
 }
 
 /// What repository `key`'s branch of `feature` would take in, before any
@@ -1056,10 +1070,22 @@ pub fn conflict_ends(feature: &Feature, key: &str) -> Result<MergeBegun, String>
 /// How the conflicts an agent takes on stand (see `super::Resolving`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Resolution {
-    /// The `Resolving` it was read for: its `at` and `planning`. A read of
+    /// The take it was read for (`Resolving::at`, `planning`): a read for
     /// another is old by the time it is back.
     pub at: u64,
     pub planning: bool,
+    /// Each repository taken on, as its worktree stands.
+    pub repos: Vec<RepoResolution>,
+    /// The agent wrote its plan, or its questions.
+    pub plan: bool,
+    pub questions: bool,
+}
+
+/// How a repository whose conflicts an agent takes on stands.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepoResolution {
+    /// The repository's `Repo::key`.
+    pub repo: String,
     /// A merge is under way in the worktree.
     pub merging: bool,
     /// The files still conflicted.
@@ -1068,74 +1094,98 @@ pub struct Resolution {
     pub head: String,
     /// The base's commit is in the branch: the merge was committed.
     pub took_in: bool,
-    /// The agent wrote its plan, or its questions.
-    pub plan: bool,
-    pub questions: bool,
+}
+
+impl Resolution {
+    /// A merge is under way in any of them.
+    pub fn merging(&self) -> bool {
+        self.repos.iter().any(|r| r.merging)
+    }
+
+    /// Every merge was committed.
+    pub fn took_in(&self) -> bool {
+        !self.repos.is_empty() && self.repos.iter().all(|r| r.took_in)
+    }
+
+    /// How repository `key` stands.
+    pub fn of(&self, key: &str) -> Option<&RepoResolution> {
+        self.repos.iter().find(|r| r.repo == key)
+    }
+}
+
+/// How repository worktree `dir` stands against `taking`.
+fn read_taking(dir: &Path, taking: &super::Taking) -> RepoResolution {
+    let merging = git(dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok();
+    let left = git(dir, &["diff", "--name-only", "--diff-filter=U"])
+        .map(|out| out.lines().map(str::to_owned).collect())
+        .unwrap_or_default();
+    let head = git(dir, &["rev-parse", "HEAD"]).map_or(String::new(), |h| h.trim().to_owned());
+    let took_in = !taking.onto_sha.is_empty()
+        && git(
+            dir,
+            &["merge-base", "--is-ancestor", &taking.onto_sha, "HEAD"],
+        )
+        .is_ok();
+    RepoResolution {
+        repo: taking.repo.clone(),
+        merging,
+        left,
+        head,
+        took_in,
+    }
 }
 
 /// Read how the conflicts `feature`'s agent takes on stand, its files in
 /// data dir `data`; none when it takes none on.
 pub fn read_resolution(feature: &Feature, data: &Path) -> Option<Resolution> {
     let resolving = feature.shipping.resolving.as_ref()?;
-    let repo = feature.repo(&resolving.repo)?;
-    let dir = &repo.worktree;
-    let merging = git(dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok();
-    let left = git(dir, &["diff", "--name-only", "--diff-filter=U"])
-        .map(|out| out.lines().map(str::to_owned).collect())
-        .unwrap_or_default();
-    let head = git(dir, &["rev-parse", "HEAD"]).map_or(String::new(), |h| h.trim().to_owned());
-    let took_in = !resolving.onto_sha.is_empty()
-        && git(
-            dir,
-            &["merge-base", "--is-ancestor", &resolving.onto_sha, "HEAD"],
-        )
-        .is_ok();
+    let repos = (resolving.repos.iter())
+        .filter_map(|t| Some(read_taking(&feature.repo(&t.repo)?.worktree, t)))
+        .collect();
     Some(Resolution {
         at: resolving.at,
         planning: resolving.planning,
-        merging,
-        left,
-        head,
-        took_in,
+        repos,
         plan: resolving.plan(data).exists(),
         questions: resolving.questions(data).exists(),
     })
 }
 
-/// Stop the merge `feature`'s agent resolves: aborted in its worktree,
-/// leaving the branch as it was.
-pub fn abort_conflict_merge(feature: &Feature) -> Result<(), String> {
+/// Stop the merges `feature`'s agent resolves: aborted in their worktrees,
+/// leaving those branches as they were. The repositories whose merge was
+/// committed already stay so: they go back to Verify.
+pub fn abort_conflict_merge(feature: &Feature) -> Result<Vec<String>, String> {
     let Some(resolving) = feature.shipping.resolving.as_ref() else {
-        return Ok(());
+        return Ok(Vec::new());
     };
-    let repo = (feature.repo(&resolving.repo))
-        .ok_or_else(|| format!("{} has no repository {}", feature.title, resolving.repo))?;
-    let dir = &repo.worktree;
-    if git(dir, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_err() {
-        // Committed already: it goes back to Verify, not as it was.
-        let head = git(dir, &["rev-parse", "HEAD"]).map_or(String::new(), |h| h.trim().to_owned());
-        let took_in = !resolving.onto_sha.is_empty()
-            && git(
-                dir,
-                &["merge-base", "--is-ancestor", &resolving.onto_sha, "HEAD"],
-            )
-            .is_ok();
-        if took_in && head != resolving.before && !resolving.planning {
-            return Err(format!(
-                "The merge in {} is committed already: it goes back to Verify",
-                resolving.repo
+    let mut committed = Vec::new();
+    let mut failed = Vec::new();
+    for taking in &resolving.repos {
+        let Some(repo) = feature.repo(&taking.repo) else {
+            failed.push(format!(
+                "{} has no repository {}",
+                feature.title, taking.repo
+            ));
+            continue;
+        };
+        let found = read_taking(&repo.worktree, taking);
+        if !found.merging {
+            if found.took_in && found.head != taking.before && !resolving.planning {
+                committed.push(taking.repo.clone());
+            }
+            continue;
+        }
+        if let Err(why) = git_ops::abort_op(&repo.worktree, crate::git::InProgress::Merge) {
+            failed.push(format!(
+                "Couldn't stop the merge in {}: {}",
+                taking.repo, why.why
             ));
         }
-        return Ok(());
     }
-    git_ops::abort_op(&repo.worktree, crate::git::InProgress::Merge)
-        .map(|_| ())
-        .map_err(|failed| {
-            format!(
-                "Couldn't stop the merge in {}: {}",
-                resolving.repo, failed.why
-            )
-        })
+    match failed.is_empty() {
+        true => Ok(committed),
+        false => Err(failed.join("; ")),
+    }
 }
 
 /// What undoing a step that ran does.
@@ -2378,11 +2428,13 @@ esac
         assert_eq!(begun.before, head.trim());
         f.shipping.resolving = Some(super::super::Resolving {
             at: 1,
-            repo: "api".into(),
-            onto: begun.onto.clone(),
-            onto_sha: begun.onto_sha.clone(),
-            before: begun.before.clone(),
-            files: begun.files.clone(),
+            repos: vec![super::super::Taking {
+                repo: "api".into(),
+                onto: begun.onto.clone(),
+                onto_sha: begun.onto_sha.clone(),
+                before: begun.before.clone(),
+                files: begun.files.clone(),
+            }],
             agent: "claude".into(),
             pane: None,
             n: 1,
@@ -2391,11 +2443,11 @@ esac
         });
         let data = t.0.join("data");
         let found = read_resolution(&f, &data).unwrap();
-        assert!(found.merging && !found.took_in);
-        assert_eq!(found.left, ["c"]);
-        abort_conflict_merge(&f).unwrap();
+        assert!(found.merging() && !found.took_in());
+        assert_eq!(found.of("api").unwrap().left, ["c"]);
+        assert_eq!(abort_conflict_merge(&f).unwrap(), Vec::<String>::new());
         let found = read_resolution(&f, &data).unwrap();
-        assert!(!found.merging && !found.took_in);
+        assert!(!found.merging() && !found.took_in());
         assert_eq!(run(&wt(&f, "api"), &["rev-parse", "HEAD"]), head);
 
         // Resolved and committed: the base is in.
@@ -2404,8 +2456,71 @@ esac
         run(&wt(&f, "api"), &["add", "c"]);
         run(&wt(&f, "api"), &["commit", "-q", "--no-edit"]);
         let found = read_resolution(&f, &data).unwrap();
-        assert!(!found.merging && found.took_in && found.left.is_empty());
-        assert_ne!(found.head, head.trim());
+        let api = found.of("api").unwrap();
+        assert!(!found.merging() && found.took_in() && api.left.is_empty());
+        assert_ne!(api.head, head.trim());
+        // Stopped once committed: it stays so, named as such.
+        assert_eq!(abort_conflict_merge(&f).unwrap(), ["api"]);
+    }
+
+    /// Conflicts in two repositories are taken on at once: both merges
+    /// start, are read apart, and stopping aborts each.
+    #[test]
+    fn merges_in_two_repositories_are_read_and_stopped_together() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api", "web"], &[]);
+        origins(&t, &f);
+        for key in ["api", "web"] {
+            commit(&wt(&f, key), "c", "feature side");
+        }
+        mark_all(&mut f);
+        for repo in f.repos.clone() {
+            commit(&repo.main, "c", "base side");
+            run(&repo.main, &["push", "-q", "origin", "main"]);
+        }
+        read_bases(&f, true);
+        let heads: Vec<String> = ["api", "web"]
+            .map(|key| run(&wt(&f, key), &["rev-parse", "HEAD"]))
+            .into();
+        for key in ["api", "web"] {
+            conflict_merge_ready(&f, key).unwrap();
+        }
+        let repos = ["api", "web"]
+            .map(|key| {
+                let begun = begin_conflict_merge(&f, key).unwrap();
+                super::super::Taking {
+                    repo: key.into(),
+                    onto: begun.onto,
+                    onto_sha: begun.onto_sha,
+                    before: begun.before,
+                    files: begun.files,
+                }
+            })
+            .into();
+        f.shipping.resolving = Some(super::super::Resolving {
+            at: 1,
+            repos,
+            agent: "claude".into(),
+            pane: None,
+            n: 1,
+            planning: false,
+            nudged: false,
+        });
+        let data = t.0.join("data");
+        // One resolved and committed, the other still under way.
+        std::fs::write(wt(&f, "api").join("c"), "both sides").unwrap();
+        run(&wt(&f, "api"), &["add", "c"]);
+        run(&wt(&f, "api"), &["commit", "-q", "--no-edit"]);
+        let found = read_resolution(&f, &data).unwrap();
+        assert!(found.merging() && !found.took_in());
+        assert!(found.of("api").unwrap().took_in && !found.of("web").unwrap().took_in);
+        assert_eq!(found.of("web").unwrap().left, ["c"]);
+        // Stopping aborts web's and leaves api's commit.
+        assert_eq!(abort_conflict_merge(&f).unwrap(), ["api"]);
+        let found = read_resolution(&f, &data).unwrap();
+        assert!(!found.merging());
+        assert_eq!(run(&wt(&f, "web"), &["rev-parse", "HEAD"]), heads[1]);
+        assert_ne!(run(&wt(&f, "api"), &["rev-parse", "HEAD"]), heads[0]);
     }
 
     /// Updated from its base, a shipped feature is open at Verify again,

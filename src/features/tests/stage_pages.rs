@@ -453,6 +453,18 @@ fn ships_buttons_have_keys_that_follow_the_selected_repository() {
         !web.iter().any(|(chord, _)| *chord == "Alt+M"),
         "web has no conflicts"
     );
+    // Both conflicting: one agent takes on all, from either card.
+    let mut both = p.clone();
+    if let Some(web) = both.bases.get_mut("web") {
+        web.conflicts = vec!["b.rs".into()];
+    }
+    let keys = ship_keys(&f, ctx, Some(&both), Some("web"));
+    let resolve = keys.iter().find(|k| k.chord == "Ctrl+M").unwrap();
+    assert_eq!(
+        resolve.outcome,
+        PanelOutcome::ResolveConflicts("web".into(), false)
+    );
+    assert_eq!(resolve.what, "resolve all with agent");
     // Keys come as their own symbol (checklist K8).
     let keys = ship_keys(&f, ctx, Some(&p), None);
     let pressed = |ctrl, shift, alt, sym| {
@@ -476,22 +488,28 @@ fn ships_buttons_have_keys_that_follow_the_selected_repository() {
     // footer says so in place of starting over.
     f.shipping.resolving = Some(crate::feature::Resolving {
         at: 1,
-        repo: "api".into(),
-        onto: "origin/main".into(),
-        onto_sha: "b".into(),
-        before: "a".into(),
-        files: vec!["a.rs".into()],
+        repos: vec![crate::feature::Taking {
+            repo: "api".into(),
+            onto: "origin/main".into(),
+            onto_sha: "b".into(),
+            before: "a".into(),
+            files: vec!["a.rs".into()],
+        }],
         agent: "claude".into(),
         pane: None,
         n: 1,
         planning: false,
         nudged: false,
     });
-    let keys = ship_keys(&f, ctx, Some(&p), None);
-    assert!(
-        keys.iter()
-            .any(|k| k.chord == "Ctrl+Shift+Del" && k.outcome == PanelOutcome::StopResolving)
-    );
+    // Stopped from any row: the take is the page's.
+    for row in [None, Some("api"), Some("web")] {
+        let keys = ship_keys(&f, ctx, Some(&p), row);
+        assert!(
+            keys.iter()
+                .any(|k| k.chord == "Ctrl+Shift+Del" && k.outcome == PanelOutcome::StopResolving),
+            "{row:?}"
+        );
+    }
     let panel = FeaturePanel::default();
     let hints = vec![
         ("Ctrl+Shift+Del".to_owned(), "start over\u{2026}".to_owned()),

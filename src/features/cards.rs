@@ -1460,9 +1460,10 @@ pub(super) fn ship_base_actions(
                 button("Review plan", ButtonStyle::Plain),
                 PanelOutcome::ReviewConflictPlan,
             ));
+            let first = r.repos.first().map_or_else(String::new, |t| t.repo.clone());
             out.push((
                 button("Resolve as planned", ButtonStyle::Primary),
-                PanelOutcome::ResolveConflicts(r.repo.clone(), false),
+                PanelOutcome::ResolveConflicts(first, false),
             ));
         }
         out.push((
@@ -1481,15 +1482,24 @@ pub(super) fn ship_base_actions(
             ));
         }
     }
-    for (key, state) in probe.map(|p| &p.bases).into_iter().flatten() {
+    let bases = probe.map(|p| &p.bases);
+    // One agent takes every conflicting repository on: each card says so.
+    let conflicting = (bases.into_iter().flatten())
+        .filter(|(_, state)| !state.conflicts.is_empty())
+        .count();
+    let (resolve, plan) = match conflicting {
+        1 => ("Resolve with agent", "Plan resolution"),
+        _ => ("Resolve all with agent", "Plan resolution of all"),
+    };
+    for (key, state) in bases.into_iter().flatten() {
         if !state.conflicts.is_empty() {
             // Ship is no default while they conflict: this is.
             out.push((
-                button("Resolve with agent", ButtonStyle::Primary),
+                button(resolve, ButtonStyle::Primary),
                 PanelOutcome::ResolveConflicts(key.clone(), false),
             ));
             out.push((
-                button("Plan resolution", ButtonStyle::Quiet),
+                button(plan, ButtonStyle::Quiet),
                 PanelOutcome::ResolveConflicts(key.clone(), true),
             ));
             continue;
@@ -1546,15 +1556,14 @@ pub(super) fn ship_row_repo(panel: &FeaturePanel, ships: &[ShipRow]) -> Option<S
 /// page's own.
 pub(super) fn ship_outcome_repo(feature: &Feature, outcome: &PanelOutcome) -> Option<String> {
     match outcome {
-        PanelOutcome::UpdateBase(repo, _)
-        | PanelOutcome::ResolveConflicts(repo, _)
-        | PanelOutcome::UndoShip(repo, _) => Some(repo.clone()),
+        PanelOutcome::UpdateBase(repo, _) | PanelOutcome::UndoShip(repo, _) => Some(repo.clone()),
+        PanelOutcome::ResolveConflicts(repo, _) if feature.shipping.resolving.is_none() => {
+            Some(repo.clone())
+        }
         PanelOutcome::OpenPr(url) => (feature.shipping.prs.iter())
             .find(|pr| pr.url == *url)
             .map(|pr| pr.repo.clone()),
-        PanelOutcome::ReviewConflictPlan | PanelOutcome::StopResolving => {
-            (feature.shipping.resolving.as_ref()).map(|r| r.repo.clone())
-        }
+        // A take on conflicts is the page's: it spans their repositories.
         _ => None,
     }
 }
@@ -1604,15 +1613,12 @@ pub(super) fn ship_base_line(
     key: &str,
 ) -> Option<CheckLine> {
     // Its conflicts taken on: how that goes.
-    if let Some(r) = feature
-        .shipping
-        .resolving
-        .as_ref()
-        .filter(|r| r.repo == key)
-    {
+    let resolving = feature.shipping.resolving.as_ref();
+    if let Some((r, t)) = resolving.and_then(|r| Some((r, r.taking(key)?))) {
         let who = r.agent.clone();
         let found = probe.and_then(|p| p.resolution.as_ref());
-        let files = r.files.join(", ");
+        let mine = found.and_then(|f| f.of(key));
+        let files = t.files.join(", ");
         return Some(match (r.planning, found) {
             (_, Some(f)) if f.questions => line(
                 format!(
@@ -1638,12 +1644,17 @@ pub(super) fn ship_base_line(
                 format!("{who} plans how to resolve {files}\u{2026}"),
                 CheckTone::Note,
             ),
-            (false, Some(f)) if !f.left.is_empty() => line(
+            (false, Some(_)) if let Some(f) = mine.filter(|f| !f.left.is_empty()) => line(
                 format!("{who} resolves {}\u{2026}", f.left.join(", ")),
                 CheckTone::Note,
             ),
+            // Committed: the others' merges are what it waits for.
+            (false, Some(_)) if mine.is_some_and(|f| f.took_in) => line(
+                format!("{} merged in \u{b7} waits for the rest", t.onto),
+                CheckTone::Note,
+            ),
             (false, _) => line(
-                format!("{who} finishes the merge of {}\u{2026}", r.onto),
+                format!("{who} finishes the merge of {}\u{2026}", t.onto),
                 CheckTone::Note,
             ),
         });

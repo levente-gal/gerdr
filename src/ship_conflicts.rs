@@ -1,16 +1,17 @@
 //! Conflicts taking a base into a shipping feature's branch, from Ship's
 //! page, the way other changes go: an agent plans how to resolve them for
-//! the user to review, or resolves them at once. To resolve, gerdr starts
-//! the merge in the feature's worktree and Build's agent finishes it in a
-//! tab; once its commit lands, the feature goes back to Verify as any
-//! update from the base does (`Feature::updated_from_base`).
+//! the user to review, or resolves them at once. It takes on every
+//! repository that conflicts at once. To resolve, gerdr starts the merges in
+//! the feature's worktrees and one agent finishes them in a tab; once their
+//! commits land, the feature goes back to Verify as any update from the base
+//! does (`Feature::updated_from_base`).
 
 use crate::{
     Gerdr,
     confirm::Then,
     doc_review::{CONFLICT_PLAN_PAST, DocFile},
     feature::{
-        self, Resolving, Stage, UpdateWay,
+        self, Resolving, Stage, Taking, UpdateWay,
         agents::{command_line, with_prompt},
         ship::{self, MergeBegun, Resolution},
         store,
@@ -41,26 +42,68 @@ fn next_turn(data: &std::path::Path) -> u32 {
     taken + 1
 }
 
-/// The files as a prompt lists them.
-fn listed(files: &[String]) -> String {
-    files
-        .iter()
-        .map(|f| format!("- {f}"))
+/// The repositories as a prompt lists them: each worktree `dirs` has for
+/// it, what it takes in and its conflicted files. Those that merged cleanly
+/// are left out: nothing is left there to do.
+fn listed(repos: &[Taking], dirs: &[(String, String)], planning: bool) -> String {
+    let doing = match planning {
+        true => "would conflict in",
+        false => "merged in, stopped on conflicts in",
+    };
+    (repos.iter())
+        .filter(|t| planning || !t.files.is_empty())
+        .map(|t| {
+            let dir = (dirs.iter())
+                .find(|(key, _)| *key == t.repo)
+                .map_or(t.repo.as_str(), |(_, dir)| dir.as_str());
+            let files: String = t.files.iter().map(|f| format!("\n  - {f}")).collect();
+            format!("- {dir}: {} {doing}:{files}", t.onto)
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
+/// Start the merges of `repos` (each with the files its base conflicts
+/// in) of `feature`, or for `planning` only read what each takes in: every
+/// worktree is checked before any merge starts. Those that started, and
+/// why the rest didn't.
+fn begin_all(
+    feature: &feature::Feature,
+    repos: Vec<(String, Vec<String>)>,
+    planning: bool,
+) -> (Vec<(String, MergeBegun)>, Option<String>) {
+    if !planning {
+        let unready: Vec<String> = (repos.iter())
+            .filter_map(|(repo, _)| ship::conflict_merge_ready(feature, repo).err())
+            .collect();
+        if !unready.is_empty() {
+            return (Vec::new(), Some(unready.join("; ")));
+        }
+    }
+    let mut begun = Vec::new();
+    for (repo, known) in repos {
+        let one = match planning {
+            true => ship::conflict_ends(feature, &repo).map(|ends| MergeBegun {
+                files: known,
+                ..ends
+            }),
+            false => ship::begin_conflict_merge(feature, &repo),
+        };
+        match one {
+            Ok(b) => begun.push((repo, b)),
+            // Those begun go on to the agent, and can be stopped there.
+            Err(why) => return (begun, Some(why)),
+        }
+    }
+    (begun, None)
+}
+
 impl Gerdr {
-    /// Take on the conflicts of repository `repo` of feature `slug`:
-    /// `planning`, an agent plans their resolution and changes nothing; else
-    /// gerdr starts the merge and an agent resolves it.
-    pub(crate) fn resolve_conflicts(
-        &mut self,
-        project: &str,
-        slug: &str,
-        repo: &str,
-        planning: bool,
-    ) {
+    /// Take on the conflicts of every repository of feature `slug` with
+    /// its base, at once: `planning`, an agent plans their resolution and
+    /// changes nothing; else gerdr starts the merges and an agent resolves
+    /// them. Resolving as planned takes on the plan's repositories.
+    pub(crate) fn resolve_conflicts(&mut self, project: &str, slug: &str, planning: bool) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
@@ -70,113 +113,149 @@ impl Gerdr {
                 "\u{201c}{title}\u{201d} is busy; try again once it is done"
             ));
         }
-        // One at a time: resolving as planned goes on from the plan.
+        // One take at a time: resolving as planned goes on from the plan.
         let going = feature.shipping.resolving.as_ref();
-        if let Some(r) = going.filter(|r| r.repo != repo || !r.planning) {
+        if let Some(r) = going.filter(|r| !r.planning) {
             return self.show_warning(format!(
                 "\u{201c}{title}\u{201d} is taking on the conflicts of {} already",
-                r.repo
+                r.names()
             ));
         }
         if let Err(why) = self.summary_agent(&feature) {
             return self.show_warning(format!("Couldn't take the conflicts on: {why}"));
         }
-        let known = (self.last_probe(project, slug))
-            .and_then(|p| p.bases.get(repo))
-            .map(|b| b.conflicts.clone())
-            .unwrap_or_default();
+        let bases = self.last_probe(project, slug).map(|p| p.bases.clone());
+        let known = |key: &str| {
+            (bases.as_ref().and_then(|b| b.get(key)))
+                .map(|b| b.conflicts.clone())
+                .unwrap_or_default()
+        };
+        let repos: Vec<(String, Vec<String>)> = match going {
+            Some(r) => (r.repos.iter())
+                .map(|t| (t.repo.clone(), known(&t.repo)))
+                .collect(),
+            None => (feature.repos.iter())
+                .map(|r| r.key())
+                .map(|key| {
+                    let files = known(&key);
+                    (key, files)
+                })
+                .filter(|(_, files)| !files.is_empty())
+                .collect(),
+        };
+        if repos.is_empty() {
+            return self.show_warning(format!(
+                "Nothing of \u{201c}{title}\u{201d} conflicts with its base now"
+            ));
+        }
+        let only = (repos.len() == 1).then(|| repos[0].0.clone());
         let busy = Busy {
             project: project.to_owned(),
             slug: slug.to_owned(),
             job: Job::Ship,
-            repo: Some(repo.to_owned()),
+            repo: only,
             what: format!("Taking on the conflicts of \u{201c}{title}\u{201d}"),
         };
-        let (project, slug, repo) = (project.to_owned(), slug.to_owned(), repo.to_owned());
+        let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| {
-            let result = match planning {
-                true => ship::conflict_ends(&feature, &repo).map(|ends| MergeBegun {
-                    files: known,
-                    ..ends
-                }),
-                false => ship::begin_conflict_merge(&feature, &repo),
-            };
+            let (begun, failed) = begin_all(&feature, repos, planning);
             Done::ConflictsBegun {
                 project,
                 slug,
-                repo,
                 planning,
-                result,
+                begun,
+                failed,
             }
         });
     }
 
-    /// The merge for repository `repo`'s conflicts started, or the plan of
-    /// them is to be written: an agent takes them on in a tab.
+    /// The merges for the conflicts of `begun`'s repositories started, or
+    /// the plan of them is to be written: one agent takes them on in a tab.
+    /// `failed`: why the rest didn't start.
     pub(crate) fn conflicts_begun(
         &mut self,
         project: &str,
         slug: &str,
-        (repo, planning): (&str, bool),
-        result: Result<MergeBegun, String>,
+        planning: bool,
+        begun: Vec<(String, MergeBegun)>,
+        failed: Option<String>,
     ) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
         let title = feature.title.clone();
-        let begun = match result {
-            Ok(begun) => begun,
-            Err(why) => {
-                tracing::warn!("taking on the conflicts of {project}/{slug}: {why}");
-                return self.show_error(format!(
-                    "Couldn't take on the conflicts of \u{201c}{title}\u{201d}: {why}"
-                ));
-            }
-        };
+        if let Some(why) = failed {
+            tracing::warn!("taking on the conflicts of {project}/{slug}: {why}");
+            self.show_error(format!(
+                "Couldn't take on the conflicts of \u{201c}{title}\u{201d}: {why}"
+            ));
+        }
+        if begun.is_empty() {
+            return;
+        }
         let data = store::dir(None, project, slug);
         // Resolving as planned stays the plan's turn; else a new one.
         let n = match feature.shipping.resolving.as_ref() {
             Some(r) if r.planning && !planning => r.n,
             _ => next_turn(&data),
         };
+        let repos: Vec<Taking> = (begun.into_iter())
+            .map(|(repo, b)| Taking {
+                repo,
+                onto: b.onto,
+                onto_sha: b.onto_sha,
+                before: b.before,
+                files: b.files,
+            })
+            .collect();
         let mut resolving = Resolving {
             at: feature::now(),
-            repo: repo.to_owned(),
-            onto: begun.onto.clone(),
-            onto_sha: begun.onto_sha.clone(),
-            before: begun.before.clone(),
-            files: begun.files.clone(),
+            repos,
             agent: String::new(),
             pane: None,
             n,
             planning,
             nudged: false,
         };
-        // It merged cleanly after all: the next read finds it done.
-        if begun.files.is_empty() && !planning {
+        let names = resolving.names();
+        // They merged cleanly after all: the next read finds them done.
+        if !planning && resolving.repos.iter().all(|t| t.files.is_empty()) {
             return self.set_resolving(project, slug, resolving, "Merged cleanly");
         }
-        // The merge is under way: kept now, so it can be stopped whatever
-        // comes of the agent.
+        // The merges are under way: kept now, so they can be stopped
+        // whatever comes of the agent.
         if !planning {
-            let what = format!(
-                "Merge of {} into {repo} started for its conflicts",
-                begun.onto
-            );
+            let what = format!("Merges into {names} started for their conflicts");
             self.set_resolving(project, slug, resolving.clone(), &what);
         }
         let (agent, base) = match self.summary_agent(&feature) {
             Ok(pick) => pick,
             Err(why) => return self.show_warning(format!("Couldn't take the conflicts on: {why}")),
         };
-        let Some(dir) = feature.repo(repo).map(|r| r.worktree.clone()) else {
-            return;
+        let dirs: Vec<(String, String)> = (resolving.repos.iter())
+            .filter_map(|t| {
+                let dir = feature.repo(&t.repo)?.worktree.display().to_string();
+                Some((t.repo.clone(), dir))
+            })
+            .collect();
+        let to_do: Vec<&Taking> = (resolving.repos.iter())
+            .filter(|t| planning || !t.files.is_empty())
+            .collect();
+        // One repository: its agent works in its worktree; more, in the
+        // feature's folder over them all.
+        let dir = match to_do.as_slice() {
+            [one] => match feature.repo(&one.repo) {
+                Some(repo) => repo.worktree.clone(),
+                None => return,
+            },
+            _ => feature.dir.clone(),
         };
-        let names = self.projects.names(&feature);
-        let mut values = vars(&feature, &names, &data, Stage::Ship);
-        values.insert("conflicts.dir".into(), dir.display().to_string());
-        values.insert("conflicts.onto".into(), begun.onto.clone());
-        values.insert("conflicts.files".into(), listed(&begun.files));
+        let names_vars = self.projects.names(&feature);
+        let mut values = vars(&feature, &names_vars, &data, Stage::Ship);
+        values.insert(
+            "conflicts.repos".into(),
+            listed(&resolving.repos, &dirs, planning),
+        );
         let plan = resolving.plan(&data);
         let followed = if !planning && plan.exists() {
             format!(
@@ -220,8 +299,8 @@ impl Gerdr {
         resolving.pane = Some(pane);
         // Its agent too, now.
         let what = match planning {
-            true => format!("{agent} plans the resolution of the conflicts in {repo}"),
-            false => format!("{agent} resolves the conflicts in {repo}"),
+            true => format!("{agent} plans the resolution of the conflicts in {names}"),
+            false => format!("{agent} resolves the conflicts in {names}"),
         };
         self.set_resolving(project, slug, resolving, &what);
         self.show_success(format!("\u{201c}{title}\u{201d}: {what}"));
@@ -240,9 +319,9 @@ impl Gerdr {
     }
 
     /// A read of feature `slug` found its conflicts as `found`, its code
-    /// `patch`'s: once the merge is committed it goes back to Verify; a
-    /// merge aborted ends it. Says whether it took the code on, so the
-    /// marks needn't go.
+    /// `patch`'s: once no merge is under way any more, each committed one
+    /// takes it back to Verify; an aborted one ends there. Says whether it
+    /// took the code on, so the marks needn't go.
     pub(crate) fn resolution_read(
         &mut self,
         project: &str,
@@ -258,47 +337,65 @@ impl Gerdr {
         };
         // Read for another take: old by now.
         let other = found.at != resolving.at || found.planning != resolving.planning;
-        if other || resolving.planning || found.merging {
+        if other || resolving.planning || found.merging() {
             return false;
         }
         let title = feature.title.clone();
         let now = feature::now();
         feature.shipping.resolving = None;
-        // Committed: the base is in.
-        if found.took_in && found.head != resolving.before {
+        let mut resolved = Vec::new();
+        let mut stopped = Vec::new();
+        for t in &resolving.repos {
+            // Committed: the base is in.
+            let Some(f) = found
+                .of(&t.repo)
+                .filter(|f| f.took_in && f.head != t.before)
+            else {
+                stopped.push(t.repo.clone());
+                continue;
+            };
             let update = feature::BaseUpdate {
                 at: now,
-                repo: resolving.repo.clone(),
+                repo: t.repo.clone(),
                 way: UpdateWay::Merge,
-                onto: resolving.onto.clone(),
-                onto_sha: resolving.onto_sha.clone(),
-                before: resolving.before.clone(),
-                after: found.head.clone(),
+                onto: t.onto.clone(),
+                onto_sha: t.onto_sha.clone(),
+                before: t.before.clone(),
+                after: f.head.clone(),
             };
-            feature.log(now, format!("Conflicts in {} resolved", resolving.repo));
+            feature.log(now, format!("Conflicts in {} resolved", t.repo));
             feature.updated_from_base(update, patch, now);
-            self.save_feature(project, slug);
-            self.feature_cursor_to_current_of(project, slug);
-            self.show_success(format!(
-                "\u{201c}{title}\u{201d}: the conflicts in {} are resolved; back to Verify",
-                resolving.repo
-            ));
-            let key = (project.to_owned(), slug.to_owned());
-            if !self.features.build.verifying.contains(&key) {
-                self.recheck(project, slug);
-            }
-            return true;
+            resolved.push(t.repo.clone());
         }
-        feature.log(
-            now,
-            format!("Conflicts in {}: the merge was stopped", resolving.repo),
-        );
+        let (resolved, stopped) = (resolved.join(", "), stopped.join(", "));
+        if !stopped.is_empty() {
+            feature.log(
+                now,
+                format!("Conflicts in {stopped}: the merge was stopped"),
+            );
+        }
         self.save_feature(project, slug);
-        self.show_warning(format!(
-            "\u{201c}{title}\u{201d}: the merge in {} was stopped before it was committed",
-            resolving.repo
-        ));
-        false
+        if resolved.is_empty() {
+            self.show_warning(format!(
+                "\u{201c}{title}\u{201d}: the merge in {stopped} was stopped before it was committed"
+            ));
+            return false;
+        }
+        self.feature_cursor_to_current_of(project, slug);
+        match stopped.is_empty() {
+            true => self.show_success(format!(
+                "\u{201c}{title}\u{201d}: the conflicts in {resolved} are resolved; back to Verify"
+            )),
+            false => self.show_warning(format!(
+                "\u{201c}{title}\u{201d}: the conflicts in {resolved} are resolved, the merge in \
+                 {stopped} was stopped; back to Verify"
+            )),
+        }
+        let key = (project.to_owned(), slug.to_owned());
+        if !self.features.build.verifying.contains(&key) {
+            self.recheck(project, slug);
+        }
+        true
     }
 
     /// Ask before stopping the conflicts feature `slug`'s agent takes on.
@@ -309,17 +406,39 @@ impl Gerdr {
         else {
             return;
         };
-        let (question, body) = match resolving.planning {
-            true => (
-                format!("Stop planning the conflicts of {}?", resolving.repo),
+        // The question stays one line: past two, a count; the body names them.
+        let names = match resolving.repos.len() {
+            0..=2 => resolving.names(),
+            n => format!("{n} repositories"),
+        };
+        let (question, body) = match (resolving.planning, resolving.repos.len()) {
+            (true, 0..=2) => (
+                format!("Stop planning the conflicts of {names}?"),
                 "The plan, if written, stays. Its agent's tab stays open.".to_owned(),
             ),
-            false => (
-                format!("Stop the merge in {}?", resolving.repo),
+            (true, _) => (
+                format!("Stop planning the conflicts of {names}?"),
+                format!(
+                    "Of {}. The plan, if written, stays. Its agent's tab stays open.",
+                    resolving.names()
+                ),
+            ),
+            (false, 1) => (
+                format!("Stop the merge in {names}?"),
                 format!(
                     "The merge of {} is aborted: what was resolved goes, and the branch \
                      stays as it was. Its agent's tab stays open: close it too.",
-                    resolving.onto
+                    resolving.onto()
+                ),
+            ),
+            (false, _) => (
+                format!("Stop the merges in {names}?"),
+                format!(
+                    "Each merge of {} into {} not committed yet is aborted: what was resolved \
+                     there goes, and its branch stays as it was. Its agent's tab stays open: \
+                     close it too.",
+                    resolving.onto(),
+                    resolving.names()
                 ),
             ),
         };
@@ -351,24 +470,42 @@ impl Gerdr {
         });
     }
 
-    /// The merge feature `slug`'s agent resolved was aborted, or wasn't.
+    /// The merges feature `slug`'s agent resolved were aborted, or weren't;
+    /// those `committed` already stay, and the next read takes them back
+    /// to Verify.
     pub(crate) fn resolving_stopped(
         &mut self,
         project: &str,
         slug: &str,
-        result: Result<(), String>,
+        result: Result<Vec<String>, String>,
     ) {
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };
         let title = feature.title.clone();
-        if let Err(why) = result {
-            tracing::warn!("stopping the merge of {project}/{slug}: {why}");
-            return self.show_error(why);
-        }
+        let committed = match result {
+            Ok(committed) => committed,
+            Err(why) => {
+                tracing::warn!("stopping the merge of {project}/{slug}: {why}");
+                return self.show_error(why);
+            }
+        };
         let now = feature::now();
+        if !committed.is_empty() {
+            let committed = committed.join(", ");
+            feature.log(
+                now,
+                format!("Conflicts stopped; the merge in {committed} was committed already"),
+            );
+            self.save_feature(project, slug);
+            self.probe_feature(project, slug);
+            return self.show_warning(format!(
+                "\u{201c}{title}\u{201d}: the merge in {committed} was committed already: \
+                 it goes back to Verify"
+            ));
+        }
         if let Some(r) = feature.shipping.resolving.take() {
-            feature.log(now, format!("Conflicts in {}: stopped", r.repo));
+            feature.log(now, format!("Conflicts in {}: stopped", r.names()));
         }
         self.save_feature(project, slug);
         self.probe_feature(project, slug);
@@ -396,14 +533,14 @@ impl Gerdr {
     /// The plan of conflicts `file` shows is approved: they are resolved as
     /// planned, its review done.
     pub(crate) fn approve_conflict_plan(&mut self, project: &str, slug: &str, file: DocFile) {
-        let Some(r) = (self.feature(project, slug))
-            .and_then(|f| f.shipping.resolving.clone())
-            .filter(|r| r.planning && DocFile::ConflictPlan(r.n) == file)
-        else {
+        let open = (self.feature(project, slug))
+            .and_then(|f| f.shipping.resolving.as_ref())
+            .is_some_and(|r| r.planning && DocFile::ConflictPlan(r.n) == file);
+        if !open {
             return self.show_warning(CONFLICT_PLAN_PAST.into());
-        };
+        }
         self.doc_done(project, slug, file);
-        self.resolve_conflicts(project, slug, &r.repo, false);
+        self.resolve_conflicts(project, slug, false);
     }
 
     /// Send the plan of conflicts `file` shows back to its agent with
@@ -447,7 +584,10 @@ impl Gerdr {
         }
         self.doc_done(project, slug, file);
         if let Some(feature) = self.feature_mut(project, slug) {
-            feature.log(feature::now(), format!("Conflicts plan of {} sent back", r.repo));
+            feature.log(
+                feature::now(),
+                format!("Conflicts plan of {} sent back", r.names()),
+            );
             self.save_feature(project, slug);
         }
         self.show_success(format!("Sent the plan back to {}", r.agent));
@@ -456,7 +596,31 @@ impl Gerdr {
 
 #[cfg(test)]
 mod tests {
-    use super::next_turn;
+    use super::{Taking, listed, next_turn};
+
+    /// The prompt lists each repository by its worktree with its files;
+    /// resolving, one that merged cleanly is left out.
+    #[test]
+    fn the_prompt_lists_each_repository_with_its_files() {
+        let take = |repo: &str, files: &[&str]| Taking {
+            repo: repo.into(),
+            onto: "origin/main".into(),
+            onto_sha: "b".into(),
+            before: "a".into(),
+            files: files.iter().map(|f| (*f).to_owned()).collect(),
+        };
+        let repos = [take("api", &["a.rs", "b.rs"]), take("web", &[])];
+        let dirs = [("api".to_owned(), "/w/x/api".to_owned())];
+        assert_eq!(
+            listed(&repos, &dirs, false),
+            "- /w/x/api: origin/main merged in, stopped on conflicts in:\n  - a.rs\n  - b.rs"
+        );
+        assert_eq!(
+            listed(&repos, &dirs, true),
+            "- /w/x/api: origin/main would conflict in:\n  - a.rs\n  - b.rs\n\
+             - web: origin/main would conflict in:"
+        );
+    }
 
     #[test]
     fn a_turn_at_conflicts_comes_after_any_with_files_or_prompts() {

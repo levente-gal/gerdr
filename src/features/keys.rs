@@ -77,7 +77,7 @@ pub(super) const SHIP_KEYS: &[Binding<ShipCtx, PanelOutcome>] = &[
             })
         },
         footer: true,
-        f1: "Ship: merge the base into the selected repository's branch; with conflicts, have an agent resolve them, as planned once a plan is written",
+        f1: "Ship: merge the base into the selected repository's branch; with conflicts, have an agent resolve those of every repository at once, as planned once a plan is written",
     },
     Binding {
         chord: "Ctrl+Shift+M",
@@ -89,7 +89,7 @@ pub(super) const SHIP_KEYS: &[Binding<ShipCtx, PanelOutcome>] = &[
         chord: "Alt+M",
         does: |c| c.find(|o| matches!(o, PanelOutcome::ResolveConflicts(_, true))),
         footer: true,
-        f1: "Ship: have an agent plan how to resolve the conflicts first",
+        f1: "Ship: have an agent plan how to resolve every repository's conflicts first",
     },
     Binding {
         chord: "Ctrl+Shift+O",
@@ -105,7 +105,7 @@ pub(super) const SHIP_KEYS: &[Binding<ShipCtx, PanelOutcome>] = &[
         chord: "Ctrl+Shift+Del",
         does: |c| c.find(|o| matches!(o, PanelOutcome::StopResolving)),
         footer: true,
-        f1: "Ship: stop an agent's merge and abort it, after asking",
+        f1: "Ship: stop an agent's merges and abort those not committed, after asking",
     },
     Binding {
         chord: "Alt+Z",

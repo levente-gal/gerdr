@@ -201,7 +201,12 @@ fn conflict_plan_open(feature: Option<&Feature>, n: u32) -> Option<&crate::featu
 /// How a plan of conflicts stands, as its review's header says it.
 fn conflict_plan_state(feature: Option<&Feature>, n: u32) -> String {
     match conflict_plan_open(feature, n) {
-        Some(r) => format!("{}: {} with {}", r.repo, r.files.join(", "), r.onto),
+        Some(r) => {
+            let each: Vec<String> = (r.repos.iter())
+                .map(|t| format!("{}: {}", t.repo, t.files.join(", ")))
+                .collect();
+            format!("{} with {}", each.join("; "), r.onto())
+        }
         None => "past".to_owned(),
     }
 }

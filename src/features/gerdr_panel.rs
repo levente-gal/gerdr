@@ -587,8 +587,8 @@ impl Gerdr {
             }
             PanelOutcome::PullBase(repo) => self.pull_base(&project, &slug, &repo),
             PanelOutcome::CloseShipped => self.ask_close_shipped(&project, &slug),
-            PanelOutcome::ResolveConflicts(repo, planning) => {
-                self.resolve_conflicts(&project, &slug, &repo, planning);
+            PanelOutcome::ResolveConflicts(_, planning) => {
+                self.resolve_conflicts(&project, &slug, planning);
             }
             PanelOutcome::ReviewConflictPlan => self.review_conflict_plan(&project, &slug),
             PanelOutcome::StopResolving => self.ask_stop_resolving(&project, &slug),

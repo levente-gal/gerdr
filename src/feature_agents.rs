@@ -345,7 +345,7 @@ fn judge(
 
 /// Whether the agent taking on conflicts `r`, its files in data dir `data`,
 /// is through: planning, its plan or questions are written; resolving, its
-/// questions are, or the merge is committed (`took_in`).
+/// questions are, or every merge is committed (`took_in`).
 fn conflicts_done(r: &feature::Resolving, data: &Path, took_in: bool) -> bool {
     let written = if r.planning {
         r.plan(data).exists()
@@ -2919,9 +2919,10 @@ impl Gerdr {
             let (status, alive) = self.agent_key_state(&agents::AgentKey::Herdr(pane.clone()));
             let data = store::dir(None, project, &slug);
             let found = (self.last_probe(project, &slug))
-                .and_then(|p| p.resolution.as_ref())
+                .and_then(|p| p.resolution.clone())
                 .filter(|f| f.at == r.at && f.planning == r.planning);
-            let done = conflicts_done(&r, &data, found.is_some_and(|f| f.took_in));
+            let found = found.as_ref();
+            let done = conflicts_done(&r, &data, found.is_some_and(|f| f.took_in()));
             let file = if done {
                 File::Good((0, 0))
             } else {
@@ -2958,10 +2959,16 @@ impl Gerdr {
                     }
                 }
             } else {
+                // Those not committed yet, by their worktrees.
+                let left: Vec<String> = (r.repos.iter())
+                    .filter(|t| !found.and_then(|f| f.of(&t.repo)).is_some_and(|f| f.took_in))
+                    .filter_map(|t| self.feature(project, &slug)?.repo(&t.repo))
+                    .map(|repo| repo.worktree.display().to_string())
+                    .collect();
                 format!(
-                    "The merge of {} isn't committed yet. Please resolve what is left and commit it, \
-                     or write what the user must settle to {}.",
-                    r.onto,
+                    "The merge isn't committed yet in {}. Please resolve what is left and commit \
+                     it, or write what the user must settle to {}.",
+                    left.join(", "),
                     r.questions(&data).display()
                 )
             };
@@ -4149,11 +4156,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut r = crate::feature::Resolving {
             at: 1,
-            repo: "api".into(),
-            onto: "origin/main".into(),
-            onto_sha: "b".into(),
-            before: "a".into(),
-            files: vec!["a.rs".into()],
+            repos: vec![crate::feature::Taking {
+                repo: "api".into(),
+                onto: "origin/main".into(),
+                onto_sha: "b".into(),
+                before: "a".into(),
+                files: vec!["a.rs".into()],
+            }],
             agent: "claude".into(),
             pane: None,
             n: 7,

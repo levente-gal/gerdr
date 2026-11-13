@@ -711,20 +711,21 @@ pub(crate) enum Done {
         repo: String,
         result: Result<usize, String>,
     },
-    /// The merge for an agent to resolve began, or the plan of it is to be
-    /// written; or why not.
+    /// The merges for an agent to resolve began, or the plan of them is to
+    /// be written: each repository's that did, and why the rest didn't.
     ConflictsBegun {
         project: String,
         slug: String,
-        repo: String,
         planning: bool,
-        result: Result<ship::MergeBegun, String>,
+        begun: Vec<(String, ship::MergeBegun)>,
+        failed: Option<String>,
     },
-    /// The merge an agent resolved was stopped, or wasn't.
+    /// The merges an agent resolved were stopped: the repositories whose
+    /// merge was committed already; or why not.
     ResolvingStopped {
         project: String,
         slug: String,
-        result: Result<(), String>,
+        result: Result<Vec<String>, String>,
     },
     /// Undoing steps shipping ran ended: those undone, and why it stopped.
     ShipUndone {
@@ -1375,8 +1376,9 @@ pub enum PanelOutcome {
     PullBase(String),
     /// Close the workspace that shipping left open (see `close_left`).
     CloseShipped,
-    /// Have an agent take on repository `.0`'s conflicts with its base:
-    /// plan their resolution (`.1`), or resolve them.
+    /// Have an agent take on the conflicts of every repository with its
+    /// base at once: plan their resolution (`.1`), or resolve them. `.0` is
+    /// the repository whose card shows the button.
     ResolveConflicts(String, bool),
     /// Open the plan of the conflicts' resolution.
     ReviewConflictPlan,

@@ -104,9 +104,10 @@ mod tests {
             ("plan_review.open", ""),
             ("plan_review.accepted_ids", "r1-1"),
             ("summary.path", "/d/bulk-edit/summary.md"),
-            ("conflicts.dir", "/w/bulk-edit/api"),
-            ("conflicts.onto", "origin/main"),
-            ("conflicts.files", "- src/a.rs\n- src/b.rs"),
+            (
+                "conflicts.repos",
+                "- /w/bulk-edit/api: origin/main would conflict in:\n  - src/a.rs",
+            ),
             ("conflicts.plan", ""),
             ("conflicts.plan_path", "/d/bulk-edit/conflicts-1.md"),
             (
