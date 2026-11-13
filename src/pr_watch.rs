@@ -432,7 +432,7 @@ impl Gerdr {
             }
         };
         let then = match f.ship_plan.keep_workspace {
-            true => "Its workspace stays open",
+            true => "Its agents stop and its other tabs close",
             false => "Its workspace closes",
         };
         let body = format!("{how}\n{then}; its worktree stays");

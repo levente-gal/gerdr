@@ -825,7 +825,7 @@ pub(super) fn after_undo_words(step: feature::AfterStep) -> &'static str {
 
 /// What the Ship confirm says follows shipping `feature`, as its Afterwards
 /// ticks have it (`removable`: what is ticked merges everything); none when
-/// nothing does, or it is shipped already and ships more.
+/// it is shipped already and ships more.
 pub(super) fn ship_after_line(feature: &Feature, removable: bool) -> Option<String> {
     if feature.status != Status::Open {
         return None;
@@ -837,7 +837,10 @@ pub(super) fn ship_after_line(feature: &Feature, removable: bool) -> Option<Stri
             false => "Then its worktree and branch go".to_owned(),
         });
     }
-    (!plan.keep_workspace).then(|| "Then its workspace closes".to_owned())
+    Some(match plan.keep_workspace {
+        true => "Then its agents stop and its other tabs close".to_owned(),
+        false => "Then its workspace closes".to_owned(),
+    })
 }
 
 /// The one repository whose base is to be pulled when that alone stops

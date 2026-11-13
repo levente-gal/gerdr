@@ -77,18 +77,6 @@ pub(crate) fn feature_label(name: &str, dir: &Path, title: &str) -> String {
     }
 }
 
-/// What a toast says of a workspace kept open because `running` runs in
-/// it.
-pub(crate) fn kept_text(running: &[String]) -> String {
-    match running {
-        [one] => format!("its workspace stays open: \u{201c}{one}\u{201d} runs in it"),
-        more => format!(
-            "its workspace stays open: {} commands run in it",
-            more.len()
-        ),
-    }
-}
-
 /// What the confirm to remove a feature says of its open workspace, with
 /// `running` running in it.
 pub(crate) fn closing_text(running: &[String]) -> String {
@@ -535,19 +523,16 @@ impl Gerdr {
         }
     }
 
-    /// Ship of feature `slug` of `project` is done: its workspace closes
-    /// when nothing runs in it. What the success toast adds when it stays
-    /// open, if anything.
-    /// The agent writing the summary is gerdr's own and its work is used by
-    /// now: it doesn't keep the workspace open.
-    pub(crate) fn close_shipped_workspace(&mut self, project: &str, slug: &str) -> Option<String> {
-        let w = self.feature_workspace(project, slug)?;
-        let running = self.shipped_running(project, slug, w);
-        if running.is_empty() {
-            self.close_shipped_now(project, slug);
-            return None;
+    /// Close every tab of feature `slug`'s workspace but the feature tab,
+    /// what runs in them ending: it is over, its workspace kept open.
+    pub(crate) fn close_feature_tabs(&mut self, project: &str, slug: &str) {
+        let Some(w) = self.feature_workspace(project, slug) else {
+            return;
+        };
+        // From the last: a tab closing at once doesn't move those before it.
+        for t in (0..self.workspaces[w].tabs.len()).rev() {
+            self.close_tab_in(w, t);
         }
-        Some(kept_text(&running))
     }
 
     /// What runs in feature `slug`'s workspace `w` but the agent writing
@@ -709,14 +694,6 @@ mod tests {
         let dir = Path::new("/work/.features/bulk");
         assert_eq!(feature_label("bulk", dir, "Bulk export"), "Bulk export");
         assert_eq!(feature_label("mine", dir, "Bulk export"), "mine");
-        assert_eq!(
-            kept_text(&["claude".into()]),
-            "its workspace stays open: \u{201c}claude\u{201d} runs in it"
-        );
-        assert_eq!(
-            kept_text(&["claude".into(), "npm".into()]),
-            "its workspace stays open: 2 commands run in it"
-        );
         assert_eq!(closing_text(&[]), "Its workspace closes");
         assert_eq!(
             closing_text(&["claude".into()]),

@@ -32,7 +32,8 @@ fn the_ship_confirm_says_what_follows_shipping() {
     assert_eq!(said(&f, false), closes);
     f.ship_plan = Default::default();
     f.ship_plan.keep_workspace = true;
-    assert_eq!(said(&f, true), None);
+    let stops = Some("Then its agents stop and its other tabs close".to_owned());
+    assert_eq!(said(&f, true), stops);
     f.ship_plan.keep_workspace = false;
     f.status = Status::Done;
     assert_eq!(said(&f, true), None);
@@ -330,9 +331,9 @@ fn findings_show_as_cards_in_their_order_each_with_what_it_can_do() {
     assert_eq!(
         stripes,
         [
-            None,
-            Some(CardStripe::ToFix),
             Some(CardStripe::Dismissed),
+            Some(CardStripe::ToFix),
+            None,
             Some(CardStripe::Sent),
             None
         ]

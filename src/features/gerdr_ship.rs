@@ -624,10 +624,11 @@ impl Gerdr {
         self.probe_feature(project, slug);
     }
 
-    /// Feature `slug` is shipped or finished, whichever way: its sandbox has
-    /// done its work and goes, or its tabs would keep the workspace open.
-    /// Then its worktrees go, or its workspace closes, as its ticks say. What
-    /// keeps the workspace open, if anything.
+    /// Feature `slug` is shipped or finished, whichever way: what it runs
+    /// stops, its sandbox, checks and agents (here and on other machines).
+    /// Then its worktrees go, or its workspace closes, as its ticks say; kept
+    /// open, every tab but the feature tab closes. What keeps running, if
+    /// anything: a T3 Code thread, which gerdr can't stop.
     pub(crate) fn after_ship(&mut self, project: &str, slug: &str) -> Option<String> {
         let feature = self.feature(project, slug)?;
         let plan = feature.ship_plan.clone();
@@ -635,14 +636,25 @@ impl Gerdr {
             self.finish_stop(project, slug, crate::feature_sandbox::StopFor::Remove);
         }
         crate::launch::remove_sandbox_profiles(project, slug);
+        self.halt_checks(project, slug, None);
+        if let Some(mut feature) = self.feature(project, slug).cloned() {
+            // Its sandbox went its own way just now.
+            feature.sandbox = None;
+            self.close_machine_panes_of(&feature);
+        }
+        let stages: Vec<Stage> = (self.feature(project, slug))
+            .map_or_else(Vec::new, |f| f.runs.keys().copied().collect());
+        let t3: Vec<String> = (stages.into_iter())
+            .filter_map(|stage| self.t3_left_running(project, slug, stage))
+            .collect();
         if plan.remove_worktrees {
             self.check_removing_after_ship(project, slug);
-            return None;
+        } else if plan.keep_workspace {
+            self.close_feature_tabs(project, slug);
+        } else {
+            self.close_shipped_now(project, slug);
         }
-        if plan.keep_workspace {
-            return None;
-        }
-        self.close_shipped_workspace(project, slug)
+        (!t3.is_empty()).then(|| t3.join("; "))
     }
 
     /// The tick removing the worktrees holds only as long as what is ticked
