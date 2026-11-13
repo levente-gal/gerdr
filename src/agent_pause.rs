@@ -152,9 +152,13 @@ impl Gerdr {
             return;
         };
         let lock_dir = project_lock::dir();
+        let shown = self.project.as_deref();
+        // The lock test counts this gerdr's own lock: the shown project is ours.
         let sessions: Vec<(String, String)> = (self.projects.projects.iter())
             .filter(|p| {
-                !(lock_dir.as_ref()).is_some_and(|dir| project_lock::is_open_elsewhere(dir, &p.id))
+                shown == Some(p.id.as_str())
+                    || !(lock_dir.as_ref())
+                        .is_some_and(|dir| project_lock::is_open_elsewhere(dir, &p.id))
             })
             .map(|p| (p.id.clone(), p.session.clone()))
             .collect();
