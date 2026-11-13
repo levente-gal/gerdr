@@ -1189,6 +1189,8 @@ pub enum PanelOutcome {
     ShowAgent(Stage),
     /// Show the feature's own agent `n` (`Feature::own_agents`).
     ShowOwnAgent(u32),
+    /// Show the agent taking on Ship's conflicts (`Shipping::resolving`).
+    ShowResolvingAgent,
     /// Go back to the chat of this agent stage's agent, its tab closed.
     ResumeAgent(Stage),
     /// Show the stage's file in its tab: one already open as it stands, a
@@ -1461,6 +1463,7 @@ impl PanelOutcome {
             Self::ShowAgent(_)
                 | Self::CheckShip
                 | Self::ShowOwnAgent(_)
+                | Self::ShowResolvingAgent
                 | Self::ShowCheck(_)
                 | Self::OpenSandbox
                 | Self::OpenSandboxPage(_)

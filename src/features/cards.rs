@@ -151,6 +151,71 @@ pub(super) fn own_cards(
     .collect()
 }
 
+/// The card of the agent taking on `feature`'s conflicts on Ship's page,
+/// while one does: what it does, whose turn it is, and the page's buttons in
+/// `actions` that act on it.
+pub(super) fn resolving_card(
+    feature: &Feature,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Option<PageSection> {
+    let r = feature.shipping.resolving.as_ref()?;
+    let found = (state.probe.and_then(|p| p.resolution.as_ref()))
+        .filter(|f| f.at == r.at && f.planning == r.planning);
+    let (status, there) = state.resolving_status;
+    let questions = found.is_some_and(|f| f.questions);
+    let planned = r.planning && found.is_some_and(|f| f.plan);
+    let words = match status {
+        _ if r.pane.is_some() && !there => "tab closed",
+        _ if questions => "has questions",
+        _ if planned => "plan written: review it",
+        Some(AgentStatus::Blocked) => "asks you",
+        Some(AgentStatus::Working) => "working",
+        Some(AgentStatus::Idle | AgentStatus::Done) => "your turn",
+        _ => "",
+    };
+    let doing = match r.planning {
+        true => "plans",
+        false => "resolves",
+    };
+    let started = format!("started {}", crate::clock::ago(now, r.at));
+    let status_line = match words {
+        "" => format!("{doing} the conflicts in {} \u{b7} {started}", r.names()),
+        words => format!(
+            "{doing} the conflicts in {} \u{b7} {words} \u{b7} {started}",
+            r.names()
+        ),
+    };
+    let waits = questions || planned || status == Some(AgentStatus::Blocked);
+    let buttons = (actions.iter().enumerate())
+        .filter(|(_, (_, o))| {
+            matches!(
+                o,
+                PanelOutcome::ShowResolvingAgent
+                    | PanelOutcome::ReviewConflictPlan(_)
+                    | PanelOutcome::StopResolving(_)
+            ) || (r.planning && matches!(o, PanelOutcome::ResolveConflicts(_, false)))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    Some(PageSection::Agent {
+        stage: Stage::Ship,
+        icon: AgentIcon::from_agent(&r.agent),
+        name: r.agent.clone(),
+        dot: match waits {
+            true => Dot::Blocked,
+            false => status.map_or(Dot::Unknown, Dot::of_status),
+        },
+        status: status_line,
+        tail: Vec::new(),
+        buttons,
+        picks: Vec::new(),
+        model: None,
+        waits,
+    })
+}
+
 /// What an agent card shows of its pane's last lines: none of the shell's
 /// prompt or the command gerdr launched it with (a path and flags, cut off),
 /// and while it doesn't wait on the user only its last line, a plain status;
@@ -1452,27 +1517,29 @@ pub(super) fn ship_base_actions(
         label: label.to_owned(),
         style,
     };
-    // An agent at work on conflicts: its plan, and stopping it, on each
-    // of their cards (a page's button shows in one place).
+    // An agent at work on conflicts: its tab, its plan, and stopping it.
     if let Some(r) = feature.shipping.resolving.as_ref() {
+        out.push((
+            button("Show agent", ButtonStyle::Plain),
+            PanelOutcome::ShowResolvingAgent,
+        ));
         let found = probe.and_then(|p| p.resolution.as_ref());
-        let plan = r.planning && found.is_some_and(|f| f.plan);
-        for repo in r.repos.iter().map(|t| &t.repo) {
-            if plan {
-                out.push((
-                    button("Review plan", ButtonStyle::Plain),
-                    PanelOutcome::ReviewConflictPlan(repo.clone()),
-                ));
-                out.push((
-                    button("Resolve as planned", ButtonStyle::Primary),
-                    PanelOutcome::ResolveConflicts(repo.clone(), false),
-                ));
-            }
+        // One set, on its card: the take spans its repositories.
+        let repo = r.repos.first().map_or_else(String::new, |t| t.repo.clone());
+        if r.planning && found.is_some_and(|f| f.plan) {
             out.push((
-                button("Stop\u{2026}", ButtonStyle::Quiet),
-                PanelOutcome::StopResolving(repo.clone()),
+                button("Review plan", ButtonStyle::Plain),
+                PanelOutcome::ReviewConflictPlan(repo.clone()),
+            ));
+            out.push((
+                button("Resolve as planned", ButtonStyle::Primary),
+                PanelOutcome::ResolveConflicts(repo.clone(), false),
             ));
         }
+        out.push((
+            button("Stop\u{2026}", ButtonStyle::Quiet),
+            PanelOutcome::StopResolving(repo),
+        ));
         return out;
     }
     // Its squash waits for its base to be pulled: that, first.

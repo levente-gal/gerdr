@@ -501,8 +501,7 @@ fn ships_buttons_have_keys_that_follow_the_selected_repository() {
         planning: false,
         nudged: false,
     });
-    // Taken on with web too: each card holds its own Stop, as a page's
-    // button shows in one place.
+    // Taken on with web too: one Stop, on its agent's card.
     let mut both = f.clone();
     if let Some(r) = both.shipping.resolving.as_mut() {
         let mut web = r.repos[0].clone();
@@ -513,13 +512,7 @@ fn ships_buttons_have_keys_that_follow_the_selected_repository() {
         .map(|(_, o)| o)
         .filter(|o| matches!(o, PanelOutcome::StopResolving(_)))
         .collect();
-    assert_eq!(
-        stops,
-        [
-            PanelOutcome::StopResolving("api".into()),
-            PanelOutcome::StopResolving("web".into())
-        ]
-    );
+    assert_eq!(stops, [PanelOutcome::StopResolving("api".into())]);
     // Stopped from any row: the take is the page's.
     for row in [None, Some("api"), Some("web")] {
         let keys = ship_keys(&f, ctx, Some(&p), row);
@@ -608,6 +601,97 @@ fn a_blocked_ship_says_what_stops_it() {
         rail_node(&f, Stage::Ship, &state, 2_000).line,
         "ready to ship"
     );
+}
+
+#[test]
+fn the_agent_taking_on_conflicts_has_its_own_card_on_ship() {
+    let mut f = feature("s", vec![repo("api", true)], 8);
+    f.shipping.resolving = Some(crate::feature::Resolving {
+        at: 1_000,
+        repos: vec![crate::feature::Taking {
+            repo: "api".into(),
+            onto: "origin/main".into(),
+            onto_sha: "b".into(),
+            before: "a".into(),
+            files: vec!["a.rs".into()],
+        }],
+        agent: "Claude Code".into(),
+        pane: Some("p1".into()),
+        n: 1,
+        planning: true,
+        nudged: false,
+    });
+    let card_of = |p: &Probe, status| {
+        let mut actions = page_actions(&f, Stage::Ship, RowCtx::default());
+        actions.extend(ship_base_actions(&f, Some(p)));
+        let state = PanelState {
+            probe: Some(p),
+            resolving_status: status,
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, Stage::Ship, &state, &actions, 1_120);
+        let card = (page.sections.iter()).find_map(|s| match s {
+            PageSection::Agent {
+                name,
+                status,
+                waits,
+                buttons,
+                ..
+            } if name == "Claude Code" => {
+                let said: Vec<&str> = (buttons.iter())
+                    .map(|&i| actions[i].0.label.as_str())
+                    .collect();
+                Some((status.clone(), *waits, said.join(" | ")))
+            }
+            _ => None,
+        });
+        // The repositories' cards hold none of its buttons: they are its.
+        let on_repos: Vec<&str> = (page.sections.iter())
+            .filter_map(|s| match s {
+                PageSection::ShipGroup(g) => g.card.as_ref(),
+                _ => None,
+            })
+            .flat_map(|c| c.buttons.iter().map(|&i| actions[i].0.label.as_str()))
+            .collect();
+        let its = [
+            "Show agent",
+            "Review plan",
+            "Resolve as planned",
+            "Stop\u{2026}",
+        ];
+        assert!(!on_repos.iter().any(|l| its.contains(l)), "{on_repos:?}");
+        let groups = (page.sections.iter())
+            .filter(|s| matches!(s, PageSection::ShipGroup(g) if g.card.is_some()))
+            .count();
+        assert!(groups > 0, "the repository's card shows meanwhile");
+        card.expect("the agent's card")
+    };
+    let p = probe(check(&[], &["api"], &[]));
+    let (status, waits, buttons) = card_of(&p, (Some(AgentStatus::Working), true));
+    assert!(
+        status.starts_with("plans the conflicts in api \u{b7} working \u{b7} started"),
+        "{status}"
+    );
+    assert!(!waits);
+    assert_eq!(buttons, "Show agent | Stop\u{2026}");
+    // Its plan written: the user's turn, to review it or resolve as planned.
+    let mut planned = p.clone();
+    planned.resolution = Some(ship::Resolution {
+        at: 1_000,
+        planning: true,
+        plan: true,
+        ..ship::Resolution::default()
+    });
+    let (status, waits, buttons) = card_of(&planned, (Some(AgentStatus::Idle), true));
+    assert!(status.contains("plan written: review it"), "{status}");
+    assert!(waits);
+    assert_eq!(
+        buttons,
+        "Show agent | Review plan | Resolve as planned | Stop\u{2026}"
+    );
+    // Its tab closed: it says so.
+    let (status, ..) = card_of(&p, (None, false));
+    assert!(status.contains("tab closed"), "{status}");
 }
 
 #[test]
