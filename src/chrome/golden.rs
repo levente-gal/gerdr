@@ -3837,10 +3837,16 @@ fn feature_tab_ship_blocked() -> super::FeatureTabView {
         title: "Ship".into(),
         about: Stage::Ship.about().into(),
         status: None,
-        buttons: vec![PageButton {
-            label: "Ship\u{2026}".into(),
-            style: ButtonStyle::Off,
-        }],
+        buttons: vec![
+            PageButton {
+                label: "Ship\u{2026}".into(),
+                style: ButtonStyle::Off,
+            },
+            PageButton {
+                label: "Check again".into(),
+                style: ButtonStyle::Quiet,
+            },
+        ],
         sections: vec![
             PageSection::Lines {
                 label: "Ship check".into(),
@@ -3848,6 +3854,9 @@ fn feature_tab_ship_blocked() -> super::FeatureTabView {
                     tab_line("api has changes not committed", CheckTone::Blocker),
                     tab_line("web is 3 commits behind dev", CheckTone::Blocker),
                 ],
+            },
+            PageSection::Toolbar {
+                groups: vec![(String::new(), vec![1])],
             },
             PageSection::ShipGroup(ship_blocked(ship_group(
                 "api \u{b7} 4 commits \u{b7} +120 \u{2212}8 \u{b7} into main",
@@ -6265,7 +6274,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 68]; 4] = [
         0x80b4f04c3fd0c18e, // tab_verify_failed_1920
         0xe5e64df17db90883, // tab_verify_running_1180
         0x1187cfc7308080cd, // tab_fix_plan_860
-        0xbd60166f01faa305, // tab_ship_blocked_1180
+        0xe977123f06005f8f, // tab_ship_blocked_1180
         0x9dbb5792a79a623e, // tab_ship_routes_1180
         0x7bebf6e4652d947e, // tab_ship_routes_860
         0xe0d06cd4f379fc6a, // tab_ship_finish_1180
@@ -6336,7 +6345,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 68]; 4] = [
         0x87e9612051e6d593, // tab_verify_failed_1920
         0x1842640f4d4cc7f8, // tab_verify_running_1180
         0x70f6c4a256fe013c, // tab_fix_plan_860
-        0xfd97c3b9d0d7ac16, // tab_ship_blocked_1180
+        0x3a9972df7b44513c, // tab_ship_blocked_1180
         0x42f962be0d0290ab, // tab_ship_routes_1180
         0x1aa5e7649b9fce47, // tab_ship_routes_860
         0x2c11f0eca4ba4afc, // tab_ship_finish_1180
@@ -6407,7 +6416,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 68]; 4] = [
         0xf040df7ef7dafd1f, // tab_verify_failed_1920
         0xbae5c983af5f6a10, // tab_verify_running_1180
         0x77ba2ff0178ca183, // tab_fix_plan_860
-        0xa686253aaf3d7cd1, // tab_ship_blocked_1180
+        0x359957db4ac7ac8e, // tab_ship_blocked_1180
         0x306cc381e7cf44f2, // tab_ship_routes_1180
         0xf44d2ccaa407829d, // tab_ship_routes_860
         0xca72555ba2d3dc06, // tab_ship_finish_1180
@@ -6478,7 +6487,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 68]; 4] = [
         0x71b1389341d4070b, // tab_verify_failed_1920
         0x5ea01a4a5019262d, // tab_verify_running_1180
         0x4906da0bcd42b77a, // tab_fix_plan_860
-        0xd3dc11e2dac70251, // tab_ship_blocked_1180
+        0xa839a2c905d7b0af, // tab_ship_blocked_1180
         0x22e7cb557ae4571d, // tab_ship_routes_1180
         0x2ffe9fea2fe7fdf0, // tab_ship_routes_860
         0xb8102763a9592a47, // tab_ship_finish_1180

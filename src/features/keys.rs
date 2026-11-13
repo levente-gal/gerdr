@@ -125,6 +125,12 @@ pub(super) const SHIP_KEYS: &[Binding<ShipCtx, PanelOutcome>] = &[
         footer: true,
         f1: "Ship: edit the summary",
     },
+    Binding {
+        chord: "F5",
+        does: |c| c.find(|o| matches!(o, PanelOutcome::CheckShip)),
+        footer: true,
+        f1: "Ship: check again now, fetching origin too",
+    },
 ];
 
 /// The pull request `feature` reviews while its review can be submitted:

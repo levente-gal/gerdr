@@ -229,6 +229,22 @@ impl Gerdr {
         });
     }
 
+    /// Read Ship's check of feature `slug` of `project` again now, as its
+    /// Check again button asks: fetching origin and asking for its pull
+    /// requests too, which a probe does only every few minutes.
+    pub(super) fn check_ship_again(&mut self, project: &str, slug: &str) {
+        let key = (project.to_owned(), slug.to_owned());
+        if let Some(probed) = self.features.probes.get_mut(&key) {
+            probed.fetch_at = None;
+            probed.prs_at = None;
+        }
+        let Some(title) = self.feature(project, slug).map(|f| f.title.clone()) else {
+            return;
+        };
+        self.probe_feature(project, slug);
+        self.show_notice(format!("Checking \u{201c}{title}\u{201d} again"));
+    }
+
     /// Read finished `feature` (`slug` of `project`) for its tab: its
     /// stage files and line counts only (`ship::probe_finished`). Its code
     /// isn't watched any more, nor its hooks made sure of.

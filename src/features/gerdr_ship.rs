@@ -401,7 +401,8 @@ impl Gerdr {
             return;
         };
         let title = feature.title.clone();
-        let (dir, command) = ship::squash_command(feature, squash);
+        let check = self.last_probe(project, slug).and_then(|p| p.ship.as_ref());
+        let (dir, command) = ship::squash_command(feature, squash, check);
         if command.trim().is_empty() {
             tracing::warn!("shipping feature {project}/{slug}: no squash command");
             return self.show_error(format!(

@@ -259,7 +259,6 @@ pub fn unguard(dir: &Path, branch: &str) -> Result<(), String> {
 
 /// Whether `branch` of the repository `dir` is in has a guard file (empty
 /// or allowing a commit).
-#[cfg(test)]
 pub fn guarded(dir: &Path, branch: &str) -> bool {
     guard_file(dir, branch).is_ok_and(|f| f.is_file())
 }

@@ -791,7 +791,7 @@ impl Gerdr {
                 spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
                 let text = match segment {
                     0 => "Through origin, for a review",
-                    1 => "Into the base in its main worktree; nothing leaves it unless ticked",
+                    1 => "Into the base where it is checked out; nothing leaves it unless ticked",
                     _ => "It stays as it is",
                 };
                 Some(Tooltip::new(text, spot))

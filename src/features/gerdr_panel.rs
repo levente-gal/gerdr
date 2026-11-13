@@ -579,6 +579,7 @@ impl Gerdr {
             PanelOutcome::EditPulls => self.open_review_edit(&project, &slug),
             PanelOutcome::FinishReview => self.ask_finish_pr_review(&project, &slug),
             PanelOutcome::WriteSummary => self.write_ship_summary(&project, &slug, true),
+            PanelOutcome::CheckShip => self.check_ship_again(&project, &slug),
             PanelOutcome::UndoShip(repo, step) => self.ask_undo_ship(&project, &slug, &repo, step),
             PanelOutcome::UndoAfter(step) => self.undo_after_ship(&project, &slug, step),
             PanelOutcome::UpdateBase(repo, way) => {

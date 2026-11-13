@@ -706,6 +706,14 @@ fn writers_page_actions(
             PanelOutcome::EditSummary,
         ));
     }
+    // The Ship check, read again now: it reads on its own every few
+    // seconds, but fetches origin only every few minutes.
+    if stage == Stage::Ship && feature.ships() {
+        out.push((
+            button("Check again", ButtonStyle::Quiet),
+            PanelOutcome::CheckShip,
+        ));
+    }
     // Each step that ran and can be undone, on its row (once the rows
     // show), the latest first: those of the repositories, then what
     // followed shipping.

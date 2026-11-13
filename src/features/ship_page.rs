@@ -559,7 +559,7 @@ fn ship_step_row(
             Some(pr) => format!("Keep its pull request open: {}", pr_tail(&pr.url)),
             None => format!("Open a pull request into {base}"),
         },
-        ShipStep::Merge => format!("Merge into {base} in {}", short_folder(&repo.main)),
+        ShipStep::Merge => format!("Merge into {base} in {}", short_folder(&repo.tree)),
         ShipStep::PushBase => format!("Push {base} to origin"),
     };
     let why = repo.why_not(step);

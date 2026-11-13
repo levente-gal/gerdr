@@ -110,8 +110,8 @@ pub struct RepoCheck {
     pub key: String,
     /// The branch it merges into.
     pub base: String,
-    /// Its main worktree.
-    pub main: PathBuf,
+    /// Where its base is checked out (`base_tree`): its squash goes there.
+    pub tree: PathBuf,
     /// Its commits on the feature's branch.
     pub commits: usize,
     /// The route it takes without a pick (`mode_of`).
@@ -153,15 +153,31 @@ fn pull_first(base: &str) -> String {
     format!(": pull {base} first")
 }
 
-/// Move `repo`'s base on to origin's in its main worktree, as a pull does,
-/// only fast-forward: what its squash waits for (`RepoCheck::pulls_base`).
-/// How many commits it took.
+/// Where `repo`'s base is checked out, where its squash goes: the worktree
+/// that has it, as a feature started from another feature's branch finds it
+/// in that feature's worktree; else its main worktree, to switch to it.
+fn base_tree(repo: &Repo) -> PathBuf {
+    gitinfo::checked_out_in(&repo.main, &repo.base).unwrap_or_else(|| repo.main.clone())
+}
+
+/// `repo`'s worktree `dir` (`base_tree`) in words: "api's main worktree",
+/// or "api's worktree of feature/x" for another.
+fn tree_words(repo: &Repo, dir: &Path) -> String {
+    match dir == repo.main {
+        true => format!("{}'s main worktree", repo.key()),
+        false => format!("{}'s worktree of {}", repo.key(), repo.base),
+    }
+}
+
+/// Move `repo`'s base on to origin's where it is checked out
+/// (`base_tree`), as a pull does, only fast-forward: what its squash waits
+/// for (`RepoCheck::pulls_base`). How many commits it took.
 pub fn pull_base(repo: &Repo) -> Result<usize, String> {
     let remote = format!("origin/{}", repo.base);
     let range = format!("{}..{remote}", repo.base);
     let count = git(&repo.main, &["rev-list", "--count", &range])?;
     let n = (count.trim().parse()).map_err(|err| format!("couldn't read a commit count: {err}"))?;
-    git(&repo.main, &["merge", "-q", "--ff-only", &remote])?;
+    git(&base_tree(repo), &["merge", "-q", "--ff-only", &remote])?;
     Ok(n)
 }
 
@@ -631,7 +647,7 @@ fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) ->
         out.repos.push(RepoCheck {
             key: repo.key(),
             base: repo.base.clone(),
-            main: repo.main.clone(),
+            tree: base_tree(repo),
             commits,
             route: Route::of_mode(mode_of(feature, &repo.key(), modes)),
             no_origin: git(&repo.main, &["remote", "get-url", "origin"])
@@ -653,36 +669,31 @@ fn tracking(repo: &Repo, branch: &str) -> Option<String> {
     Some(sha.trim().to_owned())
 }
 
-/// What stops squashing `branch` into `repo`'s base in its main worktree.
+/// What stops squashing `branch` into `repo`'s base where it is checked
+/// out (`base_tree`).
 fn squash_blocker(repo: &Repo, branch: &str) -> Option<String> {
     let (name, base) = (&repo.key(), &repo.base);
-    let on = git(&repo.main, &["symbolic-ref", "-q", "--short", "HEAD"])
-        .map(|b| b.trim().to_owned())
-        .unwrap_or_default();
-    if on.is_empty() {
-        return Some(format!(
-            "{name}'s main worktree is on no branch: switch it to {base}"
-        ));
+    let dir = base_tree(repo);
+    let tree = tree_words(repo, &dir);
+    // Checked out nowhere: the main worktree is to be switched to it.
+    if dir == repo.main {
+        let on = git(&repo.main, &["symbolic-ref", "-q", "--short", "HEAD"])
+            .map(|b| b.trim().to_owned())
+            .unwrap_or_default();
+        if on.is_empty() {
+            return Some(format!("{tree} is on no branch: switch it to {base}"));
+        }
+        if &on != base {
+            return Some(format!("{tree} is on {on}: switch it to {base}"));
+        }
     }
-    if &on != base {
-        return Some(format!(
-            "{name}'s main worktree is on {on}: switch it to {base}"
-        ));
-    }
-    match git(
-        &repo.main,
-        &["status", "--porcelain", "--untracked-files=no"],
-    ) {
+    match git(&dir, &["status", "--porcelain", "--untracked-files=no"]) {
         Ok(status) if !status.trim().is_empty() => {
-            return Some(format!(
-                "{name}'s main worktree has uncommitted changes on {base}"
-            ));
+            return Some(format!("{tree} has uncommitted changes on {base}"));
         }
         Ok(_) => {}
         Err(err) => {
-            return Some(format!(
-                "{name}: couldn't tell what its main worktree has: {err}"
-            ));
+            return Some(format!("{name}: couldn't tell what {tree} has: {err}"));
         }
     }
     // Taken in from origin's base, its commits would go into the squash
@@ -1147,7 +1158,7 @@ impl Undo {
             Self::ClosePr { url, .. } => format!("Its pull request closes on GitHub: {url}"),
             Self::DeleteBranch { .. } => format!("{branch} goes off origin"),
             Self::ResetSquash { repo, base } => {
-                format!("The squash comes off {base} in {repo}'s main worktree")
+                format!("The squash comes off {base} in {repo}")
             }
         }
     }
@@ -1273,16 +1284,15 @@ fn delete_branch(repo: &Repo, branch: &str, sha: Option<&str>) -> Result<(), Str
 /// worktree clean.
 fn reset_squash(repo: &Repo, base: &str, branch: &str) -> Result<(), String> {
     let name = repo.key();
-    let main = &repo.main;
+    let main = &base_tree(repo);
+    let tree = tree_words(repo, main);
     let on = git(main, &["symbolic-ref", "-q", "--short", "HEAD"]).unwrap_or_default();
     if on.trim() != base {
-        return Err(format!(
-            "{name}'s main worktree isn't on {base}: switch it back to undo"
-        ));
+        return Err(format!("{tree} isn't on {base}: switch it back to undo"));
     }
     let status = git(main, &["status", "--porcelain", "--untracked-files=no"])?;
     if !status.trim().is_empty() {
-        return Err(format!("{name}'s main worktree has uncommitted changes"));
+        return Err(format!("{tree} has uncommitted changes"));
     }
     // The last commit is the squash: it changes what the branch does.
     let not_squash = || format!("{base}'s last commit in {name} isn't the feature's squash");
@@ -1458,38 +1468,64 @@ pub(crate) fn run_gh(gh: &str, dir: &Path, args: &[&str]) -> Result<String, Stri
     Err(why.map_or_else(|| format!("gh {what} failed"), str::to_owned))
 }
 
-/// Push the base of `repo` to origin from its main worktree, which a squash
-/// left on it, unless the user went elsewhere since: then that is what would
-/// go. The commit pushed, or what stops it, in a line.
+/// Push the base of `repo` to origin from where the squash went
+/// (`base_tree`), unless the user went elsewhere since: then that is what
+/// would go. A base that is another feature's branch is guarded: allowed for
+/// this commit alone, and guarded again after. The commit pushed, or what
+/// stops it, in a line.
 pub fn push_base(repo: &Repo) -> Result<String, String> {
-    let on = git(&repo.main, &["symbolic-ref", "-q", "--short", "HEAD"])
+    let dir = base_tree(repo);
+    let on = git(&dir, &["symbolic-ref", "-q", "--short", "HEAD"])
         .map(|b| b.trim().to_owned())
         .unwrap_or_default();
     if on != repo.base {
-        return Err(format!("its main worktree isn't on {} now", repo.base));
+        // Its callers name the repository first.
+        let tree = match dir == repo.main {
+            true => "its main worktree".to_owned(),
+            false => format!("its worktree of {}", repo.base),
+        };
+        return Err(format!("{tree} isn't on {} now", repo.base));
     }
     let common = git(
-        &repo.main,
+        &dir,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
     let _turn = git_ops::Turn::take(Path::new(common.trim()), "the push");
-    let head = git(&repo.main, &["rev-parse", "HEAD"])?.trim().to_owned();
-    git_ops::push(&repo.main, Some("origin"), false)
-        .map(|_| head)
-        .map_err(|failed| push_why(&failed))
+    let head = git(&dir, &["rev-parse", "HEAD"])?.trim().to_owned();
+    let guarded = hook::guarded(&repo.main, &repo.base);
+    if guarded {
+        hook::allow(&repo.main, &repo.base, &head)?;
+    }
+    let pushed = git_ops::push(&dir, Some("origin"), false);
+    if guarded && let Err(err) = hook::guard(&repo.main, &repo.base) {
+        tracing::warn!("guarding {} of {} again: {err}", repo.base, repo.key());
+    }
+    pushed.map(|_| head).map_err(|failed| push_why(&failed))
 }
 
 /// The folder and the shell command of a squash ship of `feature`'s
-/// `actions`, for a tab: every `Squash` action's repository in turn.
-pub fn squash_command(feature: &Feature, actions: &[Action]) -> (PathBuf, String) {
+/// `actions`, for a tab: every `Squash` action's repository in turn, where
+/// `check` found its base checked out (`RepoCheck::tree`), else in its main
+/// worktree. No git runs here: it is called on the UI thread.
+pub fn squash_command(
+    feature: &Feature,
+    actions: &[Action],
+    check: Option<&ShipCheck>,
+) -> (PathBuf, String) {
     let branch = feature.branch();
-    let mains: Vec<&Path> = actions
+    let tree = |key: &str| {
+        (check.into_iter().flat_map(|c| &c.repos))
+            .find(|r| r.key == key)
+            .map(|r| r.tree.clone())
+    };
+    let mains: Vec<PathBuf> = actions
         .iter()
         .filter_map(|a| match a {
-            Action::Squash { repo, .. } => feature.repo(repo),
+            Action::Squash { repo, .. } => {
+                tree(repo).or_else(|| feature.repo(repo).map(|r| r.main.clone()))
+            }
             _ => None,
         })
-        .map(|r| r.main.as_path())
         .collect();
     let Some(first) = mains.first() else {
         return (feature.root.clone(), String::new());
@@ -1509,7 +1545,7 @@ pub fn squash_command(feature: &Feature, actions: &[Action]) -> (PathBuf, String
         })
         .collect::<Vec<_>>()
         .join(" && ");
-    (first.to_path_buf(), command)
+    (first.clone(), command)
 }
 
 #[cfg(test)]
@@ -1855,7 +1891,7 @@ esac
         commit(&wt(&f, "api"), "x", "feature");
         mark_all(&mut f);
         let check = planned(&f, &Modes::default());
-        let (dir, command) = squash_command(&f, &check.actions);
+        let (dir, command) = squash_command(&f, &check.actions, None);
         let main = f.repos[0].main.clone();
         assert_eq!(dir, main);
         assert_eq!(
@@ -1865,7 +1901,10 @@ esac
                 crate::desktop::shell_quote(&main.to_string_lossy())
             )
         );
-        assert_eq!(squash_command(&f, &[]), (f.root.clone(), String::new()));
+        assert_eq!(
+            squash_command(&f, &[], None),
+            (f.root.clone(), String::new())
+        );
 
         f.shipping.squash_at = Some(5);
         assert!(!probe(&f, &Modes::default()).merged);
@@ -1910,7 +1949,7 @@ esac
                 },
             ]
         );
-        let (dir, command) = squash_command(&f, &check.actions);
+        let (dir, command) = squash_command(&f, &check.actions, None);
         let linked = f.repos[1].main.clone();
         assert_eq!(dir, linked);
         let cd = crate::desktop::shell_quote(&linked.to_string_lossy());
@@ -1959,7 +1998,7 @@ esac
                 }
             ]
         );
-        let (_, command) = squash_command(&f, &check.actions);
+        let (_, command) = squash_command(&f, &check.actions, None);
         assert!(!command.contains("git push"), "{command}");
 
         // Push the feature's branch too: through origin, before the squash.
@@ -1977,7 +2016,7 @@ esac
                 }
             ]
         );
-        let (_, command) = squash_command(&f, &check.actions);
+        let (_, command) = squash_command(&f, &check.actions, None);
         assert!(!command.contains("git push"), "{command}");
 
         // Push without a pull request.
@@ -2288,7 +2327,7 @@ esac
         let check = |no_merge: Option<String>| RepoCheck {
             key: "api".into(),
             base: "main".into(),
-            main: main.clone(),
+            tree: main.clone(),
             commits: 1,
             route: Route::Merge,
             no_origin: None,
@@ -2457,7 +2496,7 @@ esac
         let repo = |head: &str, pushed: Option<&str>| RepoCheck {
             key: "api".into(),
             base: "main".into(),
-            main: PathBuf::from("/m"),
+            tree: PathBuf::from("/m"),
             commits: 1,
             route: Route::Pr,
             no_origin: None,
@@ -2635,6 +2674,61 @@ esac
         assert_eq!(
             push_base(repo).unwrap_err(),
             "its main worktree isn't on main now"
+        );
+    }
+
+    /// A feature started from another feature's branch: that branch is
+    /// checked out in the other feature's worktree, where the main
+    /// worktree can't switch to it. The squash goes there.
+    #[test]
+    fn a_base_checked_out_in_another_worktree_takes_the_squash_there() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        let main = f.repos[0].main.clone();
+        commit(&wt(&f, "api"), "a", "feature side");
+        mark_all(&mut f);
+        run(&main, &["switch", "-q", "-c", "other"]);
+        let other = t.0.join("other-feature");
+        run(
+            &main,
+            &["worktree", "add", "-q", &other.to_string_lossy(), "main"],
+        );
+        let plan = planned(&f, &Modes::default());
+        assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+        let check = probe(&f, &Modes::default()).ship.unwrap();
+        assert_eq!(check.repos[0].tree, other);
+        let (dir, command) = squash_command(&f, &plan.actions, Some(&check));
+        assert_eq!(dir, other);
+        assert!(command.starts_with(&format!(
+            "cd {} && ",
+            crate::desktop::shell_quote(&other.to_string_lossy())
+        )));
+
+        std::fs::write(other.join("a"), "edited").unwrap();
+        assert_eq!(
+            planned(&f, &Modes::default()).blockers,
+            ["api's worktree of main has uncommitted changes on main"]
+        );
+        run(&other, &["checkout", "-q", "--", "a"]);
+
+        // Squashed there, it comes off there, and its base pushes from
+        // there, through the other feature's guard, which stays.
+        run(&other, &["merge", "-q", "--squash", "feature/f"]);
+        run(&other, &["commit", "-q", "-m", "squash"]);
+        reset_squash(&f.repos[0], "main", "feature/f").unwrap();
+        run(&other, &["merge", "-q", "--squash", "feature/f"]);
+        run(&other, &["commit", "-q", "-m", "squash"]);
+        hook::guard(&main, "main").unwrap();
+        push_base(&f.repos[0]).unwrap();
+        assert_eq!(
+            run(&t.0.join("api.git"), &["rev-parse", "main"]),
+            run(&other, &["rev-parse", "HEAD"])
+        );
+        assert!(hook::guarded(&main, "main"));
+        assert_eq!(
+            run(&main, &["symbolic-ref", "--short", "HEAD"]).trim(),
+            "other"
         );
     }
 

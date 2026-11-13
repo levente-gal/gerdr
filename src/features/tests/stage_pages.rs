@@ -54,8 +54,10 @@ fn a_shipped_feature_ships_more_from_its_page() {
             vec![line("Shipped: 1 step ticked to run", CheckTone::Ready)]
         )
     );
-    assert!(matches!(page.sections[1], PageSection::Recap(_)));
-    let Some(PageSection::ShipGroup(group)) = page.sections.get(2) else {
+    // Its Check again button under the check.
+    assert!(matches!(&page.sections[1], PageSection::Toolbar { groups } if groups[0].1.len() == 1));
+    assert!(matches!(page.sections[2], PageSection::Recap(_)));
+    let Some(PageSection::ShipGroup(group)) = page.sections.get(3) else {
         panic!("no card: {:?}", page.sections);
     };
     let steps: Vec<(&str, bool)> = (group.steps.iter())
@@ -132,7 +134,7 @@ fn a_branch_moved_since_its_push_keeps_undo_and_logs_its_update() {
     };
     let actions = page_actions(&f, Stage::Ship, ctx);
     let page = stage_page(&f, Stage::Ship, &state, &actions, 2_000);
-    let Some(PageSection::ShipGroup(group)) = page.sections.get(2) else {
+    let Some(PageSection::ShipGroup(group)) = page.sections.get(3) else {
         panic!("no card: {:?}", page.sections);
     };
     let again = &group.steps[0];
@@ -425,6 +427,7 @@ fn ships_buttons_have_keys_that_follow_the_selected_repository() {
             ),
             ("Ctrl+R", PanelOutcome::WriteSummary),
             ("Ctrl+E", PanelOutcome::EditSummary),
+            ("F5", PanelOutcome::CheckShip),
         ]
     );
     let undo = ship_keys(&f, ctx, Some(&p), None);
@@ -521,7 +524,8 @@ fn a_blocked_ship_says_what_stops_it() {
         [
             ("Ship\u{2026}", PanelOutcome::Ship),
             ("Write summary", PanelOutcome::WriteSummary),
-            ("Edit", PanelOutcome::EditSummary)
+            ("Edit", PanelOutcome::EditSummary),
+            ("Check again", PanelOutcome::CheckShip),
         ]
     );
     let page = stage_page(&f, Stage::Ship, &state, &actions, 2_000);

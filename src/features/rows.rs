@@ -1711,6 +1711,7 @@ pub(super) fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::Tick => "mark done",
         PanelOutcome::Ship => "ship\u{2026}",
         PanelOutcome::WriteSummary => "write the summary again",
+        PanelOutcome::CheckShip => "check again",
         PanelOutcome::UndoShip(..) => "undo\u{2026}",
         PanelOutcome::UndoAfter(step) => after_undo_words(*step),
         PanelOutcome::UpdateBase(..) => "update from the base\u{2026}",

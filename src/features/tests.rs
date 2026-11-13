@@ -331,7 +331,7 @@ fn check(blockers: &[&str], repos: &[&str], notes: &[&str]) -> Option<ShipCheck>
     let repo = |key: &&str| ship::RepoCheck {
         key: (*key).to_owned(),
         base: "main".to_owned(),
-        main: PathBuf::from("/m"),
+        tree: PathBuf::from("/m"),
         commits: 1,
         route: Route::Pr,
         no_origin: None,

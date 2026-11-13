@@ -272,6 +272,15 @@ pub(super) fn stage_page(
                 if !check.is_empty() {
                     sections.push(lines("Ship check", check));
                 }
+                let again: Vec<usize> = (actions.iter().enumerate())
+                    .filter(|(_, (_, o))| *o == PanelOutcome::CheckShip)
+                    .map(|(i, _)| i)
+                    .collect();
+                if !again.is_empty() {
+                    sections.push(PageSection::Toolbar {
+                        groups: vec![(String::new(), again)],
+                    });
+                }
                 let mut recap = recap_card(feature, state, now);
                 recap.buttons = (actions.iter().enumerate())
                     .filter(|(_, (_, o))| {

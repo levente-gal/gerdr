@@ -490,6 +490,16 @@ fn worktrees(dir: &Path) -> Vec<Worktree> {
     all
 }
 
+/// The worktree of the repository `dir` is in that has `branch` checked
+/// out, if one does and its folder is there.
+pub fn checked_out_in(dir: &Path, branch: &str) -> Option<PathBuf> {
+    let list = git(dir, &["worktree", "list", "--porcelain"])?;
+    parse_worktrees(&list)
+        .into_iter()
+        .find(|w| !w.gone && w.branch.as_deref() == Some(branch))
+        .map(|w| w.path)
+}
+
 /// Of worktrees `all`, the one at `here` and the others.
 fn split_worktrees(
     mut all: Vec<Worktree>,

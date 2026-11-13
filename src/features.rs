@@ -1360,6 +1360,8 @@ pub enum PanelOutcome {
     EditPulls,
     /// Ask an agent to write the feature's summary again.
     WriteSummary,
+    /// Read Ship's check again now, fetching origin too.
+    CheckShip,
     /// Undo step `.1` that shipping ran for repository `.0`, after asking.
     UndoShip(String, ShipStep),
     /// Undo what followed shipping: bring back its workspace's tabs, or its
@@ -1452,6 +1454,7 @@ impl PanelOutcome {
         matches!(
             self,
             Self::ShowAgent(_)
+                | Self::CheckShip
                 | Self::ShowOwnAgent(_)
                 | Self::ShowCheck(_)
                 | Self::OpenSandbox
