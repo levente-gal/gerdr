@@ -547,7 +547,7 @@ impl Gerdr {
                 });
             };
             // Read from the worktrees here, which a machine running it has a copy of.
-            let pages = {
+            let guessed = {
                 let lines: Vec<SandboxLine> = (lines_of(&feature, &runs, false).into_iter())
                     .filter(|l| l.on)
                     .collect();
@@ -557,11 +557,13 @@ impl Gerdr {
                         command: &l.command,
                     })
                     .collect();
-                sandbox_pages::pages(&set_pages, set_url.as_deref(), &ran)
+                sandbox_pages::pages(&[], None, &ran)
             };
+            let pages = sandbox_pages::settled(&set_pages, set_url.as_deref(), &guessed);
             if let Some(there) = there {
                 let (mut run, missing) = there.run(&stop, &mut progress);
                 run.pages = pages;
+                run.guessed = guessed;
                 return Done::Sandbox {
                     stopped: stop.load(Ordering::Relaxed),
                     project,
@@ -599,6 +601,7 @@ impl Gerdr {
             };
             let mut run = sandbox_run::start(&job, &mut progress);
             run.pages = pages;
+            run.guessed = guessed;
             Done::Sandbox {
                 stopped: stop.load(Ordering::Relaxed),
                 project,

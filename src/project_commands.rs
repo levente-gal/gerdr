@@ -699,6 +699,17 @@ impl CommandsDialog {
             })
     }
 
+    /// Whether anything but the sandbox app's pages was edited.
+    fn changed_besides_pages(&self) -> bool {
+        self.limit_changed()
+            || self.own_changed()
+            || (self.rows.iter()).any(|r| {
+                (COMMANDS_PROJECT_TABS.iter())
+                    .filter(|tab| **tab != CommandsTab::Pages)
+                    .any(|tab| r.slot(*tab).is_some_and(Slot::changed))
+            })
+    }
+
     /// Whether what only the feature runs or skips was edited.
     fn own_changed(&self) -> bool {
         (self.rows.iter()).any(|r| r.own.as_ref().is_some_and(Slot::changed) || r.skip_changed())
@@ -993,6 +1004,16 @@ impl CommandsDialog {
 pub const FEATURE_BODY: &str =
     "One command per line. They run beside the project's, for this feature only.";
 
+/// What the toast says of a save of `what`: the sandbox app's pages, if
+/// `pages` were edited, apply at once, the `rest` from the next run.
+fn saved_said(what: &str, pages: bool, rest: bool) -> String {
+    match (pages, rest) {
+        (true, false) => "Sandbox app pages saved; Open app opens them now".to_owned(),
+        (true, true) => format!("{what} saved; the pages apply now, the rest from the next run"),
+        (false, _) => format!("{what} saved; they apply from the next run"),
+    }
+}
+
 /// What the tab of the sandbox app's pages says they are.
 pub const PAGES_BODY: &str = "A page per line: a name, then its address. Open app opens the first; no port takes what listens.";
 
@@ -1240,6 +1261,7 @@ impl Gerdr {
             return;
         }
         let pages_of = dialog.pages_row().map(|row| row.project.clone());
+        let rest = dialog.changed_besides_pages();
         let ids = dialog.changed_projects();
         let own = dialog.own_changed();
         if ids.is_empty() && !own {
@@ -1287,8 +1309,8 @@ impl Gerdr {
             return;
         }
         self.features.commands_drafts.remove(&dialog.scope);
-        if let Some(project) = pages_of {
-            self.sandbox_pages_set(&project);
+        if let Some(project) = &pages_of {
+            self.sandbox_pages_set(project);
         }
         self.refresh_pointer_focus();
         let what = match (before.is_empty(), feature_before.is_some()) {
@@ -1301,7 +1323,7 @@ impl Gerdr {
             feature: feature_before,
         };
         self.toast_with(
-            format!("{what} saved; they apply from the next run"),
+            saved_said(what, pages_of.is_some(), rest),
             Level::Success,
             Some(("Undo".to_owned(), MenuAction::RestoreProjectCommands(undo))),
         );
@@ -1404,19 +1426,21 @@ impl Gerdr {
     }
 
     /// The pages of `project`'s sandbox app were set: its running sandboxes
-    /// open them from now, with no restart. Emptied, they keep the pages they
-    /// found as they started, until the next start guesses again.
+    /// open them from now, with no restart. Emptied, they open what their
+    /// commands told of as they started.
     fn sandbox_pages_set(&mut self, project: &str) {
-        let Some(set) = (self.projects.project(project))
-            .map(|p| p.workflow.sandbox_pages.clone())
-            .filter(|set| !set.is_empty())
-        else {
+        let Some(w) = self.projects.project(project).map(|p| p.workflow.clone()) else {
             return;
         };
         let mut changed = Vec::new();
         for feature in self.features.all.get_mut(project).into_iter().flatten() {
-            if let Some(run) = feature.sandbox.as_mut().filter(|run| run.pages != set) {
-                run.pages = set.clone();
+            let Some(run) = feature.sandbox.as_mut() else {
+                continue;
+            };
+            let pages =
+                sandbox_pages::settled(&w.sandbox_pages, w.sandbox_url.as_deref(), &run.guessed);
+            if run.pages != pages {
+                run.pages = pages;
                 changed.push(feature.slug.clone());
             }
         }
@@ -2282,5 +2306,20 @@ mod tests {
         assert_eq!(after.sandbox_url, w.sandbox_url);
         assert_eq!(after.verify, w.verify);
         assert_eq!(after.verify_timeout, w.verify_timeout);
+    }
+
+    #[test]
+    fn a_save_says_the_pages_apply_at_once() {
+        let mut d = dialog();
+        pages(&mut d).set("App http://localhost:4200/");
+        assert!(!d.changed_besides_pages());
+        assert_eq!(
+            saved_said("Project commands", true, false),
+            "Sandbox app pages saved; Open app opens them now"
+        );
+        row(&mut d, "api").checks.field.set("make");
+        assert!(d.changed_besides_pages());
+        assert!(saved_said("Commands", true, true).contains("the pages apply now"));
+        assert!(saved_said("Commands", false, true).ends_with("from the next run"));
     }
 }

@@ -114,6 +114,15 @@ pub fn pages(set: &[Page], url: Option<&str>, ran: &[Ran]) -> Vec<Page> {
     first
 }
 
+/// The pages of a sandbox whose commands told of `guessed`: those `set`
+/// lists, else the one `url` names, else `guessed`.
+pub fn settled(set: &[Page], url: Option<&str>, guessed: &[Page]) -> Vec<Page> {
+    match pages(set, url, &[]) {
+        pages if pages.is_empty() => guessed.to_vec(),
+        pages => pages,
+    }
+}
+
 /// The text of the shell script `command`, run in `dir`, runs: `bash
 /// ./runlocal.sh`, `sh run.sh`, `./run.sh`. Its servers are started inside,
 /// out of the command's sight.
@@ -556,6 +565,11 @@ mod tests {
             }]
         );
         assert_eq!(pages(&[], None, &ran), [Page::new("Web app", 8000, "/")]);
+        // What the commands told of is kept for when the settings are emptied.
+        let guessed = [Page::guessed("App")];
+        assert_eq!(settled(&set, None, &guessed), set);
+        assert_eq!(settled(&[], Some("http://localhost:4"), &guessed), one);
+        assert_eq!(settled(&[], None, &guessed), guessed);
     }
 
     #[test]
