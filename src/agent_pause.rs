@@ -132,6 +132,21 @@ impl Gerdr {
         (self.paused_live()).any(|p| Some(p.project.as_str()) == project && p.pane == pane)
     }
 
+    /// herdr's list of the shown project's agents, but a paused one's status
+    /// unknown: herdr's is from before it stopped, and would show it at work.
+    pub(crate) fn mark_paused_agents(&mut self) {
+        let project = self.project.clone();
+        let paused: Vec<String> = (self.paused_live())
+            .filter(|p| Some(&p.project) == project.as_ref())
+            .map(|p| p.pane.clone())
+            .collect();
+        for agent in &mut self.session.agents {
+            if paused.contains(&agent.pane_id) {
+                agent.agent_status = herdr::AgentStatus::Unknown;
+            }
+        }
+    }
+
     /// Pause every agent of every project, or let them go on while some are
     /// paused.
     pub(crate) fn toggle_agents_paused(&mut self) {
@@ -201,9 +216,14 @@ impl Gerdr {
         self.projects.paused_agents.retain(Paused::live);
         self.projects.paused_agents.extend(found.paused);
         self.projects.save();
+        self.mark_paused_agents();
         if !found.unread.is_empty() {
             let names: Vec<String> = (found.unread.iter())
-                .map(|id| self.projects.project(id).map_or_else(|| id.clone(), |p| p.name.clone()))
+                .map(|id| {
+                    self.projects
+                        .project(id)
+                        .map_or_else(|| id.clone(), |p| p.name.clone())
+                })
                 .collect();
             self.show_warning(format!(
                 "Couldn't read the agents of {}: they go on",

@@ -431,6 +431,7 @@ impl TestRun {
                 |o| o.state,
             )),
             icon: crate::agent_icons::AgentIcon::Test,
+            paused: false,
         }
     }
 }
