@@ -433,13 +433,9 @@ impl Gerdr {
             ),
             (false, _) => (
                 format!("Stop the merges in {names}?"),
-                format!(
-                    "Each merge of {} into {} not committed yet is aborted: what was resolved \
-                     there goes, and its branch stays as it was. Its agent's tab stays open: \
-                     close it too.",
-                    resolving.onto(),
-                    resolving.names()
-                ),
+                "Merges not committed yet are aborted; committed ones stay. Its agent's tab \
+                 stays open."
+                    .to_owned(),
             ),
         };
         let then = Then::StopResolving {
@@ -498,11 +494,8 @@ impl Gerdr {
                 format!("Conflicts stopped; the merge in {committed} was committed already"),
             );
             self.save_feature(project, slug);
-            self.probe_feature(project, slug);
-            return self.show_warning(format!(
-                "\u{201c}{title}\u{201d}: the merge in {committed} was committed already: \
-                 it goes back to Verify"
-            ));
+            // The read that follows takes them back to Verify, and says so.
+            return self.probe_feature(project, slug);
         }
         if let Some(r) = feature.shipping.resolving.take() {
             feature.log(now, format!("Conflicts in {}: stopped", r.names()));
