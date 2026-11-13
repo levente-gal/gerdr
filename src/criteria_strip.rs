@@ -27,6 +27,8 @@
 //! The user's own comments are rows of it too, after the criteria: Done and
 //! Not done (Space, F) as on the page, Edit… opens the comment dialog. Add
 //! comment… (C) adds one from any row. Deleting one is on the page.
+//! Screenshot (Alt+C) on an open comment adds what the page shows to it, as
+//! to a failure's note; one done takes none.
 
 use std::{
     collections::HashMap,
@@ -55,17 +57,24 @@ use crate::{
 };
 
 /// The buttons on the strip for row `i`, as `strip_buttons` lists them:
-/// those of its card, but deleting a comment, which the page does, and then
-/// adding one.
-fn strip_buttons(i: usize, row: &Row) -> Vec<(chrome::PageButton, PanelOutcome)> {
+/// those of its card, but deleting a comment, which the page does; a
+/// screenshot for an open comment; and then adding one.
+fn strip_buttons(i: usize, row: &Row) -> Vec<(chrome::PageButton, StripKey)> {
     let mut out: Vec<_> = (criterion_buttons(i, row).into_iter())
-        .filter(|(_, o)| !matches!(o, PanelOutcome::Manual(Outcome::DeleteComment(_))))
+        .filter_map(|(b, o)| match o {
+            PanelOutcome::Manual(Outcome::DeleteComment(_)) => None,
+            PanelOutcome::Manual(o) => Some((b, StripKey::Do(o))),
+            _ => None,
+        })
         .collect();
-    let add = chrome::PageButton {
-        label: "Add comment\u{2026}".to_owned(),
+    let quiet = |label: &str| chrome::PageButton {
+        label: label.to_owned(),
         style: chrome::ButtonStyle::Quiet,
     };
-    out.push((add, PanelOutcome::AddComment));
+    if row.comment && row.found == Some(Verdict::Fail) {
+        out.push((quiet("Screenshot"), StripKey::Shot));
+    }
+    out.push((quiet("Add comment\u{2026}"), StripKey::AddComment));
     out
 }
 
@@ -314,7 +323,7 @@ const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
         chord: "Alt+C",
         does: |_| Some(StripKey::Shot),
         footer: true,
-        f1: "add a screenshot of the page to the note",
+        f1: "add a screenshot of the page to the note, or to an open comment",
     },
     Binding {
         chord: "Alt+Super+C",
@@ -590,15 +599,21 @@ impl Gerdr {
             StripHit::Button(b) => {
                 let target = self.criteria_target()?;
                 let (rows, i) = self.strip_rows(&target)?;
-                let (button, outcome) = strip_buttons(i, &rows[i]).into_iter().nth(b)?;
-                let PanelOutcome::Manual(outcome) = outcome else {
-                    let mut tip =
-                        Tooltip::new("Add a comment of your own: what should change", rect);
-                    tip.key = Some(strip_chord(&StripKey::AddComment).to_owned());
-                    return Some(tip);
-                };
-                let (text, key) = button_tip(&outcome, &button.label);
-                (text.into(), key)
+                let (button, does) = strip_buttons(i, &rows[i]).into_iter().nth(b)?;
+                match does {
+                    StripKey::Do(outcome) => {
+                        let (text, key) = button_tip(&outcome, &button.label);
+                        (text.into(), key)
+                    }
+                    StripKey::Shot => (
+                        "Add a screenshot of the page to the comment".into(),
+                        strip_chord(&StripKey::Shot),
+                    ),
+                    _ => (
+                        "Add a comment of your own: what should change".into(),
+                        strip_chord(&StripKey::AddComment),
+                    ),
+                }
             }
             StripHit::Field | StripHit::Panel => return None,
         };
@@ -632,13 +647,14 @@ impl Gerdr {
                     return;
                 };
                 let outcome = match strip_buttons(i, &rows[i]).into_iter().nth(b) {
-                    Some((_, PanelOutcome::Manual(outcome))) => outcome,
-                    Some((_, PanelOutcome::AddComment)) => {
+                    Some((_, StripKey::Do(outcome))) => outcome,
+                    Some((_, StripKey::AddComment)) => {
                         if self.keep_strip_note(&target) {
                             self.ask_add_comment(&target.project, &target.slug);
                         }
                         return;
                     }
+                    Some((_, StripKey::Shot)) => return self.criterion_shot(&target),
                     _ => return,
                 };
                 // A note being written is saved before what changes the
@@ -875,7 +891,8 @@ impl Gerdr {
     }
 
     /// Ask the strip's page for a screenshot, for the note of the criterion
-    /// shown: one is started if none is written.
+    /// shown: one is started if none is written. A comment says what is
+    /// wrong itself: the screenshot goes to it, while it is open.
     fn criterion_shot(&mut self, target: &Target) {
         if self.criteria_strip.shot.is_some() {
             return self.show_warning("Still taking the last screenshot".into());
@@ -891,6 +908,15 @@ impl Gerdr {
         else {
             return;
         };
+        let open = (self.feature(&target.project, &target.slug))
+            .and_then(|f| manual::check(f.manual.as_ref(), &c))
+            .is_some_and(|k| k.state == Verdict::Fail);
+        if c.comment && !open {
+            return self.show_warning(format!(
+                "{} is done: press Not done to add a screenshot to it",
+                c.id
+            ));
+        }
         if !self.strip_writes(target) {
             return;
         }
@@ -899,7 +925,9 @@ impl Gerdr {
                 "This page can't be captured: its browser runs without gerdr's extension".into(),
             );
         }
-        self.write_strip_note(target, c.clone());
+        if !c.comment {
+            self.write_strip_note(target, c.clone());
+        }
         let since = Instant::now();
         self.criteria_strip.shot = Some(ShotWait {
             pane: target.pane,
@@ -1077,6 +1105,31 @@ mod tests {
             seen: false,
             planning: false,
         }
+    }
+
+    #[test]
+    fn an_open_comment_offers_a_screenshot_a_done_one_and_criteria_dont() {
+        let shot = |r: &Row| (strip_buttons(0, r).iter()).any(|(_, k)| *k == StripKey::Shot);
+        let comment = |found| Row {
+            comment: true,
+            ..row(found)
+        };
+        assert!(shot(&comment(Some(Verdict::Fail))));
+        assert!(!shot(&comment(Some(Verdict::Pass))));
+        assert!(!shot(&row(Some(Verdict::Fail))));
+        let labels: Vec<_> = (strip_buttons(0, &comment(Some(Verdict::Fail))).into_iter())
+            .map(|(b, _)| b.label)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Edit\u{2026}",
+                "Done",
+                "Not done",
+                "Screenshot",
+                "Add comment\u{2026}"
+            ]
+        );
     }
 
     #[test]
