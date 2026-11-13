@@ -449,6 +449,14 @@ impl Gerdr {
             }
             PanelOutcome::SendPrompt(stage) => self.send_stage_prompt(&project, &slug, stage),
             PanelOutcome::ShowAgent(stage) => self.show_stage_agent(&project, &slug, stage),
+            PanelOutcome::ShowOwnAgent(n) => {
+                let pane = (self.feature(&project, &slug))
+                    .and_then(|f| f.own_agents.iter().find(|a| a.n == n)?.pane.clone());
+                match pane.filter(|p| self.pane_there(p)) {
+                    Some(pane) => self.focus_agent(&crate::agents::AgentKey::Herdr(pane)),
+                    None => self.show_warning("That agent's tab is closed".to_owned()),
+                }
+            }
             PanelOutcome::ResumeAgent(stage) => self.resume_stage_agent(&project, &slug, stage),
             PanelOutcome::OpenDoc(stage) => {
                 self.open_doc_tab(&project, &slug, DocFile::Stage(stage));

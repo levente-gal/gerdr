@@ -527,6 +527,7 @@ impl Gerdr {
             shipping: Default::default(),
             ship_plan: Default::default(),
             runs: Default::default(),
+            own_agents: Vec::new(),
             stage_agents: Default::default(),
             stage_machines: Default::default(),
             setups_elsewhere: Vec::new(),

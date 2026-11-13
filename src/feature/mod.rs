@@ -789,6 +789,9 @@ pub struct Feature {
     /// The agent stages' latest runs (see `agents`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub runs: BTreeMap<Stage, agents::StageRun>,
+    /// The agents the user started for it with its AI button, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own_agents: Vec<agents::OwnRun>,
     /// The agent picked on a stage's page, by the name the picker gives
     /// it; over the project's `workflow.agents`, and only where it differs
     /// from what that gives.
@@ -2016,6 +2019,7 @@ pub(crate) mod tests {
             shipping: Default::default(),
             ship_plan: Default::default(),
             runs: Default::default(),
+            own_agents: Vec::new(),
             stage_agents: Default::default(),
             stage_machines: Default::default(),
             setups_elsewhere: Vec::new(),
@@ -2116,6 +2120,7 @@ pub(crate) mod tests {
             context: Vec::new(),
             removed: Vec::new(),
             runs: BTreeMap::new(),
+            own_agents: Vec::new(),
             stage_agents: BTreeMap::new(),
             stage_machines: BTreeMap::new(),
             setups_elsewhere: Vec::new(),

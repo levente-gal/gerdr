@@ -1144,6 +1144,12 @@ pub(crate) fn agent_tab_label(agent: &str, stage: Stage) -> String {
     format!("{agent} \u{b7} {}", stage.label())
 }
 
+/// The name an own agent's tab goes by, and so its sidebar row: its agent
+/// and which of the feature's own agents it is ("Claude Code · Agent 2").
+pub(crate) fn own_tab_label(agent: &str, n: u32) -> String {
+    format!("{agent} \u{b7} Agent {n}")
+}
+
 /// What the feature panel says of `run` under its stage: its agent's state,
 /// as herdr has it (`status`) and the watch saw it (`watch`).
 pub(crate) fn agent_line(
@@ -1516,6 +1522,136 @@ impl Gerdr {
     pub(crate) fn label_agent_tab(&mut self, pane: &str, agent: &str, stage: Stage) {
         if let Some((w, t)) = self.herdr_pane_place(pane) {
             self.rename_tab(w, t, agent_tab_label(agent, stage));
+        }
+    }
+
+    /// Start agent CLI `command` for feature `slug` in a new tab of its
+    /// workspace `w`: told what the feature is (`agent.md`) where gerdr knows
+    /// how to give it a prompt, then left to the user. The feature keeps it
+    /// (`Feature::own_agents`), its log says so and its page shows it. Whether
+    /// it started one: not for a feature that isn't written here.
+    pub(crate) fn start_own_agent(
+        &mut self,
+        w: usize,
+        project: &str,
+        slug: &str,
+        command: &str,
+    ) -> bool {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return false;
+        };
+        let data = store::dir(None, project, slug);
+        let line = feature::agents::allowed_into(command, &feature.agent_dirs_for(command, &data));
+        let n = feature.own_agents.last().map_or(1, |a| a.n + 1);
+        let agent = (self.launcher.cli_agents.iter())
+            .find(|a| {
+                (a.command()).is_some_and(|c| command == c || command.starts_with(&format!("{c} ")))
+            })
+            .map_or_else(
+                || feature::agents::program(command).to_owned(),
+                |a| a.name.clone(),
+            );
+        // Another CLI may read a bare argument as something else (OpenCode,
+        // as a folder): it starts untold.
+        let told = matches!(
+            Flavor::of(command),
+            Flavor::Claude | Flavor::Codex | Flavor::Cursor
+        );
+        let line = match told {
+            true => match self.own_agent_prompt(&feature, project, slug, n) {
+                Ok(start) => with_prompt(&line, &start),
+                Err(why) => {
+                    tracing::warn!("{why}");
+                    self.show_error(why);
+                    return true;
+                }
+            },
+            false => line,
+        };
+        // No pane to follow (herdr gone, or the tab didn't open, which said
+        // so): nothing to keep.
+        let Some(pane) = self.new_tab_pane(w, &feature.dir, Some(line)) else {
+            return true;
+        };
+        if let Some((w, t)) = self.herdr_pane_place(&pane) {
+            self.rename_tab(w, t, own_tab_label(&agent, n));
+        }
+        let now = feature::now();
+        let Some(f) = self.feature_mut(project, slug) else {
+            return true;
+        };
+        f.own_agents.push(feature::agents::OwnRun {
+            n,
+            agent: agent.clone(),
+            pane: Some(pane),
+            started: now,
+        });
+        f.log(now, format!("Own agent started: {agent} (agent {n})"));
+        self.save_feature(project, slug);
+        true
+    }
+
+    /// The line that tells own agent `n` of `feature` what the feature is:
+    /// its prompt written to the feature's data folder, as stage agents'
+    /// are.
+    fn own_agent_prompt(
+        &self,
+        feature: &Feature,
+        project: &str,
+        slug: &str,
+        n: u32,
+    ) -> Result<String, String> {
+        let data = store::dir(None, project, slug);
+        let stage = feature.current().unwrap_or(Stage::Ship);
+        let names = self.projects.names(feature);
+        let mut values = vars(feature, &names, &data, stage);
+        values.insert("stage".into(), stage.label().to_owned());
+        let text = prompts::render_builtin("agent", &values)
+            .map_err(|err| format!("Couldn't write the agent's prompt: {err}"))?;
+        let prompt = write_prompt(&data, &format!("agent-{n}.md"), &text)?;
+        self.start_line(feature, project, slug, stage, &prompt)
+            .map_err(|err| format!("Couldn't write the agent's prompt: {err}"))
+    }
+
+    /// The tabs of the features' own agents of `project` that stay gone: their
+    /// records forget them, and their pages stop showing them.
+    fn own_agents_tick(&mut self, project: &str) {
+        let Some(all) = self.features.all.get(project) else {
+            return;
+        };
+        let panes: Vec<(String, u32, String)> = (all.iter())
+            .flat_map(|f| {
+                (f.own_agents.iter()).filter_map(|a| Some((f.slug.clone(), a.n, a.pane.clone()?)))
+            })
+            .collect();
+        let now = Instant::now();
+        let mut gone = Vec::new();
+        for (slug, n, pane) in panes {
+            let alive = self
+                .agent_key_state(&agents::AgentKey::Herdr(pane.clone()))
+                .1;
+            if alive {
+                self.features.own_gone.remove(&pane);
+                continue;
+            }
+            // herdr may only be coming back.
+            let since = *self.features.own_gone.entry(pane.clone()).or_insert(now);
+            if now.duration_since(since) >= STABLE {
+                self.features.own_gone.remove(&pane);
+                gone.push((slug, n));
+            }
+        }
+        for (slug, n) in gone {
+            let Some(f) = self.feature_mut(project, &slug) else {
+                continue;
+            };
+            let Some(own) = f.own_agents.iter_mut().find(|a| a.n == n) else {
+                continue;
+            };
+            own.pane = None;
+            let what = format!("Own agent's tab closed: {} (agent {n})", own.agent);
+            f.log(feature::now(), what);
+            self.save_feature(project, &slug);
         }
     }
 
@@ -2290,6 +2426,7 @@ impl Gerdr {
         self.fix_rounds_tick(&project);
         self.adopt_checks(&project);
         self.conflicts_agents_tick(&project);
+        self.own_agents_tick(&project);
         let Some(all) = self.features.all.get(&project) else {
             return;
         };
@@ -4197,6 +4334,20 @@ mod tests {
         let text = prompts::render_builtin("plan", &v).unwrap();
         assert!(text.contains("Feature a") && text.contains("Acme"));
         assert_eq!(stage_key(Stage::AiReview), "ai-review");
+        // An own agent is told where the feature is and to wait.
+        let mut v = v;
+        v.insert("stage".into(), "Plan".into());
+        let text = prompts::render_builtin("agent", &v).unwrap();
+        assert!(
+            text.contains("\u{201c}Feature a\u{201d} in project\nAcme"),
+            "{text}"
+        );
+        assert!(text.contains("it is at\nPlan now") && text.contains("/data/a/brief.md"));
+        assert!(text.contains("wait for the user") && !text.contains("{{"));
+        assert_eq!(
+            own_tab_label("Claude Code", 2),
+            "Claude Code \u{b7} Agent 2"
+        );
     }
 
     #[test]

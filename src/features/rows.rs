@@ -779,6 +779,7 @@ pub(super) fn works_during_checks(outcome: &PanelOutcome) -> bool {
             | PanelOutcome::ReviewFixPlan
             | PanelOutcome::DropFixPlan
             | PanelOutcome::ShowAgent(_)
+            | PanelOutcome::ShowOwnAgent(_)
             | PanelOutcome::GoToCurrent
     )
 }
@@ -1666,7 +1667,7 @@ pub(super) fn action_hint(action: &PanelOutcome) -> &'static str {
     match action {
         PanelOutcome::StartAgent(..) => "start agent",
         PanelOutcome::SendPrompt(_) => "send prompt",
-        PanelOutcome::ShowAgent(_) => "show agent",
+        PanelOutcome::ShowAgent(_) | PanelOutcome::ShowOwnAgent(_) => "show agent",
         PanelOutcome::ResumeAgent(_) => "resume agent",
         PanelOutcome::OpenDoc(Stage::Discover) => "review brief",
         PanelOutcome::OpenDoc(_) => "review plan",

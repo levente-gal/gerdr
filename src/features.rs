@@ -178,6 +178,9 @@ pub struct Features {
     /// Features this gerdr takes back because the machine writing them handed
     /// them back (`lease::HAND_BACK`): taken, they have nobody to hand back to.
     pub(crate) taking_back: std::collections::BTreeSet<(String, String)>,
+    /// When the tab of each of the features' own agents was first seen gone,
+    /// by its pane: it forgets the tab only once it stays gone.
+    pub(crate) own_gone: HashMap<String, Instant>,
     /// When each machine was last told its record lost, by machine, project, slug.
     pub(crate) claims: HashMap<(String, String, String), Instant>,
     /// Cursor's models, for the picker of a stage's model.
@@ -1182,6 +1185,8 @@ pub enum PanelOutcome {
     SendPrompt(Stage),
     /// Show this agent stage's agent.
     ShowAgent(Stage),
+    /// Show the feature's own agent `n` (`Feature::own_agents`).
+    ShowOwnAgent(u32),
     /// Go back to the chat of this agent stage's agent, its tab closed.
     ResumeAgent(Stage),
     /// Show the stage's file in its tab: one already open as it stands, a
@@ -1447,6 +1452,7 @@ impl PanelOutcome {
         matches!(
             self,
             Self::ShowAgent(_)
+                | Self::ShowOwnAgent(_)
                 | Self::ShowCheck(_)
                 | Self::OpenSandbox
                 | Self::OpenSandboxPage(_)

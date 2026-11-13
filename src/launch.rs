@@ -378,12 +378,26 @@ impl Gerdr {
     }
 
     /// Start an agent CLI by `command` in a new tab of workspace `w`, in
-    /// its folder: herdr shows it as an agent like any other. In a
-    /// feature's workspace it may go where the feature's stage agents go.
+    /// its folder: herdr shows it as an agent like any other. In the
+    /// workspace of a feature written here it is the feature's own agent
+    /// (`start_own_agent`); in another's it may still go where the
+    /// feature's stage agents go.
     pub fn new_agent(&mut self, w: usize, command: &str) {
         let Some(dir) = self.workspaces.get(w).map(|ws| ws.dir.clone()) else {
             return;
         };
+        let own = (self.project.clone()).and_then(|project| {
+            let all = self.features.all.get(&project)?;
+            let slug = crate::feature_workspace::feature_on(all, &dir)?
+                .slug
+                .clone();
+            Some((project, slug))
+        });
+        if let Some((project, slug)) = own
+            && self.start_own_agent(w, &project, &slug, command)
+        {
+            return;
+        }
         let dirs = match (self.project.as_deref(), self.workspace_feature(w)) {
             (Some(project), Some(feature)) => {
                 let data = crate::feature::store::dir(None, project, &feature.slug);

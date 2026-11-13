@@ -254,8 +254,29 @@ pub fn page_actions(
         let style = ButtonStyle::Plain;
         out.push((PageButton { label, style }, PanelOutcome::HandBack));
     }
+    if stage == own_page(feature) {
+        out.extend(own_actions(feature));
+    }
     manual_order(feature, stage, ctx, &mut out);
     out
+}
+
+/// The page that shows `feature`'s own agents: that of the stage it is at.
+pub(super) fn own_page(feature: &Feature) -> Stage {
+    feature.current().unwrap_or(Stage::Ship)
+}
+
+/// The way to each of `feature`'s own agents whose tab is there, on its card.
+fn own_actions(feature: &Feature) -> impl Iterator<Item = (PageButton, PanelOutcome)> + '_ {
+    (feature.own_agents.iter())
+        .filter(|a| a.pane.is_some())
+        .map(|a| {
+            let button = PageButton {
+                label: "Show agent".to_owned(),
+                style: ButtonStyle::Plain,
+            };
+            (button, PanelOutcome::ShowOwnAgent(a.n))
+        })
 }
 
 /// Manual test's buttons in the order of every page: its gate, Mark passed,

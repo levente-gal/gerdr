@@ -26,6 +26,8 @@ pub(super) struct PanelState<'a> {
     /// gerdr reads what that agent wrote (`feature_agents::Watch::reads`):
     /// it waits on gerdr, not on the user.
     pub(super) agent_read: bool,
+    /// What each of its own agents with a tab does, by `OwnRun::n`.
+    pub(super) own_status: Vec<(u32, Option<AgentStatus>)>,
     /// The last lines of its current stage's agent's pane, as last read.
     pub(super) tail: &'a [String],
     /// What its rows need besides it.

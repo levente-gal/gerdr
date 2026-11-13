@@ -376,6 +376,9 @@ pub fn taken(
             moved(&mut run.machine);
         }
     }
+    for own in &mut out.own_agents {
+        cut(&mut own.pane);
+    }
     if let Some(verify) = &mut out.verify {
         moved(&mut verify.machine);
         for check in &mut verify.checks {

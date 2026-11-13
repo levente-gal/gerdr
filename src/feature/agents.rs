@@ -344,6 +344,22 @@ pub enum T3Run {
     },
 }
 
+/// An agent the user started for the feature with its AI button: told what
+/// the feature is, then theirs to direct. Kept so the feature's page shows it
+/// while its tab is there.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnRun {
+    /// Which of the feature's own agents: 1, 2, …
+    pub n: u32,
+    /// The agent's name, as the picker shows it ("Claude Code").
+    pub agent: String,
+    /// The herdr pane it runs in, while its tab is there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
+    /// Unix seconds.
+    pub started: u64,
+}
+
 /// One run of a stage's agent, kept in the feature record.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StageRun {

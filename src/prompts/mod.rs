@@ -24,6 +24,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "nudge" => (include_str!("../../assets/prompts/nudge.md"), 1),
         "send-back" => (include_str!("../../assets/prompts/send-back.md"), 1),
         "start" => (include_str!("../../assets/prompts/start.md"), 1),
+        "agent" => (include_str!("../../assets/prompts/agent.md"), 1),
         "rules" => (include_str!("../../assets/prompts/rules.md"), 1),
         "repos" => (include_str!("../../assets/prompts/repos.md"), 5),
         "summary" => (include_str!("../../assets/prompts/summary.md"), 1),

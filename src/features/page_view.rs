@@ -332,6 +332,14 @@ pub(super) fn stage_page(
         };
         sections.insert(at, next);
     }
+    // The feature's own agents go under the stage's, else first.
+    let own = own_cards(feature, stage, state, actions, now);
+    if !own.is_empty() {
+        let at = (sections.iter())
+            .rposition(|s| matches!(s, PageSection::Agent { .. }))
+            .map_or(0, |i| i + 1);
+        sections.splice(at..at, own);
+    }
     // The agent's card says what it does: the status line needn't again.
     let carded = |l: &CheckLine| {
         (sections.iter()).any(|s| {

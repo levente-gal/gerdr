@@ -949,6 +949,12 @@ impl Gerdr {
             agent,
             agent_status,
             agent_standing: self.agent_standing_of(feature),
+            own_status: (feature.own_agents.iter())
+                .filter_map(|a| {
+                    let key = crate::agents::AgentKey::Herdr(a.pane.clone()?);
+                    Some((a.n, self.agent_key_state(&key).0))
+                })
+                .collect(),
             agent_read,
             tail,
             ctx: self.row_ctx(feature),

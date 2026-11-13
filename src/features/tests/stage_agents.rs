@@ -1099,3 +1099,65 @@ fn build_continues_after_a_milestone_and_offers_no_mark() {
         Some(PanelOutcome::StartAgent(Stage::Build, true))
     );
 }
+
+#[test]
+fn own_agents_with_a_tab_show_on_the_page_of_the_stage_it_is_at() {
+    let mut f = feature("o", vec![repo("api", true)], 2);
+    let own = |n, pane: Option<&str>| feature::agents::OwnRun {
+        n,
+        agent: "Claude Code".into(),
+        pane: pane.map(str::to_owned),
+        started: 1_000,
+    };
+    // The second's tab is closed: nothing to show.
+    f.own_agents = vec![own(1, Some("p1")), own(2, None), own(3, Some("p3"))];
+    let at = f.current().unwrap();
+    let actions = page_actions(&f, at, RowCtx::default());
+    let shows: Vec<_> = (actions.iter())
+        .filter(|(_, o)| matches!(o, PanelOutcome::ShowOwnAgent(_)))
+        .map(|(b, o)| (b.label.as_str(), o.clone()))
+        .collect();
+    assert_eq!(
+        shows,
+        [
+            ("Show agent", PanelOutcome::ShowOwnAgent(1)),
+            ("Show agent", PanelOutcome::ShowOwnAgent(3)),
+        ]
+    );
+    let state = PanelState {
+        own_status: vec![
+            (1, Some(AgentStatus::Blocked)),
+            (3, Some(AgentStatus::Working)),
+        ],
+        ..PanelState::default()
+    };
+    let page = stage_page(&f, at, &state, &actions, 1_120);
+    let cards: Vec<_> = (page.sections.iter())
+        .filter_map(|s| match s {
+            PageSection::Agent {
+                name,
+                status,
+                waits,
+                buttons,
+                ..
+            } if name == "Claude Code" => Some((status.clone(), *waits, buttons.len())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cards.len(), 2, "{:?}", page.sections);
+    let said = |k: usize, start: &str| assert!(cards[k].0.starts_with(start), "{}", cards[k].0);
+    said(0, "agent 1 \u{b7} asks you \u{b7} started");
+    assert!(cards[0].1, "asking, it waits on the user");
+    said(1, "agent 3 \u{b7} working");
+    assert!(!cards[1].1);
+    assert_eq!((cards[0].2, cards[1].2), (1, 1), "each its own Show agent");
+    // Not on another stage's page.
+    let other = Stage::Discover;
+    let actions = page_actions(&f, other, RowCtx::default());
+    let shows = |o: &PanelOutcome| matches!(o, PanelOutcome::ShowOwnAgent(_));
+    assert!(!actions.iter().any(|(_, o)| shows(o)));
+    let page = stage_page(&f, other, &state, &actions, 1_120);
+    let own =
+        |s: &PageSection| matches!(s, PageSection::Agent { name, .. } if name == "Claude Code");
+    assert!(!page.sections.iter().any(own));
+}

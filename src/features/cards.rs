@@ -102,6 +102,55 @@ pub(super) fn agent_card(
     })
 }
 
+/// The cards of `feature`'s own agents whose tab is there, on the page of
+/// the stage it is at (`own_page`), each with its Show agent in `actions`.
+pub(super) fn own_cards(
+    feature: &Feature,
+    stage: Stage,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Vec<PageSection> {
+    if stage != own_page(feature) {
+        return Vec::new();
+    }
+    let live = feature.own_agents.iter().filter(|a| a.pane.is_some());
+    live.map(|own| {
+        let status = (state.own_status.iter())
+            .find(|(n, _)| *n == own.n)
+            .and_then(|(_, s)| *s);
+        let started = format!("started {}", crate::clock::ago(now, own.started));
+        let words = match status {
+            Some(AgentStatus::Working) => "working",
+            Some(AgentStatus::Blocked) => "asks you",
+            Some(AgentStatus::Idle | AgentStatus::Done) => "your turn",
+            _ => "",
+        };
+        let status_line = match words {
+            "" => format!("agent {} \u{b7} {started}", own.n),
+            words => format!("agent {} \u{b7} {words} \u{b7} {started}", own.n),
+        };
+        let buttons = (actions.iter().enumerate())
+            .filter(|(_, (_, o))| *o == PanelOutcome::ShowOwnAgent(own.n))
+            .map(|(i, _)| i)
+            .collect();
+        let waits = status == Some(AgentStatus::Blocked);
+        PageSection::Agent {
+            stage,
+            icon: AgentIcon::from_agent(&own.agent),
+            name: own.agent.clone(),
+            dot: status.map_or(Dot::Unknown, Dot::of_status),
+            status: status_line,
+            tail: Vec::new(),
+            buttons,
+            picks: Vec::new(),
+            model: None,
+            waits,
+        }
+    })
+    .collect()
+}
+
 /// What an agent card shows of its pane's last lines: none of the shell's
 /// prompt or the command gerdr launched it with (a path and flags, cut off),
 /// and while it doesn't wait on the user only its last line, a plain status;
