@@ -1339,6 +1339,9 @@ pub enum PanelOutcome {
     Evidence,
     /// Open this pull request's page.
     OpenPr(String),
+    /// Open the repositories panel on the feature's worktree of this
+    /// repository (by key), all its worktrees ticked.
+    OpenRepos(String),
     /// A pull request's review: move its worktree to the head GitHub has
     /// now (see `pr_watch`).
     UpdatePrHead,

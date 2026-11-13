@@ -1436,7 +1436,10 @@ fn each_kind_of_row_has_its_buttons() {
     };
     assert_eq!(
         of(RepoEntry::Held(0)),
-        [PanelOutcome::MakeContext("api".into())]
+        [
+            PanelOutcome::MakeContext("api".into()),
+            PanelOutcome::OpenRepos("api".into())
+        ]
     );
     assert_eq!(
         of(RepoEntry::Context(0)),

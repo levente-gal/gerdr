@@ -121,7 +121,8 @@ fn a_repository_with_a_pull_request_opens_it_by_button_and_key() {
     let view = tab_view(&panel, &f, &slugs, &state, 2_060);
     assert_eq!(view.repos[0].buttons.first(), Some(&"Open PR"));
     assert_eq!(view.repos[0].line, "feature/bulk \u{b7} PR api/pull/12");
-    assert!(view.repos[1].buttons.is_empty(), "a shipped one's can't go");
+    // A shipped one's can't go: only its worktree opens in the repos panel.
+    assert_eq!(view.repos[1].buttons, ["Repos"]);
     assert_eq!(view.repos[2].buttons.first(), Some(&FEATURE_BUTTON));
     assert!(
         view.hints

@@ -102,8 +102,10 @@ pub fn entry_buttons(
                 buttons.push(("Open PR", PanelOutcome::OpenPr(pr.url.clone())));
             }
             if repo_removable(feature, i) {
-                buttons.push((CONTEXT_BUTTON, PanelOutcome::MakeContext(key)));
+                buttons.push((CONTEXT_BUTTON, PanelOutcome::MakeContext(key.clone())));
             }
+            // Last: Enter does the first.
+            buttons.push((REPOS_BUTTON, PanelOutcome::OpenRepos(key)));
             buttons
         }
         RepoEntry::Context(_) if found() => {
@@ -116,6 +118,9 @@ pub fn entry_buttons(
         _ => Vec::new(),
     }
 }
+
+/// The button opening the repositories panel on a worktree of the feature.
+const REPOS_BUTTON: &str = "Repos";
 
 /// The button adding a repository to the feature, on its branch.
 pub(super) const FEATURE_BUTTON: &str = "Feature";

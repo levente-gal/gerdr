@@ -186,7 +186,6 @@ impl GitStatus {
 /// It runs every few seconds for every workspace folder (as `read_all`),
 /// so it keeps to five git commands where it can and reads git's own files
 /// for the rest.
-#[cfg(test)]
 pub fn status(dir: &Path) -> Option<GitStatus> {
     let mut status = own_status(dir)?;
     (status.here, status.worktrees) = split_worktrees(worktrees(dir), status.root.as_deref());
@@ -711,6 +710,41 @@ pub fn checkout_in_main(main: &Path, w: &Worktree) -> Result<(), String> {
     Ok(())
 }
 
+/// Give `branch` back to the worktree at `w` from the main worktree at
+/// `main`: the undo of `checkout_in_main`. Main goes back to the branch it
+/// was on before it took `branch`, else to `fallback`; when main isn't on
+/// `branch`, `w` only switches to it. Changes to tracked files either side
+/// stop it; main takes `branch` again if `w` can't.
+pub fn give_back(main: &Path, w: &Path, branch: &str, fallback: Option<&str>) -> Result<(), String> {
+    for dir in [main, w] {
+        let edited = git(dir, &["status", "--porcelain", "--untracked-files=no"])
+            .ok_or_else(|| format!("couldn't read {}", dir.display()))?;
+        if !edited.trim().is_empty() {
+            return Err(format!("{} has uncommitted changes", dir.display()));
+        }
+    }
+    let on = git(main, &["symbolic-ref", "-q", "--short", "HEAD"]);
+    if on.as_deref().map(str::trim) != Some(branch) {
+        return git_run(w, &["switch", branch]).map(drop);
+    }
+    let local = |b: &String| git(main, &["show-ref", "--verify", "-q", &format!("refs/heads/{b}")]).is_some();
+    let before = git(main, &["rev-parse", "--abbrev-ref", "@{-1}"])
+        .map(|b| b.trim().to_owned())
+        .filter(|b| b != branch && local(b));
+    let to = before
+        .or_else(|| fallback.map(str::to_owned))
+        .filter(|b| b != branch)
+        .ok_or_else(|| format!("{} has no other branch to go back to", main.display()))?;
+    git_run(main, &["switch", &to])?;
+    if let Err(why) = git_run(w, &["switch", branch]) {
+        return Err(match git_run(main, &["switch", branch]) {
+            Ok(_) => why,
+            Err(back) => format!("{why}; {} is left on {to}: {back}", main.display()),
+        });
+    }
+    Ok(())
+}
+
 /// An untracked file or folder of a worktree, for a checkout to bring
 /// along or leave behind.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1023,7 +1057,7 @@ fn code(xy: &str) -> char {
 mod tests {
     use super::{
         Change, GitStatus, InProgress, Worktree, bring_untracked, checkout_check, checkout_in_main,
-        clashes, parse, parse_worktrees, pick_remote, remote_to_web, remove_worktree, squash_check,
+        clashes, give_back, parse, parse_worktrees, pick_remote, remote_to_web, remove_worktree, squash_check,
         status, untracked,
     };
     use std::{
@@ -1285,6 +1319,39 @@ mod tests {
         assert!(checkout_in_main(&repo.0, &topic).is_err());
         assert_eq!(status(&repo.0).unwrap().branch.as_deref(), Some("main"));
         assert_eq!(status(&path).unwrap().branch.as_deref(), Some("topic"));
+    }
+
+    #[test]
+    fn a_branch_taken_into_main_is_given_back() {
+        let repo = Repo::new();
+        repo.branch_commit("dev", "d", "dev");
+        repo.git(&repo.0, &["switch", "-q", "dev"]);
+        let path = repo.worktree("topic");
+        checkout_in_main(&repo.0, &repo.find("topic")).unwrap();
+        // Changes to tracked files stop it.
+        std::fs::write(path.join("topic"), "edited").unwrap();
+        assert!(give_back(&repo.0, &path, "topic", Some("main")).is_err());
+        repo.git(&path, &["checkout", "--", "topic"]);
+        // Main goes back to the branch it was on: dev, not the fallback.
+        assert_eq!(give_back(&repo.0, &path, "topic", Some("main")), Ok(()));
+        assert_eq!(status(&repo.0).unwrap().branch.as_deref(), Some("dev"));
+        assert_eq!(status(&path).unwrap().branch.as_deref(), Some("topic"));
+        // Main not on it: the worktree only switches.
+        repo.git(&path, &["switch", "-q", "--detach"]);
+        assert_eq!(give_back(&repo.0, &path, "topic", None), Ok(()));
+        assert_eq!(status(&path).unwrap().branch.as_deref(), Some("topic"));
+    }
+
+    #[test]
+    fn a_branch_the_worktree_cant_take_stays_in_main() {
+        let repo = Repo::new();
+        let path = repo.worktree("topic");
+        checkout_in_main(&repo.0, &repo.find("topic")).unwrap();
+        // topic moves on in main with a file the worktree has untracked.
+        repo.commit(&repo.0, "late", "late");
+        std::fs::write(path.join("late"), "mine").unwrap();
+        assert!(give_back(&repo.0, &path, "topic", Some("main")).is_err());
+        assert_eq!(status(&repo.0).unwrap().branch.as_deref(), Some("topic"));
     }
 
     #[test]

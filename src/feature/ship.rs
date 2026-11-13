@@ -1265,7 +1265,7 @@ fn delete_branch(repo: &Repo, branch: &str, sha: Option<&str>) -> Result<(), Str
     } else {
         &repo.main
     };
-    match git_ops::delete_remote_branch(dir, "origin", branch, sha).map_err(|f| push_why(&f)) {
+    match git_ops::delete_remote_branch(dir, "origin", branch, sha).map_err(|f| f.why) {
         Ok(_) => Ok(()),
         Err(why) if why.contains("remote ref does not exist") => Ok(()),
         Err(why) if why.contains("stale info") => Err(format!(
@@ -1363,34 +1363,10 @@ pub fn summary_text(feature: &Feature) -> Option<String> {
 fn push(repo: &Repo, branch: &str, lease: bool) -> Result<String, String> {
     let head = git(&repo.worktree, &["rev-parse", "HEAD"])?;
     let head = head.trim().to_owned();
-    hook::allow(&repo.main, branch, &head)?;
-    let pushed = git_ops::push(&repo.worktree, Some("origin"), lease);
-    let guarded = hook::guard(&repo.main, branch);
-    if let Err(err) = &guarded {
-        tracing::warn!("guarding {branch} of {} again: {err}", repo.key());
-    }
-    pushed.map(|_| head).map_err(|failed| push_why(&failed))
-}
-
-/// One line on why a push failed: git's own last line only says "failed
-/// to push some refs" when a hook refused it, so the first line of what
-/// was printed then.
-fn push_why(failed: &git_ops::Failed) -> String {
-    if !failed.why.starts_with("failed to push some refs") {
-        return failed.why.clone();
-    }
-    let output = failed.log.last().map(|r| r.output.as_str()).unwrap_or("");
-    output
-        .lines()
-        .map(str::trim)
-        .find(|l| {
-            !l.is_empty()
-                && !l.starts_with("To ")
-                && !l.starts_with("error: failed to push")
-                && !l.starts_with("hint:")
-        })
-        .unwrap_or(&failed.why)
-        .to_owned()
+    let pushed = hook::past_guard(&repo.main, branch, &head, || {
+        git_ops::push(&repo.worktree, Some("origin"), lease)
+    })?;
+    pushed.map(|_| head).map_err(|failed| failed.why)
 }
 
 /// The open pull request of `branch` of `repo`, or a new one into `base`:
@@ -1500,7 +1476,7 @@ pub fn push_base(repo: &Repo) -> Result<String, String> {
     if guarded && let Err(err) = hook::guard(&repo.main, &repo.base) {
         tracing::warn!("guarding {} of {} again: {err}", repo.base, repo.key());
     }
-    pushed.map(|_| head).map_err(|failed| push_why(&failed))
+    pushed.map(|_| head).map_err(|failed| failed.why)
 }
 
 /// The folder and the shell command of a squash ship of `feature`'s

@@ -571,6 +571,7 @@ impl Gerdr {
             PanelOutcome::SkipPlanReview => self.ask_skip_plan_review(&project, &slug),
             PanelOutcome::ChangeDecisions => self.ask_change_decisions(&project, &slug),
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
+            PanelOutcome::OpenRepos(key) => self.open_feature_repos(&project, &slug, &key),
             PanelOutcome::UpdatePrHead => self.update_pr_head(&project, &slug),
             PanelOutcome::RerunCi => self.rerun_ci(&project, &slug),
             PanelOutcome::SubmitReview(event) => self.ask_submit_review(&project, &slug, event),

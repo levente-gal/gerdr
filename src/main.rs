@@ -2777,7 +2777,9 @@ impl Gerdr {
             return;
         }
         self.git.pending = true;
-        let mut dirs: Vec<PathBuf> = self.workspaces.iter().map(|ws| ws.dir.clone()).collect();
+        let mut dirs: Vec<PathBuf> = (self.workspaces.iter().map(|ws| ws.dir.clone()))
+            .chain(self.panel_dirs().into_iter().map(|d| d.dir))
+            .collect();
         dirs.sort();
         dirs.dedup();
         git::read_all(dirs, move |git| {
