@@ -704,6 +704,7 @@ fn finding_card(f: &ReviewFinding, multi: bool, w: &Words) -> FindingCard {
         stripe: match f.state {
             FindingState::Fix => Some(CardStripe::ToFix),
             FindingState::Sent => Some(CardStripe::Sent),
+            FindingState::Dismissed => Some(CardStripe::Dismissed),
             _ => None,
         },
         field: None,
@@ -777,7 +778,11 @@ fn suggestion_card(s: &Suggestion) -> FindingCard {
         // Decided, it folds to its line: what is left to decide stands out.
         collapsed: decided,
         folds: false,
-        stripe: (s.state == State::Accepted).then_some(CardStripe::ToFix),
+        stripe: match s.state {
+            State::Accepted => Some(CardStripe::ToFix),
+            State::Rejected => Some(CardStripe::Dismissed),
+            State::Open => None,
+        },
         field: None,
         field_hint: if question { w.answer } else { w.comment },
         selected: false,

@@ -1155,6 +1155,8 @@ pub enum CardStripe {
     ToFix,
     /// It went to Build.
     Sent,
+    /// Dismissed, or a suggestion rejected: it asks for nothing.
+    Dismissed,
 }
 
 /// An AI review finding, a Verify check or a Manual test criterion, as its
@@ -3027,26 +3029,23 @@ impl Stack {
             false => format!("{} \u{b7} {}", card.state, card.place),
         };
         if !word.is_empty() {
-            let text = match why.is_empty() {
-                true => word.to_owned(),
-                false => format!("{word}:"),
-            };
-            let w = self.decision_word(&text, card.stripe, self.x, self.y);
-            match why.is_empty() {
-                true => {
-                    self.x += w;
-                    self.w = (self.w - w).max(1);
-                    rest = format!("\u{b7} {rest}");
-                }
-                false => {
-                    (self.x, self.w) = (title_x + w, (title_w - w).max(1));
-                    self.all_text(why, Font::Small, Ink::Text, false, TAIL_LINE);
-                    (self.x, self.w) = (title_x, title_w);
-                }
-            }
+            let w = self.decision_word(word, card.stripe, self.x, self.y);
+            self.x += w;
+            self.w = (self.w - w).max(1);
+            rest = format!("\u{b7} {rest}");
         }
         self.all_text(&rest, Font::Small, Ink::Muted, false, TAIL_LINE);
         (self.x, self.w) = (left, width);
+        // Why, in a box of its own, as plain as the comment's: the box under it
+        // has the comment, so the folded line's mark of it goes.
+        if !why.is_empty() {
+            let why = match card.comment.is_empty() {
+                true => why,
+                false => why.rsplit_once(" \u{b7} ").map_or(why, |(why, _)| why),
+            };
+            self.y += FINDING_GAP;
+            self.quote_block(&format!("Why {word}"), why, &[], buttons);
+        }
         if !card.preview.is_empty() {
             self.y += FINDING_GAP;
             let line = |s: &mut Self, h: i32, text: &str| {
@@ -3729,6 +3728,7 @@ impl Stack {
                 // Decided: the done colour, apart from the selection's accent.
                 ink: match stripe {
                     Some(CardStripe::ToFix) => Ink::Tone(CheckTone::Ready),
+                    Some(CardStripe::Dismissed) => Ink::Muted,
                     _ => Ink::Text,
                 },
                 bold: true,
@@ -3783,6 +3783,34 @@ impl Stack {
             true => decision(&card.state),
             false => ("", card.state.as_str()),
         };
+        let size = Font::Small.size();
+        // Why it was decided reads first, plain, so it is found at a glance;
+        // the title keeps up to half the line after it.
+        if !word.is_empty() && !why.is_empty() {
+            left += self.decision_word(&format!("{word}:"), card.stripe, left, text_y) + PILL_GAP;
+            let room = (right - left).max(1);
+            let title = format!(" \u{b7} {}", card.title);
+            let title_w = (width_of(&title, size).ceil() as i32 + 1).min(room / 2);
+            let why = cut_to_width(why, size, (room - title_w).max(1));
+            let why_w = (width_of(&why, size).ceil() as i32 + 1).min(room);
+            let text = |text, ink| Piece::Text {
+                text,
+                font: Font::Small,
+                ink,
+                bold: false,
+            };
+            self.pieces.push((
+                Rectangle::new((left, text_y).into(), (why_w, TAIL_LINE).into()),
+                text(why, Ink::Text),
+            ));
+            let rest = (room - why_w).max(1);
+            self.pieces.push((
+                Rectangle::new((left + why_w, text_y).into(), (rest, TAIL_LINE).into()),
+                text(cut_to_width(&title, size, rest), Ink::Muted),
+            ));
+            self.y += line;
+            return;
+        }
         if !word.is_empty() {
             left += self.decision_word(word, card.stripe, left, text_y) + PILL_GAP;
         }
@@ -3791,7 +3819,6 @@ impl Stack {
             true => String::new(),
             false => format!(" \u{b7} {why}"),
         };
-        let size = Font::Small.size();
         let state_w = (width_of(&state, size).ceil() as i32 + 1).min(room / 2);
         let mut text = cut_to_width(&card.title, size, (room - state_w).max(1));
         let title_w = width_of(&text, size).ceil() as i32 + 1;
@@ -3812,22 +3839,33 @@ impl Stack {
     /// inside the item's: its word (`field_hint`, "Your comment" or a
     /// question's "Your answer") and its buttons, then what it says.
     fn your_comment(&mut self, card: &FindingCard, page: &StagePage, buttons: &mut [Option<Rect>]) {
-        let at = self.pieces.len();
-        let (x, w, top) = (self.x, self.w, self.y);
-        self.x += COMMENT_PAD;
-        self.w = (w - 2 * COMMENT_PAD).max(1);
-        self.y += COMMENT_PAD;
-        let held: Vec<usize> = (card.comment_buttons.iter().copied())
+        let held: Vec<(usize, i32)> = (card.comment_buttons.iter().copied())
             .filter(|b| *b < page.buttons.len())
-            .collect();
-        let widths: Vec<i32> = (held.iter())
-            .map(|b| button_width(&page.buttons[*b].label))
+            .map(|b| (b, button_width(&page.buttons[b].label)))
             .collect();
         // A question's is its answer.
         let word = match card.field_hint {
             "" => "Your comment",
             hint => hint,
         };
+        self.quote_block(word, &card.comment, &held, buttons);
+    }
+
+    /// `text` in a card of its own inside a card's, `word` bold over it and
+    /// the buttons `held` (each with its width) at its right.
+    fn quote_block(
+        &mut self,
+        word: &str,
+        text: &str,
+        held: &[(usize, i32)],
+        buttons: &mut [Option<Rect>],
+    ) {
+        let at = self.pieces.len();
+        let (x, w, top) = (self.x, self.w, self.y);
+        self.x += COMMENT_PAD;
+        self.w = (w - 2 * COMMENT_PAD).max(1);
+        self.y += COMMENT_PAD;
+        let widths: Vec<i32> = held.iter().map(|(_, w)| *w).collect();
         // Bold runs wider than it measures.
         let word_w = width_of(word, Font::Small.size()).ceil() as i32 * 9 / 8;
         let placed = rows_from_right(&widths, self.x + word_w + QUIT_BUTTON_GAP, self.x + self.w);
@@ -3844,14 +3882,14 @@ impl Stack {
                 bold: true,
             },
         ));
-        for (i, (b, (bx, row))) in held.iter().zip(&placed).enumerate() {
+        for ((b, bw), (bx, row)) in held.iter().zip(&placed) {
             let by = self.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
-            let rect = Rectangle::new((*bx, by).into(), (widths[i], ROW_BUTTON).into());
+            let rect = Rectangle::new((*bx, by).into(), (*bw, ROW_BUTTON).into());
             buttons[*b] = Some(rect);
             self.pieces.push((rect, Piece::Button(*b)));
         }
         self.y += line + FINDING_GAP / 2;
-        self.all_text(&card.comment, Font::Body, Ink::Text, false, BODY_LINE);
+        self.all_text(text, Font::Body, Ink::Text, false, BODY_LINE);
         self.y += COMMENT_PAD;
         (self.x, self.w) = (x, w);
         let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
@@ -8131,7 +8169,7 @@ impl Painter {
                     let s = scale as f32;
                     let colour = match stripe {
                         CardStripe::ToFix => Standing::Done.color(p),
-                        CardStripe::Sent => p.muted,
+                        CardStripe::Sent | CardStripe::Dismissed => p.muted,
                     };
                     let inset = AGENT_RADIUS * s;
                     let (bar, edge) = ((3.0 * s).round(), (2.0 * s).round());
@@ -10881,17 +10919,23 @@ mod tests {
         assert_eq!(frame.size.h, 2 * AGENT_PAD + ROW_BUTTON);
         assert!(closed.page_buttons[0].is_some());
         assert!(closed.page_buttons[1].is_none() && closed.page_buttons[2].is_none());
-        // The decision bold, and why: a title past the line leaves it room.
-        let texts: Vec<(&str, bool)> = (closed.pieces.iter().flatten())
-            .filter_map(|(_, p)| match p {
-                Piece::Text { text, bold, .. } => Some((text.as_str(), *bold)),
-                _ => None,
-            })
-            .collect();
-        assert!(texts.contains(&("dismissed", true)), "{texts:?}");
+        // The decision bold, then why, then the title: a title past the line
+        // can't hide why.
+        let texts = |l: &FeatureTabLayout| -> Vec<(String, bool)> {
+            (l.pieces.iter().flatten())
+                .filter_map(|(_, p)| match p {
+                    Piece::Text { text, bold, .. } => Some((text.clone(), *bold)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let line = texts(&closed);
+        let at = |want: (&str, bool)| line.iter().position(|(t, b)| (t.as_str(), *b) == want);
+        let (word, why) = (at(("dismissed:", true)), at(("why", false)));
+        assert!(word.is_some() && word < why, "{line:?}");
         assert!(
-            texts.iter().any(|(t, _)| t.ends_with("\u{b7} why")),
-            "{texts:?}"
+            line[why.unwrap() + 1].0.starts_with(" \u{b7} A title"),
+            "{line:?}"
         );
         let button = closed.page_buttons[0].unwrap();
         assert!(button.loc.x + button.size.w <= frame.loc.x + frame.size.w);
@@ -10904,6 +10948,13 @@ mod tests {
         view.page.sections[0] = PageSection::Finding(card(false));
         let open = feature_tab_layout(&view, area);
         assert!(open.finding_cards[0].size.h > frame.size.h);
+        // Opened, why is in a box of its own.
+        let open_texts = texts(&open);
+        let boxed = (open_texts.iter()).position(|t| *t == ("Why dismissed".to_owned(), true));
+        assert!(
+            boxed.is_some_and(|i| open_texts[i + 1].0 == "why"),
+            "{open_texts:?}"
+        );
         // Its chevron folds it, open or not.
         for layout in [&closed, &open] {
             let chevron = (layout.pieces.iter().flatten())

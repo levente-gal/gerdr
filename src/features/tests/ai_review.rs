@@ -323,7 +323,7 @@ fn findings_show_as_cards_in_their_order_each_with_what_it_can_do() {
     assert!(cards[0].faded && !cards[2].faded);
     assert!(cards[2].place.contains("src/2.rs"));
     // Every decided card closes to a line, so what is left to decide
-    // stands out; to fix and sent say so down their edge.
+    // stands out; to fix, sent and dismissed say so down their edge.
     let closed: Vec<bool> = cards.iter().map(|c| c.collapsed).collect();
     assert_eq!(closed, [true, true, false, true, true]);
     let stripes: Vec<Option<CardStripe>> = cards.iter().map(|c| c.stripe).collect();
@@ -332,7 +332,7 @@ fn findings_show_as_cards_in_their_order_each_with_what_it_can_do() {
         [
             None,
             Some(CardStripe::ToFix),
-            None,
+            Some(CardStripe::Dismissed),
             Some(CardStripe::Sent),
             None
         ]

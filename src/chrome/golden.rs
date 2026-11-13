@@ -6988,29 +6988,29 @@ const FINDINGS: [&str; 4] = [
 const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
     // Dark at 1
     [
-        0xb7a86352132a06d5, // tab_findings_1180
-        0xcd0568622727e33e, // tab_findings_860
+        0x77d628be192de02e, // tab_findings_1180
+        0xe4b967ef6cd81d39, // tab_findings_860
         0xbe15a6efe4a5304a, // finding_dialog
         0x395e21db12f14c4c, // finding_dialog_error
     ],
     // Dark at 2
     [
-        0x65ff4e359d61f5d4, // tab_findings_1180
-        0xb2ae91b46d547e61, // tab_findings_860
+        0xfc4e834e68f50a18, // tab_findings_1180
+        0x3989f371de27979d, // tab_findings_860
         0x2e982fd65dcbba89, // finding_dialog
         0x1c54a50260a223cf, // finding_dialog_error
     ],
     // Light at 1
     [
-        0x7bdca22f9339214f, // tab_findings_1180
-        0xa15a22d08908ad4c, // tab_findings_860
+        0x6a831030a3611a81, // tab_findings_1180
+        0xbf20353c17fa474e, // tab_findings_860
         0xc8efa4d7ca6d61b1, // finding_dialog
         0x3068a0f01a434524, // finding_dialog_error
     ],
     // Light at 2
     [
-        0x140c936f53b914e3, // tab_findings_1180
-        0xc056960fe620cd1b, // tab_findings_860
+        0xe417b152ed107e70, // tab_findings_1180
+        0xf6f42a61247018a4, // tab_findings_860
         0xf28a5af0ae02e0c9, // finding_dialog
         0x00c403fa84109bce, // finding_dialog_error
     ],
@@ -7568,7 +7568,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     // Dark at 1
     [
         0xb8d703f2e766a7e1, // tab_plan_review_cards_1180
-        0x2d2f817396ccae8f, // tab_plan_review_cards_860
+        0xaac652c0f1959119, // tab_plan_review_cards_860
         0xaf9c28a2c2316094, // tab_plan_review_writing_1180
         0x9afd892c41b157e8, // doc_suggestions_1180
         0xa12094154779b8df, // doc_suggestions_850
@@ -7578,7 +7578,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     // Dark at 2
     [
         0x4132b4861b778764, // tab_plan_review_cards_1180
-        0x9f9a835807989cf2, // tab_plan_review_cards_860
+        0x164eaa616a396ef6, // tab_plan_review_cards_860
         0xb8cd05d49a2eaa6c, // tab_plan_review_writing_1180
         0xb8dd8bfa55c221fc, // doc_suggestions_1180
         0x26814b5764a0c7e5, // doc_suggestions_850
@@ -7588,7 +7588,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     // Light at 1
     [
         0xe31633aedcdb17f2, // tab_plan_review_cards_1180
-        0xf56752da11a12459, // tab_plan_review_cards_860
+        0xce401a9296946f37, // tab_plan_review_cards_860
         0xd5a0c053497c5c1f, // tab_plan_review_writing_1180
         0x3f5c1f61a4bd2248, // doc_suggestions_1180
         0xb11d9822b77a1556, // doc_suggestions_850
@@ -7598,7 +7598,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     // Light at 2
     [
         0xd12f9a32f021114f, // tab_plan_review_cards_1180
-        0xc4e2231cdabbbd38, // tab_plan_review_cards_860
+        0x4e2ff2dbb516e786, // tab_plan_review_cards_860
         0x108fd64310d04ef0, // tab_plan_review_writing_1180
         0x991937caceaf8188, // doc_suggestions_1180
         0x0d8e3c393196a9a8, // doc_suggestions_850
