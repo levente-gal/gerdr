@@ -435,6 +435,12 @@ impl Gerdr {
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };
+        // An agent's merges under way: a commit in one repository while
+        // another still merges is theirs, and `resolution_read` marks the
+        // code once all are through.
+        if (feature.shipping.resolving.as_ref()).is_some_and(|r| !r.planning) {
+            return;
+        }
         if feature.keep_marks(patch, feature::now()) {
             return self.fixes_landed(project, slug, patch);
         }
