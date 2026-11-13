@@ -338,6 +338,10 @@ fn sandbox_actions(
                 PanelOutcome::OpenSandboxPage(i),
             ));
         }
+        out.push((
+            button("Edit pages\u{2026}", ButtonStyle::Quiet),
+            PanelOutcome::EditCommands(CommandsTab::Pages),
+        ));
         // A phone reaches only what runs on this machine.
         if !sandbox_elsewhere(feature) {
             let label = match ctx.lan_open {

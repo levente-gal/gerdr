@@ -1,7 +1,8 @@
 //! The pages of a sandbox's app: what Open app and the buttons beside it open.
 //!
 //! The project's settings can list them (`workflow.sandbox_pages`, the first
-//! being the one Open app opens). Without, they come from the commands the
+//! being the one Open app opens), as the project commands dialog's Pages tab
+//! edits them (`to_lines`, `from_lines`). Without, they come from the commands the
 //! sandbox runs: a Django server gives its site, then its admin when it has
 //! one; Expo gives its web client, which never comes first, as the backend's
 //! own site is what is tried by hand. A JavaScript dev server (Vite, Nx, `npm
@@ -338,6 +339,45 @@ fn words(command: &str) -> Vec<&str> {
     command.split_whitespace().collect()
 }
 
+/// `pages` as the project commands dialog shows them: a line each, its name
+/// then its address. A guessed page's address says no port.
+pub fn to_lines(pages: &[Page]) -> Vec<String> {
+    (pages.iter())
+        .map(|page| format!("{} {}", page.name, page.url))
+        .collect()
+}
+
+/// The pages `text` lists, a line each as `to_lines` writes them: a name then
+/// an address. A line of only an address is named for it, the first "App". A
+/// `localhost` address with no port is guessed from what listens. Else why
+/// not, as a sentence.
+pub fn from_lines(text: &str) -> Result<Vec<Page>, String> {
+    let mut pages = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let words = words(line);
+        let url = words[words.len() - 1];
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(format!(
+                "\u{201c}{line}\u{201d} has no address. A page is its name, then an address such as http://localhost:5173/."
+            ));
+        }
+        let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+        // With its port, if it says one.
+        let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+        let name = match words[..words.len() - 1].join(" ") {
+            name if !name.is_empty() => name,
+            _ if pages.is_empty() => "App".to_owned(),
+            _ => host.to_owned(),
+        };
+        pages.push(Page {
+            name,
+            url: url.to_owned(),
+            guess: host == "localhost",
+        });
+    }
+    Ok(pages)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +506,31 @@ mod tests {
             let ran = [django, Ran { dir: &web, command }];
             assert_eq!(pages(&[], None, &ran), after, "{command}");
         }
+    }
+
+    #[test]
+    fn pages_are_written_and_read_a_line_each() {
+        let pages = [
+            Page::guessed("App"),
+            Page::new("Django admin", 8000, "/admin/"),
+        ];
+        let lines = to_lines(&pages);
+        assert_eq!(
+            lines,
+            [
+                "App http://localhost/",
+                "Django admin http://localhost:8000/admin/"
+            ]
+        );
+        assert_eq!(from_lines(&lines.join("\n")).unwrap(), pages);
+        // Unnamed, the first is the app and the rest are named for their host.
+        let read = from_lines("\n  http://localhost:4200/ \nhttps://api.test:8443/docs\n").unwrap();
+        assert_eq!(read[0].name, "App");
+        assert!(!read[0].guess);
+        assert_eq!(read[1].name, "api.test:8443");
+        assert_eq!(from_lines("").unwrap(), []);
+        assert!(from_lines("App localhost:4200").is_err());
+        assert!(from_lines("App").is_err());
     }
 
     #[test]

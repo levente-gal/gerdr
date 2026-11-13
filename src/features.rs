@@ -505,11 +505,13 @@ pub(crate) enum Done {
         result: Result<(), String>,
     },
     /// The repositories of `project` for the commands dialog of `serial`,
-    /// with what their files suggest.
+    /// with what their files suggest, and the pages of its sandbox app its
+    /// sandbox commands tell of, as lines.
     CommandsFound {
         serial: u64,
         project: String,
         result: Result<Vec<(String, feature::suggest::Suggested)>, String>,
+        pages: Vec<String>,
     },
     Found {
         serial: u64,

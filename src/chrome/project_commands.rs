@@ -15,19 +15,21 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The dialog's tabs for a project.
-pub const COMMANDS_PROJECT_TABS: [CommandsTab; 4] = [
+pub const COMMANDS_PROJECT_TABS: [CommandsTab; 5] = [
     CommandsTab::Checks,
     CommandsTab::Setup,
     CommandsTab::Run,
     CommandsTab::Prepare,
+    CommandsTab::Pages,
 ];
 /// The dialog's tabs for a feature.
-pub const COMMANDS_FEATURE_TABS: [CommandsTab; 5] = [
+pub const COMMANDS_FEATURE_TABS: [CommandsTab; 6] = [
     CommandsTab::Checks,
     CommandsTab::Setup,
     CommandsTab::Feature,
     CommandsTab::Run,
     CommandsTab::Prepare,
+    CommandsTab::Pages,
 ];
 /// The dialog's buttons while it can save.
 pub const COMMANDS_BUTTONS: [&str; 2] = ["Cancel", "Save"];
@@ -73,6 +75,8 @@ pub enum CommandsTab {
     Run,
     /// What a feature's sandbox runs once first.
     Prepare,
+    /// The pages of a sandbox's app, the first the one Open app opens.
+    Pages,
 }
 
 impl CommandsTab {
@@ -83,6 +87,7 @@ impl CommandsTab {
             Self::Feature => "This feature",
             Self::Run => "Run",
             Self::Prepare => "Prepare",
+            Self::Pages => "Pages",
         }
     }
 }
@@ -255,7 +260,8 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
     let room = (size.h - 2 * MARGIN - fixed).max(LIST_MIN);
     let list_h = LIST_TALL.min(room);
     let height = fixed + list_h;
-    let width = DIALOG_WIDTH.min(size.w);
+    // Wider than other dialogs by a tab, so its six leave the title room.
+    let width = (DIALOG_WIDTH + TAB_W).min(size.w);
     let panel = Rectangle::new(
         (
             ((size.w - width) / 2).max(0),
@@ -569,6 +575,7 @@ impl Painter {
                     CommandsTab::Run => "Nothing runs in a sandbox",
                     CommandsTab::Prepare => "Nothing runs first",
                     CommandsTab::Feature => "Nothing added",
+                    CommandsTab::Pages => "Guessed from the Run commands",
                 };
                 self.field_of_lines(
                     c,

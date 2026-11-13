@@ -834,8 +834,29 @@ impl Gerdr {
                 self.sandbox_shown(project, slug);
                 self.open_feature_page(project, slug, url);
             }
-            None => self.show_warning(nothing_listens(&run, page)),
+            None => self.warn_nothing_listens(project, slug, &run, page),
         }
+    }
+
+    /// Say nothing listens yet for page `page` of the app of `slug`'s sandbox
+    /// `run`, offering to set where its pages are, should gerdr guess wrong.
+    pub(crate) fn warn_nothing_listens(
+        &mut self,
+        project: &str,
+        slug: &str,
+        run: &SandboxRun,
+        page: usize,
+    ) {
+        let edit = MenuAction::EditCommands {
+            project: project.to_owned(),
+            slug: Some(slug.to_owned()),
+            tab: crate::chrome::CommandsTab::Pages,
+        };
+        self.toast_with(
+            nothing_listens(run, page),
+            crate::toast::Level::Warning,
+            Some(("Edit pages".to_owned(), edit)),
+        );
     }
 
     /// The page the settings of `project` name for its sandbox's app.

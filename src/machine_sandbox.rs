@@ -1302,7 +1302,7 @@ impl Gerdr {
         let set = self.set_sandbox_url(project);
         let Some(url) = crate::feature_sandbox::sandbox_url(&run, page, &ports, set.as_deref())
         else {
-            return self.show_warning(crate::feature_sandbox::nothing_listens(&run, page));
+            return self.warn_nothing_listens(project, slug, &run, page);
         };
         let said = self.follow_sandbox(project, slug);
         let key = (project.to_owned(), slug.to_owned());

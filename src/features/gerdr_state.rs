@@ -425,7 +425,8 @@ impl Gerdr {
                 serial,
                 project,
                 result,
-            } => self.commands_found(serial, &project, result),
+                pages,
+            } => self.commands_found(serial, &project, result, pages),
             Done::Found {
                 serial,
                 from,

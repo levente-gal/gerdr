@@ -1,7 +1,7 @@
 //! The project commands dialog: what Verify checks (`workflow.verify`,
 //! `verify_timeout`), what sets a new worktree up (`workflow.setup`) and what a
-//! sandbox runs (`workflow.run`, `workflow.prepare`), without editing the
-//! project file by hand.
+//! sandbox runs (`workflow.run`, `workflow.prepare`) and the pages of its app
+//! (`workflow.sandbox_pages`), without editing the project file by hand.
 //!
 //! Each repository has a field of lines, a command a line; emptied, its key
 //! goes. Only what was edited is written, so a command a hand wrote over
@@ -33,7 +33,7 @@ use crate::{
         CommandsBorrowed, CommandsFocus, CommandsHit, CommandsRow, CommandsTab, CommandsView,
     },
     feature::{
-        Feature,
+        Feature, sandbox_pages,
         suggest::{self, Suggested},
         verify::FEATURE_KEY,
     },
@@ -100,6 +100,12 @@ struct Row {
     /// Looked for and not there: its commands stay until emptied.
     missing: bool,
     suggested: Suggested,
+    /// The pages of the project's sandbox app, a line each
+    /// (`sandbox_pages::to_lines`): on the home project's whole-feature row
+    /// only, as they are the project's.
+    pages: Option<Slot>,
+    /// Those its sandbox commands tell of, as lines.
+    suggested_pages: Vec<String>,
 }
 
 impl Row {
@@ -110,6 +116,7 @@ impl Row {
             CommandsTab::Run => self.run.as_ref(),
             CommandsTab::Prepare => self.prepare.as_ref(),
             CommandsTab::Feature => self.own.as_ref(),
+            CommandsTab::Pages => self.pages.as_ref(),
         }
     }
 
@@ -120,6 +127,7 @@ impl Row {
             CommandsTab::Run => self.run.as_mut(),
             CommandsTab::Prepare => self.prepare.as_mut(),
             CommandsTab::Feature => self.own.as_mut(),
+            CommandsTab::Pages => self.pages.as_mut(),
         }
     }
 
@@ -143,6 +151,8 @@ impl Row {
             in_feature: false,
             missing: false,
             suggested: Suggested::default(),
+            pages: (key == FEATURE_KEY).then(|| Slot::new(Some(&page_lines(workflow)))),
+            suggested_pages: Vec::new(),
         }
     }
 
@@ -184,8 +194,39 @@ impl Row {
             CommandsTab::Prepare => &self.suggested.prepare,
             // What a repository suggests is for all its features.
             CommandsTab::Feature => &[],
+            CommandsTab::Pages => &self.suggested_pages,
         }
     }
+}
+
+/// The pages `workflow` sets for its sandbox app, a line each: its list, else
+/// the one address it names.
+fn page_lines(workflow: &Workflow) -> Vec<String> {
+    match (workflow.sandbox_pages.is_empty(), &workflow.sandbox_url) {
+        (true, Some(url)) => vec![format!("App {url}")],
+        _ => sandbox_pages::to_lines(&workflow.sandbox_pages),
+    }
+}
+
+/// The pages the sandbox commands `run` tell of in `root`'s repositories, as
+/// lines: what a sandbox started with them would open, with no pages set.
+/// It reads their scripts and manifests, so off the UI thread.
+fn found_pages(
+    root: &crate::feature::layout::Root,
+    run: &BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    let lines: Vec<(&std::path::Path, &str)> = (root.repos.iter())
+        .flat_map(|r| {
+            let commands = run.get(&r.name).into_iter().flatten();
+            commands.map(|c| (r.main.as_path(), c.as_str()))
+        })
+        // A line starting with # doesn't run.
+        .filter(|(_, c)| !c.trim_start().starts_with('#'))
+        .collect();
+    let ran: Vec<sandbox_pages::Ran> = (lines.iter())
+        .map(|&(dir, command)| sandbox_pages::Ran { dir, command })
+        .collect();
+    sandbox_pages::to_lines(&sandbox_pages::pages(&[], None, &ran))
 }
 
 /// What has the keyboard, by what it is: the rows come and go as the
@@ -208,14 +249,42 @@ pub struct CommandsDraft {
     limit: Option<String>,
 }
 
-/// How `verify`, `setup` and `verify_timeout` of a project stood before a
-/// save, for its Undo.
+/// How what the dialog edits of a project stood before a save, for its Undo.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandsBefore {
     project: String,
     verify: BTreeMap<String, Vec<String>>,
     setup: BTreeMap<String, Vec<String>>,
+    run: BTreeMap<String, Vec<String>>,
+    prepare: BTreeMap<String, Vec<String>>,
     verify_timeout: Option<u64>,
+    sandbox_url: Option<String>,
+    sandbox_pages: Vec<sandbox_pages::Page>,
+}
+
+impl CommandsBefore {
+    fn of(project: &str, w: &Workflow) -> Self {
+        Self {
+            project: project.to_owned(),
+            verify: w.verify.clone(),
+            setup: w.setup.clone(),
+            run: w.run.clone(),
+            prepare: w.prepare.clone(),
+            verify_timeout: w.verify_timeout,
+            sandbox_url: w.sandbox_url.clone(),
+            sandbox_pages: w.sandbox_pages.clone(),
+        }
+    }
+
+    fn put_back(&self, w: &mut Workflow) {
+        w.verify = self.verify.clone();
+        w.setup = self.setup.clone();
+        w.run = self.run.clone();
+        w.prepare = self.prepare.clone();
+        w.verify_timeout = self.verify_timeout;
+        w.sandbox_url = self.sandbox_url.clone();
+        w.sandbox_pages = self.sandbox_pages.clone();
+    }
 }
 
 /// Make `skips` say whether the check `command` of `repo` is skipped. A
@@ -658,6 +727,29 @@ impl CommandsDialog {
         *self.limit != *self.limit_was
     }
 
+    /// The edited pages' row, if they were edited.
+    fn pages_row(&self) -> Option<&Row> {
+        (self.rows.iter()).find(|r| r.pages.as_ref().is_some_and(Slot::changed))
+    }
+
+    /// Why the edited pages can't be saved, if they can't.
+    fn pages_error(&self) -> Option<String> {
+        let slot = self.pages_row()?.pages.as_ref()?;
+        sandbox_pages::from_lines(&slot.field).err()
+    }
+
+    /// The pages the commands of `project` tell of, as lines: suggested
+    /// for its sandbox app if it is the home project.
+    fn found_pages(&mut self, project: &str, pages: Vec<String>) {
+        let row = self
+            .rows
+            .iter_mut()
+            .find(|r| r.project == project && r.pages.is_some());
+        if let Some(row) = row {
+            row.suggested_pages = pages;
+        }
+    }
+
     /// What was typed, for the next opening.
     fn draft(&self) -> CommandsDraft {
         let mut rows = Vec::new();
@@ -747,6 +839,12 @@ impl CommandsDialog {
             if let Some(prepare) = row.prepare.as_ref().filter(|s| s.changed()) {
                 set_commands(&mut workflow.prepare, &row.key, lines_of(&prepare.field));
             }
+            // A list replaces the one address an older file names.
+            let pages = row.pages.as_ref().filter(|s| s.changed());
+            if let Some(Ok(pages)) = pages.map(|s| sandbox_pages::from_lines(&s.field)) {
+                workflow.sandbox_pages = pages;
+                workflow.sandbox_url = None;
+            }
         }
         if project == self.scope.project && self.limit_changed() {
             workflow.verify_timeout = limit;
@@ -757,7 +855,11 @@ impl CommandsDialog {
     /// project.
     fn row_view(&self, row: &Row, slot: &Slot, heading: Option<String>) -> CommandsRow {
         let on_feature = self.tab == CommandsTab::Feature;
-        let tag = if row.is_feature() {
+        let on_pages = self.tab == CommandsTab::Pages;
+        // What listens there now is said by gerdr (`commands_view`).
+        let tag = if on_pages {
+            None
+        } else if row.is_feature() {
             Some("in the feature folder")
         } else if on_feature {
             (!row.in_feature).then_some("runs once this feature changes it")
@@ -771,9 +873,10 @@ impl CommandsDialog {
         let suggestion = row.suggestion(self.tab);
         CommandsRow {
             heading,
-            label: match row.is_feature() {
-                true => "Whole feature".to_owned(),
-                false => row.key.clone(),
+            label: match (on_pages, row.is_feature()) {
+                (true, _) => "Sandbox app".to_owned(),
+                (false, true) => "Whole feature".to_owned(),
+                (false, false) => row.key.clone(),
             },
             tag: tag.map(str::to_owned),
             suggestion: (slot.field.is_empty() && !suggestion.is_empty())
@@ -871,6 +974,7 @@ impl CommandsDialog {
                     "One command per line, in order, before a sandbox's commands: a migration on its data."
                 }
                 CommandsTab::Feature => FEATURE_BODY,
+                CommandsTab::Pages => PAGES_BODY,
             },
             note: self.note(rows.len()),
             limit: self.has_limit().then(|| self.limit.line()),
@@ -888,6 +992,9 @@ impl CommandsDialog {
 /// What the tab of a feature's own checks says they are.
 pub const FEATURE_BODY: &str =
     "One command per line. They run beside the project's, for this feature only.";
+
+/// What the tab of the sandbox app's pages says they are.
+pub const PAGES_BODY: &str = "A page per line: a name, then its address. Open app opens the first; no port takes what listens.";
 
 /// What the dialog says once a project's file changed outside gerdr.
 const STALE: &str = "The project file was edited outside gerdr. Reload it to save here.";
@@ -996,21 +1103,32 @@ impl Gerdr {
         self.stop_key_repeat();
         self.features.commands = Some(dialog);
         for (id, from, (dirs, ignore, bases), others, seen) in looks {
-            self.feature_work(None, move |_| crate::features::Done::CommandsFound {
-                serial,
-                project: id,
-                result: crate::feature::layout::find_project_root(
+            // Only the home project's pages are its sandbox's.
+            let run = (id == project)
+                .then(|| self.projects.project(&id).map(|p| p.workflow.run.clone()))
+                .flatten();
+            self.feature_work(None, move |_| {
+                let root = crate::feature::layout::find_project_root(
                     &from, &dirs, &others, &ignore, &bases,
-                )
-                .map(|root| {
-                    (root.repos.iter())
-                        .map(|r| {
-                            let mut suggested = suggest::suggest(&r.main);
-                            suggest::with_seen(&mut suggested, &r.main, &seen);
-                            (r.name.clone(), suggested)
-                        })
-                        .collect()
-                }),
+                );
+                let pages = match (&root, run) {
+                    (Ok(root), Some(run)) => found_pages(root, &run),
+                    _ => Vec::new(),
+                };
+                crate::features::Done::CommandsFound {
+                    serial,
+                    project: id,
+                    result: root.map(|root| {
+                        (root.repos.iter())
+                            .map(|r| {
+                                let mut suggested = suggest::suggest(&r.main);
+                                suggest::with_seen(&mut suggested, &r.main, &seen);
+                                (r.name.clone(), suggested)
+                            })
+                            .collect()
+                    }),
+                    pages,
+                }
             });
         }
         // It takes the pointer from the client under it.
@@ -1024,6 +1142,7 @@ impl Gerdr {
         serial: u64,
         project: &str,
         result: Result<Vec<(String, Suggested)>, String>,
+        pages: Vec<String>,
     ) {
         if let Err(why) = &result {
             tracing::warn!("finding the repositories of {project}: {why}");
@@ -1039,6 +1158,7 @@ impl Gerdr {
             return;
         };
         dialog.looking = dialog.looking.saturating_sub(1);
+        dialog.found_pages(project, pages);
         match (result, workflow) {
             (Ok(names), Some(workflow)) => dialog.found(project, names, &workflow),
             (Ok(_), None) => {}
@@ -1110,6 +1230,16 @@ impl Gerdr {
                 return;
             }
         };
+        if let Some(why) = dialog.pages_error() {
+            dialog.error = Some(why);
+            if let Some(row) = dialog.pages_row() {
+                dialog.focus = Focus::Row(row.project.clone(), row.key.clone());
+            }
+            dialog.tab = CommandsTab::Pages;
+            dialog.follow(size);
+            return;
+        }
+        let pages_of = dialog.pages_row().map(|row| row.project.clone());
         let ids = dialog.changed_projects();
         let own = dialog.own_changed();
         if ids.is_empty() && !own {
@@ -1139,12 +1269,7 @@ impl Gerdr {
         let mut before = Vec::new();
         for id in &ids {
             if let Some(p) = self.projects.project_mut(id) {
-                before.push(CommandsBefore {
-                    project: id.clone(),
-                    verify: p.workflow.verify.clone(),
-                    setup: p.workflow.setup.clone(),
-                    verify_timeout: p.workflow.verify_timeout,
-                });
+                before.push(CommandsBefore::of(id, &p.workflow));
                 dialog.apply(id, &mut p.workflow, limit);
             }
         }
@@ -1162,6 +1287,9 @@ impl Gerdr {
             return;
         }
         self.features.commands_drafts.remove(&dialog.scope);
+        if let Some(project) = pages_of {
+            self.sandbox_pages_set(&project);
+        }
         self.refresh_pointer_focus();
         let what = match (before.is_empty(), feature_before.is_some()) {
             (true, _) => "This feature's checks",
@@ -1270,10 +1398,30 @@ impl Gerdr {
     fn put_commands_back(&mut self, before: &[CommandsBefore]) {
         for was in before {
             if let Some(p) = self.projects.project_mut(&was.project) {
-                p.workflow.verify = was.verify.clone();
-                p.workflow.setup = was.setup.clone();
-                p.workflow.verify_timeout = was.verify_timeout;
+                was.put_back(&mut p.workflow);
             }
+        }
+    }
+
+    /// The pages of `project`'s sandbox app were set: its running sandboxes
+    /// open them from now, with no restart. Emptied, they keep the pages they
+    /// found as they started, until the next start guesses again.
+    fn sandbox_pages_set(&mut self, project: &str) {
+        let Some(set) = (self.projects.project(project))
+            .map(|p| p.workflow.sandbox_pages.clone())
+            .filter(|set| !set.is_empty())
+        else {
+            return;
+        };
+        let mut changed = Vec::new();
+        for feature in self.features.all.get_mut(project).into_iter().flatten() {
+            if let Some(run) = feature.sandbox.as_mut().filter(|run| run.pages != set) {
+                run.pages = set.clone();
+                changed.push(feature.slug.clone());
+            }
+        }
+        for slug in changed {
+            self.save_feature(project, &slug);
         }
     }
 
@@ -1302,6 +1450,9 @@ impl Gerdr {
         }
         self.put_commands_back(&before);
         if self.projects.save_projects(&ids) {
+            for id in &ids {
+                self.sandbox_pages_set(id);
+            }
             let what = match feature {
                 Some(_) => "Commands put back",
                 None => "Project commands put back",
@@ -1404,7 +1555,31 @@ impl Gerdr {
     }
 
     pub fn commands_view(&self) -> Option<CommandsView> {
-        self.features.commands.as_ref().map(CommandsDialog::view)
+        let dialog = self.features.commands.as_ref()?;
+        let mut view = dialog.view();
+        if dialog.tab == CommandsTab::Pages
+            && let Some(row) = view.rows.first_mut()
+        {
+            row.tag = self.listening_said(&dialog.scope);
+        }
+        Some(view)
+    }
+
+    /// What listens in the running sandbox of `scope`'s feature, else of a
+    /// feature of its project: the ports a page can be at.
+    fn listening_said(&self, scope: &CommandsScope) -> Option<String> {
+        let features = self.features.all.get(&scope.project).into_iter().flatten();
+        let mut alive = features
+            .filter(|f| scope.slug.as_ref().is_none_or(|slug| f.slug == *slug))
+            .filter_map(|f| f.sandbox.as_ref().filter(|run| run.alive()));
+        let ports = alive.next()?.listening();
+        Some(match ports.is_empty() {
+            true => "nothing listens in its sandbox yet".to_owned(),
+            false => {
+                let ports: Vec<String> = ports.iter().map(u16::to_string).collect();
+                format!("listening now: {}", ports.join(", "))
+            }
+        })
     }
 }
 
@@ -1785,9 +1960,11 @@ mod tests {
         press(&mut d, ctrl(), Keysym::Page_Down);
         assert_eq!(d.tab, CommandsTab::Prepare);
         press(&mut d, ctrl(), Keysym::Page_Down);
+        assert_eq!(d.tab, CommandsTab::Pages);
+        press(&mut d, ctrl(), Keysym::Page_Down);
         assert_eq!(d.tab, CommandsTab::Checks);
         press(&mut d, ctrl(), Keysym::Page_Up);
-        assert_eq!(d.tab, CommandsTab::Prepare);
+        assert_eq!(d.tab, CommandsTab::Pages);
     }
 
     #[test]
@@ -2031,5 +2208,79 @@ mod tests {
         );
         empty.nowhere = true;
         assert!(empty.view().note.unwrap().0.starts_with("Add a workspace"));
+    }
+
+    fn pages(d: &mut CommandsDialog) -> &mut TextField {
+        &mut row(d, FEATURE_KEY).pages.as_mut().unwrap().field
+    }
+
+    #[test]
+    fn the_pages_tab_sets_the_home_projects_pages_over_its_one_address() {
+        let mut w = workflow();
+        w.sandbox_url = Some("http://localhost:8000".into());
+        let projects = vec![
+            ("home".into(), "Home".into(), w),
+            ("other".into(), "Other".into(), workflow()),
+        ];
+        let mut d = CommandsDialog::new(1, scope(), &projects, CommandsTab::Pages);
+        // One field, the home project's, holding the address it named.
+        assert_eq!(labels(&d), ["Sandbox app"]);
+        assert_eq!(d.view().rows[0].tag, None);
+        assert_eq!(d.focus, Focus::Row("home".into(), FEATURE_KEY.into()));
+        assert_eq!(**pages(&mut d), *"App http://localhost:8000");
+        assert!(d.changed_projects().is_empty());
+        pages(&mut d).set("App http://localhost:4200/\nAPI http://localhost:8000/docs");
+        assert_eq!(d.changed_projects(), ["home"]);
+        assert_eq!(d.pages_error(), None);
+        let mut saved = projects[0].2.clone();
+        d.apply("home", &mut saved, Some(90));
+        assert_eq!(saved.sandbox_url, None);
+        let names: Vec<_> = saved
+            .sandbox_pages
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["App", "API"]);
+        // Emptied, gerdr guesses again.
+        pages(&mut d).set("");
+        d.apply("home", &mut saved, Some(90));
+        assert!(saved.sandbox_pages.is_empty() && saved.sandbox_url.is_none());
+        // A line with no address isn't saved.
+        pages(&mut d).set("App localhost:4200");
+        assert!(d.pages_error().unwrap().contains("has no address"));
+    }
+
+    #[test]
+    fn the_pages_the_run_commands_tell_of_are_suggested_and_kept_in_a_draft() {
+        let mut d = CommandsDialog::new(1, scope(), &projects(), CommandsTab::Pages);
+        d.found_pages("home", vec!["App http://localhost/".into()]);
+        let view = d.view();
+        assert_eq!(
+            view.rows[0].suggestion.as_deref(),
+            Some("App http://localhost/")
+        );
+        assert!(view.keys.contains(&("Alt+U", "use")));
+        press(&mut d, alt(), Keysym::u);
+        assert_eq!(**pages(&mut d), *"App http://localhost/");
+        let draft = d.draft();
+        let mut again = CommandsDialog::new(2, scope(), &projects(), CommandsTab::Checks);
+        again.restore(draft, &projects());
+        assert_eq!(**pages(&mut again), *"App http://localhost/");
+    }
+
+    #[test]
+    fn undo_puts_back_all_the_dialog_edits() {
+        let mut w = workflow();
+        w.run.insert("api".into(), vec!["cargo run".into()]);
+        w.prepare.insert("api".into(), vec!["make db".into()]);
+        w.sandbox_url = Some("http://localhost:1".into());
+        let before = CommandsBefore::of("home", &w);
+        let mut after = Workflow::default();
+        before.put_back(&mut after);
+        assert_eq!(after.run, w.run);
+        assert_eq!(after.prepare, w.prepare);
+        assert_eq!(after.sandbox_url, w.sandbox_url);
+        assert_eq!(after.verify, w.verify);
+        assert_eq!(after.verify_timeout, w.verify_timeout);
     }
 }

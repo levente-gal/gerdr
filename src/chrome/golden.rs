@@ -2986,6 +2986,19 @@ fn commands(case: usize) -> super::CommandsView {
             view.limit = None;
             view.hover = Some(super::CommandsHit::Tab(super::CommandsTab::Checks));
         }
+        6 => {
+            view.tabs = &super::COMMANDS_FEATURE_TABS;
+            view.tab = super::CommandsTab::Pages;
+            view.body = crate::project_commands::PAGES_BODY;
+            view.rows = vec![row(
+                "Sandbox app",
+                Some("listening now: 4200, 8000, 8001"),
+                Some("App http://localhost/, Web app http://localhost:8000/"),
+                "",
+            )];
+            view.limit = None;
+            view.keys.push(("Alt+U", "use"));
+        }
         _ => {}
     }
     view
@@ -3009,52 +3022,57 @@ fn paint_commands(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         .collect()
 }
 
-const COMMANDS: [&str; 6] = [
+const COMMANDS: [&str; 7] = [
     "commands",
     "commands_setup",
     "commands_stale",
     "commands_low",
     "commands_run",
     "commands_feature",
+    "commands_pages",
 ];
 
 /// The recorded hashes of `COMMANDS`, per case in `CASES`.
-const GOLDEN_COMMANDS: [[u64; 6]; 4] = [
+const GOLDEN_COMMANDS: [[u64; 7]; 4] = [
     // Dark at 1
     [
-        0x8948934910003701, // commands
-        0xe36104db016e0ed6, // commands_setup
-        0x6eaaa9f78af5fb15, // commands_stale
-        0xf49ab1be12a62367, // commands_low
-        0x2c3fd9fa4109884a, // commands_run
-        0xa0e9bc346c0817da, // commands_feature
+        0xdf91a826b0deb076, // commands
+        0x29ea6b232a4f738a, // commands_setup
+        0x8d72e1a35a5d8a23, // commands_stale
+        0x23aa7bc8677e9fa8, // commands_low
+        0x3a7eea4b834591ff, // commands_run
+        0x9cd7622fe0915f5e, // commands_feature
+        0x13acb54dee027190, // commands_pages
     ],
     // Dark at 2
     [
-        0x71a3270da89e0e47, // commands
-        0xd9bb577893bcd7cd, // commands_setup
-        0x5ea91e40f6792835, // commands_stale
-        0xbdf723e3a366fbb0, // commands_low
-        0xf13751978d084386, // commands_run
-        0x97fe7637fbec54a9, // commands_feature
+        0x9c598b7d5611642e, // commands
+        0x2de259070591206d, // commands_setup
+        0xaa4771bea94c0478, // commands_stale
+        0x65c92614e6cf6c39, // commands_low
+        0x2ab8cb4fbe186c16, // commands_run
+        0x1d9e1d32342f05d9, // commands_feature
+        0x56e5039ecda64c06, // commands_pages
     ],
     // Light at 1
     [
-        0xcd689f42fe3f3c88, // commands
-        0x2a5b2af524fb6f5c, // commands_setup
-        0x27856c7290db9bf1, // commands_stale
-        0x85b0ff253543353d, // commands_low
-        0x357b272456513d94, // commands_run
-        0x597332502b26ab0b, // commands_feature
+        0xe18ed46e1bb3ab72, // commands
+        0xc4fd549e5c9248ae, // commands_setup
+        0x6a09ad3a66abda04, // commands_stale
+        0xa0c67366a3918a07, // commands_low
+        0x1a4be9b68a6f4146, // commands_run
+        0xf11deca6aa0d9ccd, // commands_feature
+        0x006a3fe04b40c689, // commands_pages
     ],
     // Light at 2
     [
-        0xdc6500d5bdaead9c, // commands
-        0x416312f9a5ac3fc4, // commands_setup
-        0xe322415985254a50, // commands_stale
-        0xd777ebd60fc712aa, // commands_low
-        0x5877ebb209449bd6, // commands_run
-        0x0c21e4134d23cd90, // commands_feature
+        0x5d03a4d2cc483f51, // commands
+        0x82bab0b452f0838b, // commands_setup
+        0x6606832b8a351d8b, // commands_stale
+        0x1e8d4befa61f7bd7, // commands_low
+        0xa96a02d6e5a3c6f6, // commands_run
+        0xd7f7d5b2ec2484c3, // commands_feature
+        0x757605e97d854643, // commands_pages
     ],
 ];
 
