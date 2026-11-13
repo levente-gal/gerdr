@@ -685,6 +685,13 @@ fn the_sandbox_is_offered_on_manual_test_only_and_by_its_state() {
         sandbox_labels(&f, Stage::ManualTest, none),
         ["Open app", "Restart", "Reset data\u{2026}", "Stop\u{2026}"]
     );
+    // Reset data is tried between runs: a button on the page, not a menu row.
+    let actions = page_actions(&f, Stage::ManualTest, none);
+    let page = stage_page(&f, Stage::ManualTest, &PanelState::default(), &actions, 0);
+    let reset = (actions.iter())
+        .position(|(_, o)| *o == PanelOutcome::ResetSandbox)
+        .unwrap();
+    assert!(!page.menu.contains(&reset), "{:?}", page.menu);
     f.sandbox = Some(feature::sandbox_run::SandboxRun {
         stopped: true,
         ..running_run()

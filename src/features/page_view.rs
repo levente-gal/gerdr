@@ -450,13 +450,11 @@ fn next_section(feature: &Feature, stage: Stage, mark: StageMark) -> Option<Page
 
 /// Whether a page's button is a rare one, a row of the tab's `⋯` menu rather
 /// than a button on the page: starting over, setting up again, the project's
-/// commands (unless the page wants them), a sandbox's reset and removal.
+/// commands (unless the page wants them), a stopped sandbox's removal. A
+/// running sandbox's Reset data stays on the page, tried between runs.
 fn in_menu(button: &PageButton, outcome: &PanelOutcome) -> bool {
     match outcome {
-        PanelOutcome::StartOver(_)
-        | PanelOutcome::SetUp
-        | PanelOutcome::ResetSandbox
-        | PanelOutcome::RemoveSandbox => true,
+        PanelOutcome::StartOver(_) | PanelOutcome::SetUp | PanelOutcome::RemoveSandbox => true,
         PanelOutcome::EditCommands(_) => button.style == ButtonStyle::Quiet,
         _ => false,
     }
