@@ -1391,6 +1391,13 @@ pub enum PanelOutcome {
     /// Stop the conflicts an agent takes on, after asking; `.0` as for
     /// `ReviewConflictPlan`.
     StopResolving(String),
+    /// Send the checks failing on GitHub on every pull request shipping
+    /// opened to the Build agent at once, as a fix round: planned first
+    /// (`.1`), or not. `.0` is the repository whose card shows the button.
+    FixCi(String, bool),
+    /// Run the failed GitHub Actions runs of repository `.0`'s pull request
+    /// again on GitHub.
+    RerunShipCi(String),
     /// Open the feature's summary to edit.
     EditSummary,
     /// Reopen this done stage, once it isn't locked (see

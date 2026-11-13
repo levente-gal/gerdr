@@ -256,6 +256,18 @@ impl Gerdr {
                 pull.number
             ));
         }
+        self.rerun_failed_runs(project, slug, runs);
+    }
+
+    /// Run the failed jobs of `runs` again on GitHub, off the thread: each a
+    /// pull request's number, its `--repo`, a folder of its repository, and
+    /// its runs' ids.
+    pub(crate) fn rerun_failed_runs(
+        &mut self,
+        project: &str,
+        slug: &str,
+        runs: Vec<(u64, String, std::path::PathBuf, Vec<u64>)>,
+    ) {
         let number = (runs.iter())
             .map(|(n, ..)| format!("#{n}"))
             .collect::<Vec<_>>()
@@ -315,6 +327,8 @@ impl Gerdr {
                 "{number}: {ran} failed {runs} going again on GitHub"
             ));
             self.refresh_pr_reviews();
+            // A shipped feature's pull requests: read again at once too.
+            self.read_prs_now(project, slug);
         }
     }
 

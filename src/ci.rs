@@ -993,17 +993,6 @@ pub fn rollup_checks(rollup: serde_json::Value) -> Vec<Check> {
     pull_row(&pull, "", Group::Mine, false).checks
 }
 
-/// The states of a pull request's checks from the `statusCheckRollup` gh
-/// gives, each check once: one run again in place of the one before it.
-pub fn rollup_states(rollup: serde_json::Value) -> Vec<CiState> {
-    let pull = Pull {
-        status_check_rollup: serde_json::from_value(rollup).unwrap_or_default(),
-        ..Pull::default()
-    };
-    let row = pull_row(&pull, "", Group::Mine, false);
-    row.checks.into_iter().map(|check| check.state).collect()
-}
-
 /// Whether a run or check run with `status` is yet to finish.
 fn running(status: &str) -> bool {
     !status.is_empty() && !status.eq_ignore_ascii_case("completed")

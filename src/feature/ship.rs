@@ -370,6 +370,8 @@ pub struct PrState {
     pub passed: usize,
     pub failed: usize,
     pub running: usize,
+    /// Each of its checks, with its name and page.
+    pub checks: Vec<super::pr::CiCheck>,
     /// `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or empty.
     pub review: String,
     /// `MERGEABLE`, `CONFLICTING` or `UNKNOWN`.
@@ -410,6 +412,13 @@ impl PrState {
         }
         parts.join(" \u{b7} ")
     }
+
+    /// Its failed checks, while it is open: what a fix round is asked for.
+    pub fn failed_checks(&self) -> Vec<&super::pr::CiCheck> {
+        (self.checks.iter())
+            .filter(|c| self.state == "OPEN" && c.state == crate::ci::CiState::Failed)
+            .collect()
+    }
 }
 
 /// Read `feature`'s pull requests on GitHub with `gh`, by `Repo::key`: those
@@ -441,8 +450,15 @@ pub fn read_prs(feature: &Feature, gh: &str) -> BTreeMap<String, Result<PrState,
         let read = run_gh(gh, &repo.worktree, &["pr", "view", &url, "--json", fields])
             .and_then(|out| serde_json::from_str::<View>(&out).map_err(|e| e.to_string()))
             .map(|view| {
-                let states = crate::ci::rollup_states(view.status_check_rollup);
-                let count = |s| states.iter().filter(|x| **x == s).count();
+                let checks: Vec<super::pr::CiCheck> =
+                    (crate::ci::rollup_checks(view.status_check_rollup).into_iter())
+                        .map(|c| super::pr::CiCheck {
+                            name: c.name,
+                            state: c.state,
+                            link: c.link,
+                        })
+                        .collect();
+                let count = |s| checks.iter().filter(|x| x.state == s).count();
                 PrState {
                     number: view.number,
                     state: view.state,
@@ -452,6 +468,7 @@ pub fn read_prs(feature: &Feature, gh: &str) -> BTreeMap<String, Result<PrState,
                     running: count(crate::ci::CiState::Running),
                     review: view.review_decision.unwrap_or_default(),
                     mergeable: view.mergeable,
+                    checks,
                 }
             });
         if let Err(why) = &read {

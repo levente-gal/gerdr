@@ -1598,6 +1598,57 @@ pub(super) fn ship_base_actions(
             ));
         }
     }
+    out.extend(ship_ci_actions(feature, probe, repos));
+    out
+}
+
+/// The buttons of Ship's cards whose pull requests fail checks on GitHub:
+/// fix them all in one round, planned first or not, while no round is open
+/// and what failed is what was pushed; and run its failed Actions runs again.
+fn ship_ci_actions(
+    feature: &Feature,
+    probe: Option<&Probe>,
+    repos: &[ship::RepoCheck],
+) -> Vec<(PageButton, PanelOutcome)> {
+    let Some(prs) = probe.and_then(|p| p.prs.as_ref()) else {
+        return Vec::new();
+    };
+    // Fixes made since the push are Push's to send first.
+    let failing: Vec<(&ship::RepoCheck, &ship::PrState)> = (repos.iter())
+        .filter(|r| ship::step_done(feature, r, ShipStep::Push).is_some())
+        .filter_map(|r| Some((r, prs.get(&r.key)?.as_ref().ok()?)))
+        .filter(|(_, state)| !state.failed_checks().is_empty())
+        .collect();
+    let (fix, plan) = match failing.len() {
+        1 => ("Fix CI", "Plan CI fixes"),
+        _ => ("Fix all CI", "Plan all CI fixes"),
+    };
+    let button = |label: &str, style| PageButton {
+        label: label.to_owned(),
+        style,
+    };
+    let mut out = Vec::new();
+    for (repo, state) in failing {
+        // One round takes every repository's failures: each card says so.
+        if feature.fix_round.is_none() {
+            out.push((
+                button(fix, ButtonStyle::Primary),
+                PanelOutcome::FixCi(repo.key.clone(), false),
+            ));
+            out.push((
+                button(plan, ButtonStyle::Quiet),
+                PanelOutcome::FixCi(repo.key.clone(), true),
+            ));
+        }
+        let checks: Vec<feature::pr::CiCheck> =
+            state.failed_checks().into_iter().cloned().collect();
+        if !feature::pr::rerun_ids(&checks).is_empty() {
+            out.push((
+                button("Rerun failed", ButtonStyle::Plain),
+                PanelOutcome::RerunShipCi(repo.key.clone()),
+            ));
+        }
+    }
     out
 }
 
@@ -1626,7 +1677,10 @@ pub(super) fn ship_row_repo(panel: &FeaturePanel, ships: &[ShipRow]) -> Option<S
 /// page's own.
 pub(super) fn ship_outcome_repo(feature: &Feature, outcome: &PanelOutcome) -> Option<String> {
     match outcome {
-        PanelOutcome::UpdateBase(repo, _) | PanelOutcome::UndoShip(repo, _) => Some(repo.clone()),
+        PanelOutcome::UpdateBase(repo, _)
+        | PanelOutcome::UndoShip(repo, _)
+        | PanelOutcome::FixCi(repo, _)
+        | PanelOutcome::RerunShipCi(repo) => Some(repo.clone()),
         PanelOutcome::ResolveConflicts(repo, _) if feature.shipping.resolving.is_none() => {
             Some(repo.clone())
         }

@@ -2329,3 +2329,187 @@ fn a_review_recaps_its_own_stages_on_ship() {
     assert_eq!(names, ["Verify", "AI review", "Code review", "Manual test"]);
     assert!(recap.summary.is_empty() && recap.summary_note.is_none());
 }
+
+#[test]
+fn checks_failing_on_a_pull_request_go_to_build_from_its_card() {
+    use crate::{
+        ci::CiState,
+        feature::{Pr, RepoPlan, ShipDone, pr::CiCheck},
+    };
+    let root = std::env::temp_dir().join(format!("gerdr-ship-ci-{}", std::process::id()));
+    let mut repos = Vec::new();
+    for name in ["api", "web"] {
+        let mut r = repo(name, true);
+        r.worktree = root.join(name);
+        std::fs::create_dir_all(&r.worktree).unwrap();
+        repos.push(r);
+    }
+    let mut f = feature("s", repos, Stage::ALL.len());
+    f.status = Status::Done;
+    for (n, name) in ["api", "web"].into_iter().enumerate() {
+        f.ship_ran(ShipDone {
+            at: 1_900,
+            repo: name.into(),
+            step: ShipStep::Push,
+            sha: Some(format!("{name}-head")),
+            url: None,
+            undone: None,
+        });
+        f.ship_plan
+            .repos
+            .insert(name.into(), RepoPlan::new(Route::Pr));
+        let url = format!("https://github.com/o/{name}/pull/{n}");
+        f.ship_ran(ShipDone {
+            at: 1_901,
+            repo: name.into(),
+            step: ShipStep::OpenPr,
+            sha: None,
+            url: Some(url.clone()),
+            undone: None,
+        });
+        f.shipping.prs.push(Pr {
+            repo: name.into(),
+            url,
+        });
+    }
+    let mut found = check(&[], &["api", "web"], &[]).unwrap();
+    found.repos[0].head = Some("api-head".into());
+    found.repos[1].head = Some("web-head".into());
+    let mut p = probe(Some(found));
+    let failed = |name: &str, link: &str| CiCheck {
+        name: name.into(),
+        state: CiState::Failed,
+        link: Some(link.into()),
+    };
+    let pr = |checks| {
+        Ok(ship::PrState {
+            state: "OPEN".into(),
+            failed: 1,
+            checks,
+            ..ship::PrState::default()
+        })
+    };
+    // api's tests failed on GitHub Actions; web's deploy elsewhere.
+    let run = "https://github.com/o/api/actions/runs/77/job/9";
+    p.prs = Some(BTreeMap::from([
+        ("api".to_owned(), pr(vec![failed("test", run)])),
+        (
+            "web".to_owned(),
+            pr(vec![failed("deploy", "https://ci.example/5")]),
+        ),
+    ]));
+    let ctx = RowCtx {
+        ship_read: true,
+        ..RowCtx::default()
+    };
+    let of = |f: &Feature, p: &Probe, repo: Option<&str>| -> Vec<(&'static str, PanelOutcome)> {
+        (ship_keys(f, ctx, Some(p), repo).into_iter())
+            .filter(|k| {
+                matches!(
+                    k.outcome,
+                    PanelOutcome::FixCi(..) | PanelOutcome::RerunShipCi(_)
+                )
+            })
+            .map(|k| (k.chord, k.outcome))
+            .collect()
+    };
+    // One round takes both: the first card's, or the selected one's.
+    assert_eq!(
+        of(&f, &p, None),
+        [
+            ("Ctrl+Enter", PanelOutcome::FixCi("api".into(), false)),
+            ("Ctrl+Shift+Enter", PanelOutcome::FixCi("api".into(), true)),
+            ("Alt+R", PanelOutcome::RerunShipCi("api".into())),
+        ]
+    );
+    // web's check isn't an Actions run: nothing runs it again from here.
+    assert_eq!(
+        of(&f, &p, Some("web")),
+        [
+            ("Ctrl+Enter", PanelOutcome::FixCi("web".into(), false)),
+            ("Ctrl+Shift+Enter", PanelOutcome::FixCi("web".into(), true)),
+        ]
+    );
+    let keys = ship_keys(&f, ctx, Some(&p), None);
+    let fix = keys.iter().find(|k| k.chord == "Ctrl+Enter").unwrap();
+    assert_eq!(fix.what, "fix all CI");
+    // Keys come as their own symbol (checklist K8).
+    let alt = ModifiersState {
+        alt: true,
+        ..ModifiersState::default()
+    };
+    let rerun = keys
+        .iter()
+        .find(|k| crate::key_table::is(k.chord, &alt, Keysym::r));
+    assert_eq!(rerun.map(|k| k.what.as_str()), Some("rerun failed"));
+    // Its card names what failed, and holds its buttons.
+    let state = PanelState {
+        probe: Some(&p),
+        ..PanelState::default()
+    };
+    let mut actions = page_actions(&f, Stage::Ship, ctx);
+    actions.extend(round_plan_actions(&f, Stage::Ship, Some(&p)));
+    let page = stage_page(&f, Stage::Ship, &state, &actions, 2_000);
+    let api = (page.sections.iter())
+        .find_map(|s| match s {
+            PageSection::ShipGroup(g) if g.head == "api" => g.card.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(api.dot, Dot::Failed);
+    assert_eq!(api.ci, Some(line("failed: test", CheckTone::Failed)));
+    let held: Vec<&str> = (api.buttons.iter())
+        .map(|b| actions[*b].0.label.as_str())
+        .collect();
+    assert_eq!(
+        held,
+        ["Fix all CI", "Plan all CI fixes", "Rerun failed", "Open PR"]
+    );
+    // Fixes made since the push are Push's: no round for that card.
+    let mut moved = p.clone();
+    if let Some(check) = moved.ship.as_mut() {
+        check.repos[0].head = Some("api-fixed".into());
+    }
+    let left = of(&f, &moved, None);
+    assert_eq!(
+        left[0],
+        ("Ctrl+Enter", PanelOutcome::FixCi("web".into(), false))
+    );
+    assert_eq!(keys_what(&f, ctx, &moved, "Ctrl+Enter"), "fix CI");
+    // A round open, Ship to do again: Ship waits for it, and no other starts.
+    assert!(f.untick(Stage::Ship, 2_000));
+    f.fix_round = Some(crate::feature::fix_round::FixRound {
+        n: 2,
+        what: "CI failures".into(),
+        input: root.join("in.md"),
+        stage: Stage::Ship,
+        phase: crate::feature::fix_round::FixPhase::Planning,
+        sent_back: 0,
+        asked: 0,
+        ready: None,
+        stalled: None,
+        give_back: Default::default(),
+        items: Vec::new(),
+        done: 0,
+        ended: None,
+        trail: Default::default(),
+    });
+    assert_eq!(
+        of(&f, &p, None),
+        [("Alt+R", PanelOutcome::RerunShipCi("api".into()))]
+    );
+    assert_eq!(
+        ship_ask(&f, Some(&p)),
+        ShipAsk::Blocked(
+            "Can't ship yet: Fix round 2 takes on the CI failures: Ship waits for it".into()
+        )
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// What the footer says of `chord` on Ship's page of `f`.
+fn keys_what(f: &Feature, ctx: RowCtx, p: &Probe, chord: &str) -> String {
+    (ship_keys(f, ctx, Some(p), None).into_iter())
+        .find(|k| k.chord == chord)
+        .map_or_else(String::new, |k| k.what)
+}

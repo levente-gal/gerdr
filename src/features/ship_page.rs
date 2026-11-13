@@ -49,7 +49,7 @@ pub(super) fn ship_ask(feature: &Feature, probe: Option<&Probe>) -> ShipAsk {
     if !planned.blockers.is_empty() {
         return ShipAsk::Blocked(blocked_text(&planned.blockers));
     }
-    // An agent works on its conflicts: what it ships is the agent's.
+    // An agent works on its conflicts or fixes: what it ships is theirs.
     if let Some(line) = resolving_line(feature) {
         return ShipAsk::Blocked(blocked_text(&[line.text]));
     }
@@ -267,8 +267,18 @@ fn passed_checks(feature: &Feature, check: &ship::ShipCheck, probe: Option<&Prob
 }
 
 /// What the Ship check says while an agent takes on `feature`'s conflicts
-/// with its base: Ship waits for it.
+/// with its base, or a fix round Ship asked for is open: Ship waits for it,
+/// or it would ship without what they change.
 fn resolving_line(feature: &Feature) -> Option<CheckLine> {
+    if let Some(round) = feature.fix_round.as_ref() {
+        return Some(CheckLine {
+            text: format!(
+                "Fix round {} takes on the {}: Ship waits for it",
+                round.n, round.what
+            ),
+            tone: CheckTone::Note,
+        });
+    }
     let r = feature.shipping.resolving.as_ref()?;
     let doing = match r.planning {
         true => "plans how to resolve",
@@ -408,6 +418,15 @@ fn ran_when(done: &feature::ShipDone, now: u64) -> String {
     let url = done.url.as_deref().map(pr_tail);
     let parts: Vec<String> = when.into_iter().chain(sha).chain(url).collect();
     parts.join(" \u{b7} ")
+}
+
+/// The checks failing on a pull request, by name, for its card: "failed:
+/// test, lint".
+fn failed_line(state: &ship::PrState) -> Option<CheckLine> {
+    let names: Vec<&str> = (state.failed_checks().into_iter())
+        .map(|c| c.name.as_str())
+        .collect();
+    (!names.is_empty()).then(|| line(format!("failed: {}", names.join(", ")), CheckTone::Failed))
 }
 
 /// How repository `repo`'s card stands: its dot and words.
@@ -601,7 +620,9 @@ pub(super) fn ship_sections(
 ) -> Vec<PageSection> {
     let probe = state.probe;
     let rows = ship_rows(feature, probe);
-    let going = feature.squash_going();
+    // While a pull request it opened waits on GitHub, its card says how it
+    // stands, its checks too: what ran is all there is to show then.
+    let going = feature.squash_going() || pr_wait(feature, probe).is_some();
     let Some(check) = probe
         .and_then(|p| p.ship.as_ref())
         .filter(|c| !c.unread && (!rows.is_empty() || going))
@@ -639,13 +660,20 @@ pub(super) fn ship_sections(
         };
         let pr_state = (probe.and_then(|p| p.prs.as_ref())).and_then(|prs| prs.get(&repo.key));
         let (dot, state_line) = ship_card_state(feature, repo, state.shipping, pr_state);
+        // Its pull request's failed checks, while its card says they fail.
+        let ci = (pr_state.and_then(|s| s.as_ref().ok()))
+            .filter(|_| dot == Dot::Failed)
+            .and_then(failed_line);
         let open = (pr.and_then(|pr| pr.url)).and_then(|url| {
             (actions.iter()).position(|(_, o)| *o == PanelOutcome::OpenPr(url.clone()))
         });
         // Taking its base in, then its pull request.
         let buttons = (actions.iter().enumerate())
             .filter(|(_, (_, o))| match o {
-                PanelOutcome::UpdateBase(r, _) | PanelOutcome::PullBase(r) => *r == repo.key,
+                PanelOutcome::UpdateBase(r, _)
+                | PanelOutcome::PullBase(r)
+                | PanelOutcome::FixCi(r, _)
+                | PanelOutcome::RerunShipCi(r) => *r == repo.key,
                 // A take on conflicts under way is its agent's card's.
                 PanelOutcome::ResolveConflicts(r, _) => {
                     feature.shipping.resolving.is_none() && *r == repo.key
@@ -671,6 +699,7 @@ pub(super) fn ship_sections(
                 base: (!repo.merged && !repo.pulls_base())
                     .then(|| ship_base_line(feature, probe, &repo.key))
                     .flatten(),
+                ci,
                 buttons,
             }),
             route: route_row.map(|row| chrome::ShipRouteRow {

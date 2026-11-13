@@ -102,6 +102,24 @@ pub(super) const SHIP_KEYS: &[Binding<ShipCtx, PanelOutcome>] = &[
         f1: "Ship: review the plan of a resolution, or open the selected repository's pull request",
     },
     Binding {
+        chord: "Ctrl+Enter",
+        does: |c| c.find(|o| matches!(o, PanelOutcome::FixCi(_, false))),
+        footer: true,
+        f1: "Ship: have the Build agent fix the checks failing on every pull request at once, then back through Verify and the reviews",
+    },
+    Binding {
+        chord: "Ctrl+Shift+Enter",
+        does: |c| c.find(|o| matches!(o, PanelOutcome::FixCi(_, true))),
+        footer: true,
+        f1: "Ship: have the Build agent plan fixes for the checks failing on every pull request first",
+    },
+    Binding {
+        chord: "Alt+R",
+        does: |c| c.find(|o| matches!(o, PanelOutcome::RerunShipCi(_))),
+        footer: true,
+        f1: "Ship: run the selected repository's failed GitHub Actions runs again",
+    },
+    Binding {
         chord: "Ctrl+Shift+Del",
         does: |c| c.find(|o| matches!(o, PanelOutcome::StopResolving(_))),
         footer: true,

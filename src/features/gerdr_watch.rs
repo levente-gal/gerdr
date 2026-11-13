@@ -229,6 +229,16 @@ impl Gerdr {
         });
     }
 
+    /// Read feature `slug`'s pull requests on GitHub again now, with the
+    /// rest of its probe, not after the minute a probe waits for them.
+    pub(crate) fn read_prs_now(&mut self, project: &str, slug: &str) {
+        let key = (project.to_owned(), slug.to_owned());
+        if let Some(probed) = self.features.probes.get_mut(&key) {
+            probed.prs_at = None;
+        }
+        self.probe_feature(project, slug);
+    }
+
     /// Read Ship's check of feature `slug` of `project` again now, as its
     /// Check again button asks: fetching origin and asking for its pull
     /// requests too, which a probe does only every few minutes.

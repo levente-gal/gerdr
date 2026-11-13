@@ -175,15 +175,18 @@ impl Ci {
 pub fn rerun_ids(checks: &[CiCheck]) -> Vec<u64> {
     let mut ids: Vec<u64> = (checks.iter())
         .filter(|c| matches!(c.state, CiState::Failed | CiState::Unknown))
-        .filter_map(|c| {
-            let link = c.link.as_deref()?;
-            let (_, after) = link.split_once("/actions/runs/")?;
-            after.split(['/', '?', '#']).next()?.parse().ok()
-        })
+        .filter_map(|c| run_id(c.link.as_deref()?))
         .collect();
     ids.sort_unstable();
     ids.dedup();
     ids
+}
+
+/// The id of the GitHub Actions run whose page `link` is, if it is one's
+/// (`…/actions/runs/<id>/job/…`).
+pub fn run_id(link: &str) -> Option<u64> {
+    let (_, after) = link.split_once("/actions/runs/")?;
+    after.split(['/', '?', '#']).next()?.parse().ok()
 }
 
 impl Remote {
