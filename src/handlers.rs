@@ -92,32 +92,30 @@ impl CompositorHandler for Gerdr {
             }
         }
 
-        // First commit of a toplevel: app_id is known now, so pick its tab and pane.
+        // First commit of a toplevel: app_id is known now, so pick its tab and
+        // pane. Placed even when already configured: a window asking to be
+        // maximized before it commits (Chromium's DevTools) gets smithay's
+        // configure first, and would stay unplaced, never shown.
         if let Some(window) = self
             .unplaced
             .iter()
             .find(|w| w.toplevel().is_some_and(|t| t.wl_surface() == surface))
             .cloned()
         {
-            let (app_id, configured) = with_states(surface, |states| {
+            let app_id = with_states(surface, |states| {
                 let data = states
                     .data_map
                     .get::<XdgToplevelSurfaceData>()
                     .expect("an unplaced window is an xdg toplevel")
                     .lock()
                     .expect("toplevel data lock poisoned");
-                (
-                    data.app_id.clone().unwrap_or_default(),
-                    data.initial_configure_sent,
-                )
+                data.app_id.clone().unwrap_or_default()
             });
-            if !configured {
-                self.place(window.clone(), &app_id);
-                if let Some(toplevel) = window.toplevel()
-                    && !toplevel.is_initial_configure_sent()
-                {
-                    toplevel.send_configure();
-                }
+            self.place(window.clone(), &app_id);
+            if let Some(toplevel) = window.toplevel()
+                && !toplevel.is_initial_configure_sent()
+            {
+                toplevel.send_configure();
             }
         }
 
