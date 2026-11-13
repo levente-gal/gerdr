@@ -22,6 +22,7 @@ macro_rules! ui {
 
 mod activate;
 mod agent_icons;
+mod agent_pause;
 mod agent_tell;
 mod agents;
 mod ai_work;
@@ -1313,6 +1314,8 @@ pub enum Action {
     /// The agent picker: an agent CLI in a new tab of the active
     /// workspace.
     NewAgent,
+    /// Every agent paused, or let go on (see `agent_pause`).
+    PauseAgents,
     CloseTab,
     /// Name the active tab: a field on it takes the name.
     RenameTab,
@@ -4231,6 +4234,7 @@ impl Gerdr {
         match action {
             Action::NewTab => self.new_tab(),
             Action::NewAgent => self.open_agent_picker(self.active_workspace),
+            Action::PauseAgents => self.toggle_agents_paused(),
             Action::CloseTab => self.close_tab(tab),
             Action::RenameTab if tabs > 0 => self.start_rename(RenameTarget::Tab(ws, tab)),
             Action::MoveTab(step) => self.move_tab(step),

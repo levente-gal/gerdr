@@ -55,6 +55,8 @@ pub enum MenuAction {
     StopT3,
     /// T3 Code's server, stopped and started again.
     RestartT3,
+    /// Every agent paused, or let go on (see `agent_pause`).
+    ToggleAgentsPaused,
     /// T3 Code's app, in the shown workspace.
     OpenT3,
     /// Look for a newer T3 Code now (see `Gerdr::check_t3`).
@@ -572,6 +574,7 @@ impl Gerdr {
             MenuAction::StartT3 => self.spawn_t3(None),
             MenuAction::StopT3 => self.stop_t3_asking(),
             MenuAction::RestartT3 => self.restart_t3_asking(),
+            MenuAction::ToggleAgentsPaused => self.toggle_agents_paused(),
             MenuAction::OpenT3 => self.open_t3(self.active_workspace, None),
             MenuAction::CheckT3 => self.check_t3(true),
             MenuAction::ShowLog(path) => self.show_log(path),

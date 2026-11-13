@@ -85,6 +85,8 @@ pub enum Target {
     Machines,
     /// The dialog connecting another machine (see `machines`).
     ConnectMachine,
+    /// Every agent paused, or let go on (see `agent_pause`).
+    PauseAgents,
     /// An agent CLI's command, to run in a new tab of workspace `.0` (see
     /// `Gerdr::new_agent`).
     NewAgent(usize, String),
@@ -183,6 +185,7 @@ impl Target {
             | Target::Inbox
             | Target::Machines
             | Target::ConnectMachine
+            | Target::PauseAgents
             | Target::NewAgent(..)
             | Target::T3(_)
             | Target::UpdateT3
@@ -219,6 +222,7 @@ impl Target {
             | Target::Inbox
             | Target::Machines
             | Target::ConnectMachine
+            | Target::PauseAgents
             | Target::NewAgent(..)
             | Target::T3(_)
             | Target::UpdateT3
@@ -1040,6 +1044,7 @@ fn frecency_key(
         | Target::Inbox
         | Target::Machines
         | Target::ConnectMachine
+        | Target::PauseAgents
         | Target::Settings
         | Target::ProjectFile(_)
         | Target::ReloadProjects
@@ -1374,6 +1379,7 @@ impl Gerdr {
             Target::AiStats,
         ));
         items.extend(self.machines_entries());
+        items.push(self.pause_entry());
         items.extend(self.feature_entries());
         let home = home_dir();
         if let Some(home) = &home {
@@ -1468,6 +1474,24 @@ impl Gerdr {
             n => format!("{n} need you"),
         };
         Item::new(ItemIcon::Command, "Inbox", detail, Target::Inbox)
+    }
+
+    /// The row pausing every agent, or letting them go on.
+    fn pause_entry(&self) -> Item {
+        match self.agents_paused() {
+            true => Item::new(
+                ItemIcon::Command,
+                "Resume agents",
+                "let the paused agents go on",
+                Target::PauseAgents,
+            ),
+            false => Item::new(
+                ItemIcon::Command,
+                "Pause all agents",
+                "stop them where they are, on this machine",
+                Target::PauseAgents,
+            ),
+        }
     }
 
     /// The rows opening the machines panel, saying how many are connected,
@@ -1780,6 +1804,7 @@ impl Gerdr {
             Target::Inbox => self.open_inbox(None),
             Target::Machines => self.open_machines(None),
             Target::ConnectMachine => self.open_machine_dialog(),
+            Target::PauseAgents => self.toggle_agents_paused(),
             Target::NewAgent(w, command) => {
                 match free_model_pick(w, &command, &self.launcher.cli_agents) {
                     Some((of, slot)) => self.open_model_picker(of, slot),

@@ -41,6 +41,12 @@ const DEFAULT_PREFIX: &str = "Ctrl+B";
 const ACTIONS: &[(&str, Action, &str, &str)] = &[
     ("new-tab", Action::NewTab, "Open a new tab", "c"),
     ("new-agent", Action::NewAgent, "Start an agent…", "Shift+A"),
+    (
+        "pause-agents",
+        Action::PauseAgents,
+        "Pause or resume all agents",
+        "Alt+A",
+    ),
     ("next-tab", Action::NextTab, "Go to the next tab", "n"),
     (
         "previous-tab",
@@ -351,6 +357,7 @@ const OLD_NAMES: &[(&str, &str)] = &[
 const HELP_LINES: &[(&str, &[&str])] = &[
     ("Open a new tab", &["new-tab"]),
     ("Start an agent…", &["new-agent"]),
+    ("Pause or resume all agents", &["pause-agents"]),
     (
         "Go to the next / previous tab",
         &["next-tab", "previous-tab"],
@@ -1207,6 +1214,7 @@ mod tests {
             [
                 "C: Open a new tab",
                 "Shift+A: Start an agent…",
+                "Alt+A: Pause or resume all agents",
                 "N / P: Go to the next / previous tab",
                 "1–9: Go to tab",
                 "Shift+X: Close tab",

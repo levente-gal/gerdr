@@ -77,6 +77,9 @@ pub struct Store {
     /// its chip (see `criteria_strip`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub criteria_folded: bool,
+    /// The agents paused, to let go (see `agent_pause`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paused_agents: Vec<crate::agent_pause::Paused>,
     /// How wide the sidebar was left, in logical pixels.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar_width: Option<i32>,
@@ -146,6 +149,8 @@ struct State {
     repo_grouping: Grouping,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     criteria_folded: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    paused_agents: Vec<crate::agent_pause::Paused>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sidebar_width: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -641,6 +646,7 @@ impl Store {
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
         self.criteria_folded = state.criteria_folded;
+        self.paused_agents = state.paused_agents;
         self.sidebar_width = state.sidebar_width;
         self.dock_share = state.dock_share;
         self.window_size = state.window_size;
@@ -665,6 +671,7 @@ impl Store {
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
             criteria_folded: self.criteria_folded,
+            paused_agents: self.paused_agents.clone(),
             sidebar_width: self.sidebar_width,
             dock_share: self.dock_share,
             window_size: self.window_size,
@@ -2071,6 +2078,7 @@ mod tests {
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
             criteria_folded: true,
+            paused_agents: Vec::new(),
             sidebar_width: Some(280),
             dock_share: Some(0.6),
             window_size: Some((1600, 1000)),

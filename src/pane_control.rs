@@ -761,6 +761,9 @@ impl Gerdr {
                 content.buttons = BarButtons::Waiting;
                 content.note = Some("waiting for its prompt");
             }
+            if self.pane_paused(&herdr.pane_id) {
+                content.note = Some("paused");
+            }
             return content;
         }
         let content = app_bar_content(pane);

@@ -522,6 +522,7 @@ impl Gerdr {
         tasks.extend(self.sandbox_left_tasks());
         tasks.extend(self.take_tasks());
         tasks.extend(self.ai_work.tasks());
+        tasks.extend(self.paused_task());
         tasks
     }
 

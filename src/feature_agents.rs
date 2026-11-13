@@ -2157,6 +2157,9 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return false;
         };
+        if !self.starts_while_paused() {
+            return false;
+        }
         if let Some(why) = crate::stage_lock::authors_agent(&feature, stage, extra) {
             self.show_warning(why);
             return false;
@@ -2452,6 +2455,10 @@ impl Gerdr {
             if (run.pane.as_deref()).is_some_and(|p| self.pane_out_of_reach(p)) {
                 continue;
             }
+            // Stopped where it was: nothing it does now says anything.
+            if (run.pane.as_deref()).is_some_and(|p| self.pane_paused(p)) {
+                continue;
+            }
             if run.held {
                 // No work to judge yet, only a tab to lose, unless the user
                 // told it what to do themselves and its file shows it.
@@ -2706,11 +2713,13 @@ impl Gerdr {
         let Some(mut herdr) = self.session.herdr.take() else {
             return;
         };
+        // A paused agent takes the line once it goes on: Enter isn't pressed again.
         let at_work = |pane: &str| {
-            (self.session.agents.iter()).any(|a| {
-                a.pane_id == pane
-                    && matches!(a.agent_status, AgentStatus::Working | AgentStatus::Blocked)
-            })
+            self.pane_paused(pane)
+                || (self.session.agents.iter()).any(|a| {
+                    a.pane_id == pane
+                        && matches!(a.agent_status, AgentStatus::Working | AgentStatus::Blocked)
+                })
         };
         let gave_up = herdr.check_agent_lines(at_work);
         self.session.herdr = Some(herdr);
