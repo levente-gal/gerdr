@@ -4460,6 +4460,7 @@ mod tests {
             agent: None,
             zoomed: false,
             pinned: false,
+            stage: None,
         };
         let tabs = [
             tab(

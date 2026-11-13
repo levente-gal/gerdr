@@ -5448,9 +5448,13 @@ impl Gerdr {
                 }
                 // The feature panel's tab.
                 if tab.is_feature() {
+                    let stage = self
+                        .feature_of_workspace(ws)
+                        .map(|f| f.current().map_or("Done", |s| s.label()));
                     return TabView {
                         title: "Feature".into(),
                         pinned: true,
+                        stage,
                         ..TabView::default()
                     };
                 }

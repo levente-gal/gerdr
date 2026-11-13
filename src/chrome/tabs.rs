@@ -7,8 +7,8 @@ use super::{
     Badge, Canvas, Density, Dot, FONT_SIZE, FieldSpot, GAP, LABEL_FONT_SIZE, NEW_TAB_SIZE, PADDING,
     Painter, Palette, Rect, Rgb, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, STROKE, TAB_MAX_WIDTH,
     Theme, ThemeMode, agent_icon, chevron_side, cross, dot_slot, eye, field_text, icon_sdf, mix,
-    moon, new_tab, no_restart, physical, rounded_rect, row_dot, segment, status_dot, status_label,
-    sun, tab_strip_height, tray, zoom_corners,
+    moon, new_tab, no_restart, physical, rounded_rect, row_dot, segment, stages_mark, status_dot,
+    status_label, sun, tab_strip_height, tray, zoom_corners,
 };
 use crate::agent_icons::AgentIcon;
 use crate::app_icons::github_icon;
@@ -47,6 +47,9 @@ pub struct TabView {
     pub zoomed: bool,
     /// It is a feature's panel tab: it has no "×" (see `Tab::pinned`).
     pub pinned: bool,
+    /// On a feature's panel tab, the stage the feature is at: the tab
+    /// shows it in place of its title.
+    pub stage: Option<&'static str>,
 }
 
 impl TabView {
@@ -150,6 +153,7 @@ impl TabView {
             agent,
             zoomed: false,
             pinned: false,
+            stage: None,
         }
     }
 
@@ -157,6 +161,7 @@ impl TabView {
     /// "⊘" mark says, if it has one.
     pub fn tooltip(&self) -> String {
         let mut parts = vec![self.title.as_str()];
+        parts.extend(self.stage);
         if !self.place.is_empty() {
             parts.push(&self.place);
         }
@@ -411,6 +416,7 @@ impl TabStripView {
             watch: self.watch.is_some(),
             inbox: self.inbox.is_some(),
             problems: self.problems.is_some(),
+            pinned: self.tabs.first().is_some_and(|t| t.pinned),
         };
         let mut layout = tab_layout_at(self.tabs.len(), self.active, size, parts);
         // A pinned tab can't close: no "×" to show or press.
@@ -472,6 +478,14 @@ const CLOSE_MIN_TAB: i32 = 2 * PADDING as i32 + CLOSE + 40;
 const TAB_MIN_WIDTH: i32 = CLOSE_MIN_TAB + 24;
 /// The "more tabs" chip: a chevron and how many it holds.
 const MORE_WIDTH: i32 = 44;
+/// A feature's panel tab: its mark and its longest stage, "Code review".
+const PINNED_TAB_WIDTH: i32 = 140;
+/// The square the stairs mark of a feature's panel tab sits in.
+const PINNED_ICON: i32 = 16;
+/// How far a feature's panel tab, not shown, tints toward the accent.
+const PINNED_TINT: f32 = 0.10;
+/// The accent line along a feature's panel tab's top edge.
+const PINNED_LINE: i32 = 2;
 /// How many tabs have a number, and a key going to them.
 const NUMBERED_TABS: usize = 9;
 /// The rename field inside a tab: this far in from the tab's edges.
@@ -586,6 +600,7 @@ pub fn tab_layout(
         watch,
         inbox,
         problems: false,
+        pinned: false,
     };
     tab_layout_at(count, 0, size, parts)
 }
@@ -605,6 +620,9 @@ pub struct StripParts {
     pub inbox: bool,
     /// The problems button, left of the inbox button.
     pub problems: bool,
+    /// The first tab is a feature's panel tab: `PINNED_TAB_WIDTH` wide
+    /// and always shown.
+    pub pinned: bool,
 }
 
 /// The layout of a strip of `size` holding `count` tabs, `active` among
@@ -614,7 +632,8 @@ pub struct StripParts {
 /// shows or not, so it moves nothing; the tabs share what is left of the
 /// "+", at most `TAB_MAX_WIDTH` each. Past `TAB_MIN_WIDTH` each, those
 /// that fit show, taking in `active`, and the rest go behind the "more
-/// tabs" chip between them and the "+".
+/// tabs" chip between them and the "+". A pinned first tab takes
+/// `PINNED_TAB_WIDTH` before them and always shows.
 pub fn tab_layout_at(
     count: usize,
     active: usize,
@@ -628,6 +647,7 @@ pub fn tab_layout_at(
         watch,
         inbox,
         problems,
+        pinned,
     } = parts;
     let (width, height) = (size.w, size.h);
     let top = (height - PILL) / 2;
@@ -658,16 +678,21 @@ pub fn tab_layout_at(
         right -= CHIP_GAP + WATCH_WIDTH;
         Rectangle::new((right, top).into(), (WATCH_WIDTH, PILL).into())
     });
-    let room = (right - CHIP_GAP - PILL - PLUS_GAP - NAV_WIDTH).max(0);
+    // The pinned tab first, then the rest share what is left.
+    let lead = usize::from(pinned && count > 0);
+    let lead_w = lead as i32 * PINNED_TAB_WIDTH;
+    let (count_rest, active) = (count - lead, active.saturating_sub(lead));
+    let start = NAV_WIDTH + lead_w;
+    let room = (right - CHIP_GAP - PILL - PLUS_GAP - start).max(0);
     // How many show, from which: all, or as many as fit at the narrowest
     // beside the "more tabs" chip, the active one last if it is past them.
-    let all_fit = count as i32 * TAB_MIN_WIDTH <= room;
+    let all_fit = count_rest as i32 * TAB_MIN_WIDTH <= room;
     let (first, shown, room) = if all_fit {
-        (0, count, room)
+        (0, count_rest, room)
     } else {
         let room = (room - MORE_WIDTH - PLUS_GAP).max(0);
-        let shown = ((room / TAB_MIN_WIDTH) as usize).clamp(1, count);
-        let first = (active + 1).saturating_sub(shown).min(count - shown);
+        let shown = ((room / TAB_MIN_WIDTH) as usize).clamp(1, count_rest);
+        let first = (active + 1).saturating_sub(shown).min(count_rest - shown);
         (first, shown, room)
     };
     let tab_w = if shown == 0 {
@@ -675,18 +700,19 @@ pub fn tab_layout_at(
     } else {
         (room / shown as i32).min(TAB_MAX_WIDTH)
     };
-    let end = NAV_WIDTH + shown as i32 * tab_w;
-    let tabs: Vec<Rect> = (0..count)
-        .map(|i| {
+    let end = start + shown as i32 * tab_w;
+    let pinned_tab = Rectangle::new((NAV_WIDTH, 0).into(), (lead_w, height).into());
+    let tabs: Vec<Rect> = std::iter::repeat_n(pinned_tab, lead)
+        .chain((0..count_rest).map(|i| {
             if (first..first + shown).contains(&i) {
-                let x = NAV_WIDTH + (i - first) as i32 * tab_w;
+                let x = start + (i - first) as i32 * tab_w;
                 Rectangle::new((x, 0).into(), (tab_w, height).into())
             } else {
                 // Not shown: no room, before or after those that are.
-                let x = if i < first { NAV_WIDTH } else { end };
+                let x = if i < first { start } else { end };
                 Rectangle::new((x, 0).into(), (0, height).into())
             }
-        })
+        }))
         .collect();
     let more =
         (!all_fit).then(|| Rectangle::new((end + PLUS_GAP, top).into(), (MORE_WIDTH, PILL).into()));
@@ -858,6 +884,33 @@ impl Painter {
                 c.fill(x, 0, w - line, c.h - line, fill);
             }
             c.fill(x + w - line, 0, line, c.h, p.border);
+
+            // A feature's panel tab, the workspace's main one: tinted
+            // toward the accent, an accent line along its top, the
+            // Features stairs mark and the stage the feature is at.
+            if tab.pinned {
+                if !is_active && !hovered {
+                    let tint = mix(p.tab_bar, p.accent, PINNED_TINT);
+                    c.fill(x, 0, w - line, c.h - line, tint);
+                }
+                let edge = if is_active {
+                    p.accent
+                } else {
+                    mix(p.tab_bar, p.accent, 0.5)
+                };
+                c.fill(x, 0, w - line, px(PINNED_LINE), edge);
+                let icon = Rectangle::new(
+                    (rect.loc.x + PADDING as i32, 0).into(),
+                    (PINNED_ICON, size.h).into(),
+                );
+                icon_sdf(&mut c, icon, scale, p.accent, |x, y| stages_mark(x, y, s));
+                let text_x = px(icon.loc.x + PINNED_ICON + STATUS_GAP) as f32;
+                let right = px(rect.loc.x + rect.size.w - GAP) as f32 - pad;
+                let label = tab.stage.unwrap_or(&tab.title);
+                let color = if is_active { p.text } else { p.muted };
+                self.text(&mut c, label, font, text_x, right, band, scale, color);
+                continue;
+            }
 
             if let Some((_, name)) = view.renaming.as_ref().filter(|(t, _)| *t == i)
                 && let Some(field) = layout.rename_field(i)
@@ -1288,7 +1341,7 @@ pub fn tab_zoom_rect(view: &TabStripView, layout: &TabLayout, i: usize, h: i32) 
 #[cfg(test)]
 mod tests {
     use super::{
-        CHIP_GAP, CLOSE, EDGE, NAV_WIDTH, PILL, PLUS_GAP, StripParts, TAB_MAX_WIDTH, TAB_MIN_WIDTH,
+        CHIP_GAP, CLOSE, EDGE, NAV_WIDTH, PILL, PINNED_TAB_WIDTH, PINNED_TINT, PLUS_GAP, StripParts, TAB_MAX_WIDTH, TAB_MIN_WIDTH,
         TabHit, TabStripView, TabView, WATCH_WIDTH, tab_blinkers, tab_layout, tab_layout_at,
         tab_rename_field, tab_slot, tab_strip_hit, tab_zoom_rect,
     };
@@ -1968,5 +2021,50 @@ mod tests {
         assert!(dots[0].loc.x + dots[0].size.w <= l.closes[1].loc.x);
         view.renaming = Some((1, Line::default()));
         assert_eq!(tab_blinkers(&view, size).len(), 1);
+    }
+
+    #[test]
+    fn a_feature_tab_is_narrow_first_and_always_shown() {
+        let size = (500, 36).into();
+        let mut tabs = vec![TabView::default(); 12];
+        tabs[0].pinned = true;
+        for active in [0, 1, 11] {
+            let view = TabStripView::plain(tabs.clone(), active, false, ThemeMode::System);
+            let l = view.layout(size);
+            assert_eq!(l.tabs[0].loc.x, NAV_WIDTH);
+            assert_eq!(l.tabs[0].size.w, PINNED_TAB_WIDTH, "{active}");
+            assert_eq!(l.closes[0].size.w, 0);
+            assert!(l.more.is_some() && !l.hidden().contains(&0));
+            assert!(l.tabs[active].size.w > 0);
+            // The others run on from it, without gaps.
+            let shown: Vec<_> = (1..12).filter(|&i| l.tabs[i].size.w > 0).collect();
+            let mut x = NAV_WIDTH + PINNED_TAB_WIDTH;
+            for i in shown {
+                assert_eq!(l.tabs[i].loc.x, x, "{active}: tab {i}");
+                x += l.tabs[i].size.w;
+            }
+        }
+        // With room for all, the others share it; the feature tab stays narrow.
+        let view = TabStripView::plain(tabs[..3].to_vec(), 0, false, ThemeMode::System);
+        let l = view.layout((1600, 36).into());
+        assert_eq!(l.tabs[0].size.w, PINNED_TAB_WIDTH);
+        assert!(l.tabs[1].size.w > PINNED_TAB_WIDTH && l.tabs[1].size.w == l.tabs[2].size.w);
+    }
+
+    #[test]
+    fn a_feature_tab_reads_in_both_themes() {
+        use crate::chrome::sidebar::contrast;
+        for theme in [Theme::Dark, Theme::Light] {
+            let p = theme.palette();
+            let tinted = mix(p.tab_bar, p.accent, PINNED_TINT);
+            for (what, back) in [("shown", p.tab_active), ("not shown", tinted)] {
+                let mark = contrast(p.accent, back);
+                assert!(mark >= 3.0, "{theme:?} {what}: mark {mark:.2}:1");
+            }
+            let text = contrast(p.text, p.tab_active);
+            assert!(text >= 4.5, "{theme:?} shown: stage {text:.2}:1");
+            let text = contrast(p.muted, tinted);
+            assert!(text >= 4.5, "{theme:?} not shown: stage {text:.2}:1");
+        }
     }
 }

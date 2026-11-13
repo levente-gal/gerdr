@@ -175,6 +175,7 @@ fn tabs() -> Vec<TabView> {
             agent: Some(crate::agent_icons::AgentIcon::Claude),
             zoomed: false,
             pinned: false,
+            stage: None,
         },
         TabView {
             title: "zsh".into(),
@@ -1553,6 +1554,7 @@ fn pinned_strip_view() -> TabStripView {
         TabView {
             title: "Feature".into(),
             pinned: true,
+            stage: Some("Code review"),
             ..Default::default()
         },
     );
@@ -1575,19 +1577,19 @@ const PINNED: [&str; 1] = ["pinned_tab_strip"];
 const GOLDEN_PINNED: [[u64; 1]; 4] = [
     // Dark at 1
     [
-        0xf152f0daf2737043, // pinned_tab_strip
+        0xa6726d0fb2dd7838, // pinned_tab_strip
     ],
     // Dark at 2
     [
-        0x58fb2e701d2fe9fd, // pinned_tab_strip
+        0x1c5037c37d080c91, // pinned_tab_strip
     ],
     // Light at 1
     [
-        0xf2f7f19a81351ca3, // pinned_tab_strip
+        0x0d59eb62e4c2787c, // pinned_tab_strip
     ],
     // Light at 2
     [
-        0xf7f40168b0293f90, // pinned_tab_strip
+        0xfb596a5200382915, // pinned_tab_strip
     ],
 ];
 
