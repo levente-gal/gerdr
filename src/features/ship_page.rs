@@ -645,11 +645,11 @@ pub(super) fn ship_sections(
         // Taking its base in, then its pull request.
         let buttons = (actions.iter().enumerate())
             .filter(|(_, (_, o))| match o {
-                PanelOutcome::UpdateBase(r, _)
-                | PanelOutcome::PullBase(r)
-                | PanelOutcome::ResolveConflicts(r, _)
-                | PanelOutcome::ReviewConflictPlan(r)
-                | PanelOutcome::StopResolving(r) => *r == repo.key,
+                PanelOutcome::UpdateBase(r, _) | PanelOutcome::PullBase(r) => *r == repo.key,
+                // A take on conflicts under way is its agent's card's.
+                PanelOutcome::ResolveConflicts(r, _) => {
+                    feature.shipping.resolving.is_none() && *r == repo.key
+                }
                 _ => false,
             })
             .map(|(i, _)| i)

@@ -61,11 +61,26 @@ impl Gerdr {
     /// The tabs of workspace `w` as gerdr saves them, as JSON: what undoing
     /// its closing opens again.
     pub(crate) fn kept_tabs(&self, w: usize) -> Vec<serde_json::Value> {
+        self.kept_tabs_where(w, |_| true)
+    }
+
+    /// `kept_tabs`, but only those that come back once closed: a file's, or
+    /// one with an app in it. A closed terminal doesn't.
+    pub(crate) fn kept_app_tabs(&self, w: usize) -> Vec<serde_json::Value> {
+        self.kept_tabs_where(w, |tab| tab.doc.is_some() || tab.layout.holds_apps())
+    }
+
+    fn kept_tabs_where(
+        &self,
+        w: usize,
+        keep: impl Fn(&TabRecord) -> bool,
+    ) -> Vec<serde_json::Value> {
         let Some(ws) = self.workspaces.get(w) else {
             return Vec::new();
         };
         (ws.tabs.iter())
             .filter_map(Tab::save)
+            .filter(|tab| keep(tab))
             .filter_map(|tab| {
                 serde_json::to_value(tab)
                     .inspect_err(|err| tracing::warn!("keeping a closed tab: {err}"))

@@ -28,6 +28,9 @@ pub(super) struct PanelState<'a> {
     pub(super) agent_read: bool,
     /// What each of its own agents with a tab does, by `OwnRun::n`.
     pub(super) own_status: Vec<(u32, Option<AgentStatus>)>,
+    /// What the agent taking on Ship's conflicts does, and whether its tab
+    /// is there (`Shipping::resolving`).
+    pub(super) resolving_status: (Option<AgentStatus>, bool),
     /// The last lines of its current stage's agent's pane, as last read.
     pub(super) tail: &'a [String],
     /// What its rows need besides it.

@@ -2414,6 +2414,7 @@ impl Gerdr {
                 }
                 if let Some(agents) = round.agents {
                     state.session.agents = agents;
+                    state.mark_paused_agents();
                     state.notify_agents();
                     state.stage_agents_tick();
                 }
@@ -2776,7 +2777,9 @@ impl Gerdr {
             return;
         }
         self.git.pending = true;
-        let mut dirs: Vec<PathBuf> = self.workspaces.iter().map(|ws| ws.dir.clone()).collect();
+        let mut dirs: Vec<PathBuf> = (self.workspaces.iter().map(|ws| ws.dir.clone()))
+            .chain(self.panel_dirs().into_iter().map(|d| d.dir))
+            .collect();
         dirs.sort();
         dirs.dedup();
         git::read_all(dirs, move |git| {
@@ -2875,6 +2878,7 @@ impl Gerdr {
         match herdr.agent_list() {
             Ok(agents) => {
                 self.session.agents = agents;
+                self.mark_paused_agents();
                 self.notify_agents();
                 self.stage_agents_tick();
             }
@@ -3134,6 +3138,13 @@ impl Gerdr {
             .enumerate()
             .map(|(w, ws)| {
                 let mut views = self.session.herdr_cards(ws);
+                for view in &mut views {
+                    let paused = match &view.key {
+                        agents::AgentKey::Herdr(pane) => self.pane_paused(pane),
+                        _ => false,
+                    };
+                    view.paused = paused;
+                }
                 views.extend(self.cursor_cards(w));
                 views.extend(self.t3_cards(w));
                 views.extend(self.test_cards(ws));

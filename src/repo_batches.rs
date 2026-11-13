@@ -31,11 +31,12 @@ use crate::{
     desktop,
     diff_edit::{self, Cut, Done, FileEdit, Put, Register},
     diff_view::Position,
-    git::{Change, GitStatus, InProgress},
+    feature::hook,
+    git::{self, Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
     repos::{
         Batch, BatchKind, Ctx, Found, Job, MarkAt, MarkCommits, Outcome, Panel, RepoEvent,
-        RepoItem, RepoRun, Repos, RunState,
+        RepoDir, RepoItem, RepoRun, Repos, RunState,
     },
     review,
     toast::Level,
@@ -123,6 +124,15 @@ fn blocked(why: &str) -> Failed {
     }
 }
 
+/// A failure of a step gerdr ran itself, which says why in one line.
+fn failed(why: &str) -> Failed {
+    Failed {
+        failure: Failure::Other,
+        why: why.to_owned(),
+        log: Vec::new(),
+    }
+}
+
 /// `then` after the commands in `log`: both in the log, whatever `then`
 /// came to.
 fn chain(log: Vec<Ran>, then: OpResult) -> OpResult {
@@ -202,6 +212,48 @@ fn perform(task: &Task, step: &dyn Fn(&str)) -> OpResult {
         BatchKind::Push { force } => {
             step("pushing…");
             git_ops::push(dir, task.remote.as_deref(), *force)
+        }
+        BatchKind::PushPastGuard => {
+            let head = git_ops::head(dir).ok_or_else(|| blocked("can't read HEAD"))?;
+            let branch = head.branch.ok_or_else(|| blocked("detached HEAD"))?;
+            let oid = head.oid.ok_or_else(|| blocked("no commit"))?;
+            // Allowing a branch that isn't guarded would guard it after.
+            if !hook::guarded(dir, &branch) {
+                return Err(blocked("not a guarded branch"));
+            }
+            step("pushing…");
+            hook::past_guard(dir, &branch, &oid, || {
+                git_ops::push(dir, task.remote.as_deref(), false)
+            })
+            .map_err(|why| failed(&why))?
+        }
+        BatchKind::TakeHere(names) => {
+            let name = git_ops::branch_named(dir, names, task.remote.as_deref())
+                .ok_or_else(|| blocked("no such branch here"))?;
+            let holder = git::checked_out_in(dir, &name)
+                .ok_or_else(|| blocked("not checked out elsewhere"))?;
+            let main = (git::status(dir).and_then(|s| s.here))
+                .filter(|w| w.main)
+                .ok_or_else(|| blocked("not the main worktree"))?;
+            let w = (git::status(&holder).and_then(|s| s.here))
+                .ok_or_else(|| blocked("its worktree can't be read"))?;
+            git::checkout_check(&main, &w).map_err(|why| blocked(&why))?;
+            step("switching…");
+            git::checkout_in_main(dir, &w).map_err(|why| failed(&why))?;
+            Ok(Vec::new())
+        }
+        BatchKind::TakeBack(branch) => {
+            let status = git::status(dir).ok_or_else(|| blocked("can't read it"))?;
+            if status.branch.is_some() {
+                return Err(blocked("on a branch already"));
+            }
+            let main = (status.worktrees.iter())
+                .find(|w| w.main)
+                .ok_or_else(|| blocked("no main worktree"))?;
+            step("switching…");
+            git::give_back(&main.path, dir, branch, task.base.as_deref())
+                .map_err(|why| failed(&why))?;
+            Ok(Vec::new())
         }
         BatchKind::Fetch => {
             step("fetching…");
@@ -563,14 +615,53 @@ fn level(tone: Tone) -> Level {
     }
 }
 
+/// The folders the repositories panel lists, in the sidebar's order: each
+/// workspace's own, then the worktrees of the features workspaces are on,
+/// feature by feature. A multi-repository feature's own folder is no
+/// repository: its worktrees are.
+pub fn repo_dirs<'a>(
+    workspaces: &[crate::Workspace],
+    feature_of: impl Fn(&crate::Workspace) -> Option<&'a crate::feature::Feature>,
+) -> Vec<RepoDir> {
+    let mut dirs: Vec<RepoDir> = (workspaces.iter().enumerate())
+        .filter(|(_, ws)| feature_of(ws).is_none())
+        .map(|(w, ws)| RepoDir {
+            dir: ws.dir.clone(),
+            label: ws.name.clone(),
+            workspace: w,
+            feature_branch: None,
+        })
+        .collect();
+    for (w, ws) in workspaces.iter().enumerate() {
+        let Some(feature) = feature_of(ws) else {
+            continue;
+        };
+        for repo in feature.repos.iter().filter(|r| r.touched) {
+            dirs.push(RepoDir {
+                dir: repo.worktree.clone(),
+                label: format!("{} / {}", ws.name, repo.name),
+                workspace: w,
+                feature_branch: repo.branch.clone(),
+            });
+        }
+    }
+    dirs
+}
+
+impl Gerdr {
+    /// The folders the repositories panel lists (`repo_dirs`).
+    pub fn panel_dirs(&self) -> Vec<RepoDir> {
+        repo_dirs(&self.workspaces, |ws| self.feature_of_workspace(ws))
+    }
+}
+
 impl crate::state::GitWatch {
-    /// The project's repositories: one per checkout among its
-    /// `workspaces`, in the sidebar's order, named after the first
-    /// workspace in each.
-    fn repo_items(&self, workspaces: &[crate::Workspace]) -> Vec<RepoItem> {
+    /// The project's repositories: one per checkout among `dirs`, in their
+    /// order, named after the first folder in each.
+    fn repo_items(&self, dirs: &[RepoDir]) -> Vec<RepoItem> {
         let mut items: Vec<RepoItem> = Vec::new();
-        for (w, ws) in workspaces.iter().enumerate() {
-            let Some(status) = self.status.get(&ws.dir) else {
+        for d in dirs {
+            let Some(status) = self.status.get(&d.dir) else {
                 continue;
             };
             let Some(root) = status.root.clone() else {
@@ -581,8 +672,9 @@ impl crate::state::GitWatch {
             }
             items.push(RepoItem {
                 root,
-                label: ws.name.clone(),
-                workspace: w,
+                label: d.label.clone(),
+                workspace: d.workspace,
+                feature_branch: d.feature_branch.clone(),
                 status: status.clone(),
             });
         }
@@ -714,7 +806,7 @@ impl Gerdr {
         self.close_menu();
         self.hover.tooltip.hide();
         self.chrome.drop_tooltip();
-        self.repos.items = self.git.repo_items(&self.workspaces);
+        self.repos.items = self.git.repo_items(&self.panel_dirs());
         let panel = match self.repos.kept.take() {
             Some((project, panel)) if project == self.project => panel,
             _ => {
@@ -739,6 +831,31 @@ impl Gerdr {
     /// Open the repositories panel on the repository at `root`, selected.
     pub fn open_repos_at(&mut self, root: &Path) {
         self.open_repos();
+        self.select_repo_line(root);
+    }
+
+    /// Open the repositories panel on feature `slug`'s worktree of
+    /// repository `key`, selected, every worktree on the feature's branch
+    /// ticked: what runs on them all (a rebase onto another feature's
+    /// branch, a push) is a press away.
+    pub fn open_feature_repos(&mut self, project: &str, slug: &str, key: &str) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let touched = feature.repos.iter().filter(|r| r.touched);
+        let roots: Vec<PathBuf> = touched.map(|r| r.worktree.clone()).collect();
+        let Some(at) = feature.repos.iter().find(|r| r.key() == key) else {
+            return;
+        };
+        let at = at.worktree.clone();
+        self.open_repos_at(&at);
+        if let Some(panel) = self.repos.panel.as_mut() {
+            panel.tick_repos(roots);
+        }
+    }
+
+    /// Select the open panel's line of the repository at `root`.
+    fn select_repo_line(&mut self, root: &Path) {
         let page = self.repos_page();
         let (density, tree_share, cols, sheet_rows) = self.repos_env();
         let Repos {
@@ -997,7 +1114,7 @@ impl Gerdr {
         if self.repos.panel.is_none() && self.repos.batch.is_none() {
             return;
         }
-        self.repos.items = self.git.repo_items(&self.workspaces);
+        self.repos.items = self.git.repo_items(&self.panel_dirs());
         self.repos_refresh();
     }
 
@@ -1900,6 +2017,7 @@ impl Gerdr {
                 self.close_repos();
                 self.new_tab_running(w, &root, command);
             }
+            Outcome::SelectRepo(path) => self.select_repo_line(&path),
             Outcome::OpenWorkspace(path) => {
                 match self
                     .workspaces
@@ -2978,7 +3096,7 @@ mod tests {
         git.status.insert("/s".into(), status("/s", false));
         let ws = |dir: &str| crate::Workspace::new(dir.into(), crate::WorkspaceKind::Terminal);
         let workspaces = [ws("/none"), ws("/r/src"), ws("/s"), ws("/r")];
-        let items = git.repo_items(&workspaces);
+        let items = git.repo_items(&repo_dirs(&workspaces, |_| None));
         let got: Vec<_> = (items.iter())
             .map(|i| (i.root.to_str().unwrap(), i.label.as_str(), i.workspace))
             .collect();
@@ -2986,6 +3104,38 @@ mod tests {
         assert_eq!(
             git.repos_changed(&workspaces),
             changed_repos([status("/r", true), status("/s", false)].iter())
+        );
+    }
+
+    #[test]
+    fn a_features_worktrees_follow_the_workspaces_named_after_it() {
+        use crate::features::tests::{feature, repo};
+        let bulk = feature("bulk", vec![repo("api", true), repo("web", true), repo("docs", false)], 0);
+        let mut git = crate::state::GitWatch::default();
+        git.status.insert("/work/api".into(), status("/work/api", false));
+        for name in ["api", "web", "docs"] {
+            let wt = format!("/work/.features/bulk/{name}");
+            git.status.insert(wt.clone().into(), status(&wt, false));
+        }
+        let ws = |dir: &str, name: &str| {
+            let mut ws = crate::Workspace::new(dir.into(), crate::WorkspaceKind::Terminal);
+            ws.name = name.into();
+            ws
+        };
+        let workspaces = [ws("/work/.features/bulk", "bulk"), ws("/work/api", "api")];
+        let dirs = repo_dirs(&workspaces, |w| (w.dir == bulk.dir).then_some(&bulk));
+        let items = git.repo_items(&dirs);
+        let got: Vec<_> = (items.iter())
+            .map(|i| (i.label.as_str(), i.workspace, i.feature_branch.as_deref()))
+            .collect();
+        // The untouched one is context: no branch of the feature's.
+        assert_eq!(
+            got,
+            [
+                ("api", 1, None),
+                ("bulk / api", 0, Some("feature/bulk")),
+                ("bulk / web", 0, Some("feature/bulk")),
+            ]
         );
     }
 

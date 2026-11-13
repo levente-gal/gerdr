@@ -268,6 +268,7 @@ pub(super) fn stage_page(
             }
             Stage::Ship => {
                 sections.extend(card());
+                sections.extend(resolving_card(feature, state, actions, now));
                 let check = check_lines(feature, state.probe, state.shipping, now);
                 if !check.is_empty() {
                     sections.push(lines("Ship check", check));

@@ -830,6 +830,14 @@ pub enum ReposButton {
     /// Ask for the name and email git wants for commits.
     SetIdentity,
     OpenWorkspace,
+    /// Select the line of the worktree a branch is checked out in.
+    GoToRow,
+    /// Check that branch out here instead, the other worktree detached.
+    TakeHere,
+    /// Give a feature's branch back to its detached worktree.
+    TakeBack,
+    /// Push a feature's guarded branch past Ship.
+    PushAnyway,
     /// The selected repository's stashes.
     Stash,
     StashPop,
@@ -945,6 +953,10 @@ impl ReposButton {
             ReposButton::RunInTerminal => "Run in terminal",
             ReposButton::SetIdentity => "Set name and email\u{2026}",
             ReposButton::OpenWorkspace => "Open workspace",
+            ReposButton::GoToRow => "Go to its row",
+            ReposButton::TakeHere => "Take it here",
+            ReposButton::TakeBack => "Take branch back",
+            ReposButton::PushAnyway => "Push anyway",
             ReposButton::Stash => "Stash",
             ReposButton::StashPop => "Pop stash",
             ReposButton::StashDrop => "Drop stash",

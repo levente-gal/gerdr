@@ -452,10 +452,12 @@ impl Gerdr {
             PanelOutcome::ShowOwnAgent(n) => {
                 let pane = (self.feature(&project, &slug))
                     .and_then(|f| f.own_agents.iter().find(|a| a.n == n)?.pane.clone());
-                match pane.filter(|p| self.pane_there(p)) {
-                    Some(pane) => self.focus_agent(&crate::agents::AgentKey::Herdr(pane)),
-                    None => self.show_warning("That agent's tab is closed".to_owned()),
-                }
+                self.show_agent_pane(pane);
+            }
+            PanelOutcome::ShowResolvingAgent => {
+                let pane = (self.feature(&project, &slug))
+                    .and_then(|f| f.shipping.resolving.as_ref()?.pane.clone());
+                self.show_agent_pane(pane);
             }
             PanelOutcome::ResumeAgent(stage) => self.resume_stage_agent(&project, &slug, stage),
             PanelOutcome::OpenDoc(stage) => {
@@ -571,6 +573,7 @@ impl Gerdr {
             PanelOutcome::SkipPlanReview => self.ask_skip_plan_review(&project, &slug),
             PanelOutcome::ChangeDecisions => self.ask_change_decisions(&project, &slug),
             PanelOutcome::OpenPr(url) => self.open_feature_page(&project, &slug, url),
+            PanelOutcome::OpenRepos(key) => self.open_feature_repos(&project, &slug, &key),
             PanelOutcome::UpdatePrHead => self.update_pr_head(&project, &slug),
             PanelOutcome::RerunCi => self.rerun_ci(&project, &slug),
             PanelOutcome::SubmitReview(event) => self.ask_submit_review(&project, &slug, event),
@@ -696,6 +699,14 @@ impl Gerdr {
             "{}'s agent tab is gone; Enter starts a new one",
             stage.label()
         ));
+    }
+
+    /// Show the agent in `pane`, or say its tab is closed.
+    fn show_agent_pane(&mut self, pane: Option<String>) {
+        match pane.filter(|p| self.pane_there(p)) {
+            Some(pane) => self.focus_agent(&crate::agents::AgentKey::Herdr(pane)),
+            None => self.show_warning("That agent's tab is closed".to_owned()),
+        }
     }
 
     pub(crate) fn feature_cursor_to_current_of(&mut self, project: &str, slug: &str) {

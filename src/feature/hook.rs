@@ -247,6 +247,18 @@ pub fn allow(dir: &Path, branch: &str, commit: &str) -> Result<(), String> {
     write_guard(dir, branch, &format!("{commit}\n"))
 }
 
+/// Run `push` of `branch` of the repository `dir` is in past its guard:
+/// allowed for commit `head` alone, and guarded again after, whatever came
+/// of it.
+pub fn past_guard<T>(dir: &Path, branch: &str, head: &str, push: impl FnOnce() -> T) -> Result<T, String> {
+    allow(dir, branch, head)?;
+    let pushed = push();
+    if let Err(err) = guard(dir, branch) {
+        tracing::warn!("guarding {branch} again: {err}");
+    }
+    Ok(pushed)
+}
+
 /// Stop guarding `branch`: its feature is gone. Nothing to remove is fine.
 pub fn unguard(dir: &Path, branch: &str) -> Result<(), String> {
     let file = guard_file(dir, branch)?;
@@ -332,6 +344,26 @@ mod tests {
 
     fn push(wt: &Path) -> Result<(), String> {
         push_to(wt, "HEAD")
+    }
+
+    #[test]
+    fn a_push_past_the_guard_goes_once_and_guards_again() {
+        let t = Temp::new();
+        let (app, wt) = setup(&t);
+        assert_eq!(ensure(&wt), Guard::On);
+        guard(&wt, "feature/x").unwrap();
+        commit(&wt, "g", "more");
+        let head = run(&wt, &["rev-parse", "HEAD"]).trim().to_owned();
+        let pushed = past_guard(&wt, "feature/x", &head, || push(&wt)).unwrap();
+        assert_eq!(pushed, Ok(()));
+        // Guarded again after, and after a failed push too.
+        commit(&wt, "h", "again");
+        assert!(push(&wt).is_err());
+        let failed = past_guard(&wt, "feature/x", "0123456789012345678901234567890123456789", || push(&wt));
+        assert!(failed.unwrap().is_err());
+        assert!(guarded(&app, "feature/x"));
+        let file = guard_file(&app, "feature/x").unwrap();
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "");
     }
 
     #[test]

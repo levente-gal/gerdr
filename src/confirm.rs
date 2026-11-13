@@ -1050,6 +1050,7 @@ mod tests {
             inbox: false,
             test: None,
             icon: crate::agent_icons::AgentIcon::Claude,
+            paused: false,
         };
         let (title, body) = close_question(&card);
         assert_eq!(title, "Close \u{201c}claude\u{201d}?");

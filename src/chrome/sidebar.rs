@@ -395,6 +395,9 @@ pub struct AgentView {
     pub test: Option<CiState>,
     /// What its badge shows it is.
     pub icon: AgentIcon,
+    /// Stopped where it was until resumed (see `agent_pause`): its status
+    /// is herdr's from before.
+    pub paused: bool,
 }
 
 /// A subagent on its parent's row: what it is on, and the agent a click
@@ -473,6 +476,7 @@ impl AgentView {
             inbox: false,
             test: None,
             icon: AgentIcon::from_info(info),
+            paused: false,
         }
     }
 
@@ -533,6 +537,7 @@ impl AgentView {
             inbox: false,
             test: None,
             icon: AgentIcon::Cursor,
+            paused: false,
         }
     }
 
@@ -577,6 +582,7 @@ impl AgentView {
             subagents,
             inbox: false,
             test: None,
+            paused: false,
         }
     }
 
@@ -585,6 +591,7 @@ impl AgentView {
     pub fn badge(&self) -> Badge {
         let dot = match self.test {
             Some(test) => Dot::of_ci(test),
+            None if self.paused => Dot::Unknown,
             None => Dot::of_status(self.status),
         };
         Badge {
@@ -593,8 +600,11 @@ impl AgentView {
         }
     }
 
-    /// What it is on: its title line, if any.
+    /// What it is on: its title line, if any. Paused, it says so instead.
     pub fn title(&self) -> Option<&str> {
+        if self.paused {
+            return Some("paused");
+        }
         self.lines.iter().find_map(|l| match l {
             AgentLine::Title(title) => Some(title.as_str()),
             _ => None,
@@ -675,6 +685,7 @@ impl AgentView {
         // A test run says how it went, not what an agent would.
         let status = match self.test {
             Some(state) => test_meaning(state),
+            None if self.paused => "Paused until resumed",
             None => status_meaning(self.status),
         };
         let mut fields = vec![("Status".to_owned(), status.to_owned())];
@@ -4506,6 +4517,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_paused_agent_says_so_and_shows_no_status() {
+        let mut view = agent("p1", AgentStatus::Working, None);
+        view.lines.push(AgentLine::Title("Reading the diff".into()));
+        view.paused = true;
+        assert_eq!(view.title(), Some("paused"));
+        assert_eq!(view.badge().dot, super::Dot::Unknown);
+        let status = &view.tooltip_fields()[0];
+        assert_eq!(status.1, "Paused until resumed");
+        // What it was on stays in its tooltip.
+        let on = ("Working on".to_owned(), "Reading the diff".to_owned());
+        assert!(view.tooltip_fields().contains(&on));
+    }
+
     fn agent(pane: &str, status: AgentStatus, cwd: Option<&str>) -> AgentView {
         AgentView {
             key: crate::agents::AgentKey::Herdr(pane.into()),
@@ -4523,6 +4548,7 @@ mod tests {
             inbox: false,
             test: None,
             icon: crate::agent_icons::AgentIcon::Claude,
+            paused: false,
         }
     }
 

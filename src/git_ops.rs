@@ -90,6 +90,9 @@ pub enum Failure {
     Diverged,
     /// The branch is checked out in the worktree at this path.
     CheckedOut(PathBuf),
+    /// gerdr's pre-push hook refused this branch of a feature: only Ship,
+    /// or a push past the guard, pushes it (`feature::hook`).
+    Guarded(String),
     /// Another git holds a lock: `index.lock`, a ref's, `packed-refs`'.
     Locked,
     /// git doesn't know who commits: no `user.name` or `user.email` set,
@@ -537,6 +540,9 @@ pub fn classify(stderr: &str, stdout: &str) -> Failure {
     if let Some(path) = checked_out_at(&text) {
         return Failure::CheckedOut(path);
     }
+    if let Some(branch) = guarded(&text) {
+        return Failure::Guarded(branch);
+    }
     // A ref named like a folder another has is no lock gone free later.
     let locked = has("index.lock")
         || has(".lock': File exists")
@@ -591,6 +597,15 @@ pub fn classify(stderr: &str, stdout: &str) -> Failure {
     Failure::Other
 }
 
+/// The branch gerdr's pre-push hook refused, from its "gerdr: <branch> is
+/// a gerdr feature's branch" (`feature::hook::HOOK`).
+fn guarded(text: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        let rest = l.trim().strip_prefix("gerdr: ")?;
+        Some(rest.split_once(" is a gerdr feature's branch")?.0.to_owned())
+    })
+}
+
 /// The worktree a branch is checked out in, from git's "'x' is already
 /// checked out at '<path>'", "is already used by worktree at '<path>'" or
 /// "cannot delete branch 'x' used by worktree at '<path>'".
@@ -605,7 +620,8 @@ fn checked_out_at(text: &str) -> Option<PathBuf> {
 /// One line on why a command failed: what the remote said when it
 /// refused a push, else the last line git marked as an error, else the
 /// last line, with `fatal: `, `error: ` or `hint: ` stripped; from
-/// stderr, else stdout.
+/// stderr, else stdout. A push's "failed to push some refs" says nothing:
+/// the line before it does (`! [rejected] …`, a pre-push hook's own).
 pub(crate) fn why(stderr: &str, stdout: &str) -> String {
     let text = if stderr.trim().is_empty() {
         stdout
@@ -620,6 +636,15 @@ pub(crate) fn why(stderr: &str, stdout: &str) -> String {
         .rfind(|l| l.starts_with("fatal: ") || l.starts_with("error: "))
         .or_else(|| lines().next_back())
         .unwrap_or("");
+    let said = || {
+        lines().find(|l| {
+            !l.starts_with("To ") && !l.starts_with("error: failed to push") && !l.starts_with("hint:")
+        })
+    };
+    let marked = match marked.starts_with("error: failed to push some refs") {
+        true => said().unwrap_or(marked),
+        false => marked,
+    };
     marked
         .trim_start_matches("fatal: ")
         .trim_start_matches("error: ")
@@ -2235,21 +2260,28 @@ mod tests {
                  hint: Updates were rejected because the remote contains work that you do not\n",
                 "",
                 Rejected,
-                "failed to push some refs to '/srv/r.git'",
+                "! [rejected]        main -> main (fetch first)",
             ),
             (
                 " ! [rejected]        feat -> feat (non-fast-forward)\n\
                  error: failed to push some refs to 'github.com:o/r.git'\n",
                 "",
                 Rejected,
-                "failed to push some refs to 'github.com:o/r.git'",
+                "! [rejected]        feat -> feat (non-fast-forward)",
             ),
             (
                 " ! [rejected]        feat -> feat (stale info)\n\
                  error: failed to push some refs to '/srv/r.git'\n",
                 "",
                 Rejected,
-                "failed to push some refs to '/srv/r.git'",
+                "! [rejected]        feat -> feat (stale info)",
+            ),
+            (
+                "gerdr: feature/x is a gerdr feature's branch; ship it from the feature panel in gerdr\n\
+                 error: failed to push some refs to 'github.com:o/r.git'\n",
+                "",
+                Guarded("feature/x".into()),
+                "gerdr: feature/x is a gerdr feature's branch; ship it from the feature panel in gerdr",
             ),
             (
                 "hint: Diverging branches can't be fast-forwarded, you need to either:\nhint:\n\
@@ -2856,7 +2888,7 @@ mod tests {
         let failed = push(dir, None, false).unwrap_err();
         assert_eq!(failed.failure, Failure::Rejected);
         assert!(
-            failed.why.starts_with("failed to push some refs"),
+            failed.why.starts_with("! [rejected]"),
             "{}",
             failed.why
         );

@@ -234,16 +234,29 @@ impl Repos {
     }
 }
 
+/// A folder the panel reads a repository from: a workspace's own, or a
+/// worktree of the feature a workspace is on (see `repo_batches::repo_dirs`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RepoDir {
+    pub dir: PathBuf,
+    pub label: String,
+    pub workspace: usize,
+    /// The feature's branch, for a feature's worktree.
+    pub feature_branch: Option<String>,
+}
+
 /// A repository as the panel lists it: one per checkout among the
-/// project's workspaces.
+/// project's workspaces and their features' worktrees.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RepoItem {
     /// The checkout's top folder: who it is, as the list changes.
     pub root: PathBuf,
-    /// Its workspace's name.
+    /// Its workspace's name; a feature's worktree, `<feature> / <repo>`.
     pub label: String,
     /// The workspace, for its Zed and its tabs.
     pub workspace: usize,
+    /// The branch a feature's worktree is meant to be on: `feature/<slug>`.
+    pub feature_branch: Option<String>,
     pub status: GitStatus,
 }
 
@@ -615,6 +628,17 @@ pub enum BatchKind {
     Push {
         force: bool,
     },
+    /// Push a feature's branch that gerdr's pre-push hook guards, allowed
+    /// for its HEAD alone (`feature::hook::past_guard`): Ship's checks
+    /// skipped.
+    PushPastGuard,
+    /// Check out here, in the main worktree, the branch (one of these
+    /// names) another worktree has: that one is left detached
+    /// (`git::checkout_in_main`).
+    TakeHere(Vec<String>),
+    /// Give this feature branch back to the detached worktree from the
+    /// main worktree (`git::give_back`).
+    TakeBack(String),
     Fetch,
     Pull(Pull),
     /// Bring the branch `from` in (one branch, as `main` and `master`),
@@ -651,6 +675,9 @@ impl BatchKind {
             BatchKind::Amend { .. } => "Amend last commit",
             BatchKind::Push { force: false } => "Push",
             BatchKind::Push { force: true } => "Force push",
+            BatchKind::PushPastGuard => "Push anyway",
+            BatchKind::TakeHere(_) => "Take it here",
+            BatchKind::TakeBack(_) => "Take branch back",
             BatchKind::Fetch => "Fetch",
             BatchKind::Pull(Pull::Rebase) => "Pull (rebase)",
             BatchKind::Pull(_) => "Pull",
@@ -683,7 +710,10 @@ impl BatchKind {
             BatchKind::DeleteBranch { .. } => "deleted",
             BatchKind::Commit { push: false, .. } => "committed",
             BatchKind::Amend { .. } => "amended",
-            BatchKind::Commit { push: true, .. } | BatchKind::Push { force: false } => "pushed",
+            BatchKind::Commit { push: true, .. }
+            | BatchKind::Push { force: false }
+            | BatchKind::PushPastGuard => "pushed",
+            BatchKind::TakeHere(_) | BatchKind::TakeBack(_) => "switched",
             BatchKind::Push { force: true } => "force pushed",
             BatchKind::Fetch => "fetched",
             BatchKind::Pull(Pull::Rebase) => "pulled (rebase)",
@@ -714,6 +744,9 @@ impl BatchKind {
         matches!(
             self,
             BatchKind::Push { force: true }
+                | BatchKind::PushPastGuard
+                | BatchKind::TakeHere(_)
+                | BatchKind::TakeBack(_)
                 | BatchKind::Amend { pushed: true, .. }
                 | BatchKind::Abort
                 | BatchKind::Undo
@@ -763,6 +796,22 @@ fn branch_page(ctx: &Ctx, create: bool) -> usize {
     BRANCH_MENU_ROWS
         .min(ctx.page.0.saturating_sub(above))
         .max(1)
+}
+
+/// Whether `item` is its repository's main worktree, which other
+/// worktrees' branches can be checked out in.
+fn is_main(item: &RepoItem) -> bool {
+    item.status.here.as_ref().is_some_and(|w| w.main)
+}
+
+/// The main worktree that has `item`'s feature branch checked out while
+/// `item`, the feature's worktree, is detached: it took the branch.
+fn out_in_main(item: &RepoItem) -> Option<&crate::git::Worktree> {
+    let branch = item.feature_branch.as_deref()?;
+    if item.status.branch.is_some() {
+        return None;
+    }
+    (item.status.worktrees.iter()).find(|w| w.main && w.branch.as_deref() == Some(branch))
 }
 
 /// `n` and `one`, or its plural with an `s`: `1 conflict`, `2 conflicts`.
@@ -1071,6 +1120,8 @@ pub enum Outcome {
     /// Show the workspace of the worktree at this path (where a branch is
     /// checked out already).
     OpenWorkspace(PathBuf),
+    /// Select the panel's line of the repository at this path.
+    SelectRepo(PathBuf),
     /// The files are listed this way now: remember it.
     Grouping(Grouping),
     /// Say this briefly.
@@ -1721,6 +1772,9 @@ fn confirm_button(kind: &BatchKind) -> ReposButton {
         BatchKind::DeleteBranch { .. } => ReposButton::DeleteBranch,
         BatchKind::StashDrop(..) => ReposButton::StashDrop,
         BatchKind::Discard => ReposButton::DiscardFile,
+        BatchKind::PushPastGuard => ReposButton::PushAnyway,
+        BatchKind::TakeHere(_) => ReposButton::TakeHere,
+        BatchKind::TakeBack(_) => ReposButton::TakeBack,
         _ => ReposButton::Cancel,
     }
 }
@@ -2255,6 +2309,12 @@ impl Panel {
         } else {
             Check::Off
         }
+    }
+
+    /// Tick the repositories at `roots` for what runs on them all, their
+    /// files left as they are.
+    pub fn tick_repos(&mut self, roots: Vec<PathBuf>) {
+        self.checked_repos.extend(roots);
     }
 
     /// Check `item` and all its files, or none of them.
@@ -3444,6 +3504,52 @@ impl Panel {
                 Some(Failure::CheckedOut(path)) => Ok(Outcome::OpenWorkspace(path)),
                 _ => Err(Why::other("Not checked out elsewhere")),
             },
+            B::GoToRow => match failure {
+                Some(Failure::CheckedOut(path)) if items.iter().any(|i| i.root == path) => {
+                    Ok(Outcome::SelectRepo(path))
+                }
+                _ => Err(Why::other("Its worktree has no line here")),
+            },
+            B::TakeHere => {
+                let names = match ctx.batch.map(|b| &b.kind) {
+                    Some(BatchKind::Switch(names)) => names.clone(),
+                    Some(BatchKind::Branch(name)) => vec![name.clone()],
+                    _ => return Err(Why::other("Not checked out elsewhere")),
+                };
+                let held = |item: &RepoItem| {
+                    let failure = run_of(item).and_then(|r| r.state.failure());
+                    matches!(failure, Some(Failure::CheckedOut(_))) && is_main(item)
+                };
+                let ks: Vec<usize> = (0..items.len()).filter(|&k| held(&items[k])).collect();
+                if ks.is_empty() {
+                    return Err(Why::other("Only a main worktree takes a branch from another"));
+                }
+                run(BatchKind::TakeHere(names), ks)
+            }
+            B::PushAnyway => {
+                let guarded = |item: &RepoItem| {
+                    let failure = run_of(item).and_then(|r| r.state.failure());
+                    matches!(failure, Some(Failure::Guarded(_)))
+                };
+                let ks: Vec<usize> = (0..items.len()).filter(|&k| guarded(&items[k])).collect();
+                if ks.is_empty() {
+                    return Err(Why::other("No push was refused as a feature's branch"));
+                }
+                run(BatchKind::PushPastGuard, ks)
+            }
+            B::TakeBack => {
+                let ks: Vec<usize> = (targets.iter().copied())
+                    .filter(|&k| out_in_main(&items[k]).is_some())
+                    .collect();
+                let mut branches = ks.iter().filter_map(|&k| items[k].feature_branch.clone());
+                let Some(branch) = branches.next() else {
+                    return Err(Why::other("Its feature's branch isn't out in the main worktree"));
+                };
+                if branches.any(|b| b != branch) {
+                    return Err(Why::other("Pick the worktrees of one feature"));
+                }
+                run(BatchKind::TakeBack(branch), ks)
+            }
             B::Help => Err(Why::other("Press F1 for the keys")),
             // Shown by `act`, when one is picked.
             B::ShowCommit => Err(Why::other("Pick a commit in the Log tab first")),
@@ -3601,6 +3707,23 @@ impl Panel {
                             "throw away the changes to {files}: {}{rest}",
                             shown.join(", ")
                         )
+                    }
+                    BatchKind::PushPastGuard => {
+                        let branch = status.and_then(|s| s.branch.as_deref()).unwrap_or("HEAD");
+                        format!("push {branch} past Ship: its checks are skipped")
+                    }
+                    BatchKind::TakeHere(names) => {
+                        let names = names.join(" / ");
+                        let other = status
+                            .and_then(|s| s.worktrees.iter().find(|w| names.split(" / ").any(|n| w.branch.as_deref() == Some(n))))
+                            .map_or("its worktree".to_owned(), |w| w.path.display().to_string());
+                        format!("check {names} out here: {other} is left detached")
+                    }
+                    BatchKind::TakeBack(branch) => {
+                        let main = status
+                            .and_then(|s| s.worktrees.iter().find(|w| w.main))
+                            .map_or("the main worktree".to_owned(), |w| w.path.display().to_string());
+                        format!("take {branch} back: {main} goes back to the branch it was on before")
                     }
                     _ => kind.label().to_lowercase(),
                 };
@@ -4715,6 +4838,12 @@ impl Panel {
                             Tone::Warning,
                             format!("The branch is checked out in {}", path.display()),
                         ),
+                        // git's line before it names the branch.
+                        Failure::Guarded(_) => (
+                            "guarded",
+                            Tone::Warning,
+                            "Ship pushes a feature's branch: Push anyway skips its checks".into(),
+                        ),
                         Failure::Identity => (
                             "author unknown",
                             Tone::Error,
@@ -4746,6 +4875,14 @@ impl Panel {
                 }
                 RunState::Queued | RunState::Running(_) => {}
             }
+        }
+        if let Some(main) = out_in_main(item) {
+            let branch = item.feature_branch.as_deref().unwrap_or_default();
+            let tip = format!(
+                "{branch} is out in {}: Take branch back gives it back",
+                main.path.display()
+            );
+            return chip("detached", Tone::Warning, &tip);
         }
         if item.status.branch.is_none() && item.status.head.is_some() {
             return chip(
@@ -4899,9 +5036,21 @@ impl Panel {
                 Some(Failure::Auth | Failure::Timeout | Failure::Other) => {
                     buttons.push(B::RunInTerminal);
                 }
-                Some(Failure::CheckedOut(_)) => buttons.push(B::OpenWorkspace),
+                Some(Failure::CheckedOut(path)) => {
+                    match items.iter().any(|i| &i.root == path) {
+                        true => buttons.push(B::GoToRow),
+                        false => buttons.push(B::OpenWorkspace),
+                    }
+                    if is_main(item) {
+                        buttons.push(B::TakeHere);
+                    }
+                }
+                Some(Failure::Guarded(_)) => buttons.push(B::PushAnyway),
                 Some(Failure::Identity) => buttons.push(B::SetIdentity),
                 _ => {}
+            }
+            if out_in_main(item).is_some() {
+                buttons.push(B::TakeBack);
             }
         }
         if selected.is_some_and(in_conflict) {
@@ -5631,6 +5780,7 @@ mod tests {
             root: root(name),
             label: name.into(),
             workspace: 0,
+            feature_branch: None,
             status: GitStatus {
                 branch: Some(branch.into()),
                 dirty: !changes.is_empty(),
@@ -7514,6 +7664,96 @@ mod tests {
         assert_eq!(
             panel.click(ReposHit::Button(ReposButton::OpenWorkspace), &ctx),
             Some(Outcome::OpenWorkspace("/src/zed2".into()))
+        );
+    }
+
+    #[test]
+    fn a_branch_out_elsewhere_is_gone_to_taken_and_given_back() {
+        let main = |branch: &str| crate::git::Worktree {
+            path: root("api"),
+            branch: Some(branch.into()),
+            main: true,
+            ..Default::default()
+        };
+        let mut api = repo("api", "dev", vec![]);
+        api.status.here = Some(main("dev"));
+        let mut wt = repo("api-wt", "feature/f", vec![]);
+        wt.feature_branch = Some("feature/f".into());
+        let items = vec![api, wt];
+        let mut panel = Panel::new(&items);
+        // The switch in main found it out in the feature's worktree.
+        let b = batch(
+            BatchKind::Switch(vec!["feature/f".into()]),
+            vec![run("api", failed(Failure::CheckedOut(root("api-wt"))))],
+        );
+        let out = super::Ctx {
+            batch: Some(&b),
+            ..ctx(&items, None)
+        };
+        select(&mut panel, "api");
+        assert_eq!(
+            panel.click(ReposHit::Button(ReposButton::GoToRow), &out),
+            Some(Outcome::SelectRepo(root("api-wt")))
+        );
+        // Taken here is asked first.
+        let take = ReposHit::Button(ReposButton::TakeHere);
+        assert_eq!(panel.click(take, &out), None);
+        assert_eq!(
+            panel.click(take, &out),
+            Some(Outcome::Batch {
+                kind: BatchKind::TakeHere(vec!["feature/f".into()]),
+                jobs: jobs(&["api"])
+            })
+        );
+        select(&mut panel, "api-wt");
+
+        // Taken: the worktree is detached, its branch out in main.
+        let mut items = items;
+        items[0].status.branch = Some("feature/f".into());
+        items[1].status.branch = None;
+        items[1].status.worktrees = vec![main("feature/f")];
+        let ctx = ctx(&items, None);
+        let view = panel.view("p", &ctx);
+        let line = repo_lines(&view).into_iter().find(|l| l.label == "api-wt");
+        let chip = line.and_then(|l| l.chip.clone()).unwrap();
+        assert_eq!(chip.text, "detached");
+        assert!(chip.tip.contains("Take branch back"), "{}", chip.tip);
+        let back = ReposHit::Button(ReposButton::TakeBack);
+        assert_eq!(panel.click(back, &ctx), None);
+        assert_eq!(
+            panel.click(back, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::TakeBack("feature/f".into()),
+                jobs: jobs(&["api-wt"])
+            })
+        );
+    }
+
+    #[test]
+    fn a_guarded_push_goes_past_ship_when_asked() {
+        let items = vec![repo("api", "feature/f", vec![]), repo("web", "feature/f", vec![])];
+        let mut panel = Panel::new(&items);
+        let refused = Failure::Guarded("feature/f".into());
+        let b = batch(
+            BatchKind::Push { force: false },
+            vec![run("api", failed(refused)), run("web", RunState::Done)],
+        );
+        let ctx = super::Ctx {
+            batch: Some(&b),
+            ..ctx(&items, None)
+        };
+        select(&mut panel, "api");
+        let chip = repo_lines(&panel.view("p", &ctx))[0].chip.clone().unwrap();
+        assert_eq!(chip.text, "guarded");
+        let anyway = ReposHit::Button(ReposButton::PushAnyway);
+        assert_eq!(panel.click(anyway, &ctx), None);
+        // Only where the guard refused it.
+        assert_eq!(
+            panel.click(anyway, &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::PushPastGuard,
+                jobs: jobs(&["api"])
+            })
         );
     }
 

@@ -955,6 +955,11 @@ impl Gerdr {
                     Some((a.n, self.agent_key_state(&key).0))
                 })
                 .collect(),
+            resolving_status: (feature.shipping.resolving.as_ref())
+                .and_then(|r| r.pane.clone())
+                .map_or((None, false), |pane| {
+                    self.agent_key_state(&crate::agents::AgentKey::Herdr(pane))
+                }),
             agent_read,
             tail,
             ctx: self.row_ctx(feature),
