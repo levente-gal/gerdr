@@ -1080,6 +1080,7 @@ mod tests {
             inbox: false,
             test: None,
             icon: crate::agent_icons::AgentIcon::Claude,
+            paused: false,
         }
     }
 

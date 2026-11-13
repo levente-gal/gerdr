@@ -102,6 +102,7 @@ fn agents() -> Vec<Vec<AgentView>> {
             inbox: false,
             test: None,
             icon: crate::agent_icons::AgentIcon::Claude,
+            paused: false,
         }],
         vec![],
     ]
