@@ -804,14 +804,21 @@ fn is_main(item: &RepoItem) -> bool {
     item.status.here.as_ref().is_some_and(|w| w.main)
 }
 
-/// The main worktree that has `item`'s feature branch checked out while
-/// `item`, the feature's worktree, is detached: it took the branch.
-fn out_in_main(item: &RepoItem) -> Option<&crate::git::Worktree> {
+/// Where `item`'s feature branch is while `item`, the feature's worktree,
+/// is detached, when it can come back: `Some(Some(main))` out in the main
+/// worktree, which took it; `Some(None)` in no worktree. Out in another
+/// worktree, it stays there.
+fn branch_away(item: &RepoItem) -> Option<Option<&crate::git::Worktree>> {
     let branch = item.feature_branch.as_deref()?;
     if item.status.branch.is_some() {
         return None;
     }
-    (item.status.worktrees.iter()).find(|w| w.main && w.branch.as_deref() == Some(branch))
+    let holder = (item.status.worktrees.iter()).find(|w| w.branch.as_deref() == Some(branch));
+    match holder {
+        Some(w) if w.main => Some(Some(w)),
+        Some(_) => None,
+        None => Some(None),
+    }
 }
 
 /// `n` and `one`, or its plural with an `s`: `1 conflict`, `2 conflicts`.
@@ -3539,11 +3546,13 @@ impl Panel {
             }
             B::TakeBack => {
                 let ks: Vec<usize> = (targets.iter().copied())
-                    .filter(|&k| out_in_main(&items[k]).is_some())
+                    .filter(|&k| branch_away(&items[k]).is_some())
                     .collect();
                 let mut branches = ks.iter().filter_map(|&k| items[k].feature_branch.clone());
                 let Some(branch) = branches.next() else {
-                    return Err(Why::other("Its feature's branch isn't out in the main worktree"));
+                    return Err(Why::other(
+                        "Nothing to take back: it is on a branch, or its branch is out in another worktree",
+                    ));
                 };
                 if branches.any(|b| b != branch) {
                     return Err(Why::other("Pick the worktrees of one feature"));
@@ -3719,12 +3728,13 @@ impl Panel {
                             .map_or("its worktree".to_owned(), |w| w.path.display().to_string());
                         format!("check {names} out here: {other} is left detached")
                     }
-                    BatchKind::TakeBack(branch) => {
-                        let main = status
-                            .and_then(|s| s.worktrees.iter().find(|w| w.main))
-                            .map_or("the main worktree".to_owned(), |w| w.path.display().to_string());
-                        format!("take {branch} back: {main} goes back to the branch it was on before")
-                    }
+                    BatchKind::TakeBack(branch) => match item.and_then(branch_away) {
+                        Some(Some(main)) => format!(
+                            "take {branch} back: {} goes back to the branch it was on before",
+                            main.path.display()
+                        ),
+                        _ => format!("switch back to {branch}"),
+                    },
                     _ => kind.label().to_lowercase(),
                 };
                 (label, what, Tone::Warning)
@@ -4876,12 +4886,15 @@ impl Panel {
                 RunState::Queued | RunState::Running(_) => {}
             }
         }
-        if let Some(main) = out_in_main(item) {
+        if let Some(away) = branch_away(item) {
             let branch = item.feature_branch.as_deref().unwrap_or_default();
-            let tip = format!(
-                "{branch} is out in {}: Take branch back gives it back",
-                main.path.display()
-            );
+            let tip = match away {
+                Some(main) => format!(
+                    "{branch} is out in {}: Take branch back gives it back",
+                    main.path.display()
+                ),
+                None => format!("Not on {branch}: Take branch back switches back to it"),
+            };
             return chip("detached", Tone::Warning, &tip);
         }
         if item.status.branch.is_none() && item.status.head.is_some() {
@@ -5049,7 +5062,7 @@ impl Panel {
                 Some(Failure::Identity) => buttons.push(B::SetIdentity),
                 _ => {}
             }
-            if out_in_main(item).is_some() {
+            if branch_away(item).is_some() {
                 buttons.push(B::TakeBack);
             }
         }
@@ -7727,6 +7740,25 @@ mod tests {
                 jobs: jobs(&["api-wt"])
             })
         );
+        // Main went on to another branch: no worktree has it, it still comes back.
+        items[1].status.worktrees = vec![main("dev")];
+        let ctx = self::ctx(&items, None);
+        let view = panel.view("p", &ctx);
+        let line = repo_lines(&view).into_iter().find(|l| l.label == "api-wt");
+        let tip = line.and_then(|l| l.chip.clone()).unwrap().tip;
+        assert_eq!(tip, "Not on feature/f: Take branch back switches back to it");
+        assert_eq!(panel.click(back, &ctx), None);
+        assert!(panel.click(back, &ctx).is_some());
+        // Out in another worktree: it stays there.
+        let other = crate::git::Worktree {
+            path: root("api-other"),
+            branch: Some("feature/f".into()),
+            ..Default::default()
+        };
+        items[1].status.worktrees = vec![main("dev"), other];
+        let ctx = self::ctx(&items, None);
+        assert_eq!(panel.click(back, &ctx), None);
+        assert!(panel.sheet.is_none());
     }
 
     #[test]
