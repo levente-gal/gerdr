@@ -215,9 +215,10 @@ pub struct Features {
     /// Features whose Ship was pressed before their code was read: it asks once
     /// the read is back.
     ship_waits: BTreeSet<(String, String)>,
-    /// The feature whose workspace shipping closed just now, for the toast
-    /// saying it shipped to offer it back (see `Gerdr::show_shipped`).
-    pub(crate) just_closed: Option<(String, String)>,
+    /// The feature whose workspace (or tabs) shipping closed just now, and
+    /// which, for the toast saying it shipped to offer it back (see
+    /// `Gerdr::show_shipped`).
+    pub(crate) just_closed: Option<(String, String, crate::feature::AfterStep)>,
     /// The feature folders whose docs link was seen to this run:
     /// `link_feature_docs` goes once for each.
     pub(crate) docs_linked: BTreeSet<PathBuf>,

@@ -770,12 +770,14 @@ pub(super) fn shipped_after_group(
         done: false,
         button: (actions.iter()).position(|(_, o)| *o == PanelOutcome::CloseShipped),
     });
-    let steps: Vec<chrome::ShipStepRow> = [AfterStep::Close, AfterStep::Remove]
+    let all = [AfterStep::Close, AfterStep::CloseTabs, AfterStep::Remove];
+    let steps: Vec<chrome::ShipStepRow> = all
         .into_iter()
         .filter_map(|step| {
             let done = (feature.shipping.after.iter().rev()).find(|d| d.step == step)?;
             let label = match step {
                 AfterStep::Close => "Closed the workspace",
+                AfterStep::CloseTabs => "Closed its other tabs",
                 AfterStep::Remove if feature.touched().count() > 1 => {
                     "Removed the worktrees and branches"
                 }
@@ -784,7 +786,7 @@ pub(super) fn shipped_after_group(
             let mut when = crate::clock::ago(now, done.at);
             if let Some(at) = done.undone {
                 let word = match step {
-                    AfterStep::Close => "reopened",
+                    AfterStep::Close | AfterStep::CloseTabs => "reopened",
                     AfterStep::Remove => "restored",
                 };
                 when = format!("{when} \u{b7} {word} {}", crate::clock::ago(now, at));
@@ -818,15 +820,20 @@ pub(super) fn shipped_after_group(
 /// What undoing `step` does, for the footer and the button's tooltip.
 pub(super) fn after_undo_words(step: feature::AfterStep) -> &'static str {
     match step {
-        feature::AfterStep::Close => "bring back its tabs",
+        feature::AfterStep::Close | feature::AfterStep::CloseTabs => "bring back its tabs",
         feature::AfterStep::Remove => "restore the worktrees",
     }
 }
 
 /// What the Ship confirm says follows shipping `feature`, as its Afterwards
-/// ticks have it (`removable`: what is ticked merges everything); none when
-/// it is shipped already and ships more.
-pub(super) fn ship_after_line(feature: &Feature, removable: bool) -> Option<String> {
+/// ticks have it (`removable`: what is ticked merges everything), naming
+/// what `running` in its workspace stops; none when it is shipped already
+/// and ships more.
+pub(super) fn ship_after_line(
+    feature: &Feature,
+    removable: bool,
+    running: &[String],
+) -> Option<String> {
     if feature.status != Status::Open {
         return None;
     }
@@ -837,10 +844,8 @@ pub(super) fn ship_after_line(feature: &Feature, removable: bool) -> Option<Stri
             false => "Then its worktree and branch go".to_owned(),
         });
     }
-    Some(match plan.keep_workspace {
-        true => "Then its agents stop and its other tabs close".to_owned(),
-        false => "Then its workspace closes".to_owned(),
-    })
+    let ending = crate::feature_workspace::ending_text(plan.keep_workspace, running);
+    Some(format!("Then {ending}"))
 }
 
 /// The one repository whose base is to be pulled when that alone stops
@@ -904,6 +909,7 @@ pub(super) fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
     let after = feature.shipping.after.iter().map(|done| {
         let said = match done.step {
             feature::AfterStep::Close => "closed the workspace",
+            feature::AfterStep::CloseTabs => "closed its other tabs",
             feature::AfterStep::Remove => "removed the worktrees",
         };
         let undone = (done.undone).map(|at| format!(" \u{b7} undone {}", crate::clock::ago(now, at)));

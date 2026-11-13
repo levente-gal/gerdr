@@ -750,7 +750,11 @@ fn writers_page_actions(
         }
     }
     if stage == after_stage(feature) && feature.status != Status::Open {
-        for step in [feature::AfterStep::Close, feature::AfterStep::Remove] {
+        for step in [
+            feature::AfterStep::Close,
+            feature::AfterStep::CloseTabs,
+            feature::AfterStep::Remove,
+        ] {
             let Some(done) = feature.after_done(step) else {
                 continue;
             };

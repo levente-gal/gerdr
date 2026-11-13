@@ -22,15 +22,22 @@ pub fn after_refusal(feature: &feature::Feature, step: AfterStep) -> Option<Stri
             AfterStep::Close => {
                 format!("\u{201c}{title}\u{201d} has no closed workspace to bring back")
             }
+            AfterStep::CloseTabs => {
+                format!("\u{201c}{title}\u{201d} has no closed tabs to bring back")
+            }
             AfterStep::Remove => {
                 format!("\u{201c}{title}\u{201d} has no removed worktrees to bring back")
             }
         });
     }
     match step {
-        AfterStep::Close if feature.after_done(AfterStep::Remove).is_some() => Some(format!(
-            "The worktrees of \u{201c}{title}\u{201d} are gone: restore them first"
-        )),
+        AfterStep::Close | AfterStep::CloseTabs
+            if feature.after_done(AfterStep::Remove).is_some() =>
+        {
+            Some(format!(
+                "The worktrees of \u{201c}{title}\u{201d} are gone: restore them first"
+            ))
+        }
         AfterStep::Remove if feature.writer.is_some() => Some(format!(
             "\u{201c}{title}\u{201d} is written on another machine: restore it there"
         )),
@@ -41,7 +48,7 @@ pub fn after_refusal(feature: &feature::Feature, step: AfterStep) -> Option<Stri
 /// The button a toast saying `step` happened has, to undo it.
 fn toast_button(project: &str, slug: &str, step: AfterStep) -> (String, MenuAction) {
     let label = match step {
-        AfterStep::Close => "Reopen",
+        AfterStep::Close | AfterStep::CloseTabs => "Reopen",
         AfterStep::Remove => "Restore",
     };
     (
@@ -91,11 +98,11 @@ impl Gerdr {
     }
 
     /// Say `text`, a success of shipping feature `slug`: with a Reopen
-    /// button when it closed its workspace just now.
+    /// button when it closed its workspace, or its tabs, just now.
     pub(crate) fn show_shipped(&mut self, project: &str, slug: &str, text: String) {
         let closed =
-            self.features.just_closed.take() == Some((project.to_owned(), slug.to_owned()));
-        let button = closed.then(|| toast_button(project, slug, AfterStep::Close));
+            (self.features.just_closed.take()).filter(|(p, s, _)| p == project && s == slug);
+        let button = closed.map(|(_, _, step)| toast_button(project, slug, step));
         self.toast_with(text, crate::toast::Level::Success, button);
     }
 
@@ -135,16 +142,18 @@ impl Gerdr {
             ));
         }
         match step {
-            AfterStep::Close => self.reopen_shipped_workspace(project, slug),
+            AfterStep::Close | AfterStep::CloseTabs => {
+                self.reopen_shipped_workspace(project, slug, step);
+            }
             AfterStep::Remove => self.restore_worktrees(project, slug),
         }
     }
 
     /// Open feature `slug`'s workspace again on its Ship page, with the tabs
-    /// it had when shipping closed it.
-    fn reopen_shipped_workspace(&mut self, project: &str, slug: &str) {
+    /// it had when shipping closed it, or them (`step`).
+    fn reopen_shipped_workspace(&mut self, project: &str, slug: &str, step: AfterStep) {
         let Some(done) = (self.feature(project, slug))
-            .and_then(|f| f.after_done(AfterStep::Close))
+            .and_then(|f| f.after_done(step))
             .cloned()
         else {
             return;
@@ -156,11 +165,19 @@ impl Gerdr {
             return;
         };
         let now = feature::now();
-        feature.after_undid(AfterStep::Close, now);
-        feature.log(now, "workspace reopened");
+        feature.after_undid(step, now);
+        let tabs = step == AfterStep::CloseTabs;
+        let said = match tabs {
+            true => "tabs reopened",
+            false => "workspace reopened",
+        };
+        feature.log(now, said);
         let title = feature.title.clone();
         self.save_feature(project, slug);
-        self.show_success(format!("Reopened the workspace of \u{201c}{title}\u{201d}"));
+        self.show_success(match tabs {
+            true => format!("Reopened the tabs of \u{201c}{title}\u{201d}"),
+            false => format!("Reopened the workspace of \u{201c}{title}\u{201d}"),
+        });
     }
 
     /// Show feature `slug`'s workspace on its page, opening it if it isn't,
@@ -266,5 +283,36 @@ impl Gerdr {
             true => format!("Restored {what}; setting it up"),
             false => format!("Restored {what}"),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::features::tests::{feature, repo};
+
+    fn done(step: AfterStep) -> AfterDone {
+        AfterDone {
+            at: 1,
+            step,
+            tabs: Vec::new(),
+            heads: Vec::new(),
+            undone: None,
+        }
+    }
+
+    #[test]
+    fn closed_tabs_come_back_until_the_worktrees_went() {
+        let mut f = feature("s", vec![repo("api", true)], 1);
+        assert!(after_refusal(&f, AfterStep::CloseTabs).is_some());
+        f.after_ran(done(AfterStep::CloseTabs));
+        assert_eq!(after_refusal(&f, AfterStep::CloseTabs), None);
+        // Not a closed workspace: that one has nothing to bring back.
+        assert!(after_refusal(&f, AfterStep::Close).is_some());
+        f.after_ran(done(AfterStep::Remove));
+        let why = after_refusal(&f, AfterStep::CloseTabs).unwrap_or_default();
+        assert!(why.ends_with("restore them first"), "{why}");
+        let said = serde_json::to_string(&AfterStep::CloseTabs).unwrap_or_default();
+        assert_eq!(said, "\"close-tabs\"");
     }
 }

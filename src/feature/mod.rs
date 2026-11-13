@@ -237,6 +237,8 @@ pub struct Shipping {
 pub enum AfterStep {
     /// Its workspace closed.
     Close,
+    /// Its tabs but the feature tab closed, its workspace kept open.
+    CloseTabs,
     /// Its worktrees and branches went (its workspace with them).
     Remove,
 }

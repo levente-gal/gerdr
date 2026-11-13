@@ -80,14 +80,33 @@ pub(crate) fn feature_label(name: &str, dir: &Path, title: &str) -> String {
 /// What the confirm to remove a feature says of its open workspace, with
 /// `running` running in it.
 pub(crate) fn closing_text(running: &[String]) -> String {
+    capitalized(&ending_text(false, running))
+}
+
+/// What ending a feature does to its workspace, with `running` running in
+/// it: it closes, or (`keep`) its tabs but the feature tab do.
+pub(crate) fn ending_text(keep: bool, running: &[String]) -> String {
+    let (what, them) = match keep {
+        false => ("its workspace closes", "it"),
+        true => ("its other tabs close", "them"),
+    };
     match running {
-        [] => "Its workspace closes".to_owned(),
-        [one] => format!("Its workspace closes, and \u{201c}{one}\u{201d} running in it stops"),
+        [] => what.to_owned(),
+        [one] => format!("{what}, and \u{201c}{one}\u{201d} running in {them} stops"),
         more => format!(
-            "Its workspace closes, and the {} commands running in it stop",
+            "{what}, and the {} commands running in {them} stop",
             more.len()
         ),
     }
+}
+
+/// `text` with its first letter a capital.
+pub(crate) fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// Give `tabs` a pinned first tab if `want`, else take every pinned one
@@ -524,15 +543,37 @@ impl Gerdr {
     }
 
     /// Close every tab of feature `slug`'s workspace but the feature tab,
-    /// what runs in them ending: it is over, its workspace kept open.
+    /// what runs in them ending: it is over, its workspace kept open. Kept
+    /// to reopen, as a closed workspace is.
     pub(crate) fn close_feature_tabs(&mut self, project: &str, slug: &str) {
         let Some(w) = self.feature_workspace(project, slug) else {
             return;
         };
+        let tabs = self.kept_tabs(w);
         // From the last: a tab closing at once doesn't move those before it.
         for t in (0..self.workspaces[w].tabs.len()).rev() {
             self.close_tab_in(w, t);
         }
+        if tabs.is_empty() {
+            return;
+        }
+        self.note_after_ship(project, slug, AfterStep::CloseTabs, tabs, Vec::new());
+        self.features.just_closed =
+            Some((project.to_owned(), slug.to_owned(), AfterStep::CloseTabs));
+    }
+
+    /// What ending feature `slug` does to its workspace, as a confirm says
+    /// it: what closes, and what running there stops.
+    pub(crate) fn ending_said(&self, project: &str, slug: &str) -> String {
+        let keep = (self.feature(project, slug)).is_some_and(|f| f.ship_plan.keep_workspace);
+        capitalized(&ending_text(keep, &self.ending_running(project, slug)))
+    }
+
+    /// What ending feature `slug` stops in its workspace, if open: what its
+    /// confirm names.
+    pub(crate) fn ending_running(&self, project: &str, slug: &str) -> Vec<String> {
+        (self.feature_workspace(project, slug))
+            .map_or_else(Vec::new, |w| self.shipped_running(project, slug, w))
     }
 
     /// What runs in feature `slug`'s workspace `w` but the agent writing
@@ -553,7 +594,7 @@ impl Gerdr {
         let tabs = self.kept_tabs(w);
         self.close_workspace_now(w);
         self.note_after_ship(project, slug, AfterStep::Close, tabs, Vec::new());
-        self.features.just_closed = Some((project.to_owned(), slug.to_owned()));
+        self.features.just_closed = Some((project.to_owned(), slug.to_owned(), AfterStep::Close));
     }
 
     /// Close shipped feature `slug`'s workspace as its Afterwards tick
@@ -695,6 +736,12 @@ mod tests {
         assert_eq!(feature_label("bulk", dir, "Bulk export"), "Bulk export");
         assert_eq!(feature_label("mine", dir, "Bulk export"), "mine");
         assert_eq!(closing_text(&[]), "Its workspace closes");
+        assert_eq!(
+            ending_text(true, &["claude".into()]),
+            "its other tabs close, and \u{201c}claude\u{201d} running in them stops"
+        );
+        assert_eq!(ending_text(true, &[]), "its other tabs close");
+        assert_eq!(capitalized(""), "");
         assert_eq!(
             closing_text(&["claude".into()]),
             "Its workspace closes, and \u{201c}claude\u{201d} running in it stops"

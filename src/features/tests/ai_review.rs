@@ -22,7 +22,7 @@ fn a_pull_request_merged_on_github_offers_no_undo() {
 #[test]
 fn the_ship_confirm_says_what_follows_shipping() {
     let mut f = feature("s", vec![repo("api", true)], 8);
-    let said = |f: &Feature, removable| ship_after_line(f, removable);
+    let said = |f: &Feature, removable| ship_after_line(f, removable, &[]);
     let closes = Some("Then its workspace closes".to_owned());
     assert_eq!(said(&f, true), closes);
     f.ship_plan.remove_worktrees = true;
@@ -32,8 +32,13 @@ fn the_ship_confirm_says_what_follows_shipping() {
     assert_eq!(said(&f, false), closes);
     f.ship_plan = Default::default();
     f.ship_plan.keep_workspace = true;
-    let stops = Some("Then its agents stop and its other tabs close".to_owned());
+    let stops = Some("Then its other tabs close".to_owned());
     assert_eq!(said(&f, true), stops);
+    let running = ["claude".to_owned(), "npm".to_owned()];
+    assert_eq!(
+        ship_after_line(&f, true, &running),
+        Some("Then its other tabs close, and the 2 commands running in them stop".to_owned())
+    );
     f.ship_plan.keep_workspace = false;
     f.status = Status::Done;
     assert_eq!(said(&f, true), None);

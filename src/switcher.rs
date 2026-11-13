@@ -1560,7 +1560,8 @@ impl Gerdr {
             .get(project)
             .map_or(&[][..], Vec::as_slice);
         for feature in all {
-            let undoable = [AfterStep::Remove, AfterStep::Close].into_iter().find_map(|step| {
+            let steps = [AfterStep::Remove, AfterStep::Close, AfterStep::CloseTabs];
+            let undoable = steps.into_iter().find_map(|step| {
                 let done = feature.after_done(step)?;
                 let open = step == AfterStep::Close
                     && self.feature_workspace(project, &feature.slug).is_some();
@@ -1576,6 +1577,10 @@ impl Gerdr {
                 (AfterStep::Close, _) => (
                     format!("Reopen \u{201c}{title}\u{201d}"),
                     format!("history \u{b7} workspace closed {when}"),
+                ),
+                (AfterStep::CloseTabs, _) => (
+                    format!("Reopen the tabs of \u{201c}{title}\u{201d}"),
+                    format!("history \u{b7} tabs closed {when}"),
                 ),
                 (AfterStep::Remove, Status::Abandoned) => (
                     format!("Restore \u{201c}{title}\u{201d}"),

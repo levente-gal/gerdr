@@ -672,8 +672,12 @@ impl Gerdr {
         (title, branch): (&str, &str),
         worktrees: (usize, bool),
         dirty: &[String],
+        after: Option<String>,
     ) {
-        let (question, body) = finish_question(title, branch, worktrees, dirty);
+        let (question, mut body) = finish_question(title, branch, worktrees, dirty);
+        if let Some(after) = after {
+            body = format!("{body}\n{after}");
+        }
         self.ask(
             question,
             body,

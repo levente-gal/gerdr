@@ -431,16 +431,14 @@ impl Gerdr {
                 ));
             }
         };
-        let then = match f.ship_plan.keep_workspace {
-            true => "Its agents stop and its other tabs close",
-            false => "Its workspace closes",
-        };
+        let title = f.title.clone();
+        let then = self.ending_said(project, slug);
         let body = format!("{how}\n{then}; its worktree stays");
         let then = Then::FinishPrReview {
             project: project.to_owned(),
             slug: slug.to_owned(),
         };
-        self.ask(format!("Finish “{}”?", f.title), body, "Finish", then);
+        self.ask(format!("Finish “{title}”?"), body, "Finish", then);
     }
 
     /// Finish review `slug`, its pull request ended: done, its workspace

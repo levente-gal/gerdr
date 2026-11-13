@@ -501,6 +501,7 @@ impl Gerdr {
                     (&title, &branch),
                     (feature.repos.len(), removing),
                     &dirty,
+                    (!removing).then(|| self.ending_said(project, slug)),
                 );
             }
             ShipAsk::AllRan if feature.status == Status::Done => self.show_notice(format!(
@@ -519,7 +520,8 @@ impl Gerdr {
                     .collect();
                 let check = probe.and_then(|p| p.ship.as_ref());
                 let removing = check.is_some_and(|c| ship::removable(&feature, c));
-                steps.extend(ship_after_line(&feature, removing));
+                let running = self.ending_running(project, slug);
+                steps.extend(ship_after_line(&feature, removing, &running));
                 self.features.asked.insert(key, asked);
                 self.ask_ship(project.to_owned(), slug.to_owned(), &title, &branch, &steps);
             }
