@@ -75,6 +75,7 @@ impl Gerdr {
         let outcome = match hit {
             FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(..) => None,
             FeatureTabHit::MilestoneMode(i) => Some(PanelOutcome::FreshMilestones(i == 1)),
+            FeatureTabHit::Shot(i, n) => Some(PanelOutcome::FlipShots(i, Some(n))),
             FeatureTabHit::Fold(i) => {
                 let card = (self.feature_tab_parts()).and_then(|(view, _)| {
                     (view.page.sections.into_iter())
@@ -631,6 +632,24 @@ impl Gerdr {
                     smithay::utils::Rectangle::new(pos.to_i32_round(), (1, 1).into()),
                 ))
             }
+            FeatureTabHit::Shot(i, n) => {
+                let shot = (self.features.panel_feature())
+                    .and_then(|f| self.criterion_rows(f).into_iter().nth(i))?
+                    .shots
+                    .get(n)?
+                    .clone();
+                let across =
+                    (self.features.panel.as_ref()).is_some_and(|p| p.open_shots.contains(&shot));
+                let text = match (crate::shot_images::size(&shot), across) {
+                    (None, _) => "This screenshot's file is gone",
+                    (Some(_), true) => "Show it small again (Alt+I: all of its own)",
+                    (Some(_), false) => "Show it across the page (Alt+I: all of its own)",
+                };
+                Some(Tooltip::new(
+                    text,
+                    smithay::utils::Rectangle::new(pos.to_i32_round(), (1, 1).into()),
+                ))
+            }
             FeatureTabHit::Fold(i) => {
                 let open = self
                     .features
@@ -997,6 +1016,7 @@ impl Gerdr {
             criteria: self.criterion_rows(feature),
             manual_gate: manual_counts.map(manual_gate),
             rounds_open: panel.rounds_open.clone(),
+            open_shots: panel.open_shots.clone(),
             fix_rounds_flipped: panel.fix_rounds_flipped.clone(),
         };
         let mut view = tab_view(panel, feature, &slugs, &state, now);

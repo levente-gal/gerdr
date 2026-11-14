@@ -111,8 +111,9 @@ pub struct Row {
     pub open: bool,
     /// The user read it: opened it, or marked it.
     pub seen: bool,
-    /// The screenshots of a failure, by file name (see `manual::SHOTS_DIR`).
-    pub shots: Vec<String>,
+    /// The screenshots of a failure: by file name, and where they are once
+    /// `ManualTest::criterion_rows` says (see `manual::SHOTS_DIR`).
+    pub shots: Vec<std::path::PathBuf>,
     /// It is a comment of the user's own: its text is what should change,
     /// passed means done.
     pub comment: bool,
@@ -235,9 +236,9 @@ fn rows(
                     .and_then(|t| t.retest.get(&c.id).copied()),
                 open: folds.is_some_and(|f| f.open.contains(&c.text)),
                 seen: folds.is_some_and(|f| f.seen.contains(&c.text)) || check.is_some(),
-                shots: check
-                    .filter(|k| k.state == Verdict::Fail)
-                    .map_or_else(Vec::new, |k| k.shots.clone()),
+                shots: (check.filter(|k| k.state == Verdict::Fail).into_iter())
+                    .flat_map(|k| k.shots.iter().map(Into::into))
+                    .collect(),
                 comment: c.comment,
                 planning: false,
             }
@@ -725,8 +726,14 @@ impl Gerdr {
                 .criteria_folds
                 .get(&folds_key(&f.project, &f.slug)),
         );
-        for row in rows.iter_mut().filter(|r| r.sent) {
-            row.planning = planning;
+        let shots = store::dir(None, &f.project, &f.slug).join(manual::SHOTS_DIR);
+        for row in &mut rows {
+            if row.sent {
+                row.planning = planning;
+            }
+            for shot in &mut row.shots {
+                *shot = shots.join(&*shot);
+            }
         }
         rows
     }
@@ -766,6 +773,38 @@ impl Gerdr {
             criteria.get(i).is_some_and(|c| folds.set(&c.text, open))
         });
         self.select_criterion(i);
+    }
+
+    /// Show screenshot `n` of criterion `i` of the feature on the tab across
+    /// the page, or small again; with no `n`, all of the criterion's: across
+    /// while one is small, its row opened to show them.
+    pub(crate) fn flip_shots(&mut self, i: usize, n: Option<usize>) {
+        let Some(row) =
+            (self.features.panel_feature()).and_then(|f| self.criterion_rows(f).into_iter().nth(i))
+        else {
+            return;
+        };
+        let shots: Vec<_> = match n {
+            Some(n) => row.shots.get(n).cloned().into_iter().collect(),
+            None => row.shots,
+        };
+        if shots.is_empty() {
+            return self.show_warning(format!("{} has no screenshots", row.id));
+        }
+        let Some(panel) = self.features.panel.as_mut() else {
+            return;
+        };
+        let across = shots.iter().any(|s| !panel.open_shots.contains(s));
+        for shot in shots {
+            match across {
+                true => panel.open_shots.insert(shot),
+                false => panel.open_shots.remove(&shot),
+            };
+        }
+        match across && !row.open {
+            true => self.fold_criterion(i, true),
+            false => self.select_criterion(i),
+        }
     }
 
     /// Open or fold the criteria `scope` names of the feature on the tab.

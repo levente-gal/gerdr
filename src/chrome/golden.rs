@@ -5603,6 +5603,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
                 hidden: false,
                 needle: String::new(),
                 whole: false,
+                shots: Vec::new(),
             })),
             tag,
             title: title.into(),
@@ -5723,6 +5724,7 @@ fn feature_tab_manual_comment() -> super::FeatureTabView {
             hidden: false,
             needle: String::new(),
             whole: false,
+            shots: golden_shots(),
         })),
         tag: FindingTag::Failed,
         title: "Make the settings page look better\u{2026}".into(),
@@ -6412,7 +6414,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0x0c7f88af5e3be46e, // tab_manual_select_860
         0x3534b6bb7df59306, // tab_manual_rounds_1180
         0x5c172bdf495b9981, // tab_manual_rounds_860
-        0xcb1355fea1973cfb, // tab_manual_comment_860
+        0x160dbfffb54fefd7, // tab_manual_comment_860
         0x6ed0e5a54cf691c4, // tab_manual_hand_back_1180
         0x3c00f0f293e13bed, // tab_ship_live_1180
         0x84c5e772a6e07522, // tab_ship_live_860
@@ -6485,7 +6487,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0x70dd2852ac3327a6, // tab_manual_select_860
         0xeb025273c814c247, // tab_manual_rounds_1180
         0xbc43a1bed8fe031b, // tab_manual_rounds_860
-        0xd053d354a12075a8, // tab_manual_comment_860
+        0x99bff877303f1a90, // tab_manual_comment_860
         0xc4db353623cc9ce3, // tab_manual_hand_back_1180
         0xa8dd18c6152a3eb4, // tab_ship_live_1180
         0x7e9786f472f4b08f, // tab_ship_live_860
@@ -6558,7 +6560,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0xd6558fab28223313, // tab_manual_select_860
         0xf09266e7a8993f7d, // tab_manual_rounds_1180
         0xc717bedb2ee4778e, // tab_manual_rounds_860
-        0x93aaf7bbe320efeb, // tab_manual_comment_860
+        0xc1e1122750e0c9ad, // tab_manual_comment_860
         0x6dab8def82d1789b, // tab_manual_hand_back_1180
         0xfec52c27283ca419, // tab_ship_live_1180
         0x6c43d154be418d32, // tab_ship_live_860
@@ -6631,7 +6633,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0xca950363fcc8c8c2, // tab_manual_select_860
         0xb9232baa4f892d3c, // tab_manual_rounds_1180
         0xa6d7f964d34db941, // tab_manual_rounds_860
-        0x023b8c2449876dcb, // tab_manual_comment_860
+        0xf8c11347d0ec5c0d, // tab_manual_comment_860
         0x34dc7e5676e7483b, // tab_manual_hand_back_1180
         0x1348f903f91769a5, // tab_ship_live_1180
         0x09bcc015a6813509, // tab_ship_live_860
@@ -8819,4 +8821,76 @@ fn dump_criteria_strip() {
             );
         }
     }
+}
+
+/// A comment's screenshots on Manual test's page: one small, one whose
+/// file is gone. The first is drawn here, the same each time.
+fn golden_shots() -> Vec<super::SheetShot> {
+    use resvg::tiny_skia;
+    static DRAWN: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    let path = DRAWN.get_or_init(|| {
+        let path =
+            std::env::temp_dir().join(format!("gerdr-golden-shot-{}.png", std::process::id()));
+        let mut pixmap = tiny_skia::Pixmap::new(320, 180).expect("a pixmap");
+        pixmap.fill(tiny_skia::Color::from_rgba8(0x30, 0x60, 0xa0, 0xff));
+        let bar = tiny_skia::Rect::from_xywh(0.0, 0.0, 320.0, 36.0).expect("a rect");
+        let mut paint = tiny_skia::Paint::default();
+        paint.set_color_rgba8(0xf0, 0xf0, 0xf0, 0xff);
+        pixmap.fill_rect(bar, &paint, tiny_skia::Transform::identity(), None);
+        pixmap
+            .save_png(&path)
+            .expect("the golden screenshot written");
+        path
+    });
+    let path = path.clone();
+    vec![
+        super::SheetShot {
+            size: crate::shot_images::size(&path),
+            path,
+            open: false,
+        },
+        super::SheetShot {
+            path: "/nonexistent/T1-2.png".into(),
+            size: None,
+            open: false,
+        },
+    ]
+}
+
+#[test]
+fn a_comments_screenshots_sit_small_under_it_and_a_click_on_one_is_its_hit() {
+    use super::{PageSection, features::Piece};
+    let mut view = feature_tab_manual_comment();
+    let area = Rect::new((0, 0).into(), (1180, TAB_HEIGHT).into());
+    let shots = |view: &super::FeatureTabView| {
+        let layout = super::feature_tab_layout(view, area);
+        let rects: Vec<Rect> = (layout.pieces.iter().flatten())
+            .filter_map(|(r, p)| matches!(p, Piece::Shot(..)).then_some(*r))
+            .collect();
+        (layout, rects)
+    };
+    let (layout, small) = shots(&view);
+    assert_eq!(small.len(), 2);
+    // Side by side, no taller than a thumbnail, the gone one 16:9.
+    assert_eq!(small[0].loc.y, small[1].loc.y);
+    assert!(small.iter().all(|r| r.size.h <= 72 && r.size.w <= 160));
+    assert_eq!((small[1].size.w, small[1].size.h), (128, 72));
+    let card = (view.page.sections.iter())
+        .filter(|s| matches!(s, PageSection::Finding(_)))
+        .count()
+        - 1;
+    let middle = |r: Rect| (r.loc.x + r.size.w / 2, r.loc.y + r.size.h / 2).into();
+    assert_eq!(
+        layout.hit(&view, middle(small[1])),
+        Some(super::FeatureTabHit::Shot(card, 1))
+    );
+    // Opened, the first goes across on a line of its own, no wider than it
+    // is: 320 pixels.
+    let Some(PageSection::Finding(c)) = view.page.sections.last_mut() else {
+        panic!("the comment's row");
+    };
+    c.sheet.as_mut().expect("a sheet row").shots[0].open = true;
+    let (_, open) = shots(&view);
+    assert_eq!((open[0].size.w, open[0].size.h), (320, 180));
+    assert!(open[1].loc.y >= open[0].loc.y + open[0].size.h);
 }

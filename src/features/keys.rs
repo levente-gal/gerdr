@@ -792,6 +792,14 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                             .then_some(TabKey::Out(PanelOutcome::FoldCriterion(t.finding, true)))
                     }
                 ),
+                row!(
+                    "Alt+I",
+                    "show its screenshots across the page, or small again",
+                    |t| {
+                        (t.shown > 0 && t.findings())
+                            .then_some(TabKey::Out(PanelOutcome::FlipShots(t.finding, None)))
+                    }
+                ),
                 row!("Alt+Left", "fold all, or open all", |t| (t.shown > 0
                     && t.page())
                 .then_some(TabKey::Out(PanelOutcome::FoldCriteria(

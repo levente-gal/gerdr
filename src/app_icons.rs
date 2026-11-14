@@ -53,6 +53,22 @@ impl AppIcon {
         self.0.symbolic
     }
 
+    /// A picture of `width` × `height` premultiplied RGBA pixels, drawn as
+    /// it is: a screenshot's (see `shot_images`).
+    pub fn from_rgba(width: usize, height: usize, rgba: Vec<u8>) -> Self {
+        AppIcon(Arc::new(Picture {
+            width,
+            height,
+            rgba,
+            symbolic: false,
+        }))
+    }
+
+    /// Its width and height in pixels.
+    pub fn size(&self) -> (usize, usize) {
+        (self.0.width, self.0.height)
+    }
+
     /// Whether it draws nothing at all.
     pub fn is_empty(&self) -> bool {
         self.0.rgba.chunks(4).all(|p| p[3] == 0)

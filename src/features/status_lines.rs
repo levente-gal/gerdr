@@ -61,6 +61,9 @@ pub(super) struct PanelState<'a> {
     /// The earlier AI reviews showing their findings (see
     /// `FeaturePanel::rounds_open`).
     pub(super) rounds_open: BTreeSet<u32>,
+    /// Manual test's screenshots shown across the page (see
+    /// `FeaturePanel::open_shots`).
+    pub(super) open_shots: BTreeSet<std::path::PathBuf>,
     /// The fix round cards flipped from how they show by default (see
     /// `FeaturePanel::fix_rounds_flipped`).
     pub(super) fix_rounds_flipped: BTreeSet<u32>,
@@ -616,9 +619,8 @@ pub(super) fn rail_node(feature: &Feature, stage: Stage, state: &PanelState, now
             crate::clock::ago(now, at)
         }
         (StageMark::Current, _) => current_line(feature, stage, &lines, now),
-        (StageMark::Later, _) => {
-            (feature.ran_once.get(&stage)).map_or_else(String::new, |at| crate::clock::ago(now, *at))
-        }
+        (StageMark::Later, _) => (feature.ran_once.get(&stage))
+            .map_or_else(String::new, |at| crate::clock::ago(now, *at)),
     };
     RailNode {
         label: stage.label().to_owned(),
@@ -795,7 +797,11 @@ pub(super) fn submit_sections(
     let done: Vec<CheckLine> = (feature.shipping.reviews.iter().rev())
         .map(|r| {
             let short = r.commit.get(..7).unwrap_or(&r.commit);
-            let mut text = format!("{} {} at {short}", r.event.done(), crate::clock::ago(now, r.at));
+            let mut text = format!(
+                "{} {} at {short}",
+                r.event.done(),
+                crate::clock::ago(now, r.at)
+            );
             if r.inline + r.in_body > 0 {
                 text.push_str(&format!(
                     " \u{b7} {}",

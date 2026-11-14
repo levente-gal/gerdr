@@ -62,6 +62,7 @@ mod ship_conflicts;
 mod ship_after;
 mod ship_undo;
 mod ship_update;
+mod shot_images;
 mod features;
 mod file_tree;
 mod find;

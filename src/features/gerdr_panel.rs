@@ -553,6 +553,7 @@ impl Gerdr {
             PanelOutcome::ManualTest => self.focus_criteria(&project, &slug),
             PanelOutcome::Manual(outcome) => self.apply_manual_test(outcome),
             PanelOutcome::FoldCriterion(i, open) => self.fold_criterion(i, open),
+            PanelOutcome::FlipShots(i, n) => self.flip_shots(i, n),
             PanelOutcome::FoldCard(i, open) => self.features.fold_card(i, open),
             PanelOutcome::FoldCriteria(scope, open) => self.fold_criteria(scope, open),
             PanelOutcome::NoteSave => {

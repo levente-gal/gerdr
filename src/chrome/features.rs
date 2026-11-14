@@ -1222,6 +1222,19 @@ pub struct SheetRow {
     pub needle: String,
     /// It looks for `needle` only as a word of its own (vim's `*`).
     pub whole: bool,
+    /// The screenshots of what went wrong, under its note while open.
+    pub shots: Vec<SheetShot>,
+}
+
+/// A screenshot on a criterion's row: small, or across the page once
+/// clicked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SheetShot {
+    pub path: std::path::PathBuf,
+    /// Its width and height in pixels; `None` when its file can't be read.
+    pub size: Option<(u32, u32)>,
+    /// It shows across the page.
+    pub open: bool,
 }
 
 /// A place in the text of the feature tab's page: which of its lines
@@ -1444,6 +1457,9 @@ pub enum FeatureTabHit {
     Finding(usize),
     /// The chevron of a criterion's row, indexed as `Finding`.
     Fold(usize),
+    /// A screenshot on a criterion's row: the row, indexed as `Finding`,
+    /// then which of its `SheetRow::shots`.
+    Shot(usize, usize),
     /// A review summary's pill: go to the first card with its tag.
     Jump(FindingTag),
     /// A part of the criteria's search, heading their list on the page.
@@ -1715,6 +1731,18 @@ impl FeatureTabLayout {
                                 _ => None,
                             }
                         })
+                    })
+                    .or_else(|| {
+                        let (k, n) = self.pieces[TabColumn::Page as usize].iter().find_map(
+                            |(r, piece)| match piece {
+                                Piece::Shot(k, n) if r.contains(at) => Some((*k, *n)),
+                                _ => None,
+                            },
+                        )?;
+                        let card = (view.page.sections[..k].iter())
+                            .filter(|s| matches!(s, PageSection::Finding(_)))
+                            .count();
+                        Some(FeatureTabHit::Shot(card, n))
                     })
                     .or_else(|| {
                         let k = self.pieces[TabColumn::Page as usize].iter().find_map(
@@ -2132,6 +2160,11 @@ const SHEET_PAD: i32 = 6;
 const SHEET_FOLD: i32 = 18;
 const SHEET_TITLE_MIN: i32 = 120;
 const SHEET_WORD_GAP: i32 = 10;
+/// A small screenshot's most height and width on a criterion's row, and the
+/// room between two.
+const SHOT_HEIGHT: i32 = 72;
+const SHOT_MAX_WIDTH: i32 = 160;
+const SHOT_GAP: i32 = 8;
 /// Between a toolbar's buttons, and before its next word.
 const SHEET_BUTTON_GAP: i32 = 2;
 const TOOLBAR_GAP: i32 = 14;
@@ -2342,6 +2375,8 @@ pub(super) enum Piece {
     /// The chevron folding or opening the sheet row of
     /// `StagePage::sections[i]`.
     Fold(usize),
+    /// Screenshot `.1` of the sheet row of `StagePage::sections[.0]`.
+    Shot(usize, usize),
     /// A line of text, the places saying `needle` (see `crate::find`)
     /// tinted, the `current`th of them more: the match gone to.
     Found {
@@ -3700,6 +3735,10 @@ impl Stack {
                 self.y += FINDING_GAP;
                 self.found_text(&card.note, Font::Body, Ink::Error, false, BODY_LINE, sheet);
             }
+            if !sheet.shots.is_empty() {
+                self.y += FINDING_GAP;
+                self.sheet_shots(k, &sheet.shots, text_x, right);
+            }
             // As tall as its lines, as on a card.
             if let Some(field) = &card.field {
                 self.y += FINDING_GAP;
@@ -3714,6 +3753,45 @@ impl Stack {
         let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
         self.pieces.insert(frame_at, (frame, Piece::FindingCard(k)));
         frame
+    }
+
+    /// The screenshots of sheet row `k` from `x` to `right`: the small ones
+    /// side by side, wrapping, and an open one across on a line of its own.
+    fn sheet_shots(&mut self, k: usize, shots: &[SheetShot], x: i32, right: i32) {
+        let room = (right - x).max(1);
+        let (mut at, mut line) = (x, 0);
+        for (n, shot) in shots.iter().enumerate() {
+            let (w, h) = shot_box(shot, room);
+            if at > x && (shot.open || at + w > right) {
+                self.y += line + SHOT_GAP;
+                (at, line) = (x, 0);
+            }
+            let rect = Rectangle::new((at, self.y).into(), (w, h).into());
+            self.pieces.push((rect, Piece::Shot(k, n)));
+            if shot.size.is_none() {
+                let text = "file gone";
+                let tw = (width_of(text, Font::Small.size()).ceil() as i32 + 1).min(w);
+                self.pieces.push((
+                    Rectangle::new(
+                        (at + (w - tw) / 2, self.y + (h - TAIL_LINE) / 2).into(),
+                        (tw, TAIL_LINE).into(),
+                    ),
+                    Piece::Text {
+                        text: text.to_owned(),
+                        font: Font::Small,
+                        ink: Ink::Muted,
+                        bold: false,
+                    },
+                ));
+            }
+            line = line.max(h);
+            at = match shot.open {
+                // Nothing else on its line.
+                true => right,
+                false => at + w + SHOT_GAP,
+            };
+        }
+        self.y += line;
     }
 
     /// A collapsed card's one line: tag, title and where it stands cut to fit,
@@ -5910,6 +5988,27 @@ pub(super) struct PageBand {
     pub(super) pieces: Vec<usize>,
 }
 
+/// How big screenshot `shot` shows in `room` wide: small, at most
+/// `SHOT_HEIGHT` tall and `SHOT_MAX_WIDTH` wide; open, across `room` but no
+/// wider than it is. One whose file can't be read is a small 16:9 box.
+fn shot_box(shot: &SheetShot, room: i32) -> (i32, i32) {
+    let (w, h) = (shot.size)
+        .filter(|(w, h)| *w > 0 && *h > 0)
+        .map_or((16.0, 9.0), |(w, h)| (w as f64, h as f64));
+    let room = room.max(1) as f64;
+    let width = match shot.open && shot.size.is_some() {
+        true => room.min(w),
+        false => (SHOT_HEIGHT as f64 * w / h)
+            .min(SHOT_MAX_WIDTH as f64)
+            .min(room),
+    };
+    let width = width.max(1.0);
+    (
+        width.round() as i32,
+        (width * h / w).round().max(1.0) as i32,
+    )
+}
+
 /// The page section piece `piece` paints from, if one.
 fn piece_section(piece: &Piece) -> Option<usize> {
     match piece {
@@ -5922,6 +6021,7 @@ fn piece_section(piece: &Piece) -> Option<usize> {
         | Piece::ShipCard(k)
         | Piece::RecapCard(k)
         | Piece::Fold(k)
+        | Piece::Shot(k, _)
         | Piece::CardField(k) => Some(*k),
         _ => None,
     }
@@ -6011,7 +6111,10 @@ fn piece_hovered(
             view.page.sections.get(*k),
             Some(PageSection::Agent { stage: s, .. }) if *s == stage
         ),
-        (Piece::FindingCard(k) | Piece::Fold(k), H::Finding(n) | H::Fold(n)) => finding(*k) == n,
+        (Piece::FindingCard(k) | Piece::Fold(k), H::Finding(n) | H::Fold(n) | H::Shot(n, _)) => {
+            finding(*k) == n
+        }
+        (Piece::Shot(k, m), H::Shot(n, j)) => finding(*k) == n && *m == j,
         (Piece::Search { .. }, H::Search(_)) => true,
         (Piece::Repo(i), H::Repo(r) | H::RepoButton(r, _) | H::RepoRemove(r)) => r == *i,
         _ => false,
@@ -8137,7 +8240,7 @@ impl Painter {
                         .filter(|s| matches!(s, PageSection::Finding(_)))
                         .count();
                     let hovered = matches!(view.hover,
-                        Some(FeatureTabHit::Finding(i) | FeatureTabHit::Fold(i)) if i == n);
+                        Some(FeatureTabHit::Finding(i) | FeatureTabHit::Fold(i) | FeatureTabHit::Shot(i, _)) if i == n);
                     let lit = (card.selected, if hovered { 1.0 } else { 0.0 });
                     self.row_highlight(c, rect, lit, scale, p);
                     // The rule under it, across the row.
@@ -8216,6 +8319,35 @@ impl Painter {
                         self.page_button(c, view, i, at(r), scale, p);
                     }
                 }
+            }
+            Piece::Shot(k, m) => {
+                let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {
+                    return;
+                };
+                let Some(shot) = card.sheet.as_ref().and_then(|s| s.shots.get(*m)) else {
+                    return;
+                };
+                let (x, y, w, h) = rect_px(rect, scale);
+                let picture = (shot.size.is_some())
+                    .then(|| crate::shot_images::picture(&shot.path, w.max(h).round() as usize))
+                    .flatten();
+                match picture {
+                    Some(picture) => {
+                        let size = rect.size.w.max(rect.size.h);
+                        c.picture_sized(&picture, rect, scale, p.text, size);
+                    }
+                    // Its file is gone: a box where it was (its tooltip says).
+                    None => c.rounded(x, y, w, h, 0.0, p.element),
+                }
+                let n = (view.page.sections[..*k].iter())
+                    .filter(|s| matches!(s, PageSection::Finding(_)))
+                    .count();
+                let color = match view.hover == Some(FeatureTabHit::Shot(n, *m)) {
+                    true => p.accent,
+                    false => p.border,
+                };
+                let b = (scale as f32).round().max(1.0) as i32;
+                c.outline(x as i32, y as i32, w as i32, h as i32, b, color);
             }
             Piece::Fold(k) => {
                 let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {

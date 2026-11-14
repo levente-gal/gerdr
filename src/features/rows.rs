@@ -1085,13 +1085,15 @@ pub(crate) fn criterion_details(row: &Row) -> String {
 }
 
 /// Criterion `i`'s card on Manual test's page, its buttons those in
-/// `actions`: its dot tells how it went, the note what went wrong. While
+/// `actions`: its dot tells how it went, the note what went wrong, with the
+/// screenshots under it, those in `open_shots` across the page. While
 /// `trying`, one that passed fades: the rest are what is left to do.
 pub(super) fn criterion_card(
     i: usize,
     row: &Row,
     actions: &[(PageButton, PanelOutcome)],
     trying: bool,
+    open_shots: &std::collections::BTreeSet<std::path::PathBuf>,
 ) -> FindingCard {
     let tag = match row.found {
         None => FindingTag::NotRun,
@@ -1138,6 +1140,13 @@ pub(super) fn criterion_card(
             hidden: false,
             needle: String::new(),
             whole: false,
+            shots: (row.shots.iter())
+                .map(|path| chrome::SheetShot {
+                    size: crate::shot_images::size(path),
+                    open: open_shots.contains(path),
+                    path: path.clone(),
+                })
+                .collect(),
         })),
         preview: Vec::new(),
         fix: String::new(),
@@ -1146,13 +1155,10 @@ pub(super) fn criterion_card(
                 true => "Note",
                 false => "What went wrong",
             };
-            match (row.note.is_empty(), row.shots.len()) {
-                (true, 0) => String::new(),
-                (true, 1) => "1 screenshot".to_owned(),
-                (true, n) => format!("{n} screenshots"),
-                (false, 0) => format!("{label}: {}", row.note),
-                (false, 1) => format!("{label}: {} (1 screenshot)", row.note),
-                (false, n) => format!("{label}: {} ({n} screenshots)", row.note),
+            // Its screenshots show under it.
+            match row.note.is_empty() {
+                true => String::new(),
+                false => format!("{label}: {}", row.note),
             }
         },
         comment: String::new(),
@@ -1181,8 +1187,9 @@ pub(super) fn criterion_sections<'a>(
     actions: &'a [(PageButton, PanelOutcome)],
     trying: bool,
 ) -> impl Iterator<Item = PageSection> + 'a {
-    let cards = (state.criteria.iter().enumerate())
-        .map(move |(i, row)| PageSection::Finding(criterion_card(i, row, actions, trying)));
+    let cards = (state.criteria.iter().enumerate()).map(move |(i, row)| {
+        PageSection::Finding(criterion_card(i, row, actions, trying, &state.open_shots))
+    });
     std::iter::once(fold_toolbar(actions)).chain(cards)
 }
 
