@@ -318,6 +318,8 @@ enum Done {
         path: PathBuf,
         name: String,
         target: String,
+        /// The commit message, kept for the next try when it fails.
+        msg: String,
         result: Result<(), String>,
     },
 }
@@ -1355,7 +1357,7 @@ impl Gerdr {
                 };
                 self.close_worktrees();
                 let heading = format!("Squash {branch} into {}?", item.target);
-                let about = "Its commits go in as one, on top of it".to_owned();
+                let about = format!("Its commits go into {} as one commit", item.target);
                 let id = item.wt.path.to_string_lossy().into_owned();
                 let squash = crate::finding_dialog::Squash::Worktree { path: item.wt.path };
                 self.ask_squash_message("", "", &id, heading, about, branch, squash);
@@ -1586,8 +1588,9 @@ impl Gerdr {
                         path,
                         name,
                         target,
+                        msg,
                         result,
-                    }) => state.worktree_squashed(path, &name, &target, result),
+                    }) => state.worktree_squashed(path, (&name, &target), msg, result),
                     channel::Event::Closed => {}
                 });
             match inserted {
@@ -1650,17 +1653,19 @@ impl Gerdr {
                 path: item.wt.path,
                 name: branch,
                 target: item.target,
+                msg,
                 result,
             });
         });
     }
 
     /// A worktree's squash ran: once merged, `worktrees_read` says so.
+    /// Failed, its message waits as a draft for the next try.
     fn worktree_squashed(
         &mut self,
         path: PathBuf,
-        name: &str,
-        target: &str,
+        (name, target): (&str, &str),
+        msg: String,
         result: Result<(), String>,
     ) {
         self.worktrees.busy.remove(&path);
@@ -1669,6 +1674,8 @@ impl Gerdr {
                 self.worktrees.merging.insert(path);
             }
             Err(why) => {
+                let id = path.to_string_lossy().into_owned();
+                self.keep_squash_draft("", "", &id, msg);
                 tracing::warn!("squashing {name} into {target}: {why}");
                 let text = format!("Couldn't squash {name} into {target}: {why}");
                 self.toast(text, Level::Error);

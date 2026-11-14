@@ -742,6 +742,8 @@ pub(crate) enum Done {
         project: String,
         slug: String,
         squash: Vec<Action>,
+        /// The commit message, kept for the next try when it fails.
+        message: String,
         done: crate::feature::ship::Squashed,
     },
     /// The bases a merged feature ticked to push, each by its

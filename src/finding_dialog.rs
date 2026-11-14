@@ -613,7 +613,31 @@ impl Gerdr {
         if let Some(dialog) = self.features.finding_dialog.as_mut() {
             dialog.heading = Some(heading);
             dialog.squash = Some(squash);
+            // The caret at the subject's end: the field shows from the top.
+            if let Some(field) = dialog.fields.first_mut() {
+                let text = field.line().text;
+                field.click(text.find('\n').unwrap_or(text.len()), false, 1);
+            }
         }
+    }
+
+    /// Keep `message` of a squash that failed (`ask_squash_message`'s
+    /// `project`, `slug` and `id`) as its draft: the next try starts from it.
+    pub(crate) fn keep_squash_draft(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        message: String,
+    ) {
+        let key = (
+            project.to_owned(),
+            slug.to_owned(),
+            Ask::Squash,
+            ItemOf::Finding,
+            id.to_owned(),
+        );
+        self.features.finding_drafts.insert(key, vec![message]);
     }
 
     /// A key while the dialog has the keyboard.

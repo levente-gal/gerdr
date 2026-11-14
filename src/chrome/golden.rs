@@ -4010,7 +4010,7 @@ fn feature_tab_ship_routes() -> super::FeatureTabView {
             ship_row(
                 5,
                 "Merge into dev in ~/code/web",
-                Some(("Squash; you edit the message in a tab", false)),
+                Some(("Squash; you edit its message when you ship", false)),
                 true,
             ),
             ship_row(6, "Push dev to origin", None, true),
@@ -6367,8 +6367,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0xe5e64df17db90883, // tab_verify_running_1180
         0x1187cfc7308080cd, // tab_fix_plan_860
         0xe977123f06005f8f, // tab_ship_blocked_1180
-        0x9dbb5792a79a623e, // tab_ship_routes_1180
-        0x7bebf6e4652d947e, // tab_ship_routes_860
+        0x9c502abfa5952f88, // tab_ship_routes_1180
+        0x19e90bf2eb7e1258, // tab_ship_routes_860
         0xe0d06cd4f379fc6a, // tab_ship_finish_1180
         0x2f08e7bf0490db54, // tab_done_1920
         0x928c3f4d013b3415, // tab_later_860
@@ -6440,8 +6440,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0x1842640f4d4cc7f8, // tab_verify_running_1180
         0x70f6c4a256fe013c, // tab_fix_plan_860
         0x3a9972df7b44513c, // tab_ship_blocked_1180
-        0x42f962be0d0290ab, // tab_ship_routes_1180
-        0x1aa5e7649b9fce47, // tab_ship_routes_860
+        0x6ce5b39287e5c080, // tab_ship_routes_1180
+        0xbabd2943791bd4fc, // tab_ship_routes_860
         0x2c11f0eca4ba4afc, // tab_ship_finish_1180
         0xc36191d9e657fd98, // tab_done_1920
         0xf0012ccd361bc307, // tab_later_860
@@ -6513,8 +6513,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0xbae5c983af5f6a10, // tab_verify_running_1180
         0x77ba2ff0178ca183, // tab_fix_plan_860
         0x359957db4ac7ac8e, // tab_ship_blocked_1180
-        0x306cc381e7cf44f2, // tab_ship_routes_1180
-        0xf44d2ccaa407829d, // tab_ship_routes_860
+        0x03cddc6d4a735b10, // tab_ship_routes_1180
+        0xbd6871929fa9371f, // tab_ship_routes_860
         0xca72555ba2d3dc06, // tab_ship_finish_1180
         0x5a8d078d0d3cb0bc, // tab_done_1920
         0x35a3cc9c1a09b576, // tab_later_860
@@ -6586,8 +6586,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0x5ea01a4a5019262d, // tab_verify_running_1180
         0x4906da0bcd42b77a, // tab_fix_plan_860
         0xa839a2c905d7b0af, // tab_ship_blocked_1180
-        0x22e7cb557ae4571d, // tab_ship_routes_1180
-        0x2ffe9fea2fe7fdf0, // tab_ship_routes_860
+        0x922b7ae53f747e71, // tab_ship_routes_1180
+        0xa2a6c117d778a0ec, // tab_ship_routes_860
         0xb8102763a9592a47, // tab_ship_finish_1180
         0xf7c1aeae788f35de, // tab_done_1920
         0x0b357c465475b979, // tab_later_860
