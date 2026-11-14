@@ -51,7 +51,7 @@
 //! it to create a branch (in it, Ctrl+Enter creates the one typed), Alt+Del
 //! it to delete one. The actions' chords (`ACTIONS`, which F1 lists with
 //! the rest) work with either focus: Ctrl+Enter commits, Ctrl+P pushes,
-//! Ctrl+F fetches (in the diff, finds), Ctrl+M merges the default branch
+//! Alt+Shift+F fetches, Ctrl+M merges the default branch
 //! in, Alt+D marks a file resolved, Ctrl+R reads them all again (in the
 //! diff, redoes), and so on.
 //! What can't be taken back (a force push, an abort, an undo, a branch or
@@ -78,7 +78,7 @@ use crate::{
         BRANCH_MENU_ROWS, BranchCreate, BranchMenuView, BranchPicker, Check, Chip, CleanLine,
         Density, DetailLine, DetailRow, DetailTab, DetailView, DiffTone, DirLine, FileLine, Hint,
         LineState, RepoLine, RepoMark, ReposButton, ReposHit, ReposView, ResultBar, RowMark,
-        SheetView, Tone, TreeLine, TreeTool,
+        SearchBar, SearchPart, SheetView, Tone, TreeLine, TreeTool,
     },
     diff::FileDiff,
     diff_edit::{FileEdit, Put, Register},
@@ -227,6 +227,9 @@ impl Repos {
         if panel.search_has_keys() && panel.branch_menu.is_none() {
             return panel.diff.search_field_mut();
         }
+        if panel.focus == Focus::Filter && panel.branch_menu.is_none() {
+            return panel.filter.as_mut();
+        }
         Some(match &mut panel.branch_menu {
             Some(menu) => &mut menu.query,
             None => &mut panel.field,
@@ -371,6 +374,8 @@ pub enum Focus {
     /// file at its top.
     Detail,
     Field,
+    /// The tree's filter, while open (`Panel::filter`).
+    Filter,
 }
 
 /// A tree line, by who it is.
@@ -420,6 +425,9 @@ pub struct Panel {
     /// The features whose worktrees show under their heading: the others'
     /// fold away.
     pub(crate) open_groups: HashSet<String>,
+    /// The tree's filter while open: only the repositories whose name,
+    /// feature or branch says what is typed show.
+    pub(crate) filter: Option<TextField>,
     /// Where the tree stands, in lines.
     pub(crate) tree_scroll: Scroll,
     /// Where the log or the stashes stand, in rows.
@@ -1263,7 +1271,7 @@ fn diff_keys(focus: Focus) -> Keys {
     match focus {
         Focus::Detail => Keys::Diff,
         Focus::Tree => Keys::Other,
-        Focus::Field => Keys::Field,
+        Focus::Field | Focus::Filter => Keys::Field,
     }
 }
 
@@ -1423,11 +1431,7 @@ const ACTIONS: &[Key<ReposButton>] = &[
         ForcePush,
         "force push them, with lease (asked first)"
     ),
-    button!(
-        "Ctrl+F",
-        Fetch,
-        "fetch the checked, else all; in the diff, find"
-    ),
+    button!("Alt+Shift+F", Fetch, "fetch the checked, else all"),
     button!("Ctrl+L", Pull, "pull the checked, else the selected"),
     button!(
         "Ctrl+M",
@@ -1522,6 +1526,8 @@ enum PanelKey {
     /// Every line unfolded, or folded.
     FoldAll(bool),
     Tab(DetailTab),
+    /// Open the tree's filter, or give it the keyboard.
+    Filter,
 }
 
 /// The panel's own keys, after the diff's (`Panel::key`). Rows saying the
@@ -1545,6 +1551,11 @@ const PANEL_KEYS: &[Key<PanelKey>] = &[
     },
     // Aliases: presses taken before the keys were a table.
     key!("Shift+Esc", PanelKey::Back, ""),
+    key!(
+        "Ctrl+F",
+        PanelKey::Filter,
+        "filter the repositories by name, feature or branch (in the diff, find)"
+    ),
     key!(
         "Alt+F",
         PanelKey::Grouping,
@@ -2109,14 +2120,17 @@ impl Panel {
     /// otherwise, so that lines don't jump as a batch goes.
     fn rows(&self, items: &[RepoItem]) -> Vec<Row> {
         let mut rows = Vec::new();
+        // Filtering, what it lets through shows unfolded.
+        let filtering = self.filtering();
         let own: Vec<usize> = (0..items.len())
-            .filter(|&k| items[k].group.is_none())
+            .filter(|&k| items[k].group.is_none() && self.shows(&items[k]))
             .collect();
+        let grouped_items = (items.iter()).filter(|i| i.group.is_some() && self.shows(i)).count();
         // Those with nothing to do go last, under a heading, when there
         // are others to go after.
         let (clean, busy): (Vec<usize>, Vec<usize>) =
             own.iter().copied().partition(|&k| self.is_clean(&items[k]));
-        let grouped = !clean.is_empty() && (!busy.is_empty() || own.len() < items.len());
+        let grouped = !clean.is_empty() && (!busy.is_empty() || grouped_items > 0);
         let order = match grouped {
             true => busy,
             false => own,
@@ -2124,9 +2138,11 @@ impl Panel {
         for k in order {
             self.push_repo(&mut rows, k, items);
         }
-        for (first, members) in groups(items) {
+        for (_, members) in groups(items) {
+            let members: Vec<usize> = members.into_iter().filter(|&k| self.shows(&items[k])).collect();
+            let Some(&first) = members.first() else { continue };
             rows.push(Row::Group(first));
-            if self.group_open(&items[first]) {
+            if filtering || self.group_open(&items[first]) {
                 for k in members {
                     self.push_repo(&mut rows, k, items);
                 }
@@ -2134,7 +2150,7 @@ impl Panel {
         }
         if grouped {
             rows.push(Row::Clean);
-            if !self.clean_folded {
+            if filtering || !self.clean_folded {
                 rows.extend(clean.into_iter().map(Row::Repo));
             }
         }
@@ -2427,11 +2443,12 @@ impl Panel {
         self.checked_repos.extend(roots);
     }
 
-    /// The repositories under the heading of `items[g]`'s feature.
+    /// The repositories under the heading of `items[g]`'s feature, those
+    /// the filter lets through.
     fn members(&self, g: usize, items: &[RepoItem]) -> Vec<usize> {
         let group = &items[g].group;
         (0..items.len())
-            .filter(|&k| items[k].group == *group)
+            .filter(|&k| items[k].group == *group && self.shows(&items[k]))
             .collect()
     }
 
@@ -2619,18 +2636,21 @@ impl Panel {
             .collect()
     }
 
-    /// Check everything, or nothing when everything is.
+    /// Check everything the filter lets through, or nothing when all of
+    /// it is.
     fn toggle_all(&mut self, items: &[RepoItem]) {
-        let on = !items.iter().all(|i| self.check(i) == Check::On);
-        for item in items {
+        let shown: Vec<&RepoItem> = items.iter().filter(|i| self.shows(i)).collect();
+        let on = !shown.iter().all(|i| self.check(i) == Check::On);
+        for item in shown {
             self.set_checked(item, on);
         }
     }
 
-    /// The repositories checked, or with a file checked, by index.
+    /// The repositories checked, or with a file checked, by index: those
+    /// the filter lets through, as nothing runs on a line not shown.
     fn picked(&self, items: &[RepoItem]) -> Vec<usize> {
         (0..items.len())
-            .filter(|&k| self.check(&items[k]) != Check::Off)
+            .filter(|&k| self.check(&items[k]) != Check::Off && self.shows(&items[k]))
             .collect()
     }
 
@@ -2643,7 +2663,7 @@ impl Panel {
         }
         if let Some(Selected::Group(name)) = &self.selected {
             return (0..items.len())
-                .filter(|&k| items[k].group.as_ref() == Some(name))
+                .filter(|&k| items[k].group.as_ref() == Some(name) && self.shows(&items[k]))
                 .collect();
         }
         self.selection(items)
@@ -4226,6 +4246,11 @@ impl Panel {
         if self.branch_menu.is_some() {
             return self.branch_menu_key(mods, sym, typed, ctx);
         }
+        if self.focus == Focus::Filter
+            && let Some(outcome) = self.filter_key(mods, sym, typed, ctx)
+        {
+            return outcome;
+        }
         // Ctrl+Shift+F opens the diff's search from anywhere.
         if key_table::press(diff_view::FIND_KEYS, &(), mods, sym) == Some(diff_view::Find::Anywhere)
         {
@@ -4363,11 +4388,17 @@ impl Panel {
                 self.focus = match (self.focus, back) {
                     (Focus::Tree, false) | (Focus::Field, true) => Focus::Detail,
                     (Focus::Detail, false) | (Focus::Tree, true) => Focus::Field,
-                    (Focus::Field, false) | (Focus::Detail, true) => Focus::Tree,
+                    (Focus::Field, false) | (Focus::Detail, true) | (Focus::Filter, _) => {
+                        Focus::Tree
+                    }
                 };
             }
             // The field (its message kept) or the detail give the keyboard
             // to the tree; from there it closes.
+            // The filter goes first, then the panel.
+            PanelKey::Back if self.focus == Focus::Tree && self.filter.is_some() => {
+                self.close_filter(ctx);
+            }
             PanelKey::Back if self.focus == Focus::Tree => return Some(Outcome::Close),
             PanelKey::Back => self.focus = Focus::Tree,
             PanelKey::SwitchMenu => self.open_branch_menu(MenuAction::Switch, ctx),
@@ -4375,8 +4406,81 @@ impl Panel {
             PanelKey::Grouping => return self.set_grouping(self.grouping.other(), ctx),
             PanelKey::FoldAll(open) => self.fold_all(open, ctx),
             PanelKey::Tab(tab) => self.set_tab(tab),
+            PanelKey::Filter => self.open_filter(),
         }
         None
+    }
+
+    /// Open the tree's filter, with the keyboard.
+    fn open_filter(&mut self) {
+        self.filter.get_or_insert_with(TextField::default);
+        self.focus = Focus::Filter;
+    }
+
+    /// Close the tree's filter, every repository shown again.
+    fn close_filter(&mut self, ctx: &Ctx) {
+        self.filter = None;
+        if self.focus == Focus::Filter {
+            self.focus = Focus::Tree;
+        }
+        self.relist(ctx);
+    }
+
+    /// A key while the filter has the keyboard: Esc clears it, then
+    /// closes it; Enter, Tab and Down give the keys to the tree; the rest
+    /// edit it. `None` when it is the panel's.
+    fn filter_key(
+        &mut self,
+        mods: &ModifiersState,
+        sym: Keysym,
+        typed: Keysym,
+        ctx: &Ctx,
+    ) -> Option<Option<Outcome>> {
+        let plain = !(mods.ctrl || mods.alt || mods.logo || mods.shift);
+        let filter = self.filter.as_mut()?;
+        match sym {
+            Keysym::Escape if plain && !filter.line().text.is_empty() => {
+                *filter = TextField::default();
+                self.relist(ctx);
+            }
+            Keysym::Escape if plain => self.close_filter(ctx),
+            Keysym::Return | Keysym::KP_Enter | Keysym::Tab | Keysym::Down | Keysym::KP_Down
+                if plain =>
+            {
+                self.focus = Focus::Tree;
+                self.relist(ctx);
+            }
+            _ => match filter.key(mods, sym, typed) {
+                Edit::Ignored => return None,
+                Edit::Changed => self.relist(ctx),
+                Edit::Moved => {}
+            },
+        }
+        Some(None)
+    }
+
+    /// Whether `item` shows under the filter: its name, feature or branch
+    /// says what is typed, in that case only when it has a capital.
+    fn shows(&self, item: &RepoItem) -> bool {
+        let Some(query) = self.filter.as_ref().map(|f| f.line().text) else {
+            return true;
+        };
+        let query = query.trim();
+        if query.is_empty() {
+            return true;
+        }
+        let exact = query.chars().any(char::is_uppercase);
+        let says = |text: &str| match exact {
+            true => text.contains(query),
+            false => text.to_lowercase().contains(&query.to_lowercase()),
+        };
+        let branches = [&item.status.branch, &item.feature_branch];
+        says(&item.label) || branches.into_iter().flatten().any(|b| says(b))
+    }
+
+    /// Something is typed in the filter.
+    fn filtering(&self) -> bool {
+        self.filter.as_ref().is_some_and(|f| !f.line().text.trim().is_empty())
     }
 
     /// A key for the tree: Up/Down and the pages move with either focus,
@@ -4600,6 +4704,8 @@ impl Panel {
                 TreeTool::PrevUnviewed | TreeTool::NextUnviewed => {}
             },
             ReposHit::Field => self.focus = Focus::Field,
+            ReposHit::Filter(SearchPart::Close) => self.close_filter(ctx),
+            ReposHit::Filter(_) => self.open_filter(),
             ReposHit::Button(button) => return self.act(button, ctx),
             ReposHit::DetailTab(tab) => self.set_tab(tab),
             ReposHit::DiffRow(i) if self.tab() == DetailTab::Stashes => {
@@ -5172,7 +5278,9 @@ impl Panel {
         let Some(k) = row.item() else {
             return TreeLine::Clean(CleanLine {
                 open: !self.clean_folded,
-                count: ctx.items.iter().filter(|i| self.is_clean(i)).count(),
+                count: (ctx.items.iter())
+                    .filter(|i| i.group.is_none() && self.is_clean(i) && self.shows(i))
+                    .count(),
             });
         };
         let item = &ctx.items[k];
@@ -5788,10 +5896,30 @@ impl Panel {
             hints: self.hints(ctx),
             detail: self.detail_view(ctx),
             sheet: self.sheet_view(ctx),
-            empty: "No git repositories in this project: add a workspace in a git checkout".into(),
+            empty: match self.filtering() {
+                true => "No repository's name, feature or branch says that".into(),
+                false => "No git repositories in this project: add a workspace in a git checkout".into(),
+            },
             density: ctx.density,
             tree_share: ctx.tree_share,
             grouping: self.grouping,
+            tree_filter: self.filter.as_ref().map(|filter| {
+                let shown = items.iter().filter(|i| self.shows(i)).count();
+                SearchBar {
+                    query: filter.line(),
+                    placeholder: "Filter repositories".into(),
+                    count: match (self.filtering(), shown) {
+                        (false, _) => String::new(),
+                        (true, 0) => "No matches".into(),
+                        (true, 1) => "1 repo".into(),
+                        (true, n) => format!("{n} repos"),
+                    },
+                    found: shown > 0,
+                    focused: self.focus == Focus::Filter,
+                    whole: false,
+                }
+            }),
+            filterable: true,
             diff_only: false,
             diff_tree: false,
             unchecked: false,
@@ -6538,7 +6666,7 @@ mod tests {
         press(&mut panel, ctrl(), Keysym::a, &ctx);
         press(&mut panel, ctrl(), Keysym::a, &ctx);
         assert_eq!(
-            press(&mut panel, ctrl(), Keysym::f, &ctx),
+            panel.key(&mods(false, true, true), Keysym::f, Keysym::F, &ctx),
             Some(Outcome::Batch {
                 kind: BatchKind::Fetch,
                 jobs: jobs(&["gerdr", "herdr", "zed"])
@@ -11103,7 +11231,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_f_finds_in_the_diff_and_fetches_elsewhere() {
+    fn ctrl_f_finds_in_the_diff_and_filters_the_tree() {
         let items = items();
         let ctx = ctx(&items, None);
         let mut panel = Panel::new(&items);
@@ -11122,10 +11250,13 @@ mod tests {
         assert_eq!(press(&mut panel, ctrl(), Keysym::f, &ctx), None);
         assert!(panel.search_has_keys());
         press(&mut panel, none(), Keysym::Escape, &ctx);
-        // With the tree's, it fetches.
+        // With the tree's, it filters the tree; Alt+Shift+F fetches.
         press(&mut panel, none(), Keysym::Escape, &ctx);
         assert_eq!(panel.focus, Focus::Tree);
-        let fetch = press(&mut panel, ctrl(), Keysym::f, &ctx);
+        assert_eq!(press(&mut panel, ctrl(), Keysym::f, &ctx), None);
+        assert_eq!(panel.focus, Focus::Filter);
+        assert!(panel.diff.search.is_none());
+        let fetch = panel.key(&mods(false, true, true), Keysym::f, Keysym::F, &ctx);
         assert!(matches!(
             fetch,
             Some(Outcome::Batch {
@@ -11133,7 +11264,57 @@ mod tests {
                 ..
             })
         ));
-        assert!(panel.diff.search.is_none());
+    }
+
+    #[test]
+    fn the_filter_shows_the_repositories_whose_name_or_branch_says_it() {
+        let items = with_feature();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        press(&mut panel, ctrl(), Keysym::f, &ctx);
+        let bar = panel.view("p", &ctx).tree_filter.expect("open");
+        assert!(bar.focused && bar.count.is_empty());
+        // A feature's worktree shows under its heading, unfolded.
+        type_text(&mut panel, "api", &ctx);
+        assert_eq!(indented(&panel, &ctx), ["login", "  api", "    src/a.rs"]);
+        assert_eq!(panel.view("p", &ctx).tree_filter.unwrap().count, "1 repo");
+        // By branch: the feature's, with its heading's sums over them.
+        for _ in 0..3 {
+            press(&mut panel, none(), Keysym::BackSpace, &ctx);
+        }
+        type_text(&mut panel, "LOGIN", &ctx);
+        assert_eq!(panel.view("p", &ctx).tree_filter.unwrap().count, "No matches");
+        assert!(panel.view("p", &ctx).lines.is_empty());
+        for _ in 0..5 {
+            press(&mut panel, none(), Keysym::BackSpace, &ctx);
+        }
+        type_text(&mut panel, "feature/", &ctx);
+        assert_eq!(indented(&panel, &ctx)[..2], ["login", "  api"]);
+        // Clean ones the filter lets through show, their heading open.
+        for _ in 0..8 {
+            press(&mut panel, none(), Keysym::BackSpace, &ctx);
+        }
+        type_text(&mut panel, "herdr", &ctx);
+        assert_eq!(indented(&panel, &ctx), ["herdr"]);
+        // What runs, runs on what shows: Ctrl+A checks only herdr, and
+        // gerdr checked before is left out.
+        panel.checked_repos.insert(root("gerdr"));
+        press(&mut panel, none(), Keysym::Return, &ctx);
+        assert_eq!(panel.focus, Focus::Tree);
+        press(&mut panel, ctrl(), Keysym::a, &ctx);
+        assert_eq!(panel.picked(&items), [1]);
+        // Esc closes the filter first, every line back, then the panel.
+        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
+        assert!(panel.filter.is_none());
+        assert_eq!(panel.picked(&items), [0, 1]);
+        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), Some(Outcome::Close));
+        // In the field, Esc clears what is typed, then closes it.
+        panel.click(ReposHit::Filter(SearchPart::Open), &ctx);
+        type_text(&mut panel, "zed", &ctx);
+        press(&mut panel, none(), Keysym::Escape, &ctx);
+        assert_eq!(panel.filter.as_ref().unwrap().line().text, "");
+        press(&mut panel, none(), Keysym::Escape, &ctx);
+        assert!(panel.filter.is_none() && panel.focus == Focus::Tree);
     }
 
     #[test]

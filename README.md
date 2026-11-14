@@ -24,7 +24,8 @@ they come back when it starts again.
   commit log and a branch picker. The diff has vim keys (search, yank,
   delete, restore) and review comments you can copy for an agent. An open
   feature's worktrees sit folded under its heading, which sums up their
-  changes, commits to push and anything that needs a look.
+  changes, commits to push and anything that needs a look. Ctrl+F filters
+  the list by repository, feature or branch name.
 - **Worktrees** (prefix `W`). Create, open, check out and delete git
   worktrees.
 - **Inbox** (prefix `I`). One place for agents that wait on you, repositories

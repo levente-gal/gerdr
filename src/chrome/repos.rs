@@ -80,6 +80,9 @@ const REPOS_FOLDER: i32 = 20;
 const BRANCH_ICON: i32 = 14;
 /// The room between the tree's toolbar's groups of buttons.
 const REPOS_TOOL_GAP: i32 = 12;
+/// The tree's filter's count, and the least its field keeps beside it.
+const FILTER_COUNT: i32 = 72;
+const FILTER_FIELD_MIN: i32 = 120;
 /// The scrollbar at the right of the tree and of the detail: its width
 /// (its thumb's least height is every scrollbar's, see `Thumb::of`).
 const SCROLLBAR: i32 = 6;
@@ -248,6 +251,11 @@ pub struct ReposView {
     pub tree_note: Option<(String, Tone)>,
     /// How the tree lists the files: the toolbar over it says.
     pub grouping: Grouping,
+    /// The tree's filter, while open: its field takes the toolbar's title.
+    pub tree_filter: Option<SearchBar>,
+    /// The toolbar has a button opening the filter (the repositories
+    /// panel's; a code review's file list has none).
+    pub filterable: bool,
     /// The diff alone across the panel, `title` its heading: no tree,
     /// branch picker, tabs, field or footer (a worktree's diff).
     pub diff_only: bool,
@@ -320,6 +328,8 @@ impl ReposView {
             tree_share: 0.0,
             tree_note: None,
             grouping: Default::default(),
+            tree_filter: None,
+            filterable: false,
             diff_only: true,
             diff_tree: false,
             unchecked: false,
@@ -1064,6 +1074,8 @@ pub enum ReposHit {
     Tool(TreeTool),
     /// A part of the diff's search.
     Search(SearchPart),
+    /// A part of the tree's filter: its button, field or close button.
+    Filter(SearchPart),
     /// Inside the panel, on nothing.
     Panel,
 }
@@ -1285,6 +1297,12 @@ pub struct ReposLayout {
     pub tree: Rect,
     /// The buttons of the tree's toolbar, over its lines.
     pub tree_tools: Vec<(TreeTool, Rect)>,
+    /// The tree's filter left of them: its button while closed; open, its
+    /// field, and its button closing it.
+    pub tree_filter: Vec<(SearchPart, Rect)>,
+    /// Where the filter says how many repositories it lets through, when
+    /// the toolbar has room.
+    pub tree_filter_count: Option<Rect>,
     /// Per tree line: its rect, its checkbox's, and a repository line's
     /// expander's. A scrolled tree's first and last lines reach out of
     /// `tree_list`.
@@ -1757,6 +1775,36 @@ fn tree_tools(tree: Rect, nav: bool) -> Vec<(TreeTool, Rect)> {
     }
     tools.reverse();
     tools
+}
+
+/// The tree's filter in its toolbar's row, left of its `tools`: its
+/// button while closed; `open`, its field from the row's start, how many it
+/// lets through when the field keeps `FILTER_FIELD_MIN` with it, and its
+/// close button.
+fn filter_spots(
+    tree: Rect,
+    tools: &[(TreeTool, Rect)],
+    open: bool,
+) -> (Vec<(SearchPart, Rect)>, Option<Rect>) {
+    let y = tree.loc.y + (REPOS_DETAIL_TITLE - ROW_BUTTON) / 2;
+    let right = tools.first().map_or(tree.loc.x + tree.size.w - HELP_PADDING, |(_, r)| {
+        r.loc.x - REPOS_TOOL_GAP
+    });
+    let square = |x: i32| Rectangle::new((x, y).into(), (ROW_BUTTON, ROW_BUTTON).into());
+    if !open {
+        return (vec![(SearchPart::Open, square(right - ROW_BUTTON))], None);
+    }
+    let close = square(right - ROW_BUTTON);
+    let left = tree.loc.x + HELP_PADDING;
+    let mut end = close.loc.x - REPOS_TAB_GAP;
+    let count = (end - FILTER_COUNT - FIELD_GAP - left >= FILTER_FIELD_MIN).then(|| {
+        end -= FILTER_COUNT;
+        let count = Rectangle::new((end, y).into(), (FILTER_COUNT, ROW_BUTTON).into());
+        end -= FIELD_GAP;
+        count
+    });
+    let field = Rectangle::new((left, y).into(), ((end - left).max(0), ROW_BUTTON).into());
+    (vec![(SearchPart::Field, field), (SearchPart::Close, close)], count)
 }
 
 /// Where a buffer holding the panel `panel` and its shadow has its top
@@ -2520,16 +2568,22 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         buttons.extend(sheet_buttons.iter().map(|&(i, r)| (s.buttons[i], r)));
     }
     let _ = line_h;
+    let tools = match no_tree {
+        true => Vec::new(),
+        false => tree_tools(tree, view.tree_nav.is_some()),
+    };
+    let (tree_filter, tree_filter_count) = match no_tree || !view.filterable {
+        true => (Vec::new(), None),
+        false => filter_spots(tree, &tools, view.tree_filter.is_some()),
+    };
     Parts {
         layout: ReposLayout {
             panel,
             header,
             tree,
-            tree_tools: if no_tree {
-                Vec::new()
-            } else {
-                tree_tools(tree, view.tree_nav.is_some())
-            },
+            tree_tools: tools.clone(),
+            tree_filter,
+            tree_filter_count,
             lines,
             tree_list,
             marks,
@@ -2679,6 +2733,9 @@ pub fn repos_hit(layout: &ReposLayout, pos: Point<f64, Logical>) -> Option<Repos
     }
     if let Some(&(tool, _)) = layout.tree_tools.iter().find(|(_, r)| at(r)) {
         return Some(ReposHit::Tool(tool));
+    }
+    if let Some(&(part, _)) = layout.tree_filter.iter().find(|(_, r)| at(r)) {
+        return Some(ReposHit::Filter(part));
     }
     // A scrolled tree's lines count only where they show.
     let lines = if at(&layout.tree_list) {
@@ -2840,6 +2897,7 @@ pub fn repos_field(view: &ReposView, panel: Rect, scale: f64) -> FieldSpot {
         .detail_search
         .iter()
         .find(|(part, _)| *part == SearchPart::Field);
+    let tree_filter = (layout.tree_filter.iter()).find(|(part, _)| *part == SearchPart::Field);
     // Both searches start with a magnifier; the commit message doesn't.
     let (area, line, text) = match (&view.branch.menu, layout.branch_search) {
         (Some(menu), Some(search)) => (search, &menu.query, search_field_text(search, scale)),
@@ -2847,7 +2905,12 @@ pub fn repos_field(view: &ReposView, panel: Rect, scale: f64) -> FieldSpot {
             (Some(bar), Some(&(_, field))) if bar.focused => {
                 (field, &bar.query, search_field_text(field, scale))
             }
-            _ => (layout.field, &view.field, field_text(layout.field, scale)),
+            _ => match (&view.tree_filter, tree_filter) {
+                (Some(bar), Some(&(_, field))) if bar.focused => {
+                    (field, &bar.query, search_field_text(field, scale))
+                }
+                _ => (layout.field, &view.field, field_text(layout.field, scale)),
+            },
         },
     };
     FieldSpot {
@@ -3240,8 +3303,13 @@ impl Painter {
             .map(|&(g, r)| (g, shift(r)))
             .collect();
         let no_tree = only && !view.diff_tree;
+        let filter: Vec<_> = (layout.tree_filter.iter())
+            .map(|&(part, r)| (part, shift(r)))
+            .collect();
+        let filter_count = layout.tree_filter_count.map(shift);
         if !no_tree {
-            self.tree_title(&mut c, view, tree, &tools, scale, p);
+            let filter = (&filter[..], filter_count);
+            self.tree_title(&mut c, view, tree, &tools, filter, scale, p);
         }
         if !no_tree && view.lines.is_empty() && !view.empty.is_empty() {
             let first = Rectangle::new(
@@ -4868,12 +4936,14 @@ impl Painter {
 
     /// The detail pane's `tab` segment in `rect`: an outlined pill, filled
     /// when it is the tab shown, lighter under the pointer.
+    #[allow(clippy::too_many_arguments)]
     fn tree_title(
         &self,
         c: &mut Canvas,
         view: &ReposView,
         tree: Rect,
         tools: &[(TreeTool, Rect)],
+        (filter, filter_count): (&[(SearchPart, Rect)], Option<Rect>),
         scale: f64,
         p: &Palette,
     ) {
@@ -4881,8 +4951,13 @@ impl Painter {
         let s = scale as f32;
         let title = Rectangle::new(tree.loc, (tree.size.w, REPOS_DETAIL_TITLE).into());
         let (x, mut right) = phys(title, scale);
-        if let Some((_, first)) = tools.first() {
-            right = px(first.loc.x) as f32 - (FIELD_GAP as f32 * s).round();
+        // The filter's button, else the first tool, ends the title.
+        let first = (filter.iter().map(|(_, r)| r))
+            .chain(tools.iter().map(|(_, r)| r))
+            .map(|r| r.loc.x)
+            .min();
+        if let Some(first) = first {
+            right = px(first) as f32 - (FIELD_GAP as f32 * s).round();
         }
         let x = x + px(HELP_PADDING) as f32;
         let (text, color) = match &view.tree_note {
@@ -4891,7 +4966,16 @@ impl Painter {
             Some((text, _)) => (text.as_str(), p.text),
             None => ("Changes", p.text),
         };
-        self.mixed_text(c, text, FONT_SIZE, x, right, band(title, scale), scale, color);
+        // Open, the filter's field takes the title's place.
+        if view.tree_filter.is_none() {
+            self.mixed_text(c, text, FONT_SIZE, x, right, band(title, scale), scale, color);
+        }
+        let hover = match view.hover {
+            Some(ReposHit::Filter(part)) => Some(part),
+            _ => None,
+        };
+        let bar = view.tree_filter.as_ref();
+        self.search_bar(c, bar, filter, filter_count, hover, scale, p);
         for &(tool, rect) in tools {
             self.tool_button(c, view, tool, rect, scale, p);
         }
@@ -5571,6 +5655,8 @@ fn frame_view(view: &ReposView) -> ReposView {
         tree_share: view.tree_share,
         tree_note: view.tree_note.clone(),
         grouping: view.grouping,
+        tree_filter: view.tree_filter.clone(),
+        filterable: view.filterable,
         diff_only: view.diff_only,
         diff_tree: view.diff_tree,
         unchecked: view.unchecked,
@@ -6047,6 +6133,8 @@ mod tests {
             detail_share: 1.0,
             modes: None,
             grouping: Grouping::List,
+            tree_filter: None,
+            filterable: true,
             title: "gerdr".into(),
             summary: "2 dirty · 1 conflict · fetched 2m ago".into(),
             summary_tone: Tone::Muted,
@@ -6337,6 +6425,48 @@ mod tests {
             hover: Some(ReposHit::Button(CleanOnly)),
             ..full()
         }
+    }
+
+    #[test]
+    fn the_filter_takes_the_toolbars_title_and_drops_its_count_when_narrow() {
+        for (w, counted) in [(REPOS_TREE_MIN, false), (600, true)] {
+            let tree = Rectangle::new((0, 0).into(), (w, 400).into());
+            let tools = tree_tools(tree, false);
+            let (closed, none) = filter_spots(tree, &tools, false);
+            assert_eq!(closed.iter().map(|(p, _)| *p).collect::<Vec<_>>(), [SearchPart::Open]);
+            assert!(none.is_none() && closed[0].1.loc.x + ROW_BUTTON < tools[0].1.loc.x);
+            let (open, count) = filter_spots(tree, &tools, true);
+            let field = open[0].1;
+            assert_eq!(open[0].0, SearchPart::Field);
+            // At the tree's least, room for a name of about nine letters.
+            assert!(field.size.w >= 90, "{w}: {field:?}");
+            assert_eq!(count.is_some(), counted, "{w}");
+            let close = open[1].1;
+            assert!(field.loc.x + field.size.w < close.loc.x && close.loc.x + ROW_BUTTON < tools[0].1.loc.x);
+        }
+    }
+
+    /// `with_groups` filtered by "unlink", the field with the keyboard.
+    fn with_filter() -> ReposView {
+        let mut view = with_groups();
+        view.lines.drain(..4);
+        view.lines.truncate(4);
+        view.selected = Some(1);
+        view.field_focused = false;
+        view.tree_filter = Some(SearchBar {
+            query: Line {
+                text: "unlink".into(),
+                caret: 6,
+                anchor: 6,
+                scroll: 0,
+            },
+            placeholder: "Filter repositories".into(),
+            count: "2 repos".into(),
+            found: true,
+            focused: true,
+            whole: false,
+        });
+        view
     }
 
     /// `full` with two features: one folded, summing up its worktrees, one
@@ -7873,6 +8003,7 @@ mod tests {
         let cases = [
             ("full", full()),
             ("groups", with_groups()),
+            ("filter", with_filter()),
             ("folders", by_folder()),
             ("sheet", with_sheet()),
             ("empty", empty()),

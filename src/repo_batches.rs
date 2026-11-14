@@ -1758,6 +1758,7 @@ impl Gerdr {
             }
             ReposHit::Tool(tool) => tool_tip(&layout, tool),
             ReposHit::Search(part) => search_tip(&layout, part),
+            ReposHit::Filter(part) => filter_tip(&layout, part),
             ReposHit::Chip(i) => {
                 let (_, rect) = layout.chips.iter().find(|(j, _)| *j == i)?;
                 let chip = repo(i)?.chip.as_ref()?;
@@ -2898,6 +2899,17 @@ pub(crate) fn search_tip(layout: &chrome::ReposLayout, part: SearchPart) -> Opti
         SearchPart::Next => ("The next place found", "Enter"),
         SearchPart::Close => ("Close the search", "Esc"),
         SearchPart::Field => return None,
+    };
+    Some(Tooltip::new(text, *rect).key(key))
+}
+
+/// The tip of a button of the tree's filter.
+fn filter_tip(layout: &chrome::ReposLayout, part: SearchPart) -> Option<Tooltip> {
+    let (_, rect) = layout.tree_filter.iter().find(|(p, _)| *p == part)?;
+    let (text, key) = match part {
+        SearchPart::Open => ("Filter the repositories by name, feature or branch", "Ctrl+F"),
+        SearchPart::Close => ("Close the filter, every repository shown", "Esc"),
+        SearchPart::Field | SearchPart::Prev | SearchPart::Next => return None,
     };
     Some(Tooltip::new(text, *rect).key(key))
 }
