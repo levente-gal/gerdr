@@ -8215,6 +8215,8 @@ fn listed_review(flat: bool) -> super::ReposView {
             removed: 18,
             chip: None,
             state: LineState::Settled,
+            depth: 0,
+            repos: 0,
         }),
         dir("src/auth", Check::Partial, 0),
         file("login.rs", Check::On, 1, 40, 12, 2),

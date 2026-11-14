@@ -450,6 +450,12 @@ pub struct RepoLine {
     pub chip: Option<Chip>,
     /// What is being done to it, `pushing…`, or a second press's warning.
     pub state: LineState,
+    /// How many headings it is under: a feature's worktree is under its
+    /// feature's.
+    pub depth: usize,
+    /// A feature's heading: how many worktrees it is over; none on a
+    /// repository's line.
+    pub repos: usize,
 }
 
 /// A folder's line, with changed files under it.
@@ -1146,8 +1152,22 @@ fn count_gap(s: f32) -> f32 {
 /// A repository line's counts: its files while folded (they show else),
 /// and its lines added and removed.
 fn repo_counts(repo: &RepoLine) -> Vec<(String, Tone)> {
-    let files = (repo.expanded == Some(false)).then(|| files_text(repo.files));
-    count_parts(files, (repo.added, repo.removed))
+    let files = (repo.expanded == Some(false) && repo.files > 0).then(|| files_text(repo.files));
+    // A feature's heading counts its worktrees, and their files.
+    let lead = match (repo.repos, files) {
+        (0, files) => files,
+        (n, None) => Some(repos_text(n)),
+        (n, Some(files)) => Some(format!("{} · {files}", repos_text(n))),
+    };
+    count_parts(lead, (repo.added, repo.removed))
+}
+
+/// `1 repo`, `3 repos`.
+fn repos_text(n: usize) -> String {
+    match n {
+        1 => "1 repo".to_string(),
+        n => format!("{n} repos"),
+    }
 }
 
 /// `1 file`, `3 files`.
@@ -1688,6 +1708,7 @@ fn line_rects(line: &TreeLine, rect: Rect) -> (Rect, Rect, Option<Rect>) {
     let (x, y, h) = (rect.loc.x, rect.loc.y, rect.size.h);
     let level = |depth: usize| REPOS_INDENT + depth as i32 * REPOS_LEVEL;
     let indent = match line {
+        TreeLine::Repo(repo) if repo.depth > 0 => level(repo.depth - 1),
         TreeLine::Repo(_) | TreeLine::Clean(_) => 0,
         TreeLine::Dir(dir) => level(dir.depth),
         TreeLine::File(file) => level(file.depth),
@@ -3497,12 +3518,13 @@ impl Painter {
         }
         // A rule down from each line it is under, through its checkbox's
         // middle: its repository's, then its folders'.
-        let depth = match line {
-            TreeLine::Dir(dir) => Some(dir.depth),
-            TreeLine::File(file) => Some(file.depth),
-            TreeLine::Repo(_) | TreeLine::Clean(_) => None,
+        let levels = match line {
+            TreeLine::Dir(dir) => dir.depth + 1,
+            TreeLine::File(file) => file.depth + 1,
+            TreeLine::Repo(repo) => repo.depth,
+            TreeLine::Clean(_) => 0,
         };
-        for level in 0..depth.map_or(0, |d| d + 1) {
+        for level in 0..levels {
             let indent = match level {
                 0 => 0,
                 n => REPOS_INDENT + (n as i32 - 1) * REPOS_LEVEL,
@@ -5861,6 +5883,8 @@ mod tests {
             removed: 0,
             chip: None,
             state: LineState::Settled,
+            depth: 0,
+            repos: 0,
         }
     }
 
@@ -6313,6 +6337,60 @@ mod tests {
             hover: Some(ReposHit::Button(CleanOnly)),
             ..full()
         }
+    }
+
+    /// `full` with two features: one folded, summing up its worktrees, one
+    /// open with its worktrees a level in.
+    fn with_groups() -> ReposView {
+        let mut view = full();
+        view.lines.truncate(3);
+        view.lines.extend([
+            TreeLine::Repo(RepoLine {
+                expanded: Some(false),
+                dirty: true,
+                ahead: 3,
+                files: 5,
+                added: 40,
+                removed: 6,
+                repos: 3,
+                chip: Some(Chip {
+                    text: "detached".into(),
+                    tone: Tone::Warning,
+                    tip: "web: detached".into(),
+                }),
+                state: LineState::Attention,
+                ..repo("custom-decision-port", Some("feature/custom-decision-port"))
+            }),
+            TreeLine::Repo(RepoLine {
+                check: Check::Partial,
+                expanded: Some(true),
+                files: 1,
+                repos: 2,
+                ..repo("unlink-strategy", Some("feature/unlink-strategy"))
+            }),
+            TreeLine::Repo(RepoLine {
+                check: Check::On,
+                expanded: Some(true),
+                files: 1,
+                depth: 1,
+                ..repo("ao-app", Some("feature/unlink-strategy"))
+            }),
+            match file('M', "src/decision.rs", Check::On) {
+                TreeLine::File(f) => TreeLine::File(FileLine { depth: 1, ..f }),
+                line => line,
+            },
+            TreeLine::Repo(RepoLine {
+                no_upstream: true,
+                depth: 1,
+                ..repo("ao-api", Some("feature/unlink-strategy"))
+            }),
+            TreeLine::Clean(CleanLine {
+                open: false,
+                count: 4,
+            }),
+        ]);
+        view.selected = Some(4);
+        view
     }
 
     /// The views the layout is checked with: bare, full, and with a sheet.
@@ -7794,6 +7872,7 @@ mod tests {
         };
         let cases = [
             ("full", full()),
+            ("groups", with_groups()),
             ("folders", by_folder()),
             ("sheet", with_sheet()),
             ("empty", empty()),

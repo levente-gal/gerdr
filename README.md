@@ -22,7 +22,9 @@ they come back when it starts again.
 - **Repositories panel** (prefix `G`). Status of every repository in the
   workspace, a diff of all of them in one view, staging, commits, stashes, a
   commit log and a branch picker. The diff has vim keys (search, yank,
-  delete, restore) and review comments you can copy for an agent.
+  delete, restore) and review comments you can copy for an agent. An open
+  feature's worktrees sit folded under its heading, which sums up their
+  changes, commits to push and anything that needs a look.
 - **Worktrees** (prefix `W`). Create, open, check out and delete git
   worktrees.
 - **Inbox** (prefix `I`). One place for agents that wait on you, repositories

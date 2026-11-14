@@ -234,6 +234,45 @@ impl Repos {
     }
 }
 
+/// The repository a feature's worktree is of, from its `<feature> /
+/// <repo>` label; any other's whole label.
+fn repo_name(item: &RepoItem) -> &str {
+    let feature = item.group.as_deref().unwrap_or_default();
+    (item.label.strip_prefix(feature))
+        .and_then(|rest| rest.strip_prefix(" / "))
+        .unwrap_or(&item.label)
+}
+
+/// How much a chip in `tone` asks for a look: the most is shown for a
+/// feature's worktrees together.
+fn tone_rank(tone: Tone) -> u8 {
+    match tone {
+        Tone::Muted => 0,
+        Tone::Normal => 1,
+        Tone::Success => 2,
+        Tone::Medium => 3,
+        Tone::Warning => 4,
+        Tone::Error => 5,
+    }
+}
+
+/// The features' worktrees of `items`, by feature in the order they first
+/// come: the first one's index, and all of theirs.
+pub(crate) fn groups(items: &[RepoItem]) -> Vec<(usize, Vec<usize>)> {
+    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    for (k, item) in items.iter().enumerate() {
+        let Some(name) = &item.group else { continue };
+        match groups
+            .iter_mut()
+            .find(|(first, _)| items[*first].group.as_ref() == Some(name))
+        {
+            Some((_, members)) => members.push(k),
+            None => groups.push((k, vec![k])),
+        }
+    }
+    groups
+}
+
 /// A folder the panel reads a repository from: a workspace's own, or a
 /// worktree of the feature a workspace is on (see `repo_batches::repo_dirs`).
 #[derive(Clone, Debug, PartialEq)]
@@ -243,6 +282,9 @@ pub struct RepoDir {
     pub workspace: usize,
     /// The feature's branch, for a feature's worktree.
     pub feature_branch: Option<String>,
+    /// The feature's name, for a feature's worktree: the panel lists its
+    /// worktrees together under it.
+    pub group: Option<String>,
 }
 
 /// A repository as the panel lists it: one per checkout among the
@@ -257,6 +299,8 @@ pub struct RepoItem {
     pub workspace: usize,
     /// The branch a feature's worktree is meant to be on: `feature/<slug>`.
     pub feature_branch: Option<String>,
+    /// The feature a worktree is of, by name: listed under its heading.
+    pub group: Option<String>,
     pub status: GitStatus,
 }
 
@@ -339,6 +383,8 @@ pub enum Selected {
     File(PathBuf, String),
     /// The heading over the repositories with nothing to do.
     Clean,
+    /// The heading over a feature's worktrees, by the feature's name.
+    Group(String),
 }
 
 /// The panel's state, kept by who things are as the list changes under it
@@ -371,6 +417,9 @@ pub struct Panel {
     /// The repositories with nothing to do are hidden under their
     /// heading.
     pub(crate) clean_folded: bool,
+    /// The features whose worktrees show under their heading: the others'
+    /// fold away.
+    pub(crate) open_groups: HashSet<String>,
     /// Where the tree stands, in lines.
     pub(crate) tree_scroll: Scroll,
     /// Where the log or the stashes stand, in rows.
@@ -2005,8 +2054,8 @@ impl Panel {
     pub fn new(items: &[RepoItem]) -> Panel {
         let mut panel = Panel::default();
         panel.stir(items, false);
-        let first = panel.rows(items).first().and_then(|r| r.item());
-        panel.selected = first.map(|k| Selected::Repo(items[k].root.clone()));
+        let first = panel.rows(items).first().copied();
+        panel.selected = first.map(|row| Panel::row_id(row, items));
         panel.diff.rebuild(&sections(items));
         panel
     }
@@ -2025,7 +2074,7 @@ impl Panel {
             Some(Selected::Repo(root)) => Place::Section(root),
             Some(Selected::File(root, path)) => Place::File(root, path),
             Some(Selected::Dir(root, dir)) => Place::Dir(root, dir),
-            Some(Selected::Clean) | None => return,
+            Some(Selected::Clean | Selected::Group(_)) | None => return,
         };
         self.diff.show(place);
     }
@@ -2055,36 +2104,32 @@ impl Panel {
 
     /// The tree's lines, in `items`' order: each repository, then its
     /// files when unfolded, as `file_rows` has them, but those in folded
-    /// folders; the repositories with nothing to do last. Never sorted by
-    /// state otherwise, so that lines don't jump as a batch goes.
+    /// folders; then each feature's worktrees under its heading; the
+    /// repositories with nothing to do last. Never sorted by state
+    /// otherwise, so that lines don't jump as a batch goes.
     fn rows(&self, items: &[RepoItem]) -> Vec<Row> {
         let mut rows = Vec::new();
+        let own: Vec<usize> = (0..items.len())
+            .filter(|&k| items[k].group.is_none())
+            .collect();
         // Those with nothing to do go last, under a heading, when there
         // are others to go after.
         let (clean, busy): (Vec<usize>, Vec<usize>) =
-            (0..items.len()).partition(|&k| self.is_clean(&items[k]));
-        let grouped = !clean.is_empty() && !busy.is_empty();
+            own.iter().copied().partition(|&k| self.is_clean(&items[k]));
+        let grouped = !clean.is_empty() && (!busy.is_empty() || own.len() < items.len());
         let order = match grouped {
             true => busy,
-            false => (0..items.len()).collect(),
+            false => own,
         };
         for k in order {
-            let item = &items[k];
-            rows.push(Row::Repo(k));
-            if !self.open(item) {
-                continue;
-            }
-            // The depth of the folded folder whose lines are skipped.
-            let mut hiding = None;
-            for row in file_rows(k, &item.status.changes, self.grouping) {
-                if hiding.is_some_and(|d| row.depth() > d) {
-                    continue;
+            self.push_repo(&mut rows, k, items);
+        }
+        for (first, members) in groups(items) {
+            rows.push(Row::Group(first));
+            if self.group_open(&items[first]) {
+                for k in members {
+                    self.push_repo(&mut rows, k, items);
                 }
-                hiding = None;
-                if !self.dir_open(row, items) {
-                    hiding = Some(row.depth());
-                }
-                rows.push(row);
             }
         }
         if grouped {
@@ -2094,6 +2139,58 @@ impl Panel {
             }
         }
         rows
+    }
+
+    /// Repository `k`'s line, then its files when unfolded, but those in
+    /// folded folders.
+    fn push_repo(&self, rows: &mut Vec<Row>, k: usize, items: &[RepoItem]) {
+        let item = &items[k];
+        rows.push(Row::Repo(k));
+        if !self.open(item) {
+            return;
+        }
+        // The depth of the folded folder whose lines are skipped.
+        let mut hiding = None;
+        for row in file_rows(k, &item.status.changes, self.grouping) {
+            if hiding.is_some_and(|d| row.depth() > d) {
+                continue;
+            }
+            hiding = None;
+            if !self.dir_open(row, items) {
+                hiding = Some(row.depth());
+            }
+            rows.push(row);
+        }
+    }
+
+    /// Whether the worktrees of `item`'s feature show; true of a
+    /// repository of no feature.
+    fn group_open(&self, item: &RepoItem) -> bool {
+        item.group
+            .as_ref()
+            .is_none_or(|g| self.open_groups.contains(g))
+    }
+
+    /// Show or hide the worktrees of `item`'s feature.
+    fn set_group_open(&mut self, item: &RepoItem, open: bool) {
+        let Some(group) = &item.group else { return };
+        if open {
+            self.open_groups.insert(group.clone());
+        } else {
+            self.open_groups.remove(group);
+        }
+    }
+
+    /// Show the line of `item`: its feature's heading, or the clean ones',
+    /// unfolded over it.
+    fn unhide(&mut self, item: &RepoItem) {
+        match &item.group {
+            Some(group) => {
+                self.open_groups.insert(group.clone());
+            }
+            None if self.is_clean(item) => self.clean_folded = false,
+            None => {}
+        }
     }
 
     /// Whether `item` has nothing to do: no changes, nothing to push or
@@ -2159,7 +2256,7 @@ impl Panel {
     fn parent(rows: &[Row], at: usize) -> Option<usize> {
         let depth = rows[at].depth();
         rows[..at].iter().rposition(|r| match r {
-            Row::Repo(_) | Row::Clean => true,
+            Row::Repo(_) | Row::Clean | Row::Group(_) => true,
             Row::Dir { depth: d, .. } => *d < depth,
             Row::File(..) => false,
         })
@@ -2176,6 +2273,7 @@ impl Panel {
                 items[k].root == *root && items[k].status.changes[c].path == *path
             }
             (Some(Selected::Clean), Row::Clean) => true,
+            (Some(Selected::Group(name)), Row::Group(g)) => items[g].group.as_ref() == Some(name),
             _ => false,
         }
     }
@@ -2191,7 +2289,7 @@ impl Panel {
         let (root, path) = match self.selected.as_ref()? {
             Selected::Repo(root) | Selected::Dir(root, _) => (root, None),
             Selected::File(root, path) => (root, Some(path)),
-            Selected::Clean => return None,
+            Selected::Clean | Selected::Group(_) => return None,
         };
         let k = items.iter().position(|i| i.root == *root)?;
         match path {
@@ -2215,21 +2313,19 @@ impl Panel {
         match self.selected.as_ref()? {
             Selected::Repo(root) => Some(root.clone()),
             Selected::Dir(root, path) | Selected::File(root, path) => Some(root.join(path)),
-            Selected::Clean => None,
+            Selected::Clean | Selected::Group(_) => None,
         }
     }
 
     /// Select the line of the repository at `root`, in view and with the
-    /// keys on the tree: the clean ones' heading unfolded when it is under
-    /// it, the diff on it even when it was selected already.
+    /// keys on the tree: the heading it is under unfolded, the diff on it
+    /// even when it was selected already.
     pub fn select_repo(&mut self, root: &Path, ctx: &Ctx) {
         let items = ctx.items;
         let Some(k) = items.iter().position(|item| item.root == root) else {
             return;
         };
-        if self.is_clean(&items[k]) {
-            self.clean_folded = false;
-        }
+        self.unhide(&items[k]);
         let rows = self.rows(items);
         let Some(r) = rows.iter().position(|row| *row == Row::Repo(k)) else {
             return;
@@ -2239,11 +2335,10 @@ impl Panel {
         self.select(&rows, r, items, ctx.page.0.max(1));
     }
 
-    /// Select line `k` of `rows`, scrolling it into a view of `page`.
-    fn select(&mut self, rows: &[Row], k: usize, items: &[RepoItem], page: usize) {
-        let Some(&row) = rows.get(k) else { return };
+    /// Who line `row` is.
+    fn row_id(row: Row, items: &[RepoItem]) -> Selected {
         let root = || items[row.item().unwrap_or_default()].root.clone();
-        let id = match row {
+        match row {
             Row::Repo(_) => Selected::Repo(root()),
             Row::Dir { .. } => {
                 let path = Panel::dir_path(row, items).unwrap_or_default();
@@ -2251,7 +2346,14 @@ impl Panel {
             }
             Row::File(k, c, _) => Selected::File(root(), items[k].status.changes[c].path.clone()),
             Row::Clean => Selected::Clean,
-        };
+            Row::Group(g) => Selected::Group(items[g].group.clone().unwrap_or_default()),
+        }
+    }
+
+    /// Select line `k` of `rows`, scrolling it into a view of `page`.
+    fn select(&mut self, rows: &[Row], k: usize, items: &[RepoItem], page: usize) {
+        let Some(&row) = rows.get(k) else { return };
+        let id = Panel::row_id(row, items);
         let moved = self.selected.as_ref() != Some(&id);
         self.selected = Some(id);
         if moved && self.tab() == DetailTab::Diff {
@@ -2272,7 +2374,8 @@ impl Panel {
             Some(k) => self.selected_at = k,
             None if !rows.is_empty() => {
                 let mut k = self.selected_at.min(rows.len() - 1);
-                // A line, rather than the heading, takes its place.
+                // A line, rather than the clean ones' heading, takes its
+                // place.
                 if rows[k] == Row::Clean {
                     k = if k + 1 < rows.len() {
                         k + 1
@@ -2324,6 +2427,27 @@ impl Panel {
         self.checked_repos.extend(roots);
     }
 
+    /// The repositories under the heading of `items[g]`'s feature.
+    fn members(&self, g: usize, items: &[RepoItem]) -> Vec<usize> {
+        let group = &items[g].group;
+        (0..items.len())
+            .filter(|&k| items[k].group == *group)
+            .collect()
+    }
+
+    /// A feature's checkbox, over its repositories `members`: on when all
+    /// are, partly when some are, else off.
+    fn group_check(&self, members: &[usize], items: &[RepoItem]) -> Check {
+        let checks: Vec<Check> = members.iter().map(|&k| self.check(&items[k])).collect();
+        if !checks.is_empty() && checks.iter().all(|c| *c == Check::On) {
+            Check::On
+        } else if checks.iter().any(|c| *c != Check::Off) {
+            Check::Partial
+        } else {
+            Check::Off
+        }
+    }
+
     /// Check `item` and all its files, or none of them.
     fn set_checked(&mut self, item: &RepoItem, on: bool) {
         for change in &item.status.changes {
@@ -2360,10 +2484,18 @@ impl Panel {
     /// Check line `row`, or uncheck it: a repository or folder partly
     /// checked is unchecked.
     fn toggle(&mut self, row: Row, items: &[RepoItem]) {
+        if let Row::Group(g) = row {
+            let members = self.members(g, items);
+            let on = self.group_check(&members, items) == Check::Off;
+            for k in members {
+                self.set_checked(&items[k], on);
+            }
+            return;
+        }
         let Some(k) = row.item() else { return };
         let item = &items[k];
         match row {
-            Row::Clean => return,
+            Row::Clean | Row::Group(_) => return,
             Row::Repo(_) => {
                 let on = self.check(item) == Check::Off;
                 self.set_checked(item, on);
@@ -2424,6 +2556,9 @@ impl Panel {
             self.set_open(item, open);
         }
         self.clean_folded = !open;
+        for item in items {
+            self.set_group_open(item, open);
+        }
         if open {
             self.folded_dirs.clear();
         } else {
@@ -2438,6 +2573,15 @@ impl Panel {
             }
             if let Some(Selected::Dir(root, _) | Selected::File(root, _)) = &self.selected {
                 self.selected = Some(Selected::Repo(root.clone()));
+            }
+            // A feature's worktree, hidden, on its feature's heading.
+            if let Some(Selected::Repo(root)) = &self.selected
+                && let Some(group) = items
+                    .iter()
+                    .find(|i| i.root == *root)
+                    .and_then(|i| i.group.clone())
+            {
+                self.selected = Some(Selected::Group(group));
             }
         }
         self.relist(ctx);
@@ -2491,11 +2635,16 @@ impl Panel {
     }
 
     /// What an action runs on: the picked repositories, else the selected
-    /// one.
+    /// one, or the selected feature's.
     fn targets(&self, items: &[RepoItem]) -> Vec<usize> {
         let picked = self.picked(items);
         if !picked.is_empty() {
             return picked;
+        }
+        if let Some(Selected::Group(name)) = &self.selected {
+            return (0..items.len())
+                .filter(|&k| items[k].group.as_ref() == Some(name))
+                .collect();
         }
         self.selection(items)
             .map(|(k, _)| vec![k])
@@ -4012,6 +4161,12 @@ impl Panel {
             Moved::Section(root) => Selected::Repo(root),
             Moved::File(root, path) => Selected::File(root, path),
         };
+        let (Selected::Repo(root) | Selected::File(root, _)) = &id else {
+            return;
+        };
+        if let Some(item) = items.iter().find(|i| i.root == *root) {
+            self.unhide(item);
+        }
         if let Selected::File(root, path) = &id
             && let Some(item) = items.iter().find(|i| i.root == *root)
         {
@@ -4289,10 +4444,20 @@ impl Panel {
                 Some(Row::Repo(k)) => self.set_open(&items[k], true),
                 Some(row @ Row::Dir { .. }) => self.set_dir_open(row, items, true),
                 Some(Row::Clean) => self.clean_folded = false,
+                Some(Row::Group(g)) => self.unhide(&items[g]),
                 _ => {}
             },
             // A line folds, else the one over it is selected.
             Keysym::Left | Keysym::KP_Left if plain => match (row, at) {
+                // A feature's worktree with nothing shown goes up to its
+                // feature's heading.
+                (Some(Row::Repo(k)), Some(at))
+                    if items[k].group.is_some() && !self.open(&items[k]) =>
+                {
+                    if let Some(up) = rows[..at].iter().rposition(|r| matches!(r, Row::Group(_))) {
+                        self.select(&rows, up, items, page);
+                    }
+                }
                 (Some(Row::Repo(k)), _) => {
                     self.set_open(&items[k], false);
                     self.settle(items, page);
@@ -4303,6 +4468,10 @@ impl Panel {
                 }
                 (Some(Row::Clean), _) => {
                     self.clean_folded = true;
+                    self.settle(items, page);
+                }
+                (Some(Row::Group(g)), _) => {
+                    self.set_group_open(&items[g], false);
                     self.settle(items, page);
                 }
                 (Some(_), Some(at)) => {
@@ -4404,7 +4573,11 @@ impl Panel {
                 let k = at(i)?;
                 self.select(&rows, k, items, page);
                 self.focus = Focus::Tree;
-                return self.mark_press(mark, rows[k].item()?, ctx);
+                let ks = match rows[k] {
+                    Row::Group(g) => self.members(g, items),
+                    row => vec![row.item()?],
+                };
+                return self.mark_press(mark, &ks, ctx);
             }
             ReposHit::Check(i) => {
                 let k = at(i)?;
@@ -4481,6 +4654,10 @@ impl Panel {
             }
             Row::File(..) => return self.act(ReposButton::OpenInZed, ctx),
             Row::Clean => self.clean_folded = !self.clean_folded,
+            Row::Group(g) => {
+                let open = !self.group_open(&items[g]);
+                self.set_group_open(&items[g], open);
+            }
         }
         self.settle(items, page);
         None
@@ -4615,27 +4792,40 @@ impl Panel {
         matches!(rows.get(first + i), Some(Row::File(..)))
     }
 
-    /// A click on a mark of repository `k`'s line: the arrows push or pull
-    /// it alone, whatever is checked; the stash count lists its stashes.
-    fn mark_press(&mut self, mark: RepoMark, k: usize, ctx: &Ctx) -> Option<Outcome> {
-        let kind = match mark {
+    /// A click on a mark of the line of repositories `ks` (a feature's
+    /// heading is over several): the arrows push or pull those with
+    /// commits to, whatever is checked; the stash count lists its stashes.
+    fn mark_press(&mut self, mark: RepoMark, ks: &[usize], ctx: &Ctx) -> Option<Outcome> {
+        let (kind, has): (_, fn(&GitStatus) -> bool) = match mark {
             RepoMark::Dirty => return None,
+            // A heading has no stashes tab of its own.
+            RepoMark::Stashes if ks.len() > 1 => return None,
             RepoMark::Stashes => {
                 self.set_tab(DetailTab::Stashes);
                 return None;
             }
-            RepoMark::Ahead => BatchKind::Push { force: false },
-            RepoMark::Behind => BatchKind::Pull(Pull::FastForward),
+            RepoMark::Ahead => (BatchKind::Push { force: false }, |s| s.ahead > 0),
+            RepoMark::Behind => (BatchKind::Pull(Pull::FastForward), |s| s.behind > 0),
         };
-        if let Some(why) = busy([ctx.items[k].root.as_path()], ctx) {
+        // A heading's worktrees with none to push or pull are left out.
+        let roots: Vec<&Path> = (ks.iter().map(|&k| &ctx.items[k]))
+            .filter(|i| ks.len() == 1 || has(&i.status))
+            .map(|i| i.root.as_path())
+            .collect();
+        if roots.is_empty() {
+            return None;
+        }
+        if let Some(why) = busy(roots.iter().copied(), ctx) {
             self.error = Some(why);
             return None;
         }
         self.error = None;
-        let jobs = vec![Job {
-            root: ctx.items[k].root.clone(),
-            files: Vec::new(),
-        }];
+        let jobs = (roots.into_iter())
+            .map(|root| Job {
+                root: root.to_path_buf(),
+                files: Vec::new(),
+            })
+            .collect();
         Some(Outcome::Batch { kind, jobs })
     }
 
@@ -4907,8 +5097,78 @@ impl Panel {
         None
     }
 
+    /// The heading over `items[g]`'s feature: its worktrees' lines summed,
+    /// what most needs a look among them on its chip.
+    fn group_line(&self, g: usize, ctx: &Ctx) -> RepoLine {
+        let items = ctx.items;
+        let members = self.members(g, items);
+        let lines: Vec<RepoLine> = (members.iter())
+            .filter_map(|&k| match self.tree_line(Row::Repo(k), ctx) {
+                TreeLine::Repo(line) => Some(line),
+                _ => None,
+            })
+            .collect();
+        let worst = (lines.iter())
+            .filter_map(|l| l.chip.as_ref())
+            .max_by_key(|c| tone_rank(c.tone));
+        let chip = worst.map(|worst| {
+            let like = (lines.iter())
+                .filter(|l| l.chip.as_ref().is_some_and(|c| c.text == worst.text))
+                .count();
+            let tip = (members.iter().zip(&lines))
+                .filter_map(|(&k, l)| {
+                    let chip = l.chip.as_ref()?;
+                    let name = repo_name(&items[k]);
+                    Some(format!("{name}: {} · {}", chip.text, chip.tip))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Chip {
+                text: match like {
+                    1 => worst.text.clone(),
+                    n => format!("{} · {n}", worst.text),
+                },
+                tone: worst.tone,
+                tip,
+            }
+        });
+        let state = (lines.iter())
+            .map(|l| &l.state)
+            .find(|s| matches!(s, LineState::Busy(_)))
+            .or_else(|| {
+                lines
+                    .iter()
+                    .map(|l| &l.state)
+                    .find(|s| **s != LineState::Settled)
+            })
+            .cloned()
+            .unwrap_or(LineState::Settled);
+        RepoLine {
+            check: self.group_check(&members, items),
+            expanded: Some(self.group_open(&items[g])),
+            label: items[g].group.clone().unwrap_or_default(),
+            // The feature's: a worktree off it says so on the chip.
+            branch: items[g].feature_branch.clone(),
+            dirty: lines.iter().any(|l| l.dirty),
+            ahead: lines.iter().map(|l| l.ahead).sum(),
+            behind: lines.iter().map(|l| l.behind).sum(),
+            no_upstream: lines.iter().any(|l| l.no_upstream),
+            stashes: lines.iter().map(|l| l.stashes).sum(),
+            files: lines.iter().map(|l| l.files).sum(),
+            added: lines.iter().map(|l| l.added).sum(),
+            removed: lines.iter().map(|l| l.removed).sum(),
+            chip,
+            state,
+            depth: 0,
+            repos: members.len(),
+        }
+    }
+
     /// Line `row` of the tree.
     fn tree_line(&self, row: Row, ctx: &Ctx) -> TreeLine {
+        if let Row::Group(g) = row {
+            return TreeLine::Repo(self.group_line(g, ctx));
+        }
         let Some(k) = row.item() else {
             return TreeLine::Clean(CleanLine {
                 open: !self.clean_folded,
@@ -4919,6 +5179,8 @@ impl Panel {
         let status = &item.status;
         let files = self.diff.diffs.get(&item.root).map(|(_, f)| f.as_slice());
         let files = files.unwrap_or_default();
+        // A feature's worktree is a level in, under its feature's heading.
+        let indent = usize::from(item.group.is_some());
         if let Row::Dir {
             from, to, depth, ..
         } = row
@@ -4928,7 +5190,7 @@ impl Panel {
                 check: self.dir_check(item, path),
                 open: self.dir_open(row, ctx.items),
                 name: path_parts(path, from, to).to_owned(),
-                depth,
+                depth: depth + indent,
             });
         }
         let Row::File(_, c, depth) = row else {
@@ -4953,7 +5215,11 @@ impl Panel {
             return TreeLine::Repo(RepoLine {
                 check: self.check(item),
                 expanded: (!status.changes.is_empty()).then(|| self.open(item)),
-                label: item.label.clone(),
+                // Under its feature's heading, the repository alone.
+                label: match indent {
+                    0 => item.label.clone(),
+                    _ => repo_name(item).to_owned(),
+                },
                 branch: status.branch.clone(),
                 dirty: status.dirty,
                 ahead: status.ahead,
@@ -4965,6 +5231,8 @@ impl Panel {
                 removed: files.iter().map(|f| f.removed).sum(),
                 chip,
                 state,
+                depth: indent,
+                repos: 0,
             });
         };
         let change = &status.changes[c];
@@ -4987,7 +5255,7 @@ impl Panel {
                 Grouping::Folders => file_name_text(change),
             },
             conflicted: change.conflicted(),
-            depth,
+            depth: depth + indent,
             added: diff.map_or(0, |f| f.added),
             removed: diff.map_or(0, |f| f.removed),
         })
@@ -5143,7 +5411,7 @@ impl Panel {
     fn detail_key(&self) -> Option<DetailKey> {
         let root = match self.selected.as_ref()? {
             Selected::Repo(root) | Selected::Dir(root, _) | Selected::File(root, _) => root,
-            Selected::Clean => return None,
+            Selected::Clean | Selected::Group(_) => return None,
         };
         let tab = self.tab();
         (tab != DetailTab::Diff).then(|| DetailKey {
@@ -5794,6 +6062,7 @@ mod tests {
             label: name.into(),
             workspace: 0,
             feature_branch: None,
+            group: None,
             status: GitStatus {
                 branch: Some(branch.into()),
                 dirty: !changes.is_empty(),
@@ -7122,6 +7391,110 @@ mod tests {
         let skip = ReposHit::Button(ReposButton::SkipDiverged);
         assert_eq!(panel.click(skip, &ctx), None);
         assert!(panel.sheet.is_none());
+    }
+
+    /// `items()`, then feature `login`'s worktrees: api with a change
+    /// and 2 commits to push, web detached off the feature's branch.
+    fn with_feature() -> Vec<RepoItem> {
+        let mut items = items();
+        for (name, changes) in [("api", vec![change("src/a.rs", 'M')]), ("web", vec![])] {
+            let mut item = repo(name, "feature/login", changes);
+            item.label = format!("login / {name}");
+            item.group = Some("login".into());
+            item.feature_branch = Some("feature/login".into());
+            items.push(item);
+        }
+        items[3].status.ahead = 2;
+        items[4].status.branch = None;
+        items
+    }
+
+    /// The tree's lines, indented two spaces a level.
+    fn indented(panel: &Panel, ctx: &Ctx) -> Vec<String> {
+        (panel.view("p", ctx).lines.iter())
+            .map(|l| match l {
+                TreeLine::Repo(r) => format!("{}{}", "  ".repeat(r.depth), r.label),
+                TreeLine::Dir(d) => format!("{}{}/", "  ".repeat(d.depth + 1), d.name),
+                TreeLine::File(f) => format!("{}{}", "  ".repeat(f.depth + 1), f.path),
+                TreeLine::Clean(c) => format!("Clean · {}", c.count),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_features_worktrees_fold_under_its_heading() {
+        let items = with_feature();
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        // Folded at first, after the workspaces' own and before the clean
+        // ones.
+        assert_eq!(
+            indented(&panel, &ctx),
+            [
+                "gerdr",
+                "  src/git.rs",
+                "  notes.md",
+                "zed",
+                "  old.rs → new.rs",
+                "login",
+                "Clean · 1",
+                "herdr"
+            ]
+        );
+        // Its line sums up what is under it.
+        let view = panel.view("p", &ctx);
+        let TreeLine::Repo(head) = &view.lines[5] else {
+            panic!("no heading: {:?}", view.lines[5]);
+        };
+        assert_eq!(
+            (head.repos, head.files, head.ahead, head.expanded),
+            (2, 1, 2, Some(false))
+        );
+        assert_eq!(head.branch.as_deref(), Some("feature/login"));
+        let chip = head.chip.as_ref().expect("web's chip");
+        assert_eq!(chip.text, "detached");
+        assert!(chip.tip.starts_with("web: detached"), "{}", chip.tip);
+        // Right unfolds it, its worktrees a level in; Left on one goes
+        // back up, and folds it.
+        panel.selected = Some(Selected::Group("login".into()));
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(
+            indented(&panel, &ctx)[5..9],
+            ["login", "  api", "    src/a.rs", "  web"]
+        );
+        panel.selected = Some(Selected::Repo(root("web")));
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        assert_eq!(panel.selected, Some(Selected::Group("login".into())));
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        assert_eq!(indented(&panel, &ctx)[5..7], ["login", "Clean · 1"]);
+        // Its checkbox ticks them all, what runs then runs on them both.
+        panel.toggle(Row::Group(3), &items);
+        assert!(
+            panel.checked_repos.contains(&root("api"))
+                && panel.checked_repos.contains(&root("web"))
+        );
+        assert_eq!(panel.targets(&items), [3, 4]);
+        // Selected alone, it stands for them.
+        panel.toggle(Row::Group(3), &items);
+        assert_eq!(panel.targets(&items), [3, 4]);
+        // Its ↑ pushes those with commits to push.
+        let rows = panel.rows(&items);
+        let at = rows.iter().position(|r| *r == Row::Group(3)).unwrap();
+        assert_eq!(
+            panel.click(ReposHit::Mark(at, RepoMark::Ahead), &ctx),
+            Some(Outcome::Batch {
+                kind: BatchKind::Push { force: false },
+                jobs: jobs(&["api"])
+            })
+        );
+        // Folding all hides a worktree selected, on its heading; selecting
+        // one unfolds it again.
+        panel.fold_all(true, &ctx);
+        panel.selected = Some(Selected::File(root("api"), "src/a.rs".into()));
+        panel.fold_all(false, &ctx);
+        assert_eq!(panel.selected, Some(Selected::Group("login".into())));
+        panel.select_repo(&root("web"), &ctx);
+        assert!(indented(&panel, &ctx).contains(&"  web".to_string()));
     }
 
     #[test]

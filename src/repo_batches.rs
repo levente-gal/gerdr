@@ -630,6 +630,7 @@ pub fn repo_dirs<'a>(
             label: ws.name.clone(),
             workspace: w,
             feature_branch: None,
+            group: None,
         })
         .collect();
     for (w, ws) in workspaces.iter().enumerate() {
@@ -642,6 +643,7 @@ pub fn repo_dirs<'a>(
                 label: format!("{} / {}", ws.name, repo.name),
                 workspace: w,
                 feature_branch: repo.branch.clone(),
+                group: Some(ws.name.clone()),
             });
         }
     }
@@ -675,6 +677,7 @@ impl crate::state::GitWatch {
                 label: d.label.clone(),
                 workspace: d.workspace,
                 feature_branch: d.feature_branch.clone(),
+                group: d.group.clone(),
                 status: status.clone(),
             });
         }
@@ -1717,6 +1720,10 @@ impl Gerdr {
                         "Hide the repositories with nothing to do"
                     }
                     TreeLine::Clean(_) => "Show the repositories with nothing to do",
+                    TreeLine::Repo(repo) if repo.repos > 0 && repo.expanded? => {
+                        "Hide the feature's repositories"
+                    }
+                    TreeLine::Repo(repo) if repo.repos > 0 => "Show the feature's repositories",
                     TreeLine::Repo(repo) if repo.expanded? => "Hide its changed files",
                     TreeLine::Dir(dir) if dir.open => "Hide its changed files",
                     TreeLine::Repo(_) | TreeLine::Dir(_) => "Show its changed files",
