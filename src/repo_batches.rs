@@ -5,7 +5,7 @@
 //! the workspace where a branch is out already.
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -823,6 +823,7 @@ impl Gerdr {
         self.repos.panel = Some(panel);
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.grouping = self.projects.repo_grouping;
+            panel.open_groups = self.projects.repo_open_groups.iter().cloned().collect();
         }
         self.repos_refresh();
         self.repos_fetch();
@@ -890,6 +891,7 @@ impl Gerdr {
         };
         panel.select_repo(root, &ctx);
         self.repos_detail();
+        self.repos_save_folds();
     }
 
     /// The agent the review goes to, by its pane and what it is called:
@@ -953,6 +955,18 @@ impl Gerdr {
     }
 
     /// Save the panel's review comments with the project, if they changed.
+    /// Keep the features unfolded in the panel for the next start.
+    fn repos_save_folds(&mut self) {
+        let Some(panel) = self.repos.panel.as_ref() else {
+            return;
+        };
+        let open: BTreeSet<String> = panel.open_groups.iter().cloned().collect();
+        if open != self.projects.repo_open_groups {
+            self.projects.repo_open_groups = open;
+            self.projects.save();
+        }
+    }
+
     fn repos_save_review(&mut self) {
         let Some(panel) = self.repos.panel.as_mut().filter(|p| p.diff.review_dirty) else {
             return;
@@ -1226,6 +1240,7 @@ impl Gerdr {
         let outcome = panel.as_mut()?.key(mods, sym, typed, &ctx);
         self.repos_detail();
         self.repos_save_review();
+        self.repos_save_folds();
         outcome
     }
 
@@ -1363,6 +1378,7 @@ impl Gerdr {
         self.mouse.repos_editor_drag = editor_drag;
         self.repos_detail();
         self.repos_save_review();
+        self.repos_save_folds();
         if let Some(outcome) = outcome {
             self.apply_repos(outcome);
         }
@@ -1464,6 +1480,7 @@ impl Gerdr {
         let outcome = panel.as_mut().and_then(|p| p.press(button, &ctx));
         self.repos_detail();
         self.repos_save_review();
+        self.repos_save_folds();
         if let Some(outcome) = outcome {
             self.apply_repos(outcome);
         }

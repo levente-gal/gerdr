@@ -73,6 +73,10 @@ pub struct Store {
     /// How the repositories panel lists changed files, as last picked.
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     pub repo_grouping: Grouping,
+    /// The features whose worktrees the repositories panel shows under
+    /// their heading, by name: the others' are folded.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub repo_open_groups: BTreeSet<String>,
     /// Whether the criteria strip over a sandbox's app was left folded to
     /// its chip (see `criteria_strip`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -147,6 +151,8 @@ struct State {
     ci_watched: crate::ci::Watched,
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     repo_grouping: Grouping,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    repo_open_groups: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     criteria_folded: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -645,6 +651,7 @@ impl Store {
         self.t3_finished = state.t3_finished;
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
+        self.repo_open_groups = state.repo_open_groups;
         self.criteria_folded = state.criteria_folded;
         self.paused_agents = state.paused_agents;
         self.sidebar_width = state.sidebar_width;
@@ -670,6 +677,7 @@ impl Store {
             t3_finished: self.t3_finished.clone(),
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
+            repo_open_groups: self.repo_open_groups.clone(),
             criteria_folded: self.criteria_folded,
             paused_agents: self.paused_agents.clone(),
             sidebar_width: self.sidebar_width,
@@ -2077,6 +2085,7 @@ mod tests {
             t3_finished: Default::default(),
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
+            repo_open_groups: BTreeSet::from(["login".to_string()]),
             criteria_folded: true,
             paused_agents: Vec::new(),
             sidebar_width: Some(280),
