@@ -6446,6 +6446,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_press_on_the_filter_hits_its_part() {
+        let size = repos_panel_rect((1280, 800).into());
+        for view in [full(), with_filter()] {
+            let l = repos_layout(&view, size);
+            assert!(!l.tree_filter.is_empty());
+            for &(part, r) in &l.tree_filter {
+                let at = Point::from(((r.loc.x + r.size.w / 2) as f64, (r.loc.y + r.size.h / 2) as f64));
+                assert_eq!(repos_hit(&l, at), Some(ReposHit::Filter(part)), "{part:?}");
+            }
+        }
+    }
+
     /// `with_groups` filtered by "unlink", the field with the keyboard.
     fn with_filter() -> ReposView {
         let mut view = with_groups();

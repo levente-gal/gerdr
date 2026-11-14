@@ -5251,7 +5251,7 @@ impl Panel {
             .unwrap_or(LineState::Settled);
         RepoLine {
             check: self.group_check(&members, items),
-            expanded: Some(self.group_open(&items[g])),
+            expanded: Some(self.filtering() || self.group_open(&items[g])),
             label: items[g].group.clone().unwrap_or_default(),
             // The feature's: a worktree off it says so on the chip.
             branch: items[g].feature_branch.clone(),
@@ -5277,7 +5277,7 @@ impl Panel {
         }
         let Some(k) = row.item() else {
             return TreeLine::Clean(CleanLine {
-                open: !self.clean_folded,
+                open: self.filtering() || !self.clean_folded,
                 count: (ctx.items.iter())
                     .filter(|i| i.group.is_none() && self.is_clean(i) && self.shows(i))
                     .count(),
@@ -11277,6 +11277,8 @@ mod tests {
         // A feature's worktree shows under its heading, unfolded.
         type_text(&mut panel, "api", &ctx);
         assert_eq!(indented(&panel, &ctx), ["login", "  api", "    src/a.rs"]);
+        let TreeLine::Repo(head) = &panel.view("p", &ctx).lines[0] else { panic!() };
+        assert_eq!(head.expanded, Some(true));
         assert_eq!(panel.view("p", &ctx).tree_filter.unwrap().count, "1 repo");
         // By branch: the feature's, with its heading's sums over them.
         for _ in 0..3 {
