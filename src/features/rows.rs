@@ -1168,6 +1168,7 @@ pub(super) fn criterion_card(
         stripe: None,
         field: None,
         field_hint: "What went wrong",
+        clock: String::new(),
         selected: false,
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| {
@@ -1283,6 +1284,7 @@ pub(super) fn check_card(
     };
     let took = |secs: u64| crate::clock::took(std::time::Duration::from_secs(secs));
     let mut said = Vec::new();
+    let mut clock = String::new();
     match (tag, outcome) {
         (FindingTag::Running | FindingTag::Queued, _) if row.is_some_and(|row| row.stopping) => {
             said.push("stopping".to_owned());
@@ -1290,11 +1292,9 @@ pub(super) fn check_card(
         (FindingTag::Queued, _) => said.push("waiting for a check in this folder".to_owned()),
         (FindingTag::Running, _) => {
             let began = row.and_then(|row| row.began);
-            said.extend(
-                began
-                    .or(verify.map(|v| v.started))
-                    .map(|at| took(now.saturating_sub(at))),
-            );
+            clock = (began.or(verify.map(|v| v.started)))
+                .map(|at| took(now.saturating_sub(at)))
+                .unwrap_or_default();
             said.extend(
                 row.and_then(|row| row.last_secs)
                     .map(|secs| format!("took {} last run", took(secs))),
@@ -1341,6 +1341,7 @@ pub(super) fn check_card(
         stripe: None,
         field: None,
         field_hint: "",
+        clock,
         selected: false,
         sheet: None,
         buttons: (actions.iter().enumerate())
@@ -1446,6 +1447,7 @@ pub(super) fn note_card(
         stripe: None,
         field: None,
         field_hint: "",
+        clock: String::new(),
         selected: false,
         sheet: None,
         buttons: (actions.iter().enumerate())

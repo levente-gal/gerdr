@@ -556,7 +556,9 @@ const NO_FLOCK: &str =
 /// on the file they both copy. The script holds the lock itself, not what it
 /// runs: a daemon left behind doesn't keep it, and the kernel drops it however
 /// the script ends. It leaves `queued` when it has to wait, and `start` when
-/// the check starts; its time counts from there.
+/// the check starts; its time counts from there. What it runs is niced, where
+/// `nice` is there: a build or a test run on every core leaves gerdr, which
+/// draws on the CPU, its share.
 pub fn script(dir: &Path, i: usize, check: &CheckRun, slug: &str) -> String {
     script_with(dir, i, check, slug, "")
 }
@@ -582,11 +584,12 @@ pub fn script_with(dir: &Path, i: usize, check: &CheckRun, slug: &str, prelude: 
     format!(
         "trap : INT TERM\n{pid}printf '\\033[H\\033[2J%s\\n' {head}\nGERDR_FEATURE={slug}\nexport GERDR_FEATURE\n\
          {MARKER}={marker}\nexport {MARKER}\n\
+         gerdr_nice=\nif command -v nice >/dev/null 2>&1; then\n  gerdr_nice='nice -n 10'\nfi\n\
          if cd {cwd}; then\n  code=0\n  if [ -r . ] && command -v flock >/dev/null 2>&1; then\n    exec 9<.\n    \
          if ! flock -n 9; then\n      {queued}      printf '%s\\n' {waiting}\n      flock 9\n      code=$?\n      \
          if [ \"$code\" -le 128 ]; then\n        code=0\n        printf '\\033[H\\033[2J%s\\n' {head}\n      fi\n    fi\n  \
          else\n    printf '%s\\n' {no_flock}\n  fi\n  if [ \"$code\" -eq 0 ]; then\n    {start}    {prelude}\
-         sh -c {command} </dev/null 9<&-\n    code=$?\n  fi\nelse\n  code=127\nfi\n\
+         $gerdr_nice sh -c {command} </dev/null 9<&-\n    code=$?\n  fi\nelse\n  code=127\nfi\n\
          if [ \"$code\" -eq 0 ]; then\n  printf '%s\\n' {passed}\nelse\n  printf '%s\\n' \"{end}exited with $code\"\nfi\n{exit}",
         pid = leave("$$", "pid"),
         marker = shell_quote(&marker_value(dir, i)),
@@ -1810,6 +1813,24 @@ mod tests {
         let script = script(dir, 0, &check, "slug");
         assert!(script.contains("\nGERDR_CHECK=/data/checks/3/0\nexport GERDR_CHECK\n"));
         assert_eq!(marker_of(dir, 0), "GERDR_CHECK=/data/checks/3/0");
+    }
+
+    #[test]
+    fn a_checks_command_runs_niced() {
+        let dir = run_folder();
+        let check = rows(&[check("a", &dir, "nice > niced")]).remove(0);
+        std::fs::write(script_path(&dir, 0), script(&dir, 0, &check, "slug")).unwrap();
+        let ran = (Command::new("sh").arg(script_path(&dir, 0)))
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(ran.success());
+        let level = |s: &str| s.trim().parse::<i32>().unwrap();
+        let here = Command::new("nice").output().unwrap().stdout;
+        let niced = std::fs::read_to_string(dir.join("niced")).unwrap();
+        let expected = (level(&String::from_utf8_lossy(&here)) + 10).min(19);
+        assert_eq!(level(&niced), expected);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

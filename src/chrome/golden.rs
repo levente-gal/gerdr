@@ -4773,6 +4773,7 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
             stripe,
             field: None,
             field_hint: "",
+            clock: String::new(),
             selected: false,
             buttons,
         })
@@ -5076,6 +5077,7 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
             stripe: None,
             field: None,
             field_hint: "",
+            clock: String::new(),
             selected: false,
             buttons,
         })
@@ -5622,6 +5624,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             stripe: None,
             field: writing.then(|| Line::from("Takes 4 seconds")),
             field_hint: "",
+            clock: String::new(),
             selected,
             buttons: (at..at + labels.len()).collect(),
         }));
@@ -5743,6 +5746,7 @@ fn feature_tab_manual_comment() -> super::FeatureTabView {
         stripe: None,
         field: None,
         field_hint: "",
+        clock: String::new(),
         selected: true,
         buttons: (at..at + 4).collect(),
     }));
@@ -6364,7 +6368,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0x817ac2beb9826805, // tab_build_1920
         0x92cb5c3660a45cc2, // tab_plan_ready_1180
         0x80b4f04c3fd0c18e, // tab_verify_failed_1920
-        0xe5e64df17db90883, // tab_verify_running_1180
+        0x0787ec14cac4b4e8, // tab_verify_running_1180
         0x1187cfc7308080cd, // tab_fix_plan_860
         0xe977123f06005f8f, // tab_ship_blocked_1180
         0x9c502abfa5952f88, // tab_ship_routes_1180
@@ -6437,7 +6441,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0xfdcf3f8801d99c0e, // tab_build_1920
         0xddccee975d02f15c, // tab_plan_ready_1180
         0x87e9612051e6d593, // tab_verify_failed_1920
-        0x1842640f4d4cc7f8, // tab_verify_running_1180
+        0x7fbb2383c6abb7d0, // tab_verify_running_1180
         0x70f6c4a256fe013c, // tab_fix_plan_860
         0x3a9972df7b44513c, // tab_ship_blocked_1180
         0x6ce5b39287e5c080, // tab_ship_routes_1180
@@ -6510,7 +6514,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0xeeee9bdb11642ca7, // tab_build_1920
         0x8c60b8df055e13d2, // tab_plan_ready_1180
         0xf040df7ef7dafd1f, // tab_verify_failed_1920
-        0xbae5c983af5f6a10, // tab_verify_running_1180
+        0xc30fc0eea8376f1b, // tab_verify_running_1180
         0x77ba2ff0178ca183, // tab_fix_plan_860
         0x359957db4ac7ac8e, // tab_ship_blocked_1180
         0x03cddc6d4a735b10, // tab_ship_routes_1180
@@ -6583,7 +6587,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0xf30e113649ec16c4, // tab_build_1920
         0xc3c1e027ad13139e, // tab_plan_ready_1180
         0x71b1389341d4070b, // tab_verify_failed_1920
-        0x5ea01a4a5019262d, // tab_verify_running_1180
+        0xad250e1cb03322e2, // tab_verify_running_1180
         0x4906da0bcd42b77a, // tab_fix_plan_860
         0xa839a2c905d7b0af, // tab_ship_blocked_1180
         0x922b7ae53f747e71, // tab_ship_routes_1180
@@ -7036,6 +7040,7 @@ fn tab_checks() -> super::FeatureTabView {
             stripe: None,
             field: None,
             field_hint: "",
+            clock: String::new(),
             selected: i == 1,
             buttons: (at..at + labels.len()).collect(),
         }));
