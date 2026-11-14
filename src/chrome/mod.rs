@@ -46,6 +46,7 @@ mod restart;
 mod scrollback;
 mod search;
 mod shapes;
+mod shot_viewer;
 mod sidebar;
 mod stats;
 mod switcher;
@@ -101,6 +102,7 @@ pub use restart::*;
 pub use scrollback::*;
 pub use search::*;
 use shapes::*;
+pub use shot_viewer::*;
 pub use sidebar::*;
 pub use stats::*;
 pub use switcher::*;
@@ -164,6 +166,8 @@ pub struct ChromeView {
     pub welcome: Option<WelcomeView>,
     /// Set while the quit dialog is open, over everything.
     pub quit: Option<QuitView>,
+    /// Set while a screenshot shows over everything but the dialogs.
+    pub shot_viewer: Option<ShotViewerView>,
     /// Set while the restart dialog is open, over all but that.
     pub restart: Option<RestartView>,
     /// Set while the checkout dialog is open, over all but the quit dialog.
@@ -237,6 +241,7 @@ pub struct Chrome {
     switcher: SwitcherLayers,
     welcome: Overlay<(WelcomeView, Size<i32, Logical>, Theme, f64)>,
     quit: Overlay<(QuitView, Size<i32, Logical>, Theme, f64)>,
+    shot_viewer: Overlay<(ShotViewerView, Size<i32, Logical>, Theme, f64)>,
     restart: Overlay<(RestartView, Size<i32, Logical>, Theme, f64)>,
     checkout: Overlay<(CheckoutView, Size<i32, Logical>, Theme, f64)>,
     confirm: Overlay<(ConfirmView, Size<i32, Logical>, Theme, f64)>,
@@ -318,6 +323,7 @@ impl Chrome {
             switcher: SwitcherLayers::default(),
             welcome: Overlay::default(),
             quit: Overlay::default(),
+            shot_viewer: Overlay::default(),
             restart: Overlay::default(),
             checkout: Overlay::default(),
             confirm: Overlay::default(),
@@ -565,6 +571,16 @@ impl Chrome {
                         .part(confirm, now, true, |(confirm, output, ..)| {
                             painter.confirm_dialog(confirm, *output, scale, theme.palette())
                         });
+                    parts.extend(scrimmed(part, output, theme.palette()));
+                }
+                Kind::ShotViewer => {
+                    let viewer = view.shot_viewer.take().map(|v| {
+                        let (loc, size) = shadowed(shot_viewer_layout(&v, output).panel);
+                        ((v, output, theme, scale), loc, size)
+                    });
+                    let part = self.shot_viewer.part(viewer, now, true, |(v, output, ..)| {
+                        painter.shot_viewer(v, *output, scale, theme.palette())
+                    });
                     parts.extend(scrimmed(part, output, theme.palette()));
                 }
                 // The context menu, under its anchor: over the popups it

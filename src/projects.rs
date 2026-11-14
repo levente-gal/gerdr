@@ -73,6 +73,11 @@ pub struct Store {
     /// How the repositories panel lists changed files, as last picked.
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     pub repo_grouping: Grouping,
+    /// The features whose worktrees the repositories panel shows under
+    /// their heading, by name, by project: the others' are folded. (Saved
+    /// under a new key: `repo_open_groups` was one list for all.)
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub open_feature_groups: BTreeMap<String, BTreeSet<String>>,
     /// Whether the criteria strip over a sandbox's app was left folded to
     /// its chip (see `criteria_strip`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -147,6 +152,8 @@ struct State {
     ci_watched: crate::ci::Watched,
     #[serde(default, skip_serializing_if = "Grouping::is_list")]
     repo_grouping: Grouping,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    open_feature_groups: BTreeMap<String, BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     criteria_folded: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -645,6 +652,7 @@ impl Store {
         self.t3_finished = state.t3_finished;
         self.ci_watched = state.ci_watched;
         self.repo_grouping = state.repo_grouping;
+        self.open_feature_groups = state.open_feature_groups;
         self.criteria_folded = state.criteria_folded;
         self.paused_agents = state.paused_agents;
         self.sidebar_width = state.sidebar_width;
@@ -670,6 +678,7 @@ impl Store {
             t3_finished: self.t3_finished.clone(),
             ci_watched: self.ci_watched.clone(),
             repo_grouping: self.repo_grouping,
+            open_feature_groups: self.open_feature_groups.clone(),
             criteria_folded: self.criteria_folded,
             paused_agents: self.paused_agents.clone(),
             sidebar_width: self.sidebar_width,
@@ -2043,6 +2052,18 @@ mod tests {
         }
     }
 
+    /// A state.json from before the open features were kept by project
+    /// still loads: their old list is let go.
+    #[test]
+    fn the_old_open_features_list_is_let_go() {
+        let json = r#"{"version": 1, "repo_open_groups": ["login"]}"#;
+        let state: State = serde_json::from_str(json).unwrap();
+        assert!(state.open_feature_groups.is_empty());
+        let json = r#"{"version": 1, "open_feature_groups": {"api": ["login"]}}"#;
+        let state: State = serde_json::from_str(json).unwrap();
+        assert!(state.open_feature_groups["api"].contains("login"));
+    }
+
     fn sample() -> Store {
         let layout = SavedNode::Split {
             dir: Dir::Right,
@@ -2077,6 +2098,10 @@ mod tests {
             t3_finished: Default::default(),
             ci_watched: Default::default(),
             repo_grouping: Grouping::Folders,
+            open_feature_groups: BTreeMap::from([(
+                "api".to_string(),
+                BTreeSet::from(["login".to_string()]),
+            )]),
             criteria_folded: true,
             paused_agents: Vec::new(),
             sidebar_width: Some(280),

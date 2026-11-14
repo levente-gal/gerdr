@@ -61,9 +61,6 @@ pub(super) struct PanelState<'a> {
     /// The earlier AI reviews showing their findings (see
     /// `FeaturePanel::rounds_open`).
     pub(super) rounds_open: BTreeSet<u32>,
-    /// Manual test's screenshots shown across the page (see
-    /// `FeaturePanel::open_shots`).
-    pub(super) open_shots: BTreeSet<std::path::PathBuf>,
     /// The fix round cards flipped from how they show by default (see
     /// `FeaturePanel::fix_rounds_flipped`).
     pub(super) fix_rounds_flipped: BTreeSet<u32>,

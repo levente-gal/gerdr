@@ -8849,20 +8849,18 @@ fn golden_shots() -> Vec<super::SheetShot> {
         super::SheetShot {
             size: crate::shot_images::size(&path),
             path,
-            open: false,
         },
         super::SheetShot {
             path: "/nonexistent/T1-2.png".into(),
             size: None,
-            open: false,
         },
     ]
 }
 
 #[test]
-fn a_comments_screenshots_sit_small_under_it_and_a_click_on_one_is_its_hit() {
+fn a_comments_screenshots_sit_small_under_it_and_a_press_on_one_is_its_hit() {
     use super::{PageSection, features::Piece};
-    let mut view = feature_tab_manual_comment();
+    let view = feature_tab_manual_comment();
     let area = Rect::new((0, 0).into(), (1180, TAB_HEIGHT).into());
     let shots = |view: &super::FeatureTabView| {
         let layout = super::feature_tab_layout(view, area);
@@ -8886,15 +8884,97 @@ fn a_comments_screenshots_sit_small_under_it_and_a_click_on_one_is_its_hit() {
         layout.hit(&view, middle(small[1])),
         Some(super::FeatureTabHit::Shot(card, 1))
     );
-    // Opened, the first goes across on a line of its own, no wider than it
-    // is: 320 pixels.
-    let Some(PageSection::Finding(c)) = view.page.sections.last_mut() else {
-        panic!("the comment's row");
+}
+
+/// The screenshot viewer's looks: one of two, Next under the pointer; and
+/// one whose file is gone.
+const VIEWER: [&str; 2] = ["viewer", "viewer_gone"];
+
+/// The output the viewer's looks are drawn for.
+const VIEWER_OUTPUT: (i32, i32) = (1280, 800);
+
+fn viewer_views() -> [super::ShotViewerView; 2] {
+    let shot = golden_shots().remove(0);
+    [
+        super::ShotViewerView {
+            path: shot.path,
+            size: shot.size,
+            title: "T1 \u{b7} Make the settings page look better".into(),
+            at: 0,
+            of: 2,
+            hover: Some(super::ShotViewerHit::Next),
+        },
+        super::ShotViewerView {
+            path: "/nonexistent/AC-2-1.png".into(),
+            size: None,
+            title: "AC-2 \u{b7} Export off with no invoices".into(),
+            at: 0,
+            of: 1,
+            hover: None,
+        },
+    ]
+}
+
+fn paint_viewer(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    (viewer_views().iter())
+        .map(|view| hash(painter.shot_viewer(view, VIEWER_OUTPUT.into(), scale, p)))
+        .collect()
+}
+
+/// The recorded hashes of `VIEWER`, per case in `CASES`.
+const GOLDEN_VIEWER: [[u64; 2]; 4] = [
+    // Dark at 1
+    [
+        0x2dca2f9b4f8320f2, // viewer
+        0x405c62af7a24b25f, // viewer_gone
+    ],
+    // Dark at 2
+    [
+        0x0c52c0d6b9007e65, // viewer
+        0xc66180392eed3149, // viewer_gone
+    ],
+    // Light at 1
+    [
+        0x9ac40c4eb9568b77, // viewer
+        0xae791f3058df83dc, // viewer_gone
+    ],
+    // Light at 2
+    [
+        0xba0d8015d6b6a083, // viewer
+        0x49c5e27cf2e0b75f, // viewer_gone
+    ],
+];
+
+#[test]
+fn the_shot_viewer_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_VIEWER.iter().map(|row| row.as_slice()).collect();
+    check(&VIEWER, &golden, paint_viewer);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the screenshot viewer's looks there.
+#[test]
+fn dump_shot_viewer() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
     };
-    c.sheet.as_mut().expect("a sheet row").shots[0].open = true;
-    let (_, open) = shots(&view);
-    assert_eq!((open[0].size.w, open[0].size.h), (320, 180));
-    assert!(open[1].loc.y >= open[0].loc.y + open[0].size.h);
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    for (theme, scale) in CASES {
+        let p = theme.palette();
+        let px = |v: i32| (v as f64 * scale).round() as usize;
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (name, view) in VIEWER.iter().zip(viewer_views()) {
+            let panel = super::shot_viewer_layout(&view, VIEWER_OUTPUT.into()).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.shot_viewer(&view, VIEWER_OUTPUT.into(), scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
+    }
 }
 
 /// The Ship sheet of a feature that squashes: its steps, then its commit
