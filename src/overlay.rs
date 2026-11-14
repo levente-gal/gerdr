@@ -3,7 +3,8 @@
 //! paints in the same order, so what takes a click is always what shows.
 //!
 //! From the top: the tooltip, the modal dialogs (quit, restart, checkout,
-//! new feature, the manual test sheet, the plan review's sheet, confirm), the context menu, the toasts, the welcome screen,
+//! new feature, the manual test sheet, the plan review's sheet, confirm,
+//! the screenshot viewer), the context menu, the toasts, the welcome screen,
 //! the help panel, then the panels (the tasks, the project menu, the
 //! worktrees popup, the repositories and inbox panels, the AI work's
 //! stats, the scrollback viewer, the switcher), the criteria strip over a
@@ -48,6 +49,9 @@ pub enum Overlay {
     /// `project_commands`).
     ProjectCommands,
     Confirm,
+    /// A Manual test criterion's screenshots, one at a time over
+    /// everything (see `shot_viewer`).
+    ShotViewer,
     ContextMenu,
     Toasts,
     Welcome,
@@ -78,7 +82,7 @@ pub enum Overlay {
 
 impl Overlay {
     /// Every overlay, top first.
-    pub const ORDER: [Self; 26] = [
+    pub const ORDER: [Self; 27] = [
         Self::Tooltip,
         Self::Quit,
         Self::Restart,
@@ -89,6 +93,7 @@ impl Overlay {
         Self::ConnectMachine,
         Self::ProjectCommands,
         Self::Confirm,
+        Self::ShotViewer,
         Self::ContextMenu,
         Self::Toasts,
         Self::Welcome,
@@ -125,6 +130,7 @@ impl Overlay {
                 | Self::ConnectMachine
                 | Self::ProjectCommands
                 | Self::Confirm
+                | Self::ShotViewer
         )
     }
 
@@ -197,6 +203,7 @@ impl Overlay {
             Self::ConnectMachine => "the connect a machine dialog",
             Self::ProjectCommands => "the project commands dialog",
             Self::Confirm => "the dialog",
+            Self::ShotViewer => "the screenshot viewer",
             Self::ContextMenu => "the menu",
             Self::Toasts => "the notices",
             Self::Welcome => "the welcome screen",
@@ -232,6 +239,7 @@ impl Gerdr {
             Overlay::ConnectMachine => self.machines.dialog.is_some(),
             Overlay::ProjectCommands => self.features.commands.is_some(),
             Overlay::Confirm => self.overlays.confirm.is_some(),
+            Overlay::ShotViewer => self.overlays.shot_viewer.is_some(),
             Overlay::ContextMenu => self.overlays.context_menu.is_some(),
             Overlay::Toasts => {
                 let now = Instant::now();
@@ -316,6 +324,7 @@ impl Gerdr {
             Overlay::Restart => self.restart_hover(pos),
             Overlay::Checkout => self.checkout_hover(pos),
             Overlay::Confirm => self.confirm_hover(pos),
+            Overlay::ShotViewer => self.shot_viewer_hover(pos),
             Overlay::Tasks => self.tasks_hover(pos),
             Overlay::Machines => self.machines_panel_hover(pos),
             Overlay::NewFeature => return self.new_feature_hover(pos),

@@ -145,6 +145,8 @@ pub struct Hover {
 /// The popups and panels over the apps; none open is all `None`.
 #[derive(Default)]
 pub struct Overlays {
+    /// The screenshot viewer, while it is open (see `shot_viewer`).
+    pub shot_viewer: Option<crate::shot_viewer::ShotViewer>,
     /// The tasks panel, while it is open over the footer.
     pub tasks_panel: Option<tasks::TasksPanel>,
     /// The machines panel, while it is open (see `machines_panel`).

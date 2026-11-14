@@ -1104,8 +1104,6 @@ pub struct FeaturePanel {
     pub collapse_to: TabArea,
     /// The earlier AI reviews showing their findings, by run.
     pub rounds_open: BTreeSet<u32>,
-    /// Manual test's screenshots shown across the page, not small.
-    pub open_shots: BTreeSet<std::path::PathBuf>,
     /// The review cards the user opened (true) or folded: they stay so,
     /// selected or not. The rest show as their decision has them.
     pub(crate) cards_open: Vec<(CardId, bool)>,
@@ -1317,10 +1315,9 @@ pub enum PanelOutcome {
     Manual(crate::manual_test::Outcome),
     /// Open Manual test's criterion `.0` to its steps (true), or fold it.
     FoldCriterion(usize, bool),
-    /// Show Manual test's criterion `.0`'s screenshot `.1` across the page,
-    /// or small again; with no `.1`, all of its own (see
-    /// `Gerdr::flip_shots`).
-    FlipShots(usize, Option<usize>),
+    /// Show Manual test's criterion `.0`'s screenshot `.1` in the
+    /// screenshot viewer (see `shot_viewer`).
+    ShowShot(usize, usize),
     /// Open review card `.0` (true), or fold it to its line.
     FoldCard(usize, bool),
     /// Open the criteria `.0` names (true), or fold them.
@@ -1502,7 +1499,7 @@ impl PanelOutcome {
                 | Self::DraftChanges(..)
                 | Self::OpenRoundPlan(_)
                 | Self::FoldCriterion(..)
-                | Self::FlipShots(..)
+                | Self::ShowShot(..)
                 | Self::FoldCard(..)
                 | Self::FoldCriteria(..)
                 | Self::NoteDiscard

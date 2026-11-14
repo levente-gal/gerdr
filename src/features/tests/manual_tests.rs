@@ -136,7 +136,7 @@ fn a_comment_is_done_or_not_and_its_keys_edit_and_delete_it() {
     assert_eq!(done[2].1, ButtonStyle::Passed);
     // Its card: its lines as its steps, "open" until it goes to Build.
     let row = comment(Some(Verdict::Fail));
-    let card = criterion_card(2, &row, &[], true, &Default::default());
+    let card = criterion_card(2, &row, &[], true);
     assert_eq!(card.state, "open");
     assert_eq!(
         card.sheet.as_ref().unwrap().steps,
@@ -151,7 +151,7 @@ fn a_comment_is_done_or_not_and_its_keys_edit_and_delete_it() {
         ..row
     };
     assert_eq!(
-        criterion_card(2, &made, &[], true, &Default::default()).state,
+        criterion_card(2, &made, &[], true).state,
         "fix made: look again"
     );
     // Its keys: two criteria and the comment, open and not sent.
@@ -684,7 +684,7 @@ fn manual_test_goes_on_while_its_fixes_are_made() {
     };
     assert!(criterion_details(&changed).ends_with("Changed by fix round 3: try it again"));
     assert_eq!(
-        criterion_card(0, &changed, &[], true, &Default::default()).state,
+        criterion_card(0, &changed, &[], true).state,
         "changed by fix round 3: try again"
     );
     // Fixes landed that Verify hasn't run on: the page says marking it

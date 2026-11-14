@@ -775,38 +775,6 @@ impl Gerdr {
         self.select_criterion(i);
     }
 
-    /// Show screenshot `n` of criterion `i` of the feature on the tab across
-    /// the page, or small again; with no `n`, all of the criterion's: across
-    /// while one is small, its row opened to show them.
-    pub(crate) fn flip_shots(&mut self, i: usize, n: Option<usize>) {
-        let Some(row) =
-            (self.features.panel_feature()).and_then(|f| self.criterion_rows(f).into_iter().nth(i))
-        else {
-            return;
-        };
-        let shots: Vec<_> = match n {
-            Some(n) => row.shots.get(n).cloned().into_iter().collect(),
-            None => row.shots,
-        };
-        if shots.is_empty() {
-            return self.show_warning(format!("{} has no screenshots", row.id));
-        }
-        let Some(panel) = self.features.panel.as_mut() else {
-            return;
-        };
-        let across = shots.iter().any(|s| !panel.open_shots.contains(s));
-        for shot in shots {
-            match across {
-                true => panel.open_shots.insert(shot),
-                false => panel.open_shots.remove(&shot),
-            };
-        }
-        match across && !row.open {
-            true => self.fold_criterion(i, true),
-            false => self.select_criterion(i),
-        }
-    }
-
     /// Open or fold the criteria `scope` names of the feature on the tab.
     pub(crate) fn fold_criteria(&mut self, scope: manual::FoldScope, open: bool) {
         let Some((project, slug)) = self.features.tab_feature_names() else {

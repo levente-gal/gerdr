@@ -1226,15 +1226,12 @@ pub struct SheetRow {
     pub shots: Vec<SheetShot>,
 }
 
-/// A screenshot on a criterion's row: small, or across the page once
-/// clicked.
+/// A screenshot on a criterion's row, small: a press shows it full screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SheetShot {
     pub path: std::path::PathBuf,
     /// Its width and height in pixels; `None` when its file can't be read.
     pub size: Option<(u32, u32)>,
-    /// It shows across the page.
-    pub open: bool,
 }
 
 /// A place in the text of the feature tab's page: which of its lines
@@ -3755,14 +3752,14 @@ impl Stack {
         frame
     }
 
-    /// The screenshots of sheet row `k` from `x` to `right`: the small ones
-    /// side by side, wrapping, and an open one across on a line of its own.
+    /// The screenshots of sheet row `k` from `x` to `right`, side by side,
+    /// wrapping.
     fn sheet_shots(&mut self, k: usize, shots: &[SheetShot], x: i32, right: i32) {
         let room = (right - x).max(1);
         let (mut at, mut line) = (x, 0);
         for (n, shot) in shots.iter().enumerate() {
             let (w, h) = shot_box(shot, room);
-            if at > x && (shot.open || at + w > right) {
+            if at > x && at + w > right {
                 self.y += line + SHOT_GAP;
                 (at, line) = (x, 0);
             }
@@ -3785,11 +3782,7 @@ impl Stack {
                 ));
             }
             line = line.max(h);
-            at = match shot.open {
-                // Nothing else on its line.
-                true => right,
-                false => at + w + SHOT_GAP,
-            };
+            at += w + SHOT_GAP;
         }
         self.y += line;
     }
@@ -5988,21 +5981,18 @@ pub(super) struct PageBand {
     pub(super) pieces: Vec<usize>,
 }
 
-/// How big screenshot `shot` shows in `room` wide: small, at most
-/// `SHOT_HEIGHT` tall and `SHOT_MAX_WIDTH` wide; open, across `room` but no
-/// wider than it is. One whose file can't be read is a small 16:9 box.
+/// How big screenshot `shot` shows in `room` wide: at most `SHOT_HEIGHT`
+/// tall and `SHOT_MAX_WIDTH` wide. One whose file can't be read is a 16:9
+/// box.
 fn shot_box(shot: &SheetShot, room: i32) -> (i32, i32) {
     let (w, h) = (shot.size)
         .filter(|(w, h)| *w > 0 && *h > 0)
         .map_or((16.0, 9.0), |(w, h)| (w as f64, h as f64));
     let room = room.max(1) as f64;
-    let width = match shot.open && shot.size.is_some() {
-        true => room.min(w),
-        false => (SHOT_HEIGHT as f64 * w / h)
-            .min(SHOT_MAX_WIDTH as f64)
-            .min(room),
-    };
-    let width = width.max(1.0);
+    let width = (SHOT_HEIGHT as f64 * w / h)
+        .min(SHOT_MAX_WIDTH as f64)
+        .min(room)
+        .max(1.0);
     (
         width.round() as i32,
         (width * h / w).round().max(1.0) as i32,
