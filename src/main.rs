@@ -63,6 +63,7 @@ mod ship_after;
 mod ship_undo;
 mod ship_update;
 mod shot_images;
+mod shot_viewer;
 mod features;
 mod file_tree;
 mod find;
@@ -6556,6 +6557,7 @@ impl Gerdr {
                 .then(|| self.shown_help()),
             welcome: self.welcome_view(),
             quit: self.quit_view(),
+            shot_viewer: self.shot_viewer_view(),
             restart: self.restart_view(),
             checkout: self.checkout_view(),
             confirm: self
@@ -7253,6 +7255,7 @@ fn new_gerdr(
             pane_bar: None,
         },
         overlays: state::Overlays {
+            shot_viewer: None,
             tasks_panel: None,
             machines_panel: None,
             rename: None,

@@ -863,6 +863,7 @@ impl Gerdr {
             O::Restart => _ = self.restart_click(pos),
             O::Checkout => _ = self.checkout_click(pos),
             O::Confirm => _ = self.confirm_click(pos),
+            O::ShotViewer => self.shot_viewer_click(pos),
             O::Tasks => self.tasks_click(pos),
             O::Machines => self.machines_panel_click(pos),
             O::NewFeature => self.new_feature_click(pos),
@@ -930,6 +931,7 @@ impl Gerdr {
             O::Restart => self.restart_controls().iter().any(on),
             O::Checkout => self.checkout_controls().iter().any(on),
             O::Confirm => self.confirm_controls().iter().any(on),
+            O::ShotViewer => self.shot_viewer_controls().iter().any(on),
             O::Tasks => self.tasks_controls().iter().any(on),
             O::Machines => self.machines_panel_controls().iter().any(on),
             O::NewFeature => self.new_feature_controls().iter().any(on),
@@ -1014,6 +1016,10 @@ impl Gerdr {
             O::Restart => self.restart_key(mods, sym).map(Intercepted::Restart),
             O::Checkout => self.checkout_key(mods, sym).map(Intercepted::Checkout),
             O::Confirm => (self.overlays.confirm.as_mut()?.key(sym)).map(Intercepted::Confirm),
+            O::ShotViewer => {
+                self.shot_viewer_key(mods, sym);
+                None
+            }
             _ => None,
         }
     }
