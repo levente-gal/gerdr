@@ -42,6 +42,8 @@ pub(crate) enum Row {
     Clean,
     /// The heading over a feature's worktrees, by its first one's index.
     Group(usize),
+    /// The heading over the shipped features, after the clean ones.
+    Shipped,
 }
 
 impl Row {
@@ -49,14 +51,14 @@ impl Row {
     pub(crate) fn item(self) -> Option<usize> {
         match self {
             Row::Repo(k) | Row::Dir { k, .. } | Row::File(k, ..) => Some(k),
-            Row::Clean | Row::Group(_) => None,
+            Row::Clean | Row::Group(_) | Row::Shipped => None,
         }
     }
 
     /// How many folders in it is; a repository is none.
     pub(crate) fn depth(self) -> usize {
         match self {
-            Row::Repo(_) | Row::Clean | Row::Group(_) => 0,
+            Row::Repo(_) | Row::Clean | Row::Group(_) | Row::Shipped => 0,
             Row::Dir { depth, .. } | Row::File(.., depth) => depth,
         }
     }
@@ -402,7 +404,7 @@ impl FileTree {
             Row::Repo(_) => Selected::Repo(root),
             Row::Dir { .. } => Selected::Dir(root, dir_path(row, section.changes)?.to_owned()),
             Row::File(_, c, _) => Selected::File(root, section.changes.get(c)?.path.clone()),
-            Row::Clean | Row::Group(_) => return None,
+            Row::Clean | Row::Group(_) | Row::Shipped => return None,
         })
     }
 
@@ -418,7 +420,7 @@ impl FileTree {
             Selected::Repo(root) => Place::Section(root),
             Selected::Dir(root, dir) => Place::Dir(root, dir),
             Selected::File(root, path) => Place::File(root, path),
-            Selected::Clean | Selected::Group(_) => return None,
+            Selected::Clean | Selected::Group(_) | Selected::Shipped => return None,
         })
     }
 
@@ -551,7 +553,7 @@ impl FileTree {
                     .collect()
             }
             Row::File(_, c, _) => vec![section.changes.get(c)?.path.clone()],
-            Row::Clean | Row::Group(_) => return None,
+            Row::Clean | Row::Group(_) | Row::Shipped => return None,
         };
         Some((section.root.to_path_buf(), paths))
     }
@@ -664,7 +666,7 @@ impl FileTree {
                     (Some(_), Some(at)) => {
                         let depth = rows[at].depth();
                         let up = rows[..at].iter().rposition(|r| match r {
-                            Row::Repo(_) | Row::Clean | Row::Group(_) => true,
+                            Row::Repo(_) | Row::Clean | Row::Group(_) | Row::Shipped => true,
                             Row::Dir { depth: d, .. } => *d < depth,
                             Row::File(..) => false,
                         });

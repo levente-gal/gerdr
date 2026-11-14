@@ -432,6 +432,8 @@ pub struct CleanLine {
     /// Its repositories show.
     pub open: bool,
     pub count: usize,
+    /// It is the heading over the shipped features, `Shipped · 2`.
+    pub shipped: bool,
 }
 
 /// A repository's line.
@@ -3640,7 +3642,10 @@ impl Painter {
                     });
                 }
                 let label_x = px(check.loc.x + REPOS_CHECK + REPOS_EXPANDER) as f32;
-                let label = format!("Clean · {}", clean.count);
+                let label = match clean.shipped {
+                    true => format!("Shipped · {}", clean.count),
+                    false => format!("Clean · {}", clean.count),
+                };
                 self.mixed_text(
                     c,
                     &label,
@@ -6125,6 +6130,7 @@ mod tests {
             TreeLine::Clean(CleanLine {
                 open: true,
                 count: 1,
+                shipped: false,
             }),
             TreeLine::Repo(repo("docs", Some("main"))),
         ];
@@ -6530,6 +6536,12 @@ mod tests {
             TreeLine::Clean(CleanLine {
                 open: false,
                 count: 4,
+                shipped: false,
+            }),
+            TreeLine::Clean(CleanLine {
+                open: false,
+                count: 2,
+                shipped: true,
             }),
         ]);
         view.selected = Some(4);
