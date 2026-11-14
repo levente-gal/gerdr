@@ -631,6 +631,7 @@ pub fn repo_dirs<'a>(
             workspace: w,
             feature_branch: None,
             group: None,
+            shipped: false,
         })
         .collect();
     for (w, ws) in workspaces.iter().enumerate() {
@@ -644,6 +645,7 @@ pub fn repo_dirs<'a>(
                 workspace: w,
                 feature_branch: repo.branch.clone(),
                 group: Some(ws.name.clone()),
+                shipped: feature.status == crate::feature::Status::Done,
             });
         }
     }
@@ -678,6 +680,7 @@ impl crate::state::GitWatch {
                 workspace: d.workspace,
                 feature_branch: d.feature_branch.clone(),
                 group: d.group.clone(),
+                shipped: d.shipped,
                 status: status.clone(),
             });
         }
@@ -1741,6 +1744,10 @@ impl Gerdr {
             ReposHit::Expander(i) => {
                 let rect = layout.lines.get(i)?.2?;
                 let text = match view.lines.get(i)? {
+                    TreeLine::Clean(clean) if clean.shipped && clean.open => {
+                        "Hide the shipped features"
+                    }
+                    TreeLine::Clean(clean) if clean.shipped => "Show the shipped features",
                     TreeLine::Clean(clean) if clean.open => {
                         "Hide the repositories with nothing to do"
                     }

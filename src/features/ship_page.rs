@@ -638,7 +638,7 @@ fn ship_step_row(
             tone: CheckTone::Blocker,
         }),
         (None, ShipStep::Merge) => Some(CheckLine {
-            text: "Squash; you edit the message in a tab".to_owned(),
+            text: "Squash; you edit its message when you ship".to_owned(),
             tone: CheckTone::Note,
         }),
         _ => None,

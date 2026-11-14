@@ -433,18 +433,19 @@ impl Gerdr {
             project,
             slug,
             squash,
+            message,
         });
     }
 
     /// The squash of feature `slug` (`squash`, its Squash steps) ran: all
     /// of it, and it is done once its branches read as merged, which the
     /// next read finds; or it stopped at a repository, those squashed
-    /// before kept as done.
+    /// before kept as done, and `message` kept as the next try's draft.
     pub(super) fn feature_squashed(
         &mut self,
         project: &str,
         slug: &str,
-        squash: &[Action],
+        (squash, message): (&[Action], String),
         done: ship::Squashed,
     ) {
         let Some(feature) = self.feature_mut(project, slug) else {
@@ -482,6 +483,7 @@ impl Gerdr {
         let text = format!("Couldn't squash \u{201c}{title}\u{201d} into the base of {key}: {why}");
         feature.log(now, text.clone());
         self.save_feature(project, slug);
+        self.keep_squash_draft(project, slug, "", message);
         tracing::warn!("shipping feature {project}/{slug}: {text}");
         self.show_error(text);
         self.probe_feature(project, slug);

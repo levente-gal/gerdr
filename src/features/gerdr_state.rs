@@ -762,10 +762,11 @@ impl Gerdr {
                 project,
                 slug,
                 squash,
+                message,
                 done,
             } => {
                 self.unbusy(&project, &slug, Job::Ship);
-                self.feature_squashed(&project, &slug, &squash, done);
+                self.feature_squashed(&project, &slug, (&squash, message), done);
             }
             Done::ConflictsBegun {
                 project,
