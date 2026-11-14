@@ -9,8 +9,8 @@
 //! diff view (see `worktree_diff`); Esc there comes back. Ctrl+S checks
 //! its branch out in the main worktree (switches main to it), Ctrl+Shift+S
 //! squashes it into main, asking for the commit message first (git runs
-//! off the event loop; a squash that conflicts is undone), Delete deletes it (twice when that loses changes or
-//! commits), Shift+Delete deletes the repository's merged ones, Ctrl+O
+//! off the event loop; a squash that conflicts is undone), Delete deletes
+//! it (twice when that loses changes or commits), Shift+Delete deletes the repository's merged ones, Ctrl+O
 //! opens a tab in it (Zed over a terminal), Ctrl+C copies its path,
 //! Ctrl+R reads Git again, Esc clears the filter, then closes.
 
