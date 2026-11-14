@@ -2,7 +2,7 @@
 //! dir from the brief, the plan and the diff, once Ship is reached or when
 //! the user asks again. Ship's recap shows it, its pull requests take it as
 //! their body and its squash as its message (`ship::pr_body`,
-//! `ship::squash_command`).
+//! `ship::squash_message`).
 
 use std::path::Path;
 

@@ -36,7 +36,8 @@ pub struct FindingFieldView {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FindingDialogView {
     pub title: String,
-    /// What it is about: the finding's title.
+    /// What it is about: the finding's title; for a squash's message, what
+    /// else it does, a line each (the Ship sheet's steps).
     pub about: String,
     pub fields: Vec<FindingFieldView>,
     /// The field with the keyboard.
@@ -87,10 +88,11 @@ pub fn finding_dialog_layout(
         Some(_) => QUIT_BODY + QUIT_LINE_GAP,
         None => 0,
     };
+    let about_h = QUIT_BODY * super::confirm_body_lines(&view.about) as i32;
     let height = 2 * QUIT_PADDING
         + QUIT_TITLE
         + QUIT_LINE_GAP
-        + QUIT_BODY
+        + about_h
         + QUIT_LINE_GAP
         + fields_h
         + error_h
@@ -112,7 +114,7 @@ pub fn finding_dialog_layout(
         rect
     };
     let title = next(QUIT_TITLE);
-    let about = next(QUIT_BODY);
+    let about = next(about_h);
     let mut labels = Vec::new();
     let mut fields = Vec::new();
     for f in &view.fields {
@@ -409,7 +411,12 @@ impl Painter {
             self.text(c, text, size, x, end, band(rect, scale), scale, color)
         };
         line(&mut c, &view.title, layout.title, LABEL_FONT_SIZE, p.text);
-        line(&mut c, &view.about, layout.about, FONT_SIZE, p.muted);
+        for (i, text) in view.about.lines().enumerate() {
+            let about = layout.about;
+            let at = (about.loc.x, about.loc.y + i as i32 * QUIT_BODY);
+            let rect = Rectangle::new(at.into(), (about.size.w, QUIT_BODY).into());
+            line(&mut c, text, rect, FONT_SIZE, p.muted);
+        }
         for (i, field) in view.fields.iter().enumerate() {
             line(&mut c, field.label, layout.labels[i], FONT_SIZE, p.muted);
             let focused = view.focus == i;
@@ -483,6 +490,18 @@ mod tests {
             hover: None,
             keys: Vec::new(),
         }
+    }
+
+    #[test]
+    fn an_about_of_several_lines_makes_the_dialog_taller() {
+        let size = (1920, 1080).into();
+        let one = finding_dialog_layout(&view(&[4], false), size);
+        let mut three = view(&[4], false);
+        three.about = "From feature/x:\nSquash into main\nPush main".into();
+        let three = finding_dialog_layout(&three, size);
+        assert_eq!(three.about.size.h, 3 * one.about.size.h);
+        assert_eq!(three.panel.size.h - one.panel.size.h, 2 * QUIT_BODY);
+        assert!(three.labels[0].loc.y >= three.about.loc.y + three.about.size.h);
     }
 
     #[test]

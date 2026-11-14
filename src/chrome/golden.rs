@@ -8896,3 +8896,79 @@ fn a_comments_screenshots_sit_small_under_it_and_a_click_on_one_is_its_hit() {
     assert_eq!((open[0].size.w, open[0].size.h), (320, 180));
     assert!(open[1].loc.y >= open[0].loc.y + open[0].size.h);
 }
+
+/// The Ship sheet of a feature that squashes: its steps, then its commit
+/// message, filled with the title and the summary, the caret at its end.
+fn ship_squash_dialog() -> super::FindingDialogView {
+    let text = "Faster sidebar\n\nThe sidebar reads Git once per change, not per frame.";
+    let mut line = crate::text_field::Line {
+        text: text.into(),
+        ..Default::default()
+    };
+    (line.caret, line.anchor) = (text.len(), text.len());
+    super::FindingDialogView {
+        title: "Ship \u{201c}Faster sidebar\u{201d}?".into(),
+        about: "From feature/faster-sidebar:\nSquash into main\nPush main".into(),
+        fields: vec![super::FindingFieldView {
+            label: "Commit message",
+            line,
+            placeholder: "What the commit says",
+            rows: 6,
+        }],
+        focus: 0,
+        action: "Ship",
+        cancel: "Cancel",
+        error: None,
+        hover: None,
+        keys: vec![("Shift+Enter", "new line"), ("Esc", "close")],
+    }
+}
+
+const SHIP_SQUASH: [&str; 1] = ["ship_squash_dialog"];
+
+/// The recorded hashes of `SHIP_SQUASH`, per case in `CASES`.
+const GOLDEN_SHIP_SQUASH: [[u64; 1]; 4] = [
+    [0x0aa9df8f116e5fa8], // Dark at 1
+    [0xa8f8468613d2d8e3], // Dark at 2
+    [0x59756989ec401a22], // Light at 1
+    [0x553640296b3b95a2], // Light at 2
+];
+
+/// The Ship sheet with its message field, and how wide it is.
+fn ship_squash_surface(painter: &Painter, theme: Theme, scale: f64) -> (MemoryRenderBuffer, i32) {
+    let size = IDENTITY_OUTPUT.into();
+    let shown = ship_squash_dialog();
+    let panel = super::finding_dialog_layout(&shown, size).panel;
+    (
+        painter.finding_dialog(&shown, size, scale, theme.palette()),
+        panel.size.w + 2 * super::SHADOW,
+    )
+}
+
+#[test]
+fn the_ship_sheet_with_a_message_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_SHIP_SQUASH
+        .iter()
+        .map(|row| row.as_slice())
+        .collect();
+    check_each(&SHIP_SQUASH, &golden, |painter, theme, scale, _| {
+        hash(ship_squash_surface(painter, theme, scale).0)
+    });
+}
+
+/// With `GERDR_DUMP_DIR` set, write the Ship sheet with its message there.
+#[test]
+fn dump_ship_squash() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    for (theme, scale) in CASES {
+        let (buffer, w) = ship_squash_surface(&painter, theme, scale);
+        let px = (w as f64 * scale).round() as usize;
+        let name = format!("{}_{}_{}", SHIP_SQUASH[0], theme.name(), scale);
+        dump(&dir, &name, buffer, px);
+    }
+}

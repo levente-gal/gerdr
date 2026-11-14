@@ -437,7 +437,7 @@ fn finish_question(
 
 /// What the Ship sheet for feature `title` on `branch` says: its title,
 /// the branch once, and the steps shipping takes, a line each.
-fn ship_question(title: &str, branch: &str, steps: &[String]) -> (String, String) {
+pub(crate) fn ship_question(title: &str, branch: &str, steps: &[String]) -> (String, String) {
     // Said once: a step pushing it names it already.
     let from = (!steps.iter().any(|s| s.contains(branch))).then(|| format!("From {branch}:"));
     let body = from
@@ -847,7 +847,7 @@ impl Gerdr {
                 let how = crate::features::RepoRemoval { force, to_context };
                 self.remove_repos(&project, &slug, &keys, how)
             }
-            Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug),
+            Then::ShipFeature { project, slug } => self.ship_feature(&project, &slug, None),
             Then::SubmitReview {
                 project,
                 slug,

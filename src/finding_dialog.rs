@@ -5,6 +5,11 @@
 //! comment of theirs on no criterion. Esc closes it and keeps what was typed
 //! for the next opening on the same thing; nothing here loses anything, since
 //! a dismissed finding or rejected suggestion can be reopened.
+//!
+//! It also asks for a squash's commit message (`Ask::Squash`): the Ship
+//! sheet of a feature that squashes, with its steps above the field, and a
+//! worktree squashed from the worktrees popup. Git runs once it is sent,
+//! off the event loop: no editor opens.
 
 use std::collections::HashMap;
 
@@ -40,6 +45,17 @@ pub enum Ask {
     EditDiffNote,
     /// What a comment of the user's own on the manual test says.
     EditComment,
+    /// A squash's commit message: what it squashes is `FindingDialog::squash`.
+    Squash,
+}
+
+/// What a commit message is asked for (`Ask::Squash`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Squash {
+    /// Shipping the dialog's feature, its squash committed with it.
+    Ship,
+    /// Squashing worktree `path`'s branch into its main worktree.
+    Worktree { path: std::path::PathBuf },
 }
 
 /// What was typed and left: by project, slug, what was asked, and the item
@@ -72,6 +88,10 @@ pub struct FindingDialog {
     pub marks_fix: bool,
     /// The comment in the diff it edits (`Ask::EditDiffNote`).
     pub note: Option<crate::review::Comment>,
+    /// Its title, when it isn't about an item (`Ask::Squash`).
+    pub heading: Option<String>,
+    /// What the message is for (`Ask::Squash`).
+    pub squash: Option<Squash>,
 }
 
 /// A finding of the user's own, or a comment in the diff, with nothing typed.
@@ -146,6 +166,7 @@ impl FindingDialog {
             Ask::Add | Ask::EditOwn if empty => Some(w.say_what),
             Ask::EditDiffNote if empty => Some(FINDING_SAY_WHAT),
             Ask::EditComment if empty => Some("Say what should change."),
+            Ask::Squash if empty => Some("Type a commit message first."),
             _ => None,
         }
     }
@@ -241,6 +262,14 @@ impl FindingDialog {
                 format!("Edit comment {id}"),
                 [("Comment", "What should change", 6)],
                 "Save",
+            ),
+            Ask::Squash => (
+                self.heading.clone().unwrap_or_default(),
+                [("Commit message", "What the commit says", 6)],
+                match self.squash {
+                    Some(Squash::Ship) => "Ship",
+                    _ => "Squash",
+                },
             ),
         };
         let fields = (self.fields.iter().zip(&labels))
@@ -352,6 +381,8 @@ impl Gerdr {
             hover: None,
             marks_fix,
             note: None,
+            heading: None,
+            squash: None,
         });
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
@@ -561,6 +592,30 @@ impl Gerdr {
         self.open_finding_dialog(project, slug, Ask::Add, of, "", about, from, false);
     }
 
+    /// Ask for the commit message of a squash, `squash`, under `heading`
+    /// and `about` (what else it does, a line each), filled with `message`
+    /// or what was last left typed for it. Drafts are kept by `project`,
+    /// `slug` and `id`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ask_squash_message(
+        &mut self,
+        project: &str,
+        slug: &str,
+        id: &str,
+        heading: String,
+        about: String,
+        message: String,
+        squash: Squash,
+    ) {
+        let of = ItemOf::Finding;
+        let from = vec![message];
+        self.open_finding_dialog(project, slug, Ask::Squash, of, id, about, from, false);
+        if let Some(dialog) = self.features.finding_dialog.as_mut() {
+            dialog.heading = Some(heading);
+            dialog.squash = Some(squash);
+        }
+    }
+
     /// A key while the dialog has the keyboard.
     pub fn finding_dialog_key(
         &mut self,
@@ -641,6 +696,15 @@ impl Gerdr {
                 true
             }
             (Ask::EditComment, _) => self.edit_manual_comment(project, slug, id, first),
+            (Ask::Squash, _) => {
+                let msg = first.trim();
+                match &dialog.squash {
+                    Some(Squash::Ship) => self.ship_feature(project, slug, Some(msg)),
+                    Some(Squash::Worktree { path }) => self.squash_worktree(path, msg),
+                    None => {}
+                }
+                true
+            }
         };
         // Not taken: what was typed waits for the next opening.
         if !kept {
@@ -790,6 +854,8 @@ mod tests {
             hover: None,
             marks_fix: true,
             note: None,
+            heading: None,
+            squash: None,
         }
     }
 
@@ -868,6 +934,35 @@ mod tests {
             of: ItemOf::Suggestion,
             ..dialog(ask, from)
         }
+    }
+
+    #[test]
+    fn a_squash_asks_for_its_commit_message_under_the_ship_steps() {
+        let mut d = dialog(Ask::Squash, &["Title\n\nSummary"]);
+        d.heading = Some("Ship \u{201c}T\u{201d}?".into());
+        d.about = "Squash into main\nPush main".into();
+        d.squash = Some(Squash::Ship);
+        let view = d.view();
+        assert_eq!(view.title, "Ship \u{201c}T\u{201d}?");
+        assert_eq!((view.action, view.cancel), ("Ship", "Cancel"));
+        assert_eq!(view.fields[0].label, "Commit message");
+        // Shift+Enter breaks the line; Enter ships.
+        let shift = ModifiersState {
+            shift: true,
+            ..none()
+        };
+        assert_eq!(press(&mut d, &shift, Keysym::Return), None);
+        assert_eq!(d.texts(), ["Title\n\nSummary\n"]);
+        assert_eq!(
+            press(&mut d, &none(), Keysym::Return),
+            Some(FindingDialogOutcome::Save)
+        );
+        // Nothing to commit with: it says so instead.
+        let mut empty = dialog(Ask::Squash, &["  "]);
+        empty.squash = Some(Squash::Worktree { path: "/wt".into() });
+        assert_eq!(empty.view().action, "Squash");
+        assert_eq!(press(&mut empty, &none(), Keysym::Return), None);
+        assert_eq!(empty.error.as_deref(), Some("Type a commit message first."));
     }
 
     #[test]

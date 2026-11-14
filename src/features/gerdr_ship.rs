@@ -294,12 +294,14 @@ impl Gerdr {
 
     /// Ship feature `slug` of `project` as its last Ship check said, once
     /// the Ship sheet is confirmed: open its pull requests off the thread,
-    /// or start its squash in a tab.
-    pub fn ship_feature(&mut self, project: &str, slug: &str) {
+    /// then squash it, committed with `message` (its title and summary
+    /// without one).
+    pub fn ship_feature(&mut self, project: &str, slug: &str, message: Option<&str>) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
         let title = feature.title.clone();
+        let message = message.map_or_else(|| ship::squash_message(&feature), str::to_owned);
         let key = (project.to_owned(), slug.to_owned());
         let asked = self.features.asked.remove(&key).or_else(|| {
             let probe = self.features.probes.get(&key)?.last.as_ref();
@@ -363,6 +365,7 @@ impl Gerdr {
                 slug,
                 patch,
                 squash,
+                message,
                 pushed,
             }
         });
@@ -394,53 +397,94 @@ impl Gerdr {
         self.probe_feature(project, slug);
     }
 
-    /// Start the squash of feature `slug` (`squash`, its Squash steps) in a
-    /// tab: done once its branches read as merged.
-    fn start_squash(&mut self, project: &str, slug: &str, squash: &[Action]) {
-        let Some(feature) = self.feature(project, slug) else {
+    /// Squash feature `slug` (`squash`, its Squash steps) off the event
+    /// loop, committed with `message`: done once its branches read as
+    /// merged.
+    fn start_squash(&mut self, project: &str, slug: &str, (squash, message): (&[Action], &str)) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
         let title = feature.title.clone();
         let check = self.last_probe(project, slug).and_then(|p| p.ship.as_ref());
-        let (dir, command) = ship::squash_command(feature, squash, check);
-        if command.trim().is_empty() {
-            tracing::warn!("shipping feature {project}/{slug}: no squash command");
+        let trees = ship::squash_trees(&feature, squash, check);
+        if trees.is_empty() {
+            tracing::warn!("shipping feature {project}/{slug}: nothing to squash into");
             return self.show_error(format!(
-                "Couldn't ship \u{201c}{title}\u{201d}: no squash command for it"
+                "Couldn't ship \u{201c}{title}\u{201d}: none of its repositories is there to squash into"
             ));
         }
-        if !dir.exists() {
+        if let Some((_, dir)) = trees.iter().find(|(_, dir)| !dir.exists()) {
             return self.show_error(format!(
                 "Couldn't ship \u{201c}{title}\u{201d}: {} is gone",
-                short_folder(&dir)
+                short_folder(dir)
             ));
         }
-        // In its own workspace; another project's feature can't open one.
-        if (self.in_feature_workspace(project, slug, |gerdr, w| {
-            gerdr.new_tab_in(w, &dir, Some(command))
-        }))
-        .is_none()
-        {
+        let busy = Busy {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            job: Job::Ship,
+            repo: None,
+            what: format!("Squashing \u{201c}{title}\u{201d}"),
+        };
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        let (squash, message) = (squash.to_vec(), message.to_owned());
+        self.feature_work(Some(busy), move |_| Done::Squashed {
+            done: ship::squash(&feature, &trees, &message),
+            project,
+            slug,
+            squash,
+        });
+    }
+
+    /// The squash of feature `slug` (`squash`, its Squash steps) ran: all
+    /// of it, and it is done once its branches read as merged, which the
+    /// next read finds; or it stopped at a repository, those squashed
+    /// before kept as done.
+    pub(super) fn feature_squashed(
+        &mut self,
+        project: &str,
+        slug: &str,
+        squash: &[Action],
+        done: ship::Squashed,
+    ) {
+        let Some(feature) = self.feature_mut(project, slug) else {
             return;
+        };
+        let title = feature.title.clone();
+        let now = feature::now();
+        for (key, _) in &done.went {
+            feature.log(now, format!("Squashed into the base of {key}"));
         }
-        if let Some(feature) = self.feature_mut(project, slug) {
-            let now = feature::now();
+        let Some((key, why)) = done.failed else {
             feature.shipping.squash_at = Some(now);
-            feature.shipping.squash_repos = (squash.iter())
-                .filter_map(|a| match a {
-                    Action::Squash { repo, .. } => Some(repo.clone()),
-                    _ => None,
-                })
-                .collect();
+            feature.shipping.squash_repos = done.went.into_iter().map(|(key, _)| key).collect();
             feature.shipping.push_base = (squash.iter())
                 .filter_map(|a| match a {
                     Action::PushBase { repo, .. } => Some(repo.clone()),
                     _ => None,
                 })
                 .collect();
-            feature.log(now, "Squash started");
+            self.save_feature(project, slug);
+            return self.probe_feature(project, slug);
+        };
+        // Those squashed stay so: shipping again pushes their bases, if
+        // ticked, and squashes the rest.
+        for (repo, sha) in done.went {
+            feature.ship_ran(feature::ShipDone {
+                at: now,
+                repo,
+                step: ShipStep::Merge,
+                sha: Some(sha),
+                url: None,
+                undone: None,
+            });
         }
+        let text = format!("Couldn't squash \u{201c}{title}\u{201d} into the base of {key}: {why}");
+        feature.log(now, text.clone());
         self.save_feature(project, slug);
+        tracing::warn!("shipping feature {project}/{slug}: {text}");
+        self.show_error(text);
+        self.probe_feature(project, slug);
     }
 
     pub(crate) fn last_probe(&self, project: &str, slug: &str) -> Option<&Probe> {
@@ -522,8 +566,22 @@ impl Gerdr {
                 let removing = check.is_some_and(|c| ship::removable(&feature, c));
                 let running = self.ending_running(project, slug);
                 steps.extend(ship_after_line(&feature, removing, &running));
+                let squashes = (asked.actions.iter()).any(|a| matches!(a, Action::Squash { .. }));
                 self.features.asked.insert(key, asked);
-                self.ask_ship(project.to_owned(), slug.to_owned(), &title, &branch, &steps);
+                if !squashes {
+                    return self.ask_ship(
+                        project.to_owned(),
+                        slug.to_owned(),
+                        &title,
+                        &branch,
+                        &steps,
+                    );
+                }
+                // Its commit message is asked with it: git takes it from there.
+                let (heading, about) = crate::confirm::ship_question(&title, &branch, &steps);
+                let message = ship::squash_message(&feature);
+                let ship = crate::finding_dialog::Squash::Ship;
+                self.ask_squash_message(project, slug, "", heading, about, message, ship);
             }
         }
     }
@@ -537,7 +595,7 @@ impl Gerdr {
         project: &str,
         slug: &str,
         patch: Option<&str>,
-        squash: &[Action],
+        squash: (&[Action], &str),
         pushed: Vec<String>,
         ran: Vec<feature::ShipDone>,
         result: Result<Vec<Pr>, (String, Vec<Pr>)>,
@@ -555,7 +613,7 @@ impl Gerdr {
             .filter(|d| d.step == ShipStep::PushBase)
             .map(|d| d.repo.clone())
             .collect();
-        if result.is_ok() && !squash.is_empty() {
+        if result.is_ok() && !squash.0.is_empty() {
             self.start_squash(project, slug, squash);
         }
         let Some(feature) = self.feature_mut(project, slug) else {
@@ -612,7 +670,7 @@ impl Gerdr {
             }
         }
         feature.log(now, text.clone());
-        let done = squash.is_empty()
+        let done = squash.0.is_empty()
             && feature.status == Status::Open
             && feature.current() == Some(Stage::Ship);
         if done {

@@ -8,8 +8,8 @@
 //! worktree's branch in place of the popup, in the repositories panel's
 //! diff view (see `worktree_diff`); Esc there comes back. Ctrl+S checks
 //! its branch out in the main worktree (switches main to it), Ctrl+Shift+S
-//! squashes it into main (in a tab, for the commit message and any
-//! conflicts), Delete deletes it (twice when that loses changes or
+//! squashes it into main, asking for the commit message first (git runs
+//! off the event loop; a squash that conflicts is undone), Delete deletes it (twice when that loses changes or
 //! commits), Shift+Delete deletes the repository's merged ones, Ctrl+O
 //! opens a tab in it (Zed over a terminal), Ctrl+C copies its path,
 //! Ctrl+R reads Git again, Esc clears the filter, then closes.
@@ -52,7 +52,7 @@ pub struct Worktrees {
     /// The worktrees being deleted or checked out, by path, with what
     /// their rows say meanwhile.
     busy: HashMap<PathBuf, &'static str>,
-    /// The worktrees squashed in a tab, by path, until they read as merged.
+    /// The worktrees squashed, by path, until they read as merged.
     merging: HashSet<PathBuf>,
     /// Hands the deletes' and checkouts' results to the event loop.
     done: Option<channel::Sender<Done>>,
@@ -312,6 +312,13 @@ enum Done {
         said: String,
         result: Result<(), String>,
         brought: Result<usize, String>,
+    },
+    /// Squashing worktree `path`'s branch, called `name`, into `target`.
+    Squashed {
+        path: PathBuf,
+        name: String,
+        target: String,
+        result: Result<(), String>,
     },
 }
 
@@ -1044,7 +1051,7 @@ impl Worktrees {
         paths
     }
 
-    /// The worktrees squashed in a tab that read as merged among `items`
+    /// The worktrees squashed that read as merged among `items`
     /// now, by name and path: no longer waited for. Those still unmerged
     /// are waited for on; those gone are not.
     fn squashed(&mut self, items: &[Item]) -> Vec<(String, PathBuf)> {
@@ -1347,10 +1354,11 @@ impl Gerdr {
                     return;
                 };
                 self.close_worktrees();
-                self.worktrees.merging.insert(item.wt.path.clone());
-                let branch = crate::desktop::shell_quote(&branch);
-                let command = format!("git merge --squash {branch} && git commit");
-                self.new_tab_running(item.workspace, &item.main, command);
+                let heading = format!("Squash {branch} into {}?", item.target);
+                let about = "Its commits go in as one, on top of it".to_owned();
+                let id = item.wt.path.to_string_lossy().into_owned();
+                let squash = crate::finding_dialog::Squash::Worktree { path: item.wt.path };
+                self.ask_squash_message("", "", &id, heading, about, branch, squash);
             }
             Outcome::Delete { path, force } => {
                 if let Some(item) = find(&path) {
@@ -1574,6 +1582,12 @@ impl Gerdr {
                         result,
                         brought,
                     }) => state.worktree_checked_out(&path, said, result, brought),
+                    channel::Event::Msg(Done::Squashed {
+                        path,
+                        name,
+                        target,
+                        result,
+                    }) => state.worktree_squashed(path, &name, &target, result),
                     channel::Event::Closed => {}
                 });
             match inserted {
@@ -1600,6 +1614,69 @@ impl Gerdr {
         self.refresh_git();
     }
 
+    /// Squash worktree `path`'s branch into its main worktree off the event
+    /// loop, committed with `msg`; once it reads as merged, it is offered
+    /// for deleting.
+    pub(crate) fn squash_worktree(&mut self, path: &Path, msg: &str) {
+        let (_, items) = self
+            .git
+            .worktree_items(&self.workspaces, self.active_workspace, None);
+        let Some(item) = items.into_iter().find(|i| i.wt.path == path) else {
+            return self.toast("That worktree is gone".into(), Level::Warning);
+        };
+        let Some(branch) = item.wt.branch.clone() else {
+            return;
+        };
+        if self.worktrees.busy.contains_key(path) {
+            return;
+        }
+        let Some(tx) = self.done_sender() else {
+            return;
+        };
+        self.worktrees.busy.insert(path.to_owned(), "squashing…");
+        let msg = msg.to_owned();
+        std::thread::spawn(move || {
+            let result = {
+                let _turn = Turn::take(&item.common, "a worktree squash");
+                crate::git_ops::squash_commit(&item.main, &branch, &msg)
+            };
+            let result = result.map(|_| ()).map_err(|failed| match failed.failure {
+                crate::git_ops::Failure::Conflict(files) if !files.is_empty() => {
+                    format!("it conflicts in {}", files.join(", "))
+                }
+                _ => failed.why,
+            });
+            let _ = tx.send(Done::Squashed {
+                path: item.wt.path,
+                name: branch,
+                target: item.target,
+                result,
+            });
+        });
+    }
+
+    /// A worktree's squash ran: once merged, `worktrees_read` says so.
+    fn worktree_squashed(
+        &mut self,
+        path: PathBuf,
+        name: &str,
+        target: &str,
+        result: Result<(), String>,
+    ) {
+        self.worktrees.busy.remove(&path);
+        match result {
+            Ok(()) => {
+                self.worktrees.merging.insert(path);
+            }
+            Err(why) => {
+                tracing::warn!("squashing {name} into {target}: {why}");
+                let text = format!("Couldn't squash {name} into {target}: {why}");
+                self.toast(text, Level::Error);
+            }
+        }
+        self.refresh_git();
+    }
+
     /// Worktrees were deleted, or failed to be.
     fn worktrees_deleted(&mut self, deleted: Deleted) {
         let mut ui = ui!(self);
@@ -1609,7 +1686,7 @@ impl Gerdr {
         self.refresh_git();
     }
 
-    /// A Git status read came in: a worktree squashed in a tab that reads
+    /// A Git status read came in: a worktree squashed that reads
     /// as merged now is offered for deleting.
     pub fn worktrees_read(&mut self) {
         let (_, items) = self.popup_items();

@@ -12,13 +12,13 @@
 //!   request into its base with `gh pr create`, or keep the one open for the
 //!   branch already. With more than one, every body links the others
 //!   (`gh pr edit`).
-//! - squash (`squash_command`): a command for a tab that goes to each
-//!   repository's own main worktree in turn (a linked project's too) and
-//!   squashes the branch into the base and commits, the message
-//!   prefilled with the title, for the user to edit. When ticked,
-//!   `feature/<slug>` goes to origin first, as through origin. The feature is done
-//!   once every such branch reads as merged (`Probe::merged`), then those
-//!   ticked go to origin (`push_base`).
+//! - squash (`squash`): in each repository's own main worktree in turn (a
+//!   linked project's too), the branch squashed into the base and
+//!   committed, with the message the user edited in the Ship sheet
+//!   (`squash_message` fills it first). When ticked, `feature/<slug>` goes
+//!   to origin first, as through origin. The feature is done once every
+//!   such branch reads as merged (`Probe::merged`), then those ticked go to
+//!   origin (`push_base`).
 //! - nothing: it stays as it is. With no step ticked anywhere, the feature
 //!   finishes without shipping, once the user says so.
 //!
@@ -1604,49 +1604,78 @@ pub fn push_base(repo: &Repo) -> Result<String, String> {
     pushed.map(|_| head).map_err(|failed| failed.why)
 }
 
-/// The folder and the shell command of a squash ship of `feature`'s
-/// `actions`, for a tab: every `Squash` action's repository in turn, where
-/// `check` found its base checked out (`RepoCheck::tree`), else in its main
-/// worktree. No git runs here: it is called on the UI thread.
-pub fn squash_command(
+/// Where each `Squash` action of `actions` squashes, in order: its
+/// repository's key and the tree `check` found its base checked out in
+/// (`RepoCheck::tree`), else its main worktree. No git runs here: it is
+/// called on the UI thread.
+pub fn squash_trees(
     feature: &Feature,
     actions: &[Action],
     check: Option<&ShipCheck>,
-) -> (PathBuf, String) {
-    let branch = feature.branch();
+) -> Vec<(String, PathBuf)> {
     let tree = |key: &str| {
         (check.into_iter().flat_map(|c| &c.repos))
             .find(|r| r.key == key)
             .map(|r| r.tree.clone())
     };
-    let mains: Vec<PathBuf> = actions
-        .iter()
+    (actions.iter())
         .filter_map(|a| match a {
             Action::Squash { repo, .. } => {
-                tree(repo).or_else(|| feature.repo(repo).map(|r| r.main.clone()))
+                let dir = tree(repo).or_else(|| feature.repo(repo).map(|r| r.main.clone()))?;
+                Some((repo.clone(), dir))
             }
             _ => None,
         })
-        .collect();
-    let Some(first) = mains.first() else {
-        return (feature.root.clone(), String::new());
-    };
-    // The summary, if written, is the message's body, to edit with the rest.
-    let quote = crate::desktop::shell_quote;
-    let body = summary_text(feature).map_or(String::new(), |text| format!(" -m {}", quote(&text)));
-    let command = mains
-        .iter()
-        .map(|main| {
-            format!(
-                "cd {} && git merge --squash {} && git commit -e -m {}{body}",
-                quote(&main.to_string_lossy()),
-                quote(&branch),
-                quote(&feature.title)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" && ");
-    (first.clone(), command)
+        .collect()
+}
+
+/// The message `feature`'s squash starts with, for the user to edit: its
+/// title, then its summary, if written.
+pub fn squash_message(feature: &Feature) -> String {
+    match summary_text(feature) {
+        Some(summary) => format!("{}\n\n{summary}", feature.title),
+        None => feature.title.clone(),
+    }
+}
+
+/// What a squash of a feature did: each repository squashed, with its
+/// commit, and the one it stopped at, with why.
+#[derive(Debug, Default)]
+pub struct Squashed {
+    pub went: Vec<(String, String)>,
+    pub failed: Option<(String, String)>,
+}
+
+/// Squash `feature`'s branch into each of `trees` (`squash_trees`) in turn,
+/// committed with `msg`, one git at a time in each repository. It stops at
+/// the first that fails, left as it was (`git_ops::squash_commit`).
+pub fn squash(feature: &Feature, trees: &[(String, PathBuf)], msg: &str) -> Squashed {
+    let branch = feature.branch();
+    let mut out = Squashed::default();
+    for (key, dir) in trees {
+        let one = || -> Result<String, String> {
+            let common = git(
+                dir,
+                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            )?;
+            let _turn = git_ops::Turn::take(Path::new(common.trim()), "the squash");
+            git_ops::squash_commit(dir, &branch, msg).map_err(|failed| match failed.failure {
+                git_ops::Failure::Conflict(files) if !files.is_empty() => {
+                    format!("it conflicts in {}", files.join(", "))
+                }
+                _ => failed.why,
+            })?;
+            Ok(git(dir, &["rev-parse", "HEAD"])?.trim().to_owned())
+        };
+        match one() {
+            Ok(sha) => out.went.push((key.clone(), sha)),
+            Err(why) => {
+                out.failed = Some((key.clone(), why));
+                break;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1985,36 +2014,56 @@ esac
     }
 
     #[test]
-    fn a_squash_runs_in_a_tab_and_reads_as_merged_once_committed() {
+    fn a_squash_commits_with_the_message_and_reads_as_merged() {
         let t = Temp::new();
         let mut f = feature_over(&t, &["api", "web"], &[]);
         f.title = "Don't break".into();
         commit(&wt(&f, "api"), "x", "feature");
         mark_all(&mut f);
         let check = planned(&f, &Modes::default());
-        let (dir, command) = squash_command(&f, &check.actions, None);
+        let trees = squash_trees(&f, &check.actions, None);
         let main = f.repos[0].main.clone();
-        assert_eq!(dir, main);
-        assert_eq!(
-            command,
-            format!(
-                "cd {} && git merge --squash feature/f && git commit -e -m 'Don'\\''t break'",
-                crate::desktop::shell_quote(&main.to_string_lossy())
-            )
-        );
-        assert_eq!(
-            squash_command(&f, &[], None),
-            (f.root.clone(), String::new())
-        );
+        assert_eq!(trees, [("api".to_owned(), main.clone())]);
+        assert!(squash_trees(&f, &[], None).is_empty());
+        assert_eq!(squash_message(&f), "Don't break");
 
         f.shipping.squash_at = Some(5);
         assert!(!probe(&f, &Modes::default()).merged);
-        run(&main, &["merge", "-q", "--squash", "feature/f"]);
-        run(&main, &["commit", "-q", "-m", "Don't break"]);
+        let done = squash(&f, &trees, "Don't break\n\nWhy");
+        assert!(done.failed.is_none(), "{:?}", done.failed);
+        let head = run(&main, &["rev-parse", "HEAD"]);
+        assert_eq!(done.went, [("api".to_owned(), head.trim().to_owned())]);
+        let msg = run(&main, &["log", "-1", "--format=%B"]);
+        assert_eq!(msg.trim(), "Don't break\n\nWhy");
         let p = probe(&f, &Modes::default());
         assert!(p.merged);
         f.shipping.squash_at = None;
         assert!(!probe(&f, &Modes::default()).merged);
+    }
+
+    #[test]
+    fn a_squash_stops_at_the_first_repository_that_fails_left_as_it_was() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api", "web"], &[]);
+        commit(&wt(&f, "api"), "x", "feature");
+        commit(&wt(&f, "web"), "y", "feature");
+        mark_all(&mut f);
+        let check = planned(&f, &Modes::default());
+        let trees = squash_trees(&f, &check.actions, None);
+        assert_eq!(trees.len(), 2);
+        // Web's main moves on with the same file since.
+        let web = f.repos[1].main.clone();
+        commit(&web, "y", "main");
+        let before = run(&web, &["rev-parse", "HEAD"]);
+        let done = squash(&f, &trees, "m");
+        assert_eq!(done.went.len(), 1);
+        assert_eq!(done.went[0].0, "api");
+        assert_eq!(
+            done.failed,
+            Some(("web".to_owned(), "it conflicts in y".to_owned()))
+        );
+        assert_eq!(run(&web, &["rev-parse", "HEAD"]), before);
+        assert_eq!(run(&web, &["status", "--porcelain"]), "");
     }
 
     #[test]
@@ -2050,11 +2099,11 @@ esac
                 },
             ]
         );
-        let (dir, command) = squash_command(&f, &check.actions, None);
         let linked = f.repos[1].main.clone();
-        assert_eq!(dir, linked);
-        let cd = crate::desktop::shell_quote(&linked.to_string_lossy());
-        assert!(command.starts_with(&format!("cd {cd} &&")));
+        assert_eq!(
+            squash_trees(&f, &check.actions, None),
+            [("other:api".to_owned(), linked)]
+        );
 
         let gh = fake_gh(&t);
         let prs = open_prs(&f, &check.actions, &gh).unwrap();
@@ -2085,7 +2134,7 @@ esac
         };
         assert_eq!(planned(&f, &modes).actions, std::slice::from_ref(&merge));
 
-        // Push the base too: run after the squash, named in the tab's stead.
+        // Push the base too: run after the squash.
         let plan = f.ship_plan.repos.get_mut("api").unwrap();
         plan.toggle(ShipStep::PushBase);
         let check = planned(&f, &modes);
@@ -2099,8 +2148,6 @@ esac
                 }
             ]
         );
-        let (_, command) = squash_command(&f, &check.actions, None);
-        assert!(!command.contains("git push"), "{command}");
 
         // Push the feature's branch too: through origin, before the squash.
         let plan = f.ship_plan.repos.get_mut("api").unwrap();
@@ -2117,8 +2164,6 @@ esac
                 }
             ]
         );
-        let (_, command) = squash_command(&f, &check.actions, None);
-        assert!(!command.contains("git push"), "{command}");
 
         // Push without a pull request.
         route(&mut f, "api", Route::Pr);
@@ -2864,12 +2909,8 @@ esac
         assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
         let check = probe(&f, &Modes::default()).ship.unwrap();
         assert_eq!(check.repos[0].tree, other);
-        let (dir, command) = squash_command(&f, &plan.actions, Some(&check));
-        assert_eq!(dir, other);
-        assert!(command.starts_with(&format!(
-            "cd {} && ",
-            crate::desktop::shell_quote(&other.to_string_lossy())
-        )));
+        let trees = squash_trees(&f, &plan.actions, Some(&check));
+        assert_eq!(trees, [("api".to_owned(), other.clone())]);
 
         std::fs::write(other.join("a"), "edited").unwrap();
         assert_eq!(
@@ -2880,8 +2921,8 @@ esac
 
         // Squashed there, it comes off there, and its base pushes from
         // there, through the other feature's guard, which stays.
-        run(&other, &["merge", "-q", "--squash", "feature/f"]);
-        run(&other, &["commit", "-q", "-m", "squash"]);
+        let done = squash(&f, &trees, "squash");
+        assert!(done.failed.is_none(), "{:?}", done.failed);
         reset_squash(&f.repos[0], "main", "feature/f").unwrap();
         run(&other, &["merge", "-q", "--squash", "feature/f"]);
         run(&other, &["commit", "-q", "-m", "squash"]);

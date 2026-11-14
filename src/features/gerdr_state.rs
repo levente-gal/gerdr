@@ -748,13 +748,24 @@ impl Gerdr {
                 slug,
                 patch,
                 squash,
+                message,
                 pushed,
                 result,
                 ran,
             } => {
                 self.unbusy(&project, &slug, Job::Ship);
                 let patch = patch.as_deref();
-                self.feature_shipped(&project, &slug, patch, &squash, pushed, ran, result);
+                let squash = (squash.as_slice(), message.as_str());
+                self.feature_shipped(&project, &slug, patch, squash, pushed, ran, result);
+            }
+            Done::Squashed {
+                project,
+                slug,
+                squash,
+                done,
+            } => {
+                self.unbusy(&project, &slug, Job::Ship);
+                self.feature_squashed(&project, &slug, &squash, done);
             }
             Done::ConflictsBegun {
                 project,

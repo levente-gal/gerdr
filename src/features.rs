@@ -688,9 +688,11 @@ pub(crate) enum Done {
         slug: String,
         /// The patch-id the Ship check was on.
         patch: Option<String>,
-        /// The squash steps, to start in a tab once the code is found
-        /// unchanged: then done once merged, not now.
+        /// The squash steps, to run once the code is found unchanged:
+        /// then done once merged, not now.
         squash: Vec<Action>,
+        /// The squash's commit message, as the user left it.
+        message: String,
         /// The repositories whose branch the steps push.
         pushed: Vec<String>,
         /// Each step that ran, however it ended.
@@ -733,6 +735,14 @@ pub(crate) enum Done {
         slug: String,
         undone: Vec<(String, ShipStep)>,
         failed: Option<String>,
+    },
+    /// A feature's squash ran (`ship::squash`): its `squash` steps, and
+    /// how far it went.
+    Squashed {
+        project: String,
+        slug: String,
+        squash: Vec<Action>,
+        done: crate::feature::ship::Squashed,
     },
     /// The bases a merged feature ticked to push, each by its
     /// `Repo::key`, its name and how it went.
