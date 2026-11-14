@@ -1169,6 +1169,9 @@ pub struct FindingCard {
     pub title: String,
     /// Where it stands, once decided: "to fix".
     pub state: String,
+    /// How long a running check has run, "12s": before `state`, drawn
+    /// apart from the card so its ticking doesn't draw the card again.
+    pub clock: String,
     /// Its id, and where in the code it is.
     pub place: String,
     pub body: String,
@@ -2404,6 +2407,10 @@ pub(super) enum Piece {
     /// How a check stands, on its card. It blinks when at work: see
     /// `feature_tab_blinkers`.
     CheckDot(Dot),
+    /// The clock of the running check of `StagePage::sections[i]`
+    /// (`FindingCard::clock`): composed over its card, which doesn't draw
+    /// it, so its ticking draws only itself.
+    Clock(usize),
     /// `FeatureTabView::repos[i]`.
     Repo(usize),
     /// `StagePage::buttons[i]`, one acting on the stage as a whole.
@@ -3062,6 +3069,21 @@ impl Stack {
             true => card.place.clone(),
             false => format!("{} \u{b7} {}", card.state, card.place),
         };
+        // A running check's clock, in a place of its own composed over the
+        // card: as wide as its widest digits, so it moves the line on only
+        // when it gets a digit more.
+        if !card.clock.is_empty() {
+            let w = width_of(&format!("{} ", widest(&card.clock)), Font::Small.size()).ceil()
+                as i32
+                + 1;
+            self.pieces.push((
+                Rectangle::new((self.x, self.y).into(), (w, TAIL_LINE).into()),
+                Piece::Clock(k),
+            ));
+            self.x += w;
+            self.w = (self.w - w).max(1);
+            rest = format!("\u{b7} {rest}");
+        }
         if !word.is_empty() {
             let w = self.decision_word(word, card.stripe, self.x, self.y);
             self.x += w;
@@ -5108,7 +5130,10 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let review_switch = view.review_switch.as_ref().map(|switch| {
         let buttons = view.review_page.then(|| {
             let from = (x + title_w + PAGE_GAP).min(right);
-            Rectangle::new((from, page_bar.loc.y).into(), (right - from, PAGE_BAR).into())
+            Rectangle::new(
+                (from, page_bar.loc.y).into(),
+                (right - from, PAGE_BAR).into(),
+            )
         });
         review_switch_spots(switch, x, row_top + REVIEW_SWITCH_GAP, inner, buttons)
     });
@@ -5928,7 +5953,13 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
             v.more = view.more;
             v.review_switch = view.review_switch.clone();
             v.test_strip = view.test_strip.clone();
-            v.running = view.running.clone();
+            // Their clocks go over it (see `FeatureTabLayers::parts`).
+            v.running = (view.running.iter())
+                .map(|row| RunningRow {
+                    took: String::new(),
+                    ..row.clone()
+                })
+                .collect();
             v.running_more = view.running_more;
             v.page.menu = view.page.menu.clone();
             if strip {
@@ -5960,6 +5991,7 @@ fn slice_view(view: &FeatureTabView, slice: TabSlice) -> FeatureTabView {
         }
         TabSlice::Column(TabColumn::Page) => {
             v.page = view.page.clone();
+            v.page.sections.iter_mut().for_each(still_clock);
             v.activity = view.activity.clone();
             v.marks = view.marks.clone();
         }
@@ -6000,6 +6032,21 @@ fn shot_box(shot: &SheetShot, room: i32) -> (i32, i32) {
 }
 
 /// The page section piece `piece` paints from, if one.
+/// `clock` with every digit its widest: what its place is laid out for.
+fn widest(clock: &str) -> String {
+    (clock.chars())
+        .map(|ch| if ch.is_ascii_digit() { '8' } else { ch })
+        .collect()
+}
+
+/// `section` as a cache key has it: a card's clock goes over it (see
+/// `Piece::Clock`), so only its place counts, not the time it tells.
+fn still_clock(section: &mut PageSection) {
+    if let PageSection::Finding(card) = section {
+        card.clock = widest(&card.clock);
+    }
+}
+
 fn piece_section(piece: &Piece) -> Option<usize> {
     match piece {
         Piece::GroupCaption(k, _)
@@ -6226,7 +6273,9 @@ fn band_key(
         let (rect, piece) = &pieces[k];
         key.pieces.push((at(*rect), piece.clone()));
         if let Some(section) = piece_section(piece).and_then(|k| view.page.sections.get(k)) {
-            key.sections.push(section.clone());
+            let mut section = section.clone();
+            still_clock(&mut section);
+            key.sections.push(section);
         }
         let buttons = piece_buttons(view, piece);
         key.buttons.extend(buttons.iter().map(|i| {
@@ -6266,6 +6315,17 @@ type ThumbKey = (Size<i32, Logical>, super::Theme, f64);
 /// `Overlay`): its ground and cards, then a buffer per slice (see
 /// `TabSlice`) and a thumb per column that scrolls, each drawn again
 /// only when what it shows changes.
+/// A clock's buffer's key: its text, its place's size, and its font's
+/// size and colour.
+#[derive(Clone, PartialEq)]
+pub(super) struct ClockKey {
+    text: String,
+    size: Size<i32, Logical>,
+    font: u32,
+    color: Rgb,
+    scale: f64,
+}
+
 #[derive(Default)]
 pub(super) struct FeatureTabLayers {
     overlay: super::Overlay<BackKey>,
@@ -6285,6 +6345,9 @@ pub(super) struct FeatureTabLayers {
     /// drawn again as they move.
     spinner: super::Cached<(u32, super::Theme, f64)>,
     sweep: super::Cached<(i32, super::Theme, f64)>,
+    /// The clocks of what runs, over the head and the page's cards, so
+    /// these aren't drawn again as they tick (see `Piece::Clock`).
+    clocks: Vec<super::Cached<ClockKey>>,
     /// What the spinner and the sweep move from: the first frame's time.
     epoch: Option<std::time::Instant>,
     /// How many buffers were drawn, for tests.
@@ -6327,7 +6390,7 @@ impl FeatureTabLayers {
             &mut self.thumbs,
             &mut self.pulse,
         );
-        let (spinner, sweep) = (&mut self.spinner, &mut self.sweep);
+        let (spinner, sweep, clocks) = (&mut self.spinner, &mut self.sweep, &mut self.clocks);
         let more = |_: &BackKey| {
             let (Some(view), Some(l)) = (&view, &layout) else {
                 return Vec::new();
@@ -6408,6 +6471,54 @@ impl FeatureTabLayers {
                         .at(loc)
                         .clipped(track),
                 );
+            }
+            // The clocks: each row's under the rail, then each running
+            // check's on its card, scrolling with the page.
+            let page = TabColumn::Page as usize;
+            let rows = (view.running.iter().zip(&l.running)).map(|(row, spots)| {
+                (
+                    row.took.as_str(),
+                    spots.took,
+                    SMALL_FONT_SIZE,
+                    p.muted,
+                    None,
+                )
+            });
+            let cards = (l.pieces[page].iter())
+                .filter_map(|(rect, piece)| match piece {
+                    Piece::Clock(k) => Some((*k, *rect)),
+                    _ => None,
+                })
+                .filter_map(
+                    |(k, rect)| match (view.page.sections.get(k), l.columns[page]) {
+                        (Some(PageSection::Finding(card)), Some(place)) => {
+                            let (font, ink) = (Font::Small.size(), Ink::Muted.color(p));
+                            Some((card.clock.as_str(), rect, font, ink, Some(place)))
+                        }
+                        _ => None,
+                    },
+                );
+            let ticks: Vec<_> = rows.chain(cards).collect();
+            clocks.resize_with(ticks.len(), Default::default);
+            for ((text, rect, font, color, place), cache) in
+                ticks.into_iter().zip(clocks.iter_mut())
+            {
+                let key = ClockKey {
+                    text: text.to_owned(),
+                    size: rect.size,
+                    font: font.to_bits(),
+                    color,
+                    scale,
+                };
+                let buffer = cache.get(key, |key| painter.clock(key));
+                let part = Part::new(buffer, at(rect), rect.size, 1.0);
+                parts.push(match place {
+                    Some(place) => {
+                        let loc = (part.loc.x, part.loc.y - view.scroll[page]).into();
+                        part.at(loc).clipped(inside(place))
+                    }
+                    None => part,
+                });
             }
             let alpha = rail_pulse_alpha(pulse);
             if let Some(halo) = feature_tab_pulse(view, l).filter(|_| alpha > 0.0) {
@@ -6919,6 +7030,18 @@ impl Painter {
         c.into_buffer(false)
     }
 
+    /// A clock (see `FeatureTabLayers::clocks`): its text alone, on
+    /// nothing.
+    pub(super) fn clock(&self, key: &ClockKey) -> MemoryRenderBuffer {
+        let rect = Rectangle::from_size(key.size);
+        let mut c = Canvas::new(physical(key.size, key.scale));
+        let (x, end) = phys(rect, key.scale);
+        let font = f32::from_bits(key.font);
+        let band = band(rect, key.scale);
+        self.text(&mut c, &key.text, font, x, end, band, key.scale, key.color);
+        c.into_buffer(false)
+    }
+
     /// The line sweeping the top of the card of work running, `w` wide and
     /// `SWEEP_H` high, on nothing.
     pub(super) fn running_sweep(&self, w: i32, scale: f64, p: &Palette) -> MemoryRenderBuffer {
@@ -6988,7 +7111,7 @@ impl Painter {
                 }
                 small(c, &format!("{done} of {total}"), count, p.muted);
             }
-            small(c, &row.took, spots.took, p.muted);
+            // `row.took` goes over the card (see `FeatureTabLayers::parts`).
             for (k, (rect, label)) in spots.buttons.iter().zip(&row.buttons).enumerate() {
                 let hovered = view.hover == Some(FeatureTabHit::RunningButton(i, k));
                 self.button(
@@ -8423,6 +8546,8 @@ impl Painter {
             }
             // A dot at work blinks: it is composed over the tab.
             Piece::CheckDot(dot) => status_dot(c, rect, *dot, scale, p),
+            // Composed over the tab (see `card_clock`).
+            Piece::Clock(_) => {}
             Piece::Button(i) => self.page_button(c, view, *i, rect, scale, p),
             Piece::Activity { row, lines } => {
                 let Some(a) = view.activity.get(*row) else {
@@ -9902,7 +10027,7 @@ mod tests {
 
     /// Work running gets a card under the rail, which stays put;
     /// a row goes to its stage's page and its buttons press; ticking time
-    /// draws only the head again.
+    /// draws neither the head nor a running check's card again.
     #[test]
     fn work_running_shows_under_the_rail() {
         use crate::chrome::Theme;
@@ -9972,10 +10097,52 @@ mod tests {
         };
         assert_eq!(moving(&parts), (2, 1), "two spinners and the sweep");
         assert_eq!(moving(&step(&tab_view(), 900).1), (0, 0));
+        // A running check's card, its clock over it as the head's are.
+        let mut view = view;
+        view.page.sections.push(PageSection::Finding(FindingCard {
+            sheet: None,
+            tag: FindingTag::Running,
+            title: "cargo test".into(),
+            state: "took 2m 3s last run".into(),
+            place: "here".into(),
+            body: String::new(),
+            preview: vec!["compiling".into()],
+            fix: String::new(),
+            note: String::new(),
+            comment: String::new(),
+            comment_buttons: Vec::new(),
+            made: false,
+            faded: false,
+            collapsed: false,
+            folds: false,
+            stripe: None,
+            field: None,
+            field_hint: "",
+            clock: "41s".into(),
+            selected: false,
+            buttons: Vec::new(),
+        }));
+        let card = view.page.sections.len() - 1;
+        let l = feature_tab_layout(&view, area);
+        let clock = (l.pieces[TabColumn::Page as usize].iter())
+            .find(|(_, piece)| *piece == Piece::Clock(card))
+            .map(|(rect, _)| rect.size)
+            .expect("the card's clock");
         let mut later = view.clone();
         later.running[0].took = "0:42".into();
+        if let Some(PageSection::Finding(c)) = later.page.sections.get_mut(card) {
+            c.clock = "42s".into();
+        }
         step(&view, 1200);
-        assert_eq!(step(&later, 1500).0, 1, "only the head");
+        step(&view, 1300);
+        let (drawn, parts) = step(&later, 1500);
+        assert_eq!(drawn, 0, "the clocks go over what doesn't change");
+        let clocks = parts.iter().filter(|p| p.size == clock).count();
+        assert_eq!(clocks, 1, "the card's clock");
+        assert!(
+            parts.iter().any(|p| p.size == first.took.size),
+            "the row's clock"
+        );
     }
 
     #[test]
@@ -10851,6 +11018,7 @@ mod tests {
                 stripe: None,
                 field: None,
                 field_hint: "",
+                clock: String::new(),
                 selected: false,
                 buttons: (at..at + 4).collect(),
             }));
@@ -11034,6 +11202,7 @@ mod tests {
             stripe: None,
             field: None,
             field_hint: "",
+            clock: String::new(),
             selected: false,
             buttons: vec![0, 1, 2],
         };

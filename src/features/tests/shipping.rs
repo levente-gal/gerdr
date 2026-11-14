@@ -1768,7 +1768,8 @@ fn a_running_card_says_how_long_and_keeps_its_height() {
     let entries = check_entries(&f, Stage::Verify, &state.plan);
     let card = check_card(&entries[1], &f, &state, &[], 2_000);
     assert_eq!(card.tag, FindingTag::Running);
-    assert_eq!(card.state, "1m 40s \u{b7} took 1m 40s last run");
+    assert_eq!(card.clock, "1m 40s");
+    assert_eq!(card.state, "took 1m 40s last run");
     assert_eq!(card.preview, ["compiling", "", "", ""]);
     // The one that ended keeps what it printed.
     let ended = check_card(&entries[0], &f, &state, &[], 2_000);
@@ -1797,7 +1798,7 @@ fn a_check_in_the_queue_says_so_and_its_clock_starts_with_it() {
     run.checks[1].began = Some(1_990);
     let card = check_card(&entries[1], &f, &state, &[], 2_000);
     assert_eq!(card.tag, FindingTag::Running);
-    assert!(card.state.starts_with("10s"), "{}", card.state);
+    assert_eq!(card.clock, "10s");
 }
 
 #[test]
