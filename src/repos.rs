@@ -288,6 +288,8 @@ pub struct RepoDir {
     /// The feature's name, for a feature's worktree: the panel lists its
     /// worktrees together under it.
     pub group: Option<String>,
+    /// A shipped feature's worktree: listed under the Shipped heading.
+    pub shipped: bool,
 }
 
 /// A repository as the panel lists it: one per checkout among the
@@ -304,6 +306,9 @@ pub struct RepoItem {
     pub feature_branch: Option<String>,
     /// The feature a worktree is of, by name: listed under its heading.
     pub group: Option<String>,
+    /// Its feature shipped: it shows only while the Shipped heading is
+    /// unfolded (or the filter finds it).
+    pub shipped: bool,
     pub status: GitStatus,
 }
 
@@ -390,6 +395,8 @@ pub enum Selected {
     Clean,
     /// The heading over a feature's worktrees, by the feature's name.
     Group(String),
+    /// The heading over the shipped features.
+    Shipped,
 }
 
 /// The panel's state, kept by who things are as the list changes under it
@@ -425,6 +432,8 @@ pub struct Panel {
     /// The features whose worktrees show under their heading: the others'
     /// fold away.
     pub(crate) open_groups: HashSet<String>,
+    /// The shipped features show under their heading; folded by default.
+    pub(crate) shipped_open: bool,
     /// The tree's filter while open: only the repositories whose name,
     /// feature or branch says what is typed show.
     pub(crate) filter: Option<TextField>,
@@ -2085,7 +2094,7 @@ impl Panel {
             Some(Selected::Repo(root)) => Place::Section(root),
             Some(Selected::File(root, path)) => Place::File(root, path),
             Some(Selected::Dir(root, dir)) => Place::Dir(root, dir),
-            Some(Selected::Clean | Selected::Group(_)) | None => return,
+            Some(Selected::Clean | Selected::Group(_) | Selected::Shipped) | None => return,
         };
         self.diff.show(place);
     }
@@ -2125,7 +2134,9 @@ impl Panel {
         let own: Vec<usize> = (0..items.len())
             .filter(|&k| items[k].group.is_none() && self.shows(&items[k]))
             .collect();
-        let grouped_items = (items.iter()).filter(|i| i.group.is_some() && self.shows(i)).count();
+        let grouped_items = (items.iter())
+            .filter(|i| i.group.is_some() && !i.shipped && self.shows(i))
+            .count();
         // Those with nothing to do go last, under a heading, when there
         // are others to go after.
         let (clean, busy): (Vec<usize>, Vec<usize>) =
@@ -2138,15 +2149,10 @@ impl Panel {
         for k in order {
             self.push_repo(&mut rows, k, items);
         }
-        for (_, members) in groups(items) {
-            let members: Vec<usize> = members.into_iter().filter(|&k| self.shows(&items[k])).collect();
-            let Some(&first) = members.first() else { continue };
-            rows.push(Row::Group(first));
-            if filtering || self.group_open(&items[first]) {
-                for k in members {
-                    self.push_repo(&mut rows, k, items);
-                }
-            }
+        let (shipped, live): (Vec<_>, Vec<_>) =
+            groups(items).into_iter().partition(|(first, _)| items[*first].shipped);
+        for (_, members) in live {
+            self.push_group(&mut rows, members, items);
         }
         if grouped {
             rows.push(Row::Clean);
@@ -2154,7 +2160,30 @@ impl Panel {
                 rows.extend(clean.into_iter().map(Row::Repo));
             }
         }
+        // The shipped features last, folded away unless asked for.
+        let any = |(_, members): &(usize, Vec<usize>)| members.iter().any(|&k| self.matches(&items[k]));
+        if shipped.iter().any(any) {
+            rows.push(Row::Shipped);
+            if filtering || self.shipped_open {
+                for (_, members) in shipped {
+                    self.push_group(&mut rows, members, items);
+                }
+            }
+        }
         rows
+    }
+
+    /// A feature's heading over those of its worktrees `members` that
+    /// show, then their lines while it is unfolded; nothing when none show.
+    fn push_group(&self, rows: &mut Vec<Row>, members: Vec<usize>, items: &[RepoItem]) {
+        let members: Vec<usize> = members.into_iter().filter(|&k| self.shows(&items[k])).collect();
+        let Some(&first) = members.first() else { return };
+        rows.push(Row::Group(first));
+        if self.filtering() || self.group_open(&items[first]) {
+            for k in members {
+                self.push_repo(rows, k, items);
+            }
+        }
     }
 
     /// Repository `k`'s line, then its files when unfolded, but those in
@@ -2200,6 +2229,7 @@ impl Panel {
     /// Show the line of `item`: its feature's heading, or the clean ones',
     /// unfolded over it.
     fn unhide(&mut self, item: &RepoItem) {
+        self.shipped_open |= item.shipped;
         match &item.group {
             Some(group) => {
                 self.open_groups.insert(group.clone());
@@ -2272,7 +2302,7 @@ impl Panel {
     fn parent(rows: &[Row], at: usize) -> Option<usize> {
         let depth = rows[at].depth();
         rows[..at].iter().rposition(|r| match r {
-            Row::Repo(_) | Row::Clean | Row::Group(_) => true,
+            Row::Repo(_) | Row::Clean | Row::Group(_) | Row::Shipped => true,
             Row::Dir { depth: d, .. } => *d < depth,
             Row::File(..) => false,
         })
@@ -2289,6 +2319,7 @@ impl Panel {
                 items[k].root == *root && items[k].status.changes[c].path == *path
             }
             (Some(Selected::Clean), Row::Clean) => true,
+            (Some(Selected::Shipped), Row::Shipped) => true,
             (Some(Selected::Group(name)), Row::Group(g)) => items[g].group.as_ref() == Some(name),
             _ => false,
         }
@@ -2305,7 +2336,7 @@ impl Panel {
         let (root, path) = match self.selected.as_ref()? {
             Selected::Repo(root) | Selected::Dir(root, _) => (root, None),
             Selected::File(root, path) => (root, Some(path)),
-            Selected::Clean | Selected::Group(_) => return None,
+            Selected::Clean | Selected::Group(_) | Selected::Shipped => return None,
         };
         let k = items.iter().position(|i| i.root == *root)?;
         match path {
@@ -2329,7 +2360,7 @@ impl Panel {
         match self.selected.as_ref()? {
             Selected::Repo(root) => Some(root.clone()),
             Selected::Dir(root, path) | Selected::File(root, path) => Some(root.join(path)),
-            Selected::Clean | Selected::Group(_) => None,
+            Selected::Clean | Selected::Group(_) | Selected::Shipped => None,
         }
     }
 
@@ -2362,6 +2393,7 @@ impl Panel {
             }
             Row::File(k, c, _) => Selected::File(root(), items[k].status.changes[c].path.clone()),
             Row::Clean => Selected::Clean,
+            Row::Shipped => Selected::Shipped,
             Row::Group(g) => Selected::Group(items[g].group.clone().unwrap_or_default()),
         }
     }
@@ -2392,7 +2424,7 @@ impl Panel {
                 let mut k = self.selected_at.min(rows.len() - 1);
                 // A line, rather than the clean ones' heading, takes its
                 // place.
-                if rows[k] == Row::Clean {
+                if matches!(rows[k], Row::Clean | Row::Shipped) {
                     k = if k + 1 < rows.len() {
                         k + 1
                     } else {
@@ -2512,7 +2544,7 @@ impl Panel {
         let Some(k) = row.item() else { return };
         let item = &items[k];
         match row {
-            Row::Clean | Row::Group(_) => return,
+            Row::Clean | Row::Group(_) | Row::Shipped => return,
             Row::Repo(_) => {
                 let on = self.check(item) == Check::Off;
                 self.set_checked(item, on);
@@ -2573,6 +2605,7 @@ impl Panel {
             self.set_open(item, open);
         }
         self.clean_folded = !open;
+        self.shipped_open = open;
         for item in items {
             self.set_group_open(item, open);
         }
@@ -4462,6 +4495,13 @@ impl Panel {
     /// Whether `item` shows under the filter: its name, feature or branch
     /// says what is typed, in that case only when it has a capital.
     fn shows(&self, item: &RepoItem) -> bool {
+        // A shipped feature's, only under its heading unfolded.
+        let hidden = item.shipped && !self.shipped_open && !self.filtering();
+        !hidden && self.matches(item)
+    }
+
+    /// Whether the filter lets `item` through, whatever is folded.
+    fn matches(&self, item: &RepoItem) -> bool {
         let Some(query) = self.filter.as_ref().map(|f| f.line().text) else {
             return true;
         };
@@ -4548,6 +4588,7 @@ impl Panel {
                 Some(Row::Repo(k)) => self.set_open(&items[k], true),
                 Some(row @ Row::Dir { .. }) => self.set_dir_open(row, items, true),
                 Some(Row::Clean) => self.clean_folded = false,
+                Some(Row::Shipped) => self.shipped_open = true,
                 Some(Row::Group(g)) => self.unhide(&items[g]),
                 _ => {}
             },
@@ -4572,6 +4613,10 @@ impl Panel {
                 }
                 (Some(Row::Clean), _) => {
                     self.clean_folded = true;
+                    self.settle(items, page);
+                }
+                (Some(Row::Shipped), _) => {
+                    self.shipped_open = false;
                     self.settle(items, page);
                 }
                 (Some(Row::Group(g)), _) => {
@@ -4760,6 +4805,7 @@ impl Panel {
             }
             Row::File(..) => return self.act(ReposButton::OpenInZed, ctx),
             Row::Clean => self.clean_folded = !self.clean_folded,
+            Row::Shipped => self.shipped_open = !self.shipped_open,
             Row::Group(g) => {
                 let open = !self.group_open(&items[g]);
                 self.set_group_open(&items[g], open);
@@ -5275,12 +5321,23 @@ impl Panel {
         if let Row::Group(g) = row {
             return TreeLine::Repo(self.group_line(g, ctx));
         }
+        if row == Row::Shipped {
+            let shipped = groups(ctx.items).into_iter().filter(|(first, members)| {
+                ctx.items[*first].shipped && members.iter().any(|&k| self.matches(&ctx.items[k]))
+            });
+            return TreeLine::Clean(CleanLine {
+                open: self.filtering() || self.shipped_open,
+                count: shipped.count(),
+                shipped: true,
+            });
+        }
         let Some(k) = row.item() else {
             return TreeLine::Clean(CleanLine {
                 open: self.filtering() || !self.clean_folded,
                 count: (ctx.items.iter())
                     .filter(|i| i.group.is_none() && self.is_clean(i) && self.shows(i))
                     .count(),
+                shipped: false,
             });
         };
         let item = &ctx.items[k];
@@ -5519,7 +5576,7 @@ impl Panel {
     fn detail_key(&self) -> Option<DetailKey> {
         let root = match self.selected.as_ref()? {
             Selected::Repo(root) | Selected::Dir(root, _) | Selected::File(root, _) => root,
-            Selected::Clean | Selected::Group(_) => return None,
+            Selected::Clean | Selected::Group(_) | Selected::Shipped => return None,
         };
         let tab = self.tab();
         (tab != DetailTab::Diff).then(|| DetailKey {
@@ -6191,6 +6248,7 @@ mod tests {
             workspace: 0,
             feature_branch: None,
             group: None,
+            shipped: false,
             status: GitStatus {
                 branch: Some(branch.into()),
                 dirty: !changes.is_empty(),
@@ -6416,6 +6474,7 @@ mod tests {
                 TreeLine::Repo(r) => r.label.clone(),
                 TreeLine::Dir(d) => format!("{}{}/", "  ".repeat(d.depth), d.name),
                 TreeLine::File(f) => format!("{}{}", "  ".repeat(f.depth), f.path),
+                TreeLine::Clean(c) if c.shipped => format!("Shipped · {}", c.count),
                 TreeLine::Clean(c) => format!("Clean · {}", c.count),
             })
             .collect()
@@ -7544,9 +7603,40 @@ mod tests {
                 TreeLine::Repo(r) => format!("{}{}", "  ".repeat(r.depth), r.label),
                 TreeLine::Dir(d) => format!("{}{}/", "  ".repeat(d.depth + 1), d.name),
                 TreeLine::File(f) => format!("{}{}", "  ".repeat(f.depth + 1), f.path),
+                TreeLine::Clean(c) if c.shipped => format!("Shipped · {}", c.count),
                 TreeLine::Clean(c) => format!("Clean · {}", c.count),
             })
             .collect()
+    }
+
+    #[test]
+    fn shipped_features_hide_under_their_heading_till_asked_for() {
+        let mut items = with_feature();
+        for item in &mut items[3..] {
+            item.shipped = true;
+        }
+        let ctx = ctx(&items, None);
+        let mut panel = Panel::new(&items);
+        // Folded at first: its worktrees neither show nor are acted on.
+        assert_eq!(
+            indented(&panel, &ctx),
+            ["gerdr", "  src/git.rs", "  notes.md", "zed", "  old.rs → new.rs", "Clean · 1", "herdr", "Shipped · 1"]
+        );
+        press(&mut panel, ctrl(), Keysym::a, &ctx);
+        assert_eq!(panel.picked(&items), [0, 1, 2]);
+        // Unfolded, the feature's heading shows under it, and its tick.
+        panel.selected = Some(Selected::Shipped);
+        press(&mut panel, none(), Keysym::Right, &ctx);
+        assert_eq!(indented(&panel, &ctx)[7..], ["Shipped · 1", "login"]);
+        press(&mut panel, ctrl(), Keysym::a, &ctx);
+        assert_eq!(panel.picked(&items), [0, 1, 2, 3, 4]);
+        // Folded again, the selection on its heading.
+        press(&mut panel, none(), Keysym::Left, &ctx);
+        assert_eq!(indented(&panel, &ctx).last().unwrap(), "Shipped · 1");
+        // The filter finds them folded or not; going to one unfolds it.
+        panel.select_repo(&root("web"), &ctx);
+        assert!(panel.shipped_open);
+        assert!(indented(&panel, &ctx).contains(&"  web".to_string()));
     }
 
     #[test]
