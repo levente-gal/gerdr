@@ -278,8 +278,9 @@ pub(super) fn rework_card(
     };
     let status = match (back, lit) {
         (Some(back), _) => back.status().to_owned(),
-        (None, Some(lit)) if state.fix_moved => format!("next fixes: a fresh {}", lit.name),
-        (None, _) => "makes the fixes".to_owned(),
+        // Each fix round starts a fresh agent of the pick.
+        (None, Some(lit)) => format!("next fixes: a fresh {}", lit.name),
+        (None, None) => "next fixes: a fresh agent".to_owned(),
     };
     Some(PageSection::Agent {
         stage: Stage::Build,

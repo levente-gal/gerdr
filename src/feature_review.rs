@@ -1069,8 +1069,9 @@ impl Gerdr {
 
     /// Start a fresh Build agent with `extra` on feature `slug`, whose Build
     /// stays done: what it fixes sends the feature back to Build by its
-    /// commits, and its run is seen as back there. Whether it started; if
-    /// not it said why.
+    /// commits, and its run is seen as back there. It is its open or last
+    /// fix round's own agent from then on. Whether it started; if not it
+    /// said why.
     pub(crate) fn launch_fresh_build(
         &mut self,
         project: &str,
@@ -1083,11 +1084,14 @@ impl Gerdr {
         if !self.launch_stage_agent(project, slug, Stage::Build, extra) {
             return false;
         }
-        if let Some(r) = self
-            .feature_mut(project, slug)
-            .and_then(|f| f.runs.get_mut(&Stage::Build))
+        if let Some(f) = self.feature_mut(project, slug)
+            && let Some(r) = f.runs.get_mut(&Stage::Build)
         {
             r.ready = build_at;
+            let n = r.n;
+            if let Some(round) = f.fix_round.as_mut().or(f.last_fix_round.as_mut()) {
+                round.trail.build_run = Some(n);
+            }
         }
         self.save_feature(project, slug);
         true
