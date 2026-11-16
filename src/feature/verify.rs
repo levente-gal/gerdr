@@ -149,9 +149,31 @@ pub struct Outcome {
     pub log: Option<String>,
 }
 
+/// What a system call says when the machine, not the code, is at fault, as
+/// any tool prints it (`strerror`): a full disk, too many open files.
+const MACHINE_ERRORS: &[&str] = &[
+    "Disk quota exceeded",
+    "No space left on device",
+    "Too many open files",
+    "Cannot allocate memory",
+    "Read-only file system",
+];
+
 impl Outcome {
     pub fn passed(&self) -> bool {
         self.exit == Some(0)
+    }
+
+    /// The machine's error that failed it, as its output says: it failed for
+    /// that, not for its code.
+    pub fn machine_error(&self) -> Option<&'static str> {
+        if self.passed() || self.interrupted {
+            return None;
+        }
+        let says = |error: &str| {
+            self.tail.contains(error) || self.excerpt.iter().any(|line| line.contains(error))
+        };
+        MACHINE_ERRORS.iter().copied().find(|error| says(error))
     }
 
     /// What its card previews: why it failed when that was found, else the
@@ -478,6 +500,7 @@ pub fn plan(
                 queued: false,
                 began: None,
                 stopping: false,
+                passed_before: was.is_some_and(|c| c.outcome.as_ref().is_some_and(Outcome::passed)),
             }
         })
         .collect()
@@ -1515,6 +1538,10 @@ pub struct CheckRun {
     /// stop it goes with the gerdr that was told, so a new one offers Stop.
     #[serde(skip)]
     pub stopping: bool,
+    /// It passed in the run before this one: failing now, what changed since
+    /// broke it (`regressed`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub passed_before: bool,
 }
 
 impl CheckRun {
@@ -1556,6 +1583,28 @@ pub fn fixes_plan(failures: &[String], title: &str, evidence: &Path) -> String {
         md.push_str(&format!("\n### {one}\n"));
     }
     md
+}
+
+/// The machine's error that failed every failed check of `run`: nothing in
+/// its failures is the code's to fix, and running them again is the way on.
+pub fn machine_failure(run: &VerifyRun) -> Option<&'static str> {
+    let mut failed = (run.checks.iter())
+        .filter_map(|c| c.outcome.as_ref())
+        .filter(|o| !o.passed())
+        .peekable();
+    failed.peek()?;
+    let errors: Option<Vec<_>> = failed.map(Outcome::machine_error).collect();
+    errors?.first().copied()
+}
+
+/// Whether every failed check of `run` passed in the run before it: what
+/// changed since broke them, and the agent that changed it needs no plan to
+/// put it right.
+pub fn regressed(run: &VerifyRun) -> bool {
+    let mut failed = (run.checks.iter())
+        .filter(|c| c.outcome.as_ref().is_some_and(|o| !o.passed()))
+        .peekable();
+    failed.peek().is_some() && failed.all(|c| c.passed_before)
 }
 
 /// What failed in `run` for the Build agent to fix: none while it runs, if
@@ -3059,5 +3108,66 @@ mod tests {
         assert_eq!(utc(0), "1970-01-01 00:00 UTC");
         assert_eq!(utc(951_868_740), "2000-02-29 23:59 UTC");
         assert_eq!(utc(1_793_628_300), "2026-11-02 14:05 UTC");
+    }
+
+    #[test]
+    fn a_check_that_passed_last_time_fails_as_a_regression() {
+        let check = |command: &str| Check {
+            repo: "api".into(),
+            dir: "/w".into(),
+            command: command.into(),
+            own: false,
+        };
+        let ended = |command: &str, exit: i32| CheckRun {
+            repo: "api".into(),
+            command: command.into(),
+            outcome: Some(Outcome {
+                exit: Some(exit),
+                ..Outcome::default()
+            }),
+            ..CheckRun::default()
+        };
+        let last = [ended("test", 0), ended("lint", 1)];
+        let checks = [check("test"), check("lint")];
+        let mut rows = plan(&checks, &last, &|_| false, &Scope::All, 2);
+        assert!(rows[0].passed_before && !rows[1].passed_before);
+        let ran = |row: &mut CheckRun, exit| row.outcome = ended("", exit).outcome;
+        ran(&mut rows[0], 1);
+        ran(&mut rows[1], 0);
+        let mut run = VerifyRun {
+            checks: rows.clone(),
+            ..VerifyRun::default()
+        };
+        assert!(regressed(&run));
+        // One that failed last time too isn't.
+        ran(&mut run.checks[1], 1);
+        assert!(!regressed(&run));
+        run.checks = rows;
+        ran(&mut run.checks[0], 0);
+        assert!(!regressed(&run), "nothing failed");
+    }
+
+    #[test]
+    fn failures_all_of_the_machine_say_so() {
+        let row = |exit: i32, tail: &str| CheckRun {
+            outcome: Some(Outcome {
+                exit: Some(exit),
+                tail: tail.into(),
+                ..Outcome::default()
+            }),
+            ..CheckRun::default()
+        };
+        let quota = "FAILED a.py::t - OSError: [Errno 122] Disk quota exceeded";
+        let mut run = VerifyRun {
+            checks: vec![row(0, "ok"), row(1, quota)],
+            ..VerifyRun::default()
+        };
+        assert_eq!(machine_failure(&run), Some("Disk quota exceeded"));
+        // One failing for its code is the code's.
+        run.checks.push(row(1, "AssertionError: 2 != 3"));
+        assert_eq!(machine_failure(&run), None);
+        // Nothing failed: nothing to say.
+        run.checks = vec![row(0, "No space left on device")];
+        assert_eq!(machine_failure(&run), None);
     }
 }

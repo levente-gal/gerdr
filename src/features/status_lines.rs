@@ -162,10 +162,18 @@ pub(super) fn verify_line(feature: &Feature, ctx: RowCtx, running: Option<&str>)
         .verify
         .as_ref()
         .filter(|v| v.passed == Some(false))?;
-    let line = match run.failures.first() {
+    if let Some(error) = feature::verify::machine_failure(run) {
+        return Some(format!(
+            "failed because of the machine, not its code: {error}; run the failed checks again"
+        ));
+    }
+    let mut line = match run.failures.first() {
         Some(first) => format!("failed: {first}"),
         None => "failed".to_owned(),
     };
+    if feature::verify::regressed(run) {
+        line.push_str("; it passed before the last change, so its fixes need no plan");
+    }
     Some(line)
 }
 

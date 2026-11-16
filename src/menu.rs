@@ -253,6 +253,12 @@ pub enum MenuAction {
     /// Write feature `slug`'s final plan from its decided suggestions, or go
     /// on with the plan as it is (see `Gerdr::write_final_plan`).
     WriteFinalPlan(String, String),
+    /// Run the checks of feature `slug` that failed in its last Verify run
+    /// again.
+    RunFailedChecks {
+        project: String,
+        slug: String,
+    },
     /// Make branch `to.0`, at commit `to.1`, the base of repository `repo` of
     /// feature `slug`; `undoing` when it puts back the one it had.
     SetFeatureBase {
@@ -748,6 +754,9 @@ impl Gerdr {
                 self.reopen_suggestions(&project, &slug, &ids);
             }
             MenuAction::WriteFinalPlan(project, slug) => self.write_final_plan(&project, &slug),
+            MenuAction::RunFailedChecks { project, slug } => {
+                self.rerun_failed_checks(&project, &slug);
+            }
             MenuAction::SetFeatureBase {
                 project,
                 slug,

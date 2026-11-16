@@ -1279,6 +1279,20 @@ impl Gerdr {
                 "The checks of \u{201c}{title}\u{201d} didn't all run: `{command}` {how}"
             ));
         }
+        // Nor does the machine failing them: they run again, with no agent.
+        if let Some(error) = (snapshot.verify.as_ref()).and_then(feature::verify::machine_failure) {
+            let again = MenuAction::RunFailedChecks {
+                project: project.to_owned(),
+                slug: slug.to_owned(),
+            };
+            return self.toast_with(
+                format!(
+                    "Verify of \u{201c}{title}\u{201d} failed because of the machine, not its code: {error}"
+                ),
+                Level::Warning,
+                Some(("Run failed".into(), again)),
+            );
+        }
         self.show_warning(format!("Verify of \u{201c}{title}\u{201d} failed: {first}"));
     }
 

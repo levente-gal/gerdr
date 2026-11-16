@@ -698,12 +698,20 @@ pub(crate) fn check_rows(feature: &Feature, stage: Stage) -> &[feature::verify::
 }
 
 /// Whether some of `stage`'s checks in `feature` can run again alone: the run
-/// ended, and not all failed, or running them all would do.
+/// ended, and not all failed, or running them all would do; but for the
+/// machine failing them, which is said by running them again.
 pub(super) fn has_failed_checks(feature: &Feature, stage: Stage) -> bool {
     let rows = check_rows(feature, stage);
     !checks_running(feature)
-        && rows.iter().any(check_passed)
         && rows.iter().any(|row| !check_passed(row))
+        && (rows.iter().any(check_passed) || failed_by_machine(feature, stage))
+}
+
+/// Whether the machine failed `stage`'s checks of `feature`, the last run:
+/// running them again is what comes next (`verify::machine_failure`).
+pub(super) fn failed_by_machine(feature: &Feature, stage: Stage) -> bool {
+    stage == Stage::Verify
+        && (feature.verify.as_ref()).is_some_and(|v| feature::verify::machine_failure(v).is_some())
 }
 
 /// One card of Verify's page: a check the last run ran, or one `plan` gives

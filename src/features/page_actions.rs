@@ -473,17 +473,23 @@ fn writers_page_actions(
     }
     // Verify's failures hold no word of the user's: they need no plan, but
     // planning them is what comes next by default, so the user sees the
-    // fixes before they are made (Make fixes skips that).
+    // fixes before they are made (Make fixes skips that). Checks that passed
+    // the run before were broken by what changed since: the agent that
+    // changed it puts that right with no plan. Failed by the machine, they
+    // run again first (`Run failed`).
     let plan_fixes = verify_sends(feature, stage);
     if plan_fixes {
-        out.push((
-            button("Make fixes", ButtonStyle::Plain),
-            PanelOutcome::MakeVerifyFixes,
-        ));
-        out.push((
-            button("Plan fixes", ButtonStyle::Primary),
-            PanelOutcome::PlanFixes,
-        ));
+        let run = feature.verify.as_ref();
+        let (make, plan) = match (
+            run.and_then(feature::verify::machine_failure).is_some(),
+            run.is_some_and(feature::verify::regressed),
+        ) {
+            (true, _) => (ButtonStyle::Plain, ButtonStyle::Plain),
+            (false, true) => (ButtonStyle::Primary, ButtonStyle::Plain),
+            (false, false) => (ButtonStyle::Plain, ButtonStyle::Primary),
+        };
+        out.push((button("Make fixes", make), PanelOutcome::MakeVerifyFixes));
+        out.push((button("Plan fixes", plan), PanelOutcome::PlanFixes));
     }
     let waits = feature.status == Status::Open
         && (feature.runs.get(&stage)).is_some_and(|run| run.waits_to_send());
@@ -661,15 +667,15 @@ fn writers_page_actions(
     let current = mark == StageMark::Current;
     out.extend(review_actions(feature, stage));
     if current && has_failed_checks(feature, stage) {
-        // Before Run checks: after a failure it is the one wanted.
+        // Before Run checks: after a failure it is the one wanted, and the
+        // primary when the machine failed them.
         let at = (out.iter().position(|(_, o)| *o == PanelOutcome::RunChecks)).unwrap_or(out.len());
-        out.insert(
-            at,
-            (
-                button("Run failed", ButtonStyle::Plain),
-                PanelOutcome::RunFailed,
-            ),
-        );
+        let first = !out.iter().any(|(b, _)| b.style == ButtonStyle::Primary);
+        let style = match first && failed_by_machine(feature, stage) {
+            true => ButtonStyle::Primary,
+            false => ButtonStyle::Plain,
+        };
+        out.insert(at, (button("Run failed", style), PanelOutcome::RunFailed));
     }
     if stage == Stage::Verify && can_stop_checks(feature) {
         // First, as Run checks is when none runs. Not the primary: Enter

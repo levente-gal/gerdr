@@ -1085,6 +1085,44 @@ fn a_failed_verify_waits_for_its_fixes_on_enter() {
 }
 
 #[test]
+fn a_regression_makes_its_fixes_and_the_machine_runs_them_again_on_enter() {
+    let mut f = verified(false);
+    let run = f.verify.as_mut().unwrap();
+    (run.finished, run.passed) = (Some(1_100), Some(false));
+    let ctx = RowCtx {
+        checks: true,
+        ..RowCtx::default()
+    };
+    // The failed check passed the run before: what changed since broke it.
+    f.verify.as_mut().unwrap().checks[1].passed_before = true;
+    assert_eq!(
+        page_enter(&f, Stage::Verify, ctx),
+        Some(PanelOutcome::MakeVerifyFixes)
+    );
+    let line = verify_line(&f, ctx, None).unwrap();
+    assert!(line.contains("need no plan"), "{line}");
+    // Failed by a full disk: no fixes, the checks run again.
+    let run = f.verify.as_mut().unwrap();
+    let failed = run.checks[1].outcome.as_mut().unwrap();
+    failed.tail = "OSError: [Errno 28] No space left on device\n".into();
+    assert_eq!(
+        page_enter(&f, Stage::Verify, ctx),
+        Some(PanelOutcome::RunFailed)
+    );
+    let actions = page_actions(&f, Stage::Verify, ctx);
+    let primaries = (actions.iter()).filter(|(b, _)| b.style == ButtonStyle::Primary);
+    assert_eq!(primaries.count(), 1);
+    let line = verify_line(&f, ctx, None).unwrap();
+    assert!(line.contains("No space left on device"), "{line}");
+    // All of them failed so, Run failed runs them all.
+    f.verify.as_mut().unwrap().checks.remove(0);
+    assert_eq!(
+        page_enter(&f, Stage::Verify, ctx),
+        Some(PanelOutcome::RunFailed)
+    );
+}
+
+#[test]
 fn a_double_click_on_the_bar_presses_no_other_button() {
     let t = Instant::now();
     let at: Point<f64, Logical> = (900.0, 200.0).into();
