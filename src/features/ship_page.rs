@@ -126,6 +126,9 @@ pub(super) fn capped(lines: Vec<CheckLine>, tone: CheckTone) -> Vec<CheckLine> {
     lines
 }
 
+/// The Ship check while it runs the first time.
+pub(super) const SHIP_CHECKING: &str = "Checking the worktrees and fetching origin\u{2026}";
+
 /// The Ship check the panel shows under the Ship row of `feature`, from
 /// the latest `probe`: only while Ship is its current stage. `shipping`:
 /// its pull requests are being opened now.
@@ -155,7 +158,7 @@ pub(super) fn check_lines(
     let Some(check) = check else {
         return match probe.map(|p| &p.reading) {
             Some(Err(why)) => vec![line(read_blocker(why), CheckTone::Blocker)],
-            _ => vec![line("checking\u{2026}".into(), CheckTone::Note)],
+            _ => vec![line(SHIP_CHECKING.into(), CheckTone::Note)],
         };
     };
     let planned = ship::plan_actions(feature, check);
@@ -654,6 +657,38 @@ fn ship_step_row(
     }
 }
 
+/// While Ship's first check of `feature` runs (fetching origin can take a
+/// while), a card for each repository it touches, its dot blinking: the
+/// page shows that it works, and the real cards take their place.
+fn checking_cards(feature: &Feature, probe: Option<&Probe>) -> Option<Vec<PageSection>> {
+    let checked = probe.is_some_and(|p| p.ship.is_some() || p.reading.is_err());
+    if checked || !feature.ships() || feature.squash_going() {
+        return None;
+    }
+    let card = |repo: &feature::Repo| {
+        PageSection::ShipGroup(chrome::ShipGroup {
+            head: repo.key(),
+            caption: false,
+            card: Some(chrome::ShipCard {
+                dot: Dot::Working,
+                state: line("checking\u{2026}", CheckTone::Note),
+                meta: CHECKING_META.to_owned(),
+                base: None,
+                ci: None,
+                buttons: Vec::new(),
+            }),
+            route: None,
+            note: None,
+            steps: Vec::new(),
+            selected: None,
+        })
+    };
+    Some(feature.touched().map(card).collect())
+}
+
+/// Under a repository's name while Ship's first check runs.
+pub(super) const CHECKING_META: &str = "reading its git status and fetching origin";
+
 /// The Ship page's choices and tick boxes, as `ship_rows` numbers them.
 pub(super) fn ship_sections(
     feature: &Feature,
@@ -666,6 +701,9 @@ pub(super) fn ship_sections(
     // While a pull request it opened waits on GitHub, its card says how it
     // stands, its checks too: what ran is all there is to show then.
     let going = feature.squash_going() || pr_wait(feature, probe).is_some();
+    if let Some(cards) = checking_cards(feature, probe) {
+        return cards;
+    }
     let Some(check) = probe
         .and_then(|p| p.ship.as_ref())
         .filter(|c| !c.unread && (!rows.is_empty() || going))

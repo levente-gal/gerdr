@@ -3882,6 +3882,65 @@ fn feature_tab_ship_blocked() -> super::FeatureTabView {
     view
 }
 
+/// The Ship page while its first check runs: a card for each repository,
+/// its dot blinking, until what the check found takes its place.
+fn feature_tab_ship_checking() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, Dot, NodeMark, PageButton, PageSection, StagePage};
+    use crate::feature::Stage;
+    let mut view = feature_tab();
+    at_stage(&mut view, 8, NodeMark::Current, "checking");
+    let card = |head: &str| {
+        PageSection::ShipGroup(super::ShipGroup {
+            head: head.into(),
+            caption: false,
+            card: Some(super::ShipCard {
+                dot: Dot::Working,
+                state: tab_line("checking\u{2026}", CheckTone::Note),
+                meta: "reading its git status and fetching origin".into(),
+                base: None,
+                ci: None,
+                buttons: Vec::new(),
+            }),
+            route: None,
+            note: None,
+            steps: Vec::new(),
+            selected: None,
+        })
+    };
+    view.page = StagePage {
+        primary: None,
+        menu: Vec::new(),
+        title: "Ship".into(),
+        about: Stage::Ship.about().into(),
+        status: None,
+        buttons: vec![
+            PageButton {
+                label: "Ship\u{2026}".into(),
+                style: ButtonStyle::Off,
+            },
+            PageButton {
+                label: "Check again".into(),
+                style: ButtonStyle::Quiet,
+            },
+        ],
+        sections: vec![
+            PageSection::Lines {
+                label: "Ship check".into(),
+                lines: vec![tab_line(
+                    "Checking the worktrees and fetching origin\u{2026}",
+                    CheckTone::Note,
+                )],
+            },
+            PageSection::Toolbar {
+                groups: vec![(String::new(), vec![1])],
+            },
+            card("api"),
+            card("web"),
+        ],
+    };
+    view
+}
+
 /// A repository's card on the Ship page, `head` its name then what it
 /// holds: `row` its choice's row, `on` its way, if any.
 fn ship_group(
@@ -6164,7 +6223,7 @@ fn placed(mut view: super::FeatureTabView) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 54] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 55] {
     let views = [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -6229,12 +6288,13 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 54] {
         ("tab_ai_review_history", feature_tab_ai_review_history()),
         ("tab_fix_picks", feature_tab_fix_picks()),
         ("tab_ship_picks", feature_tab_ship_picks()),
+        ("tab_ship_checking", feature_tab_ship_checking()),
     ];
     views.map(|(name, view)| (name, placed(view)))
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 70] = [
+const TAB_SURFACES: [(&str, i32); 71] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -6305,9 +6365,10 @@ const TAB_SURFACES: [(&str, i32); 70] = [
     ("tab_ship_picks", 860),
     ("tab_ship_ci", 860),
     ("tab_ship_base_ci", 1180),
+    ("tab_ship_checking", 1180),
 ];
 
-const FEATURE_TAB: [&str; 70] = [
+const FEATURE_TAB: [&str; 71] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -6378,10 +6439,11 @@ const FEATURE_TAB: [&str; 70] = [
     "tab_ship_picks_860",
     "tab_ship_ci_860",
     "tab_ship_base_ci_1180",
+    "tab_ship_checking_1180",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
     // Dark at 1
     [
         0x67093ad27ab19c53, // tab_build_860
@@ -6454,6 +6516,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0x8040979937b3c60f, // tab_ship_picks_860
         0x38114a9f4a296f0b, // tab_ship_ci_860
         0x978e49f04e09a85b, // tab_ship_base_ci_1180
+        0x51edb1354d501bd9, // tab_ship_checking_1180
     ],
     // Dark at 2
     [
@@ -6527,6 +6590,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0x481b7505c8a78ce5, // tab_ship_picks_860
         0xa7fb449280d6136d, // tab_ship_ci_860
         0xfd8a10d5b4443322, // tab_ship_base_ci_1180
+        0x9a2f01f6f743e506, // tab_ship_checking_1180
     ],
     // Light at 1
     [
@@ -6600,6 +6664,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0xbf1d1da2d3ae81ba, // tab_ship_picks_860
         0x609f8f8fcd262491, // tab_ship_ci_860
         0x2f2bf3a05461f3b8, // tab_ship_base_ci_1180
+        0xf2a063041d3ea7e4, // tab_ship_checking_1180
     ],
     // Light at 2
     [
@@ -6673,6 +6738,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0x37b19a5f62a140aa, // tab_ship_picks_860
         0x9e25b62b18120c6e, // tab_ship_ci_860
         0xec6b9ed186c8fcd5, // tab_ship_base_ci_1180
+        0x57fb4f62d5c7de92, // tab_ship_checking_1180
     ],
 ];
 
