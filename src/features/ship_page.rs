@@ -175,12 +175,12 @@ pub(super) fn check_lines(
         .filter(|repo| !repo.merged)
         .filter_map(|repo| {
             let state = probe?.bases.get(&repo.key)?;
-            let new = count_of(state.behind, "new commit", "new commits");
+            let new = match state.behind {
+                1 => "a new commit that conflicts: take it in first".to_owned(),
+                n => format!("{n} new commits that conflict: take them in first"),
+            };
             (!state.conflicts.is_empty()).then(|| {
-                let text = format!(
-                    "{}: {} has {new} that conflict: take them in first",
-                    repo.key, state.onto
-                );
+                let text = format!("{}: {} has {new}", repo.key, state.onto);
                 line(text, CheckTone::Blocker)
             })
         })

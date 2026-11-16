@@ -250,6 +250,14 @@ fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
             ("\u{2713} checks passed \u{b7} review done", CheckTone::Ready)
         ]
     );
+    // One commit: said as one.
+    if let Some(state) = both.bases.get_mut("api") {
+        state.behind = 1;
+    }
+    assert_eq!(
+        check_lines(&f, Some(&both), false, 2_060)[2].text,
+        "api: origin/main has a new commit that conflicts: take it in first"
+    );
     // Nothing to do: what would stop shipping stops nothing.
     let nothing = probe(check(
         &["api is dirty"],
