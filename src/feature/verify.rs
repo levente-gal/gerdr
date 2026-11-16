@@ -252,22 +252,6 @@ impl Outcome {
 /// file's `"workflow": {"verify": ...}`.
 pub type Config = PerProject<BTreeMap<String, Vec<String>>>;
 
-/// A check's command run another way while what its paths hold changed
-/// since it last passed: `pytest --reuse-db` run with `--create-db` once a
-/// migration changed, as the kept test database misses it. The store file's
-/// `"workflow": {"verify_fresh": {"<command>": {"when": ["**/migrations/**"],
-/// "run": "<other command>"}}}`, by the command as `verify` lists it.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Fresh {
-    /// Paths from the repository's top, as git globs (`**/migrations/**`).
-    pub when: Vec<String>,
-    /// What runs in its place.
-    pub run: String,
-}
-
-/// Each project's `Fresh` rules, by the command they change.
-pub type FreshConfig = PerProject<BTreeMap<String, Fresh>>;
-
 /// The checks `config` gives `feature`, in the order they are listed.
 pub fn checks(feature: &Feature, config: &Config) -> Vec<Check> {
     split(feature, config).0
@@ -373,44 +357,6 @@ pub struct Begun {
     pub patch: String,
     /// Each touched repository's `HEAD` commit, by `Repo::key`.
     pub heads: Vec<(String, String)>,
-    /// The checks to run another way this time, by `CheckRun::key`, with what
-    /// they run (`fresh`).
-    pub fresh: Vec<((String, String), String)>,
-}
-
-/// The checks of `feature` to run another way this time, by `CheckRun::key`,
-/// with what they run: those whose rule in `config` names a path changed
-/// since the check last passed, or since the feature began if it never did.
-/// One whose change can't be read runs so too: it costs time, not a wrong
-/// result. Runs git.
-pub fn fresh(feature: &Feature, config: &FreshConfig) -> Vec<((String, String), String)> {
-    let rows = (feature.verify.as_ref()).map_or(&[][..], |v| v.checks.as_slice());
-    let mut out = Vec::new();
-    for repo in feature.touched() {
-        for (command, rule) in config.of(repo).into_iter().flatten() {
-            let key = (repo.key(), command.trim().to_owned());
-            let row = rows.iter().find(|r| r.key() == key);
-            let since = row.and_then(|r| r.passed_at.clone());
-            let since = since.unwrap_or_else(|| repo.base_commit.clone());
-            if rule.when.is_empty() || rule.run.trim().is_empty() {
-                continue;
-            }
-            let paths: Vec<String> = rule.when.iter().map(|w| format!(":(glob){w}")).collect();
-            let mut args = vec!["diff", "--name-only", since.as_str(), "HEAD", "--"];
-            args.extend(paths.iter().map(String::as_str));
-            let changed = match git(&repo.worktree, &args) {
-                Ok(names) => !names.trim().is_empty(),
-                Err(err) => {
-                    tracing::warn!("{}: what changed since {since}: {err}", repo.key());
-                    true
-                }
-            };
-            if changed {
-                out.push((key, rule.run.trim().to_owned()));
-            }
-        }
-    }
-    out
 }
 
 /// Read `feature`'s code ahead of its checks. The evidence, when nothing is
@@ -460,7 +406,6 @@ pub fn begin(feature: &Feature) -> Result<Begun, Box<Evidence>> {
     Ok(Begun {
         patch: before.patch,
         heads,
-        fresh: Vec::new(),
     })
 }
 
@@ -556,8 +501,6 @@ pub fn plan(
                 began: None,
                 stopping: false,
                 passed_before: was.is_some_and(|c| c.outcome.as_ref().is_some_and(Outcome::passed)),
-                passed_at: was.and_then(|c| c.passed_at.clone()),
-                fresh: None,
             }
         })
         .collect()
@@ -652,9 +595,8 @@ pub fn script_with(dir: &Path, i: usize, check: &CheckRun, slug: &str, prelude: 
         let (new, file) = (quoted(path(&format!("{ext}.new"))), quoted(path(ext)));
         format!("echo \"{what}\" > {new} && mv {new} {file}\n")
     };
-    let command = check.fresh.as_deref().unwrap_or(&check.command);
-    let first = command.lines().next().unwrap_or_default();
-    let more = if command.lines().nth(1).is_some() {
+    let first = check.command.lines().next().unwrap_or_default();
+    let more = if check.command.lines().nth(1).is_some() {
         " \u{2026}"
     } else {
         ""
@@ -681,7 +623,7 @@ pub fn script_with(dir: &Path, i: usize, check: &CheckRun, slug: &str, prelude: 
         head = shell_quote(&head),
         slug = shell_quote(slug),
         cwd = shell_quote(&check.dir.to_string_lossy()),
-        command = shell_quote(command),
+        command = shell_quote(&check.command),
         passed = shell_quote(&format!("{END}passed")),
         end = END,
         exit = leave("$code", "exit"),
@@ -1600,12 +1542,6 @@ pub struct CheckRun {
     /// broke it (`regressed`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub passed_before: bool,
-    /// Its repository's `HEAD` the last time it passed (`fresh`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub passed_at: Option<String>,
-    /// What it runs this time in place of `command`, as its `Fresh` rule says.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fresh: Option<String>,
 }
 
 impl CheckRun {
@@ -3031,7 +2967,6 @@ mod tests {
         let begun = Begun {
             patch: "new".into(),
             heads: heads("a2"),
-            ..Begun::default()
         };
         let scope = Scope::after_changes(Some(&last));
         let holds = |repo: &str| last.holds(&begun, repo);
@@ -3061,7 +2996,6 @@ mod tests {
         let begun = |patch: &str, api: &str| Begun {
             patch: patch.into(),
             heads: heads(api),
-            ..Begun::default()
         };
         // The same change, rebased: all of it holds.
         assert!(run.holds(&begun("p", "a2"), "api"));
@@ -3240,47 +3174,6 @@ mod tests {
         run.checks = rows;
         ran(&mut run.checks[0], 0);
         assert!(!regressed(&run), "nothing failed");
-    }
-
-    #[test]
-    fn a_check_runs_fresh_once_its_paths_changed_since_it_passed() {
-        let t = Temp::new();
-        let mut f = feature_over(&t, &["api"], &[]);
-        let w = f.repos[0].worktree.clone();
-        let rule = Fresh {
-            when: vec!["**/migrations/**".into()],
-            run: "pytest --create-db".into(),
-        };
-        let config = FreshConfig::all(BTreeMap::from([("pytest --reuse-db".into(), rule)]));
-        let fresh = |f: &Feature| fresh(f, &config);
-        // Nothing changed there since the feature began.
-        commit(&w, "app.py", "code");
-        assert!(fresh(&f).is_empty());
-        // A migration changed, and the check never passed.
-        std::fs::create_dir_all(w.join("api/migrations")).unwrap();
-        commit(&w, "api/migrations/0001.py", "migration");
-        let key = ("api".to_owned(), "pytest --reuse-db".to_owned());
-        assert_eq!(fresh(&f), [(key.clone(), "pytest --create-db".to_owned())]);
-        // It passed with that migration in: no more.
-        let head = git_run(&w, &["rev-parse", "HEAD"]).trim().to_owned();
-        let row = CheckRun {
-            repo: key.0.clone(),
-            command: key.1.clone(),
-            passed_at: Some(head),
-            ..CheckRun::default()
-        };
-        f.verify = Some(VerifyRun {
-            checks: vec![row.clone()],
-            ..VerifyRun::default()
-        });
-        assert!(fresh(&f).is_empty());
-        // Its script runs the rule's command.
-        let row = CheckRun {
-            fresh: Some("pytest --create-db".into()),
-            ..row
-        };
-        let script = script(Path::new("/r"), 0, &row, "f");
-        assert!(script.contains("--create-db") && !script.contains("--reuse-db"));
     }
 
     #[test]

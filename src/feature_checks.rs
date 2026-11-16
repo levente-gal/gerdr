@@ -218,10 +218,6 @@ impl Gerdr {
         let checks = verify::checks(feature, &config);
         let holds = |repo: &str| run.holds(&begun, repo);
         let mut rows = verify::plan(&checks, &run.checks, &holds, &scope, n);
-        for row in rows.iter_mut().filter(|row| row.outcome.is_none()) {
-            let fresh = begun.fresh.iter().find(|(key, _)| *key == row.key());
-            row.fresh = fresh.map(|(_, run)| run.clone());
-        }
         // On the same code the user asked for just these: on changed code,
         // why the others don't run is worth a word.
         let same = run.patch.as_deref() == Some(begun.patch.as_str());
@@ -553,7 +549,6 @@ impl Gerdr {
             let begun = Begun {
                 patch: run.patch.clone().unwrap_or_default(),
                 heads: run.heads.clone(),
-                ..Begun::default()
             };
             let at = (project.as_str(), slug.as_str(), n);
             let mut ran_on = None;
@@ -691,7 +686,6 @@ impl Gerdr {
             let begun = Begun {
                 patch: run.patch.clone().unwrap_or_default(),
                 heads: run.heads.clone(),
-                ..Begun::default()
             };
             let outcomes = (run.checks.iter())
                 .map(|row| (row.outcome.clone()).unwrap_or_else(|| not_started(row, why.clone())))
