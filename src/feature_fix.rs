@@ -667,6 +667,13 @@ impl Gerdr {
         if let Some(round) = (self.feature_mut(project, slug)).and_then(|f| f.fix_round.as_mut()) {
             round.done = round.items.len() as u32;
         }
+        // Verify's failures fixed, its checks run again once this read of the
+        // code is in, whether the fixes changed it or not (a test database
+        // rebuilt): see `due_checks_read`.
+        let n = feature.fix_round.as_ref().map_or(0, |r| r.n);
+        if fix_round::asker(n, &feature.verify_fixes, &feature.fix_asked) == Some(Stage::Verify) {
+            (self.features.build.checks_due).insert(fix_key(project, slug));
+        }
         self.end_fix_round(project, slug, false);
         self.probe_feature(project, slug);
         let title = &feature.title;

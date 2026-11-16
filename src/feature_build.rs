@@ -79,9 +79,10 @@ pub(crate) struct BuildState {
     setting_up: BTreeSet<Key>,
     /// Features whose Verify checks run now.
     pub(crate) verifying: BTreeSet<Key>,
-    /// Pull request reviews whose code changed: their checks run once no
-    /// agent is fixing them (see `pr_code_changed`).
-    pr_checks_due: BTreeSet<Key>,
+    /// Features whose checks run once their code is read and no agent is
+    /// fixing them (see `due_checks_read`): a pull request review whose
+    /// code changed, or one whose Verify fix round ended, code changed or not.
+    pub(crate) checks_due: BTreeSet<Key>,
     /// Which checks the next run of a feature's runs, while its code is read.
     pub(crate) scopes: BTreeMap<Key, Scope>,
     /// What stops the running checks of a feature, by their index.
@@ -325,10 +326,10 @@ fn verify_refusal(feature: &Feature, running: bool, checks: usize) -> Result<(),
     Ok(())
 }
 
-/// What pull request review `feature`, whose code changed, does with
-/// Verify's checks now.
+/// What `feature`, with Verify's checks due (see `BuildState::checks_due`),
+/// does with them now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PrChecks {
+enum DueChecks {
     /// An agent still fixes it, or its project isn't shown.
     Wait,
     Run,
@@ -336,15 +337,21 @@ enum PrChecks {
     Drop,
 }
 
-/// What review `feature` does with its checks (`checks` set, `running`
+/// What `feature` does with its due checks (`checks` set, `running`
 /// now); `fixing`: an agent fixes it, `here`: its project is shown.
-fn pr_checks(feature: &Feature, fixing: bool, here: bool, running: bool, checks: usize) -> PrChecks {
+fn due_checks(
+    feature: &Feature,
+    fixing: bool,
+    here: bool,
+    running: bool,
+    checks: usize,
+) -> DueChecks {
     if feature.fix_round.is_some() || fixing || !here {
-        PrChecks::Wait
+        DueChecks::Wait
     } else if feature.writer.is_none() && verify_refusal(feature, running, checks).is_ok() {
-        PrChecks::Run
+        DueChecks::Run
     } else {
-        PrChecks::Drop
+        DueChecks::Drop
     }
 }
 
@@ -1064,35 +1071,36 @@ impl Gerdr {
         self.run_checks(project, slug, scope);
     }
 
-    /// The code of pull request review `slug` was read, `changed` since
-    /// Verify last ran (its author pushed, or fixes landed): Verify's checks
-    /// run on it once no agent is fixing it, as `build_done` starts them for
-    /// a feature gerdr built.
-    pub(crate) fn pr_code_changed(&mut self, project: &str, slug: &str, changed: bool) {
+    /// The code of feature `slug` was read, a pull request review's
+    /// `changed` since Verify last ran (its author pushed, or fixes landed):
+    /// Verify's checks due on it run once no agent is fixing it, as
+    /// `build_done` starts them for a feature gerdr built. One sent back to
+    /// Build by its code drops them: `build_done` runs them in time.
+    pub(crate) fn due_checks_read(&mut self, project: &str, slug: &str, changed: bool) {
         let key = (project.to_owned(), slug.to_owned());
         if changed {
-            self.features.build.pr_checks_due.insert(key.clone());
+            self.features.build.checks_due.insert(key.clone());
         }
-        if !self.features.build.pr_checks_due.contains(&key) {
+        if !self.features.build.checks_due.contains(&key) {
             return;
         }
         let Some(feature) = self.feature(project, slug) else {
-            self.features.build.pr_checks_due.remove(&key);
+            self.features.build.checks_due.remove(&key);
             return;
         };
         let config = self.projects.workflows(feature, |w| w.verify.clone());
-        let now = pr_checks(
+        let now = due_checks(
             feature,
             self.features.build.fixing.contains_key(&key),
             self.project.as_deref() == Some(project),
             self.features.build.verifying.contains(&key),
             verify::checks(feature, &config).len(),
         );
-        if now == PrChecks::Wait {
+        if now == DueChecks::Wait {
             return;
         }
-        self.features.build.pr_checks_due.remove(&key);
-        if now == PrChecks::Run {
+        self.features.build.checks_due.remove(&key);
+        if now == DueChecks::Run {
             self.recheck(project, slug);
         }
     }
@@ -1613,18 +1621,27 @@ mod tests {
     }
 
     #[test]
-    fn a_reviews_changed_code_is_checked_once_nothing_fixes_it() {
+    fn due_checks_run_once_nothing_fixes_the_code() {
         let f = feature("a", vec![repo("api", true)], 4);
-        assert_eq!(pr_checks(&f, false, true, false, 2), PrChecks::Run);
-        assert_eq!(pr_checks(&f, true, true, false, 2), PrChecks::Wait);
-        assert_eq!(pr_checks(&f, false, false, false, 2), PrChecks::Wait);
+        assert_eq!(due_checks(&f, false, true, false, 2), DueChecks::Run);
+        assert_eq!(due_checks(&f, true, true, false, 2), DueChecks::Wait);
+        assert_eq!(due_checks(&f, false, false, false, 2), DueChecks::Wait);
         let fixing = crate::feature::fix_round::FixPhase::Fixing;
         let round = crate::features::tests::in_round(f.clone(), Stage::Verify, fixing);
-        assert_eq!(pr_checks(&round, false, true, false, 2), PrChecks::Wait);
-        assert_eq!(pr_checks(&f, false, true, true, 2), PrChecks::Drop);
-        assert_eq!(pr_checks(&f, false, true, false, 0), PrChecks::Drop);
+        assert_eq!(due_checks(&round, false, true, false, 2), DueChecks::Wait);
+        assert_eq!(due_checks(&f, false, true, true, 2), DueChecks::Drop);
+        assert_eq!(due_checks(&f, false, true, false, 0), DueChecks::Drop);
         let reviewing = feature("a", vec![repo("api", true)], 5);
-        assert_eq!(pr_checks(&reviewing, false, true, false, 2), PrChecks::Drop);
+        assert_eq!(
+            due_checks(&reviewing, false, true, false, 2),
+            DueChecks::Drop
+        );
+        // Sent back to Build by its fixes' code: Build's end runs them.
+        let building = feature("a", vec![repo("api", true)], 3);
+        assert_eq!(
+            due_checks(&building, false, true, false, 2),
+            DueChecks::Drop
+        );
     }
 
     #[test]
