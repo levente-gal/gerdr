@@ -123,6 +123,12 @@ pub struct Worktree {
     pub fresh: bool,
     /// Its folder is gone; `git worktree prune` would drop it.
     pub gone: bool,
+    /// The submodules checked out in it, nested ones too, by their path in
+    /// it. git removes a worktree with any only when forced.
+    pub submodules: Vec<String>,
+    /// Those of `submodules` with commits found nowhere else: on no remote,
+    /// and not in what the worktree pins. Deleting it loses them.
+    pub stranded: Vec<String>,
 }
 
 impl Worktree {
@@ -485,8 +491,37 @@ fn worktrees(dir: &Path) -> Vec<Worktree> {
             .unwrap_or_default();
         w.dirty = !changes.is_empty();
         w.edited = changes.lines().any(|l| !l.starts_with("??"));
+        if !w.main && !w.gone && w.path.join(".gitmodules").exists() {
+            (w.submodules, w.stranded) = submodules(&w.path);
+        }
     }
     all
+}
+
+/// For each submodule checked out in `dir`, nested ones too, its first
+/// commit that is on no remote and not in what its parent pins (git
+/// fetches that by hash): none, or one only that checkout has. A pinned
+/// commit the submodule doesn't have is left out of the test.
+const STRANDED: &str = r#"u=$(git rev-list -n1 HEAD --branches --tags --not --remotes "$sha1" 2>/dev/null ||
+git rev-list -n1 HEAD --branches --tags --not --remotes 2>/dev/null)
+printf '%s %s\n' "$u" "$displaypath""#;
+
+/// The submodules checked out in `dir`, and those of them with commits
+/// found nowhere else (see `Worktree::stranded`).
+fn submodules(dir: &Path) -> (Vec<String>, Vec<String>) {
+    let args = ["submodule", "foreach", "--quiet", "--recursive", STRANDED];
+    let mut all = Vec::new();
+    let mut stranded = Vec::new();
+    for line in git(dir, &args).unwrap_or_default().lines() {
+        let Some((commit, path)) = line.split_once(' ') else {
+            continue;
+        };
+        all.push(path.to_owned());
+        if !commit.is_empty() {
+            stranded.push(path.to_owned());
+        }
+    }
+    (all, stranded)
 }
 
 /// The worktree of the repository `dir` is in that has `branch` checked
@@ -652,7 +687,10 @@ pub fn remove_worktree(main: &Path, w: &Worktree, force: bool) -> Result<(), Str
     } else {
         let path = w.path.to_string_lossy();
         let mut args = vec!["worktree", "remove"];
-        if force {
+        // git refuses one with submodules unless forced, even when they
+        // lose nothing.
+        let submodules_only = !w.submodules.is_empty() && w.stranded.is_empty() && !w.dirty;
+        if force || submodules_only {
             args.push("--force");
         }
         args.push(&path);
@@ -1152,6 +1190,32 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
         }
+    }
+
+    #[test]
+    fn a_submodule_commit_found_nowhere_else_is_stranded() {
+        let repo = Repo::new();
+        // A library pushed to its remote, added as a submodule from there.
+        let lib = repo.beside("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        repo.git(&lib, &["init", "-q", "-b", "main"]);
+        repo.commit(&lib, "l", "lib");
+        let remote = repo.beside("lib.git");
+        let (from, to) = (lib.to_str().unwrap(), remote.to_str().unwrap());
+        repo.git(&lib, &["clone", "-q", "--bare", from, to]);
+        let file = "protocol.file.allow=always";
+        repo.git(&repo.0, &["-c", file, "submodule", "add", "-q", to, "lib"]);
+        repo.git(&repo.0, &["commit", "-q", "-m", "lib"]);
+        let wt = repo.worktree("wt");
+        repo.git(&wt, &["-c", file, "submodule", "update", "-q", "--init"]);
+        let found = repo.find("wt");
+        assert_eq!(found.submodules, ["lib"]);
+        assert!(found.stranded.is_empty(), "all of it is on its remote");
+        // A commit there only.
+        let sub = wt.join("lib");
+        repo.git(&sub, &["switch", "-q", "-c", "local"]);
+        repo.commit(&sub, "m", "only here");
+        assert_eq!(repo.find("wt").stranded, ["lib"]);
     }
 
     #[test]

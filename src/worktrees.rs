@@ -483,24 +483,32 @@ fn can_checkout(wt: &Worktree) -> bool {
 /// Deleting `wt` loses nothing: it is clean and merged or without a
 /// commit of its own, or its folder is gone.
 fn safe_to_delete(wt: &Worktree) -> bool {
-    done_with(wt) || (wt.fresh && !wt.dirty)
+    done_with(wt) || (wt.fresh && !wt.dirty && wt.stranded.is_empty())
 }
 
 /// `wt` is done with, for a clean-up: merged and clean, or its folder
 /// gone. Not a new one with no commit yet: work may be about to start in
 /// it.
 fn done_with(wt: &Worktree) -> bool {
-    wt.gone || (wt.merged && !wt.dirty)
+    wt.gone || (wt.merged && !wt.dirty && wt.stranded.is_empty())
 }
 
 /// What deleting `wt` loses, for the second press to confirm.
 fn loses(wt: &Worktree) -> String {
     let mut what = Vec::new();
     if wt.dirty {
-        what.push("its changes");
+        what.push("its changes".to_owned());
     }
     if !wt.merged && !wt.fresh {
-        what.push("unmerged commits");
+        what.push("unmerged commits".into());
+    }
+    match wt.stranded.as_slice() {
+        [] => {}
+        [one] => what.push(format!("the commits found only in submodule {one}")),
+        many => what.push(format!(
+            "the commits found only in submodules {}",
+            many.join(", ")
+        )),
     }
     format!("Press Del again to delete, with {}", what.join(" and "))
 }
@@ -1891,6 +1899,14 @@ mod tests {
         assert_eq!(
             loses(&items[3].wt),
             "Press Del again to delete, with its changes"
+        );
+        // Clean, but a submodule has commits found nowhere else.
+        items[3].wt.dirty = false;
+        items[3].wt.stranded = vec!["lib".into()];
+        assert!(!safe_to_delete(&items[3].wt));
+        assert_eq!(
+            loses(&items[3].wt),
+            "Press Del again to delete, with the commits found only in submodule lib"
         );
     }
 
