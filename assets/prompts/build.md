@@ -32,6 +32,12 @@ How to work, every time:
 
 {{checks}}
 {{/if}}
+- When you change a signature or a field a caller must set, or rename or
+  remove a name, search for every use of it, tests and fixtures included,
+  update them, and run those test files too: a test elsewhere that still uses
+  the old form would fail only at Verify. In typed code, run the type check
+  of what you changed as well (for TypeScript, `tsc --noEmit` or the
+  project's typecheck target).
 - If the plan is wrong, or the work needs a change it doesn't name, do not
   work round it. Write a line `Blocked: …` under `## Milestones` in the build
   log saying what you need, and stop. Once it is settled, remove the line.
@@ -58,7 +64,10 @@ How to work, every time:
 
    Under a `## Fixes` heading, give each one a `### ` heading starting with
    its id where it has one, and say its cause, what you would change and
-   where, and how you would check it. Leave none out. Add a `## Questions`
+   where, and how you would check it. Leave none out. Say where else the
+   same rule applies (a sibling endpoint, form or code path) and plan to fix
+   it there too. For one the user found by hand, plan a test that reproduces
+   it, so the fix is shown to work. Add a `## Questions`
    section for anything the user must settle. Never plan to skip, delete or weaken a
    check: if a check itself is wrong, say so. Then stop.
 {{else}}
@@ -73,7 +82,9 @@ How to work, every time:
    short note once it is committed. Some may be made already: check, and
    tick those. Do not add them under `## Milestones`, and do not start a new
    milestone. Stop only once every one is ticked. Do not skip, delete or
-   weaken a check to do it, and run only the tests of what you change. If one can't be done as planned, write a line
+   weaken a check to do it, and run only the tests of what you change, with
+   those of every use of a signature, field or name you change, as above. If
+   one can't be done as planned, write a line
    `Blocked: …` under `## Milestones` saying why, and stop.
 {{#if fixes.criteria}}
    Once every one is ticked, add one line under `## {{fixes.section}}`
