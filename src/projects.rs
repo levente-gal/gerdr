@@ -393,6 +393,11 @@ pub struct Workflow {
     /// `feature::verify::TIMEOUT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_timeout: Option<u64>,
+    /// Verify's commands run another way after their paths changed, by the
+    /// command (see `feature::verify::Fresh`). The file is the only place for
+    /// them.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub verify_fresh: std::collections::BTreeMap<String, crate::feature::verify::Fresh>,
     /// What a feature's sandbox runs, a terminal per command, by repository
     /// folder name. A line starting with `#` starts unchecked when a sandbox
     /// asks what to run (see `feature_sandbox`).
@@ -448,6 +453,7 @@ impl Workflow {
             && self.copy.is_empty()
             && self.verify.is_empty()
             && self.verify_timeout.is_none()
+            && self.verify_fresh.is_empty()
             && self.run.is_empty()
             && self.prepare.is_empty()
             && self.sandbox_env.is_empty()

@@ -425,6 +425,7 @@ impl Remote {
         CheckRun {
             dir: self.paths.map(&row.dir),
             command: self.paths.text(&row.command),
+            fresh: row.fresh.as_deref().map(|run| self.paths.text(run)),
             ..row.clone()
         }
     }
@@ -838,6 +839,7 @@ mod tests {
         Begun {
             patch: "p".into(),
             heads: vec![("api".into(), "c1".into())],
+            ..Begun::default()
         }
     }
 

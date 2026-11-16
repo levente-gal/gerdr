@@ -1189,8 +1189,14 @@ impl Gerdr {
             what: format!("Verifying \u{201c}{title}\u{201d}"),
         };
         let data = store::dir(None, project, slug);
+        let fresh = (self.projects).workflows(&feature, |w| w.verify_fresh.clone());
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.feature_work(Some(busy), move |_| match verify::begin(&feature) {
+        let begin = move |feature: &Feature| -> Result<verify::Begun, Box<Evidence>> {
+            let mut begun = verify::begin(feature)?;
+            begun.fresh = verify::fresh(feature, &fresh);
+            Ok(begun)
+        };
+        self.feature_work(Some(busy), move |_| match begin(&feature) {
             Ok(begun) => Done::ChecksBegun {
                 project,
                 slug,
@@ -1226,6 +1232,14 @@ impl Gerdr {
         run.finished = Some(now);
         run.patch = Some(evidence.patch.clone()).filter(|p| !p.is_empty());
         run.passed = Some(passed);
+        // Where each check that passed now did: what its `Fresh` rule reads from.
+        for row in (run.checks.iter_mut()).filter(|r| r.run == n) {
+            let passed = row.outcome.as_ref().is_some_and(verify::Outcome::passed);
+            let head = evidence.heads.iter().find(|(key, _)| *key == row.repo);
+            if let (true, Some((_, head))) = (passed, head) {
+                row.passed_at = Some(head.clone());
+            }
+        }
         run.failures = failures.clone();
         // Nothing ran on this code: the last run's say nothing of it.
         if evidence.outcomes.is_empty() {
