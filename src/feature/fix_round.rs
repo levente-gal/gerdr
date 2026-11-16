@@ -917,8 +917,10 @@ pub enum Plan {
 }
 
 /// The next step of an agent told to write the plan, as `seen`, told
-/// `since` ago, `written` a file newer than that is there.
-pub fn plan_next(seen: Seen, since: Duration, written: bool) -> Plan {
+/// `since` ago, at rest for `rested` since it was last seen at work, `written`
+/// a file newer than that is there. herdr can show one idle for a moment
+/// between two steps: it stopped only once it rested `REST` with no file.
+pub fn plan_next(seen: Seen, since: Duration, rested: Duration, written: bool) -> Plan {
     let Seen {
         worked,
         status,
@@ -928,7 +930,7 @@ pub fn plan_next(seen: Seen, since: Duration, written: bool) -> Plan {
         Some(AgentStatus::Working | AgentStatus::Blocked) if alive => Plan::Worked,
         _ if written && (worked || !alive || since >= PLAN_STARTS) => Plan::Read,
         _ if !alive => Plan::Gone,
-        _ if worked => Plan::Stopped,
+        _ if worked && rested >= REST => Plan::Stopped,
         _ => Plan::Wait,
     }
 }
@@ -1151,30 +1153,53 @@ mod tests {
         let idle = Some(AgentStatus::Idle);
         let working = Some(AgentStatus::Working);
         let blocked = Some(AgentStatus::Blocked);
-        assert_eq!(plan_next(seen(false, idle, true), SOON, false), Plan::Wait);
         assert_eq!(
-            plan_next(seen(false, working, true), SOON, false),
+            plan_next(seen(false, idle, true), SOON, LATE, false),
+            Plan::Wait
+        );
+        assert_eq!(
+            plan_next(seen(false, working, true), SOON, LATE, false),
             Plan::Worked
         );
         // Still writing it, or asking something.
         assert_eq!(
-            plan_next(seen(true, working, true), SOON, true),
+            plan_next(seen(true, working, true), SOON, LATE, true),
             Plan::Worked
         );
         assert_eq!(
-            plan_next(seen(true, blocked, true), SOON, true),
+            plan_next(seen(true, blocked, true), SOON, LATE, true),
             Plan::Worked
         );
-        assert_eq!(plan_next(seen(true, idle, true), SOON, true), Plan::Read);
         assert_eq!(
-            plan_next(seen(true, idle, true), SOON, false),
+            plan_next(seen(true, idle, true), SOON, LATE, true),
+            Plan::Read
+        );
+        assert_eq!(
+            plan_next(seen(true, idle, true), SOON, LATE, false),
             Plan::Stopped
         );
+        // Idle for a moment between two steps: not stopped yet.
+        assert_eq!(
+            plan_next(seen(true, idle, true), SOON, SOON, false),
+            Plan::Wait
+        );
         // A file just written, the agent not seen working yet: not at once.
-        assert_eq!(plan_next(seen(false, idle, true), SOON, true), Plan::Wait);
-        assert_eq!(plan_next(seen(false, idle, true), LATE, true), Plan::Read);
-        assert_eq!(plan_next(seen(true, None, false), SOON, false), Plan::Gone);
-        assert_eq!(plan_next(seen(false, None, false), SOON, true), Plan::Read);
+        assert_eq!(
+            plan_next(seen(false, idle, true), SOON, LATE, true),
+            Plan::Wait
+        );
+        assert_eq!(
+            plan_next(seen(false, idle, true), LATE, LATE, true),
+            Plan::Read
+        );
+        assert_eq!(
+            plan_next(seen(true, None, false), SOON, LATE, false),
+            Plan::Gone
+        );
+        assert_eq!(
+            plan_next(seen(false, None, false), SOON, LATE, true),
+            Plan::Read
+        );
     }
 
     #[test]

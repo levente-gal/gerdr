@@ -40,7 +40,7 @@ pub(crate) struct FixWatch {
     /// The plan's stamp when its check last refused it.
     refused: Option<crate::feature_agents::Stamp>,
     /// Since when an agent making fixes showed no work and left the build
-    /// log alone.
+    /// log alone, or one planning them was last seen at work.
     rest: Instant,
     /// The build log's stamp when last read.
     log: Option<crate::feature_agents::Stamp>,
@@ -463,16 +463,18 @@ impl Gerdr {
                 let written = at.is_some_and(|(at, _)| at >= round.asked);
                 let watch = self.features.build.fix_watches.entry(key).or_default();
                 let since = watch.since.elapsed();
+                let rested = watch.rest.elapsed();
                 let refused = watch.refused;
                 let seen = fix_round::Seen {
                     worked: watch.worked,
                     status,
                     alive,
                 };
-                match fix_round::plan_next(seen, since, written) {
+                match fix_round::plan_next(seen, since, rested, written) {
                     Plan::Wait => {}
                     Plan::Worked => {
                         watch.worked = true;
+                        watch.rest = Instant::now();
                         if round.stalled.is_some() {
                             self.fix_round_going(project, slug);
                         }
