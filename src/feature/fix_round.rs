@@ -3,10 +3,10 @@
 //!
 //! Whatever asks for the fixes (Verify's failures, AI review's findings, Code
 //! review's comments, Manual test's failures), the round goes the same way:
-//! the agent's chat is compacted, the agent writes `fix-plan.md` and changes
-//! no code, the user reads it, comments and sends it back as often as it
-//! takes, and then makes the fixes, the chat compacted again first as the
-//! plan is in its file. A feature has one round open at a time.
+//! a fresh Build agent writes `fix-plan.md` and changes no code, the user
+//! reads it, comments and sends it back as often as it takes, and then that
+//! same agent makes the fixes. No chat grows over the rounds, so none is
+//! compacted. A feature has one round open at a time.
 //!
 //! AI review's findings taken as they are, with no word of the user's, skip
 //! the planning: gerdr writes the plan from them and the fixes go at once
@@ -86,7 +86,8 @@ const ROUND: &str = "Fix round";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FixPhase {
-    /// The agent compacts its chat.
+    /// The agent compacts its chat: only on a round saved before each round
+    /// got a fresh agent.
     #[default]
     Compacting,
     /// The agent writes the plan.
@@ -94,6 +95,7 @@ pub enum FixPhase {
     /// The plan waits for the user.
     Ready,
     /// The user said to make the fixes: the agent compacts its chat first.
+    /// Only on a round saved before each round got a fresh agent.
     CompactingToFix,
     /// The agent makes the fixes.
     Fixing,
@@ -205,6 +207,11 @@ pub struct Trail {
     /// Verify's. None on a round from before that was kept (`run_of`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<u32>,
+    /// The Build run started for it, which plans it and makes its fixes:
+    /// work for the round goes there while it is the Build agent, else to a
+    /// fresh one. None until one starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_run: Option<u32>,
 }
 
 impl Trail {

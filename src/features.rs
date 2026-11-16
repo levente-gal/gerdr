@@ -676,6 +676,16 @@ pub(crate) enum Done {
         stamp: crate::feature_agents::Stamp,
         result: Result<Box<crate::feature_plan_review::PlanRead>, String>,
     },
+    /// What changed since the last AI review, read before its agent starts
+    /// (see `Gerdr::review_scope`).
+    ReviewScope {
+        project: String,
+        slug: String,
+        title: String,
+        /// AI review's last run then: one started meanwhile has it.
+        n: Option<u32>,
+        result: Result<crate::feature::review_import::SinceReview, String>,
+    },
     ReviewRead {
         project: String,
         slug: String,

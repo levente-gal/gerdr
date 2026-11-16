@@ -198,6 +198,10 @@ and Ctrl+C or `y` copies what it says.
   the AI review page comes to the front of the feature's workspace; another
   workspace keeps the screen. Discover's agent is the exception: its first
   message is a question, so Start agent shows its tab, ready to answer in.
+- A later AI review reads only what changed since the last one, and leaves
+  out the repositories that didn't change. When that is test files only and
+  no finding waits to be checked, AI review passes on it with no agent, and
+  the log and a toast say so; Reopen on its page has them reviewed.
 - A stage agent's tab is named after its agent and stage ("claude · Plan"),
   and its sidebar row goes by its tab's name. Approving a stage closes the
   tabs of its files (its drafts' changes, Plan review's suggestions), and a
@@ -323,7 +327,10 @@ and Ctrl+C or `y` copies what it says.
   A fix round has one name everywhere, "Fix round N", N counting the feature's
   rounds: its card, its plan's tab, its buttons ("Send fix round N again"),
   the activity and the rows it changed. Its card's meta line says which stage
-  asked it and that the Build agent makes it. Its plan opens by "Open plan",
+  asked it and that the Build agent makes it. Each round starts a fresh Build
+  agent of the pick, which writes its plan and makes its fixes, so no chat
+  grows over the rounds; the fixes' agent card says "next fixes: a fresh …".
+  Its plan opens by "Open plan",
   shown only when an agent wrote one. On Verify's, AI review's, Code
   review's and Manual test's pages a round open (in progress) is on top,
   unfolded, over the agent's card; then the page's own work (checks,

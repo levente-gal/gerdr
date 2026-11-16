@@ -1505,7 +1505,7 @@ fn fix_pages_pick_the_agent_fixes_go_to_and_ship_picks_its_own() {
             (
                 Stage::Build,
                 "Claude Code".into(),
-                "Build agent \u{b7} makes the fixes".into(),
+                "Build agent \u{b7} next fixes: a fresh Claude Code".into(),
                 2
             ),
         ]

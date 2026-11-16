@@ -1286,6 +1286,8 @@ impl Gerdr {
     /// its agent starts on it behind that, and the toast says so. A reviewer
     /// that can't start says why itself, and the panel's Enter starts it
     /// later.
+    /// A later review with nothing left to check reads what changed first:
+    /// only tests, and it passes with no agent (`review_scope`).
     pub(crate) fn start_reviewer(&mut self, project: &str, slug: &str, title: &str) {
         let reviewing = self
             .feature(project, slug)
@@ -1294,6 +1296,15 @@ impl Gerdr {
             return self.show_success(format!("\u{201c}{title}\u{201d} passed Verify"));
         }
         self.show_stage_page(project, slug);
+        if let Some(reviewed) = self.review_may_skip(project, slug) {
+            return self.read_review_scope(project, slug, title, reviewed);
+        }
+        self.launch_reviewer(project, slug, title);
+    }
+
+    /// Start the AI review agent of feature `slug` (`title`), Verify passed,
+    /// and say so.
+    pub(crate) fn launch_reviewer(&mut self, project: &str, slug: &str, title: &str) {
         if !self.launch_stage_agent(project, slug, Stage::AiReview, &[]) {
             return;
         }

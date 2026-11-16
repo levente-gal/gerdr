@@ -14,6 +14,11 @@ Your job: find what is wrong with the change before a person reviews it.
 2. Read the change. Run these, each in its repository's folder:
 
 {{review.diffs}}
+{{#if review.unchanged}}
+
+   The code of {{review.unchanged}} didn't change since the last review: it
+   needs no reading again, but for what the change above uses of it.
+{{/if}}
 
    Read the files around the change too, as much as you need.
 3. Look for bugs, acceptance criteria the change doesn't meet, security

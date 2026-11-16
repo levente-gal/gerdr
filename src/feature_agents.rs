@@ -2213,7 +2213,8 @@ impl Gerdr {
         let n = feature.next_run(stage);
         let mut values = vars(&feature, &names, &data, stage);
         if stage == Stage::AiReview {
-            values.extend(crate::feature_review::review_vars(&feature));
+            let heads = self.feature_reading(project, slug).map(|r| &r.heads);
+            values.extend(crate::feature_review::review_vars(&feature, heads));
         }
         let config = self.projects.workflows(&feature, |w| w.verify.clone());
         values.insert(
@@ -4077,7 +4078,7 @@ mod tests {
             Stage::AiReview,
         );
         assert_eq!(v["artifact.path"], "/data/a/review.json");
-        v.extend(crate::feature_review::review_vars(&f));
+        v.extend(crate::feature_review::review_vars(&f, None));
         let text = prompts::render_builtin("ai-review", &v).unwrap();
         assert!(text.contains("`git diff abc123...HEAD`"));
         assert!(text.contains("/data/a/brief.md") && text.contains("/data/a/plan.md"));
