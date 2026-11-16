@@ -11,6 +11,26 @@ pub(super) fn agent_card(
     actions: &[(PageButton, PanelOutcome)],
     now: u64,
 ) -> Option<PageSection> {
+    agent_card_at(
+        feature,
+        stage,
+        state,
+        state.machine_line.as_ref(),
+        actions,
+        now,
+    )
+}
+
+/// `agent_card`, saying where its agent runs as `machine_line` has it: on
+/// another stage's page the Build agent's card is the one Build's page shows.
+fn agent_card_at(
+    feature: &Feature,
+    stage: Stage,
+    state: &PanelState,
+    machine_line: Option<&(String, bool)>,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Option<PageSection> {
     let picks = state.picks.clone();
     let buttons = agent_buttons(stage, actions);
     let Some(run) = feature.runs.get(&stage) else {
@@ -64,7 +84,7 @@ pub(super) fn agent_card(
     };
     let status = back.map_or(status, |back| back.status().to_owned());
     // Where it runs goes with that, or says all there is to say of it.
-    let status = match &state.machine_line {
+    let status = match machine_line {
         Some((line, true)) => line.clone(),
         Some((line, false)) if status.is_empty() => line.clone(),
         Some((line, false)) => format!("{status} \u{b7} {line}"),
@@ -245,25 +265,27 @@ pub(super) fn plain_tail(lines: &[String], waits: bool) -> Vec<String> {
     kept[kept.len().saturating_sub(keep)..].to_vec()
 }
 
-/// The Build agent's card on the page of the stage `feature` is at, while
-/// work sent back to that agent is under way, or while the page picks the
-/// agent its fixes go to: this page's own agent is another one, and this
-/// is the page the user comes back to.
+/// The Build agent's card on the page of a later stage: while work sent back
+/// to that agent from there is under way or the round it asked for is open
+/// (`shows_build_card`), the card Build's page shows, named; else while the
+/// page picks the agent its fixes go to. This page's own agent is another
+/// one, and this is the page the user comes back to.
 pub(super) fn rework_card(
     feature: &Feature,
     stage: Stage,
     state: &PanelState,
     actions: &[(PageButton, PanelOutcome)],
+    now: u64,
 ) -> Option<PageSection> {
-    let back = rework_on(feature, stage, state.ctx);
-    if back.is_none() && (state.fix_picks.is_empty() || !keys::fix_page(feature, stage)) {
+    let at_work = shows_build_card(feature, stage, state.ctx);
+    if !at_work && (state.fix_picks.is_empty() || !keys::fix_page(feature, stage)) {
         return None;
     }
     let lit = state.fix_picks.iter().find(|c| c.lit);
     let buttons = agent_buttons(Stage::Build, actions);
     let Some(run) = feature.runs.get(&Stage::Build) else {
         // None built it (a pull request's own): only where its fixes go.
-        return back.is_none().then(|| PageSection::Agent {
+        return (!at_work).then(|| PageSection::Agent {
             stage: Stage::Build,
             icon: lit.map_or(AgentIcon::Generic, |c| c.icon),
             name: String::new(),
@@ -276,28 +298,43 @@ pub(super) fn rework_card(
             waits: false,
         });
     };
-    let status = match (back, lit) {
-        (Some(back), _) => back.status().to_owned(),
-        // Each fix round starts a fresh agent of the pick.
-        (None, Some(lit)) => format!("next fixes: a fresh {}", lit.name),
-        (None, None) => "next fixes: a fresh agent".to_owned(),
+    let named = |status: &str| match status {
+        "" => "Build agent".to_owned(),
+        status => format!("Build agent \u{b7} {status}"),
+    };
+    if at_work {
+        // The same card as on Build's page, so both say the same of it.
+        let line = state.fix_machine_line.as_ref();
+        let mut card = agent_card_at(feature, Stage::Build, state, line, actions, now)?;
+        if let PageSection::Agent {
+            status,
+            picks,
+            model,
+            ..
+        } = &mut card
+        {
+            *status = named(status);
+            *picks = state.fix_picks.clone();
+            *model = state.fix_model.clone();
+        }
+        return Some(card);
+    }
+    // Each fix round starts a fresh agent of the pick.
+    let status = match lit {
+        Some(lit) => format!("next fixes: a fresh {}", lit.name),
+        None => "next fixes: a fresh agent".to_owned(),
     };
     Some(PageSection::Agent {
         stage: Stage::Build,
         icon: AgentIcon::from_agent(&run.agent),
         name: run.agent.clone(),
-        dot: match back {
-            Some(back) if back.waits_on_you() => Dot::Blocked,
-            Some(Rework::Runs(dot)) => dot,
-            Some(_) => Dot::Unknown,
-            None => Dot::Done,
-        },
-        status: format!("Build agent \u{b7} {status}"),
+        dot: Dot::Done,
+        status: named(&status),
         tail: Vec::new(),
         buttons,
         picks: state.fix_picks.clone(),
         model: state.fix_model.clone(),
-        waits: back.is_some_and(Rework::waits_on_you),
+        waits: false,
     })
 }
 

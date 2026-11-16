@@ -1172,3 +1172,153 @@ fn own_agents_with_a_tab_show_on_the_page_of_the_stage_it_is_at() {
         |s: &PageSection| matches!(s, PageSection::Agent { name, .. } if name == "Claude Code");
     assert!(!page.sections.iter().any(own));
 }
+
+/// The Build agent's card on `stage`'s page of `f`: what it says and what
+/// its buttons do, with the page's buttons as both of its lists have them.
+fn build_card(
+    f: &Feature,
+    stage: Stage,
+    state: &PanelState,
+) -> Option<(String, Vec<PanelOutcome>)> {
+    let mut actions = page_actions(f, stage, state.ctx);
+    let (place, fix) = (state.place.as_deref(), state.fix_place.as_deref());
+    actions.extend(agent_card_actions(f, stage, state.ctx, place, fix));
+    let page = stage_page(f, stage, state, &actions, 2_000);
+    page.sections.iter().find_map(|s| match s {
+        PageSection::Agent {
+            stage: Stage::Build,
+            status,
+            buttons,
+            ..
+        } => Some((
+            status.clone(),
+            buttons.iter().map(|b| actions[*b].1.clone()).collect(),
+        )),
+        _ => None,
+    })
+}
+
+/// A live Build agent on machine `m1`, its tab `p1`.
+fn build_on_machine() -> feature::agents::StageRun {
+    feature::agents::StageRun {
+        machine: Some("m1".into()),
+        ..agent_run(Some("p1"), None)
+    }
+}
+
+#[test]
+fn the_build_agents_card_is_the_same_on_every_page_showing_it() {
+    let on = Some(("on box".to_owned(), false));
+    let show = PanelOutcome::ShowAgent(Stage::Build);
+    let stop = PanelOutcome::StopOnMachine(Stage::Build);
+    for stage in [
+        Stage::Verify,
+        Stage::AiReview,
+        Stage::CodeReview,
+        Stage::ManualTest,
+    ] {
+        // The round's first commit took the feature back to Build: the page
+        // that asked is a later one, and the agent fixes there.
+        let mut f = in_round(
+            feature("b", vec![repo("api", true)], 3),
+            stage,
+            FixPhase::Fixing,
+        );
+        f.runs.insert(Stage::Build, build_on_machine());
+        assert_eq!(stage_mark(&f, stage), StageMark::Later);
+        let state = PanelState {
+            agent: Some("Claude Code working".into()),
+            agent_status: Some(AgentStatus::Working),
+            machine_line: on.clone(),
+            fix_machine_line: on.clone(),
+            ..PanelState::default()
+        };
+        let (own, own_buttons) = build_card(&f, Stage::Build, &state).unwrap();
+        let (there, buttons) = build_card(&f, stage, &state).unwrap_or_else(|| panic!("{stage:?}"));
+        assert_eq!(there, format!("Build agent \u{b7} {own}"), "{stage:?}");
+        assert!(own.ends_with("on box"), "{own}");
+        assert_eq!(buttons, own_buttons, "{stage:?}");
+        // One way to its tab, and Stop as it runs on another machine; no
+        // Restart, which would start the build over.
+        assert_eq!(
+            buttons.iter().filter(|o| **o == show).count(),
+            1,
+            "{stage:?}"
+        );
+        assert!(buttons.contains(&stop), "{stage:?}");
+        assert!(!buttons.contains(&PanelOutcome::StartAgent(Stage::Build, true)));
+    }
+}
+
+#[test]
+fn the_build_agent_planning_fixes_has_its_buttons_on_the_page_that_asked() {
+    // At AI review, the Build agent plans the fixes on another machine.
+    let mut f = in_round(
+        feature("b", vec![repo("api", true)], 5),
+        Stage::AiReview,
+        FixPhase::Planning,
+    );
+    let mut run = build_on_machine();
+    run.ready = Some(1);
+    f.runs.insert(Stage::Build, run);
+    let state = PanelState {
+        ctx: RowCtx {
+            fixing: Some(Dot::Working),
+            ..RowCtx::default()
+        },
+        fix_machine_line: Some(("on box".to_owned(), false)),
+        ..PanelState::default()
+    };
+    let (status, buttons) = build_card(&f, Stage::AiReview, &state).unwrap();
+    assert_eq!(status, "Build agent \u{b7} working again \u{b7} on box");
+    assert!(buttons.contains(&PanelOutcome::ShowAgent(Stage::Build)));
+    assert!(buttons.contains(&PanelOutcome::StopOnMachine(Stage::Build)));
+    // Its plan written, the agent idle: it says no fresh one comes.
+    let state = PanelState {
+        fix_machine_line: Some(("on box".to_owned(), false)),
+        ..PanelState::default()
+    };
+    let f = in_round(f, Stage::AiReview, FixPhase::Ready);
+    let (status, _) = build_card(&f, Stage::AiReview, &state).unwrap();
+    assert!(!status.contains("fresh"), "{status}");
+    assert!(status.ends_with("on box"), "{status}");
+}
+
+#[test]
+fn verify_failures_fixed_with_no_plan_show_the_build_agents_card() {
+    // At Verify, the Build agent puts its failures right, no round open.
+    let mut f = feature("b", vec![repo("api", true)], 4);
+    assert_eq!(f.current(), Some(Stage::Verify));
+    f.runs.insert(Stage::Build, build_on_machine());
+    let state = PanelState {
+        ctx: RowCtx {
+            fixing: Some(Dot::Working),
+            ..RowCtx::default()
+        },
+        fix_machine_line: Some(("on box".to_owned(), false)),
+        ..PanelState::default()
+    };
+    let (status, buttons) = build_card(&f, Stage::Verify, &state).unwrap();
+    assert_eq!(status, "Build agent \u{b7} working again \u{b7} on box");
+    assert!(buttons.contains(&PanelOutcome::ShowAgent(Stage::Build)));
+    assert!(buttons.contains(&PanelOutcome::StopOnMachine(Stage::Build)));
+}
+
+#[test]
+fn builds_page_in_a_fix_round_shows_its_agent_once_and_no_restart() {
+    let mut f = in_round(
+        feature("b", vec![repo("api", true)], 3),
+        Stage::AiReview,
+        FixPhase::Fixing,
+    );
+    f.runs.insert(Stage::Build, agent_run(Some("p1"), None));
+    let outcomes = page_outcomes(&f, Stage::Build);
+    let show = PanelOutcome::ShowAgent(Stage::Build);
+    assert_eq!(outcomes.iter().filter(|o| **o == show).count(), 1);
+    assert!(!outcomes.contains(&PanelOutcome::StartAgent(Stage::Build, true)));
+    // Out of a round, Restart is there again.
+    f.fix_round = None;
+    assert!(
+        page_outcomes(&f, Stage::Build).contains(&PanelOutcome::StartAgent(Stage::Build, true))
+    );
+}

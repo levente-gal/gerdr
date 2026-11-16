@@ -1635,11 +1635,15 @@ pub(super) fn fresh_stage(feature: &Feature, row: PanelRow) -> Option<Stage> {
     let PanelRow::Stage(stage) = row else {
         return None;
     };
+    // The Build agent of a fix round is told the round's step, not Build's
+    // own prompt: a fresh one would start the build over.
+    let in_round = stage == Stage::Build && feature.fix_round.is_some();
     (feature.status == Status::Open
         && feature.current() == Some(stage)
         && needs(stage).is_some()
-        && feature.runs.contains_key(&stage))
-    .then_some(stage)
+        && feature.runs.contains_key(&stage)
+        && !in_round)
+        .then_some(stage)
 }
 
 /// The stage Ctrl+Shift+Del starts over on `stage`'s page of `feature`:

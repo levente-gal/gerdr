@@ -64,9 +64,14 @@ pub(super) fn stage_page(
     // The open fix round on top, the page's own work under its agent, then
     // the rounds over (Build lists its own after its work).
     let (mut round_top, round_under, history) = round_sections(feature, stage, state, actions, now);
+    // Work sent back to Build heads the page; else on AI review the agent
+    // fixes go to follows the reviewer.
+    let mut fixes = rework_card(feature, stage, state, actions, now);
     // A stage not reached yet may start by itself: its agent is picked ahead.
     if mark == StageMark::Later {
         sections.append(&mut round_top);
+        // The fixes it asked for go on in Build: the agent making them.
+        sections.extend(fixes.take());
         sections.extend(agent_card(feature, stage, state, actions, now));
         // What it will run is there to see ahead too.
         if !check_entries(feature, stage, &state.plan).is_empty() {
@@ -104,9 +109,6 @@ pub(super) fn stage_page(
         // Over, it stays in the same place.
         sections.extend(last_round_on(feature, stage).map(|r| last_round_card(r, actions, now)));
     }
-    // Work sent back to Build heads the page; else on AI review the agent
-    // fixes go to follows the reviewer.
-    let mut fixes = rework_card(feature, stage, state, actions);
     let fixes_under = stage == Stage::AiReview && rework_on(feature, stage, state.ctx).is_none();
     if mark != StageMark::Later {
         if !fixes_under {
@@ -1082,8 +1084,13 @@ pub(super) fn tab_view(
             );
             actions.retain(|(_, o)| !undoes_merged(o, state.probe));
             actions.extend(round_plan_actions(feature, stage, state.probe));
-            actions.extend(place_action(state.place.as_deref(), stage));
-            actions.extend(stop_action(feature, stage));
+            actions.extend(agent_card_actions(
+                feature,
+                stage,
+                state.ctx,
+                state.place.as_deref(),
+                state.fix_place.as_deref(),
+            ));
             with_pull_actions(&mut actions, feature, stage, state.ctx);
             actions.extend(editing_actions(panel.note.is_some()));
             stage_page(feature, stage, state, &actions, now)

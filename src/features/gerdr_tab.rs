@@ -562,8 +562,14 @@ impl Gerdr {
         actions.retain(|(_, o)| !undoes_merged(o, probe));
         actions.extend(round_plan_actions(feature, stage, probe));
         let place = self.place_label(feature, stage);
-        actions.extend(place_action(place.as_deref(), stage));
-        actions.extend(stop_action(feature, stage));
+        let fix_place = self.place_label(feature, Stage::Build);
+        actions.extend(agent_card_actions(
+            feature,
+            stage,
+            ctx,
+            place.as_deref(),
+            fix_place.as_deref(),
+        ));
         with_pull_actions(&mut actions, feature, stage, ctx);
         let writing = (self.features.panel.as_ref()).is_some_and(|p| p.note.is_some() && !p.keys);
         actions.extend(editing_actions(writing));
@@ -1003,6 +1009,8 @@ impl Gerdr {
                 .map(|slot| model_label(slot.picked.as_deref())),
             place: self.place_label(feature, panel.page_stage(feature)),
             machine_line: self.machine_line(feature, panel.page_stage(feature)),
+            fix_place: self.place_label(feature, Stage::Build),
+            fix_machine_line: self.machine_line(feature, Stage::Build),
             seen_note: self.seen_note(feature),
             setup_on: (feature.setup.as_ref())
                 .and_then(|s| s.machine.as_deref())

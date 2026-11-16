@@ -98,6 +98,14 @@ pub(super) fn fix_round_on(feature: &Feature, stage: Stage) -> Option<&FixRound>
         })
 }
 
+/// Whether `stage`'s page, not Build's own, shows the card of `feature`'s
+/// Build agent: work sent back to it from there is under way, or the fix
+/// round that page asked for is open, before or after its first commit.
+pub(super) fn shows_build_card(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
+    stage > Stage::Build
+        && (rework_on(feature, stage, ctx).is_some() || fix_round_on(feature, stage).is_some())
+}
+
 /// The last fix round of `feature`, its fixes sent, on the page of the stage
 /// that asked, or of an earlier one the feature came back to.
 pub(super) fn last_round_on(feature: &Feature, stage: Stage) -> Option<&FixRound> {
@@ -424,18 +432,18 @@ fn writers_page_actions(
     };
     if mark == StageMark::Later {
         let mut out = review_actions(feature, stage);
-        // The fixes its comments asked for go on from an earlier stage, and
-        // its page stays where they are followed.
-        if stage == Stage::CodeReview {
-            if let Some(round) = fix_round_on(feature, stage) {
-                out.extend(fix_round_buttons(feature, round, ctx));
-            }
-            if last_round_on(feature, stage).is_some_and(FixRound::has_plan) {
-                out.push((
-                    button(OPEN_PLAN, ButtonStyle::Plain),
-                    PanelOutcome::ReviewFixPlan,
-                ));
-            }
+        // The fixes it asked for go on from an earlier stage, and its page
+        // stays where they are followed, the Build agent's card with them.
+        if let Some(round) = fix_round_on(feature, stage) {
+            out.extend(fix_round_buttons(feature, round, ctx));
+        }
+        if stage == Stage::CodeReview
+            && last_round_on(feature, stage).is_some_and(FixRound::has_plan)
+        {
+            out.push((
+                button(OPEN_PLAN, ButtonStyle::Plain),
+                PanelOutcome::ReviewFixPlan,
+            ));
         }
         // Manual test's sandbox stays to try more while its fixes are gone
         // over: what fails waits for it.
@@ -519,9 +527,12 @@ fn writers_page_actions(
         };
         out.push((button(&label, style), PanelOutcome::GoToCurrent));
     }
+    let has =
+        |out: &[(PageButton, PanelOutcome)], o: &PanelOutcome| out.iter().any(|(_, x)| x == o);
+    // The fix round's buttons may have it already: one button per outcome.
     if let (Some(label), Some(main)) = (
         stage_button(feature, stage, ctx),
-        row_action(feature, row, ctx).filter(|main| *main != send),
+        row_action(feature, row, ctx).filter(|main| *main != send && !has(&out, main)),
     ) {
         // Reopen is no default: Enter leaves a done stage be.
         let style = match main {
@@ -582,8 +593,6 @@ fn writers_page_actions(
             PanelOutcome::Manual(Outcome::MarkPassed),
         ));
     }
-    let has =
-        |out: &[(PageButton, PanelOutcome)], o: &PanelOutcome| out.iter().any(|(_, x)| x == o);
     // Also on a done stage: its agent's chat is still worth reading.
     if let Some((label, outcome)) = agent_button(feature, stage, ctx).filter(|(_, o)| !has(&out, o))
     {

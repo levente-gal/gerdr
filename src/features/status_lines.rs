@@ -80,6 +80,10 @@ pub(super) struct PanelState<'a> {
     /// Where the current agent runs, if on another machine, and whether that
     /// says all there is to say of it (see `machine_work::machine_line`).
     pub(super) machine_line: Option<(String, bool)>,
+    /// `place` and `machine_line` of the Build agent, on a page showing its
+    /// card (`shows_build_card`): the same as Build's own page says.
+    pub(super) fix_place: Option<String>,
+    pub(super) fix_machine_line: Option<(String, bool)>,
     /// The machine `Feature::setup` ran on, if not this one.
     pub(super) setup_on: Option<String>,
     /// How its sandbox stands here, when another machine has it.
@@ -1230,6 +1234,27 @@ pub(super) fn stop_action(feature: &Feature, stage: Stage) -> Option<(PageButton
             PanelOutcome::StopOnMachine(stage),
         )
     })
+}
+
+/// The buttons placing and stopping the agents whose cards `stage`'s page
+/// shows: its own, where `place` says, and the Build agent's while the page
+/// shows that card too, where `fix_place` says. Both of the page's button
+/// lists go by this.
+pub(super) fn agent_card_actions(
+    feature: &Feature,
+    stage: Stage,
+    ctx: RowCtx,
+    place: Option<&str>,
+    fix_place: Option<&str>,
+) -> Vec<(PageButton, PanelOutcome)> {
+    let mut out: Vec<_> = (place_action(place, stage).into_iter())
+        .chain(stop_action(feature, stage))
+        .collect();
+    if shows_build_card(feature, stage, ctx) {
+        out.extend(place_action(fix_place, Stage::Build));
+        out.extend(stop_action(feature, Stage::Build));
+    }
+    out
 }
 
 /// The indices in `actions` of what acts on `stage`'s agent: the buttons of
