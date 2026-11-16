@@ -3617,6 +3617,79 @@ fn feature_tab_verify_failed() -> super::FeatureTabView {
     view
 }
 
+/// Verify failed by a check that passed the run before: what changed since
+/// broke it, so Make fixes, with no plan, is what comes next.
+fn feature_tab_verify_regressed() -> super::FeatureTabView {
+    use super::{CheckTone, PageSection};
+    let mut view = feature_tab_verify_failed();
+    view.page.status = Some(tab_line(
+        "failed: api: `cargo test` exited with 101; it passed before the last change, \
+         so its fixes need no plan",
+        CheckTone::Blocker,
+    ));
+    view.page.buttons = verify_failed_buttons(0);
+    view.page.sections = vec![PageSection::Lines {
+        label: "Checks".into(),
+        lines: vec![
+            tab_line("cargo build passed", CheckTone::Ready),
+            tab_line(
+                "cargo test failed: export::csv::streams_large_files: no method named \
+                 `stream` found for struct `Export`, api/src/export/csv.rs:212",
+                CheckTone::Blocker,
+            ),
+            tab_line("pnpm lint passed", CheckTone::Ready),
+        ],
+    }];
+    view
+}
+
+/// Verify failed by the machine, not the code: a full disk. No fixes are
+/// planned, Run failed is what comes next.
+fn feature_tab_verify_machine() -> super::FeatureTabView {
+    use super::{CheckTone, PageSection};
+    let mut view = feature_tab_verify_failed();
+    view.page.status = Some(tab_line(
+        "failed because of the machine, not its code: Disk quota exceeded; run the \
+         failed checks again",
+        CheckTone::Blocker,
+    ));
+    view.page.buttons = verify_failed_buttons(2);
+    view.page.sections = vec![PageSection::Lines {
+        label: "Checks".into(),
+        lines: vec![
+            tab_line("cargo build passed", CheckTone::Ready),
+            tab_line(
+                "pytest failed: OSError: [Errno 122] Disk quota exceeded",
+                CheckTone::Blocker,
+            ),
+            tab_line("pnpm lint passed", CheckTone::Ready),
+        ],
+    }];
+    view
+}
+
+/// The buttons of Verify's page after a failure, `primary` the one Enter
+/// presses, in the order the page lists them.
+fn verify_failed_buttons(primary: usize) -> Vec<super::PageButton> {
+    use super::{ButtonStyle, PageButton};
+    let labels = [
+        "Make fixes",
+        "Plan fixes",
+        "Run failed",
+        "Run checks",
+        "Evidence",
+    ];
+    (labels.into_iter().enumerate())
+        .map(|(i, label)| PageButton {
+            label: label.into(),
+            style: match i == primary {
+                true => ButtonStyle::Primary,
+                false => ButtonStyle::Plain,
+            },
+        })
+        .collect()
+}
+
 /// Verify with its checks running: Stop all at the title's right, and only
 /// what works during a run beside it.
 fn feature_tab_verify_running() -> super::FeatureTabView {
@@ -6223,7 +6296,7 @@ fn placed(mut view: super::FeatureTabView) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 55] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 57] {
     let views = [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -6289,12 +6362,14 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 55] {
         ("tab_fix_picks", feature_tab_fix_picks()),
         ("tab_ship_picks", feature_tab_ship_picks()),
         ("tab_ship_checking", feature_tab_ship_checking()),
+        ("tab_verify_regressed", feature_tab_verify_regressed()),
+        ("tab_verify_machine", feature_tab_verify_machine()),
     ];
     views.map(|(name, view)| (name, placed(view)))
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 71] = [
+const TAB_SURFACES: [(&str, i32); 73] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -6366,9 +6441,11 @@ const TAB_SURFACES: [(&str, i32); 71] = [
     ("tab_ship_ci", 860),
     ("tab_ship_base_ci", 1180),
     ("tab_ship_checking", 1180),
+    ("tab_verify_regressed", 1180),
+    ("tab_verify_machine", 860),
 ];
 
-const FEATURE_TAB: [&str; 71] = [
+const FEATURE_TAB: [&str; 73] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -6440,10 +6517,12 @@ const FEATURE_TAB: [&str; 71] = [
     "tab_ship_ci_860",
     "tab_ship_base_ci_1180",
     "tab_ship_checking_1180",
+    "tab_verify_regressed_1180",
+    "tab_verify_machine_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 73]; 4] = [
     // Dark at 1
     [
         0x67093ad27ab19c53, // tab_build_860
@@ -6517,6 +6596,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
         0x38114a9f4a296f0b, // tab_ship_ci_860
         0x978e49f04e09a85b, // tab_ship_base_ci_1180
         0x51edb1354d501bd9, // tab_ship_checking_1180
+        0x8c5bfb636d72289d, // tab_verify_regressed_1180
+        0x5d1528bc2cc8a559, // tab_verify_machine_860
     ],
     // Dark at 2
     [
@@ -6591,6 +6672,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
         0xa7fb449280d6136d, // tab_ship_ci_860
         0xfd8a10d5b4443322, // tab_ship_base_ci_1180
         0x9a2f01f6f743e506, // tab_ship_checking_1180
+        0xe9edacb82394691d, // tab_verify_regressed_1180
+        0xd05cc43a9d172953, // tab_verify_machine_860
     ],
     // Light at 1
     [
@@ -6665,6 +6748,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
         0x609f8f8fcd262491, // tab_ship_ci_860
         0x2f2bf3a05461f3b8, // tab_ship_base_ci_1180
         0xf2a063041d3ea7e4, // tab_ship_checking_1180
+        0xcd5b80374b7fadce, // tab_verify_regressed_1180
+        0x73e583c110a3c917, // tab_verify_machine_860
     ],
     // Light at 2
     [
@@ -6739,6 +6824,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
         0x9e25b62b18120c6e, // tab_ship_ci_860
         0xec6b9ed186c8fcd5, // tab_ship_base_ci_1180
         0x57fb4f62d5c7de92, // tab_ship_checking_1180
+        0xa1eb9487db0a0cd1, // tab_verify_regressed_1180
+        0x44849469da4e5fdd, // tab_verify_machine_860
     ],
 ];
 
