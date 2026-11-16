@@ -91,6 +91,7 @@ pub(crate) fn feature(slug: &str, repos: Vec<Repo>, done: usize) -> Feature {
         drafts: Vec::new(),
         carry: None,
         unverified: None,
+        checks_due: false,
         back_from: None,
     }
 }

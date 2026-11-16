@@ -962,6 +962,12 @@ pub struct Feature {
     /// on yet: Manual test can't be marked passed until it does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unverified: Option<String>,
+    /// Verify's checks run again once its code is read and no agent fixes
+    /// it: a pull request review's code changed, or a fix round Verify asked
+    /// for ended (see `Gerdr::due_checks_read`). Saved, so a restart between
+    /// the round's end and that read doesn't lose them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub checks_due: bool,
     /// The stage whose fixes took the flow back to Verify (Manual test's,
     /// see `back_to_verify`): the rail draws the line back from it until the
     /// flow is there again, and its page says it came back, until it is
@@ -2131,6 +2137,7 @@ pub(crate) mod tests {
             drafts: Vec::new(),
             carry: None,
             unverified: None,
+            checks_due: false,
             back_from: None,
         }
     }
@@ -2232,6 +2239,7 @@ pub(crate) mod tests {
             drafts: Vec::new(),
             carry: None,
             unverified: None,
+            checks_due: false,
             back_from: None,
         }
     }

@@ -79,10 +79,6 @@ pub(crate) struct BuildState {
     setting_up: BTreeSet<Key>,
     /// Features whose Verify checks run now.
     pub(crate) verifying: BTreeSet<Key>,
-    /// Features whose checks run once their code is read and no agent is
-    /// fixing them (see `due_checks_read`): a pull request review whose
-    /// code changed, or one whose Verify fix round ended, code changed or not.
-    pub(crate) checks_due: BTreeSet<Key>,
     /// Which checks the next run of a feature's runs, while its code is read.
     pub(crate) scopes: BTreeMap<Key, Scope>,
     /// What stops the running checks of a feature, by their index.
@@ -326,7 +322,7 @@ fn verify_refusal(feature: &Feature, running: bool, checks: usize) -> Result<(),
     Ok(())
 }
 
-/// What `feature`, with Verify's checks due (see `BuildState::checks_due`),
+/// What `feature`, with Verify's checks due (see `Feature::checks_due`),
 /// does with them now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DueChecks {
@@ -1078,14 +1074,14 @@ impl Gerdr {
     /// Build by its code drops them: `build_done` runs them in time.
     pub(crate) fn due_checks_read(&mut self, project: &str, slug: &str, changed: bool) {
         let key = (project.to_owned(), slug.to_owned());
-        if changed {
-            self.features.build.checks_due.insert(key.clone());
-        }
-        if !self.features.build.checks_due.contains(&key) {
+        let Some(feature) = self.feature_mut(project, slug) else {
             return;
+        };
+        if changed && !feature.checks_due {
+            feature.checks_due = true;
+            self.save_feature(project, slug);
         }
-        let Some(feature) = self.feature(project, slug) else {
-            self.features.build.checks_due.remove(&key);
+        let Some(feature) = self.feature(project, slug).filter(|f| f.checks_due) else {
             return;
         };
         let config = self.projects.workflows(feature, |w| w.verify.clone());
@@ -1099,7 +1095,10 @@ impl Gerdr {
         if now == DueChecks::Wait {
             return;
         }
-        self.features.build.checks_due.remove(&key);
+        if let Some(f) = self.feature_mut(project, slug) {
+            f.checks_due = false;
+        }
+        self.save_feature(project, slug);
         if now == DueChecks::Run {
             self.recheck(project, slug);
         }

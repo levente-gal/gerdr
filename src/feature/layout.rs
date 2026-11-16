@@ -2635,6 +2635,7 @@ mod tests {
             drafts: Vec::new(),
             carry: None,
             unverified: None,
+            checks_due: false,
             back_from: None,
             epoch: 0,
             history: Vec::new(),
