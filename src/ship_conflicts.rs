@@ -100,10 +100,17 @@ fn begin_all(
 
 impl Gerdr {
     /// Take on the conflicts of every repository of feature `slug` with
-    /// its base, at once: `planning`, an agent plans their resolution and
-    /// changes nothing; else gerdr starts the merges and an agent resolves
-    /// them. Resolving as planned takes on the plan's repositories.
-    pub(crate) fn resolve_conflicts(&mut self, project: &str, slug: &str, planning: bool) {
+    /// its base, at once, or of repository `only`: `planning`, an agent
+    /// plans their resolution and changes nothing; else gerdr starts the
+    /// merges and an agent resolves them. Resolving as planned takes on the
+    /// plan's repositories.
+    pub(crate) fn resolve_conflicts(
+        &mut self,
+        project: &str,
+        slug: &str,
+        planning: bool,
+        only: Option<&str>,
+    ) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
@@ -140,7 +147,7 @@ impl Gerdr {
                     let files = known(&key);
                     (key, files)
                 })
-                .filter(|(_, files)| !files.is_empty())
+                .filter(|(key, files)| !files.is_empty() && only.is_none_or(|o| o == key))
                 .collect(),
         };
         if repos.is_empty() {
@@ -533,7 +540,7 @@ impl Gerdr {
             return self.show_warning(CONFLICT_PLAN_PAST.into());
         }
         self.doc_done(project, slug, file);
-        self.resolve_conflicts(project, slug, false);
+        self.resolve_conflicts(project, slug, false, None);
     }
 
     /// Send the plan of conflicts `file` shows back to its agent with

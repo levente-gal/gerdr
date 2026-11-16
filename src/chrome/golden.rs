@@ -4328,8 +4328,9 @@ fn feature_tab_ship_cards() -> super::FeatureTabView {
     // Its base moved on since the pull request opened.
     let at = view.page.buttons.len();
     for (label, style) in [
-        ("Merge main in\u{2026}", ButtonStyle::Plain),
+        ("Merge main in\u{2026}", ButtonStyle::Quiet),
         ("Rebase\u{2026}", ButtonStyle::Quiet),
+        ("Merge main into all\u{2026}", ButtonStyle::Plain),
     ] {
         view.page.buttons.push(PageButton {
             label: label.into(),
@@ -4345,6 +4346,13 @@ fn feature_tab_ship_cards() -> super::FeatureTabView {
         ));
         card.buttons = vec![at, at + 1, 1];
     }
+    // Every repository's at once, under the Ship check.
+    view.page.sections.insert(
+        1,
+        PageSection::Toolbar {
+            groups: vec![(String::new(), vec![at + 2])],
+        },
+    );
     view
 }
 
@@ -4397,15 +4405,23 @@ fn feature_tab_ship_after() -> super::FeatureTabView {
 }
 
 /// `feature_tab_ship_cards` with api's base conflicting: the agent's two
-/// ways to take that on.
+/// ways to take that on, for api on its card and for all under the Ship
+/// check.
 fn feature_tab_ship_conflicts() -> super::FeatureTabView {
-    use super::{ButtonStyle, CheckTone, PageSection};
+    use super::{ButtonStyle, CheckTone, PageButton, PageSection};
     let mut view = feature_tab_ship_cards();
-    let at = view.page.buttons.len() - 2;
-    view.page.buttons[at].label = "Resolve with agent".into();
-    view.page.buttons[at + 1].label = "Plan resolution".into();
-    view.page.buttons[at + 1].style = ButtonStyle::Quiet;
-    if let Some(PageSection::ShipGroup(api)) = view.page.sections.get_mut(1)
+    let at = view.page.buttons.len() - 3;
+    view.page.buttons[at].label = "Fix".into();
+    view.page.buttons[at + 1].label = "Plan".into();
+    view.page.buttons[at + 2].label = "Resolve all with agent".into();
+    view.page.buttons.push(PageButton {
+        label: "Plan resolution of all".into(),
+        style: ButtonStyle::Plain,
+    });
+    if let Some(PageSection::Toolbar { groups }) = view.page.sections.get_mut(1) {
+        groups[0].1.push(at + 3);
+    }
+    if let Some(PageSection::ShipGroup(api)) = view.page.sections.get_mut(2)
         && let Some(card) = api.card.as_mut()
     {
         card.base = Some(tab_line(
@@ -6489,9 +6505,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
         0x6ed0e5a54cf691c4, // tab_manual_hand_back_1180
         0x9ce2adcf3f825afa, // tab_ship_live_1180
         0x3efb6ccd9ebee607, // tab_ship_live_860
-        0x9d070e9186340ed4, // tab_ship_cards_1180
-        0x4d75f6f045653102, // tab_ship_conflicts_860
-        0x579a4e38c6b41a10, // tab_ship_after_1180
+        0x9539d685750af545, // tab_ship_cards_1180
+        0x032d96d2629e8c9c, // tab_ship_conflicts_860
+        0x0ad8968f49d14890, // tab_ship_after_1180
         0xe4762ba84bff7753, // tab_ai_review_history_1920
         0x798e6fd0f997c8c6, // tab_ai_review_history_860
         0xc346dd36c5ff5ebc, // tab_fix_picks_1180
@@ -6563,9 +6579,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
         0xc4db353623cc9ce3, // tab_manual_hand_back_1180
         0x2b0da19b5c531216, // tab_ship_live_1180
         0xfbe38a69b1b3bf5c, // tab_ship_live_860
-        0x3315b1b59d6a7802, // tab_ship_cards_1180
-        0x9702d756860e00d0, // tab_ship_conflicts_860
-        0x47ee269895f8f0f1, // tab_ship_after_1180
+        0x0e15492b79ae2e04, // tab_ship_cards_1180
+        0x4a20b80d083bace5, // tab_ship_conflicts_860
+        0x6a5ff153e0c64b91, // tab_ship_after_1180
         0x47d13bfbb815948a, // tab_ai_review_history_1920
         0xe43808387279d4e9, // tab_ai_review_history_860
         0x62d5699dc5ea2019, // tab_fix_picks_1180
@@ -6637,9 +6653,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
         0x6dab8def82d1789b, // tab_manual_hand_back_1180
         0x275cb4321b786113, // tab_ship_live_1180
         0x11423d7ef57773c9, // tab_ship_live_860
-        0xa3302b77bbd8e691, // tab_ship_cards_1180
-        0x90320659e45f7326, // tab_ship_conflicts_860
-        0xa94cebc52483c40f, // tab_ship_after_1180
+        0x96eb14372e714e03, // tab_ship_cards_1180
+        0x42693ee5537b413b, // tab_ship_conflicts_860
+        0xf9807cdad2d4db26, // tab_ship_after_1180
         0x61b9d1348da8af7d, // tab_ai_review_history_1920
         0xae63ac6a14fad9d6, // tab_ai_review_history_860
         0x56ffff311e4fb859, // tab_fix_picks_1180
@@ -6711,9 +6727,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
         0x34dc7e5676e7483b, // tab_manual_hand_back_1180
         0xd33a721f5c98d9bc, // tab_ship_live_1180
         0x79e47be956ee531e, // tab_ship_live_860
-        0x64bec86099f76b4a, // tab_ship_cards_1180
-        0x506aa01023c7f12f, // tab_ship_conflicts_860
-        0xd140ab0f410d7a2f, // tab_ship_after_1180
+        0xee663baaddfbfe9e, // tab_ship_cards_1180
+        0x5ae9ded43c6f9c00, // tab_ship_conflicts_860
+        0xb735d9925afcb817, // tab_ship_after_1180
         0x6210f6d25e980e87, // tab_ai_review_history_1920
         0x32807b5ab2f5f884, // tab_ai_review_history_860
         0x4941c37f440639c6, // tab_fix_picks_1180

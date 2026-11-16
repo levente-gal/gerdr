@@ -273,14 +273,28 @@ pub(super) fn stage_page(
                 if !check.is_empty() {
                     sections.push(lines("Ship check", check));
                 }
-                let again: Vec<usize> = (actions.iter().enumerate())
-                    .filter(|(_, (_, o))| *o == PanelOutcome::CheckShip)
-                    .map(|(i, _)| i)
+                // What takes every repository's base in at once, then the
+                // check read again.
+                let of = |want: fn(&PanelOutcome) -> bool| -> Vec<usize> {
+                    (actions.iter().enumerate())
+                        .filter(|(_, (_, o))| want(o))
+                        .map(|(i, _)| i)
+                        .collect()
+                };
+                let all = of(|o| {
+                    matches!(
+                        o,
+                        PanelOutcome::UpdateAllBases | PanelOutcome::ResolveAllConflicts(_)
+                    )
+                });
+                let again = of(|o| *o == PanelOutcome::CheckShip);
+                let groups: Vec<(String, Vec<usize>)> = [all, again]
+                    .into_iter()
+                    .filter(|g| !g.is_empty())
+                    .map(|g| (String::new(), g))
                     .collect();
-                if !again.is_empty() {
-                    sections.push(PageSection::Toolbar {
-                        groups: vec![(String::new(), again)],
-                    });
+                if !groups.is_empty() {
+                    sections.push(PageSection::Toolbar { groups });
                 }
                 let mut recap = recap_card(feature, state, now);
                 recap.buttons = (actions.iter().enumerate())

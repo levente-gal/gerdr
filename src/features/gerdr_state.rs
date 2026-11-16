@@ -789,10 +789,10 @@ impl Gerdr {
             Done::BaseUpdated {
                 project,
                 slug,
-                result,
+                results,
             } => {
                 self.unbusy(&project, &slug, Job::Ship);
-                self.base_updated(&project, &slug, *result);
+                self.base_updated(&project, &slug, results);
             }
             Done::BasePulled {
                 project,

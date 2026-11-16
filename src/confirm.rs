@@ -181,12 +181,12 @@ pub enum Then {
     /// Stop the conflicts this project's feature's agent takes on (see
     /// `Gerdr::stop_resolving`).
     StopResolving { project: String, slug: String },
-    /// Take this repository's base into this project's feature's branch
-    /// (see `Gerdr::update_base`).
+    /// Take these repositories' bases into this project's feature's
+    /// branch (see `Gerdr::update_base`).
     UpdateBase {
         project: String,
         slug: String,
-        repo: String,
+        repos: Vec<String>,
         way: crate::feature::UpdateWay,
     },
     /// Move this repository's base on to origin's, which this project's
@@ -870,9 +870,9 @@ impl Gerdr {
             Then::UpdateBase {
                 project,
                 slug,
-                repo,
+                repos,
                 way,
-            } => self.update_base(&project, &slug, &repo, way),
+            } => self.update_base(&project, &slug, repos, way),
             Then::PullBase {
                 project,
                 slug,

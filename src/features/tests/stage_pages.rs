@@ -416,6 +416,9 @@ fn ships_buttons_have_keys_that_follow_the_selected_repository() {
                 PanelOutcome::UpdateBase("web".into(), UpdateWay::Rebase)
             ),
             ("Alt+M", PanelOutcome::ResolveConflicts("api".into(), true)),
+            // Every repository's: web's clean merge before api's conflicts.
+            ("Ctrl+Alt+M", PanelOutcome::UpdateAllBases),
+            ("Alt+Shift+M", PanelOutcome::ResolveAllConflicts(true)),
             (
                 "Ctrl+Shift+O",
                 PanelOutcome::OpenPr("https://github.com/o/web/pull/7".into())
@@ -453,7 +456,7 @@ fn ships_buttons_have_keys_that_follow_the_selected_repository() {
         !web.iter().any(|(chord, _)| *chord == "Alt+M"),
         "web has no conflicts"
     );
-    // Both conflicting: one agent takes on all, from either card.
+    // Both conflicting: each card fixes its own, the Ship check all.
     let mut both = p.clone();
     if let Some(web) = both.bases.get_mut("web") {
         web.conflicts = vec!["b.rs".into()];
@@ -464,7 +467,61 @@ fn ships_buttons_have_keys_that_follow_the_selected_repository() {
         resolve.outcome,
         PanelOutcome::ResolveConflicts("web".into(), false)
     );
-    assert_eq!(resolve.what, "resolve all with agent");
+    assert_eq!(resolve.what, "fix");
+    let all = keys.iter().find(|k| k.chord == "Ctrl+Alt+M").unwrap();
+    assert_eq!(all.outcome, PanelOutcome::ResolveAllConflicts(false));
+    assert_eq!(all.what, "resolve all with agent");
+    // Every repository's under the Ship check, outlined; each card's own,
+    // text only.
+    let mut actions = page_actions(&f, Stage::Ship, ctx);
+    actions.extend(ship_base_actions(&f, Some(&p)));
+    let state = PanelState {
+        probe: Some(&p),
+        ..PanelState::default()
+    };
+    let page = stage_page(&f, Stage::Ship, &state, &actions, 2_000);
+    let bar: Vec<Vec<(&str, ButtonStyle)>> = (page.sections.iter())
+        .find_map(|s| match s {
+            PageSection::Toolbar { groups } => Some(groups),
+            _ => None,
+        })
+        .expect("the Ship check's toolbar")
+        .iter()
+        .map(|(_, g)| {
+            (g.iter())
+                .map(|&i| (actions[i].0.label.as_str(), actions[i].0.style))
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        bar,
+        [
+            vec![
+                ("Merge main into all\u{2026}", ButtonStyle::Plain),
+                ("Resolve all with agent", ButtonStyle::Plain),
+                ("Plan resolution of all", ButtonStyle::Plain),
+            ],
+            vec![("Check again", ButtonStyle::Quiet)],
+        ]
+    );
+    let own: Vec<(&str, ButtonStyle)> = (actions.iter())
+        .filter(|(_, o)| {
+            matches!(
+                o,
+                PanelOutcome::ResolveConflicts(..) | PanelOutcome::UpdateBase(..)
+            )
+        })
+        .map(|(b, _)| (b.label.as_str(), b.style))
+        .collect();
+    assert_eq!(
+        own,
+        [
+            ("Fix", ButtonStyle::Quiet),
+            ("Plan", ButtonStyle::Quiet),
+            ("Merge main in\u{2026}", ButtonStyle::Quiet),
+            ("Rebase\u{2026}", ButtonStyle::Quiet),
+        ]
+    );
     // Keys come as their own symbol (checklist K8).
     let keys = ship_keys(&f, ctx, Some(&p), None);
     let pressed = |ctrl, shift, alt, sym| {
@@ -481,6 +538,8 @@ fn ships_buttons_have_keys_that_follow_the_selected_repository() {
     assert_eq!(pressed(true, false, false, Keysym::m), Some("Ctrl+M"));
     assert_eq!(pressed(true, true, false, Keysym::m), Some("Ctrl+Shift+M"));
     assert_eq!(pressed(false, false, true, Keysym::m), Some("Alt+M"));
+    assert_eq!(pressed(true, false, true, Keysym::m), Some("Ctrl+Alt+M"));
+    assert_eq!(pressed(false, true, true, Keysym::m), Some("Alt+Shift+M"));
     assert_eq!(pressed(false, false, true, Keysym::z), Some("Alt+Z"));
     assert_eq!(pressed(false, false, false, Keysym::m), None);
     assert_eq!(pressed(true, false, false, Keysym::z), None);
