@@ -6343,7 +6343,7 @@ pub(super) struct FeatureTabLayers {
     /// The spinner of work running, by how far it turned, and the line
     /// sweeping its card's top, by its width: over the head, so it isn't
     /// drawn again as they move.
-    spinner: super::Cached<(u32, super::Theme, f64)>,
+    spinner: [super::Cached<(super::Theme, f64)>; super::placeholder::SPINNER_STEPS as usize],
     sweep: super::Cached<(i32, super::Theme, f64)>,
     /// The clocks of what runs, over the head and the page's cards, so
     /// these aren't drawn again as they tick (see `Piece::Clock`).
@@ -6433,9 +6433,8 @@ impl FeatureTabLayers {
                 use super::placeholder::{SPINNER_PERIOD, SPINNER_STEPS};
                 let turn = crate::anim::phase(epoch, SPINNER_PERIOD, now);
                 let step = (turn * SPINNER_STEPS as f32) as u32 % SPINNER_STEPS;
-                let buffer = spinner.get((step, theme, scale), |(step, ..)| {
-                    painter.running_spinner(*step, scale, p)
-                });
+                let buffer = spinner[step as usize]
+                    .get((theme, scale), |_| painter.running_spinner(step, scale, p));
                 for spots in &l.running {
                     parts.push(Part::new(
                         buffer,
