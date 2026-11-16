@@ -839,6 +839,18 @@ impl Gerdr {
     /// comments are deleted and its review closed; the agent shows only if
     /// it waits for its prompt (`show_build_agent`). A refusal keeps them all.
     pub(crate) fn make_fixes_now(&mut self, project: &str, slug: &str) {
+        // Planned while the checks run: what they fail later goes in first.
+        let planned_early = (self.feature(project, slug)).is_some_and(|f| {
+            (f.fix_round.as_ref()).is_some_and(|r| {
+                r.stage == Stage::Verify && r.trail.run == f.verify.as_ref().map(|v| v.n)
+            })
+        });
+        if planned_early && self.checks_under_way(project, slug) {
+            let title = (self.feature(project, slug)).map_or("", |f| f.title.as_str());
+            return self.show_warning(format!(
+                "The checks of \u{201c}{title}\u{201d} still run: make the fixes once they end, as what fails later joins the plan"
+            ));
+        }
         if let Some(why) = self.checks_refusal(project, slug) {
             return self.show_warning(why);
         }

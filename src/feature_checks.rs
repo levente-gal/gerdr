@@ -754,6 +754,7 @@ impl Gerdr {
         row.stopping = false;
         self.save_feature(project, slug);
         self.sync_check_cards();
+        self.plan_verify_fixes_early(project, slug);
     }
 
     /// Check `index` of run `n` of feature `slug` has to wait for its folder,

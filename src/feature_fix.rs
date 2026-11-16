@@ -752,6 +752,10 @@ impl Gerdr {
                 format!("The fix plan of \u{201c}{title}\u{201d} needs {lacks}"),
             );
         }
+        // Checks that failed since it was asked go in before the user reads it.
+        if self.send_late_verify_failures(project, slug) {
+            return;
+        }
         let now = feature::now();
         let Some(f) = self.feature_mut(project, slug) else {
             return;
@@ -1337,6 +1341,103 @@ impl Gerdr {
                 "\u{201c}{title}\u{201d} has no failed checks to fix"
             ));
         };
+        self.verify_fixes_of(project, slug, failures, unplanned);
+    }
+
+    /// A check of feature `slug`'s Verify run failed for its code while
+    /// others still run: planning its fixes reads code only, so it starts now
+    /// on what failed so far, and what fails later joins the plan before the
+    /// user can approve it (`late_verify_failures`). The fixes themselves wait
+    /// for the checks to end. Nothing starts where a round couldn't, quietly:
+    /// the user wasn't asking.
+    pub(crate) fn plan_verify_fixes_early(&mut self, project: &str, slug: &str) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let Some(run) = (feature.verify.as_ref()).filter(|v| feature::verify::plans_early(v))
+        else {
+            return;
+        };
+        let can = feature.status == Status::Open
+            && feature.current() == Some(Stage::Verify)
+            && feature.is_done(Stage::Build)
+            && self.fix_round_refusal(feature).is_none();
+        if !can {
+            return;
+        }
+        let failures = feature::verify::code_failures(run);
+        self.verify_fixes_of(project, slug, failures, false);
+    }
+
+    /// What feature `slug`'s Verify run failed for its code that its open
+    /// round, planned while the checks ran, wasn't sent: none while they run,
+    /// or once the fixes go. They are added to the round's input as they are
+    /// told.
+    fn late_verify_failures(&self, feature: &Feature) -> Vec<String> {
+        let round =
+            (feature.fix_round.as_ref()).filter(|r| r.stage == Stage::Verify && r.before_fixing());
+        let run = (feature.verify.as_ref()).filter(|v| v.finished.is_some());
+        let (Some(round), Some(run)) = (round, run) else {
+            return Vec::new();
+        };
+        if round.trail.run != Some(run.n) {
+            return Vec::new();
+        }
+        let sent = std::fs::read_to_string(&round.input).unwrap_or_else(|err| {
+            tracing::warn!("reading {}: {err}", round.input.display());
+            String::new()
+        });
+        (feature::verify::code_failures(run).into_iter())
+            .filter(|failure| !sent.contains(failure.as_str()))
+            .collect()
+    }
+
+    /// Send the plan of feature `slug`'s round back for the Verify failures
+    /// that came after it was asked for, once the agent rests with it: they
+    /// go in the round's input too. Whether it did.
+    pub(crate) fn send_late_verify_failures(&mut self, project: &str, slug: &str) -> bool {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return false;
+        };
+        let late = self.late_verify_failures(&feature);
+        let Some(round) = feature.fix_round.as_ref().filter(|_| !late.is_empty()) else {
+            return false;
+        };
+        let lines: Vec<String> = late.iter().map(|f| format!("- {f}")).collect();
+        let lines = lines.join("\n");
+        let added = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&round.input)
+            .and_then(|mut file| {
+                use std::io::Write;
+                let more = "More checks failed once the others ended";
+                writeln!(file, "\n{more}:\n\n{lines}")
+            });
+        if let Err(err) = added {
+            tracing::warn!("adding to {}: {err}", round.input.display());
+        }
+        let evidence = store::dir(None, project, slug).join(feature::verify::EVIDENCE);
+        let comments = format!(
+            "More of the checks failed once the others ended, after you were asked for this plan. Plan their fixes too, in the same way, their output is in {}:\n\n{lines}",
+            evidence.display()
+        );
+        self.fix_plan_send_back(project, slug, comments);
+        true
+    }
+
+    /// Start the round of `failures` of feature `slug`'s Verify run: planned,
+    /// or made at once by a plan gerdr writes (`unplanned`).
+    fn verify_fixes_of(
+        &mut self,
+        project: &str,
+        slug: &str,
+        failures: Vec<String>,
+        unplanned: bool,
+    ) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let title = feature.title.clone();
         let run = feature.verify.clone().unwrap_or_default();
         let data = store::dir(None, project, slug);
         let evidence = data.join(feature::verify::EVIDENCE);
@@ -1364,7 +1465,11 @@ impl Gerdr {
         }
         if let Some(f) = self.feature_mut(project, slug) {
             let agent = (f.runs.get(&Stage::Build)).map_or_else(String::new, |r| r.agent.clone());
-            let fix = VerifyFix::new(f.fix_rounds, &run, agent);
+            let mut fix = VerifyFix::new(f.fix_rounds, &run, agent);
+            // Asked while the checks run: what failed so far.
+            if fix.failures.is_empty() {
+                fix.failures = failures;
+            }
             f.verify_fixes.push(fix);
             self.save_feature(project, slug);
         }

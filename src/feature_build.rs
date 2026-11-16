@@ -1251,6 +1251,12 @@ impl Gerdr {
         if !outdated(feature, &evidence) {
             feature::fix_round::verify_ended(&mut feature.verify_fixes, n, &evidence);
         }
+        // A round asked while it ran keeps what it failed in the end.
+        let ran = feature.verify.clone().unwrap_or_default();
+        if let Some(fix) = feature.verify_fixes.last_mut().filter(|f| f.run == n) {
+            let ended = feature::fix_round::VerifyFix::new(fix.round, &ran, fix.agent.clone());
+            (fix.failures, fix.why, fix.at) = (ended.failures, ended.why, ended.at);
+        }
         let first = failures
             .first()
             .cloned()
@@ -1285,6 +1291,13 @@ impl Gerdr {
         }
         if snapshot.status != Status::Open || snapshot.current() != Some(Stage::Verify) {
             return self.show_warning(format!("Verify of \u{201c}{title}\u{201d} failed: {first}"));
+        }
+        // A plan asked while the checks ran takes what failed after; one still
+        // being written takes it once written (`fix_plan_read`).
+        let ready = (snapshot.fix_round.as_ref())
+            .is_some_and(|r| r.phase == feature::fix_round::FixPhase::Ready);
+        if ready && self.send_late_verify_failures(project, slug) {
+            return;
         }
         // A check cut short says nothing of the code: no fix to ask for.
         if let Some(cut) = evidence.outcomes.iter().find(|o| o.interrupted) {
