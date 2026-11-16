@@ -5331,7 +5331,7 @@ pub(super) fn feature_tab_fix_picks() -> super::FeatureTabView {
                 icon: AgentIcon::Claude,
                 name: "Claude Code".into(),
                 dot: Dot::Done,
-                status: "Build agent \u{b7} makes the fixes".into(),
+                status: "Build agent \u{b7} next fixes: a fresh Claude Code".into(),
                 tail: Vec::new(),
                 buttons: Vec::new(),
                 picks: agent_chips(0, false),
@@ -6510,8 +6510,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
         0x0ad8968f49d14890, // tab_ship_after_1180
         0xe4762ba84bff7753, // tab_ai_review_history_1920
         0x798e6fd0f997c8c6, // tab_ai_review_history_860
-        0xc346dd36c5ff5ebc, // tab_fix_picks_1180
-        0x5f68cf44af600e94, // tab_fix_picks_860
+        0x19e01bd9cccc3257, // tab_fix_picks_1180
+        0xa0d26ec63cc51a63, // tab_fix_picks_860
         0x1f976fa729a294ff, // tab_ship_picks_1180
         0x8040979937b3c60f, // tab_ship_picks_860
         0x38114a9f4a296f0b, // tab_ship_ci_860
@@ -6584,8 +6584,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
         0x6a5ff153e0c64b91, // tab_ship_after_1180
         0x47d13bfbb815948a, // tab_ai_review_history_1920
         0xe43808387279d4e9, // tab_ai_review_history_860
-        0x62d5699dc5ea2019, // tab_fix_picks_1180
-        0x04c2c21e407a8e99, // tab_fix_picks_860
+        0x505cde8d175ac6c6, // tab_fix_picks_1180
+        0x09852451e87ba5e6, // tab_fix_picks_860
         0x8f76a0566543e10f, // tab_ship_picks_1180
         0x481b7505c8a78ce5, // tab_ship_picks_860
         0xa7fb449280d6136d, // tab_ship_ci_860
@@ -6658,8 +6658,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
         0xf9807cdad2d4db26, // tab_ship_after_1180
         0x61b9d1348da8af7d, // tab_ai_review_history_1920
         0xae63ac6a14fad9d6, // tab_ai_review_history_860
-        0x56ffff311e4fb859, // tab_fix_picks_1180
-        0x266768c5d3f9caad, // tab_fix_picks_860
+        0x03f3ba4e310062a1, // tab_fix_picks_1180
+        0x7ad10051024455cd, // tab_fix_picks_860
         0xa5a03e984a200d3a, // tab_ship_picks_1180
         0xbf1d1da2d3ae81ba, // tab_ship_picks_860
         0x609f8f8fcd262491, // tab_ship_ci_860
@@ -6732,8 +6732,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 71]; 4] = [
         0xb735d9925afcb817, // tab_ship_after_1180
         0x6210f6d25e980e87, // tab_ai_review_history_1920
         0x32807b5ab2f5f884, // tab_ai_review_history_860
-        0x4941c37f440639c6, // tab_fix_picks_1180
-        0x2ea0b2312ab81d9f, // tab_fix_picks_860
+        0xd6e8a080af2f8ccd, // tab_fix_picks_1180
+        0x6801ce36ffc42ca8, // tab_fix_picks_860
         0x1e98b8867198f7f7, // tab_ship_picks_1180
         0x37b19a5f62a140aa, // tab_ship_picks_860
         0x9e25b62b18120c6e, // tab_ship_ci_860
