@@ -260,6 +260,23 @@ fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
         check_lines(&f, Some(&both), false, 2_060)[2].text,
         "api: origin/main has a new commit that conflicts: take it in first"
     );
+    // Its squash conflicting in the same files is said once, by that line;
+    // in other files, it is said too.
+    let squash = |files: &str| {
+        let mut p = both.clone();
+        let blocker = format!("api: squashing into main conflicts in {files}");
+        p.ship = check(&[&blocker], &["api"], &[]);
+        texts(&check_lines(&f, Some(&p), false, 2_060))
+            .into_iter()
+            .map(|(text, _)| text.to_owned())
+            .collect::<Vec<_>>()
+    };
+    let conflict = "api: origin/main has a new commit that conflicts: take it in first";
+    assert_eq!(squash("export.py")[0], conflict);
+    assert_eq!(
+        squash("export.py, cli.py")[..2],
+        ["api: squashing into main conflicts in export.py, cli.py", conflict]
+    );
     // Nothing to do: what would stop shipping stops nothing.
     let nothing = probe(check(
         &["api is dirty"],

@@ -810,6 +810,12 @@ fn tracking(repo: &Repo, branch: &str) -> Option<String> {
 
 /// What stops squashing `branch`, at commit `at`, into `repo`'s base where
 /// it is checked out (`base_tree`).
+/// What stops repository `name`'s squash into `base` that conflicts in
+/// `files`.
+pub fn squash_conflicts(name: &str, base: &str, files: &[String]) -> String {
+    format!("{name}: squashing into {base} conflicts in {}", files.join(", "))
+}
+
 fn squash_blocker(repo: &Repo, branch: &str, at: &str) -> Option<String> {
     let (name, base) = (&repo.key(), &repo.base);
     let dir = base_tree(repo);
@@ -857,10 +863,7 @@ fn squash_blocker(repo: &Repo, branch: &str, at: &str) -> Option<String> {
     }
     match git_ops::predict_merge(&repo.main, base, at) {
         git_ops::Verdict::Clean => None,
-        git_ops::Verdict::Conflicts(files) => Some(format!(
-            "{name}: squashing into {base} conflicts in {}",
-            files.join(", ")
-        )),
+        git_ops::Verdict::Conflicts(files) => Some(squash_conflicts(name, base, &files)),
         git_ops::Verdict::Blocked(why) => Some(format!(
             "{name}: couldn't tell whether squashing into {base} conflicts: {why}"
         )),

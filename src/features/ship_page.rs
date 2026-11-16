@@ -170,23 +170,34 @@ pub(super) fn check_lines(
     // Origin's base has new commits that conflict, so a pull request
     // would, and so would its base once pulled: said beside any blocker
     // too, as the cards' Fix and Plan offer them either way.
-    let conflicts: Vec<CheckLine> = (check.repos.iter())
+    let conflicted: Vec<(&ship::RepoCheck, &ship::BaseState)> = (check.repos.iter())
         .filter(|_| !planned.nothing && !planned.all_done)
         .filter(|repo| !repo.merged)
-        .filter_map(|repo| {
-            let state = probe?.bases.get(&repo.key)?;
+        .filter_map(|repo| Some((repo, probe?.bases.get(&repo.key)?)))
+        .filter(|(_, state)| !state.conflicts.is_empty())
+        .collect();
+    let conflicts: Vec<CheckLine> = (conflicted.iter())
+        .map(|(repo, state)| {
             let new = match state.behind {
                 1 => "a new commit that conflicts: take it in first".to_owned(),
                 n => format!("{n} new commits that conflict: take them in first"),
             };
-            (!state.conflicts.is_empty()).then(|| {
-                let text = format!("{}: {} has {new}", repo.key, state.onto);
-                line(text, CheckTone::Blocker)
-            })
+            line(
+                format!("{}: {} has {new}", repo.key, state.onto),
+                CheckTone::Blocker,
+            )
         })
         .collect();
+    // Its squash conflicting in the very files its base's line names says
+    // the same again: taking the base in settles both.
+    let said = |why: &String| {
+        (conflicted.iter()).any(|(repo, state)| {
+            *why == ship::squash_conflicts(&repo.key, &repo.base, &state.conflicts)
+        })
+    };
     if !planned.blockers.is_empty() {
         let lines = (planned.blockers.iter())
+            .filter(|b| !said(b))
             .map(|b| line(b.clone(), CheckTone::Failed))
             .chain(match conflicts.is_empty() {
                 true => resolving.into_iter().collect(),
