@@ -235,6 +235,21 @@ fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
             ("api pushes to origin", CheckTone::Note)
         ]
     );
+    // Blocked as well (a squash waiting for a pull): the conflicts still say so.
+    let mut both = blocked.clone();
+    both.bases = behind.bases.clone();
+    assert_eq!(
+        texts(&check_lines(&f, Some(&both), false, 2_060)),
+        [
+            ("api is dirty", CheckTone::Failed),
+            ("web is behind", CheckTone::Failed),
+            (
+                "api: origin/main has 8 new commits that conflict: take them in first",
+                CheckTone::Blocker
+            ),
+            ("\u{2713} checks passed \u{b7} review done", CheckTone::Ready)
+        ]
+    );
     // Nothing to do: what would stop shipping stops nothing.
     let nothing = probe(check(
         &["api is dirty"],

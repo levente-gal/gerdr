@@ -167,10 +167,31 @@ pub(super) fn check_lines(
         .then(|| passed_checks(feature, check, probe))
         .flatten();
     let resolving = resolving_line(feature);
+    // Origin's base has new commits that conflict, so a pull request
+    // would, and so would its base once pulled: said beside any blocker
+    // too, as the cards' Fix and Plan offer them either way.
+    let conflicts: Vec<CheckLine> = (check.repos.iter())
+        .filter(|_| !planned.nothing && !planned.all_done)
+        .filter(|repo| !repo.merged)
+        .filter_map(|repo| {
+            let state = probe?.bases.get(&repo.key)?;
+            let new = count_of(state.behind, "new commit", "new commits");
+            (!state.conflicts.is_empty()).then(|| {
+                let text = format!(
+                    "{}: {} has {new} that conflict: take them in first",
+                    repo.key, state.onto
+                );
+                line(text, CheckTone::Blocker)
+            })
+        })
+        .collect();
     if !planned.blockers.is_empty() {
         let lines = (planned.blockers.iter())
             .map(|b| line(b.clone(), CheckTone::Failed))
-            .chain(resolving)
+            .chain(match conflicts.is_empty() {
+                true => resolving.into_iter().collect(),
+                false => conflicts,
+            })
             .collect();
         let mut lines = capped(lines, CheckTone::Failed);
         if lines.len() < MAX_CHECK_LINES {
@@ -200,23 +221,6 @@ pub(super) fn check_lines(
         (false, false, false) => line("Ready to ship".into(), CheckTone::Ready),
         (false, false, true) => line(steps_left(planned.steps()), CheckTone::Ready),
     };
-    // Ready but for origin's base: its new commits conflict, so a pull
-    // request would, and so would its base once pulled.
-    let conflicts: Vec<CheckLine> = (check.repos.iter())
-        .filter(|_| !planned.nothing && !planned.all_done)
-        .filter(|repo| !repo.merged)
-        .filter_map(|repo| {
-            let state = probe?.bases.get(&repo.key)?;
-            let new = count_of(state.behind, "new commit", "new commits");
-            (!state.conflicts.is_empty()).then(|| {
-                let text = format!(
-                    "{}: {} has {new} that conflict: take them in first",
-                    repo.key, state.onto
-                );
-                line(text, CheckTone::Blocker)
-            })
-        })
-        .collect();
     let first: Vec<CheckLine> = match conflicts.is_empty() {
         true => vec![first],
         false => conflicts,
