@@ -74,9 +74,6 @@ pub(super) struct PanelState<'a> {
     /// them (`keys::fix_page`).
     pub(super) fix_picks: Vec<AgentChip>,
     pub(super) fix_model: Option<String>,
-    /// Whether the next fixes start a fresh agent, not the one open
-    /// (`Gerdr::stage_agent_moved`).
-    pub(super) fix_moved: bool,
     /// What the button placing the next agent says, with machines to place it
     /// on (see `machine_work::place_label`).
     pub(super) place: Option<String>,

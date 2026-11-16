@@ -11,6 +11,9 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// How much wider a menu is when its rows carry key hints.
 const MENU_HINT_ROOM: i32 = 80;
+/// How wide a menu holding a message is (the problems button's): its
+/// lines hold `crate::tab_strip`'s `PROBLEM_LINE` characters.
+const MENU_NOTE_WIDTH: i32 = 460;
 /// The gap between the menu and its anchor.
 const MENU_GAP: i32 = 2;
 /// The gap between a row's label and its key hint.
@@ -52,9 +55,12 @@ pub struct MenuView {
     pub hover: Option<usize>,
 }
 
-/// How wide a menu of `rows` is: wider when any row has a key hint.
+/// How wide a menu of `rows` is: wider when any row has a key hint, and
+/// wider still when it says a message.
 pub fn menu_width(rows: &[MenuRow]) -> i32 {
-    if rows.iter().any(|row| row.hint.is_some()) {
+    if rows.iter().any(|row| row.note && !row.label.is_empty()) {
+        MENU_NOTE_WIDTH
+    } else if rows.iter().any(|row| row.hint.is_some()) {
         MENU_WIDTH + MENU_HINT_ROOM
     } else {
         MENU_WIDTH
@@ -180,7 +186,7 @@ impl Painter {
 
 #[cfg(test)]
 mod tests {
-    use super::{MENU_HINT_ROOM, MenuRow, menu_layout, menu_width};
+    use super::{MENU_HINT_ROOM, MENU_NOTE_WIDTH, MenuRow, menu_layout, menu_width};
     use crate::chrome::{BAR_HEIGHT, MENU_ITEM_HEIGHT, MENU_PADDING, MENU_WIDTH, Rect};
 
     fn rows(n: usize, hint: bool) -> Vec<MenuRow> {
@@ -242,6 +248,12 @@ mod tests {
     fn hints_make_the_menu_wider() {
         assert_eq!(menu_width(&rows(2, false)), MENU_WIDTH);
         assert_eq!(menu_width(&rows(2, true)), MENU_WIDTH + MENU_HINT_ROOM);
+        let mut said = rows(2, true);
+        said[0].note = true;
+        assert_eq!(menu_width(&said), MENU_NOTE_WIDTH);
+        // A rule between groups says nothing.
+        said[0].label.clear();
+        assert_eq!(menu_width(&said), MENU_WIDTH + MENU_HINT_ROOM);
     }
 
     #[test]

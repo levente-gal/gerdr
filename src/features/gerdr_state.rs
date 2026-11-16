@@ -731,6 +731,13 @@ impl Gerdr {
                 stamp,
                 result,
             } => self.review_read(&project, &slug, n, stamp, result),
+            Done::ReviewScope {
+                project,
+                slug,
+                title,
+                n,
+                result,
+            } => self.review_scope(&project, &slug, &title, n, result),
             Done::PlanReviewBaseline {
                 project,
                 slug,

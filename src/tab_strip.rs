@@ -47,12 +47,13 @@ pub fn problems_tooltip(count: usize) -> String {
     }
 }
 
-/// How many characters of a problem's text a line of its menu holds.
-const PROBLEM_LINE: usize = 30;
+/// How many characters of a problem's text a line of its menu holds: a
+/// branch name or path whole, in a menu `chrome::menu`'s note width wide.
+const PROBLEM_LINE: usize = 52;
 /// How many lines of its menu a problem takes at most: enough for a
 /// problem's text and the fix it names (a longer one ends in "…", and the
 /// log holds all of it).
-const PROBLEM_LINES: usize = 8;
+const PROBLEM_LINES: usize = 10;
 
 /// `text` in lines of at most `width` characters, broken between words
 /// (a longer word is cut), at most `most` of them: the last one ends in

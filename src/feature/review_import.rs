@@ -1029,6 +1029,65 @@ pub fn read_code(feature: &Feature, path: &Path) -> Result<CodeRead, String> {
     Ok(out)
 }
 
+/// What changed in a feature's code since its last review read it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SinceReview {
+    /// Each touched repository's HEAD, by `Repo::key`.
+    pub heads: BTreeMap<String, String>,
+    /// The files changed since, from their repository's top folder.
+    pub files: Vec<String>,
+    /// A touched repository the last review didn't read: all of it is new.
+    pub unreviewed: bool,
+}
+
+impl SinceReview {
+    /// Whether only tests changed: nothing for the reviewer to read.
+    pub fn tests_only(&self) -> bool {
+        !self.unreviewed && !self.files.is_empty() && self.files.iter().all(|f| is_test_file(f))
+    }
+}
+
+/// What changed in `feature`'s touched repositories since `reviewed`, the
+/// HEADs its last review read. Runs git: call it off the UI thread
+/// (checklist D3).
+pub fn since_review(
+    feature: &Feature,
+    reviewed: &BTreeMap<String, String>,
+) -> Result<SinceReview, String> {
+    let mut out = SinceReview::default();
+    for repo in feature.touched() {
+        let name = repo.key();
+        let head = git(&repo.worktree, &["rev-parse", "HEAD"])
+            .map_err(|err| format!("{name}: couldn't read its commit: {err}"))?;
+        let head = head.trim().to_owned();
+        match reviewed.get(&name) {
+            Some(from) if *from == head => {}
+            Some(from) => {
+                let files = git(&repo.worktree, &["diff", "--name-only", from, &head])
+                    .map_err(|err| format!("{name}: couldn't read what changed: {err}"))?;
+                out.files.extend(files.lines().map(str::to_owned));
+            }
+            None => out.unreviewed = true,
+        }
+        out.heads.insert(name, head);
+    }
+    Ok(out)
+}
+
+/// Whether `path` is a test file by its name alone: in a `test`, `tests` or
+/// `__tests__` folder, or named `test_*.py`, `*_test.*`, `*.test.*` or
+/// `*.spec.*`.
+pub fn is_test_file(path: &str) -> bool {
+    let (dirs, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let in_tests = (dirs.split('/')).any(|d| matches!(d, "test" | "tests" | "__tests__"));
+    let parts: Vec<&str> = name.split('.').collect();
+    let middle = parts.get(1..parts.len().saturating_sub(1)).unwrap_or(&[]);
+    in_tests
+        || (name.starts_with("test_") && name.ends_with(".py"))
+        || (parts.len() > 1 && parts[parts.len() - 2].ends_with("_test"))
+        || middle.iter().any(|p| matches!(*p, "test" | "spec"))
+}
+
 /// The files of a `git diff` and, per file, the new side's line ranges
 /// of its hunks.
 fn hunks(diff: &str) -> BTreeMap<String, Vec<(usize, usize)>> {
@@ -1125,6 +1184,41 @@ mod tests {
 
     fn repos() -> Vec<(String, PathBuf)> {
         vec![("api".into(), PathBuf::from("/w/f/api"))]
+    }
+
+    #[test]
+    fn test_files_go_by_their_names() {
+        for path in [
+            "api/tests/test_a.py",
+            "test/fixtures/a.json",
+            "src/__tests__/a.ts",
+            "test_a.py",
+            "app/a_test.go",
+            "src/a.test.ts",
+            "src/A.spec.tsx",
+        ] {
+            assert!(is_test_file(path), "{path}");
+        }
+        for path in [
+            "api/views.py",
+            "src/testing.rs",
+            "latest.py",
+            "src/a.ts",
+            "tests.md",
+            "contest.py",
+        ] {
+            assert!(!is_test_file(path), "{path}");
+        }
+        let since = |files: &[&str], unreviewed| SinceReview {
+            files: files.iter().map(|f| f.to_string()).collect(),
+            unreviewed,
+            ..SinceReview::default()
+        };
+        assert!(since(&["tests/test_a.py", "src/a.spec.ts"], false).tests_only());
+        assert!(!since(&["tests/test_a.py", "src/a.ts"], false).tests_only());
+        // Nothing changed, or a repository not read yet: not tests only.
+        assert!(!since(&[], false).tests_only());
+        assert!(!since(&["tests/test_a.py"], true).tests_only());
     }
 
     #[test]

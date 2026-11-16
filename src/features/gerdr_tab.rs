@@ -1001,7 +1001,6 @@ impl Gerdr {
             fix_model: (self.model_slot_of(&panel.project, &panel.slug, Stage::Build))
                 .filter(|_| keys::fix_page(feature, panel.page_stage(feature)))
                 .map(|slot| model_label(slot.picked.as_deref())),
-            fix_moved: self.stage_agent_moved(feature, Stage::Build),
             place: self.place_label(feature, panel.page_stage(feature)),
             machine_line: self.machine_line(feature, panel.page_stage(feature)),
             seen_note: self.seen_note(feature),

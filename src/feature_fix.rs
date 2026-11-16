@@ -1,5 +1,5 @@
-//! Fix rounds, gerdr's side (see `feature::fix_round`): the Build agent's
-//! chat compacted, the plan asked for and watched, sent back, and the fixes
+//! Fix rounds, gerdr's side (see `feature::fix_round`): a fresh Build agent
+//! for each round, its plan asked for and watched, sent back, and the fixes
 //! made once the user says so. Whatever sends work to a done Build agent
 //! comes in through `Gerdr::send_to_build`.
 //!
@@ -19,7 +19,6 @@ use crate::{
     doc_review::DocFile,
     feature::{
         self, Feature, Stage, Status,
-        agents::Flavor,
         fix_round::{self, Asked, Compact, FixPhase, FixRound, Fixes, GiveBack, Plan, VerifyFix},
         store,
     },
@@ -95,21 +94,6 @@ impl Gerdr {
             })
     }
 
-    /// The line compacting feature's Build agent's chat: none for a CLI
-    /// gerdr knows no such line of, or an agent that isn't there or has no
-    /// chat yet, or one the fixes no longer go to (`stage_agent_moved`).
-    fn compact_line(&self, feature: &Feature) -> Option<&'static str> {
-        if self.stage_agent_moved(feature, Stage::Build) {
-            return None;
-        }
-        let run = feature.runs.get(&Stage::Build).filter(|r| !r.held)?;
-        let key = run.agent_key()?;
-        if !self.agent_key_state(&key).1 {
-            return None;
-        }
-        Flavor::of(&run.base).compact()
-    }
-
     /// Start a fix round on feature `slug`, of `what` in the file `input`;
     /// its refusal was looked at (`fix_round_refusal`). A failure says so.
     pub(crate) fn start_fix_round(
@@ -126,30 +110,10 @@ impl Gerdr {
         if !self.keep_last_plan(&feature) {
             return false;
         }
-        let compact = self.compact_line(&feature);
-        let phase = match compact {
-            Some(_) => FixPhase::Compacting,
-            None => FixPhase::Planning,
-        };
-        if !self.open_fix_round(&feature, asked, what, input, phase) {
+        if !self.open_fix_round(&feature, asked, what, input, FixPhase::Planning) {
             return false;
         }
-        let Some(line) = compact else {
-            self.ask_fix_plan(project, slug);
-            return true;
-        };
-        match self.tell_build_agent(&feature, SendKind::Compact, line) {
-            Ok(()) => {
-                let title = &feature.title;
-                self.show_success(format!(
-                    "The Build agent of \u{201c}{title}\u{201d} compacts its chat, then plans the fixes"
-                ));
-            }
-            Err(why) => {
-                tracing::info!("compacting the Build agent of {project}/{slug}: {why}");
-                self.ask_fix_plan(project, slug);
-            }
-        }
+        self.ask_fix_plan(project, slug);
         true
     }
 
@@ -291,8 +255,8 @@ impl Gerdr {
         self.save_feature(project, slug);
     }
 
-    /// Tell the Build agent of feature `slug` to write its round's plan, or
-    /// start a fresh one on it.
+    /// Tell the round's own Build agent of feature `slug` to write its plan,
+    /// or start a fresh one on it: a new round always does.
     pub(crate) fn ask_fix_plan(&mut self, project: &str, slug: &str) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
@@ -308,9 +272,13 @@ impl Gerdr {
         values.insert("fixes.what".into(), round.what.clone());
         values.insert("fixes.path".into(), input.clone());
         values.insert("fix_plan.path".into(), plan.clone());
-        let sent = prompts::render_builtin("fix-plan", &values)
-            .map_err(|e| e.to_string())
-            .and_then(|line| self.tell_build_agent(&feature, SendKind::FixPlan, line.trim()));
+        let sent = if own_agent(&feature) {
+            prompts::render_builtin("fix-plan", &values)
+                .map_err(|e| e.to_string())
+                .and_then(|line| self.tell_build_agent(&feature, SendKind::FixPlan, line.trim()))
+        } else {
+            Err(NEW_ROUND.into())
+        };
         let title = &feature.title;
         let text = match sent {
             Ok(()) => format!("The Build agent of \u{201c}{title}\u{201d} plans the fixes"),
@@ -417,6 +385,8 @@ impl Gerdr {
         match round.phase {
             FixPhase::Ready => {}
             FixPhase::Fixing => self.fixes_tick(feature, round),
+            // Only a round saved before each round got a fresh agent is told
+            // to compact: it goes on from there.
             FixPhase::Compacting | FixPhase::CompactingToFix => {
                 let state = run.and_then(|r| r.agent_key());
                 let (status, alive) = match &state {
@@ -866,9 +836,8 @@ impl Gerdr {
     }
 
     /// The user approved the plan of feature `slug`, or asks for the fixes
-    /// of its last round again: the agent compacts its chat if it can, as
-    /// the plan is in its file, and then makes them. Whether it went; a
-    /// refusal says why and changes nothing.
+    /// of its last round again: the round's own agent makes them, or a fresh
+    /// one. Whether it went; a refusal says why and changes nothing.
     pub(crate) fn make_fixes(&mut self, project: &str, slug: &str) -> bool {
         self.fixes_go(project, slug, Go::Approved)
     }
@@ -955,22 +924,6 @@ impl Gerdr {
             Go::Stopped | Go::Continue => "Fixes asked for again".to_owned(),
             Go::Again => format!("Fix round {n} sent again"),
         };
-        if let Some(line) = self.compact_line(&feature) {
-            match self.tell_build_agent(&feature, SendKind::Compact, line) {
-                Ok(()) => {
-                    let said = format!("{why}: the Build agent compacts its chat first");
-                    self.fixes_compact(project, slug, &said);
-                    self.fixes_went(project, slug, go);
-                    self.show_success(format!(
-                        "The Build agent of \u{201c}{title}\u{201d} compacts its chat, then makes the fixes"
-                    ));
-                    return true;
-                }
-                Err(why) => {
-                    tracing::info!("compacting the Build agent of {project}/{slug}: {why}");
-                }
-            }
-        }
         let said = format!("{why}: fixes sent to the Build agent");
         let went = self.send_fixes(project, slug, &said);
         if went {
@@ -1006,28 +959,6 @@ impl Gerdr {
                 "Couldn't untick the fixes in the build log: the round may end at once ({err})"
             ));
         }
-    }
-
-    /// The Build agent of feature `slug` was told to compact before the
-    /// fixes: `said` goes in the log.
-    fn fixes_compact(&mut self, project: &str, slug: &str, said: &str) {
-        let now = feature::now();
-        let heads = self.last_heads(project, slug);
-        let Some(f) = self.feature_mut(project, slug) else {
-            return;
-        };
-        f.reopen_fix_round();
-        f.fixes_going(now, heads.as_ref());
-        if let Some(round) = f.fix_round.as_mut() {
-            round.phase = FixPhase::CompactingToFix;
-            round.stalled = None;
-        }
-        if let Some(run) = f.runs.get_mut(&Stage::Build) {
-            run.stop = None;
-        }
-        f.log(now, said);
-        self.save_feature(project, slug);
-        (self.features.build.fix_watches).insert(fix_key(project, slug), FixWatch::default());
     }
 
     /// Fixes that couldn't go after the compact: the plan waits again.
@@ -1082,9 +1013,13 @@ impl Gerdr {
         let mut values = vars(&feature, &names, &data, Stage::Build);
         values.insert("fix_plan.path".into(), shown.clone());
         values.insert("fixes.section".into(), section.clone());
-        let sent = prompts::render_builtin("fix-go", &values)
-            .map_err(|e| e.to_string())
-            .and_then(|line| self.tell_build_agent(&feature, SendKind::FixGo, line.trim()));
+        let sent = if own_agent(&feature) {
+            prompts::render_builtin("fix-go", &values)
+                .map_err(|e| e.to_string())
+                .and_then(|line| self.tell_build_agent(&feature, SendKind::FixGo, line.trim()))
+        } else {
+            Err(NEW_ROUND.into())
+        };
         let mut to = "the Build agent";
         if let Err(why) = sent {
             tracing::info!("telling {project}/{slug}'s Build agent to make the fixes: {why}");
@@ -1516,6 +1451,21 @@ enum Go {
 }
 
 /// A feature's key among the watches.
+/// Why a round's work starts a fresh Build agent rather than going to the
+/// one there, for the log.
+const NEW_ROUND: &str = "each fix round gets a fresh Build agent";
+
+/// Whether `feature`'s Build agent is the one its open or last round started:
+/// each round gets a fresh one, which plans it and makes its fixes, so no
+/// chat grows (and needs compacting) over the rounds.
+fn own_agent(feature: &Feature) -> bool {
+    let round = (feature.fix_round.as_ref()).or(feature.last_fix_round.as_ref());
+    let run = feature.runs.get(&Stage::Build).map(|r| r.n);
+    round
+        .and_then(|r| r.trail.build_run)
+        .is_some_and(|n| Some(n) == run)
+}
+
 fn fix_key(project: &str, slug: &str) -> (String, String) {
     (project.to_owned(), slug.to_owned())
 }
@@ -1556,5 +1506,32 @@ mod tests {
         // With none there, nothing to do.
         archive_plan(&base, 4).unwrap();
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_round_goes_to_the_agent_started_for_it_only() {
+        use crate::features::tests::{feature, in_round, repo};
+        let mut f = in_round(
+            feature("a", vec![repo("api", true)], 3),
+            Stage::Verify,
+            FixPhase::Planning,
+        );
+        let run = |n| feature::agents::StageRun {
+            n,
+            ..Default::default()
+        };
+        // The Build agent there built it, or ran an earlier round: a fresh one.
+        f.runs.insert(Stage::Build, run(4));
+        assert!(!own_agent(&f));
+        f.fix_round.as_mut().unwrap().trail.build_run = Some(5);
+        assert!(!own_agent(&f));
+        // The one started for it: its plan sent back and its fixes go there.
+        f.runs.insert(Stage::Build, run(5));
+        assert!(own_agent(&f));
+        // Over, the round sent again still goes there.
+        f.last_fix_round = f.fix_round.take();
+        assert!(own_agent(&f));
+        f.last_fix_round = None;
+        assert!(!own_agent(&f));
     }
 }
