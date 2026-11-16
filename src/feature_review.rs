@@ -16,6 +16,7 @@
 //! a new review checks the fixes.
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -23,9 +24,9 @@ use std::{
 use crate::{
     Gerdr,
     feature::{
-        self, Feature, Stage, Status, artifacts,
+        self, Feature, Repo, Stage, Status, artifacts,
         fix_round::GiveBack,
-        review_import::{self, AiReview, CodeRead, Decision, Finding, FindingState},
+        review_import::{self, AiReview, CodeRead, Decision, Finding, FindingState, SinceReview},
         store,
     },
     feature_agents::Stamp,
@@ -40,11 +41,31 @@ use crate::{
 /// The values the AI review prompt gets of `feature` besides the stage's
 /// own: per touched repository the diff to review (all of the change the
 /// first time, since the last review after), and the earlier findings,
-/// sent, dismissed and still open.
-pub(crate) fn review_vars(feature: &Feature) -> Vec<(String, String)> {
+/// sent, dismissed and still open. A repository whose HEAD in `heads` (as
+/// its code was last read) is the one the last review read is left out,
+/// and named as unchanged.
+pub(crate) fn review_vars(
+    feature: &Feature,
+    heads: Option<&BTreeMap<String, String>>,
+) -> Vec<(String, String)> {
     let review = feature.review.as_ref();
-    let diffs = feature
-        .touched()
+    let same = |repo: &&Repo| {
+        let key = repo.key();
+        let read = review.and_then(|r| r.reviewed.get(&key));
+        read.is_some() && read == heads.and_then(|h| h.get(&key))
+    };
+    let (unchanged, mut moved): (Vec<&Repo>, Vec<&Repo>) = feature.touched().partition(same);
+    // None moved: the patch did all the same (a rebase), so all is read.
+    let unchanged = match moved.is_empty() {
+        true => std::mem::replace(&mut moved, unchanged),
+        false => unchanged,
+    };
+    let unchanged = (unchanged.iter())
+        .map(|r| r.key())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let diffs = moved
+        .into_iter()
         .map(|repo| {
             // A pull request's is against origin's base, as GitHub shows it.
             let from = match feature.pull() {
@@ -77,6 +98,7 @@ pub(crate) fn review_vars(feature: &Feature) -> Vec<(String, String)> {
     };
     vec![
         ("review.diffs".into(), diffs),
+        ("review.unchanged".into(), unchanged),
         ("review.sent".into(), list(&[FindingState::Sent])),
         ("review.dismissed".into(), list(&[FindingState::Dismissed])),
         (
@@ -190,6 +212,99 @@ impl Gerdr {
             n,
             stamp,
         });
+    }
+
+    /// Whether AI review of feature `slug` may go without its agent, so what
+    /// changed since the last review is read first (`review_scope`): a
+    /// later review, with no finding left to check. The HEADs it read.
+    pub(crate) fn review_may_skip(
+        &self,
+        project: &str,
+        slug: &str,
+    ) -> Option<BTreeMap<String, String>> {
+        let feature = self.feature(project, slug)?;
+        let review = feature.review.as_ref()?;
+        let waits = review.findings.iter().any(|f| f.state.holds_up());
+        (feature.pull().is_none() && !waits && !review.reviewed.is_empty())
+            .then(|| review.reviewed.clone())
+    }
+
+    /// Read off the thread what changed in feature `slug` (`title`) since
+    /// its last review, the HEADs `reviewed`, then review it or not
+    /// (`review_scope`).
+    pub(crate) fn read_review_scope(
+        &mut self,
+        project: &str,
+        slug: &str,
+        title: &str,
+        reviewed: BTreeMap<String, String>,
+    ) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        let n = feature.runs.get(&Stage::AiReview).map(|r| r.n);
+        let (project, slug, title) = (project.to_owned(), slug.to_owned(), title.to_owned());
+        self.feature_work(None, move |_| Done::ReviewScope {
+            result: review_import::since_review(&feature, &reviewed),
+            project,
+            slug,
+            title,
+            n,
+        });
+    }
+
+    /// What changed in feature `slug` since its last review was read: only
+    /// tests, and AI review passes on that code with no agent, said in the
+    /// log and a toast; else, or if it couldn't be read, its agent starts.
+    pub(crate) fn review_scope(
+        &mut self,
+        project: &str,
+        slug: &str,
+        title: &str,
+        n: Option<u32>,
+        result: Result<SinceReview, String>,
+    ) {
+        // The user may have started a reviewer meanwhile: it has it then.
+        let still = self.feature(project, slug).is_some_and(|f| {
+            f.status == Status::Open
+                && f.current() == Some(Stage::AiReview)
+                && f.runs.get(&Stage::AiReview).map(|r| r.n) == n
+        });
+        if !still || self.review_may_skip(project, slug).is_none() {
+            return;
+        }
+        let since = match result {
+            Ok(since) if since.tests_only() => since,
+            Ok(_) => return self.launch_reviewer(project, slug, title),
+            Err(why) => {
+                tracing::warn!(
+                    "feature {project}/{slug}: what changed since the last review: {why}"
+                );
+                return self.launch_reviewer(project, slug, title);
+            }
+        };
+        let now = feature::now();
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let Some(patch) = (f.marks.get(&Stage::Verify)).and_then(|m| m.patch.clone()) else {
+            return self.launch_reviewer(project, slug, title);
+        };
+        let files = plural(since.files.len(), "test file");
+        if let Some(review) = f.review.as_mut() {
+            review.reviewed = since.heads;
+            review.patch = Some(patch.clone());
+        }
+        f.log(
+            now,
+            format!("AI review skipped: only {files} changed since the last review"),
+        );
+        f.tick(now, "gerdr", Some(&patch));
+        self.save_feature(project, slug);
+        self.feature_cursor_to_current_of(project, slug);
+        self.show_success(format!(
+            "AI review of \u{201c}{title}\u{201d} skipped: only {files} changed since the last review; Reopen it to have them reviewed"
+        ));
     }
 
     /// The review of run `n` (file at `stamp`) can't be read in, as `why`
@@ -1136,7 +1251,7 @@ mod tests {
     #[test]
     fn the_first_review_reads_the_whole_change() {
         let f = feature("a", vec![repo("api", true), repo("web", false)], 5);
-        let v: prompts::render::Vars = review_vars(&f).into_iter().collect();
+        let v: prompts::render::Vars = review_vars(&f, None).into_iter().collect();
         assert_eq!(
             v["review.diffs"],
             "   - api, in /work/.features/bulk/api: `git diff abc123...HEAD`"
@@ -1197,7 +1312,7 @@ mod tests {
 
     #[test]
     fn a_later_review_reads_what_changed_and_the_earlier_findings() {
-        let v: prompts::render::Vars = review_vars(&reviewed()).into_iter().collect();
+        let v: prompts::render::Vars = review_vars(&reviewed(), None).into_iter().collect();
         assert!(
             v["review.diffs"].contains("api, in /work/.features/bulk/api: `git diff f00d..HEAD`")
         );
@@ -1218,9 +1333,55 @@ mod tests {
             std::path::Path::new("/d"),
             Stage::AiReview,
         );
-        all.extend(review_vars(&reviewed()));
+        all.extend(review_vars(&reviewed(), None));
         let text = prompts::render_builtin("ai-review", &all).unwrap();
         assert!(text.contains("/d/review.json") && text.contains("by design"));
+        assert!(!text.contains("didn't change since"), "{text}");
+    }
+
+    #[test]
+    fn a_later_review_leaves_out_what_it_read_already() {
+        let f = reviewed();
+        let heads: BTreeMap<String, String> = [("api", "f00d"), ("web", "beef")]
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .into();
+        let v: prompts::render::Vars = review_vars(&f, Some(&heads)).into_iter().collect();
+        // The web repository was never reviewed: it stays.
+        assert!(
+            !v["review.diffs"].contains("api, in"),
+            "{}",
+            v["review.diffs"]
+        );
+        assert!(v["review.diffs"].contains("web, in"));
+        assert_eq!(v["review.unchanged"], "api");
+        let mut all = crate::feature_agents::vars(
+            &f,
+            &crate::feature::PerProject::all("Acme".to_owned()),
+            std::path::Path::new("/d"),
+            Stage::AiReview,
+        );
+        all.extend(review_vars(&f, Some(&heads)));
+        let text = prompts::render_builtin("ai-review", &all).unwrap();
+        assert!(
+            text.contains("The code of api didn't change since"),
+            "{text}"
+        );
+        // Moved since: read again.
+        let heads: BTreeMap<String, String> = [("api", "cafe")]
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .into();
+        let v: prompts::render::Vars = review_vars(&f, Some(&heads)).into_iter().collect();
+        assert!(v["review.diffs"].contains("`git diff f00d..HEAD`"));
+        assert_eq!(v["review.unchanged"], "");
+        // Nothing moved at all: all of it is read as before.
+        let mut one = feature("a", vec![repo("api", true)], 5);
+        one.review = f.review.clone();
+        let heads: BTreeMap<String, String> = [("api", "f00d")]
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .into();
+        let v: prompts::render::Vars = review_vars(&one, Some(&heads)).into_iter().collect();
+        assert!(v["review.diffs"].contains("api, in"));
+        assert_eq!(v["review.unchanged"], "");
     }
 
     #[test]
