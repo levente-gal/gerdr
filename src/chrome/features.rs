@@ -73,7 +73,8 @@ const ROW_BUTTON: i32 = 24;
 /// How wide the previous and next feature buttons are.
 const SWITCH_W: i32 = 28;
 /// How many lines a list on a stage's page shows at most (the Ship
-/// check, Verify's failures): past it, the last says how many more.
+/// check, Verify's failures): past it, the last says how many more. The
+/// Ship check's line of checks passed comes on top, never folded away.
 pub const MAX_CHECK_LINES: usize = 4;
 /// The rows of the feature tab's `⋯` menu that act on the feature as a whole,
 /// before the one removing worktrees.

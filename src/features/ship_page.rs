@@ -194,9 +194,7 @@ pub(super) fn check_lines(
             })
             .collect();
         let mut lines = capped(lines, CheckTone::Failed);
-        if lines.len() < MAX_CHECK_LINES {
-            lines.extend(passed);
-        }
+        lines.extend(passed);
         return lines;
     }
     let more = feature.status == Status::Done;
@@ -236,8 +234,13 @@ pub(super) fn check_lines(
         };
         line(text, CheckTone::Note)
     });
-    let lines = first.into_iter().chain(next).chain(passed).chain(notes).collect();
-    capped(lines, CheckTone::Note)
+    let head: Vec<CheckLine> = first.into_iter().chain(next).collect();
+    let at = head.len();
+    let mut lines = capped(head.into_iter().chain(notes).collect(), CheckTone::Note);
+    if let Some(passed) = passed {
+        lines.insert(at.min(lines.len()), passed);
+    }
+    lines
 }
 
 /// The named checks `feature` passes before it ships, on one line ("checks

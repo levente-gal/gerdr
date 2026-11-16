@@ -197,8 +197,10 @@ fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
     );
     let many = probe(check(&["a", "b", "c", "d", "e", "f"], &["api"], &[]));
     let lines = check_lines(&f, Some(&many), false, 2_060);
-    assert_eq!(lines.len(), MAX_CHECK_LINES);
+    // The checks passed still show under them, on top of the cap.
+    assert_eq!(lines.len(), MAX_CHECK_LINES + 1);
     assert_eq!(lines[MAX_CHECK_LINES - 1].text, "and 3 more");
+    assert_eq!(lines[MAX_CHECK_LINES].text, passed);
     let ready = probe(check(&[], &["api"], &["api pushes to origin"]));
     assert_eq!(
         texts(&check_lines(&f, Some(&ready), false, 2_060)),
