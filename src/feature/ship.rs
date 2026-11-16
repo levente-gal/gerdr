@@ -738,7 +738,6 @@ fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) ->
                 .push(format!("{} has no commits: left out", repo.key()));
             continue;
         }
-        let merged = merged_into_base(repo, &branch);
         let reattach = match detached(repo, &branch) {
             Some(Err(why)) => {
                 out.blockers.push(why);
@@ -746,6 +745,10 @@ fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) ->
             }
             on => on.is_some(),
         };
+        let head = reading.heads.get(&repo.key()).cloned();
+        // Put back first, the branch is where its worktree is: read that.
+        let at = (head.as_deref()).filter(|_| reattach).unwrap_or(&branch);
+        let merged = merged_into_base(repo, at);
         out.repos.push(RepoCheck {
             key: repo.key(),
             base: repo.base.clone(),
@@ -755,9 +758,9 @@ fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) ->
             no_origin: git(&repo.main, &["remote", "get-url", "origin"])
                 .is_err()
                 .then(|| format!("{} has no origin remote", repo.key())),
-            no_merge: (!merged).then(|| squash_blocker(repo, &branch)).flatten(),
+            no_merge: (!merged).then(|| squash_blocker(repo, &branch, at)).flatten(),
             merged,
-            head: reading.heads.get(&repo.key()).cloned(),
+            head,
             pushed: tracking(repo, &branch),
             reattach,
         });
@@ -805,9 +808,9 @@ fn tracking(repo: &Repo, branch: &str) -> Option<String> {
     Some(sha.trim().to_owned())
 }
 
-/// What stops squashing `branch` into `repo`'s base where it is checked
-/// out (`base_tree`).
-fn squash_blocker(repo: &Repo, branch: &str) -> Option<String> {
+/// What stops squashing `branch`, at commit `at`, into `repo`'s base where
+/// it is checked out (`base_tree`).
+fn squash_blocker(repo: &Repo, branch: &str, at: &str) -> Option<String> {
     let (name, base) = (&repo.key(), &repo.base);
     let dir = base_tree(repo);
     let tree = tree_words(repo, &dir);
@@ -835,7 +838,7 @@ fn squash_blocker(repo: &Repo, branch: &str) -> Option<String> {
     // Taken in from origin's base, its commits would go into the squash
     // when the local base lacks them: as the feature's own, once pushed.
     let remote = format!("origin/{base}");
-    let taken = git(&repo.main, &["merge-base", branch, &remote])
+    let taken = git(&repo.main, &["merge-base", at, &remote])
         .ok()
         .map(|at| at.trim().to_owned())
         .filter(|at| !at.is_empty())
@@ -852,7 +855,7 @@ fn squash_blocker(repo: &Repo, branch: &str) -> Option<String> {
             pull_first(base)
         ));
     }
-    match git_ops::predict_merge(&repo.main, base, branch) {
+    match git_ops::predict_merge(&repo.main, base, at) {
         git_ops::Verdict::Clean => None,
         git_ops::Verdict::Conflicts(files) => Some(format!(
             "{name}: squashing into {base} conflicts in {}",
@@ -2359,7 +2362,7 @@ esac
         let mut f = feature_over(&t, &["api"], &[]);
         origins(&t, &f);
         let w = wt(&f, "api");
-        commit(&w, "a0", "on the branch");
+        // The branch is still at its base: it would read as merged.
         run(&w, &["switch", "-q", "--detach"]);
         commit(&w, "a1", "api change");
         mark_all(&mut f);
@@ -2582,10 +2585,10 @@ esac
         assert!(bases["api"].merges, "the merge is in its history now");
         // A local main that lacks what was taken in: squashing waits for a
         // pull, as the squash would take it in as the feature's own.
-        assert_eq!(squash_blocker(&f.repos[0], &f.branch()), None);
+        assert_eq!(squash_blocker(&f.repos[0], &f.branch(), &f.branch()), None);
         run(&main, &["reset", "-q", "--hard", "HEAD~1"]);
         assert_eq!(
-            squash_blocker(&f.repos[0], &f.branch()).as_deref(),
+            squash_blocker(&f.repos[0], &f.branch(), &f.branch()).as_deref(),
             Some("api: feature/f has a commit of origin/main that main lacks: pull main first")
         );
         let check = |no_merge: Option<String>| RepoCheck {
@@ -2601,9 +2604,9 @@ esac
             pushed: None,
             reattach: false,
         };
-        assert!(check(squash_blocker(&f.repos[0], &f.branch())).pulls_base());
+        assert!(check(squash_blocker(&f.repos[0], &f.branch(), &f.branch())).pulls_base());
         assert_eq!(pull_base(&f.repos[0]), Ok(1));
-        assert_eq!(squash_blocker(&f.repos[0], &f.branch()), None);
+        assert_eq!(squash_blocker(&f.repos[0], &f.branch(), &f.branch()), None);
         assert!(!check(Some("api: squashing into main conflicts in c".into())).pulls_base());
 
         // A change to the same file conflicts: read so, and refused as it was.
