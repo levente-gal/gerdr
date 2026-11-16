@@ -183,7 +183,7 @@ fn a_repository_built_on_another_branch_says_so() {
 fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
     let f = feature("s", vec![repo("api", true)], 8);
     let none = check_lines(&f, None, false, 2_060);
-    assert_eq!(texts(&none), [("checking\u{2026}", CheckTone::Note)]);
+    assert_eq!(texts(&none), [(SHIP_CHECKING, CheckTone::Note)]);
     let blocked = probe(check(&["api is dirty", "web is behind"], &["api"], &[]));
     // Failing first; then what passes, named on one line.
     let passed = "\u{2713} checks passed \u{b7} review done \u{b7} no conflicts";
@@ -1892,4 +1892,54 @@ fn the_recap_shows_the_summary_and_who_writes_it() {
         recap_summary(&f, Some(&p)).1.as_deref(),
         Some("claude is writing it again\u{2026}")
     );
+}
+
+#[test]
+fn while_the_first_ship_check_runs_each_repository_shows_a_card_checking() {
+    let f = feature("s", vec![repo("api", true), repo("web", true), repo("docs", false)], 8);
+    let unchecked = probe(None);
+    for probe in [None, Some(&unchecked)] {
+        let state = PanelState {
+            probe,
+            ..PanelState::default()
+        };
+        let cards: Vec<_> = (ship_sections(&f, &state, &[], 2_000).into_iter())
+            .filter_map(|s| match s {
+                PageSection::ShipGroup(group) => Some((group.head, group.card.expect("a card"))),
+                _ => None,
+            })
+            .collect();
+        let heads: Vec<&str> = cards.iter().map(|(head, _)| head.as_str()).collect();
+        assert_eq!(heads, ["api", "web"], "the touched ones only");
+        for (_, card) in &cards {
+            assert_eq!(card.dot, Dot::Working);
+            assert_eq!(card.state.text, "checking\u{2026}");
+            assert_eq!(card.meta, CHECKING_META);
+            assert!(card.buttons.is_empty());
+        }
+        assert!(ship_rows(&f, probe).is_empty(), "nothing to tick yet");
+        assert_eq!(rail_node(&f, Stage::Ship, &state, 2_000).line, "checking");
+    }
+    // Once the code can't be read, the check says so: no card waits.
+    let mut unread = probe(None);
+    unread.reading = Err("no git".into());
+    let state = PanelState {
+        probe: Some(&unread),
+        ..PanelState::default()
+    };
+    assert!(ship_sections(&f, &state, &[], 2_000).is_empty());
+    assert_eq!(rail_node(&f, Stage::Ship, &state, 2_000).line, "");
+    // Checked, the real cards take their place.
+    let ready = probe(check(&[], &["api"], &[]));
+    let state = PanelState {
+        probe: Some(&ready),
+        ..PanelState::default()
+    };
+    let metas: Vec<String> = (ship_sections(&f, &state, &[], 2_000).into_iter())
+        .filter_map(|s| match s {
+            PageSection::ShipGroup(group) => group.card.map(|c| c.meta),
+            _ => None,
+        })
+        .collect();
+    assert!(!metas.is_empty() && metas.iter().all(|m| m != CHECKING_META));
 }

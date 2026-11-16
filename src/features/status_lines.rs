@@ -544,6 +544,8 @@ pub(super) fn current_line(feature: &Feature, stage: Stage, state: &LineState, n
                 "base conflicts".into()
             } else if planned.is_some() {
                 "ready to ship".into()
+            } else if feature.ships() && state.probe.is_none_or(|p| p.reading.is_ok()) {
+                "checking".into()
             } else {
                 String::new()
             }
