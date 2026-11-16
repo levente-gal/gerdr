@@ -657,6 +657,14 @@ fn ship_step_row(
     }
 }
 
+/// Whether probes of `feature` fetch its bases from origin, now and then:
+/// at Ship, and during Manual test already, so that once it is done Ship's
+/// first check has only this machine's git to read.
+pub(super) fn fetches_bases(feature: &Feature) -> bool {
+    let testing = feature.status == Status::Open && feature.current() == Some(Stage::ManualTest);
+    feature.ships() || testing
+}
+
 /// While Ship's first check of `feature` runs (fetching origin can take a
 /// while), a card for each repository it touches, its dot blinking: the
 /// page shows that it works, and the real cards take their place.

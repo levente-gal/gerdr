@@ -1943,3 +1943,15 @@ fn while_the_first_ship_check_runs_each_repository_shows_a_card_checking() {
         .collect();
     assert!(!metas.is_empty() && metas.iter().all(|m| m != CHECKING_META));
 }
+
+#[test]
+fn bases_are_fetched_from_manual_test_on() {
+    // Stages done: 7 leaves Manual test current, 8 Ship.
+    let fetches = |done| fetches_bases(&feature("s", vec![repo("api", true)], done));
+    assert!(!fetches(6), "Code review: not yet");
+    assert!(fetches(7), "Manual test: ahead of Ship");
+    assert!(fetches(8), "Ship");
+    let mut f = feature("s", vec![repo("api", true)], 7);
+    f.status = Status::Done;
+    assert!(!fetches_bases(&f), "a feature closed at Manual test");
+}

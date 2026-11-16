@@ -202,7 +202,7 @@ impl Gerdr {
             probed.prs_at = Some(now);
         }
         let (read_prs, read_base_ci) = (due && has_prs, due && pushed_base);
-        let fetch = feature.ships()
+        let fetch = fetches_bases(&feature)
             && probed
                 .fetch_at
                 .is_none_or(|at| now.duration_since(at) >= FETCH_EVERY);
@@ -222,7 +222,7 @@ impl Gerdr {
                     models: feature::agents::read_models(&feature),
                     prs: read_prs.then(|| ship::read_prs(&feature, "gh")),
                     base_ci: read_base_ci.then(|| ship::read_base_ci(&feature, secs)),
-                    bases: match feature.ships() {
+                    bases: match feature.ships() || fetch {
                         true => ship::read_bases(&feature, fetch),
                         false => BTreeMap::new(),
                     },
