@@ -53,8 +53,6 @@ use crate::{
 /// The herdr session work runs in on another machine.
 pub const WORKER_SESSION: &str = "gerdr-worker";
 
-/// The oldest herdr gerdr works with there.
-const MIN_HERDR: (u32, u32) = (0, 9);
 /// How far apart two machines' clocks may be: a run's times are compared
 /// across them.
 const CLOCK_SKEW: i64 = 2;
@@ -143,7 +141,8 @@ impl Failure {
             Self::NoHerdr => "herdr isn't installed there.".into(),
             Self::OldHerdr(version) => format!(
                 "It has herdr {version}; gerdr needs {}.{} or newer.",
-                MIN_HERDR.0, MIN_HERDR.1
+                crate::herdr::MIN_VERSION.0,
+                crate::herdr::MIN_VERSION.1
             ),
             Self::Clock(secs) => format!("Its clock is {} s off from this one's.", secs.abs()),
             Self::Forwarding => "Its SSH server doesn't allow forwarding.".into(),
@@ -285,19 +284,10 @@ impl Site {
         if self.herdr.is_none() {
             return Some(Failure::NoHerdr);
         }
-        if !new_enough(&self.version) {
+        if !crate::herdr::new_enough(&self.version) {
             return Some(Failure::OldHerdr(self.version.clone()));
         }
         (clock_off.abs() > CLOCK_SKEW).then_some(Failure::Clock(clock_off))
-    }
-}
-
-/// Whether a version like "0.9.5" is one gerdr works with.
-fn new_enough(version: &str) -> bool {
-    let mut parts = version.split('.').map(|part| part.parse::<u32>());
-    match (parts.next(), parts.next()) {
-        (Some(Ok(major)), Some(Ok(minor))) => (major, minor) >= MIN_HERDR,
-        _ => false,
     }
 }
 
@@ -2172,8 +2162,6 @@ mod tests {
             ..good.clone()
         };
         assert_eq!(old.problem(0), Some(Failure::OldHerdr("0.8.2".into())));
-        assert!(new_enough("1.0.0"));
-        assert!(!new_enough("nonsense"));
     }
 
     #[test]

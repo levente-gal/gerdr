@@ -348,6 +348,18 @@ pub struct AgentSession {
     pub value: String,
 }
 
+/// The oldest herdr gerdr works with, here or on another machine.
+pub const MIN_VERSION: (u32, u32) = (0, 9);
+
+/// Whether a version like "0.9.5" is one gerdr works with.
+pub fn new_enough(version: &str) -> bool {
+    let mut parts = version.split('.').map(|part| part.parse::<u32>());
+    match (parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor) >= MIN_VERSION,
+        _ => false,
+    }
+}
+
 /// A coding agent herdr recognised in a pane, as `agent.list` reports it.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct AgentInfo {
@@ -655,6 +667,25 @@ impl Herdr {
         ))
     }
 
+    /// Why the herdr on PATH can't run gerdr's session, if it can't: not
+    /// there, or older than `MIN_VERSION`. A version it doesn't print as
+    /// expected is let through: the server says what it can't do.
+    fn unfit() -> Option<String> {
+        let out = match Command::new("herdr").arg("--version").output() {
+            Ok(out) => out,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Some("herdr isn't on PATH".into());
+            }
+            Err(err) => return Some(format!("herdr --version failed: {err}")),
+        };
+        let said = String::from_utf8_lossy(&out.stdout);
+        let version = said.trim().strip_prefix("herdr ")?;
+        (!new_enough(version)).then(|| {
+            let (major, minor) = MIN_VERSION;
+            format!("herdr {version} is too old; gerdr needs {major}.{minor} or newer")
+        })
+    }
+
     /// `connect_or_start` once the config folder and socket are picked.
     fn connect_or_start_server(
         session: &str,
@@ -666,6 +697,9 @@ impl Herdr {
     ) -> Result<(Self, Start), String> {
         if let Ok(herdr) = Self::connect(socket) {
             return Ok((herdr, Start::Attached));
+        }
+        if let Some(why) = Self::unfit() {
+            return Err(why);
         }
         let saved = has_saved_layout(session);
         // Its own session, out of gerdr's process groups: it outlives gerdr.
@@ -1562,6 +1596,14 @@ fn moved_pane(mut result: Value) -> Result<PaneInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn herdr_is_new_enough_from_0_9() {
+        assert!(new_enough("0.9.5"));
+        assert!(new_enough("1.0.0"));
+        assert!(!new_enough("0.8.2"));
+        assert!(!new_enough("nonsense"));
+    }
 
     #[test]
     fn a_server_that_doesnt_answer_says_nothing_of_a_pane() {
