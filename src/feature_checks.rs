@@ -900,6 +900,14 @@ pub(crate) fn checks_running(feature: &Feature) -> bool {
     (feature.verify.as_ref()).is_some_and(|v| v.opened && v.finished.is_none())
 }
 
+/// Whether a check of `feature`'s Verify run under way runs in herdr pane
+/// `pane` and hasn't ended.
+pub(crate) fn check_runs_in(feature: &Feature, pane: &str) -> bool {
+    checks_running(feature)
+        && (feature.verify.iter().flat_map(|v| &v.checks))
+            .any(|c| c.outcome.is_none() && c.pane.as_deref() == Some(pane))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{

@@ -4472,6 +4472,7 @@ mod tests {
             zoomed: false,
             pinned: false,
             stage: None,
+            running: false,
         };
         let tabs = [
             tab(

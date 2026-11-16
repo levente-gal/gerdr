@@ -50,6 +50,9 @@ pub struct TabView {
     /// On a feature's panel tab, the stage the feature is at: the tab
     /// shows it in place of its title.
     pub stage: Option<&'static str>,
+    /// A feature's work runs in it with no agent: checks not ended, sandbox
+    /// commands. Its dot blinks, with no agent's icon.
+    pub running: bool,
 }
 
 impl TabView {
@@ -154,6 +157,7 @@ impl TabView {
             zoomed: false,
             pinned: false,
             stage: None,
+            running: false,
         }
     }
 
@@ -194,6 +198,11 @@ fn foreground_program(p: &PaneState, agents: &[AgentInfo]) -> Option<String> {
         .or_else(|| p.agent.clone())
         .filter(|name| !name.trim().is_empty())
         .or_else(|| running_leader(p).map(program_name))
+}
+
+/// Whether a program runs in front in pane `p`: not the shell at its prompt.
+pub fn runs_program(p: &PaneState) -> bool {
+    running_leader(p).is_some()
 }
 
 /// The process in front in pane `p`, if it is not the shell at its prompt.
@@ -928,9 +937,9 @@ impl Painter {
             };
             // Its agent's dot, before the "×" (where it goes, shown or not).
             let badge = tab_badge(tab);
-            if let Some(badge) = badge {
+            if let Some(kind) = tab_dot_kind(tab) {
                 let dot = tab_dot(*rect, close, size.h);
-                status_dot(&mut c, dot, badge.dot, scale, p);
+                status_dot(&mut c, dot, kind, scale, p);
                 right = right.min(px(dot_slot(tab_dot_line(*rect, close, size.h)).loc.x) as f32);
             }
             // A pane fills the tab: its mark, before the dot, unzooms it.
@@ -1248,6 +1257,14 @@ fn tab_badge(tab: &TabView) -> Option<Badge> {
     })
 }
 
+/// The dot a tab shows: its badge's, else a blinking one while a
+/// feature's work runs in it.
+fn tab_dot_kind(tab: &TabView) -> Option<Dot> {
+    tab_badge(tab)
+        .map(|b| b.dot)
+        .or(tab.running.then_some(Dot::Working))
+}
+
 /// Where the badge of the tab at `rect` goes on a strip `h` high.
 fn tab_icon_rect(rect: Rect, h: i32) -> Rect {
     Rectangle::new(
@@ -1303,7 +1320,7 @@ pub fn tab_blinkers(view: &TabStripView, size: Size<i32, Logical>) -> Vec<Rect> 
         .filter(|(i, ((rect, _), tab))| {
             Some(*i) != renaming
                 && rect.size.w > TAB_ICON
-                && tab_badge(tab).is_some_and(|b| b.dot.blinks())
+                && tab_dot_kind(tab).is_some_and(Dot::blinks)
         })
         .map(|(_, ((rect, close), _))| tab_dot(*rect, *close, size.h))
         .collect()
@@ -2021,6 +2038,27 @@ mod tests {
         assert!(dots[0].loc.x + dots[0].size.w <= l.closes[1].loc.x);
         view.renaming = Some((1, Line::default()));
         assert_eq!(tab_blinkers(&view, size).len(), 1);
+    }
+
+    #[test]
+    fn a_tab_running_checks_blinks_its_dot_with_no_agent_icon() {
+        let size = (900, tab_strip_height(Density::Comfortable)).into();
+        let checks = TabView {
+            title: "Checks".into(),
+            running: true,
+            ..TabView::default()
+        };
+        assert!(super::tab_badge(&checks).is_none());
+        let view = TabStripView::plain(
+            vec![TabView::default(), checks],
+            0,
+            false,
+            ThemeMode::Dark,
+        );
+        let dots = tab_blinkers(&view, size);
+        let l = tab_layout(2, size, false, false, false, false);
+        assert_eq!(dots.len(), 1);
+        assert!(inside(l.tabs[1], dots[0]));
     }
 
     #[test]
