@@ -341,8 +341,12 @@ impl Gerdr {
 
     /// Where the toasts stack up: over the app area, above the button
     /// unzooming a zoomed pane, or the feature tab's footer (as
-    /// `chrome::toast_floor` has it).
+    /// `chrome::toast_floor` has it). Where the last frame had them, as
+    /// the pointer sees them, unless none showed since.
     pub fn toast_rect(&self) -> Rect {
+        if let Some(area) = self.chrome.toast_area() {
+            return area;
+        }
         let area = self.content_rect();
         let footer =
             || (self.feature_tab_view()).map(|view| chrome::feature_toast_floor(&view, area));

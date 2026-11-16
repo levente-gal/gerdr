@@ -261,9 +261,12 @@ pub struct Chrome {
     criteria_strip: Overlay<(CriteriaStripView, Theme, f64)>,
     /// One per toast, by id, kept while it fades out.
     toasts: Vec<(u64, ToastOverlay)>,
-    /// One per placeholder, and the spinner they share.
+    /// One per placeholder, and the spinner they share, a buffer per step.
     placeholders: Vec<Cached<PlaceholderKey>>,
-    spinner: Cached<(u32, Theme, f64)>,
+    spinner: [Cached<(Theme, f64)>; SPINNER_STEPS as usize],
+    /// Where the toasts stacked up in the last frame that had any: what a
+    /// pointer over them hits (see `Gerdr::toast_rect`).
+    toast_area: Option<Rect>,
     /// The blinking dot of what runs, composed over every surface showing
     /// one (see `badge`).
     blink_dot: Cached<(Theme, f64)>,
@@ -343,7 +346,8 @@ impl Chrome {
             criteria_strip: Overlay::default(),
             toasts: Vec::new(),
             placeholders: Vec::new(),
-            spinner: Cached::default(),
+            spinner: Default::default(),
+            toast_area: None,
             blink_dot: Cached::default(),
             pane_bars: Vec::new(),
             unzoom: Cached::default(),
@@ -352,6 +356,11 @@ impl Chrome {
             pane_drop: Cached::default(),
             hits: Cached::default(),
         }
+    }
+
+    /// Where the toasts stacked up in the last frame, if it had any.
+    pub fn toast_area(&self) -> Option<Rect> {
+        self.toast_area
     }
 
     /// What `pos` is over in the help panel listing `help` in the app
@@ -420,8 +429,10 @@ impl Chrome {
             (sidebar_w, strip_h).into(),
             (strip_size.w, (view.size.h - strip_h - footer_h).max(1)).into(),
         );
-        // Taken from the view before the feature tab is painted.
-        let toast_floor = toast_floor(&view, area);
+        // Taken from the view before the feature tab is painted, while
+        // toasts show: it lays the feature tab out.
+        self.toast_area =
+            (!view.toasts.is_empty()).then(|| toast_area(area, toast_floor(&view, area)));
         let pointer = view.pointer;
         let painter = &self.painter;
         let spinner_step = self.spinner_step(now);
@@ -600,7 +611,7 @@ impl Chrome {
                 // the dialogs (the plan review's sheet is under them). One leaving fades where the stack has it,
                 // which holds its place until it is gone.
                 Kind::Toasts => {
-                    let layouts = toast_layout(&view.toasts, toast_area(area, toast_floor));
+                    let layouts = toast_layout(&view.toasts, self.toast_area.unwrap_or(area));
                     for toast in view.toasts.iter().filter(|toast| !toast.leaving) {
                         if !self.toasts.iter().any(|(id, _)| *id == toast.id) {
                             self.toasts.push((toast.id, Overlay::default()));
@@ -826,11 +837,9 @@ impl Chrome {
         // and the spinner they share, turning with time.
         self.placeholders
             .resize_with(view.placeholders.len(), Cached::default);
-        let spinner = self
-            .spinner
-            .get((spinner_step, theme, scale), |(step, ..)| {
-                painter.spinner(*step, scale, theme.palette())
-            });
+        let spinner = self.spinner[spinner_step as usize].get((theme, scale), |_| {
+            painter.spinner(spinner_step, scale, theme.palette())
+        });
         for (cached, placeholder) in self.placeholders.iter_mut().zip(view.placeholders) {
             let rect = placeholder.rect;
             if rect.size.w <= 0 || rect.size.h <= 0 {
