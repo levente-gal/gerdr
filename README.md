@@ -192,6 +192,11 @@ To try a change at near-release speed, `cargo build --profile fast` builds
 `target/fast/gerdr` in about a quarter of the time. Its painting is about
 twice as slow as release, so install with `install.sh`.
 
+To compare how much two builds draw, start each with `GERDR_BENCH=<file>`:
+every second gerdr writes a JSON line there with its frames, those that
+changed pixels, and the time spent building and drawing them
+(`src/bench.rs` lists the fields).
+
 `docs/ux-conventions.md` gives the UX rules gerdr follows.
 `docs/feature-checklist.md` turns them into a checklist for each new feature.
 

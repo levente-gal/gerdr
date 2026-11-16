@@ -437,6 +437,9 @@ pub struct Session {
     pub herdr: Option<herdr::Herdr>,
     /// The coding agents herdr sees in the session, shown in the sidebar.
     pub agents: Vec<herdr::AgentInfo>,
+    /// The panes of `done` agents herdr was told the user saw (see
+    /// `Gerdr::mark_seen_agents`).
+    pub seen_sent: HashSet<String>,
     /// What herdr reports about the tabs of gerdr's workspaces, by herdr tab
     /// id, shown in the tab strip.
     pub tabs: HashMap<String, herdr::TabDetail>,

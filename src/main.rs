@@ -28,6 +28,7 @@ mod agents;
 mod ai_work;
 mod anim;
 mod app_icons;
+mod bench;
 mod checkout;
 mod chrome;
 mod ci;
@@ -2996,6 +2997,7 @@ impl Gerdr {
             .collect();
         self.agent_since = since;
         self.session.agent_statuses = watched.into_iter().map(|a| (a.key, a.status)).collect();
+        self.mark_seen_agents();
         // One sound a round, however many changed: needing input first.
         if let Some(news) = news.iter().max_by_key(|n| n.blocked) {
             sound::play(&self.settings.sounds, news.blocked);
@@ -3096,6 +3098,41 @@ impl Gerdr {
                     .position(|t| t.herdr_panes().any(|p| p.pane_id == pane_id))?,
             ))
         })
+    }
+
+    /// Tell herdr the agents the user looks at are seen, turning `done` into
+    /// `idle`: gerdr in front and the agent's tab shown. herdr counts only
+    /// what its own client shows, so an agent that finished in sight stayed
+    /// `done`. Once while it stays `done`, so herdr isn't asked every round.
+    fn mark_seen_agents(&mut self) {
+        use herdr::AgentStatus::Done;
+        let done: Vec<&herdr::AgentInfo> = (self.session.agents.iter())
+            .filter(|a| a.agent_status == Done)
+            .collect();
+        self.session
+            .seen_sent
+            .retain(|pane| done.iter().any(|a| a.pane_id == *pane));
+        if !self.notices.host_focused {
+            return;
+        }
+        let in_sight: Vec<String> = done
+            .iter()
+            .filter(|a| !self.session.seen_sent.contains(&a.pane_id))
+            .filter(|a| {
+                self.herdr_pane_place(&a.pane_id)
+                    .is_some_and(|(w, t)| self.is_visible(w, t))
+            })
+            .map(|a| a.pane_id.clone())
+            .collect();
+        let Some(herdr) = self.session.herdr.as_mut() else {
+            return;
+        };
+        for pane in in_sight {
+            if let Err(err) = herdr.agent_focus(&pane) {
+                tracing::warn!("herdr: marking {pane} seen: {err}");
+            }
+            self.session.seen_sent.insert(pane);
+        }
     }
 
     /// Show agent `key`: herdr's in its pane, a Cursor chat in Cursor, a T3
@@ -7424,6 +7461,7 @@ fn new_gerdr(
         session: state::Session {
             herdr: None,
             agents: Vec::new(),
+            seen_sent: HashSet::new(),
             tabs: HashMap::new(),
             blocked_since: HashMap::new(),
             agent_statuses: HashMap::new(),
@@ -7482,6 +7520,7 @@ fn register_sources(
     )?;
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
+    let mut bench = bench::Bench::from_env();
     event_loop
         .handle()
         .insert_source(winit_loop, move |event, _, state| match event {
@@ -7502,36 +7541,47 @@ fn register_sources(
                 let start = Instant::now();
                 let size = state.backend.window_size();
                 let view = state.chrome_view();
+                let viewed = start.elapsed();
                 let clear_color = state.settings.theme().clear_color();
+                let mut frame = bench::Frame::default();
                 {
                     let Ok((renderer, mut framebuffer)) = state.backend.bind() else {
                         tracing::warn!("the window can't be drawn to: frame skipped");
                         return;
                     };
                     let chrome = state.chrome.elements(renderer, view);
+                    frame.view = viewed;
+                    frame.elements = start.elapsed() - viewed;
+                    frame.chrome = chrome.len();
                     // A frame that fails is drawn whole at the next redraw.
-                    let _ = smithay::desktop::space::render_output::<
-                        _,
-                        chrome::ChromeElement,
-                        _,
-                        _,
-                    >(
-                        &output,
-                        renderer,
-                        &mut framebuffer,
-                        1.0,
-                        0,
-                        [&state.space],
-                        &chrome,
-                        &mut damage_tracker,
-                        clear_color,
-                    );
+                    let drawn =
+                        smithay::desktop::space::render_output::<_, chrome::ChromeElement, _, _>(
+                            &output,
+                            renderer,
+                            &mut framebuffer,
+                            1.0,
+                            0,
+                            [&state.space],
+                            &chrome,
+                            &mut damage_tracker,
+                            clear_color,
+                        );
+                    frame.damage = drawn.ok().and_then(|r| r.damage).map_or(0, |damage| {
+                        damage
+                            .iter()
+                            .map(|r| r.size.w as u64 * r.size.h as u64)
+                            .sum()
+                    });
                 }
                 // As above: the next redraw submits again.
                 let _ = state.backend.submit(Some(&[Rectangle::from_size(size)]));
                 let took = start.elapsed();
                 if took > SLOW_FRAME {
                     tracing::debug!("frame took {took:?}");
+                }
+                if let Some(bench) = &mut bench {
+                    frame.total = took;
+                    bench.frame(frame, Instant::now());
                 }
 
                 let elapsed = state.start_time.elapsed();
