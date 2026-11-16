@@ -1554,23 +1554,41 @@ pub(super) fn ship_base_actions(
         }
     }
     let bases = probe.map(|p| &p.bases);
-    // One agent takes every conflicting repository on: each card says so.
-    let conflicting = (bases.into_iter().flatten())
-        .filter(|(_, state)| !state.conflicts.is_empty())
-        .count();
-    let (resolve, plan) = match conflicting {
-        1 => ("Resolve with agent", "Plan resolution"),
-        _ => ("Resolve all with agent", "Plan resolution of all"),
-    };
-    for (key, state) in bases.into_iter().flatten() {
+    let bases = || bases.into_iter().flatten();
+    // Every repository at once, under the Ship check: outlined.
+    if bases().any(|(_, state)| state.clean()) {
+        let named: Vec<&str> = (bases())
+            .filter(|(_, state)| state.clean())
+            .filter_map(|(key, _)| feature.repo(key).map(|r| r.base.as_str()))
+            .collect();
+        let base = match named.as_slice() {
+            [first, rest @ ..] if rest.iter().all(|b| b == first) => *first,
+            _ => "the bases",
+        };
+        out.push((
+            button(&format!("Merge {base} into all\u{2026}"), ButtonStyle::Plain),
+            PanelOutcome::UpdateAllBases,
+        ));
+    }
+    if bases().any(|(_, state)| !state.conflicts.is_empty()) {
+        out.push((
+            button("Resolve all with agent", ButtonStyle::Plain),
+            PanelOutcome::ResolveAllConflicts(false),
+        ));
+        out.push((
+            button("Plan resolution of all", ButtonStyle::Plain),
+            PanelOutcome::ResolveAllConflicts(true),
+        ));
+    }
+    // Each repository on its own, on its card: text only.
+    for (key, state) in bases() {
         if !state.conflicts.is_empty() {
-            // Ship is no default while they conflict: this is.
             out.push((
-                button(resolve, ButtonStyle::Primary),
+                button("Fix", ButtonStyle::Quiet),
                 PanelOutcome::ResolveConflicts(key.clone(), false),
             ));
             out.push((
-                button(plan, ButtonStyle::Quiet),
+                button("Plan", ButtonStyle::Quiet),
                 PanelOutcome::ResolveConflicts(key.clone(), true),
             ));
             continue;
@@ -1579,22 +1597,14 @@ pub(super) fn ship_base_actions(
             continue;
         }
         let base = feature.repo(key).map_or("the base", |r| r.base.as_str());
-        let merge = PageButton {
-            label: format!("Merge {base} in\u{2026}"),
-            style: ButtonStyle::Plain,
-        };
-        let rebase = PageButton {
-            label: "Rebase\u{2026}".to_owned(),
-            style: ButtonStyle::Quiet,
-        };
         out.push((
-            merge,
+            button(&format!("Merge {base} in\u{2026}"), ButtonStyle::Quiet),
             PanelOutcome::UpdateBase(key.clone(), feature::UpdateWay::Merge),
         ));
         // Over merges it would stop on what they settled: merge again.
         if !state.merges {
             out.push((
-                rebase,
+                button("Rebase\u{2026}", ButtonStyle::Quiet),
                 PanelOutcome::UpdateBase(key.clone(), feature::UpdateWay::Rebase),
             ));
         }

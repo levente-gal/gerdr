@@ -703,7 +703,7 @@ pub(crate) enum Done {
     BaseUpdated {
         project: String,
         slug: String,
-        result: Box<Result<(feature::BaseUpdate, Option<String>), String>>,
+        results: Vec<Result<(feature::BaseUpdate, Option<String>), String>>,
     },
     /// A repository's base moved on to origin's, by that many commits, or
     /// didn't (see `ship::pull_base`).
@@ -1396,10 +1396,15 @@ pub enum PanelOutcome {
     PullBase(String),
     /// Close the workspace that shipping left open (see `close_left`).
     CloseShipped,
-    /// Have an agent take on the conflicts of every repository with its
-    /// base at once: plan their resolution (`.1`), or resolve them. `.0` is
-    /// the repository whose card shows the button.
+    /// Have an agent take on the conflicts of repository `.0` with its
+    /// base: plan their resolution (`.1`), or resolve them.
     ResolveConflicts(String, bool),
+    /// Have an agent take on the conflicts of every repository with its
+    /// base at once: plan their resolution (`.0`), or resolve them.
+    ResolveAllConflicts(bool),
+    /// Merge their bases into every repository behind with no conflict,
+    /// after asking once.
+    UpdateAllBases,
     /// Open the plan of the conflicts' resolution. `.0` is the repository
     /// whose card shows the button: each taken on has its own.
     ReviewConflictPlan(String),

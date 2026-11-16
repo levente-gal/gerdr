@@ -11,13 +11,13 @@ use crate::{
 };
 
 impl Gerdr {
-    /// Ask before taking repository `repo`'s base into feature `slug`'s
-    /// branch, `way`, saying what follows.
+    /// Ask before taking the bases of repositories `repos` into feature
+    /// `slug`'s branch, `way`, saying what follows.
     pub(crate) fn ask_update_base(
         &mut self,
         project: &str,
         slug: &str,
-        repo: &str,
+        repos: Vec<String>,
         way: UpdateWay,
     ) {
         let Some(feature) = self.feature(project, slug) else {
@@ -29,11 +29,23 @@ impl Gerdr {
                 "\u{201c}{title}\u{201d} is busy; try again once it is done"
             ));
         }
+        if repos.is_empty() {
+            return self.show_warning(format!(
+                "Nothing of \u{201c}{title}\u{201d} is behind its base now"
+            ));
+        }
         let branch = feature.branch();
-        let base = feature.repo(repo).map_or("its base", |r| r.base.as_str());
+        let bases: Vec<&str> = (repos.iter())
+            .map(|key| feature.repo(key).map_or("its base", |r| r.base.as_str()))
+            .collect();
+        let base = match bases.as_slice() {
+            [first, rest @ ..] if rest.iter().all(|b| b == first) => *first,
+            _ => "their bases",
+        };
+        let names = repos.join(", ");
         let question = match way {
-            UpdateWay::Merge => format!("Merge {base} into {branch} of {repo}?"),
-            UpdateWay::Rebase => format!("Rebase {branch} of {repo} onto {base}?"),
+            UpdateWay::Merge => format!("Merge {base} into {branch} of {names}?"),
+            UpdateWay::Rebase => format!("Rebase {branch} of {names} onto {base}?"),
         };
         let mut body = "Then Verify runs again, AI review and Code review look at what \
                         changed, and Manual test comes back with what was found kept."
@@ -47,7 +59,7 @@ impl Gerdr {
         let then = Then::UpdateBase {
             project: project.to_owned(),
             slug: slug.to_owned(),
-            repo: repo.to_owned(),
+            repos,
             way,
         };
         let go = match way {
@@ -57,9 +69,26 @@ impl Gerdr {
         self.ask(question, body, go, then);
     }
 
-    /// Take repository `repo`'s base into feature `slug`'s branch off the
-    /// thread, once asked.
-    pub(crate) fn update_base(&mut self, project: &str, slug: &str, repo: &str, way: UpdateWay) {
+    /// Ask before merging their bases into every repository of feature
+    /// `slug` that is behind with no conflict, as its last check read them.
+    pub(crate) fn ask_update_all_bases(&mut self, project: &str, slug: &str) {
+        let repos: Vec<String> = (self.last_probe(project, slug).into_iter())
+            .flat_map(|p| p.bases.iter())
+            .filter(|(_, state)| state.clean())
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.ask_update_base(project, slug, repos, UpdateWay::Merge);
+    }
+
+    /// Take the bases of repositories `repos` into feature `slug`'s branch
+    /// off the thread, one after another, once asked.
+    pub(crate) fn update_base(
+        &mut self,
+        project: &str,
+        slug: &str,
+        repos: Vec<String>,
+        way: UpdateWay,
+    ) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
         };
@@ -73,12 +102,14 @@ impl Gerdr {
             project: project.to_owned(),
             slug: slug.to_owned(),
             job: Job::Ship,
-            repo: Some(repo.to_owned()),
+            repo: (repos.len() == 1).then(|| repos[0].clone()),
             what: format!("Updating \u{201c}{}\u{201d} from its base", feature.title),
         };
-        let (project, slug, repo) = (project.to_owned(), slug.to_owned(), repo.to_owned());
+        let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| Done::BaseUpdated {
-            result: Box::new(ship::update_from_base(&feature, &repo, way, feature::now())),
+            results: (repos.iter())
+                .map(|repo| ship::update_from_base(&feature, repo, way, feature::now()))
+                .collect(),
             project,
             slug,
         });
@@ -144,36 +175,54 @@ impl Gerdr {
         self.probe_feature(project, slug);
     }
 
-    /// Feature `slug`'s branch took its base in, or didn't: back to Verify
-    /// with it, or why not.
+    /// Feature `slug`'s branch took the bases of its repositories in, or
+    /// some didn't: back to Verify with those that did, and why the rest
+    /// didn't, in one toast.
     pub(crate) fn base_updated(
         &mut self,
         project: &str,
         slug: &str,
-        result: Result<(feature::BaseUpdate, Option<String>), String>,
+        results: Vec<Result<(feature::BaseUpdate, Option<String>), String>>,
     ) {
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };
         let title = feature.title.clone();
-        let (update, patch) = match result {
-            Ok(done) => done,
-            Err(why) => {
-                tracing::warn!("updating feature {project}/{slug} from its base: {why}");
-                feature.log(
-                    feature::now(),
-                    format!("Update from the base stopped: {why}"),
-                );
-                self.save_feature(project, slug);
-                return self.show_error(format!("Couldn't update \u{201c}{title}\u{201d}: {why}"));
+        let (mut said, mut failed) = (Vec::new(), Vec::new());
+        for result in results {
+            match result {
+                Ok((update, patch)) => {
+                    said.push(format!(
+                        "{} {} {}",
+                        update.repo,
+                        update.way.done_word(),
+                        update.onto
+                    ));
+                    feature.updated_from_base(update, patch.as_deref(), feature::now());
+                }
+                Err(why) => {
+                    tracing::warn!("updating feature {project}/{slug} from its base: {why}");
+                    feature.log(
+                        feature::now(),
+                        format!("Update from the base stopped: {why}"),
+                    );
+                    failed.push(why);
+                }
             }
-        };
-        let said = format!("{} {} {}", update.repo, update.way.done_word(), update.onto);
-        feature.updated_from_base(update, patch.as_deref(), feature::now());
+        }
         self.save_feature(project, slug);
+        let (said, failed) = (said.join(", "), failed.join("; "));
+        if said.is_empty() {
+            return self.show_error(format!("Couldn't update \u{201c}{title}\u{201d}: {failed}"));
+        }
         self.feature_cursor_to_current_of(project, slug);
         self.show_stage_page(project, slug);
-        self.show_success(format!("\u{201c}{title}\u{201d}: {said}; back to Verify"));
+        match failed.is_empty() {
+            true => self.show_success(format!("\u{201c}{title}\u{201d}: {said}; back to Verify")),
+            false => self.show_warning(format!(
+                "\u{201c}{title}\u{201d}: {said}; back to Verify; {failed}"
+            )),
+        }
         let key = (project.to_owned(), slug.to_owned());
         if !self.features.build.verifying.contains(&key) {
             self.recheck(project, slug);

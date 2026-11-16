@@ -587,12 +587,16 @@ impl Gerdr {
             PanelOutcome::UndoShip(repo, step) => self.ask_undo_ship(&project, &slug, &repo, step),
             PanelOutcome::UndoAfter(step) => self.undo_after_ship(&project, &slug, step),
             PanelOutcome::UpdateBase(repo, way) => {
-                self.ask_update_base(&project, &slug, &repo, way)
+                self.ask_update_base(&project, &slug, vec![repo], way)
             }
+            PanelOutcome::UpdateAllBases => self.ask_update_all_bases(&project, &slug),
             PanelOutcome::PullBase(repo) => self.pull_base(&project, &slug, &repo),
             PanelOutcome::CloseShipped => self.ask_close_shipped(&project, &slug),
-            PanelOutcome::ResolveConflicts(_, planning) => {
-                self.resolve_conflicts(&project, &slug, planning);
+            PanelOutcome::ResolveConflicts(repo, planning) => {
+                self.resolve_conflicts(&project, &slug, planning, Some(&repo));
+            }
+            PanelOutcome::ResolveAllConflicts(planning) => {
+                self.resolve_conflicts(&project, &slug, planning, None);
             }
             PanelOutcome::ReviewConflictPlan(_) => self.review_conflict_plan(&project, &slug),
             PanelOutcome::StopResolving(_) => self.ask_stop_resolving(&project, &slug),
