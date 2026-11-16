@@ -608,6 +608,12 @@ impl Gerdr {
         let hit = layout.hit(&view, pos.to_i32_round());
         if let Some(panel) = self.features.panel.as_mut() {
             panel.tab_hover = hit;
+            panel.tab_hover_label = match hit {
+                Some(FeatureTabHit::PageButton(i)) => {
+                    view.page.buttons.get(i).map(|b| b.label.clone())
+                }
+                _ => None,
+            };
         }
         match hit? {
             FeatureTabHit::Node(i) => {

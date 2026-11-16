@@ -1997,3 +1997,26 @@ fn bases_are_fetched_from_manual_test_on() {
     f.status = Status::Done;
     assert!(!fetches_bases(&f), "a feature closed at Manual test");
 }
+
+#[test]
+fn a_hovered_page_button_numbered_anew_is_lit_no_more() {
+    let f = feature("s", vec![repo("api", true)], 8);
+    let slugs = vec!["s".to_owned()];
+    let state = PanelState::default();
+    let seen = |panel: &FeaturePanel| {
+        let view = tab_view(panel, &f, &slugs, &state, 2_060);
+        let label = |i: usize| view.page.buttons[i].label.clone();
+        (view.hover, view.page.buttons.len(), label(0))
+    };
+    let mut panel = FeaturePanel {
+        tab_hover: Some(FeatureTabHit::PageButton(0)),
+        ..FeaturePanel::default()
+    };
+    let (_, n, first) = seen(&panel);
+    assert!(n > 1);
+    panel.tab_hover_label = Some(first);
+    assert_eq!(seen(&panel).0, Some(FeatureTabHit::PageButton(0)));
+    // Another button is number 0 now: the pointer is not over it.
+    panel.tab_hover_label = Some("Check again".into());
+    assert_eq!(seen(&panel).0, None);
+}
