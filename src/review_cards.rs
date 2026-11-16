@@ -133,7 +133,7 @@ pub(crate) fn item_outcome(of: ItemOf, id: &str, act: ItemAct) -> PanelOutcome {
 }
 
 /// The latest review's items on `stage`'s page of `feature`, in their
-/// order: a decision leaves a card where it is (`AiReview::in_order`). AI
+/// order (`AiReview::in_order`), which `review_cards` groups by decision. AI
 /// review's findings stay once sent, while the code changes and while the
 /// next review runs; `can_decide` says when they can be acted on.
 ///
@@ -196,8 +196,9 @@ pub(crate) enum CardId {
 }
 
 /// The cards of `stage`'s page of `feature`, as `FeaturePanel::finding`
-/// counts them: the user's own items, the comments they left in the diff,
-/// then the reviewer's.
+/// counts them, in their groups (`card_group`): those left to decide, the
+/// decided, then the dismissed. Within each, the user's own items, the
+/// comments they left in the diff, then the reviewer's.
 pub(crate) fn review_cards<'a>(
     feature: &'a Feature,
     stage: Stage,
@@ -206,14 +207,26 @@ pub(crate) fn review_cards<'a>(
     let items = items(feature, stage);
     let own = items.iter().take_while(|i| i.yours()).count();
     let (mine, theirs) = items.split_at(own);
-    (mine.iter().map(|i| ReviewCard::Item(*i)))
+    let mut cards: Vec<ReviewCard> = (mine.iter().map(|i| ReviewCard::Item(*i)))
         .chain(
             shown_notes(feature, stage, notes)
                 .iter()
                 .map(ReviewCard::DiffNote),
         )
         .chain(theirs.iter().map(|i| ReviewCard::Item(*i)))
-        .collect()
+        .collect();
+    cards.sort_by_key(|c| card_group(*c));
+    cards
+}
+
+/// Which group of its page `card` is in: 0 left to decide, 1 decided (a
+/// comment left in the diff too), 2 dismissed or rejected, last.
+pub(crate) fn card_group(card: ReviewCard) -> u8 {
+    match card.item().map(Item::standing) {
+        Some(Standing::Open) => 0,
+        Some(Standing::Dismissed) => 2,
+        _ => 1,
+    }
 }
 
 /// The next card after `from` still to decide, coming round past the last:
@@ -656,6 +669,17 @@ pub(crate) fn item_card(
     };
     card.comment_buttons = held(true);
     card.buttons = held(false);
+    // Undecided, its decision and its refusal go right of its title, where
+    // they are seen first: the refusal second, the rest after.
+    if item.standing() == Standing::Open && !card.buttons.is_empty() {
+        let refuse = item_outcome(item.of(), item.id(), ItemAct::AskRefuse);
+        card.head = 1;
+        if let Some(k) = (card.buttons.iter().skip(1)).position(|i| actions[*i].1 == refuse) {
+            let b = card.buttons.remove(k + 1);
+            card.buttons.insert(1, b);
+            card.head = 2;
+        }
+    }
     card
 }
 
@@ -680,10 +704,11 @@ fn finding_card(f: &ReviewFinding, multi: bool, w: &Words) -> FindingCard {
         }
     }
     let fix = changed_by_you("Your fix", f.my_fix.as_deref(), "Fix", &f.fix);
-    // Its card shows this much while closed: the comment is behind it.
-    let state = match f.state != FindingState::Open && !f.note.is_empty() {
-        true => format!("{state} \u{b7} commented"),
-        false => state,
+    // Its card shows this much while closed: the comment is behind it. Not
+    // decided, it says so with its comment, which a decision may not follow.
+    let state = match f.note.is_empty() {
+        false => format!("{state} \u{b7} commented"),
+        true => state,
     };
     FindingCard {
         tag: FindingTag::Medium,
@@ -696,6 +721,7 @@ fn finding_card(f: &ReviewFinding, multi: bool, w: &Words) -> FindingCard {
         note: String::new(),
         comment: f.note.clone(),
         comment_buttons: Vec::new(),
+        head: 0,
         made: f.fix_made(),
         faded: matches!(f.state, FindingState::Fixed | FindingState::Dismissed),
         // Decided, it folds to its line: what is left to decide stands out.
@@ -705,6 +731,7 @@ fn finding_card(f: &ReviewFinding, multi: bool, w: &Words) -> FindingCard {
             FindingState::Fix => Some(CardStripe::ToFix),
             FindingState::Sent => Some(CardStripe::Sent),
             FindingState::Dismissed => Some(CardStripe::Dismissed),
+            FindingState::Open => Some(CardStripe::ToDecide),
             _ => None,
         },
         field: None,
@@ -732,10 +759,7 @@ fn suggestion_card(s: &Suggestion) -> FindingCard {
     // Its card shows this much while closed: the comment is behind it.
     let rejected = s.state == State::Rejected;
     let decided = s.state != State::Open;
-    let state = match (
-        decided && !s.note.is_empty() && state != "answered",
-        question,
-    ) {
+    let state = match (!s.note.is_empty() && state != "answered", question) {
         (true, true) => format!("{state} \u{b7} answered"),
         (true, false) => format!("{state} \u{b7} commented"),
         (false, _) => state,
@@ -774,6 +798,7 @@ fn suggestion_card(s: &Suggestion) -> FindingCard {
         note: String::new(),
         comment: s.note.clone(),
         comment_buttons: Vec::new(),
+        head: 0,
         made: false,
         faded: rejected,
         // Decided, it folds to its line: what is left to decide stands out.
@@ -782,7 +807,7 @@ fn suggestion_card(s: &Suggestion) -> FindingCard {
         stripe: match s.state {
             State::Accepted => Some(CardStripe::ToFix),
             State::Rejected => Some(CardStripe::Dismissed),
-            State::Open => None,
+            State::Open => Some(CardStripe::ToDecide),
         },
         field: None,
         field_hint: if question { w.answer } else { w.comment },
@@ -1027,10 +1052,8 @@ pub(crate) fn card_key(
                     return Some(act(ItemAct::Answer));
                 }
             }
-            // Decided, the keyboard goes on to what is left to decide.
-            if item.standing() == Standing::Open {
-                *at = next_open_card(cards, *at);
-            }
+            // Decided, the keyboard goes on to what is left to decide: the
+            // decision moves it (`after_decided_card`), as the card moves.
             Some(match review_items::want_key(of, item.standing()) {
                 Ok(decision) => act(ItemAct::Decide(decision)),
                 Err(why) => PanelOutcome::FindingRefused(why),
@@ -1106,6 +1129,33 @@ mod tests {
             decides,
             posts: false,
         }
+    }
+
+    /// Undecided, a card says so down its edge and in its word, its
+    /// comment too, and its decision and refusal go first, by its title.
+    #[test]
+    fn an_undecided_card_says_so_and_puts_its_decision_first() {
+        let mut f = finding("r1-1", FindingState::Open, false);
+        f.note = "Use the cache".into();
+        let item = Item::Finding(&f);
+        let actions = item_buttons(item, page(true));
+        let card = item_card(item, false, &actions, false);
+        assert_eq!(card.state, "to decide \u{b7} commented");
+        assert_eq!(card.stripe, Some(CardStripe::ToDecide));
+        let labels: Vec<&str> = (card.buttons.iter())
+            .map(|i| actions[*i].0.label.as_str())
+            .collect();
+        assert_eq!(card.head, 2);
+        assert_eq!(&labels[..2], ["Fix", "Dismiss\u{2026}"]);
+        // Decided, it keeps its order and nothing goes by its title.
+        f.state = FindingState::Fix;
+        let item = Item::Finding(&f);
+        let actions = item_buttons(item, page(true));
+        let card = item_card(item, false, &actions, false);
+        assert_eq!(
+            (card.head, card.state.as_str()),
+            (0, "to fix \u{b7} commented")
+        );
     }
 
     fn finding(id: &str, state: FindingState, yours: bool) -> ReviewFinding {
@@ -1499,7 +1549,9 @@ mod tests {
         );
         assert_eq!(card.fix, "Change: Keep it on disk");
         assert_eq!(card.field_hint, "Your comment");
-        assert!(card.stripe.is_none() && !card.collapsed && !card.faded);
+        // Left to decide, it says so down its edge.
+        assert_eq!(card.stripe, Some(CardStripe::ToDecide));
+        assert!(!card.collapsed && !card.faded);
         // A heading in place of its quote, left out by a later run.
         (s.placed, s.plan_quote, s.dropped) = (Some(Placed::Heading(3)), "x".into(), true);
         s.my_change = Some("Keep it in SQLite".into());
@@ -1628,12 +1680,14 @@ mod tests {
             let got = card_key(k, &cards, &mut at, None, None, &mut arm);
             (got, at, arm)
         };
-        // f: accept, and on to the next one open (the question, then round).
+        // f: accept; the decision moves the keyboard on, as the card moves
+        // (`after_decided_card`), so the key leaves it.
         assert_eq!(
             key(CardKey::F, 1),
-            (act("r1-1", ItemAct::Decide(Decision::Fix)), 4, None)
+            (act("r1-1", ItemAct::Decide(Decision::Fix)), 1, None)
         );
-        assert_eq!(key(CardKey::F, 5).1, 1);
+        assert_eq!(next_open_card(&cards, 1), 4);
+        assert_eq!(next_open_card(&cards, 5), 1);
         assert_eq!(
             key(CardKey::F, 2),
             (act("r1-2", ItemAct::Decide(Decision::Reopen)), 2, None)

@@ -546,7 +546,8 @@ fn review_cards_go_under_the_summary_that_counts_them_open() {
     // Each pill says how many are left to decide: the user's own is.
     assert_eq!(summary.open, [0, 1, 1]);
     assert_eq!((summary.decided, summary.refused, summary.total), (1, 0, 3));
-    // Under it: its cards, with no heading per tag (the pills say it).
+    // Under it: its cards, with no heading per tag (the pills say it), a
+    // heading per group: left to decide, then decided.
     let shape: Vec<String> = (view.page.sections[at + 1..].iter())
         .map(|s| match s {
             PageSection::Heading(label) => label.clone(),
@@ -554,7 +555,16 @@ fn review_cards_go_under_the_summary_that_counts_them_open() {
             _ => "other".into(),
         })
         .collect();
-    assert_eq!(shape, ["card Yours", "card High", "card Low"]);
+    assert_eq!(
+        shape,
+        [
+            "to decide (2)",
+            "card High",
+            "card Low",
+            "decided (1)",
+            "card Yours"
+        ]
+    );
     // Accept all open goes with the summary, not the title.
     let want = (view.page.buttons.iter())
         .position(|b| b.label == "Accept all open")
@@ -575,8 +585,9 @@ fn plan_reviews_suggestions_show_as_cards_as_ai_reviews_findings_do() {
     );
     let cards = cards_of(&view);
     let titles: Vec<&str> = cards.iter().map(|c| c.title.as_str()).collect();
-    assert_eq!(titles, ["Title u1", "Title r1-1", "Title r1-2"]);
-    let labels = labels_of(&view, cards[1]);
+    // Left to decide first; the user's own is accepted.
+    assert_eq!(titles, ["Title r1-1", "Title r1-2", "Title u1"]);
+    let labels = labels_of(&view, cards[0]);
     assert!(labels.contains(&"Accept".to_owned()), "{labels:?}");
     assert!(labels.contains(&"Show in plan".to_owned()), "{labels:?}");
     // Review in plan is the way on, with the page's own beside it.
@@ -613,7 +624,8 @@ fn plan_reviews_suggestions_show_as_cards_as_ai_reviews_findings_do() {
     plan_review::decide(review, "r1-1", Decision::Reject("Not needed".into())).unwrap();
     plan_review::set_note(review, "r1-2", "Both").unwrap();
     let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
-    assert_eq!(cards_of(&view)[1].state, "rejected: Not needed");
+    // Last, among the rejected.
+    assert_eq!(cards_of(&view)[2].state, "rejected: Not needed");
     // A note to ask about: the reviewer can be.
     let asks = page_actions(&f, Stage::PlanReview, RowCtx::default());
     assert!(
@@ -629,14 +641,13 @@ fn plan_reviews_cards_take_ai_reviews_keys() {
     // Tab goes to the cards.
     press(&mut panel, &f, key(Keysym::Tab));
     assert_eq!(panel.focus, TabArea::Findings);
-    panel.finding = 1;
-    // Accepted, the keyboard goes on to the next still to decide.
+    panel.finding = 0;
+    // Accepted: the decision moves the keyboard on, as the card moves.
     assert_eq!(
         press(&mut panel, &f, key(Keysym::f)),
         on_suggestion("r1-1", ItemAct::Decide(Decision::Fix))
     );
-    assert_eq!(panel.finding, 2);
-    panel.finding = 1;
+    assert_eq!(panel.finding, 0);
     assert_eq!(
         press(&mut panel, &f, key(Keysym::Delete)),
         on_suggestion("r1-1", ItemAct::AskRefuse)
@@ -661,7 +672,7 @@ fn plan_reviews_cards_take_ai_reviews_keys() {
     assert_eq!(press(&mut panel, &f, shifted(Keysym::Delete)), None);
     // Citing nothing, Ctrl+O opens the folder as anywhere; a question
     // with no answer is accepted by answering it.
-    panel.finding = 2;
+    panel.finding = 1;
     assert_eq!(
         press(&mut panel, &f, key(Keysym::f)),
         on_suggestion("r1-2", ItemAct::Answer)
@@ -672,7 +683,7 @@ fn plan_reviews_cards_take_ai_reviews_keys() {
     );
     // One of the user's own: nothing to take back, Del arms, then
     // deletes; `c` adds another.
-    panel.finding = 0;
+    panel.finding = 2;
     assert!(matches!(
         press(&mut panel, &f, key(Keysym::f)),
         Some(PanelOutcome::FindingRefused(_))
@@ -680,7 +691,7 @@ fn plan_reviews_cards_take_ai_reviews_keys() {
     assert_eq!(press(&mut panel, &f, key(Keysym::Delete)), None);
     assert_eq!(panel.armed.as_deref(), Some("own-suggestion:u1"));
     let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
-    assert_eq!(cards_of(&view)[0].state, "Press Del again");
+    assert_eq!(cards_of(&view)[2].state, "Press Del again");
     assert_eq!(
         press(&mut panel, &f, key(Keysym::Delete)),
         on_suggestion("u1", ItemAct::DeleteOwn)
@@ -719,7 +730,7 @@ fn plan_reviews_cards_refuse_deciding_while_the_final_plan_is_written() {
     f.plan_review.as_mut().unwrap().writing = true;
     let mut panel = on_plan_review(&f);
     panel.focus = TabArea::Findings;
-    panel.finding = 1;
+    panel.finding = 0;
     let refused = |out: Option<PanelOutcome>| {
         assert!(
             matches!(out, Some(PanelOutcome::FindingRefused(_))),
@@ -777,7 +788,7 @@ fn a_suggestions_comment_is_written_on_its_card_and_not_a_findings() {
         };
         panel.note = Some((note, TextField::default()));
         let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
-        assert_eq!(cards_of(&view)[1].field.is_some(), shows, "{of:?}");
+        assert_eq!(cards_of(&view)[0].field.is_some(), shows, "{of:?}");
     }
     // A question's answer accepting it once saved says so.
     let note = CardNote::Item {
@@ -821,7 +832,7 @@ fn plan_reviews_footer_says_its_cards_keys_in_its_own_words() {
         hints.contains(&(k.to_owned(), what.to_owned()))
     };
     panel.focus = TabArea::Findings;
-    panel.finding = 1;
+    panel.finding = 0;
     let hints = hints_on(&panel);
     for (k, what) in [
         ("Up / Down", "suggestion"),
@@ -846,14 +857,14 @@ fn plan_reviews_footer_says_its_cards_keys_in_its_own_words() {
     );
     // A question with no answer takes one: `f` accepts it once it has,
     // `c` writes it, one word for each key.
-    panel.finding = 2;
+    panel.finding = 1;
     let hints = hints_on(&panel);
     assert!(
         has(&hints, "f", "accept\u{2026}") && has(&hints, "c", "answer"),
         "{hints:?}"
     );
     // One of the user's own, accepted.
-    panel.finding = 0;
+    panel.finding = 2;
     let hints = hints_on(&panel);
     assert!(!hints.iter().any(|(k, _)| k == "f") && has(&hints, "Ctrl+E", "edit\u{2026}"));
     assert!(has(&hints, "Del", "delete") && has(&hints, "c", "add suggestion\u{2026}"));

@@ -255,7 +255,7 @@ impl AiReview {
 
     /// What `shown` lists, as the page does: the user's own first, then by
     /// severity, each group in the order raised. A decision doesn't move a
-    /// finding.
+    /// finding here; the page groups them by decision (`review_cards`).
     pub fn in_order(&self) -> Vec<&Finding> {
         let mut list = self.shown();
         list.sort_by_key(|f| list_rank(f));

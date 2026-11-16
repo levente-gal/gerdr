@@ -295,22 +295,25 @@ fn findings_show_as_cards_in_their_order_each_with_what_it_can_do() {
     let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
     let cards = cards_of(&view);
     let titles: Vec<&str> = cards.iter().map(|c| c.title.as_str()).collect();
-    // Deciding moves nothing: all of a severity stay in the order raised.
+    // Grouped by decision: left to decide, decided, dismissed last; each
+    // group in the order raised.
     assert_eq!(
         titles,
-        ["Title 0", "Title 1", "Title 2", "Title 3", "Title 4"]
+        ["Title 2", "Title 1", "Title 3", "Title 4", "Title 0"]
     );
     let labels: Vec<Vec<&str>> = cards.iter().map(|c| card_labels(&view.page, c)).collect();
+    // Undecided, its decision and refusal go first, right of its title.
     assert_eq!(
-        labels[2],
+        labels[0],
         [
             "Fix",
+            "Dismiss\u{2026}",
             "Comment",
             "Edit fix\u{2026}",
-            "Dismiss\u{2026}",
             "Show in diff"
         ]
     );
+    assert_eq!(cards[0].head, 2);
     assert_eq!(
         labels[1],
         [
@@ -321,28 +324,38 @@ fn findings_show_as_cards_in_their_order_each_with_what_it_can_do() {
             "Show in diff"
         ]
     );
+    assert_eq!(labels[2], ["Show in diff"]);
     assert_eq!(labels[3], ["Show in diff"]);
-    assert_eq!(labels[4], ["Show in diff"]);
-    assert_eq!(labels[0], ["Reopen", "Comment", "Show in diff"]);
+    assert_eq!(labels[4], ["Reopen", "Comment", "Show in diff"]);
+    assert!(cards[1..].iter().all(|c| c.head == 0));
+    assert_eq!(cards[0].state, "to decide");
     assert_eq!(cards[1].state, "to fix");
-    assert_eq!(cards[0].state, "dismissed: by design");
-    assert!(cards[0].faded && !cards[2].faded);
-    assert!(cards[2].place.contains("src/2.rs"));
+    assert_eq!(cards[4].state, "dismissed: by design");
+    assert!(cards[4].faded && !cards[0].faded);
+    assert!(cards[0].place.contains("src/2.rs"));
     // Every decided card closes to a line, so what is left to decide
-    // stands out; to fix, sent and dismissed say so down their edge.
+    // stands out; each says where it stands down its edge.
     let closed: Vec<bool> = cards.iter().map(|c| c.collapsed).collect();
-    assert_eq!(closed, [true, true, false, true, true]);
+    assert_eq!(closed, [false, true, true, true, true]);
     let stripes: Vec<Option<CardStripe>> = cards.iter().map(|c| c.stripe).collect();
     assert_eq!(
         stripes,
         [
-            Some(CardStripe::Dismissed),
+            Some(CardStripe::ToDecide),
             Some(CardStripe::ToFix),
-            None,
             Some(CardStripe::Sent),
-            None
+            None,
+            Some(CardStripe::Dismissed),
         ]
     );
+    // A heading over each group.
+    let headings: Vec<&str> = (view.page.sections.iter())
+        .filter_map(|s| match s {
+            PageSection::Heading(h) => Some(h.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(headings, ["to decide (1)", "decided (3)", "dismissed (1)"]);
     // No button of a card is the page's own, and the count says it all.
     let on_cards: Vec<usize> = cards.iter().flat_map(|c| c.buttons.clone()).collect();
     let own: Vec<&str> = (0..view.page.buttons.len())
@@ -377,14 +390,15 @@ fn a_finding_says_whose_fix_it_is_and_an_item_of_yours_has_no_place() {
     let slugs = vec!["r".to_owned()];
     let view = tab_view(&panel, &f, &slugs, &PanelState::default(), 2_060);
     let cards = cards_of(&view);
-    assert_eq!(cards[1].fix, "Fix: Reviewer's");
+    // The one left to decide comes first.
+    assert_eq!(cards[0].fix, "Fix: Reviewer's");
     // The reviewer's stays under the user's wording.
     assert_eq!(cards[2].fix, "Your fix: Mine\nThe reviewer's: Reviewer's");
     assert_eq!(cards[2].comment, "Careful");
     assert_eq!(cards[2].note, "");
     assert_eq!(comment_labels(&view.page, cards[2]), ["Delete"]);
-    // The user's own comes first.
-    let yours = cards[0];
+    // Of the decided, the user's own comes first.
+    let yours = cards[1];
     assert_eq!(yours.tag, FindingTag::Yours);
     assert_eq!(yours.title, "Also rename it");
     assert_eq!(yours.body, "It reads badly");
@@ -788,7 +802,7 @@ fn probe_with(notes: Vec<Comment>) -> Probe {
 }
 
 #[test]
-fn findings_go_by_severity_with_the_users_own_and_diff_comments_first() {
+fn findings_go_by_decision_then_the_users_own_and_diff_comments_then_by_severity() {
     use FindingState as S;
     let mut f = carded(&[S::Open, S::Open, S::Open]);
     let review = f.review.as_mut().unwrap();
@@ -803,15 +817,20 @@ fn findings_go_by_severity_with_the_users_own_and_diff_comments_first() {
     };
     let view = view_of(&f, &state);
     let titles: Vec<&str> = cards_of(&view).iter().map(|c| c.title.as_str()).collect();
+    // Those left to decide first, by severity; the user's own is decided.
     assert_eq!(
         titles,
-        ["Mine", "From the diff", "Title 1", "Title 2", "Title 0"]
+        ["Title 1", "Title 2", "Title 0", "Mine", "From the diff"]
     );
-    // A decision moves nothing.
+    // A decision moves a card among the decided, the dismissed last (the
+    // user's own too).
     decide_all(&mut f);
     let view = view_of(&f, &state);
     let after: Vec<&str> = cards_of(&view).iter().map(|c| c.title.as_str()).collect();
-    assert_eq!(after, titles);
+    assert_eq!(
+        after,
+        ["From the diff", "Title 0", "Mine", "Title 1", "Title 2"]
+    );
 }
 
 /// Every finding of `f` dismissed, but the first to fix.
@@ -833,16 +852,17 @@ fn a_closed_card_opens_while_selected() {
         stage: Some(Stage::AiReview),
         picked_at: f.current(),
         focus: TabArea::Findings,
-        finding: 1,
+        finding: 0,
         ..FeaturePanel::default()
     };
     let view = |panel: &FeaturePanel| {
         tab_view(panel, &f, &["r".to_owned()], &PanelState::default(), 2_060)
     };
-    assert!(cards_of(&view(&panel))[0].collapsed);
-    panel.finding = 0;
+    // The dismissed one comes last.
+    assert!(cards_of(&view(&panel))[1].collapsed);
+    panel.finding = 1;
     let open = view(&panel);
-    assert!(!cards_of(&open)[0].collapsed && cards_of(&open)[0].selected);
+    assert!(!cards_of(&open)[1].collapsed && cards_of(&open)[1].selected);
 }
 
 /// Left folds any review card and Right opens it, as a criterion; what
@@ -850,21 +870,22 @@ fn a_closed_card_opens_while_selected() {
 #[test]
 fn a_review_card_folds_and_opens_by_key() {
     use FindingState as S;
+    // The open one comes first, the dismissed one last.
     let f = carded(&[S::Dismissed, S::Open]);
     let mut panel = FeaturePanel {
         stage: Some(Stage::AiReview),
         picked_at: f.current(),
         focus: TabArea::Findings,
-        finding: 1,
+        finding: 0,
         ..FeaturePanel::default()
     };
     assert_eq!(
         press(&mut panel, &f, key(Keysym::Left)),
-        Some(PanelOutcome::FoldCard(1, false))
+        Some(PanelOutcome::FoldCard(0, false))
     );
     assert_eq!(
         press(&mut panel, &f, key(Keysym::Right)),
-        Some(PanelOutcome::FoldCard(1, true))
+        Some(PanelOutcome::FoldCard(0, true))
     );
     let view = |panel: &FeaturePanel| {
         tab_view(panel, &f, &["r".to_owned()], &PanelState::default(), 2_060)
@@ -875,48 +896,43 @@ fn a_review_card_folds_and_opens_by_key() {
         .map(|c| c.id())
         .collect();
     // The open one folds while selected; the dismissed one opens.
-    panel.cards_open = vec![(ids[1].clone(), false), (ids[0].clone(), true)];
+    panel.cards_open = vec![(ids[0].clone(), false), (ids[1].clone(), true)];
     let shown = view(&panel);
     let cards = cards_of(&shown);
-    assert!(cards[1].collapsed && cards[1].selected);
-    assert!(!cards[0].collapsed);
-    panel.finding = 0;
-    panel.cards_open = vec![(ids[0].clone(), false)];
-    assert!(cards_of(&view(&panel))[0].collapsed);
+    assert!(cards[0].collapsed && cards[0].selected);
+    assert!(!cards[1].collapsed);
+    panel.finding = 1;
+    panel.cards_open = vec![(ids[1].clone(), false)];
+    assert!(cards_of(&view(&panel))[1].collapsed);
 }
 
 #[test]
-fn deciding_by_key_goes_on_to_the_next_left_to_decide() {
+fn deciding_goes_on_to_the_next_left_to_decide() {
     use FindingState as S;
     let f = carded(&[S::Open, S::Fix, S::Open, S::Dismissed]);
     let mut panel = FeaturePanel {
         focus: TabArea::Findings,
         ..FeaturePanel::default()
     };
-    // Past the one already to fix.
+    // The key decides; the decision moves the keyboard, by card, as the
+    // card moves among the decided (`after_decided_card`).
     assert_eq!(
         press(&mut panel, &f, key(Keysym::f)),
         Some(PanelOutcome::DecideFinding("r1-1".into(), Decision::Fix))
     );
-    assert_eq!(panel.finding, 2);
+    assert_eq!(panel.finding, 0);
+    let cards = review_cards(&f, Stage::AiReview, &[]);
+    let id = |i: usize| cards[i].item().map(|i| i.id().to_owned());
+    // Left to decide first: r1-1, r1-3; then r1-2 to fix, r1-4 dismissed.
+    assert_eq!(id(0).as_deref(), Some("r1-1"));
+    assert_eq!(id(1).as_deref(), Some("r1-3"));
+    assert_eq!(next_open_card(&cards, 0), 1);
     // Round past the last.
-    assert_eq!(
-        press(&mut panel, &f, key(Keysym::f)),
-        Some(PanelOutcome::DecideFinding("r1-3".into(), Decision::Fix))
-    );
-    assert_eq!(panel.finding, 0);
-    // Taking a decision back stays: nothing was decided.
-    panel.finding = 1;
-    assert_eq!(
-        press(&mut panel, &f, key(Keysym::f)),
-        Some(PanelOutcome::DecideFinding("r1-2".into(), Decision::Reopen))
-    );
-    assert_eq!(panel.finding, 1);
-    // None left but this one: it stays.
+    assert_eq!(next_open_card(&cards, 1), 0);
+    // None left but this one: it stays, and moves with its card.
     let f = carded(&[S::Open, S::Fix]);
-    panel.finding = 0;
-    press(&mut panel, &f, key(Keysym::f));
-    assert_eq!(panel.finding, 0);
+    let cards = review_cards(&f, Stage::AiReview, &[]);
+    assert_eq!(next_open_card(&cards, 0), 0);
 }
 
 #[test]
@@ -965,7 +981,8 @@ fn a_comment_left_in_the_diff_has_a_card_with_its_own_keys() {
         ..PanelState::default()
     };
     let view = view_of(&f, &state);
-    let card = cards_of(&view)[0];
+    // After the one left to decide.
+    let card = cards_of(&view)[1];
     assert_eq!(card.tag, FindingTag::Yours);
     assert_eq!(card.title, "First line");
     assert_eq!(card.body, "and more");
@@ -977,6 +994,7 @@ fn a_comment_left_in_the_diff_has_a_card_with_its_own_keys() {
     );
     let mut panel = FeaturePanel {
         focus: TabArea::Findings,
+        finding: 1,
         ..FeaturePanel::default()
     };
     let mods = ModifiersState::default();
@@ -1010,7 +1028,7 @@ fn a_comment_left_in_the_diff_changes_only_while_findings_can_be_decided() {
     // A new review running: only to look at.
     f.runs.get_mut(&Stage::AiReview).unwrap().ready = None;
     let view = view_of(&f, &state);
-    assert_eq!(labels_of(&view, cards_of(&view)[0]), ["Show in diff"]);
+    assert_eq!(labels_of(&view, cards_of(&view)[1]), ["Show in diff"]);
     // Past AI review they wait for Code review: not on this page.
     let mut done = carded(&[S::Fixed]);
     sent_back(&mut done);
@@ -1059,8 +1077,14 @@ fn the_keys_pick_a_card_and_decide_it_as_in_the_diff() {
         press(&mut panel, &f, key(Keysym::f)),
         Some(PanelOutcome::DecideFinding(id("r1-2"), Decision::Reopen))
     );
-    // r1-3, dismissed: both of its keys bring it back or fix it.
+    // r1-4, sent: nothing to decide, and it says why.
     assert_eq!(press(&mut panel, &f, key(Keysym::Down)), None);
+    assert_eq!(
+        press(&mut panel, &f, key(Keysym::f)),
+        Some(PanelOutcome::FindingRefused(review_import::SENT))
+    );
+    // r1-3, dismissed, last: both of its keys bring it back or fix it.
+    assert_eq!(press(&mut panel, &f, key(Keysym::End)), None);
     assert_eq!(
         press(&mut panel, &f, key(Keysym::f)),
         Some(PanelOutcome::DecideFinding(id("r1-3"), Decision::Fix))
@@ -1068,12 +1092,6 @@ fn the_keys_pick_a_card_and_decide_it_as_in_the_diff() {
     assert_eq!(
         press(&mut panel, &f, key(Keysym::Delete)),
         Some(PanelOutcome::DecideFinding(id("r1-3"), Decision::Reopen))
-    );
-    // r1-4, sent, last: nothing to decide, and it says why.
-    assert_eq!(press(&mut panel, &f, key(Keysym::End)), None);
-    assert_eq!(
-        press(&mut panel, &f, key(Keysym::f)),
-        Some(PanelOutcome::FindingRefused(review_import::SENT))
     );
     // All open ones to fix at once, from anywhere on the page.
     let shift_f = ModifiersState {
@@ -1097,7 +1115,7 @@ fn the_keys_pick_a_card_and_decide_it_as_in_the_diff() {
     // user's own.
     assert_eq!(
         press(&mut panel, &f, key(Keysym::c)),
-        Some(PanelOutcome::CommentFinding(id("r1-4")))
+        Some(PanelOutcome::CommentFinding(id("r1-3")))
     );
     let shift = ModifiersState {
         shift: true,

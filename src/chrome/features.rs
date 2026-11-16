@@ -1150,9 +1150,11 @@ fn pill_mark(tag: FindingTag, x: f32, y: f32, s: f32) -> f32 {
     }
 }
 
-/// How a finding the user decided on is marked on its card.
+/// How a review item is marked on its card: left to decide, or decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CardStripe {
+    /// Not decided yet: the user's turn, in its colour.
+    ToDecide,
     /// It goes to Build with the next fixes.
     ToFix,
     /// It went to Build.
@@ -1185,6 +1187,9 @@ pub struct FindingCard {
     pub comment: String,
     /// The indices in `StagePage::buttons` of the buttons that comment holds.
     pub comment_buttons: Vec<usize>,
+    /// How many of `buttons`, from the first, go at the right of its title
+    /// row: a review item's decision and refusal while undecided.
+    pub head: usize,
     /// A finding whose fix the Build agent made: a dot says so, as a check's.
     pub made: bool,
     /// It no longer asks for anything: fixed or dismissed.
@@ -3036,6 +3041,24 @@ impl Stack {
             self.x = left + CHECK_DOT_ROOM;
             self.w = (width - CHECK_DOT_ROOM).max(1);
         }
+        // Its decision and refusal at the right of its title row, the title
+        // wrapping short of them.
+        let head: Vec<usize> = (card.buttons.iter().take(card.head).copied())
+            .filter(|b| *b < page.buttons.len())
+            .collect();
+        let mut head_bottom = self.y;
+        if !head.is_empty() {
+            let by = self.y + (BODY_LINE - ROW_BUTTON) / 2;
+            let mut bx = self.x + self.w;
+            for b in head.iter().rev() {
+                let w = button_width(&page.buttons[*b].label);
+                bx -= w;
+                buttons[*b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+                bx -= QUIT_BUTTON_GAP;
+            }
+            self.w = (bx - PILL_GAP - self.x).max(1);
+            head_bottom = by + ROW_BUTTON;
+        }
         // A finding's severity as a pill, its title right of it.
         let (title_x, title_w) = (self.x, self.w);
         if let Some(word) = card.tag.word() {
@@ -3056,7 +3079,11 @@ impl Stack {
             self.w = (self.w - pw - PILL_GAP).max(1);
         }
         self.all_text(&card.title, Font::Body, body, true, BODY_LINE);
+        self.y = self.y.max(head_bottom);
         (self.x, self.w) = (title_x, title_w);
+        if !head.is_empty() {
+            self.w = (left + width - self.x).max(1);
+        }
         // What the user decided stands out from the rest of the line, muted;
         // why, on a line of its own, reads as plainly as the title.
         // A check's state is no decision: it goes muted before its place.
@@ -3138,7 +3165,7 @@ impl Stack {
             self.pieces.push((rect, Piece::CardField(k)));
             self.y += h;
         }
-        let held: Vec<usize> = (card.buttons.iter().copied())
+        let held: Vec<usize> = (card.buttons.iter().skip(card.head).copied())
             .filter(|b| *b < page.buttons.len())
             .collect();
         if !held.is_empty() {
@@ -3824,6 +3851,7 @@ impl Stack {
                 ink: match stripe {
                     Some(CardStripe::ToFix) => Ink::Tone(CheckTone::Ready),
                     Some(CardStripe::Dismissed) => Ink::Muted,
+                    Some(CardStripe::ToDecide) => Ink::Tone(CheckTone::Blocker),
                     _ => Ink::Text,
                 },
                 bold: true,
@@ -8386,6 +8414,7 @@ impl Painter {
                     let s = scale as f32;
                     let colour = match stripe {
                         CardStripe::ToFix => Standing::Done.color(p),
+                        CardStripe::ToDecide => Standing::Yours.color(p),
                         CardStripe::Sent | CardStripe::Dismissed => p.muted,
                     };
                     let inset = AGENT_RADIUS * s;
@@ -10110,6 +10139,7 @@ mod tests {
             note: String::new(),
             comment: String::new(),
             comment_buttons: Vec::new(),
+            head: 0,
             made: false,
             faded: false,
             collapsed: false,
@@ -11010,6 +11040,7 @@ mod tests {
                 note: String::new(),
                 comment: String::new(),
                 comment_buttons: Vec::new(),
+                head: 0,
                 made: false,
                 faded: false,
                 collapsed: false,
@@ -11194,6 +11225,7 @@ mod tests {
             note: String::new(),
             comment: String::new(),
             comment_buttons: Vec::new(),
+            head: 0,
             made: false,
             faded: true,
             collapsed,

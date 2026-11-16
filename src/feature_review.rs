@@ -366,6 +366,16 @@ impl Gerdr {
     /// finding, an empty reason). Once no finding holds up, AI review is
     /// marked done on the code as it is.
     pub fn decide_finding(&mut self, project: &str, slug: &str, id: &str, decision: Decision) {
+        let was_open = (self.feature(project, slug))
+            .and_then(|f| f.review.as_ref()?.finding(id))
+            .is_some_and(|f| f.state == FindingState::Open);
+        let reopen = matches!(decision, Decision::Reopen);
+        // The card moves among the decided: the keys go on to what is left,
+        // found before the list changes.
+        let next = match was_open && !reopen {
+            true => self.after_decided_card(crate::feature::review_items::ItemOf::Finding, id),
+            false => self.selected_review_card(),
+        };
         let Some(f) = self.feature_mut(project, slug) else {
             return;
         };
@@ -382,14 +392,27 @@ impl Gerdr {
         };
         f.log(feature::now(), format!("Finding {id}: {what}"));
         let posts = f.posts_review();
+        // Undo while others are left to decide: once none is, the toast
+        // offers what comes next instead.
+        let left = f.review.as_ref().map_or(0, |r| r.count(FindingState::Open));
+        let undo = (was_open && !reopen && left > 0).then(|| MenuAction::ReopenItem {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            of: crate::feature::review_items::ItemOf::Finding,
+            id: id.to_owned(),
+        });
         self.save_feature(project, slug);
+        match was_open && !reopen {
+            true => self.go_to_decided_card(next),
+            false => self.reselect_review_card(next),
+        }
         let word = match decision {
             Decision::Fix if posts => "marked to comment on GitHub",
             Decision::Fix => "marked to fix",
             Decision::Dismiss(_) => "dismissed",
             Decision::Reopen => "reopened",
         };
-        self.after_decision(project, slug, format!("Finding {id} {word}"), None);
+        self.after_decision(project, slug, format!("Finding {id} {word}"), undo);
     }
 
     /// What comes of a change to feature `slug`'s findings, said in `done`,

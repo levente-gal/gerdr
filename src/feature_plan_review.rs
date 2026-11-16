@@ -500,7 +500,7 @@ impl Gerdr {
     /// Decide suggestion `id`, log it, save and say so, offering what comes
     /// next once nothing is left to decide; why not when it can't be.
     /// Whether it was.
-    fn decide_suggestion_said(
+    pub(crate) fn decide_suggestion_said(
         &mut self,
         project: &str,
         slug: &str,
@@ -508,6 +508,13 @@ impl Gerdr {
         decision: Decision,
     ) -> bool {
         let was = (self.suggestion_of(project, slug, id)).map_or(State::Open, |s| s.state);
+        let decides = was == State::Open && decision != Decision::Clear;
+        // The card moves among the decided: the keys go on to what is left,
+        // found before the list changes.
+        let next = match decides {
+            true => self.after_decided_card(ItemOf::Suggestion, id),
+            false => self.selected_review_card(),
+        };
         let done = decided_text(id, was, &decision);
         let logged = match &decision {
             Decision::Reject(why) => format!("{done}: {}", why.trim()),
@@ -518,7 +525,22 @@ impl Gerdr {
             Ok(logged)
         });
         if decided {
-            self.after_suggestion_decision(project, slug, done, None);
+            match decides {
+                true => self.go_to_decided_card(next),
+                false => self.reselect_review_card(next),
+            }
+            // Undo while others are left to decide: once none is, the toast
+            // offers the final plan instead.
+            let left = (self.feature(project, slug))
+                .and_then(|f| f.plan_review.as_ref())
+                .map_or(0, |r| r.open());
+            let undo = (decides && left > 0).then(|| MenuAction::ReopenItem {
+                project: project.to_owned(),
+                slug: slug.to_owned(),
+                of: ItemOf::Suggestion,
+                id: id.to_owned(),
+            });
+            self.after_suggestion_decision(project, slug, done, undo);
         }
         decided
     }
@@ -532,11 +554,7 @@ impl Gerdr {
         id: &str,
         why: &str,
     ) -> bool {
-        let done = self.decide_suggestion_said(project, slug, id, Decision::Reject(why.to_owned()));
-        if done {
-            self.select_next_open_item(ItemOf::Suggestion, id);
-        }
-        done
+        self.decide_suggestion_said(project, slug, id, Decision::Reject(why.to_owned()))
     }
 
     /// What comes of a change to feature `slug`'s suggestions, said in

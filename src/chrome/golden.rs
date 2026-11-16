@@ -4766,6 +4766,7 @@ fn feature_tab_review_fixes() -> super::FeatureTabView {
             note: String::new(),
             comment: String::new(),
             comment_buttons: Vec::new(),
+            head: 0,
             made,
             faded: false,
             collapsed: false,
@@ -5070,6 +5071,7 @@ fn feature_tab_review_rounds() -> super::FeatureTabView {
             note: String::new(),
             comment: String::new(),
             comment_buttons: Vec::new(),
+            head: 0,
             made: state == "fix made",
             faded,
             collapsed: false,
@@ -5617,6 +5619,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             note: said.into(),
             comment: String::new(),
             comment_buttons: Vec::new(),
+            head: 0,
             made: i == 1,
             faded: tag == FindingTag::Passed,
             collapsed: !open,
@@ -5739,6 +5742,7 @@ fn feature_tab_manual_comment() -> super::FeatureTabView {
         note: String::new(),
         comment: String::new(),
         comment_buttons: Vec::new(),
+        head: 0,
         made: false,
         faded: false,
         collapsed: false,
@@ -6425,8 +6429,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0x470def6975091142, // tab_ship_cards_1180
         0x05f84eec7f2ecd7c, // tab_ship_conflicts_860
         0x0ee193c551feebce, // tab_ship_after_1180
-        0xf0b361fda0322a07, // tab_ai_review_history_1920
-        0x1de4e901ba6fea97, // tab_ai_review_history_860
+        0xe4762ba84bff7753, // tab_ai_review_history_1920
+        0x798e6fd0f997c8c6, // tab_ai_review_history_860
         0xc346dd36c5ff5ebc, // tab_fix_picks_1180
         0x5f68cf44af600e94, // tab_fix_picks_860
         0xddb25bbb6a08578d, // tab_ship_picks_1180
@@ -6498,8 +6502,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0x2c1601c6e5dbb55c, // tab_ship_cards_1180
         0x055681e6b42dce56, // tab_ship_conflicts_860
         0xf0a5d2a771bab02f, // tab_ship_after_1180
-        0x67329f9283374816, // tab_ai_review_history_1920
-        0x643d8a843b17d7b8, // tab_ai_review_history_860
+        0x47d13bfbb815948a, // tab_ai_review_history_1920
+        0xe43808387279d4e9, // tab_ai_review_history_860
         0x62d5699dc5ea2019, // tab_fix_picks_1180
         0x04c2c21e407a8e99, // tab_fix_picks_860
         0xb7b376eb6e876146, // tab_ship_picks_1180
@@ -6571,8 +6575,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0xc4a892f1de89db19, // tab_ship_cards_1180
         0x9ec4c68fa4c9e3fa, // tab_ship_conflicts_860
         0x7eefddd1989b7e37, // tab_ship_after_1180
-        0x22df089cf65e1366, // tab_ai_review_history_1920
-        0x6e3b30c1ee890337, // tab_ai_review_history_860
+        0x61b9d1348da8af7d, // tab_ai_review_history_1920
+        0xae63ac6a14fad9d6, // tab_ai_review_history_860
         0x56ffff311e4fb859, // tab_fix_picks_1180
         0x266768c5d3f9caad, // tab_fix_picks_860
         0xdf91ba3454512187, // tab_ship_picks_1180
@@ -6644,8 +6648,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 70]; 4] = [
         0x7c46646771084cd2, // tab_ship_cards_1180
         0x54050fcad40e338f, // tab_ship_conflicts_860
         0xcf07238808ad1297, // tab_ship_after_1180
-        0xc6b8f36371e87612, // tab_ai_review_history_1920
-        0xcb5802f0ec976f52, // tab_ai_review_history_860
+        0x6210f6d25e980e87, // tab_ai_review_history_1920
+        0x32807b5ab2f5f884, // tab_ai_review_history_860
         0x4941c37f440639c6, // tab_fix_picks_1180
         0x2ea0b2312ab81d9f, // tab_fix_picks_860
         0xe160aa9774f1b69d, // tab_ship_picks_1180
@@ -7033,6 +7037,7 @@ fn tab_checks() -> super::FeatureTabView {
             note: String::new(),
             comment: String::new(),
             comment_buttons: Vec::new(),
+            head: 0,
             made: false,
             faded: tag == FindingTag::Skipped,
             collapsed: false,
@@ -7102,29 +7107,29 @@ const FINDINGS: [&str; 4] = [
 const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
     // Dark at 1
     [
-        0x77d628be192de02e, // tab_findings_1180
-        0xe4b967ef6cd81d39, // tab_findings_860
+        0x4e577012cc941f53, // tab_findings_1180
+        0xe02289bc07300de4, // tab_findings_860
         0xbe15a6efe4a5304a, // finding_dialog
         0x395e21db12f14c4c, // finding_dialog_error
     ],
     // Dark at 2
     [
-        0xfc4e834e68f50a18, // tab_findings_1180
-        0x3989f371de27979d, // tab_findings_860
+        0x5f20edeb5e1321c1, // tab_findings_1180
+        0x14d420a23f7a51ec, // tab_findings_860
         0x2e982fd65dcbba89, // finding_dialog
         0x1c54a50260a223cf, // finding_dialog_error
     ],
     // Light at 1
     [
-        0x6a831030a3611a81, // tab_findings_1180
-        0xbf20353c17fa474e, // tab_findings_860
+        0xd3b44b379bb4191d, // tab_findings_1180
+        0x6324f9eabdf85ea3, // tab_findings_860
         0xc8efa4d7ca6d61b1, // finding_dialog
         0x3068a0f01a434524, // finding_dialog_error
     ],
     // Light at 2
     [
-        0xe417b152ed107e70, // tab_findings_1180
-        0xf6f42a61247018a4, // tab_findings_860
+        0xa6293615cd115782, // tab_findings_1180
+        0x3e308f59539be47a, // tab_findings_860
         0xf28a5af0ae02e0c9, // finding_dialog
         0x00c403fa84109bce, // finding_dialog_error
     ],
@@ -7681,8 +7686,8 @@ const PLAN_REVIEW: [&str; 7] = [
 const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     // Dark at 1
     [
-        0xb8d703f2e766a7e1, // tab_plan_review_cards_1180
-        0xaac652c0f1959119, // tab_plan_review_cards_860
+        0x875b5c7f339a7b6c, // tab_plan_review_cards_1180
+        0x2c3817131a8d6454, // tab_plan_review_cards_860
         0xaf9c28a2c2316094, // tab_plan_review_writing_1180
         0x9afd892c41b157e8, // doc_suggestions_1180
         0xa12094154779b8df, // doc_suggestions_850
@@ -7691,8 +7696,8 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     ],
     // Dark at 2
     [
-        0x4132b4861b778764, // tab_plan_review_cards_1180
-        0x164eaa616a396ef6, // tab_plan_review_cards_860
+        0xadb403cb98635df5, // tab_plan_review_cards_1180
+        0x764e8223bfbb0bfc, // tab_plan_review_cards_860
         0xb8cd05d49a2eaa6c, // tab_plan_review_writing_1180
         0xb8dd8bfa55c221fc, // doc_suggestions_1180
         0x26814b5764a0c7e5, // doc_suggestions_850
@@ -7701,8 +7706,8 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     ],
     // Light at 1
     [
-        0xe31633aedcdb17f2, // tab_plan_review_cards_1180
-        0xce401a9296946f37, // tab_plan_review_cards_860
+        0xd49eeb1a466bd0d6, // tab_plan_review_cards_1180
+        0xa04b2dc210407c4d, // tab_plan_review_cards_860
         0xd5a0c053497c5c1f, // tab_plan_review_writing_1180
         0x3f5c1f61a4bd2248, // doc_suggestions_1180
         0xb11d9822b77a1556, // doc_suggestions_850
@@ -7711,8 +7716,8 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
     ],
     // Light at 2
     [
-        0xd12f9a32f021114f, // tab_plan_review_cards_1180
-        0x4e2ff2dbb516e786, // tab_plan_review_cards_860
+        0xa56af1dd0ec77ff9, // tab_plan_review_cards_1180
+        0x9bebb0e1794cfc33, // tab_plan_review_cards_860
         0x108fd64310d04ef0, // tab_plan_review_writing_1180
         0x991937caceaf8188, // doc_suggestions_1180
         0x0d8e3c393196a9a8, // doc_suggestions_850

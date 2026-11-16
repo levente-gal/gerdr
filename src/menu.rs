@@ -235,6 +235,14 @@ pub enum MenuAction {
         id: String,
         note: String,
     },
+    /// Undo deciding a review item left to decide: an AI review finding,
+    /// or a Plan review suggestion (`of`), back to undecided.
+    ReopenItem {
+        project: String,
+        slug: String,
+        of: crate::feature::review_items::ItemOf,
+        id: String,
+    },
     /// Undo accepting every open suggestion of feature `slug`: those of
     /// `ids` still accepted open again.
     ReopenSuggestions {
@@ -719,6 +727,21 @@ impl Gerdr {
                 }
                 crate::feature::review_items::ItemOf::Suggestion => {
                     self.restore_suggestion_comment(&project, &slug, &id, &note);
+                }
+            },
+            MenuAction::ReopenItem {
+                project,
+                slug,
+                of,
+                id,
+            } => match of {
+                crate::feature::review_items::ItemOf::Finding => {
+                    let reopen = crate::feature::review_import::Decision::Reopen;
+                    self.decide_finding(&project, &slug, &id, reopen);
+                }
+                crate::feature::review_items::ItemOf::Suggestion => {
+                    let clear = crate::feature::plan_review::Decision::Clear;
+                    self.decide_suggestion_said(&project, &slug, &id, clear);
                 }
             },
             MenuAction::ReopenSuggestions { project, slug, ids } => {

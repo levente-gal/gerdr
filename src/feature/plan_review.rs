@@ -352,7 +352,7 @@ impl PlanReview {
 
     /// The suggestions as the page lists them: the user's own first, then
     /// by severity, each group in the order raised. A decision doesn't move
-    /// one.
+    /// one here; the page groups them by decision (`review_cards`).
     pub fn in_order(&self) -> Vec<&Suggestion> {
         let mut list: Vec<&Suggestion> = self.suggestions.iter().collect();
         list.sort_by_key(|s| review_items::rank(s.source == Source::You, s.severity));

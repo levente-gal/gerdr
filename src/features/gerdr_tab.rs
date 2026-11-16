@@ -416,26 +416,27 @@ impl Gerdr {
         self.features.reselect_review_card(id)
     }
 
-    /// The keyboard goes from finding `id`, just decided, to the next card
-    /// left to decide, if there is one.
-    pub(crate) fn select_next_open_after(&mut self, id: &str) {
-        self.select_next_open_item(ItemOf::Finding, id);
-    }
-
-    /// The keyboard goes from item `id` of kind `of`, just decided, to the
-    /// next card left to decide, if there is one.
-    pub(crate) fn select_next_open_item(&mut self, of: ItemOf, id: &str) {
-        let next = self
-            .features
+    /// The card the keyboard goes to once item `id` of kind `of`, left to
+    /// decide, is decided: the next one left to decide, coming round, else
+    /// that card itself, which moves among the decided. Read before the
+    /// decision changes the list.
+    pub(crate) fn after_decided_card(&self, of: ItemOf, id: &str) -> Option<CardId> {
+        self.features
             .with_review_cards(|cards, _| {
                 let at = (cards.iter())
                     .position(|c| c.item().is_some_and(|i| i.of() == of && i.id() == id))?;
-                let next = next_open_card(cards, at);
-                (next != at).then_some(next)
+                Some(cards[next_open_card(cards, at)].id())
             })
-            .flatten();
-        if let Some(next) = next {
-            self.select_criterion(next);
+            .flatten()
+    }
+
+    /// The keyboard goes to card `next` (`after_decided_card`) once its list
+    /// changed, in view.
+    pub(crate) fn go_to_decided_card(&mut self, next: Option<CardId>) {
+        if next.is_some() {
+            self.reselect_review_card(next);
+            self.sync_feature_page();
+            self.reveal_feature_finding();
         }
     }
 

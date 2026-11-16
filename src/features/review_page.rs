@@ -17,7 +17,7 @@ use super::*;
 use crate::{
     chrome::ReviewSummary,
     feature::review_items::Standing,
-    review_cards::{card_tag, page_card},
+    review_cards::{card_group, card_tag, page_card},
 };
 
 /// Whether `stage` is a review stage whose page this lays out.
@@ -107,17 +107,25 @@ fn item_sections(
     let tags: Vec<FindingTag> = cards.iter().map(|c| card_tag(*c)).collect();
     let mut counts: Vec<(FindingTag, usize)> = Vec::new();
     let mut open: Vec<usize> = Vec::new();
+    // A pill per tag, the user's own first, then by severity: the cards are
+    // grouped by decision, so a tag's cards needn't sit together.
+    let rank = |t: &FindingTag| match t {
+        FindingTag::Yours => 0,
+        FindingTag::High => 1,
+        FindingTag::Medium => 2,
+        FindingTag::Low => 3,
+        _ => 4,
+    };
+    let mut ranked = tags.clone();
+    ranked.sort_by_key(rank);
+    ranked.dedup();
+    counts.extend(ranked.iter().map(|t| (*t, 0)));
+    open.resize(counts.len(), 0);
     for (card, tag) in cards.iter().zip(&tags) {
         let undecided = card.item().is_some_and(|i| i.standing() == Standing::Open);
-        match counts.last_mut() {
-            Some((last, n)) if last == tag => *n += 1,
-            _ => {
-                counts.push((*tag, 1));
-                open.push(0);
-            }
-        }
-        if let Some(n) = open.last_mut() {
-            *n += usize::from(undecided);
+        if let Some(k) = counts.iter().position(|(t, _)| t == tag) {
+            counts[k].1 += 1;
+            open[k] += usize::from(undecided);
         }
     }
     let want_all = want_all_outcome(stage);
@@ -146,8 +154,21 @@ fn item_sections(
     let mut sections = vec![PageSection::Review(summary)];
     let multi = feature.many_repos();
     // No heading per severity: the summary's pills and each card's pill say
-    // it, and a pill goes to its first card.
-    for card in cards {
+    // it, and a pill goes to its first card. A heading per group (to decide,
+    // decided, dismissed) once there are two.
+    let groups: Vec<u8> = cards.iter().map(|c| card_group(*c)).collect();
+    let in_group = |g: u8| groups.iter().filter(|x| **x == g).count();
+    let headed = (0..3).filter(|g| in_group(*g) > 0).count() > 1;
+    let mut last = None;
+    for (card, group) in cards.into_iter().zip(groups.iter().copied()) {
+        if headed && last != Some(group) {
+            let word = ["to decide", "decided", w.refused][usize::from(group)];
+            sections.push(PageSection::Heading(format!(
+                "{word} ({})",
+                in_group(group)
+            )));
+            last = Some(group);
+        }
         let mut card = match card {
             ReviewCard::Item(item) => page_card(feature, item, actions),
             ReviewCard::DiffNote(c) => note_card(c, multi, actions),

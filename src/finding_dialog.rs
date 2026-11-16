@@ -694,8 +694,6 @@ impl Gerdr {
                 let why = Decision::Dismiss(first.to_owned());
                 self.decide_finding(project, slug, id, why);
                 self.feature_findings_changed(project, slug);
-                // Its card closes: the keyboard goes on to what is left.
-                self.select_next_open_after(id);
                 true
             }
             (Ask::Edit, _) => {
