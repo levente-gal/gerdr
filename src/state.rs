@@ -38,6 +38,8 @@ pub struct Settings {
     /// Whether agents that need the user say so with a desktop
     /// notification, from the config file.
     pub notify: bool,
+    /// The sounds of agents that need the user or finish (see `sound`).
+    pub sounds: config::Sounds,
     /// Whether new Alacrittys reload their config file (`[terminal]`).
     pub live_config_reload: bool,
     /// When the config file was last read as written (see

@@ -64,6 +64,7 @@ mod ship_undo;
 mod ship_update;
 mod shot_images;
 mod shot_viewer;
+mod sound;
 mod features;
 mod file_tree;
 mod find;
@@ -2995,13 +2996,17 @@ impl Gerdr {
             .collect();
         self.agent_since = since;
         self.session.agent_statuses = watched.into_iter().map(|a| (a.key, a.status)).collect();
+        // One sound a round, however many changed: needing input first.
+        if let Some(news) = news.iter().max_by_key(|n| n.blocked) {
+            sound::play(&self.settings.sounds, news.blocked);
+        }
         if let Some(notifier) = self
             .notices
             .notifier
             .as_mut()
             .filter(|_| self.settings.notify)
         {
-            for news in news {
+            for news in news.iter().filter(|n| !n.seen) {
                 notifier.send(&news.key.to_string(), &news.summary, &news.body);
             }
         }
@@ -7187,6 +7192,7 @@ fn new_gerdr(
         t3: t3_settings,
         terminal,
         notifications,
+        sounds,
         problems: settings_problems,
     } = settings;
     anim::set_motion(ui.motion);
@@ -7278,6 +7284,7 @@ fn new_gerdr(
             density: ui.density,
             needs_you: ui.needs_you,
             notify: notifications.enabled,
+            sounds,
             live_config_reload: terminal.live_config_reload,
             settings_modified: config::modified(),
             show_footer: ui.footer,
