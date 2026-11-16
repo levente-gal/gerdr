@@ -210,11 +210,80 @@ pub struct GitWatch {
     pub pending: bool,
     /// Another round is wanted once it is done.
     pub again: bool,
-    /// Hands a round's Git status to the event loop (see `watch_git`).
-    pub read: Option<channel::Sender<HashMap<PathBuf, git::GitStatus>>>,
+    /// Hands a round's folders and the Git status read of them to the
+    /// event loop (see `watch_git`).
+    pub read: Option<channel::Sender<GitRound>>,
     /// The address of each workspace folder's repository page, once read
     /// (see `git::web_url`).
     pub repo_pages: HashMap<PathBuf, Option<String>>,
+    /// When each folder's status was last asked for (see `GitWatch::due`).
+    pub read_at: HashMap<PathBuf, Instant>,
+    /// When something last happened in a folder that may change its files:
+    /// a key or click in a workspace, an agent at work there.
+    pub busy_at: HashMap<PathBuf, Instant>,
+}
+
+/// The folders a round of Git reads asked about, and the status of those in
+/// a repository.
+pub type GitRound = (Vec<PathBuf>, HashMap<PathBuf, git::GitStatus>);
+
+/// A folder something happened in is read each round until it has been
+/// quiet this long (an editor's format on save, a hook after a commit).
+pub const GIT_QUIET: Duration = Duration::from_secs(10);
+/// A quiet folder is still read this often while gerdr is in front, for
+/// what changes it unseen (another app, a program in the background).
+pub const GIT_FALLBACK: Duration = Duration::from_secs(30);
+
+impl GitWatch {
+    /// Something happened in `dir` now.
+    pub fn busy(&mut self, dir: &Path, now: Instant) {
+        self.busy_at.insert(dir.to_owned(), now);
+    }
+
+    /// Whether `dir`'s status could have changed since it was last read: it
+    /// never was, something happened in it since or lately (in it, or in a
+    /// folder it holds or is in), or, while gerdr is `focused`, the last
+    /// read is `GIT_FALLBACK` old.
+    pub fn due(&self, dir: &Path, focused: bool, now: Instant) -> bool {
+        let Some(&read) = self.read_at.get(dir) else {
+            return true;
+        };
+        let busy = self.busy_at.iter().any(|(busy, &at)| {
+            (busy.starts_with(dir) || dir.starts_with(busy))
+                && (at >= read || now.duration_since(at) < GIT_QUIET)
+        });
+        busy || (focused && now.duration_since(read) >= GIT_FALLBACK)
+    }
+}
+
+#[cfg(test)]
+mod git_watch_tests {
+    use super::*;
+
+    #[test]
+    fn a_folder_is_read_again_only_when_it_could_have_changed() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let dir = Path::new("/w/api");
+        let mut git = GitWatch::default();
+        assert!(git.due(dir, false, at(0)), "never read");
+        git.read_at.insert(dir.to_owned(), at(0));
+        assert!(!git.due(dir, true, at(3)), "quiet since");
+        assert!(git.due(dir, true, at(30)), "the fallback, in front");
+        assert!(!git.due(dir, false, at(300)), "no fallback behind");
+        // A key in the workspace: read until quiet for GIT_QUIET.
+        git.busy(dir, at(1));
+        assert!(git.due(dir, false, at(3)));
+        git.read_at.insert(dir.to_owned(), at(3));
+        assert!(git.due(dir, false, at(6)), "still lately");
+        assert!(!git.due(dir, false, at(12)), "quiet again");
+        // An agent at work in a folder inside it, or another workspace's.
+        git.busy(Path::new("/w/api/src"), at(20));
+        assert!(git.due(dir, false, at(21)));
+        git.read_at.insert(dir.to_owned(), at(21));
+        git.busy(Path::new("/w/web"), at(40));
+        assert!(!git.due(dir, false, at(41)));
+    }
 }
 
 /// Back and forward through visited tabs (see `nav_history`).

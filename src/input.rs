@@ -321,6 +321,14 @@ impl Gerdr {
     }
 
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
+        // A key or a click may change the shown workspace's files.
+        if matches!(
+            event,
+            InputEvent::Keyboard { .. } | InputEvent::PointerButton { .. }
+        ) && let Some(dir) = self.workspace().map(|ws| ws.dir.clone())
+        {
+            self.git.busy(&dir, Instant::now());
+        }
         match event {
             InputEvent::Keyboard { event, .. } => {
                 // A key may move a field's caret: its view follows.

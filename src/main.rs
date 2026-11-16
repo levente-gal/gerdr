@@ -270,7 +270,8 @@ const LOG_CUT_INTERVAL: Duration = Duration::from_secs(600);
 const AGENT_INTERVAL: Duration = Duration::from_secs(1);
 /// A frame that takes longer to draw is logged.
 const SLOW_FRAME: Duration = Duration::from_millis(20);
-/// How often the Git status of the workspace folders is read again.
+/// How often the Git status of the workspace folders that could have
+/// changed is read again (see `GitWatch::due`).
 const GIT_INTERVAL: Duration = Duration::from_secs(3);
 /// How often the web pages' windows are asked where they are now (see
 /// `web_pages`).
@@ -2739,13 +2740,19 @@ impl Gerdr {
         self.projects.order_workspaces(project, &order)
     }
 
-    /// Read the Git status of the workspace folders now and every
-    /// `GIT_INTERVAL`, off the event loop.
+    /// Read the Git status of the workspace folders now, then every
+    /// `GIT_INTERVAL` those that could have changed (see `GitWatch::due`),
+    /// off the event loop.
     fn watch_git(&mut self) {
-        let (tx, rx): (_, Channel<HashMap<PathBuf, git::GitStatus>>) = channel::channel();
+        let (tx, rx): (_, Channel<state::GitRound>) = channel::channel();
         let read = self.loop_handle.insert_source(rx, |event, _, state| {
-            if let channel::Event::Msg(git) = event {
-                state.git.status = git;
+            if let channel::Event::Msg((asked, git)) = event {
+                // Folders no longer shown go; those not asked keep what they had.
+                let dirs = state.git_dirs();
+                let status = &mut state.git.status;
+                status.retain(|dir, _| dirs.contains(dir) && !asked.contains(dir));
+                status.extend(git);
+                state.git.read_at.retain(|dir, _| dirs.contains(dir));
                 state.git.pending = false;
                 state.worktrees_read();
                 state.repos_read();
@@ -2761,7 +2768,7 @@ impl Gerdr {
             .insert_source(Timer::immediate(), move |_, _, state| {
                 // A round can outlast the interval in a big repository.
                 if !state.git.pending {
-                    state.refresh_git();
+                    state.read_git(false);
                 }
                 TimeoutAction::ToDuration(GIT_INTERVAL)
             });
@@ -2773,25 +2780,62 @@ impl Gerdr {
         }
     }
 
-    /// Read the Git status of the workspace folders now, off the event
+    /// Read the Git status of all the workspace folders now, off the event
     /// loop; once the round under way is done, if there is one.
     pub fn refresh_git(&mut self) {
-        let Some(tx) = self.git.read.clone() else {
-            return;
-        };
         if self.git.pending {
             self.git.again = true;
             return;
         }
+        self.read_git(true);
+    }
+
+    /// Read the Git status of the workspace folders off the event loop:
+    /// `all` of them, or those that could have changed.
+    fn read_git(&mut self, all: bool) {
+        let Some(tx) = self.git.read.clone() else {
+            return;
+        };
+        let now = Instant::now();
+        // What agents at work may be changing.
+        let working = self
+            .session
+            .agents
+            .iter()
+            .filter(|a| a.agent_status == herdr::AgentStatus::Working);
+        for dir in working.filter_map(|a| a.foreground_cwd.as_ref().or(a.cwd.as_ref())) {
+            self.git.busy_at.insert(dir.clone(), now);
+        }
+        // Older ones were read since, however long a round took.
+        self.git
+            .busy_at
+            .retain(|_, at| now.duration_since(*at) < Duration::from_secs(60));
+        let focused = self.notices.host_focused;
+        let dirs: Vec<PathBuf> = (self.git_dirs().into_iter())
+            .filter(|dir| all || self.git.due(dir, focused, now))
+            .collect();
+        if dirs.is_empty() {
+            return;
+        }
+        for dir in &dirs {
+            self.git.read_at.insert(dir.clone(), now);
+        }
         self.git.pending = true;
+        let asked = dirs.clone();
+        git::read_all(dirs, move |git| {
+            let _ = tx.send((asked, git));
+        });
+    }
+
+    /// The folders whose Git status is read: the workspaces' and those the
+    /// repositories panel lists, each once.
+    fn git_dirs(&self) -> Vec<PathBuf> {
         let mut dirs: Vec<PathBuf> = (self.workspaces.iter().map(|ws| ws.dir.clone()))
             .chain(self.panel_dirs().into_iter().map(|d| d.dir))
             .collect();
         dirs.sort();
         dirs.dedup();
-        git::read_all(dirs, move |git| {
-            let _ = tx.send(git);
-        });
+        dirs
     }
 
     /// Ask the browsers where the web pages' windows are now and every
@@ -5906,6 +5950,7 @@ impl Gerdr {
         // The rest of its herdr session goes (`sources` and `poke` went above).
         self.session = state::Session::default();
         self.git.status.clear();
+        self.git.read_at.clear();
         self.hover.pane_bar = None;
         self.active_workspace = 0;
         self.mouse.drag = None;
@@ -7309,6 +7354,8 @@ fn new_gerdr(
             again: false,
             read: None,
             repo_pages: HashMap::new(),
+            read_at: HashMap::new(),
+            busy_at: HashMap::new(),
         },
         nav: state::Nav {
             history: Default::default(),
@@ -7493,6 +7540,10 @@ fn register_sources(
             }
             WinitEvent::Focus(focused) => {
                 state.notices.host_focused = focused;
+                // What changed while gerdr was behind shows at once.
+                if focused {
+                    state.refresh_git();
+                }
                 // The key's release goes elsewhere now.
                 if !focused {
                     state.stop_key_repeat();
