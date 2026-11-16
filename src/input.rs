@@ -1230,6 +1230,11 @@ impl Gerdr {
         if at != Some(overlay::Overlay::Criteria) {
             self.criteria_strip.hover = None;
         }
+        if at != Some(overlay::Overlay::Features)
+            && let Some(panel) = self.features.panel.as_mut()
+        {
+            panel.tab_hover = None;
+        }
         // The keys of the help panel light up under the pointer.
         self.hover.help = if at == Some(overlay::Overlay::Help) {
             self.help_hit(pos)
