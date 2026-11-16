@@ -85,13 +85,16 @@ pub struct News {
     pub key: AgentKey,
     pub summary: String,
     pub body: String,
+    /// It needs input now, rather than finished.
+    pub blocked: bool,
+    /// The user can see it: a sound, but no notification.
+    pub seen: bool,
 }
 
 /// What of `agents` is news, given how each was `before`: one that just
-/// came to need input or finished where the user can't see it. A finished
-/// agent may come back `idle` rather than `done`: both count. Only a change
-/// is news; an agent seen for the first time (as all are when gerdr
-/// starts) isn't.
+/// came to need input or finished, `seen` or not. A finished agent may
+/// come back `idle` rather than `done`: both count. Only a change is news;
+/// an agent seen for the first time (as all are when gerdr starts) isn't.
 ///
 /// One that stays blocked out of sight is reminded of every `reminder`,
 /// counted from when it was last notified of or last in sight; when that
@@ -110,11 +113,14 @@ pub fn agent_news(
         let what = match (was, agent.status) {
             (_, Blocked) => {
                 let since = *blocked_since.entry(agent.key.clone()).or_insert(now);
+                let came = was.is_some_and(|b| b != Blocked);
                 if agent.seen {
                     blocked_since.insert(agent.key.clone(), now);
-                    continue;
+                    if !came {
+                        continue;
+                    }
                 }
-                let what = if was.is_some_and(|b| b != Blocked) {
+                let what = if came {
                     "needs input"
                 } else if now.duration_since(since) >= reminder {
                     "still needs input"
@@ -124,13 +130,15 @@ pub fn agent_news(
                 blocked_since.insert(agent.key.clone(), now);
                 what
             }
-            (Some(Working), Idle | Done) if !agent.seen => agent.finished.unwrap_or("is done"),
+            (Some(Working), Idle | Done) => agent.finished.unwrap_or("is done"),
             _ => continue,
         };
         news.push(News {
             key: agent.key.clone(),
             summary: format!("{} {what}", agent.label),
             body: agent.body.clone(),
+            blocked: agent.status == Blocked,
+            seen: agent.seen,
         });
     }
     blocked_since.retain(|key, _| agents.iter().any(|a| a.key == *key && a.status == Blocked));
@@ -185,17 +193,33 @@ mod tests {
             // Seen for the first time: no news.
             let first = [watched(key.clone(), AgentStatus::Done, false)];
             assert!(agent_news(&HashMap::new(), &first, &mut blocked, now, REMINDER).is_empty());
-            // Done out of sight: news; in sight: none.
+            // Done out of sight: news; in sight: news only for the sound.
             let news = agent_news(&before, &first, &mut blocked, now, REMINDER);
             assert_eq!(news[0].summary, "claude is done");
             assert_eq!(news[0].key, key);
+            assert!(!news[0].seen && !news[0].blocked);
             let seen = [watched(key.clone(), AgentStatus::Idle, true)];
-            assert!(agent_news(&before, &seen, &mut blocked, now, REMINDER).is_empty());
+            assert!(agent_news(&before, &seen, &mut blocked, now, REMINDER)[0].seen);
             // Blocked: needs input.
             let stuck = [watched(key.clone(), AgentStatus::Blocked, false)];
             let news = agent_news(&before, &stuck, &mut blocked, now, REMINDER);
             assert_eq!(news[0].summary, "claude needs input");
+            assert!(news[0].blocked);
         }
+    }
+
+    #[test]
+    fn one_blocked_in_sight_is_news_once_and_never_reminded() {
+        let start = Instant::now();
+        let key = herdr("p1");
+        let working = HashMap::from([(key.clone(), AgentStatus::Working)]);
+        let stuck = [watched(key.clone(), AgentStatus::Blocked, true)];
+        let mut blocked = HashMap::new();
+        let news = agent_news(&working, &stuck, &mut blocked, start, REMINDER);
+        assert!(news[0].seen && news[0].blocked);
+        let still = HashMap::from([(key, AgentStatus::Blocked)]);
+        let later = start + REMINDER * 2;
+        assert!(agent_news(&still, &stuck, &mut blocked, later, REMINDER).is_empty());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 use super::{
     BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Canvas, DETAIL_FONT_SIZE, GIT_MARK_GAP, GIT_MARK_WIDTH,
     POPUP_RADIUS, Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, band, git_branch, icon_sdf,
-    rect_px,
+    rect_px, repos::draw_counted,
 };
 use crate::git::GitStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -281,15 +281,15 @@ impl Painter {
                 scale,
                 p.muted,
             );
-            self.text(
-                c,
+            draw_counted(
                 value,
-                SMALL_FONT_SIZE,
-                value_x,
-                right,
-                line_band,
-                scale,
-                p.text,
+                (value_x, right),
+                (p.text, p),
+                |run| self.text_width(run, SMALL_FONT_SIZE, scale),
+                |run, x, color| {
+                    let size = SMALL_FONT_SIZE;
+                    self.text(c, run, size, x, right, line_band, scale, color)
+                },
             );
         }
     }

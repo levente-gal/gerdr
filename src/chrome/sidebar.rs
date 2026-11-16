@@ -504,7 +504,7 @@ impl AgentView {
             let (added, removed) = (row.added.unwrap_or(0), row.removed.unwrap_or(0));
             lines.push(field(
                 "Changes",
-                format!("{files} file{plural}, {added} lines added, {removed} removed"),
+                format!("{files} file{plural} \u{b7} +{added} \u{2212}{removed}"),
             ));
         }
         if row.worktree {

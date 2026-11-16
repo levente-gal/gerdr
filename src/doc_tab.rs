@@ -112,11 +112,13 @@ impl DocMode {
     }
 
     /// What a new tab of `file` opens on, on an output `wide` enough for
-    /// Split or not: a stage's file beside its page, so it is read as it is
-    /// reviewed. Too narrow, no page starts unseen.
+    /// Split or not: a stage's file or a plan beside its page, so it is read
+    /// as it is reviewed. Too narrow, no page starts unseen.
     pub fn opens_on(file: DocFile, wide: bool) -> DocMode {
         match file {
-            DocFile::Stage(_) | DocFile::FixPlan if wide => DocMode::Split,
+            DocFile::Stage(_) | DocFile::FixPlan | DocFile::ConflictPlan(_) if wide => {
+                DocMode::Split
+            }
             _ => Self::default_for(file),
         }
     }
@@ -812,8 +814,9 @@ mod tests {
 
     #[test]
     fn a_new_stage_file_tab_opens_split_when_wide_enough() {
-        for stage in [Stage::Discover, Stage::Plan] {
-            let file = DocFile::Stage(stage);
+        let brief = DocFile::Stage(Stage::Discover);
+        let plan = DocFile::Stage(Stage::Plan);
+        for file in [brief, plan, DocFile::FixPlan, DocFile::ConflictPlan(1)] {
             assert_eq!(DocMode::opens_on(file, true), DocMode::Split);
             assert_eq!(DocMode::opens_on(file, false), DocMode::Review);
         }

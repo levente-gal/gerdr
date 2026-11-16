@@ -24,8 +24,8 @@ use super::{
     segment_tint, status_dot,
 };
 use super::{
-    Standing, code_mark, ellipsis, eye, flask, magnifier, plan_review_mark, ship_arrow, sparkle,
-    text_lines,
+    Standing, code_mark, ellipsis, eye, flask, magnifier, plan_review_mark, repos::draw_counted,
+    ship_arrow, sparkle, text_lines,
 };
 use crate::text_field::Line;
 use crate::{
@@ -7875,13 +7875,8 @@ impl Painter {
                 ink,
                 bold,
             } => {
-                let (x, end) = phys(rect, scale);
-                let b = band(rect, scale);
-                if *bold {
-                    self.bold_text(c, text, font.size(), x, end, b, scale, ink.color(p));
-                } else {
-                    self.text(c, text, font.size(), x, end, b, scale, ink.color(p));
-                }
+                let at = (phys(rect, scale), band(rect, scale));
+                self.page_text(c, text, (font.size(), *bold), at, scale, (ink.color(p), p));
             }
             Piece::TagPill {
                 tag, faded, text, ..
@@ -8548,11 +8543,8 @@ impl Painter {
                 }
                 let width = |t: &str| self.text_width(t, size, scale);
                 self.found_tints(c, text, &found, (x, end), b, width, p.background, scale, p);
-                if *bold {
-                    self.bold_text(c, text, size, x, end, b, scale, ink.color(p));
-                } else {
-                    self.text(c, text, size, x, end, b, scale, ink.color(p));
-                }
+                let at = ((x, end), b);
+                self.page_text(c, text, (size, *bold), at, scale, (ink.color(p), p));
             }
             Piece::CardField(k) => {
                 let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {
@@ -8609,6 +8601,29 @@ impl Painter {
                 }
             }
         }
+    }
+
+    /// A page's line `text` at `size`, bold or not, from `x` to before
+    /// `end` in `band`, in `color` but for its diff counts ("+12 −3"),
+    /// which take the repositories panel's colours.
+    fn page_text(
+        &self,
+        c: &mut Canvas,
+        text: &str,
+        (size, bold): (f32, bool),
+        ((x, end), band): ((f32, f32), (i32, i32)),
+        scale: f64,
+        (color, p): (Rgb, &Palette),
+    ) {
+        let width = |run: &str| match bold {
+            true => self.bold_width(run, size, scale),
+            false => self.text_width(run, size, scale),
+        };
+        let draw = |run: &str, x, color| match bold {
+            true => self.bold_text(c, run, size, x, end, band, scale, color),
+            false => self.text(c, run, size, x, end, band, scale, color),
+        };
+        draw_counted(text, (x, end), (color, p), width, draw);
     }
 
     /// A repository's `stat` as "F files +A −R" (files muted, added in

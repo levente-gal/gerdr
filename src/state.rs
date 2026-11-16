@@ -38,6 +38,8 @@ pub struct Settings {
     /// Whether agents that need the user say so with a desktop
     /// notification, from the config file.
     pub notify: bool,
+    /// The sounds of agents that need the user or finish (see `sound`).
+    pub sounds: config::Sounds,
     /// Whether new Alacrittys reload their config file (`[terminal]`).
     pub live_config_reload: bool,
     /// When the config file was last read as written (see
@@ -435,6 +437,9 @@ pub struct Session {
     pub herdr: Option<herdr::Herdr>,
     /// The coding agents herdr sees in the session, shown in the sidebar.
     pub agents: Vec<herdr::AgentInfo>,
+    /// The panes of `done` agents herdr was told the user saw (see
+    /// `Gerdr::mark_seen_agents`).
+    pub seen_sent: HashSet<String>,
     /// What herdr reports about the tabs of gerdr's workspaces, by herdr tab
     /// id, shown in the tab strip.
     pub tabs: HashMap<String, herdr::TabDetail>,

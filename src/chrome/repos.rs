@@ -1158,6 +1158,59 @@ fn count_parts(lead: Option<String>, (added, removed): (usize, usize)) -> Vec<(S
     parts
 }
 
+/// `text` in runs, those saying a diff's counts ("+12 −3", both there, at
+/// a word's start) in the tones `count_parts` gives them, the rest `None`.
+pub(super) fn count_runs(text: &str) -> Vec<(&str, Option<Tone>)> {
+    let digits = |s: &str| s.bytes().take_while(u8::is_ascii_digit).count();
+    let mut runs = Vec::new();
+    let (mut from, mut i) = (0, 0);
+    while let Some(plus) = text[i..].find('+').map(|k| i + k) {
+        i = plus + 1;
+        let space = i + digits(&text[i..]);
+        let Some(after) = text[space..].strip_prefix(" \u{2212}") else {
+            continue;
+        };
+        let minus = space + 1;
+        let end = text.len() - after.len() + digits(after);
+        let starts = (text[..plus].chars().next_back()).is_none_or(char::is_whitespace);
+        let ends = (text[end..].chars().next()).is_none_or(|c| !c.is_alphanumeric());
+        if !starts || space == i || end == text.len() - after.len() || !ends {
+            continue;
+        }
+        runs.extend([
+            (&text[from..plus], None),
+            (&text[plus..space], Some(Tone::Success)),
+            (&text[space..minus], None),
+            (&text[minus..end], Some(Tone::Error)),
+        ]);
+        (from, i) = (end, end);
+    }
+    runs.push((&text[from..], None));
+    runs.retain(|(run, _)| !run.is_empty());
+    runs
+}
+
+/// Draw `text` from `x` by `draw` (a run, where it starts, its colour;
+/// where it ends), cut off before `max_x` as `width` measures it: its
+/// diff counts in the panel's colours, the rest in `color`.
+pub(super) fn draw_counted(
+    text: &str,
+    (x, max_x): (f32, f32),
+    (color, p): (Rgb, &Palette),
+    width: impl Fn(&str) -> f32,
+    mut draw: impl FnMut(&str, f32, Rgb) -> f32,
+) -> f32 {
+    let mut pen = x;
+    for (run, tone) in count_runs(text) {
+        let fits = pen + width(run) <= max_x;
+        pen = draw(run, pen, tone.map_or(color, |tone| tone_color(tone, p)));
+        if !fits {
+            break;
+        }
+    }
+    pen
+}
+
 /// The gap between two of a diff's counts, physical pixels.
 fn count_gap(s: f32) -> f32 {
     (6.0 * s).round()
@@ -3250,15 +3303,15 @@ impl Painter {
         };
         if !view.no_header {
             let header_band = band(header, scale);
-            let after = self.mixed_text(
-                &mut c,
+            let after = draw_counted(
                 &heading,
-                LABEL_FONT_SIZE,
-                hx,
-                hend,
-                header_band,
-                scale,
-                p.text,
+                (hx, hend),
+                (p.text, p),
+                |run| self.mixed_width(run, LABEL_FONT_SIZE, scale),
+                |run, x, color| {
+                    let size = LABEL_FONT_SIZE;
+                    self.mixed_text(&mut c, run, size, x, hend, header_band, scale, color)
+                },
             );
             self.mixed_text(
                 &mut c,
@@ -3970,15 +4023,15 @@ impl Painter {
             true => "",
             false => &view.detail.title,
         };
-        self.mixed_text(
-            c,
+        draw_counted(
             title_text,
-            FONT_SIZE,
-            x,
-            right,
-            band(title, scale),
-            scale,
-            p.text,
+            (x, right),
+            (p.text, p),
+            |run| self.mixed_width(run, FONT_SIZE, scale),
+            |run, x, color| {
+                let b = band(title, scale);
+                self.mixed_text(c, run, FONT_SIZE, x, right, b, scale, color)
+            },
         );
         for &(tab, rect) in tabs {
             self.tab_segment(c, view, tab, rect, scale, p);
@@ -5957,6 +6010,37 @@ mod tests {
     use crate::chrome::{Theme, inside};
 
     const SIZES: [(i32, i32); 3] = [(800, 600), (1280, 800), (2560, 1440)];
+
+    /// Diff counts in a line take the panel's tones; a lone "+3", one
+    /// inside a word, or one with no number stays as the line is.
+    #[test]
+    fn count_runs_tone_the_counts() {
+        let (ok, err) = (Some(Tone::Success), Some(Tone::Error));
+        assert_eq!(
+            count_runs("12 commits · +420 \u{2212}80 · into main"),
+            [
+                ("12 commits · ", None),
+                ("+420", ok),
+                (" ", None),
+                ("\u{2212}80", err),
+                (" · into main", None),
+            ]
+        );
+        let both = [("+1", ok), (" ", None), ("\u{2212}2", err)];
+        assert_eq!(count_runs("+1 \u{2212}2"), both);
+        let plain = [
+            "c++ 3",
+            "+3 more",
+            "a+1 \u{2212}2",
+            "+1 \u{2212}2x",
+            "+ \u{2212}2",
+            "+1 \u{2212}",
+        ];
+        for plain in plain {
+            assert_eq!(count_runs(plain), [(plain, None)], "{plain}");
+        }
+        assert!(count_runs("").is_empty());
+    }
 
     fn repo(label: &str, branch: Option<&str>) -> RepoLine {
         RepoLine {

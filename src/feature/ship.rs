@@ -43,6 +43,10 @@ use crate::{git as gitinfo, git_ops};
 /// One step of shipping, in the order they run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
+    /// Put `feature/<slug>` of `repo` back on its worktree, on no branch
+    /// (a detached HEAD), at its commit: the branch is in that commit's
+    /// history (`RepoCheck::reattach`). Before any other step of `repo`.
+    Reattach { repo: String },
     /// Push `feature/<slug>` of `repo` to origin.
     Push { repo: String },
     /// Open a pull request of `repo` into `base`.
@@ -69,6 +73,9 @@ impl Action {
             false => format!(" {word} {repo}"),
         };
         match self {
+            Self::Reattach { repo } => {
+                format!("Put {branch} back on the worktree{}", named("of", repo))
+            }
             Self::Push { repo } => format!("Push {branch}{} to origin", named("of", repo)),
             Self::OpenPr { repo, base } => {
                 format!("Open a pull request into {base}{}", named("for", repo))
@@ -128,6 +135,9 @@ pub struct RepoCheck {
     /// The commit origin's `feature/<slug>` was at when last fetched, if
     /// known.
     pub pushed: Option<String>,
+    /// Its worktree is on no branch, and `feature/<slug>` goes back on its
+    /// commit losing nothing: Ship does that first (`Action::Reattach`).
+    pub reattach: bool,
 }
 
 impl RepoCheck {
@@ -200,7 +210,12 @@ impl Planned {
     /// linking them come with those.
     pub fn steps(&self) -> usize {
         (self.actions.iter())
-            .filter(|a| !matches!(a, Action::KeepPr { .. } | Action::LinkPrs))
+            .filter(|a| {
+                !matches!(
+                    a,
+                    Action::KeepPr { .. } | Action::LinkPrs | Action::Reattach { .. }
+                )
+            })
             .count()
     }
 }
@@ -250,6 +265,7 @@ pub fn plan_actions(feature: &Feature, check: &ShipCheck) -> Planned {
     let mut fresh = 0;
     let mut new_prs = 0;
     for (repo, plan) in &plans {
+        let mut reattach = repo.reattach;
         for step in plan.steps() {
             // What ran stays: only what is left runs. A pull request kept
             // open still counts for linking the others to it.
@@ -277,6 +293,10 @@ pub fn plan_actions(feature: &Feature, check: &ShipCheck) -> Planned {
                 continue;
             }
             let (key, base) = (repo.key.clone(), repo.base.clone());
+            // Before its first step, squashes too: those come after these.
+            if std::mem::take(&mut reattach) {
+                through_origin.push(Action::Reattach { repo: key.clone() });
+            }
             match step {
                 ShipStep::Push | ShipStep::PushBranch => {
                     through_origin.push(Action::Push { repo: key })
@@ -719,6 +739,13 @@ fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) ->
             continue;
         }
         let merged = merged_into_base(repo, &branch);
+        let reattach = match detached(repo, &branch) {
+            Some(Err(why)) => {
+                out.blockers.push(why);
+                false
+            }
+            on => on.is_some(),
+        };
         out.repos.push(RepoCheck {
             key: repo.key(),
             base: repo.base.clone(),
@@ -732,9 +759,43 @@ fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) ->
             merged,
             head: reading.heads.get(&repo.key()).cloned(),
             pushed: tracking(repo, &branch),
+            reattach,
         });
     }
     out
+}
+
+/// Whether `repo`'s worktree is on no branch (a detached HEAD): then
+/// whether `branch` can go back on its commit (`reattachable`).
+fn detached(repo: &Repo, branch: &str) -> Option<Result<(), String>> {
+    let on = git(&repo.worktree, &["symbolic-ref", "-q", "HEAD"]);
+    on.is_err().then(|| reattachable(repo, branch))
+}
+
+/// `branch` of `repo` can go on its worktree's commit losing nothing: it is
+/// in that commit's history, or there is no such branch yet.
+fn reattachable(repo: &Repo, branch: &str) -> Result<(), String> {
+    let name = format!("refs/heads/{branch}");
+    if git(&repo.worktree, &["rev-parse", "-q", "--verify", &name]).is_err() {
+        return Ok(());
+    }
+    let held = git(&repo.worktree, &["merge-base", "--is-ancestor", &name, "HEAD"]);
+    held.map(|_| ()).map_err(|_| {
+        format!(
+            "{} is on no branch, and {branch} has commits it lacks: switch it to {branch}",
+            repo.key()
+        )
+    })
+}
+
+/// Put `branch` of `repo` on its worktree's commit and switch to it, when
+/// the worktree is on no branch still and that loses nothing.
+fn reattach(repo: &Repo, branch: &str) -> Result<(), String> {
+    if detached(repo, branch).is_none() {
+        return Ok(());
+    }
+    reattachable(repo, branch)?;
+    git(&repo.worktree, &["switch", "-q", "-C", branch]).map(|_| ())
 }
 
 /// The commit origin's `branch` of `repo` was at when last fetched.
@@ -864,6 +925,15 @@ pub fn run_steps(
             )
         };
         match action {
+            Action::Reattach { repo } => {
+                let Some(r) = repo_of(repo) else {
+                    return (ran, Some(missing()));
+                };
+                if let Err(why) = reattach(r, &branch) {
+                    let why = format!("Couldn't put {branch} back on {repo}: {why}");
+                    return (ran, Some(why));
+                }
+            }
             Action::Push { repo } => {
                 let Some(r) = repo_of(repo) else {
                     return (ran, Some(missing()));
@@ -1449,7 +1519,8 @@ fn reset_squash(repo: &Repo, base: &str, branch: &str) -> Result<(), String> {
 /// The repository `action` acts on, or "" for one on all.
 pub(crate) fn action_repo(action: &Action) -> &str {
     match action {
-        Action::Push { repo }
+        Action::Reattach { repo }
+        | Action::Push { repo }
         | Action::OpenPr { repo, .. }
         | Action::KeepPr { repo, .. }
         | Action::Squash { repo, .. }
@@ -2280,6 +2351,53 @@ esac
         assert_eq!(planned.steps(), 1);
     }
 
+    /// Committed on no branch, the worktree gets its branch back first,
+    /// then it goes; with the branch ahead of it, nothing goes.
+    #[test]
+    fn a_detached_worktree_gets_its_branch_back_first() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        let w = wt(&f, "api");
+        commit(&w, "a0", "on the branch");
+        run(&w, &["switch", "-q", "--detach"]);
+        commit(&w, "a1", "api change");
+        mark_all(&mut f);
+        let gh = fake_gh(&t);
+        let modes = Modes::all(Some(ShipMode::Pr));
+        f.ship_plan
+            .repos
+            .insert("api".into(), RepoPlan::new(Route::Pr));
+        let check = probe(&f, &modes).ship.unwrap();
+        let planned = plan_actions(&f, &check);
+        let api = || "api".to_owned();
+        assert!(planned.actions.len() >= 2, "{planned:?}");
+        assert_eq!(
+            planned.actions[..2],
+            [
+                Action::Reattach { repo: api() },
+                Action::Push { repo: api() }
+            ]
+        );
+        assert_eq!(planned.steps(), planned.actions.len() - 1, "{planned:?}");
+        let (_, failed) = run_steps(&f, &planned.actions[..2], &gh, 7);
+        assert_eq!(failed, None);
+        let on = run(&w, &["symbolic-ref", "--short", "HEAD"]);
+        assert_eq!(on.trim(), "feature/f");
+
+        // The branch has a commit the detached HEAD lacks: it stops.
+        run(&w, &["switch", "-q", "--detach", "HEAD~1"]);
+        commit(&w, "a2", "other change");
+        mark_all(&mut f);
+        let check = probe(&f, &modes).ship.unwrap();
+        let planned = plan_actions(&f, &check);
+        assert!(planned.actions.is_empty(), "{planned:?}");
+        assert!(
+            (planned.blockers.iter()).any(|b| b.contains("is on no branch")),
+            "{planned:?}"
+        );
+    }
+
     #[test]
     fn what_ran_is_left_out_until_the_branch_moves() {
         let t = Temp::new();
@@ -2481,6 +2599,7 @@ esac
             merged: false,
             head: None,
             pushed: None,
+            reattach: false,
         };
         assert!(check(squash_blocker(&f.repos[0], &f.branch())).pulls_base());
         assert_eq!(pull_base(&f.repos[0]), Ok(1));
@@ -2715,6 +2834,7 @@ esac
             merged: false,
             head: Some(head.into()),
             pushed: pushed.map(str::to_owned),
+            reattach: false,
         };
         assert!(step_done(&f, &repo("a", Some("a")), ShipStep::Push).is_some());
         assert!(step_done(&f, &repo("b", Some("a")), ShipStep::Push).is_none());

@@ -99,6 +99,12 @@
 //! # Seconds gerdr's desktop notifications stay on screen; 0 keeps them
 //! # until dismissed, -1 leaves it to the notification daemon. By default 30.
 //! timeout = 0
+//! # A sound when an agent needs you or finishes, in sight or not: the
+//! # system's sound theme, played with pw-play or paplay. On by default.
+//! sound = false
+//! # Files to play instead (Ogg, WAV or FLAC; ~ is your home folder).
+//! sound-blocked = "~/sounds/knock.oga"
+//! sound-done = "~/sounds/ding.oga"
 //! ```
 //!
 //! Each table is read on its own, and a key that can't be read on its
@@ -423,6 +429,51 @@ pub fn with_machine_renamed(text: &str, old: &str, new: &str) -> Result<String, 
 struct NotificationsConfig {
     enabled: Option<bool>,
     timeout: Option<i64>,
+    sound: Option<bool>,
+    #[serde(rename = "sound-blocked")]
+    sound_blocked: Option<String>,
+    #[serde(rename = "sound-done")]
+    sound_done: Option<String>,
+}
+
+/// The sounds of agents that need the user or finish, from the
+/// `[notifications]` table (see `sound`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Sounds {
+    pub enabled: bool,
+    /// A file to play when one needs input, in place of the theme's.
+    pub blocked: Option<PathBuf>,
+    /// A file to play when one finishes, in place of the theme's.
+    pub done: Option<PathBuf>,
+}
+
+impl Default for Sounds {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            blocked: None,
+            done: None,
+        }
+    }
+}
+
+/// The sounds `text`'s `[notifications]` table asks for; the rest of the
+/// file is `from_text`'s, which tells its mistakes.
+pub fn sounds_from_text(text: &str) -> Sounds {
+    let table = Config::read(text, &mut Vec::new()).notifications;
+    let home = home_dir().unwrap_or_default();
+    let file = |path: Option<String>| {
+        path.filter(|p| !p.trim().is_empty())
+            .map(|p| match p.strip_prefix("~/") {
+                Some(rest) => home.join(rest),
+                None => PathBuf::from(p),
+            })
+    };
+    Sounds {
+        enabled: table.sound.unwrap_or(true),
+        blocked: file(table.sound_blocked),
+        done: file(table.sound_done),
+    }
 }
 
 /// How gerdr's desktop notifications show, from the `[notifications]`
@@ -786,6 +837,8 @@ pub struct Settings {
     pub terminal: TerminalSettings,
     /// Whether and how desktop notifications show.
     pub notifications: Notifications,
+    /// The sounds of agents that need the user or finish.
+    pub sounds: Sounds,
     /// What is wrong with the file, as sentences for the user.
     pub problems: Vec<String>,
 }
@@ -816,6 +869,7 @@ pub fn load() -> Settings {
     let t3 = t3_from_text(&text);
     let terminal = terminal_from_text(&text);
     let notifications = notifications_from_text(&text);
+    let sounds = sounds_from_text(&text);
     let machines = Config::read(&text, &mut Vec::new()).machines;
     // `Keymap::new` keeps its own under "keys": only the rest here.
     crate::problems::clear("config");
@@ -836,6 +890,7 @@ pub fn load() -> Settings {
         t3,
         terminal,
         notifications,
+        sounds,
         problems,
     }
 }
@@ -1102,6 +1157,12 @@ const TEMPLATE: &str = "\
 # # Seconds gerdr's desktop notifications stay on screen; 0 keeps them
 # # until dismissed, -1 leaves it to the notification daemon. By default 30.
 # timeout = 0
+# # A sound when an agent needs you or finishes, in sight or not: the
+# # system's sound theme, played with pw-play or paplay. On by default.
+# sound = false
+# # Files to play instead (Ogg, WAV or FLAC; ~ is your home folder).
+# sound-blocked = \"~/sounds/knock.oga\"
+# sound-done = \"~/sounds/ding.oga\"
 ";
 
 /// Make the config file at `path` from `TEMPLATE`, with its folder, unless
@@ -1185,6 +1246,7 @@ impl Gerdr {
         if let Some(notifier) = &mut self.notices.notifier {
             notifier.set_settings(settings.notifications);
         }
+        self.settings.sounds = settings.sounds;
         if settings.notifications.enabled != self.settings.notify {
             self.settings.notify = settings.notifications.enabled;
             // The bus source lets go once the notifier is gone.
@@ -1567,6 +1629,23 @@ other = 1
         let (parsed, problems) = ui("[ui]\ncolour = \"red\"\ntheme = \"dark\"\n");
         assert_eq!(parsed.theme, Some(ThemeMode::Dark));
         assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn sounds_are_on_and_the_themes_unless_told() {
+        use super::{Sounds, sounds_from_text};
+        assert_eq!(sounds_from_text(""), Sounds::default());
+        assert!(!sounds_from_text("[notifications]\nsound = false\n").enabled);
+        let own = sounds_from_text(
+            "[notifications]\nsound-blocked = \"~/a.oga\"\nsound-done = \"/b.wav\"\n",
+        );
+        let home = super::home_dir().unwrap_or_default();
+        assert_eq!(own.blocked, Some(home.join("a.oga")));
+        assert_eq!(own.done, Some("/b.wav".into()));
+        assert_eq!(
+            sounds_from_text("[notifications]\nsound-done = \"\"\n").done,
+            None
+        );
     }
 
     #[test]
