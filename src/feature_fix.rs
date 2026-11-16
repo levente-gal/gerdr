@@ -407,8 +407,7 @@ impl Gerdr {
                         self.ask_fix_plan(project, slug);
                     }
                     Compact::Go => {
-                        let said = "Chat compacted: fixes sent to the Build agent";
-                        if !self.send_fixes(project, slug, said) {
+                        if !self.send_fixes(project, slug, "Chat compacted") {
                             // It said why: they can go again from the plan.
                             self.fix_plan_waits_again(project, slug);
                         }
@@ -924,8 +923,7 @@ impl Gerdr {
             Go::Stopped | Go::Continue => "Fixes asked for again".to_owned(),
             Go::Again => format!("Fix round {n} sent again"),
         };
-        let said = format!("{why}: fixes sent to the Build agent");
-        let went = self.send_fixes(project, slug, &said);
+        let went = self.send_fixes(project, slug, &why);
         if went {
             self.fixes_went(project, slug, go);
         }
@@ -977,9 +975,9 @@ impl Gerdr {
     }
 
     /// Tell the Build agent of feature `slug`, or a fresh one, to make the
-    /// fixes of its plan: `said` goes in the log. Whether it went; if not it
-    /// said why and changed nothing.
-    fn send_fixes(&mut self, project: &str, slug: &str, said: &str) -> bool {
+    /// fixes of its plan: the log says `why` and which of them got them.
+    /// Whether it went; if not it said why and changed nothing.
+    fn send_fixes(&mut self, project: &str, slug: &str, why: &str) -> bool {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return false;
         };
@@ -1050,7 +1048,7 @@ impl Gerdr {
         if let Some(run) = f.runs.get_mut(&Stage::Build) {
             run.stop = None;
         }
-        f.log(now, said);
+        f.log(now, format!("{why}: fixes sent to {to}"));
         let agent = f.runs.get(&Stage::Build).and_then(|r| r.agent_key());
         self.save_feature(project, slug);
         (self.features.build.fix_watches).remove(&fix_key(project, slug));
