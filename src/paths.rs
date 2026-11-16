@@ -39,10 +39,22 @@ pub fn display(path: &Path, home: Option<&Path>, max_chars: usize) -> String {
     shorten(start, rest, max_chars)
 }
 
-/// A terminal title without the spinner or status glyph agents put in front.
+/// A terminal title without the spinner or status glyph agents put in front,
+/// or after a short mark of their own ("π ⠹ task" is "π task").
 pub(crate) fn tidy_title(title: &str) -> String {
     let glyph = |c: char| c.is_whitespace() || matches!(c, '\u{2190}'..='\u{2BFF}' | '·' | '•');
-    title.trim_start_matches(glyph).trim_end().to_string()
+    let title = title.trim_start_matches(glyph).trim_end();
+    let braille =
+        |w: &str| !w.is_empty() && w.chars().all(|c| matches!(c, '\u{2800}'..='\u{28FF}'));
+    let mut words = title.splitn(3, ' ');
+    match (words.next(), words.next(), words.next()) {
+        (Some(mark), Some(frame), rest) if mark.chars().count() <= 3 && braille(frame) => {
+            format!("{mark} {}", rest.unwrap_or_default().trim_start())
+                .trim_end()
+                .to_string()
+        }
+        _ => title.to_string(),
+    }
 }
 
 /// The name of the repository pane `p` is in, and its worktree's folder.
@@ -110,10 +122,20 @@ fn shorten(start: &str, rest: &Path, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{display, short_path};
+    use super::{display, short_path, tidy_title};
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
+
+    #[test]
+    fn a_title_loses_its_spinner_in_front_or_after_a_short_mark() {
+        assert_eq!(tidy_title("✳ Fix the tests"), "Fix the tests");
+        assert_eq!(tidy_title("⠹ Thinking "), "Thinking");
+        assert_eq!(tidy_title("π ⠹ task one"), "π task one");
+        assert_eq!(tidy_title("π ⠹"), "π");
+        assert_eq!(tidy_title("main.rs — gerdr"), "main.rs — gerdr");
+        assert_eq!(tidy_title("longer ⠹ task"), "longer ⠹ task");
+    }
 
     #[test]
     fn display_writes_home_as_tilde_and_keeps_short_paths_whole() {

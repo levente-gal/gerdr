@@ -478,6 +478,9 @@ pub struct Tab {
     pub expected: Vec<Expected>,
     /// Window that gets keyboard focus when the tab is shown.
     pub focused: Option<Window>,
+    /// Its panes in the order they last had the focus, the latest at the
+    /// end (see `layout::neighbor`).
+    pub recent: Vec<u32>,
     /// The name it was given, shown ahead of the title derived from what
     /// runs in it.
     pub label: Option<String>,
@@ -550,6 +553,7 @@ impl Default for Tab {
             panes: Vec::new(),
             expected: Vec::new(),
             focused: None,
+            recent: Vec::new(),
             label: None,
             zoom: None,
             kind: TabKind::Panes,
@@ -4269,7 +4273,8 @@ impl Gerdr {
                 let area = self.content_rect();
                 self.focus_pane(|tab| {
                     // By the layout under a zoom: moving on ends it.
-                    layout::neighbor(&tab.shown_layout_rects(area), tab.focused_id()?, side)
+                    let from = tab.focused_id()?;
+                    layout::neighbor(&tab.shown_layout_rects(area), from, side, &tab.recent)
                 });
             }
             Action::ToggleTheme => self.toggle_theme(),
@@ -5291,6 +5296,10 @@ impl Gerdr {
                 let active = Some(&pane.window) == window.as_ref();
                 if active {
                     tab.focused = Some(pane.window.clone());
+                    // Closed panes go too: the list stays as long as the tab's panes.
+                    tab.recent
+                        .retain(|id| *id != pane.id && tab.panes.iter().any(|p| p.id == *id));
+                    tab.recent.push(pane.id);
                     if zoomed.is_some_and(|z| z != pane.id) {
                         tab.zoom = None;
                         unzoomed = true;

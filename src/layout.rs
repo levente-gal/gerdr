@@ -519,8 +519,10 @@ pub fn remove(root: &mut Option<Node>, id: u32) -> Option<u32> {
     }
 }
 
-/// The pane next to `from` on `side`: the closest one sharing the most edge with it.
-pub fn neighbor(rects: &[(u32, Rect)], from: u32, side: Side) -> Option<u32> {
+/// The pane next to `from` on `side`: of the closest ones, the one focused
+/// last (`recent`, the latest at the end), so going one way and back returns
+/// to where it came from; else the one sharing the most edge with it.
+pub fn neighbor(rects: &[(u32, Rect)], from: u32, side: Side, recent: &[u32]) -> Option<u32> {
     let (_, a) = *rects.iter().find(|(id, _)| *id == from)?;
     let overlap =
         |a0: i32, a_len: i32, b0: i32, b_len: i32| (a0 + a_len).min(b0 + b_len) - a0.max(b0);
@@ -546,10 +548,15 @@ pub fn neighbor(rects: &[(u32, Rect)], from: u32, side: Side) -> Option<u32> {
                     overlap(a.loc.x, a.size.w, b.loc.x, b.size.w),
                 ),
             };
-            (gap >= 0 && shared > 0).then_some((gap, -shared, id))
+            let age = recent
+                .iter()
+                .rev()
+                .position(|r| *r == id)
+                .unwrap_or(usize::MAX);
+            (gap >= 0 && shared > 0).then_some((gap, age, -shared, id))
         })
         .min()
-        .map(|(_, _, id)| id)
+        .map(|(.., id)| id)
 }
 
 /// The areas a split gives its first and second child, and the gap between them.
@@ -823,11 +830,19 @@ mod tests {
     #[test]
     fn neighbors() {
         let rects = three().rects(area(), 2);
-        assert_eq!(neighbor(&rects, 1, Side::Right), Some(2));
-        assert_eq!(neighbor(&rects, 3, Side::Left), Some(1));
-        assert_eq!(neighbor(&rects, 2, Side::Down), Some(3));
-        assert_eq!(neighbor(&rects, 3, Side::Up), Some(2));
-        assert_eq!(neighbor(&rects, 1, Side::Left), None);
+        assert_eq!(neighbor(&rects, 1, Side::Right, &[]), Some(2));
+        assert_eq!(neighbor(&rects, 3, Side::Left, &[]), Some(1));
+        assert_eq!(neighbor(&rects, 2, Side::Down, &[]), Some(3));
+        assert_eq!(neighbor(&rects, 3, Side::Up, &[]), Some(2));
+        assert_eq!(neighbor(&rects, 1, Side::Left, &[]), None);
+    }
+
+    #[test]
+    fn the_neighbor_focused_last_wins_among_the_closest() {
+        let rects = three().rects(area(), 2);
+        // From 3 to 1 and back: 3 again, not 2.
+        assert_eq!(neighbor(&rects, 1, Side::Right, &[2, 3, 1]), Some(3));
+        assert_eq!(neighbor(&rects, 1, Side::Right, &[3, 2, 1]), Some(2));
     }
 
     fn split(dir: Dir, ratio: f64, first: Node, second: Node) -> Node {

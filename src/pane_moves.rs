@@ -313,7 +313,7 @@ fn neighbor_of(tab: &Tab, id: u32, side: Side, area: Rectangle<i32, Logical>) ->
         let own = tab.layout.as_ref()?.rects(area, DIVIDER);
         rects.extend(own.into_iter().filter(|(p, _)| *p == id));
     }
-    layout::neighbor(&rects, id, side)
+    layout::neighbor(&rects, id, side, &tab.recent)
 }
 
 /// The split leaf `id` is a direct child of: its direction, and the other

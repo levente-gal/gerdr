@@ -919,6 +919,7 @@ mod tests {
             panes: Vec::new(),
             expected: Vec::new(),
             focused: None,
+            recent: Vec::new(),
             label: None,
             zoom: None,
             kind,
