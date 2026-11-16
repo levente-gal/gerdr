@@ -238,6 +238,12 @@ pub(crate) fn nothing_listens(run: &SandboxRun, page: usize) -> String {
     }
 }
 
+/// Whether herdr pane `pane` runs a command of `feature`'s sandbox, not
+/// stopped.
+pub(crate) fn sandbox_pane(feature: &Feature, pane: &str) -> bool {
+    (feature.sandbox.as_ref()).is_some_and(|s| !s.stopped && s.panes.iter().any(|p| p == pane))
+}
+
 /// Whether `command` opens a page on this machine's `localhost`, which means
 /// the sandbox's own inside it. `*.localhost` isn't: T3 Code's pages are named
 /// that way, and its server runs outside.

@@ -5454,6 +5454,7 @@ impl Gerdr {
 
     /// What the tabs of `ws` show.
     fn tab_views(&self, ws: &Workspace) -> Vec<TabView> {
+        let feature = self.feature_of_workspace(ws);
         ws.tabs
             .iter()
             .map(|tab| {
@@ -5466,9 +5467,7 @@ impl Gerdr {
                 }
                 // The feature panel's tab.
                 if tab.is_feature() {
-                    let stage = self
-                        .feature_of_workspace(ws)
-                        .map(|f| f.current().map_or("Done", |s| s.label()));
+                    let stage = feature.map(|f| f.current().map_or("Done", |s| s.label()));
                     return TabView {
                         title: "Feature".into(),
                         pinned: true,
@@ -5506,6 +5505,20 @@ impl Gerdr {
                     .and_then(|p| p.app_command.as_deref())
                     .is_some_and(ci::is_github_page);
                 view.zoomed = tab.zoomed().is_some();
+                // Checks not ended, or sandbox commands still running.
+                let runs = |id: &str| {
+                    detail.is_some_and(|d| {
+                        d.panes
+                            .iter()
+                            .any(|p| p.pane_id == id && chrome::runs_program(p))
+                    })
+                };
+                view.running = feature.is_some_and(|f| {
+                    tab.herdr_panes().any(|h| {
+                        feature_checks::check_runs_in(f, &h.pane_id)
+                            || (feature_sandbox::sandbox_pane(f, &h.pane_id) && runs(&h.pane_id))
+                    })
+                });
                 view
             })
             .collect()

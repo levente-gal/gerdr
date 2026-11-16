@@ -177,6 +177,7 @@ fn tabs() -> Vec<TabView> {
             zoomed: false,
             pinned: false,
             stage: None,
+            running: false,
         },
         TabView {
             title: "zsh".into(),
