@@ -1182,24 +1182,120 @@ pub fn ensure_file(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// How often gerdr looks whether the config file was saved.
+/// How often gerdr looks whether the config file was saved, when the
+/// kernel can't tell it (no inotify instance left, see `inotify_limit`).
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
+
+/// An inotify instance watching folder `dir` for files written, moved,
+/// made or removed in it (editors save by moving a new file over the old);
+/// `None` when the kernel gives none.
+fn watch_dir(dir: &Path) -> Option<std::os::fd::OwnedFd> {
+    use std::os::{fd::FromRawFd, unix::ffi::OsStrExt};
+    let dir = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    let mask = libc::IN_CLOSE_WRITE
+        | libc::IN_MOVED_TO
+        | libc::IN_MOVED_FROM
+        | libc::IN_CREATE
+        | libc::IN_DELETE;
+    // SAFETY: `dir` is a C string that outlives the call, and the
+    // descriptor is owned from here on or closed on failure.
+    unsafe {
+        let fd = libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK);
+        if fd < 0 {
+            return None;
+        }
+        let fd = std::os::fd::OwnedFd::from_raw_fd(fd);
+        (libc::inotify_add_watch(std::os::fd::AsRawFd::as_raw_fd(&fd), dir.as_ptr(), mask) >= 0)
+            .then_some(fd)
+    }
+}
+
+/// Read all that came on inotify `fd`; whether its watch went (its folder
+/// removed or moved away).
+fn drain(fd: &std::os::fd::OwnedFd) -> bool {
+    let mut buf = [0u8; 4096];
+    let mut gone = false;
+    loop {
+        // SAFETY: `buf` is writable for its whole length.
+        let n = unsafe {
+            libc::read(
+                std::os::fd::AsRawFd::as_raw_fd(fd),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        let Ok(n) = usize::try_from(n) else {
+            return gone;
+        };
+        if n == 0 {
+            return gone;
+        }
+        gone |= watch_gone(&buf[..n]);
+    }
+}
+
+/// Whether events `bytes` (`struct inotify_event`s back to back) say the
+/// watch is gone.
+fn watch_gone(bytes: &[u8]) -> bool {
+    let word = |at: usize| u32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap());
+    let mut at = 0;
+    let mut gone = false;
+    while at + 16 <= bytes.len() {
+        gone |= word(at + 4) & libc::IN_IGNORED != 0;
+        at += 16 + word(at + 12) as usize;
+    }
+    gone
+}
 
 impl Gerdr {
     /// Read the config file again whenever it is saved (see
-    /// `reload_settings`).
+    /// `reload_settings`): told by the kernel, else looking every
+    /// `WATCH_INTERVAL`.
     pub fn watch_settings(&mut self) {
+        use smithay::reexports::calloop::{Interest, Mode, PostAction, generic::Generic};
+        let path = config_file();
+        // Made now, so that a config file made later is seen.
+        let watch = path.parent().and_then(|dir| {
+            std::fs::create_dir_all(dir).ok()?;
+            watch_dir(dir)
+        });
+        let Some(fd) = watch else {
+            return self.poll_settings();
+        };
+        let source = Generic::new(fd, Interest::READ, Mode::Level);
+        let inserted = self.loop_handle.insert_source(source, |_, fd, state| {
+            let gone = drain(fd);
+            state.settings_maybe_saved();
+            if gone {
+                state.poll_settings();
+                return Ok(PostAction::Remove);
+            }
+            Ok(PostAction::Continue)
+        });
+        if let Err(err) = inserted {
+            tracing::warn!("watching the settings: {err}");
+            self.poll_settings();
+        }
+    }
+
+    /// Look whether the config file was saved every `WATCH_INTERVAL`.
+    fn poll_settings(&mut self) {
         let timer = Timer::from_duration(WATCH_INTERVAL);
         let look = |_, _: &mut (), state: &mut Gerdr| {
-            let modified = modified();
-            if modified != state.settings.settings_modified {
-                state.settings.settings_modified = modified;
-                state.reload_settings();
-            }
+            state.settings_maybe_saved();
             TimeoutAction::ToDuration(WATCH_INTERVAL)
         };
         if let Err(err) = self.loop_handle.insert_source(timer, look) {
             tracing::warn!("watching the settings: {err}");
+        }
+    }
+
+    /// Read the config file again if it changed since it was last read.
+    fn settings_maybe_saved(&mut self) {
+        let modified = modified();
+        if modified != self.settings.settings_modified {
+            self.settings.settings_modified = modified;
+            self.reload_settings();
         }
     }
 
@@ -1629,6 +1725,30 @@ other = 1
         let (parsed, problems) = ui("[ui]\ncolour = \"red\"\ntheme = \"dark\"\n");
         assert_eq!(parsed.theme, Some(ThemeMode::Dark));
         assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn a_saved_config_file_is_told_and_a_removed_folder_ends_the_watch() {
+        let dir = std::env::temp_dir().join(format!("gerdr-watch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fd = super::watch_dir(&dir).expect("an inotify instance");
+        assert!(!super::drain(&fd), "nothing yet");
+        // An editor's save: a new file moved over the old.
+        std::fs::write(dir.join(".config.toml.tmp"), "x").unwrap();
+        std::fs::rename(dir.join(".config.toml.tmp"), dir.join("config.toml")).unwrap();
+        let mut buf = [0u8; 4096];
+        // SAFETY: `buf` is writable for its whole length.
+        let n = unsafe {
+            libc::read(
+                std::os::fd::AsRawFd::as_raw_fd(&fd),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+            )
+        };
+        assert!(n > 0, "the save is told");
+        assert!(!super::watch_gone(&buf[..n as usize]));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(super::drain(&fd), "the folder went");
     }
 
     #[test]
