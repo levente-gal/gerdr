@@ -180,7 +180,10 @@ How to use it:
   its terminal only while the page shows. While the checks go, from the press
   on, the page offers only what works: Stop all once there is something to
   stop, and what reads. What would change the code or the worktrees under them
-  (setup, fixes, a prompt to Build) is hidden, and refuses by its key. A check
+  (setup, fixes, a prompt to Build) is hidden, and refuses by its key. One
+  prompt to Build goes while they run, by itself: the plan of a check that
+  failed for its code, as planning reads code only; its fixes wait for the
+  run to end, and what fails later goes back into the plan first. A check
   told to stop says "stopping" until it ends, and offers no Stop again.
   After code changes, a rerun runs only what can say something new: the checks
   that didn't pass, those of a repository whose HEAD moved, and whole-feature
