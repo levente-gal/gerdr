@@ -168,9 +168,9 @@ impl Failure {
             Self::NoHerdr => "Install herdr there, then try again.".into(),
             Self::OldHerdr(_) => "Run herdr update there, then try again.".into(),
             Self::Clock(_) => "Turn on time sync on the machine that is off.".into(),
-            Self::Forwarding => {
-                "Set AllowTcpForwarding yes in its sshd_config, then try again.".into()
-            }
+            Self::Forwarding => "Set AllowTcpForwarding yes in its sshd_config. With SELinux \
+                 there, also let sshd use herdr's sockets: its journal says what it refused."
+                .into(),
             Self::ServerStart(log) => format!("Its log there: {log}"),
             Self::OtherMachine(_) => {
                 "Check the address, or add that machine as one of its own.".into()
@@ -194,7 +194,12 @@ impl Failure {
     pub(crate) fn retries(&self) -> bool {
         matches!(
             self,
-            Self::Unreachable(_) | Self::LinkLost | Self::HerdrDown | Self::TimedOut
+            Self::Unreachable(_)
+                | Self::LinkLost
+                | Self::HerdrDown
+                | Self::TimedOut
+                // A refusal fixed there (sshd_config, SELinux) needs no press here.
+                | Self::Forwarding
         )
     }
 }
@@ -1250,7 +1255,11 @@ impl Machines {
     pub(crate) fn report_machines(&self) {
         let mut texts: Vec<String> = (self.links.iter())
             .filter_map(|(name, link)| match &link.state {
-                LinkState::Failed(failure) => Some(format!("Machine {name}: {}", failure.why())),
+                LinkState::Failed(failure)
+                // Tried again, but only a fix there brings it back.
+                | LinkState::Retrying(failure @ Failure::Forwarding) => {
+                    Some(format!("Machine {name}: {}", failure.why()))
+                }
                 _ => None,
             })
             .collect();
@@ -2170,7 +2179,7 @@ mod tests {
         assert!(Failure::Unreachable("x".into()).retries());
         assert!(!Failure::Auth.retries());
         assert!(!Failure::HostKey.retries());
-        assert!(!Failure::Forwarding.retries());
+        assert!(Failure::Forwarding.retries());
     }
 
     #[test]

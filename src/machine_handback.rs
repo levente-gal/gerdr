@@ -112,12 +112,27 @@ fn answer(dir: &Path, refused: Option<String>) {
 }
 
 /// Why a hand back from machine `asking` (`request`) of a feature written by
-/// `writer` at `epoch` isn't one to take: another machine, or it moved since.
-fn stale(request: &lease::HandBack, writer: Option<&str>, epoch: u64) -> Option<String> {
+/// `writer` at `epoch`, as machine `here` has it, isn't one to take: another
+/// machine, it moved since, or `here` hasn't had its copy since it moved.
+fn stale(
+    request: &lease::HandBack,
+    writer: Option<&str>,
+    epoch: u64,
+    here: &str,
+) -> Option<String> {
     if writer != Some(request.machine.as_str()) {
         return Some(format!("It isn't written on {} any more", request.name));
     }
-    (epoch != request.epoch).then(|| "It changed just before: hand it back again".to_owned())
+    match epoch.cmp(&request.epoch) {
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Less => Some(format!(
+            "{here} has had no news of it from {name}: connect {name} on {here}, then hand it back again",
+            name = request.name
+        )),
+        std::cmp::Ordering::Greater => {
+            Some("It changed just before: hand it back again".to_owned())
+        }
+    }
 }
 
 impl Gerdr {
@@ -254,10 +269,10 @@ impl Gerdr {
         request: &lease::HandBack,
     ) -> Option<String> {
         let feature = self.feature(project, slug)?;
-        if let Some(why) = stale(request, feature.writer.as_deref(), feature.epoch) {
+        let here = this_machines_name();
+        if let Some(why) = stale(request, feature.writer.as_deref(), feature.epoch, &here) {
             return Some(why);
         }
-        let here = this_machines_name();
         if self.machines.work_of(&request.machine).is_none() {
             return Some(format!(
                 "{here} isn't connected to {}: connect it there first",
@@ -288,15 +303,20 @@ mod tests {
 
     #[test]
     fn only_a_hand_back_from_the_writer_of_the_record_as_it_is_is_taken() {
-        assert_eq!(stale(&request(3), Some("lap"), 3), None);
+        assert_eq!(stale(&request(3), Some("lap"), 3, "Desk"), None);
         assert_eq!(
-            stale(&request(3), Some("other"), 3).as_deref(),
+            stale(&request(3), Some("other"), 3, "Desk").as_deref(),
             Some("It isn't written on Laptop any more")
         );
-        assert!(stale(&request(3), None, 3).is_some());
+        assert!(stale(&request(3), None, 3, "Desk").is_some());
         assert_eq!(
-            stale(&request(2), Some("lap"), 3).as_deref(),
+            stale(&request(2), Some("lap"), 3, "Desk").as_deref(),
             Some("It changed just before: hand it back again")
+        );
+        // Shown as it left, with no copy from the laptop since.
+        assert_eq!(
+            stale(&request(1), Some("lap"), 0, "Desk").as_deref(),
+            Some("Desk has had no news of it from Laptop: connect Laptop on Desk, then hand it back again")
         );
     }
 
