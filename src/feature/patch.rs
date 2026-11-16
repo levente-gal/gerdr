@@ -41,6 +41,11 @@ pub struct Reading {
     /// Per touched repository by `Repo::key` whose code was built on another
     /// branch than its base (`sits_on`): that branch and the commit it is at.
     pub sits_on: BTreeMap<String, (String, String)>,
+    /// Per touched repository by `Repo::key` whose base isn't the one every
+    /// other touched repository has, while it has that branch too and its
+    /// code doesn't hold it (`odd_base`): that branch and its commit. A base
+    /// picked by mistake, found before an agent builds on it.
+    pub odd_base: BTreeMap<String, (String, String)>,
 }
 
 /// Read `feature`'s worktrees: its patch-id, and what isn't committed. An
@@ -73,6 +78,8 @@ pub fn read(feature: &Feature) -> Result<Reading, String> {
         reading.commits.insert(name.clone(), commits);
         if let Some(found) = sits_on(repo, &mb)? {
             reading.sits_on.insert(name.clone(), found);
+        } else if let Some(found) = odd_base(feature, repo) {
+            reading.odd_base.insert(name.clone(), found);
         }
         let head = git(&repo.worktree, &["rev-parse", "HEAD"])
             .map_err(|err| format!("{name}: couldn't read its HEAD: {err}"))?;
@@ -202,6 +209,37 @@ fn sits_on(repo: &Repo, mb: &str) -> Result<Option<(String, String)>, String> {
     Ok(furthest.map(|(_, branch, oid)| (branch, oid)))
 }
 
+/// The base `repo` of `feature` should likely have, and its commit: the one
+/// every other touched repository has, at least two of them, when `repo`
+/// has another, holds that branch too (or origin's), and its code doesn't
+/// hold it yet. A feature whose repositories are made together from one
+/// branch then catches a base mistyped or taken from what was checked out.
+// shortcut: repositories whose bases differ by design (main and master) only
+// warn when the odd one has a stale branch of the others' name past its own
+// code, upgrade if that shows up in practice.
+fn odd_base(feature: &Feature, repo: &Repo) -> Option<(String, String)> {
+    let others: Vec<&str> = (feature.repos.iter())
+        .filter(|r| r.touched && r.key() != repo.key())
+        .map(|r| r.base.as_str())
+        .collect();
+    let common = *others.first()?;
+    if others.len() < 2 || others.iter().any(|b| *b != common) || common == repo.base {
+        return None;
+    }
+    let dir = &repo.worktree;
+    let found = [common.to_owned(), format!("origin/{common}")]
+        .into_iter()
+        .find_map(|name| {
+            let spec = format!("{name}^{{commit}}");
+            let oid = git(dir, &["rev-parse", "--verify", "--quiet", &spec]).ok()?;
+            Some((name, oid.trim().to_owned()))
+        });
+    let (branch, oid) = found?;
+    // `--is-ancestor` exits 1 for no, which `git` reads as an error.
+    let held = git(dir, &["merge-base", "--is-ancestor", &oid, "HEAD"]).is_ok();
+    (!held).then_some((branch, oid))
+}
+
 /// Whether `repo`'s worktree has uncommitted changes, untracked files
 /// included.
 fn changed(repo: &Repo) -> Result<bool, String> {
@@ -319,6 +357,33 @@ mod tests {
         // With that branch its base, all is well.
         (f.repos[0].base, f.repos[0].base_commit) = ("port".into(), port);
         assert!(read(&f).unwrap().sits_on.is_empty());
+    }
+
+    #[test]
+    fn a_base_unlike_the_other_repositories_says_theirs() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api", "web", "db"], &[]);
+        assert!(read(&f).unwrap().odd_base.is_empty());
+        // The others start from `port`, which api has too, past its own code.
+        let api = f.repos[0].main.clone();
+        run(&api, &["checkout", "-qb", "port"]);
+        commit(&api, "port", "port work");
+        run(&api, &["checkout", "-q", "main"]);
+        let port = run(&api, &["rev-parse", "port"]).trim().to_owned();
+        for repo in &mut f.repos[1..] {
+            run(&repo.main, &["branch", "port"]);
+            repo.base = "port".into();
+        }
+        let r = read(&f).unwrap();
+        assert_eq!(r.odd_base["api"], ("port".to_owned(), port.clone()));
+        assert_eq!(r.odd_base.len(), 1);
+        // Its code holding that branch, nothing is odd.
+        run(&wt(&f, "api"), &["merge", "-q", "--ff-only", "port"]);
+        assert!(read(&f).unwrap().odd_base.is_empty());
+        // One other repository alone says nothing.
+        f.repos.pop();
+        run(&wt(&f, "api"), &["reset", "-q", "--hard", "main"]);
+        assert!(read(&f).unwrap().odd_base.is_empty());
     }
 
     #[test]

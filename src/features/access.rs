@@ -28,16 +28,17 @@ impl Features {
     }
 
     /// What the read of feature `slug` found of repositories built on another
-    /// branch than their base, `sits` by `Repo::key`, where `was` is what the
-    /// read before found: kept as a problem, and a repository newly found so
-    /// gets a warning with a button to make that branch its base.
+    /// branch than their base, or whose base isn't the other repositories'
+    /// one (`Bases`, each by `Repo::key`), where `was` is what the read before
+    /// found: kept as a problem, and a repository newly found so gets a
+    /// warning with a button to make that branch its base.
     pub(crate) fn feature_bases_read(
         &mut self,
         ui: &mut crate::toast::Ui,
         project: &str,
         slug: &str,
-        was: &BTreeMap<String, (String, String)>,
-        sits: &BTreeMap<String, (String, String)>,
+        was: &Bases,
+        now: &Bases,
     ) {
         let at = format!("{project}/{slug}");
         let Some(feature) = self.feature(project, slug) else {
@@ -46,16 +47,24 @@ impl Features {
         let title = feature.title.clone();
         let mut lines = Vec::new();
         let mut fresh = Vec::new();
-        for (key, (branch, oid)) in sits {
+        let found = (now.0.iter().map(|f| (f, &was.0, false)))
+            .chain(now.1.iter().map(|f| (f, &was.1, true)));
+        for ((key, (branch, oid)), before, odd) in found {
             let Some(repo) = feature.repo(key) else {
                 continue;
             };
-            let text = format!(
-                "{key} of \u{201c}{title}\u{201d} is built on {branch}, not on its base {}",
-                repo.base
-            );
+            let text = match odd {
+                false => format!(
+                    "{key} of \u{201c}{title}\u{201d} is built on {branch}, not on its base {}",
+                    repo.base
+                ),
+                true => format!(
+                    "{key} of \u{201c}{title}\u{201d} starts from {}, while its other repositories start from {branch}",
+                    repo.base
+                ),
+            };
             // The branch moving on isn't news.
-            if was.get(key).is_none_or(|(b, _)| b != branch) {
+            if before.get(key).is_none_or(|(b, _)| b != branch) {
                 fresh.push((key.clone(), branch.clone(), oid.clone(), text.clone()));
             }
             lines.push(text);

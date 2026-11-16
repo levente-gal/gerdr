@@ -189,6 +189,11 @@ pub(super) fn repo_line(feature: &Feature, repo: &feature::Repo, probe: Option<&
             " \u{b7} built on {branch}, not on its base {}",
             repo.base
         ));
+    } else if let Some((branch, _)) = reading.and_then(|r| r.odd_base.get(&repo.key())) {
+        line.push_str(&format!(
+            " \u{b7} starts from {}, the others from {branch}",
+            repo.base
+        ));
     }
     line
 }
@@ -196,6 +201,14 @@ pub(super) fn repo_line(feature: &Feature, repo: &feature::Repo, probe: Option<&
 /// The "!" problems of features whose repositories are built on another
 /// branch than their base, one per feature.
 pub(super) const BASE_PROBLEM: &str = "feature-base";
+
+/// What a read found of a feature's bases, each by `Repo::key`: the
+/// repositories built on another branch (`Reading::sits_on`), and those whose
+/// base isn't the others' (`Reading::odd_base`).
+pub(crate) type Bases = (
+    BTreeMap<String, (String, String)>,
+    BTreeMap<String, (String, String)>,
+);
 
 /// What a stage of `feature` not marked done says of where it stands,
 /// as `state` has it: what setup or the checks do, the agent's line on

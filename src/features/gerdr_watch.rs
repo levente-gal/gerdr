@@ -353,9 +353,10 @@ impl Gerdr {
         let patch = probe.reading.as_ref().ok().map(|r| r.patch.clone());
         let heads = (probe.reading.as_ref().ok()).map(|r| (r.heads.clone(), r.at));
         let merged = probe.merged;
-        let sits_on = |p: &Probe| (p.reading.as_ref().ok()).map(|r| r.sits_on.clone());
-        let was = (probed.last.as_ref()).and_then(sits_on).unwrap_or_default();
-        let sits = sits_on(&probe);
+        let bases =
+            |p: &Probe| (p.reading.as_ref().ok()).map(|r| (r.sits_on.clone(), r.odd_base.clone()));
+        let was = (probed.last.as_ref()).and_then(bases).unwrap_or_default();
+        let sits = bases(&probe);
         probed.last = Some(probe);
         self.reselect_review_card(selected);
         if let Some(sits) = &sits {
