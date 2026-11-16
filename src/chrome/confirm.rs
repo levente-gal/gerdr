@@ -73,9 +73,21 @@ pub fn confirm_dialog_layout(size: Size<i32, Logical>, go: &str) -> ConfirmLayou
     confirm_lines_layout(size, go, 1)
 }
 
-/// How many lines the confirm dialog's `body` takes.
-pub fn confirm_body_lines(body: &str) -> usize {
-    body.lines().count().max(1)
+/// The confirm dialog's `body` as painted on an output of `size`: each of
+/// its lines, wrapped to the dialog's width; a blank line stays a gap.
+pub fn confirm_body_rows(body: &str, size: Size<i32, Logical>) -> Vec<String> {
+    let width = DIALOG_WIDTH.min(size.w) - 2 * QUIT_PADDING;
+    (body.lines())
+        .flat_map(|line| match line.trim().is_empty() {
+            true => vec![String::new()],
+            false => super::features::wrap_all(line, FONT_SIZE, width),
+        })
+        .collect()
+}
+
+/// How many lines the confirm dialog's `body` takes on an output of `size`.
+pub fn confirm_body_lines(body: &str, size: Size<i32, Logical>) -> usize {
+    confirm_body_rows(body, size).len().max(1)
 }
 
 /// Where the confirm dialog's parts go, centred on an output of `size`,
@@ -154,7 +166,8 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> MemoryRenderBuffer {
-        let layout = confirm_lines_layout(size, view.go, confirm_body_lines(&view.body));
+        let rows = confirm_body_rows(&view.body, size);
+        let layout = confirm_lines_layout(size, view.go, rows.len());
         let panel = layout.panel;
         let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         // Rects relative to the buffer, which starts `SHADOW` before the panel.
@@ -180,7 +193,7 @@ impl Painter {
         );
         // The body, a line per `QUIT_BODY`.
         let body = shift(layout.body);
-        for (i, line) in view.body.lines().enumerate() {
+        for (i, line) in rows.iter().enumerate() {
             let rect = Rectangle::new(
                 (body.loc.x, body.loc.y + i as i32 * QUIT_BODY).into(),
                 (body.size.w, QUIT_BODY).into(),
@@ -283,7 +296,19 @@ mod tests {
         assert_eq!(three.body.size.h, 3 * one.body.size.h);
         assert_eq!(three.panel.size.h - one.panel.size.h, 2 * QUIT_BODY);
         assert!(three.buttons[0].loc.y >= three.body.loc.y + three.body.size.h);
-        assert_eq!(confirm_body_lines("a\nb\nc"), 3);
-        assert_eq!(confirm_body_lines(""), 1);
+        assert_eq!(confirm_body_lines("a\nb\nc", size), 3);
+        assert_eq!(confirm_body_lines("a\n\nb", size), 3);
+        assert_eq!(confirm_body_lines("", size), 1);
+    }
+
+    #[test]
+    fn a_body_line_too_long_for_the_dialog_wraps_with_nothing_cut() {
+        let size = (1920, 1080).into();
+        let body = "Then Verify runs again, AI review and Code review look at what \
+                    changed, and Manual test comes back with what was found kept.";
+        let rows = confirm_body_rows(body, size);
+        assert!(rows.len() >= 2, "{rows:?}");
+        assert_eq!(rows.join(" "), body);
+        assert_eq!(confirm_body_rows("Short", size), ["Short"]);
     }
 }

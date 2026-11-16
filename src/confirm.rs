@@ -267,7 +267,7 @@ impl ConfirmDialog {
 
     /// Where its parts go on an output of `size`.
     fn layout(&self, size: smithay::utils::Size<i32, Logical>) -> chrome::ConfirmLayout {
-        let lines = chrome::confirm_body_lines(&self.body);
+        let lines = chrome::confirm_body_lines(&self.body, size);
         chrome::confirm_lines_layout(size, self.go, lines)
     }
 
@@ -1122,7 +1122,7 @@ mod tests {
             body,
             "From feature/bulk-export:\nMerge into main\nPush main to origin"
         );
-        assert_eq!(chrome::confirm_body_lines(&body), 3);
+        assert_eq!(chrome::confirm_body_lines(&body, (1920, 1080).into()), 3);
         // A step naming the branch says it: no line of its own.
         let steps = ["Push feature/b to origin".to_owned()];
         assert_eq!(
@@ -1154,7 +1154,7 @@ mod tests {
         assert!(body.ends_with("2 repositories have uncommitted changes"));
         let (_, body) = finish_question("Bulk export", "feature/bulk", (1, true), &[]);
         assert!(body.ends_with("feature/bulk and its worktree go"), "{body}");
-        assert_eq!(chrome::confirm_body_lines(&body), 2);
+        assert_eq!(chrome::confirm_body_lines(&body, (1920, 1080).into()), 2);
     }
 
     #[test]

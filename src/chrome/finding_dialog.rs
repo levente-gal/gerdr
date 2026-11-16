@@ -88,7 +88,7 @@ pub fn finding_dialog_layout(
         Some(_) => QUIT_BODY + QUIT_LINE_GAP,
         None => 0,
     };
-    let about_h = QUIT_BODY * super::confirm_body_lines(&view.about) as i32;
+    let about_h = QUIT_BODY * super::confirm_body_lines(&view.about, size) as i32;
     let height = 2 * QUIT_PADDING
         + QUIT_TITLE
         + QUIT_LINE_GAP
@@ -411,7 +411,7 @@ impl Painter {
             self.text(c, text, size, x, end, band(rect, scale), scale, color)
         };
         line(&mut c, &view.title, layout.title, LABEL_FONT_SIZE, p.text);
-        for (i, text) in view.about.lines().enumerate() {
+        for (i, text) in super::confirm_body_rows(&view.about, size).iter().enumerate() {
             let about = layout.about;
             let at = (about.loc.x, about.loc.y + i as i32 * QUIT_BODY);
             let rect = Rectangle::new(at.into(), (about.size.w, QUIT_BODY).into());
