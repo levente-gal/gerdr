@@ -2248,6 +2248,8 @@ const PICK_ICON: i32 = 14;
 /// `placeholder`: a logo plainly dimmer than one that can be.
 const PICK_OFF: f32 = 0.5;
 const PICK_LABEL: i32 = 48;
+/// The room after a label longer than `PICK_LABEL` holds.
+const PICK_LABEL_GAP: i32 = 8;
 /// The room after a chip's name.
 const PICK_NAME_PAD: i32 = 8;
 /// How far a chip's name starts back inside its logo's room, close to it.
@@ -4272,6 +4274,18 @@ fn rows_height(placed: &[(i32, i32)]) -> i32 {
 
 /// The page's column: the selected stage's title, about, status, buttons
 /// and sections, then the activity if it has no column.
+/// The word before an agent card's chips while no agent has run: what it
+/// is for (`status`), else "Agent".
+fn pick_word(status: &str) -> &str {
+    if status.is_empty() { "Agent" } else { status }
+}
+
+/// How wide the label `word` before chips is: `PICK_LABEL`, or as wide as
+/// the word needs, as "Summary" does.
+fn pick_label_width(word: &str) -> i32 {
+    PICK_LABEL.max(width_of(word, SMALL_FONT_SIZE).ceil() as i32 + PICK_LABEL_GAP)
+}
+
 /// How wide an agent's chip is: its logo, then its name, so two agents of
 /// one logo are told apart without a tooltip.
 fn pick_chip_width(name: &str) -> i32 {
@@ -4508,6 +4522,7 @@ fn page_stack(
             PageSection::Agent {
                 stage,
                 name,
+                status,
                 tail,
                 buttons: held,
                 picks,
@@ -4539,7 +4554,7 @@ fn page_stack(
                             Some(Rectangle::new((*x, row).into(), (*w, ROW_BUTTON).into()));
                     }
                     if !picks.is_empty() {
-                        let from = inner_x + PICK_LABEL;
+                        let from = inner_x + pick_label_width(pick_word(status));
                         let end = placed
                             .first()
                             .map_or(inner_right, |(x, _)| x - QUIT_BUTTON_GAP);
@@ -8170,11 +8185,11 @@ impl Painter {
                 if let Some((_, track, chips)) = spots {
                     let track = at(*track);
                     if name.is_empty() {
+                        let word = pick_word(status);
                         let label = Rectangle::new(
                             (head.loc.x, track.loc.y).into(),
-                            (PICK_LABEL, track.size.h).into(),
+                            (pick_label_width(word), track.size.h).into(),
                         );
-                        let word = if status.is_empty() { "Agent" } else { status };
                         line(c, word, label, SMALL_FONT_SIZE, p.muted);
                     }
                     let rects: Vec<Rect> = chips.iter().map(|r| at(*r)).collect();
@@ -11011,6 +11026,14 @@ mod tests {
         assert!(track.size.w <= 150, "{track:?}");
         assert_eq!(chips[0].size.w, chips[7].size.w);
         assert!(chips[7].loc.x + chips[7].size.w <= 10 + 150, "{chips:?}");
+    }
+
+    #[test]
+    fn the_word_before_the_chips_gets_the_room_it_needs() {
+        assert_eq!(pick_word(""), "Agent");
+        assert_eq!(pick_label_width("Agent"), PICK_LABEL);
+        let summary = width_of("Summary", SMALL_FONT_SIZE);
+        assert!(pick_label_width("Summary") as f32 >= summary + PICK_LABEL_GAP as f32);
     }
 
     #[test]
