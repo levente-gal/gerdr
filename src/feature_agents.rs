@@ -4417,6 +4417,11 @@ mod tests {
         let names = PerProject::all("Acme".to_owned());
         let v = vars(&f, &names, Path::new("/data/a"), Stage::Plan);
         assert_eq!(v["other_repos"], format!("- web: {}", web.display()));
+        // Said to be there to read, it is let in.
+        assert_eq!(
+            f.agent_dirs(Path::new("/data/a")),
+            [PathBuf::from("/data/a"), web.clone()]
+        );
         let text = prompts::render_builtin("plan", &v).unwrap();
         assert!(text.contains(&v["other_repos"]));
         assert!(text.contains("Ctrl+Shift+L"));

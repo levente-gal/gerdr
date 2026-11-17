@@ -1635,11 +1635,14 @@ impl Feature {
 
     /// The folders its agents are let into besides their working folder
     /// (`dir`): the feature data dir `data`, each linked project's feature
-    /// folder, then each context repository's main checkout.
+    /// folder, each context repository's main checkout, then the main
+    /// checkout of each other repository of its root, which its prompt says
+    /// are there to read (`layout::others_in_root`).
     pub fn agent_dirs(&self, data: &Path) -> Vec<PathBuf> {
         std::iter::once(data.to_path_buf())
             .chain(self.links.iter().map(|l| l.dir.clone()))
             .chain(self.context.iter().map(|c| c.main.clone()))
+            .chain(layout::others_in_root(self).into_iter().map(|(_, main)| main))
             .collect()
     }
 
@@ -2421,10 +2424,15 @@ pub(crate) mod tests {
             [data.to_path_buf(), api.clone()]
         );
 
-        // The folder it starts in is its first root already.
+        // The folder it starts in is its first root already. The repository
+        // left out of the feature is let in as main, for reading.
         f.repos[0].worktree = f.dir.clone();
+        let web_main = f.repos[1].main.clone();
         f.repos.truncate(1);
-        assert_eq!(f.agent_dirs_for("cursor-agent", data), [data.to_path_buf()]);
+        assert_eq!(
+            f.agent_dirs_for("cursor-agent", data),
+            [data.to_path_buf(), web_main]
+        );
     }
 
     #[test]

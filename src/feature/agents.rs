@@ -300,11 +300,19 @@ fn unattended(base: &str, dirs: &[PathBuf]) -> String {
     }
 }
 
+/// What has Claude read the instructions of its `--add-dir` folders.
+const CLAUDE_MD_ENV: &str = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD";
+
 /// The shell command that starts `base` allowed into `dirs` too, for a CLI
 /// gerdr knows the flag of: the others reach the feature's files through
-/// `layout::DOCS_LINK`.
+/// `layout::DOCS_LINK`. Claude reads the CLAUDE.md and AGENTS.md of those
+/// folders only when told to (checked on 2.1.326): a linked project's rules
+/// matter as much as the home one's.
 pub fn allowed_into(base: &str, dirs: &[PathBuf]) -> String {
     let mut line = base.trim().to_owned();
+    if Flavor::of(base) == Flavor::Claude && !dirs.is_empty() && !line.contains(CLAUDE_MD_ENV) {
+        line = format!("{CLAUDE_MD_ENV}=1 {line}");
+    }
     if Flavor::of(base).adds_dirs() {
         for dir in dirs {
             line.push_str(" --add-dir ");
@@ -748,7 +756,7 @@ mod tests {
         assert_eq!(
             command_line("claude", prompt, &dirs),
             format!(
-                "claude --add-dir '/d/my feature' \
+                "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --add-dir '/d/my feature' \
                  --session-id \"$(tee {id} </proc/sys/kernel/random/uuid)\""
             )
         );
@@ -858,7 +866,7 @@ mod tests {
         let dirs = [PathBuf::from("/d/my feature")];
         assert_eq!(
             resume_line("claude --model opus", "abc-1", &dirs),
-            "claude --model opus --add-dir '/d/my feature' --resume abc-1"
+            "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --model opus --add-dir '/d/my feature' --resume abc-1"
         );
         assert_eq!(
             resume_line("cursor-agent", "abc-1", &dirs),
@@ -1019,12 +1027,24 @@ mod tests {
     #[test]
     fn an_agent_started_by_hand_is_allowed_into_the_dirs() {
         let dirs = [PathBuf::from("/d/my feature"), PathBuf::from("/e")];
-        for base in ["claude", "codex", "cursor-agent"] {
+        for base in ["codex", "cursor-agent"] {
             assert_eq!(
                 allowed_into(base, &dirs),
                 format!("{base} --add-dir '/d/my feature' --add-dir /e")
             );
         }
+        // Claude is told to read those folders' CLAUDE.md, once.
+        let claude = allowed_into("claude", &dirs);
+        assert_eq!(
+            claude,
+            "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --add-dir '/d/my feature' --add-dir /e"
+        );
+        assert_eq!(Flavor::of(&claude), Flavor::Claude);
+        assert_eq!(allowed_into(&claude, &[]), claude);
+        assert_eq!(
+            allowed_into(&claude, &dirs).matches("CLAUDE_MD=").count(),
+            1
+        );
         for base in ["opencode", "aider --yes", "gemini"] {
             assert_eq!(allowed_into(base, &dirs), base);
         }

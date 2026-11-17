@@ -4,7 +4,9 @@
 //! Each repository first gets a copy of what its main worktree has and its
 //! feature worktree lacks (`to_copy`):
 //! - its ignored files of at most `MAX_FILE` that aren't logs or compiled
-//!   Python and aren't in an ignored folder: `.env`, `local_config.py`;
+//!   Python and aren't in an ignored folder: `.env`, `local_config.py`. An
+//!   ignored folder of agents' settings (`AGENT_FOLDERS`: `.claude`, …)
+//!   gives its files by that same rule;
 //! - its ignored environments: `node_modules`, any folder with a
 //!   `pyvenv.cfg`. They copy with `cp -a --reflink=always`: on a
 //!   copy-on-write file system that is instant and takes no space. Where
@@ -77,6 +79,12 @@ use crate::{
 /// The name of an ignored folder copied whatever it holds; any folder with
 /// `VENV_MARK` is copied too.
 const NODE_MODULES: &str = "node_modules";
+
+/// Ignored folders of agents' settings, skills and hooks, whose small files
+/// are copied as other ignored files are: an agent in the worktree works
+/// as in main. A repository or worktree inside one (`.claude/worktrees`)
+/// is left out.
+const AGENT_FOLDERS: [&str; 4] = [".claude", ".cursor", ".codex", ".agents"];
 
 /// The file that makes a folder a Python virtual environment.
 const VENV_MARK: &str = "pyvenv.cfg";
@@ -598,6 +606,13 @@ fn picked(main: &Path, listing: &[&str]) -> Vec<Item> {
                     path: folder.to_owned(),
                     environment: true,
                 });
+            } else if AGENT_FOLDERS.contains(&name) {
+                for path in small_files(main, Path::new(folder)) {
+                    items.push(Item {
+                        path,
+                        environment: false,
+                    });
+                }
             }
             continue;
         }
@@ -615,6 +630,35 @@ fn picked(main: &Path, listing: &[&str]) -> Vec<Item> {
         }
     }
     items
+}
+
+/// The files in `folder` of `main`, at any depth, that `picked` would copy
+/// were each ignored alone, by path from `main`. A folder holding a
+/// repository or a worktree is left out, and a link is copied as a link.
+fn small_files(main: &Path, folder: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(main.join(folder)) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = folder.join(entry.file_name());
+        let Ok(meta) = entry.path().symlink_metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            if entry.path().join(".git").symlink_metadata().is_err() {
+                files.extend(small_files(main, &path));
+            }
+            continue;
+        }
+        let text = path.to_string_lossy().into_owned();
+        let junk = text.ends_with(".log") || text.ends_with(".pyc");
+        if !junk && (!meta.is_file() || meta.len() <= MAX_FILE) {
+            files.push(text);
+        }
+    }
+    files.sort();
+    files
 }
 
 /// What to copy into `repo`'s worktree, by path, with `extras` from the
@@ -2010,6 +2054,30 @@ mod tests {
             .map(|i| (i.path.as_str(), i.environment))
             .collect();
         assert_eq!(paths, [("env3", true), ("web/node_modules", true)]);
+    }
+
+    #[test]
+    fn an_agents_ignored_folder_gives_its_small_files() {
+        let t = Temp::new();
+        put(&t.0, ".claude/settings.json", "{}");
+        put(&t.0, ".claude/skills/x/SKILL.md", "x");
+        put(&t.0, ".claude/debug.log", "");
+        put(&t.0, ".claude/big", &"x".repeat(MAX_FILE as usize + 1));
+        put(&t.0, ".claude/worktrees/w/.git", "gitdir: x");
+        put(&t.0, ".claude/worktrees/w/src.rs", "");
+        put(&t.0, "target/x", "");
+        let items = picked(&t.0, &[".claude/", "target/"]);
+        let paths: Vec<_> = items
+            .iter()
+            .map(|i| (i.path.as_str(), i.environment))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                (".claude/settings.json", false),
+                (".claude/skills/x/SKILL.md", false),
+            ]
+        );
     }
 
     #[test]
