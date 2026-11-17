@@ -5,6 +5,9 @@ you start in the home one, and the others are yours to read and change too
 
 {{projects}}
 
+Their rules aren't loaded for you: read the CLAUDE.md or AGENTS.md of the
+folder and repository you work in, where there.
+
 Its repositories, each checked out in its own folder under its project's
 feature folder, named as gerdr names them (another project's as
 `project:repository`):
@@ -40,6 +43,9 @@ These repositories aren't changed by this feature. They are here for you to
 read, as main checkouts that may not be on the base branch. Don't edit them:
 
 {{context_repos}}
+
+Their rules aren't loaded for you: read a repository's CLAUDE.md or AGENTS.md,
+where there, before you rely on it.
 
 {{#if graphs}}
 The graph doesn't hold them: search them directly.
