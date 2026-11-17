@@ -1639,18 +1639,20 @@ impl Feature {
 
     /// The folders its agents are let into besides their working folder
     /// (`dir`): the feature data dir `data`, each linked project's feature
-    /// folder, each context repository's main checkout, then the main
-    /// checkout of each other repository of its root, which its prompt says
-    /// are there to read (`layout::others_in_root`).
+    /// folder, then each context repository's main checkout. Not the other
+    /// repositories of its root, though its prompt says they are there to
+    /// read: Claude asks to trust each `--add-dir` folder every time it
+    /// starts (checked on 2.1.326), and those aren't the feature's.
     pub fn agent_dirs(&self, data: &Path) -> Vec<PathBuf> {
         std::iter::once(data.to_path_buf())
             .chain(self.links.iter().map(|l| l.dir.clone()))
             .chain(self.context.iter().map(|c| c.main.clone()))
-            .chain(layout::others_in_root(self).into_iter().map(|(_, main)| main))
             .collect()
     }
 
-    /// `agent_dirs` for the agent `base` starts. Cursor's CLI also gets each
+    /// `agent_dirs` for the agent `base` starts. Cursor's CLI, which asks no
+    /// trust, also gets the main checkout of each other repository of the
+    /// root (`layout::others_in_root`), and each
     /// repository's worktree under a folder that holds several: it tells an
     /// agent a root's git branch and status only for a root that is a git
     /// repository, which such a folder isn't, and a root's own search leaves
@@ -1660,6 +1662,7 @@ impl Feature {
     pub fn agent_dirs_for(&self, base: &str, data: &Path) -> Vec<PathBuf> {
         let mut dirs = self.agent_dirs(data);
         if agents::Flavor::of(base) == agents::Flavor::Cursor {
+            dirs.extend(layout::others_in_root(self).into_iter().map(|(_, main)| main));
             let roots = self.repos.iter().map(|r| &r.worktree).filter(|worktree| {
                 **worktree != self.dir && !dirs.contains(*worktree) && worktree.is_dir()
             });

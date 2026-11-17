@@ -4536,10 +4536,13 @@ mod tests {
         let names = PerProject::all("Acme".to_owned());
         let v = vars(&f, &names, Path::new("/data/a"), Stage::Plan);
         assert_eq!(v["other_repos"], format!("- web: {}", web.display()));
-        // Said to be there to read, it is let in.
+        // Said to be there to read, only Cursor is let in: Claude would ask
+        // to trust it each start.
+        let data = Path::new("/data/a");
+        assert_eq!(f.agent_dirs_for("claude", data), [data.to_path_buf()]);
         assert_eq!(
-            f.agent_dirs(Path::new("/data/a")),
-            [PathBuf::from("/data/a"), web.clone()]
+            f.agent_dirs_for("cursor-agent", data),
+            [data.to_path_buf(), web.clone()]
         );
         let text = prompts::render_builtin("plan", &v).unwrap();
         assert!(text.contains(&v["other_repos"]));
