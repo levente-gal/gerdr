@@ -1239,11 +1239,6 @@ const UNLINKED: [&str; 4] = [FEATURES_DIR, ".git", "graphify-out", "node_modules
 /// its stage files (see `link_docs`).
 pub const DOCS_LINK: &str = "feature-docs";
 
-/// The folder at the top of a feature folder its research agents write their
-/// answers in, kept out of git as `DOCS_LINK` is. They can't write through
-/// the link: Claude asks before it writes outside the folder it started in.
-pub const RESEARCH_DIR: &str = "feature-research";
-
 /// Link the root's files and folders other than repositories into `dir`.
 fn link_root(root: &Path, dir: &Path) -> Result<Vec<PathBuf>, String> {
     let entries =
@@ -1421,8 +1416,7 @@ pub fn link_docs(dir: &Path, multi: bool, data: &Path) -> Result<Option<PathBuf>
     let exclude = if multi {
         None
     } else {
-        let docs = exclude_line(dir, &format!("/{DOCS_LINK}"))?;
-        exclude_line(dir, &format!("/{RESEARCH_DIR}"))?.or(docs)
+        exclude_line(dir, &format!("/{DOCS_LINK}"))?
     };
     if !there {
         // A link to nothing makes the tools that list files complain.
@@ -2718,7 +2712,6 @@ mod tests {
         let exclude = repo.join(".git/info/exclude");
         let text = std::fs::read_to_string(exclude).unwrap();
         assert!(text.lines().any(|l| l == "/feature-docs"), "{text}");
-        assert!(text.lines().any(|l| l == "/feature-research"), "{text}");
         assert!(data.join("brief.md").is_file());
     }
 

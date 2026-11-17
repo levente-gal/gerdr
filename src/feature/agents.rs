@@ -309,15 +309,34 @@ const CLAUDE_MD_ENV: &str = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD";
 /// folders only when told to (checked on 2.1.326): a linked project's rules
 /// matter as much as the home one's.
 pub fn allowed_into(base: &str, dirs: &[PathBuf]) -> String {
+    allowed_into_with(base, dirs, &crate::projects::data_dir())
+}
+
+/// `allowed_into`, gerdr's own files under `data`. Claude asks to trust each
+/// `--add-dir` folder anew every time it starts (checked on 2.1.326), so the
+/// ones under `data` (a feature's stage files) go in as the
+/// `additionalDirectories` of `--settings`, which it doesn't ask about.
+/// Repositories stay `--add-dir`: only those get their CLAUDE.md read. A
+/// command with `--settings` of its own keeps them all `--add-dir`.
+fn allowed_into_with(base: &str, dirs: &[PathBuf], data: &Path) -> String {
     let mut line = base.trim().to_owned();
-    if Flavor::of(base) == Flavor::Claude && !dirs.is_empty() && !line.contains(CLAUDE_MD_ENV) {
+    let claude = Flavor::of(base) == Flavor::Claude;
+    if claude && !dirs.is_empty() && !line.contains(CLAUDE_MD_ENV) {
         line = format!("{CLAUDE_MD_ENV}=1 {line}");
     }
-    if Flavor::of(base).adds_dirs() {
-        for dir in dirs {
-            line.push_str(" --add-dir ");
-            line.push_str(&crate::desktop::shell_quote(&dir.to_string_lossy()));
-        }
+    if !Flavor::of(base).adds_dirs() {
+        return line;
+    }
+    let settled = |dir: &&PathBuf| claude && dir.starts_with(data) && !base.contains("--settings");
+    let (own, added): (Vec<&PathBuf>, Vec<&PathBuf>) = dirs.iter().partition(settled);
+    for dir in added {
+        line.push_str(" --add-dir ");
+        line.push_str(&crate::desktop::shell_quote(&dir.to_string_lossy()));
+    }
+    if !own.is_empty() {
+        let settings = serde_json::json!({ "permissions": { "additionalDirectories": own } });
+        line.push_str(" --settings ");
+        line.push_str(&crate::desktop::shell_quote(&settings.to_string()));
     }
     line
 }
@@ -1090,6 +1109,28 @@ mod tests {
             assert_eq!(allowed_into(base, &dirs), base);
         }
         assert_eq!(allowed_into(" claude ", &[]), "claude");
+    }
+
+    #[test]
+    fn claude_gets_gerdrs_own_folders_by_settings_not_add_dir() {
+        let data = Path::new("/home/u/.local/share/gerdr");
+        let dirs = [
+            data.join("features/shop/csv"),
+            PathBuf::from("/w/api"),
+        ];
+        assert_eq!(
+            allowed_into_with("claude", &dirs, data),
+            "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 claude --add-dir /w/api --settings \
+             '{\"permissions\":{\"additionalDirectories\":[\"/home/u/.local/share/gerdr/features/shop/csv\"]}}'"
+        );
+        // Other CLIs, and a command with settings of its own, keep --add-dir.
+        assert_eq!(
+            allowed_into_with("codex", &dirs, data),
+            "codex --add-dir /home/u/.local/share/gerdr/features/shop/csv --add-dir /w/api"
+        );
+        let own = allowed_into_with("claude --settings my.json", &dirs, data);
+        assert!(!own.contains("additionalDirectories"), "{own}");
+        assert_eq!(own.matches("--add-dir").count(), 2, "{own}");
     }
 
     #[test]
