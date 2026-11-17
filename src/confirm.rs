@@ -315,6 +315,15 @@ fn close_question(card: &AgentView) -> (String, String) {
     (title, body.to_owned())
 }
 
+/// What the old agent tabs dialog calls the unnamed tab of `card`: its
+/// agent and what it was on ("claude · Fix dark mode toggle").
+fn unnamed_agent_tab(card: &AgentView) -> String {
+    match card.title() {
+        Some(on) => format!("{} \u{b7} {on}", card.heading()),
+        None => card.heading().to_owned(),
+    }
+}
+
 /// What a confirm dialog about closing the old agent tabs called `names`
 /// says: its title and the lines under it, naming a few.
 fn close_old_agents_question(names: &[String]) -> (String, String) {
@@ -529,8 +538,19 @@ impl Gerdr {
             return self.show_notice("No old agent tabs to close".into());
         };
         let views = self.tab_views(ws);
+        let cards = self.agent_views().into_iter().nth(w).unwrap_or_default();
+        // A tab with no name of its own says only its agent ("claude"): what
+        // the agent was on tells those apart.
+        let unnamed = |tab: &crate::Tab| {
+            let card = (cards.iter()).find(|c| {
+                tab.herdr_panes()
+                    .any(|h| c.key == AgentKey::Herdr(h.pane_id.clone()))
+            })?;
+            let label = tab.label.as_deref().filter(|l| !l.trim().is_empty());
+            label.is_none().then(|| unnamed_agent_tab(card))
+        };
         let names: Vec<String> = (tabs.iter())
-            .filter_map(|&t| views.get(t).map(|v| v.title.clone()))
+            .filter_map(|&t| unnamed(&ws.tabs[t]).or_else(|| Some(views.get(t)?.title.clone())))
             .collect();
         let ids = tabs.iter().map(|&t| ws.tabs[t].id).collect();
         let (title, body) = close_old_agents_question(&names);
@@ -1108,6 +1128,13 @@ mod tests {
         let (title, body) = close_pane_question("npm run dev");
         assert_eq!(title, "Close \u{201c}npm run dev\u{201d}?");
         assert!(body.contains("its pane stops it"));
+        // An unnamed tab among old agent tabs: its agent and what it was on.
+        assert_eq!(unnamed_agent_tab(&card), "claude");
+        card.lines = vec![chrome::AgentLine::Title("Fix dark mode toggle".into())];
+        assert_eq!(
+            unnamed_agent_tab(&card),
+            "claude \u{b7} Fix dark mode toggle"
+        );
     }
 
     #[test]

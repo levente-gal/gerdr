@@ -302,6 +302,7 @@ impl Gerdr {
         let Some(pane) = self.open_feature_tab_behind(project, slug, &dir, command) else {
             return;
         };
+        self.name_pane_tab(&pane, crate::feature_agents::conflicts_tab_label(&agent));
         resolving.agent = agent.clone();
         resolving.pane = Some(pane);
         // Its agent too, now.

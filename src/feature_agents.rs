@@ -1203,6 +1203,18 @@ pub(crate) fn own_tab_label(agent: &str, n: u32) -> String {
     format!("{agent} \u{b7} Agent {n}")
 }
 
+/// The name the tab of the agent writing a feature's summary goes by:
+/// "claude · Summary".
+pub(crate) fn summary_tab_label(agent: &str) -> String {
+    format!("{agent} \u{b7} Summary")
+}
+
+/// The name the tab of the agent taking on a feature's conflicts goes by:
+/// "claude · Conflicts".
+pub(crate) fn conflicts_tab_label(agent: &str) -> String {
+    format!("{agent} \u{b7} Conflicts")
+}
+
 /// What the feature panel says of `run` under its stage: its agent's state,
 /// as herdr has it (`status`) and the watch saw it (`watch`).
 pub(crate) fn agent_line(
@@ -1573,8 +1585,13 @@ impl Gerdr {
     /// Name the tab holding herdr pane `pane` after its agent and `stage`
     /// (see `agent_tab_label`), as a rename would.
     pub(crate) fn label_agent_tab(&mut self, pane: &str, agent: &str, stage: Stage) {
+        self.name_pane_tab(pane, agent_tab_label(agent, stage));
+    }
+
+    /// Name the tab holding herdr pane `pane` `name`, as a rename would.
+    pub(crate) fn name_pane_tab(&mut self, pane: &str, name: String) {
         if let Some((w, t)) = self.herdr_pane_place(pane) {
-            self.rename_tab(w, t, agent_tab_label(agent, stage));
+            self.rename_tab(w, t, name);
         }
     }
 

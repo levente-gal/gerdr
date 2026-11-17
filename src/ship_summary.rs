@@ -88,6 +88,7 @@ impl Gerdr {
             // Opening the tab said why.
             return;
         };
+        self.name_pane_tab(&pane, crate::feature_agents::summary_tab_label(&agent));
         let now = feature::now();
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
