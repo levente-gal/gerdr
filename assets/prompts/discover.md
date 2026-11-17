@@ -31,7 +31,30 @@ Your job: find out with the user what this feature is, then write its brief.
    the brief is unclear. Never rewrite an entry: when the user changes their
    mind, add a new one with a line `Replaces: D2`, and add `Replaced by: D5`
    to the old one.
-4. When you both agree, write the brief to exactly this path:
+4. When a decision needs a fact you can't settle from the code here (how
+   an outside API behaves, what a library supports, what a standard says),
+   don't look it up yourself: ask for it in exactly this file, and go on
+   with the user meanwhile:
+
+   {{research.path}}
+
+   One section per question, in this form:
+
+   ```markdown
+   ## R1: Does the Stripe invoices API page its results?
+   Why: decides whether export is one call.
+   ```
+
+   Number them R1, R2, … and never reuse a number. gerdr starts an agent on
+   each new question and tells you when its answer is written. Add
+   `From: R1` to a decision an answer settled.
+{{#if research}}
+
+   Answered so far:
+
+{{research}}
+{{/if}}
+5. When you both agree, write the brief to exactly this path:
 
    {{artifact.path}}
 
@@ -49,10 +72,11 @@ Your job: find out with the user what this feature is, then write its brief.
    - `## Open questions`: what is still undecided. Leave the section out
      when nothing is.
 
-   End each line that rests on a decision with its id in parentheses:
-   `- One CSV holds every invoice (D1)`, or `(D1, D3)` for several. Cite only
-   decisions that are in the log; gerdr refuses a brief that cites one it
-   lacks.
+   End each line that rests on a decision or an answer with its id in
+   parentheses: `- One CSV holds every invoice (D1)`, or `(D1, R2)` for
+   several. Cite only decisions that are in the log and answers that are
+   written; gerdr refuses a brief that cites one that isn't. It can't be
+   approved while a question is still being researched.
 
 {{#if comments}}
 The user sent an earlier brief back with these comments. Skip step 1: read

@@ -9,7 +9,7 @@ pub mod render;
 /// version: bumped when its text changes meaning.
 pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
     Some(match name {
-        "discover" => (include_str!("../../assets/prompts/discover.md"), 5),
+        "discover" => (include_str!("../../assets/prompts/discover.md"), 6),
         "plan" => (include_str!("../../assets/prompts/plan.md"), 5),
         "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 3),
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
@@ -28,6 +28,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "rules" => (include_str!("../../assets/prompts/rules.md"), 1),
         "repos" => (include_str!("../../assets/prompts/repos.md"), 5),
         "decisions" => (include_str!("../../assets/prompts/decisions.md"), 1),
+        "research" => (include_str!("../../assets/prompts/research.md"), 1),
         "summary" => (include_str!("../../assets/prompts/summary.md"), 1),
         "conflicts" => (include_str!("../../assets/prompts/conflicts.md"), 1),
         "conflicts-plan" => (include_str!("../../assets/prompts/conflicts-plan.md"), 1),
@@ -75,6 +76,11 @@ mod tests {
             ("brief.path", "/d/bulk-edit/brief.md"),
             ("decisions.path", "/d/bulk-edit/decisions.md"),
             ("decisions.kept", ""),
+            ("research.path", "/d/bulk-edit/research.md"),
+            ("research", ""),
+            ("research.id", "1"),
+            ("research.question", "Does the API page its results?"),
+            ("research.why", ""),
             ("plan.path", "/d/bulk-edit/plan.md"),
             ("evidence.path", "/d/bulk-edit/evidence.md"),
             ("graphs", ""),
@@ -150,6 +156,8 @@ mod tests {
             "summary",
             "conflicts",
             "conflicts-plan",
+            "decisions",
+            "research",
         ] {
             for multi in [false, true] {
                 for comments in ["", "Fix the scope."] {

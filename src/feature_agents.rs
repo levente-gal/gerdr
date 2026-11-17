@@ -398,7 +398,7 @@ fn rested_enough(
 /// Whether `text` is a good `stage` file of `feature`, in feature data dir
 /// `data`; else what it lacks. A multi-repository plan must name the
 /// touched repositories; a brief's cited decisions must be in its decision
-/// log (`artifacts::decision_lacks`).
+/// log, and its cited research answered (`artifacts::citation_lacks`).
 pub(crate) fn validate(
     feature: &Feature,
     stage: Stage,
@@ -414,7 +414,7 @@ pub(crate) fn validate(
     }
     let mut lacks = artifacts::check(stage, text).err().unwrap_or_default();
     if stage == Stage::Discover {
-        lacks.extend(artifacts::decision_lacks(text, data));
+        lacks.extend(artifacts::citation_lacks(text, data));
     }
     if let Some(review) = review {
         for id in plan_review::unmapped(review, text) {
@@ -458,6 +458,12 @@ pub(crate) fn approval(
         Stage::CodeReview => return Err("Approve Code review from the feature's diff".into()),
         Stage::ManualTest => return Err("Mark Manual test passed from its page".into()),
         _ => {}
+    }
+    // The brief waits for the facts it asked for.
+    if stage == Stage::Discover
+        && let Some(why) = crate::feature_research::unanswered(feature)
+    {
+        return Err(why);
     }
     let name = artifacts::name(stage).unwrap_or("its file");
     let Some(text) = text else {
@@ -1078,6 +1084,25 @@ pub(crate) fn vars(
             "decisions.path",
             data.join(artifacts::DECISIONS).display().to_string(),
         ),
+        (
+            "research.path",
+            data.join(artifacts::RESEARCH).display().to_string(),
+        ),
+        // The research answered so far, for Discover's agent starting again.
+        (
+            "research",
+            (feature.research.iter())
+                .filter(|r| r.done.is_some())
+                .map(|r| {
+                    let path = artifacts::research_path(data, r.id);
+                    format!("- R{}: {}: {}", r.id, r.question, path.display())
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        ("research.id", String::new()),
+        ("research.question", String::new()),
+        ("research.why", String::new()),
         (
             "decisions.kept",
             match data.join(artifacts::DECISIONS).is_file() {
@@ -2072,8 +2097,32 @@ impl Gerdr {
         self.show_success(format!("Sent the prompt to {agent}"));
     }
 
+    /// The agent Discover of `feature` starts, as its page picked it, with
+    /// its picked model: its name and command. Why none, for an agent gerdr
+    /// can't hand a prompt as it starts (OpenCode, T3 Code).
+    pub(crate) fn discover_agent(&self, feature: &Feature) -> Result<(String, String), String> {
+        let stage = Stage::Discover;
+        let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
+        match stage_pick(feature, stage, workflow, &self.launcher.cli_agents) {
+            Pick::Agent(agent, base)
+                if matches!(
+                    Flavor::of(&base),
+                    Flavor::Claude | Flavor::Codex | Flavor::Cursor
+                ) =>
+            {
+                let model = picked_model(feature, stage, &agent);
+                Ok((agent, with_model(&base, model.as_deref())))
+            }
+            Pick::Agent(agent, _) => Err(format!(
+                "gerdr can't hand {agent} its question: pick Claude Code, Codex or Cursor for Discover"
+            )),
+            Pick::NoCli => Err("No coding agent CLI is installed".into()),
+            Pick::Refused(why) => Err(why),
+        }
+    }
+
     /// The line that tells `stage`'s agent to do what `prompt` says.
-    fn start_line(
+    pub(crate) fn start_line(
         &self,
         feature: &Feature,
         project: &str,
@@ -2459,6 +2508,7 @@ impl Gerdr {
         self.adopt_checks(&project);
         self.conflicts_agents_tick(&project);
         self.own_agents_tick(&project);
+        self.research_tick(&project);
         let Some(all) = self.features.all.get(&project) else {
             return;
         };
@@ -3861,6 +3911,16 @@ mod tests {
         assert_eq!(
             approval(&f, Stage::Discover, Some(BRIEF), Path::new("")),
             Ok(())
+        );
+        let mut researching = f.clone();
+        researching.research = vec![crate::feature::agents::ResearchRun {
+            id: 2,
+            started: Some(5),
+            ..Default::default()
+        }];
+        assert_eq!(
+            approval(&researching, Stage::Discover, Some(BRIEF), Path::new("")),
+            Err("Research R2 is still running: wait for it, or close its tab".into())
         );
         let cites = format!("{BRIEF}- Saves to Downloads (D1)\n");
         assert_eq!(

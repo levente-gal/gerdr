@@ -378,8 +378,10 @@ pub(super) fn stage_page(
         };
         sections.insert(at, next);
     }
-    // The feature's own agents go under the stage's, else first.
-    let own = own_cards(feature, stage, state, actions, now);
+    // The feature's own agents go under the stage's, else first; its
+    // research under those.
+    let mut own = own_cards(feature, stage, state, actions, now);
+    own.extend(research_cards(feature, stage, state, actions, now));
     if !own.is_empty() {
         let at = (sections.iter())
             .rposition(|s| matches!(s, PageSection::Agent { .. }))

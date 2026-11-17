@@ -154,6 +154,7 @@ impl DocOf {
         match self.file {
             DocFile::Evidence => "Evidence",
             DocFile::Decisions => "Decisions",
+            DocFile::Research(_) => "Research",
             DocFile::FixPlan => "Fix plan",
             DocFile::PlanChanges => "Plan changes",
             DocFile::DraftChanges(..) => "Draft changes",
@@ -2048,6 +2049,9 @@ impl WorktreeDiff {
                         _ if self.feature.is_some() => "Keys in a feature's code review",
                         (Some(_), _) => "Keys in a commit's diff",
                         (_, Some(doc)) if doc.file == DocFile::Decisions => "Keys in the decisions",
+                        (_, Some(doc)) if matches!(doc.file, DocFile::Research(_)) => {
+                            "Keys in a research answer"
+                        }
                         (_, Some(doc)) if doc.only_read() => "Keys in the evidence",
                         (_, Some(doc)) if doc.suggestions.is_some() => {
                             "Keys in the suggestions on the plan"

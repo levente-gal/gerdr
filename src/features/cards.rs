@@ -171,6 +171,62 @@ pub(super) fn own_cards(
     .collect()
 }
 
+/// The cards of `feature`'s research on Discover's page, in the order asked:
+/// its question, how it stands at `now`, and its button in `actions`.
+pub(super) fn research_cards(
+    feature: &Feature,
+    stage: Stage,
+    state: &PanelState,
+    actions: &[(PageButton, PanelOutcome)],
+    now: u64,
+) -> Vec<PageSection> {
+    if stage != Stage::Discover {
+        return Vec::new();
+    }
+    (feature.research.iter())
+        .map(|run| {
+            let status = (state.research_status.iter())
+                .find(|(id, _)| *id == run.id)
+                .and_then(|(_, s)| *s);
+            let ago = |at| crate::clock::ago(now, at);
+            let (dot, said) = match (run.done, &run.stopped, run.started) {
+                (Some(at), _, _) => (Dot::Done, format!("answered {}", ago(at))),
+                (None, Some(why), _) => (Dot::Failed, format!("stopped \u{b7} {why}")),
+                (None, None, None) => (Dot::Unknown, "waits its turn".to_owned()),
+                (None, None, Some(at)) => {
+                    let words = match status {
+                        Some(AgentStatus::Blocked) => "asks you",
+                        Some(AgentStatus::Idle | AgentStatus::Done) => "idle, no answer yet",
+                        _ => "working",
+                    };
+                    let dot = status.map_or(Dot::Unknown, Dot::of_status);
+                    (dot, format!("{words} \u{b7} started {}", ago(at)))
+                }
+            };
+            let id = run.id;
+            let buttons = (actions.iter().enumerate())
+                .filter(|(_, (_, o))| {
+                    matches!(o, PanelOutcome::ShowResearch(i) | PanelOutcome::OpenResearch(i)
+                        | PanelOutcome::RerunResearch(i) if *i == id)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            PageSection::Agent {
+                stage,
+                icon: AgentIcon::from_agent(&run.agent),
+                name: format!("Research R{id}"),
+                dot,
+                status: format!("{} \u{b7} {said}", run.question),
+                tail: Vec::new(),
+                buttons,
+                picks: Vec::new(),
+                model: None,
+                waits: run.done.is_none() && status == Some(AgentStatus::Blocked),
+            }
+        })
+        .collect()
+}
+
 /// The card of the agent taking on `feature`'s conflicts on Ship's page,
 /// while one does: what it does, whose turn it is, and the page's buttons in
 /// `actions` that act on it.

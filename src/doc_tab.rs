@@ -84,6 +84,7 @@ impl DocMode {
             DocFile::Stage(_) => &[DocMode::Review, DocMode::Split],
             DocFile::Evidence
             | DocFile::Decisions
+            | DocFile::Research(_)
             | DocFile::FixPlan
             | DocFile::ConflictPlan(_) => &DocMode::ALL,
             DocFile::PlanChanges | DocFile::DraftChanges(..) | DocFile::Suggestions => {
@@ -107,7 +108,7 @@ impl DocMode {
     pub fn default_for(file: DocFile) -> DocMode {
         match file {
             DocFile::Stage(_) | DocFile::FixPlan | DocFile::ConflictPlan(_) => DocMode::Review,
-            DocFile::Evidence | DocFile::Decisions => DocMode::Preview,
+            DocFile::Evidence | DocFile::Decisions | DocFile::Research(_) => DocMode::Preview,
             DocFile::PlanChanges | DocFile::DraftChanges(..) | DocFile::Suggestions => {
                 DocMode::Review
             }
@@ -540,6 +541,7 @@ impl Gerdr {
             }
             DocFile::Evidence
             | DocFile::Decisions
+            | DocFile::Research(_)
             | DocFile::PlanChanges
             | DocFile::DraftChanges(..)
             | DocFile::Suggestions => Review::default(),

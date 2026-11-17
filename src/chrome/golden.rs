@@ -3542,6 +3542,69 @@ fn feature_tab_discover_decisions() -> super::FeatureTabView {
     view
 }
 
+/// Discover's page with its research: one running, one answered, one
+/// stopped, one waiting its turn, each a card under the agent's.
+fn feature_tab_discover_research() -> super::FeatureTabView {
+    use super::{ButtonStyle, Dot, PageButton, PageSection};
+    use crate::{agent_icons::AgentIcon, feature::Stage};
+    let mut view = feature_tab_discover_decisions();
+    let first = view.page.buttons.len();
+    for label in ["Show agent", "Open", "Run again"] {
+        view.page.buttons.push(PageButton {
+            label: label.into(),
+            style: ButtonStyle::Plain,
+        });
+    }
+    let card = |id: u32, icon, dot, status: &str, buttons: Vec<usize>, waits| PageSection::Agent {
+        stage: Stage::Discover,
+        icon,
+        name: format!("Research R{id}"),
+        dot,
+        status: status.into(),
+        tail: Vec::new(),
+        buttons,
+        picks: Vec::new(),
+        model: None,
+        waits,
+    };
+    let cards = [
+        card(
+            1,
+            AgentIcon::Claude,
+            Dot::Working,
+            "Does the Stripe invoices API page its results? \u{b7} working \u{b7} started 2m ago",
+            vec![first],
+            false,
+        ),
+        card(
+            2,
+            AgentIcon::Claude,
+            Dot::Done,
+            "Which CSV dialect does the accountant's tool read? \u{b7} answered 1m ago",
+            vec![first + 1],
+            false,
+        ),
+        card(
+            3,
+            AgentIcon::Claude,
+            Dot::Failed,
+            "Can exports run in the background? \u{b7} stopped \u{b7} its tab closed",
+            vec![first + 2],
+            false,
+        ),
+        card(
+            4,
+            AgentIcon::from_agent(""),
+            Dot::Unknown,
+            "Is there a rate limit on exports? \u{b7} waits its turn",
+            Vec::new(),
+            false,
+        ),
+    ];
+    view.page.sections.splice(1..1, cards);
+    view
+}
+
 /// A plan too long for its column, scrolled.
 fn feature_tab_plan_long() -> super::FeatureTabView {
     use super::{CheckTone, NodeMark, PageSection, TabColumn};
@@ -6323,7 +6386,7 @@ fn placed(mut view: super::FeatureTabView) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 58] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 59] {
     let views = [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -6376,6 +6439,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 58] {
         ("tab_start_over", feature_tab_start_over()),
         ("tab_discover_brief", feature_tab_discover_brief()),
         ("tab_discover_decisions", feature_tab_discover_decisions()),
+        ("tab_discover_research", feature_tab_discover_research()),
         ("tab_plan_long", feature_tab_plan_long()),
         ("tab_manual_test", feature_tab_manual_test(false)),
         ("tab_manual_note", feature_tab_manual_test(true)),
@@ -6397,7 +6461,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 58] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 74] = [
+const TAB_SURFACES: [(&str, i32); 76] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -6472,9 +6536,11 @@ const TAB_SURFACES: [(&str, i32); 74] = [
     ("tab_verify_regressed", 1180),
     ("tab_verify_machine", 860),
     ("tab_discover_decisions", 860),
+    ("tab_discover_research", 1180),
+    ("tab_discover_research", 860),
 ];
 
-const FEATURE_TAB: [&str; 74] = [
+const FEATURE_TAB: [&str; 76] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -6549,10 +6615,12 @@ const FEATURE_TAB: [&str; 74] = [
     "tab_verify_regressed_1180",
     "tab_verify_machine_860",
     "tab_discover_decisions_860",
+    "tab_discover_research_1180",
+    "tab_discover_research_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 74]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
     // Dark at 1
     [
         0x67093ad27ab19c53, // tab_build_860
@@ -6629,6 +6697,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 74]; 4] = [
         0x8c5bfb636d72289d, // tab_verify_regressed_1180
         0x5d1528bc2cc8a559, // tab_verify_machine_860
         0xd410f6df1fe56733, // tab_discover_decisions_860
+        0x6e40f72150c44370, // tab_discover_research_1180
+        0x5a15bce8cde2e7b1, // tab_discover_research_860
     ],
     // Dark at 2
     [
@@ -6706,6 +6776,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 74]; 4] = [
         0xe9edacb82394691d, // tab_verify_regressed_1180
         0xd05cc43a9d172953, // tab_verify_machine_860
         0xdb64822c21ec8637, // tab_discover_decisions_860
+        0xd4f06db6cc04bb21, // tab_discover_research_1180
+        0x3a15fe203db3dbc3, // tab_discover_research_860
     ],
     // Light at 1
     [
@@ -6783,6 +6855,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 74]; 4] = [
         0xcd5b80374b7fadce, // tab_verify_regressed_1180
         0x73e583c110a3c917, // tab_verify_machine_860
         0x41cdcaa749a870ce, // tab_discover_decisions_860
+        0x8de8bd802f466fc7, // tab_discover_research_1180
+        0xc82e012d385c0d7b, // tab_discover_research_860
     ],
     // Light at 2
     [
@@ -6860,6 +6934,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 74]; 4] = [
         0xa1eb9487db0a0cd1, // tab_verify_regressed_1180
         0x44849469da4e5fdd, // tab_verify_machine_860
         0xd656c1cb8bbb0455, // tab_discover_decisions_860
+        0x086aed1decaf1d0c, // tab_discover_research_1180
+        0xb337d293f3fefc09, // tab_discover_research_860
     ],
 ];
 
@@ -6912,8 +6988,12 @@ fn dump_feature_tab() {
     let dir = std::path::PathBuf::from(dir);
     let _ = std::fs::create_dir_all(&dir);
     let painter = Painter::new();
+    // `GERDR_DUMP_ONLY=tab_discover` writes only the scenes named so: all
+    // of them take minutes and gigabytes.
+    let only = std::env::var("GERDR_DUMP_ONLY").ok();
     for (theme, scale) in CASES {
-        for (name, view) in feature_tabs() {
+        let views = feature_tabs().into_iter();
+        for (name, view) in views.filter(|(n, _)| only.as_deref().is_none_or(|o| n.starts_with(o))) {
             for w in TAB_WIDTHS {
                 dump(
                     &dir,

@@ -487,6 +487,15 @@ impl Gerdr {
             PanelOutcome::Decisions => {
                 self.open_doc_tab(&project, &slug, DocFile::Decisions);
             }
+            PanelOutcome::ShowResearch(id) => {
+                let pane = (self.feature(&project, &slug))
+                    .and_then(|f| f.research.iter().find(|r| r.id == id)?.pane.clone());
+                self.show_agent_pane(pane);
+            }
+            PanelOutcome::OpenResearch(id) => {
+                self.open_doc_tab(&project, &slug, DocFile::Research(id));
+            }
+            PanelOutcome::RerunResearch(id) => self.rerun_research(&project, &slug, id),
             PanelOutcome::Findings => {
                 let first = self
                     .feature(&project, &slug)

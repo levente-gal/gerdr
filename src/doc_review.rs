@@ -57,6 +57,9 @@ pub enum DocFile {
     /// Discover's decision log (`artifacts::DECISIONS`), only read as the
     /// evidence is: its agent keeps it.
     Decisions,
+    /// The answer to research question `.0` (`artifacts::research_path`),
+    /// only read as the evidence is: its agent wrote it.
+    Research(u32),
     /// The fix round's plan, open or the last: reviewed as a stage's file
     /// is, and Make fixes where that has Approve.
     FixPlan,
@@ -82,7 +85,7 @@ impl DocFile {
         match self {
             DocFile::Stage(stage) => stage,
             DocFile::Evidence => Stage::Verify,
-            DocFile::Decisions => Stage::Discover,
+            DocFile::Decisions | DocFile::Research(_) => Stage::Discover,
             DocFile::FixPlan => Stage::Build,
             DocFile::PlanChanges | DocFile::Suggestions => Stage::PlanReview,
             DocFile::ConflictPlan(_) => Stage::Ship,
@@ -99,6 +102,7 @@ impl DocFile {
             DocFile::ConflictPlan(n) => dir.join(format!("conflicts-{n}-comments.json")),
             // It takes none, but must not share the brief's.
             DocFile::Decisions => dir.join("decisions-comments.json"),
+            DocFile::Research(id) => dir.join(format!("research-R{id}-comments.json")),
             _ => comments_path(dir, self.stage()),
         }
     }
@@ -113,8 +117,8 @@ impl DocFile {
             DocFile::PlanChanges => artifacts::name(Stage::PlanReview),
             DocFile::DraftChanges(stage, _) => artifacts::name(stage),
             DocFile::Suggestions => artifacts::name(Stage::Plan),
-            // Named by its turn: its path says it.
-            DocFile::ConflictPlan(_) => None,
+            // Named by its turn or its number: its path says it.
+            DocFile::ConflictPlan(_) | DocFile::Research(_) => None,
         }
     }
 
@@ -125,6 +129,7 @@ impl DocFile {
             DocFile::Stage(stage) => state(feature, stage, docs, now),
             DocFile::Evidence => evidence_state(feature, running),
             DocFile::Decisions => decisions_state(docs.decisions),
+            DocFile::Research(id) => research_state(feature, id),
             DocFile::FixPlan => fix_plan_state(feature, now),
             DocFile::DraftChanges(_, k) => format!("draft {k} against draft {}", k - 1),
             DocFile::PlanChanges => format!(
@@ -146,6 +151,7 @@ impl DocFile {
             DocFile::Stage(stage) => locked(feature, stage, docs),
             DocFile::Evidence => Some(EVIDENCE_READ_ONLY),
             DocFile::Decisions => Some(DECISIONS_READ_ONLY),
+            DocFile::Research(_) => Some(RESEARCH_READ_ONLY),
             DocFile::PlanChanges => Some(PLAN_CHANGES_READ_ONLY),
             DocFile::DraftChanges(..) => Some(DRAFT_CHANGES_READ_ONLY),
             DocFile::Suggestions => Some(SUGGESTIONS_READ_ONLY),
@@ -187,6 +193,7 @@ impl DocFile {
         match self {
             DocFile::DraftChanges(stage, k) => crate::feature::drafts::path(dir, stage, k),
             DocFile::ConflictPlan(n) => Some(dir.join(format!("conflicts-{n}.md"))),
+            DocFile::Research(id) => Some(artifacts::research_path(dir, id)),
             _ => Some(dir.join(self.name()?)),
         }
     }
@@ -194,7 +201,10 @@ impl DocFile {
     /// Whether it is a file only to read, with no actions of its own: the
     /// evidence and the decision log.
     pub fn only_read(self) -> bool {
-        matches!(self, DocFile::Evidence | DocFile::Decisions)
+        matches!(
+            self,
+            DocFile::Evidence | DocFile::Decisions | DocFile::Research(_)
+        )
     }
 
     /// Whether it shows a file as changes to another, only to read: the
@@ -569,6 +579,19 @@ fn fix_plan_locked(feature: Option<&Feature>) -> Option<&'static str> {
 /// Why the decision log takes no edit or comment.
 pub const DECISIONS_READ_ONLY: &str = "The decisions are only read: Discover's agent keeps them";
 
+/// Why a research answer takes no edit or comment.
+pub const RESEARCH_READ_ONLY: &str = "The answer is only read: its research agent wrote it";
+
+/// What research answer `id` of `feature` answers, as its tab's header says
+/// it.
+fn research_state(feature: Option<&Feature>, id: u32) -> String {
+    let question = feature.and_then(|f| f.research.iter().find(|r| r.id == id));
+    match question {
+        Some(run) => format!("R{id} \u{b7} {}", run.question),
+        None => format!("R{id}"),
+    }
+}
+
 /// How the decision log stands, as its tab's header says it: how many
 /// decisions it holds, as last read.
 fn decisions_state(n: usize) -> String {
@@ -662,13 +685,19 @@ impl Gerdr {
             return Err(Failed::Warning("That feature is gone".into()));
         };
         let title = feature.title.clone();
-        let name = file.name().unwrap_or_default();
+        // Named by its path when its kind has no one name.
+        let name = (file.name().map(str::to_owned))
+            .or_else(|| Some(path.file_name()?.to_string_lossy().into_owned()))
+            .unwrap_or_default();
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(err) if err.kind() == ErrorKind::NotFound => {
                 return Err(match file {
                     DocFile::Evidence => {
                         Failed::Warning("No evidence yet: Run checks first".into())
+                    }
+                    DocFile::Research(id) => {
+                        Failed::Warning(format!("Research R{id} isn't answered yet"))
                     }
                     DocFile::Decisions => {
                         Failed::Warning(format!("No decisions yet for \u{201c}{title}\u{201d}"))

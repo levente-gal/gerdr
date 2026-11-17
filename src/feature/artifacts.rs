@@ -394,8 +394,14 @@ pub const DECISIONS: &str = "decisions.md";
 
 /// The number of decision heading `line` (trimmed): `## D3: Export` is 3.
 fn decision_number(line: &str) -> Option<u32> {
+    numbered_heading(line, 'd')
+}
+
+/// The number of heading `line` (trimmed) that starts with `mark` and a
+/// number: `## R2: Does it page?` is 2 for `'r'`.
+fn numbered_heading(line: &str, mark: char) -> Option<u32> {
     let text = heading(line)?;
-    let rest = text.strip_prefix('d')?;
+    let rest = text.strip_prefix(mark)?;
     let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     let after = &rest[digits..];
     if digits == 0 || !(after.is_empty() || after.starts_with([':', ' '])) {
@@ -462,30 +468,55 @@ fn decided_line(line: &str) -> bool {
         .is_some_and(|rest| rest.trim_start_matches(['*', '_']).starts_with(':'))
 }
 
-/// The decisions `text` cites: the `D<n>` of each parenthesised list made
-/// only of such ids (`(D1)`, `(D1, D4)`), fenced code left out. A
-/// parenthesis with other words in it (`(D3 in the old code)`) cites none.
-pub fn cited_decisions(text: &str) -> BTreeSet<u32> {
-    let mut cited = BTreeSet::new();
+/// The decisions and the research answers `text` cites: the `D<n>` and
+/// `R<n>` of each parenthesised list made only of such ids (`(D1)`,
+/// `(D1, R2)`), fenced code left out. A parenthesis with other words in it
+/// (`(D3 in the old code)`) cites none.
+pub fn cited(text: &str) -> (BTreeSet<u32>, BTreeSet<u32>) {
+    let (mut decisions, mut research) = (BTreeSet::new(), BTreeSet::new());
     for line in Sections::of(text).lines {
         for group in line.split('(').skip(1) {
             let Some((inside, _)) = group.split_once(')') else {
                 continue;
             };
-            let ids: Option<Vec<u32>> = (inside.split(','))
-                .map(|id| id.trim().strip_prefix('D')?.parse().ok())
+            let ids: Option<Vec<(char, u32)>> = (inside.split(','))
+                .map(|id| {
+                    let id = id.trim();
+                    let mark = id.chars().next().filter(|c| matches!(c, 'D' | 'R'))?;
+                    Some((mark, id[1..].parse().ok()?))
+                })
                 .collect();
-            cited.extend(ids.unwrap_or_default());
+            for (mark, n) in ids.unwrap_or_default() {
+                match mark {
+                    'D' => decisions.insert(n),
+                    _ => research.insert(n),
+                };
+            }
         }
     }
-    cited
+    (decisions, research)
 }
 
-/// What is wrong with the decisions brief `text` rests on, in feature data
-/// dir `dir`: a decision log that isn't good, or a cited decision it lacks.
-/// A brief citing none, with no log, lacks nothing.
-pub fn decision_lacks(text: &str, dir: &Path) -> Vec<String> {
-    let cited = cited_decisions(text);
+/// What is wrong with what brief `text` cites, in feature data dir `dir`: a
+/// decision log that isn't good, a cited decision it lacks, or a cited
+/// research answer not written. A brief citing none, with no log, lacks
+/// nothing.
+pub fn citation_lacks(text: &str, dir: &Path) -> Vec<String> {
+    let (decisions, research) = cited(text);
+    let mut lacks = decision_lacks(&decisions, dir);
+    for n in research {
+        let path = research_path(dir, n);
+        let good = std::fs::read_to_string(&path).is_ok_and(|t| check_research(&t).is_ok());
+        if !good {
+            lacks.push(format!("cites R{n}, which has no answer yet"));
+        }
+    }
+    lacks
+}
+
+/// What is wrong with the decision log in feature data dir `dir`, the brief
+/// citing `cited`: a log that isn't good, or a cited decision it lacks.
+fn decision_lacks(cited: &BTreeSet<u32>, dir: &Path) -> Vec<String> {
     let path = dir.join(DECISIONS);
     let log = match std::fs::read_to_string(&path) {
         Ok(log) => log,
@@ -508,6 +539,87 @@ pub fn decision_lacks(text: &str, dir: &Path) -> Vec<String> {
         lacks.push(format!("cites D{n}, which {DECISIONS} lacks"));
     }
     lacks
+}
+
+/// The questions Discover's agent asks to have researched, one
+/// `## R<n>: <question>` section each, with an optional `Why:` line.
+pub const RESEARCH: &str = "research.md";
+
+/// The file research question `id` is answered in, under feature data dir
+/// `dir`: `research-R1.md`.
+pub fn research_path(dir: &Path, id: u32) -> PathBuf {
+    dir.join(format!("research-R{id}.md"))
+}
+
+/// A question to research, as `research.md` asks it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ask {
+    pub id: u32,
+    /// As written, its case kept.
+    pub question: String,
+    /// Why it matters, if said.
+    pub why: Option<String>,
+}
+
+/// The questions of `research.md` reading `text`, in order, the first of
+/// each number only; fenced code left out.
+pub fn research_asks(text: &str) -> Vec<Ask> {
+    let mut asks: Vec<Ask> = Vec::new();
+    let mut open = false;
+    for line in Sections::of(text).lines {
+        let line = line.trim();
+        if let Some(id) = numbered_heading(line, 'r') {
+            open = !asks.iter().any(|a| a.id == id);
+            if open {
+                // Its words as written, not lowercased as the heading is.
+                let words = line.trim_start_matches('#').trim();
+                let question = words[1..].trim_start_matches(|c: char| c.is_ascii_digit());
+                let question = question.trim_start_matches(':').trim().to_owned();
+                asks.push(Ask {
+                    id,
+                    question,
+                    why: None,
+                });
+            }
+        } else if heading(line).is_some() {
+            open = false;
+        } else if open
+            && let Some(ask) = asks.last_mut()
+            && ask.why.is_none()
+            && let Some(why) = labelled(line, "why")
+        {
+            ask.why = Some(why);
+        }
+    }
+    asks
+}
+
+/// What `line` (trimmed) says after its label `label` and a colon, as a list
+/// item or in bold too: `Why: it blocks D3` is `it blocks D3`.
+fn labelled(line: &str, label: &str) -> Option<String> {
+    let line = list_item(line)
+        .unwrap_or(line)
+        .trim_start_matches(['*', '_']);
+    let head = line.get(..label.len())?;
+    if !head.eq_ignore_ascii_case(label) {
+        return None;
+    }
+    let rest = line[label.len()..].trim_start_matches(['*', '_']);
+    let rest = rest
+        .strip_prefix(':')?
+        .trim_start_matches(['*', '_'])
+        .trim();
+    (!rest.is_empty()).then(|| rest.to_owned())
+}
+
+/// Whether `text` is a good answer to a research question: an Answer and a
+/// Sources section, neither empty; else what it lacks, one line each.
+pub fn check_research(text: &str) -> Result<(), Vec<String>> {
+    let doc = Sections::of(text);
+    let mut lacks = Vec::new();
+    doc.need("Answer", &mut lacks);
+    doc.need("Sources", &mut lacks);
+    if lacks.is_empty() { Ok(()) } else { Err(lacks) }
 }
 
 /// A Markdown file cut at its headings; code fences left out.
@@ -1017,30 +1129,78 @@ mod tests {
     fn a_brief_cites_decisions_only_in_parentheses_of_ids() {
         let brief =
             "- Exports CSV (D1)\n- Saves (D2, D4) and more (D3 in the old code)\n```\n(D7)\n```\n";
-        assert_eq!(cited_decisions(brief), BTreeSet::from([1, 2, 4]));
-        assert!(cited_decisions("Nothing (here) (d1)").is_empty());
+        assert_eq!(cited(brief).0, BTreeSet::from([1, 2, 4]));
+        assert_eq!(
+            cited("- Pages (D1, R2)\n- (R3, maybe)\n"),
+            (BTreeSet::from([1]), BTreeSet::from([2]))
+        );
+        assert_eq!(
+            cited("Nothing (here) (d1)"),
+            (BTreeSet::new(), BTreeSet::new())
+        );
     }
 
     #[test]
     fn a_brief_citing_a_missing_decision_lacks_it() {
         let dir = folder("decisions");
-        assert!(decision_lacks("- plain\n", dir.path()).is_empty());
+        assert!(citation_lacks("- plain\n", dir.path()).is_empty());
         assert_eq!(
-            decision_lacks("- CSV (D1)\n", dir.path()),
+            citation_lacks("- CSV (D1)\n", dir.path()),
             vec![format!("cites D1, but there is no {DECISIONS}")]
         );
         std::fs::write(dir.path().join(DECISIONS), LOG).unwrap();
-        assert!(decision_lacks("- CSV (D1, D2)\n", dir.path()).is_empty());
+        assert!(citation_lacks("- CSV (D1, D2)\n", dir.path()).is_empty());
         assert_eq!(
-            decision_lacks("- CSV (D3)\n", dir.path()),
+            citation_lacks("- CSV (D3)\n", dir.path()),
             vec![format!("cites D3, which {DECISIONS} lacks")]
         );
         std::fs::write(dir.path().join(DECISIONS), "## D1: A\n").unwrap();
         assert_eq!(
-            decision_lacks("- plain\n", dir.path()),
+            citation_lacks("- plain\n", dir.path()),
             vec![format!(
                 "{DECISIONS}: D1 has no \u{201c}Decided:\u{201d} line"
             )]
+        );
+        std::fs::remove_file(dir.path().join(DECISIONS)).unwrap();
+        assert_eq!(
+            citation_lacks("- Pages (R2)\n", dir.path()),
+            vec!["cites R2, which has no answer yet".to_owned()]
+        );
+        let answer = "## Answer\nYes\n## Sources\n- x\n";
+        std::fs::write(research_path(dir.path(), 2), answer).unwrap();
+        assert!(citation_lacks("- Pages (R2)\n", dir.path()).is_empty());
+    }
+
+    #[test]
+    fn research_asks_are_read_once_each_with_their_why() {
+        let text = "# Research\n\n## R1: Does the Stripe API page its results?\nWhy: decides D3.\n\n## R2 Which CSV dialect?\n- **Why:** the accountant's tool\n\n## Notes\nWhy: not R2's\n\n## R1: Asked again\n```\n## R9: fenced\n```\n";
+        assert_eq!(
+            research_asks(text),
+            vec![
+                Ask {
+                    id: 1,
+                    question: "Does the Stripe API page its results?".into(),
+                    why: Some("decides D3.".into()),
+                },
+                Ask {
+                    id: 2,
+                    question: "Which CSV dialect?".into(),
+                    why: Some("the accountant's tool".into()),
+                },
+            ]
+        );
+        assert!(research_asks("## Results\n## R: none\n").is_empty());
+    }
+
+    #[test]
+    fn an_answer_needs_its_answer_and_its_sources() {
+        assert_eq!(
+            check_research("## Answer\nYes.\n## Sources\n- https://x\n"),
+            Ok(())
+        );
+        assert_eq!(
+            check_research("## Answer\nYes.\n## Sources\n"),
+            Err(vec!["empty Sources section".to_owned()])
         );
     }
 }

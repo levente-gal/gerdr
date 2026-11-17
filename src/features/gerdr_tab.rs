@@ -996,6 +996,12 @@ impl Gerdr {
                     Some((a.n, self.agent_key_state(&key).0))
                 })
                 .collect(),
+            research_status: (feature.research.iter())
+                .filter_map(|r| {
+                    let key = crate::agents::AgentKey::Herdr(r.pane.clone()?);
+                    Some((r.id, self.agent_key_state(&key).0))
+                })
+                .collect(),
             resolving_status: (feature.shipping.resolving.as_ref())
                 .and_then(|r| r.pane.clone())
                 .map_or((None, false), |pane| {

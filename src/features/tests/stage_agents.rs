@@ -1173,6 +1173,82 @@ fn own_agents_with_a_tab_show_on_the_page_of_the_stage_it_is_at() {
     assert!(!page.sections.iter().any(own));
 }
 
+#[test]
+fn research_shows_on_discovers_page_one_card_and_button_each() {
+    let mut f = feature("r", vec![repo("api", true)], 0);
+    let run = |id, started, done: Option<u64>, stopped: Option<&str>, pane: Option<&str>| {
+        feature::agents::ResearchRun {
+            id,
+            question: format!("Question {id}?"),
+            agent: "Claude Code".into(),
+            pane: pane.map(str::to_owned),
+            started,
+            done,
+            stopped: stopped.map(str::to_owned),
+            ..Default::default()
+        }
+    };
+    f.research = vec![
+        run(1, Some(1_000), None, None, Some("p1")),
+        run(2, Some(1_000), Some(1_060), None, None),
+        run(3, Some(1_000), None, Some("its tab closed"), None),
+        run(4, None, None, None, None),
+    ];
+    let at = Stage::Discover;
+    let actions = page_actions(&f, at, RowCtx::default());
+    let research: Vec<_> = (actions.iter())
+        .filter(|(_, o)| {
+            matches!(
+                o,
+                PanelOutcome::ShowResearch(_)
+                    | PanelOutcome::OpenResearch(_)
+                    | PanelOutcome::RerunResearch(_)
+            )
+        })
+        .map(|(b, o)| (b.label.as_str(), o.clone()))
+        .collect();
+    assert_eq!(
+        research,
+        [
+            ("Show agent", PanelOutcome::ShowResearch(1)),
+            ("Open", PanelOutcome::OpenResearch(2)),
+            ("Run again", PanelOutcome::RerunResearch(3)),
+        ]
+    );
+    let state = PanelState {
+        research_status: vec![(1, Some(AgentStatus::Working))],
+        ..PanelState::default()
+    };
+    let page = stage_page(&f, at, &state, &actions, 1_120);
+    let cards: Vec<_> = (page.sections.iter())
+        .filter_map(|s| match s {
+            PageSection::Agent {
+                name,
+                status,
+                buttons,
+                ..
+            } if name.starts_with("Research") => {
+                Some((name.clone(), status.clone(), buttons.len()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cards.len(), 4, "{:?}", page.sections);
+    assert_eq!(cards[0].0, "Research R1");
+    let said = |k: usize, start: &str| assert!(cards[k].1.starts_with(start), "{}", cards[k].1);
+    said(0, "Question 1? \u{b7} working \u{b7} started");
+    said(1, "Question 2? \u{b7} answered");
+    said(2, "Question 3? \u{b7} stopped \u{b7} its tab closed");
+    said(3, "Question 4? \u{b7} waits its turn");
+    let buttons: Vec<usize> = cards.iter().map(|c| c.2).collect();
+    assert_eq!(buttons, [1, 1, 1, 0]);
+    // Not on another stage's page.
+    let actions = page_actions(&f, Stage::Plan, RowCtx::default());
+    let page = stage_page(&f, Stage::Plan, &state, &actions, 1_120);
+    let card = |s: &PageSection| matches!(s, PageSection::Agent { name, .. } if name.starts_with("Research"));
+    assert!(!page.sections.iter().any(card));
+}
+
 /// The Build agent's card on `stage`'s page of `f`: what it says and what
 /// its buttons do, with the page's buttons as both of its lists have them.
 fn build_card(

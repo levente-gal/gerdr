@@ -1699,6 +1699,7 @@ pub(super) fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::SendPrompt(_) => "send prompt",
         PanelOutcome::ShowAgent(_)
         | PanelOutcome::ShowOwnAgent(_)
+        | PanelOutcome::ShowResearch(_)
         | PanelOutcome::ShowResolvingAgent => "show agent",
         PanelOutcome::ResumeAgent(_) => "resume agent",
         PanelOutcome::OpenDoc(Stage::Discover) => "review brief",

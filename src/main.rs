@@ -54,6 +54,7 @@ mod feature_diff;
 mod feature_fix;
 mod feature_graph;
 mod feature_plan_review;
+mod feature_research;
 mod feature_review;
 mod feature_sandbox;
 mod feature_workspace;

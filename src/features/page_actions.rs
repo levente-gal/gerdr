@@ -265,6 +265,9 @@ pub fn page_actions(
     if stage == own_page(feature) {
         out.extend(own_actions(feature));
     }
+    if stage == Stage::Discover {
+        out.extend(research_actions(feature));
+    }
     manual_order(feature, stage, ctx, &mut out);
     out
 }
@@ -285,6 +288,27 @@ fn own_actions(feature: &Feature) -> impl Iterator<Item = (PageButton, PanelOutc
             };
             (button, PanelOutcome::ShowOwnAgent(a.n))
         })
+}
+
+/// The buttons of the cards of `feature`'s research: to a running agent's
+/// tab, to an answer, and to research a stopped question again.
+fn research_actions(feature: &Feature) -> impl Iterator<Item = (PageButton, PanelOutcome)> + '_ {
+    feature.research.iter().filter_map(|r| {
+        let (label, outcome) = match () {
+            _ if r.done.is_some() => ("Open", PanelOutcome::OpenResearch(r.id)),
+            // Past Discover, nothing waits for it.
+            _ if r.stopped.is_some() && !feature.is_done(Stage::Discover) => {
+                ("Run again", PanelOutcome::RerunResearch(r.id))
+            }
+            _ if r.pane.is_some() => ("Show agent", PanelOutcome::ShowResearch(r.id)),
+            _ => return None,
+        };
+        let button = PageButton {
+            label: label.to_owned(),
+            style: ButtonStyle::Plain,
+        };
+        Some((button, outcome))
+    })
 }
 
 /// Manual test's buttons in the order of every page: its gate, Mark passed,

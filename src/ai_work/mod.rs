@@ -349,6 +349,8 @@ pub enum SendKind {
     BuildCheck,
     /// Go on after a milestone stop.
     Continue,
+    /// A research question Discover's agent asked is answered.
+    Research,
 }
 
 /// How a line reached the agent.

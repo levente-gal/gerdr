@@ -28,6 +28,8 @@ pub(super) struct PanelState<'a> {
     pub(super) agent_read: bool,
     /// What each of its own agents with a tab does, by `OwnRun::n`.
     pub(super) own_status: Vec<(u32, Option<AgentStatus>)>,
+    /// What each research agent with a tab does, by `ResearchRun::id`.
+    pub(super) research_status: Vec<(u32, Option<AgentStatus>)>,
     /// What the agent taking on Ship's conflicts does, and whether its tab
     /// is there (`Shipping::resolving`).
     pub(super) resolving_status: (Option<AgentStatus>, bool),

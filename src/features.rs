@@ -181,6 +181,13 @@ pub struct Features {
     /// When the tab of each of the features' own agents was first seen gone,
     /// by its pane: it forgets the tab only once it stays gone.
     pub(crate) own_gone: HashMap<String, Instant>,
+    /// Since when each research agent's tab has looked done or gone, by its
+    /// pane: what it means is taken only once it stays so
+    /// (`feature_research`).
+    pub(crate) research_seen: HashMap<String, Instant>,
+    /// How each feature's `research.md` stood when last read, by project and
+    /// slug: it is read again only once it changes.
+    pub(crate) research_read: HashMap<(String, String), crate::feature_agents::Stamp>,
     /// When each machine was last told its record lost, by machine, project, slug.
     pub(crate) claims: HashMap<(String, String, String), Instant>,
     /// Cursor's models, for the picker of a stage's model.
@@ -1369,6 +1376,12 @@ pub enum PanelOutcome {
     Evidence,
     /// Show Discover's decision log.
     Decisions,
+    /// Show the tab of the agent researching this question (`ResearchRun`).
+    ShowResearch(u32),
+    /// Show the answer to this research question.
+    OpenResearch(u32),
+    /// Research this question again, with a fresh agent.
+    RerunResearch(u32),
     /// Open this pull request's page.
     OpenPr(String),
     /// Open the repositories panel on the feature's worktree of this
@@ -1518,6 +1531,8 @@ impl PanelOutcome {
                 | Self::ReviewFixPlan
                 | Self::Evidence
                 | Self::Decisions
+                | Self::ShowResearch(_)
+                | Self::OpenResearch(_)
                 | Self::SetupLog
                 | Self::Findings
                 | Self::ShowFinding(_)

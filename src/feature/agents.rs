@@ -354,6 +354,47 @@ pub struct OwnRun {
     pub started: u64,
 }
 
+/// A question Discover's agent asked to have researched (`research.md`),
+/// and the agent gerdr started on it: it writes its answer to
+/// `artifacts::research_path`, and is closed once it did.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchRun {
+    /// Its number: R1, R2, …
+    pub id: u32,
+    pub question: String,
+    /// Why Discover's agent asks, if it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// The agent's name, as the picker shows it; empty until one starts.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent: String,
+    /// The herdr pane it runs in, while its tab is there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<String>,
+    /// When its agent started, unix seconds; none while it waits its turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<u64>,
+    /// When its answer was found written and its agent done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done: Option<u64>,
+    /// Why it stopped without an answer: its tab closed, or no agent could
+    /// start. Run again clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
+}
+
+impl ResearchRun {
+    /// Whether its agent is at work on it, or about to be.
+    pub fn running(&self) -> bool {
+        self.started.is_some() && self.done.is_none() && self.stopped.is_none()
+    }
+
+    /// Whether it waits for a turn to start.
+    pub fn waits(&self) -> bool {
+        self.started.is_none() && self.done.is_none() && self.stopped.is_none()
+    }
+}
+
 /// One run of a stage's agent, kept in the feature record.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StageRun {

@@ -379,6 +379,9 @@ pub fn taken(
     for own in &mut out.own_agents {
         cut(&mut own.pane);
     }
+    for run in &mut out.research {
+        cut(&mut run.pane);
+    }
     if let Some(verify) = &mut out.verify {
         moved(&mut verify.machine);
         for check in &mut verify.checks {
@@ -667,6 +670,22 @@ mod tests {
             panes: panes.iter().map(|p| (*p).to_owned()).collect(),
             ..SandboxRun::default()
         }
+    }
+
+    #[test]
+    fn a_taken_feature_drops_its_research_tabs_but_keeps_their_answers() {
+        let mut f = record();
+        f.research = vec![crate::feature::agents::ResearchRun {
+            id: 1,
+            question: "Does it page?".into(),
+            pane: Some("w1:p9".into()),
+            started: Some(5),
+            done: Some(9),
+            ..Default::default()
+        }];
+        let out = take(&f);
+        assert_eq!(out.research[0].pane, None);
+        assert_eq!(out.research[0].done, Some(9));
     }
 
     #[test]
