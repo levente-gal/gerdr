@@ -1272,6 +1272,23 @@ fn dump_overlays() {
             painter.confirm_dialog(&finish, (800, 600).into(), scale, p),
             px(confirm_w + shadow),
         );
+        let old_agents = super::ConfirmView {
+            title: "Close 6 old agent tabs?".into(),
+            body: "Their agents are done; closing the tabs ends their sessions:\n\
+                   claude \u{b7} Discover\nclaude \u{b7} Plan\nclaude \u{b7} Plan review\n\
+                   codex \u{b7} Build\nand 2 more"
+                .into(),
+            go: "Close tabs",
+            selected: 1,
+            hover: None,
+            loses: true,
+        };
+        dump(
+            &dir,
+            &format!("confirm_old_agents_{tag}"),
+            painter.confirm_dialog(&old_agents, (800, 600).into(), scale, p),
+            px(confirm_w + shadow),
+        );
         let row = |path: &str, files, link, clash| super::CheckoutRow {
             path: path.into(),
             files,

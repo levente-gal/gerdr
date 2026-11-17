@@ -56,6 +56,9 @@ pub enum Then {
     /// Close the workspace holding these panes (see
     /// `Gerdr::close_workspace`), wherever it is by then.
     CloseWorkspace(Vec<u32>),
+    /// Close those of these tabs (`Tab::id`) still holding old agents only
+    /// (see `Gerdr::close_old_agent_tabs`).
+    CloseOldAgentTabs(Vec<u64>),
     /// Stop what `Stops` says of this project (see `Gerdr::stop_project`).
     StopProject(String, Stops),
     /// Stop this project's session and apps, then forget it (see
@@ -312,6 +315,22 @@ fn close_question(card: &AgentView) -> (String, String) {
     (title, body.to_owned())
 }
 
+/// What a confirm dialog about closing the old agent tabs called `names`
+/// says: its title and the lines under it, naming a few.
+fn close_old_agents_question(names: &[String]) -> (String, String) {
+    const SHOWN: usize = 4;
+    let title = match names.len() {
+        1 => "Close 1 old agent tab?".to_owned(),
+        n => format!("Close {n} old agent tabs?"),
+    };
+    let mut lines = vec!["Their agents are done; closing the tabs ends their sessions:".to_owned()];
+    lines.extend(names.iter().take(SHOWN).cloned());
+    if names.len() > SHOWN {
+        lines.push(format!("and {} more", names.len() - SHOWN));
+    }
+    (title, lines.join("\n"))
+}
+
 /// What a confirm dialog about closing a pane where `what` runs says: its
 /// title and the line under it.
 fn close_pane_question(what: &str) -> (String, String) {
@@ -500,6 +519,22 @@ impl Gerdr {
         };
         let (title, body) = close_many_question("tab", &view.title, running);
         self.ask(title, body, "Close tab", Then::CloseTab(panes));
+    }
+
+    /// Close feature workspace `w`'s tabs of old agents (see
+    /// `old_agent_tabs`), asking first: their sessions end.
+    pub fn close_old_agent_tabs(&mut self, w: usize) {
+        let tabs = self.old_agent_tabs(w);
+        let Some(ws) = self.workspaces.get(w).filter(|_| !tabs.is_empty()) else {
+            return self.show_notice("No old agent tabs to close".into());
+        };
+        let views = self.tab_views(ws);
+        let names: Vec<String> = (tabs.iter())
+            .filter_map(|&t| views.get(t).map(|v| v.title.clone()))
+            .collect();
+        let ids = tabs.iter().map(|&t| ws.tabs[t].id).collect();
+        let (title, body) = close_old_agents_question(&names);
+        self.ask(title, body, "Close tabs", Then::CloseOldAgentTabs(ids));
     }
 
     /// Ask before closing workspace `idx`, holding `panes`, where `running`
@@ -920,6 +955,7 @@ impl Gerdr {
                     self.close_workspace_now(idx);
                 }
             }
+            Then::CloseOldAgentTabs(ids) => self.close_old_agent_tabs_now(&ids),
             Then::StopProject(id, stops) => {
                 self.stop_project_now(&id, stops);
                 self.refresh_project_menu();
@@ -1000,6 +1036,18 @@ fn button_at(layout: &chrome::ConfirmLayout, pos: Point<f64, Logical>) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closing_old_agent_tabs_names_a_few_of_them() {
+        let names: Vec<String> = (1..=6).map(|n| format!("claude \u{b7} {n}")).collect();
+        let (title, body) = close_old_agents_question(&names[..1]);
+        assert_eq!(title, "Close 1 old agent tab?");
+        assert!(body.ends_with("\nclaude \u{b7} 1"));
+        let (title, body) = close_old_agents_question(&names);
+        assert_eq!(title, "Close 6 old agent tabs?");
+        assert_eq!(body.lines().count(), 6);
+        assert!(body.ends_with("claude \u{b7} 4\nand 2 more"));
+    }
 
     #[test]
     fn a_session_stopping_does_not_run_and_one_checked_runs_as_found() {

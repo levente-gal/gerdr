@@ -18,14 +18,34 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 
 use crate::{
     Gerdr, Tab, TabKind, Workspace, WorkspaceKind,
-    feature::{AfterStep, Feature, Status, layout, store},
+    feature::{AfterStep, Feature, Stage, Status, layout, store},
     features::Done,
+    herdr::AgentStatus,
 };
 
 /// How often a removal waiting for a closed feature workspace's panes to
 /// go looks again, and how long it waits at most.
 const GONE_POLL: Duration = Duration::from_millis(100);
 const GONE_WAIT: Duration = Duration::from_secs(5);
+
+/// The panes of `feature`'s agents it still has work for, which closing
+/// old agent tabs leaves: its current stage's, the Build agent of a fix
+/// round that is open, its conflicts and summary agents, and a research
+/// agent at work.
+pub(crate) fn panes_in_use(feature: &Feature) -> Vec<&str> {
+    let current = feature.current().and_then(|s| feature.runs.get(&s));
+    let fixing = (feature.fix_round.as_ref()).and_then(|_| feature.runs.get(&Stage::Build));
+    let runs = current.into_iter().chain(fixing).map(|r| &r.pane);
+    let shipping = &feature.shipping;
+    let resolving = shipping.resolving.iter().map(|r| &r.pane);
+    let summary = shipping.summary.iter().map(|r| &r.pane);
+    let research = (feature.research.iter())
+        .filter(|r| r.running())
+        .map(|r| &r.pane);
+    (runs.chain(resolving).chain(summary).chain(research))
+        .filter_map(|pane| pane.as_deref())
+        .collect()
+}
 
 /// Whether folders `a` and `b` are the same, through symlinks too. Only
 /// folders of the same name are resolved, so most pairs cost nothing.
@@ -562,6 +582,60 @@ impl Gerdr {
             Some((project.to_owned(), slug.to_owned(), AfterStep::CloseTabs));
     }
 
+    /// The tabs of feature workspace `w` holding old agents only, by place:
+    /// each pane a terminal, one at least an agent, no agent working,
+    /// waiting on the user or one the feature still has work for
+    /// (`panes_in_use`), and nothing else running.
+    pub(crate) fn old_agent_tabs(&self, w: usize) -> Vec<usize> {
+        let (Some(ws), Some(feature)) = (self.workspaces.get(w), self.workspace_feature(w)) else {
+            return Vec::new();
+        };
+        let in_use = panes_in_use(feature);
+        let agent = |p: &crate::Pane| {
+            let id = &p.herdr.as_ref()?.pane_id;
+            self.session.agents.iter().find(|a| a.pane_id == *id)
+        };
+        let old = |p: &crate::Pane| match agent(p) {
+            Some(a) => {
+                let busy = matches!(a.agent_status, AgentStatus::Working | AgentStatus::Blocked);
+                !busy && !in_use.contains(&a.pane_id.as_str())
+            }
+            // An app or a page isn't an agent's to close with it.
+            None => p.herdr.is_some() && self.running_in(p).is_none(),
+        };
+        let only_old = |tab: &Tab| {
+            tab.closes()
+                && tab.expected.is_empty()
+                && tab.panes.iter().any(|p| agent(p).is_some())
+                && tab.panes.iter().all(old)
+        };
+        (ws.tabs.iter().enumerate())
+            .filter(|(_, tab)| only_old(tab))
+            .map(|(t, _)| t)
+            .collect()
+    }
+
+    /// Close those of tabs `ids` that are still old agent tabs of their
+    /// workspace (see `old_agent_tabs`), saying how many closed.
+    pub(crate) fn close_old_agent_tabs_now(&mut self, ids: &[u64]) {
+        let Some((w, _)) = ids.iter().find_map(|&id| self.tab_place(id)) else {
+            return;
+        };
+        let tabs: Vec<u64> = (self.workspaces[w].tabs.iter()).map(|tab| tab.id).collect();
+        let closing: Vec<usize> = (self.old_agent_tabs(w).into_iter())
+            .filter(|&t| ids.contains(&tabs[t]))
+            .collect();
+        // From the last: a tab closing at once doesn't move those before it.
+        for &t in closing.iter().rev() {
+            self.close_tab_in(w, t);
+        }
+        match closing.len() {
+            0 => self.show_notice("No old agent tabs left to close".into()),
+            1 => self.show_success("Closed 1 old agent tab".into()),
+            n => self.show_success(format!("Closed {n} old agent tabs")),
+        }
+    }
+
     /// What ending feature `slug` does to its workspace, as a confirm says
     /// it: what closes, and what running there stops.
     pub(crate) fn ending_said(&self, project: &str, slug: &str) -> String {
@@ -728,6 +802,32 @@ mod tests {
         let mut abandoned = all.clone();
         abandoned[1].status = Status::Abandoned;
         assert!(feature_on(&abandoned, Path::new("/work/.features/b")).is_none());
+    }
+
+    #[test]
+    fn only_agents_the_feature_still_has_work_for_are_in_use() {
+        use crate::feature::agents::{ResearchRun, StageRun};
+        // Discover, Plan, Plan review and Build done: Verify is on.
+        let mut f = feature("bulk", vec![repo("api", true)], 4);
+        assert_eq!(f.current(), Some(Stage::Verify));
+        let run = |pane: &str| StageRun {
+            pane: Some(pane.into()),
+            ..Default::default()
+        };
+        f.runs.insert(Stage::Plan, run("plan"));
+        f.runs.insert(Stage::Build, run("build"));
+        f.runs.insert(Stage::Verify, run("verify"));
+        let research = |pane: &str, done: Option<u64>| ResearchRun {
+            pane: Some(pane.into()),
+            started: Some(1),
+            done,
+            ..Default::default()
+        };
+        f.research = vec![research("asking", None), research("answered", Some(2))];
+        assert_eq!(panes_in_use(&f), ["verify", "asking"]);
+        // Done, the feature has work for none of its stage agents.
+        f.marks = feature("bulk", Vec::new(), Stage::ALL.len()).marks;
+        assert_eq!(panes_in_use(&f), ["asking"]);
     }
 
     #[test]

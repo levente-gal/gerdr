@@ -1344,6 +1344,17 @@ impl Gerdr {
                 let choose =
                     MenuItem::new("Choose commands to restart…", MenuAction::ChooseRestarts(i));
                 items.push(choose.enabled(restartable));
+                // A feature's workspace gathers a tab per agent it ran.
+                if self.workspace_feature(i).is_some() {
+                    let n = self.old_agent_tabs(i).len();
+                    let label = match n {
+                        0 => "Close old agent tabs".to_owned(),
+                        1 => "Close 1 old agent tab\u{2026}".to_owned(),
+                        n => format!("Close {n} old agent tabs\u{2026}"),
+                    };
+                    let item = MenuItem::new(&label, MenuAction::CloseOldAgentTabs(i));
+                    items.push(item.enabled(n > 0));
+                }
                 items.push(hinted(
                     MenuItem::new("Close workspace", MenuAction::CloseWorkspace(i)),
                     Action::CloseWorkspace,

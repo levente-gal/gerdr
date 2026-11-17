@@ -122,6 +122,9 @@ pub enum MenuAction {
     RestartWorkspace(usize),
     /// Choose which of workspace `w`'s commands restarting it runs again.
     ChooseRestarts(usize),
+    /// Close feature workspace `w`'s tabs of old agents (see
+    /// `Gerdr::old_agent_tabs`).
+    CloseOldAgentTabs(usize),
     /// A new tab in workspace `w`.
     NewTab(usize),
     /// Tab `t` of workspace `w`.
@@ -584,6 +587,7 @@ impl Gerdr {
             MenuAction::RenameWorkspace(w) => self.start_rename(RenameTarget::Workspace(w)),
             MenuAction::RestartWorkspace(w) => self.restart_workspace(w),
             MenuAction::ChooseRestarts(w) => self.choose_restarts(w),
+            MenuAction::CloseOldAgentTabs(w) => self.close_old_agent_tabs(w),
             MenuAction::NewAgent(w) => self.open_agent_picker(w),
             MenuAction::StartT3 => self.spawn_t3(None),
             MenuAction::StopT3 => self.stop_t3_asking(),
