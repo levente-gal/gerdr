@@ -1448,10 +1448,11 @@ impl Gerdr {
             }
             self.features.panel.as_mut()?.review = Some(Box::new(wd));
         }
-        // Laid out anew only as it comes to show or the tab's size changes:
-        // this runs every frame, and the tab's view isn't cheap.
-        let area = self.content_rect();
+        // Laid out anew only as it comes to show, the tab's size changes or
+        // the repositories unfold or fold: this runs every frame, and the
+        // tab's view isn't cheap.
         let panel = self.features.panel.as_ref()?;
+        let area = (self.content_rect(), panel.expanded);
         if !panel.review_shown || panel.review_area != Some(area) {
             let (_, layout) = self.feature_tab_parts()?;
             let panel = self.features.panel.as_mut()?;

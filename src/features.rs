@@ -1098,10 +1098,10 @@ pub struct FeaturePanel {
     /// That page's review is up to date with what shows, read as it came to
     /// show: another diff or panel over it, or another page, and it isn't.
     pub review_shown: bool,
-    /// Where that review goes, and the tab area it was worked out in: the
-    /// rail changes height only with what takes the page from it.
+    /// Where that review goes, and the tab area and repositories' unfolding
+    /// it was worked out with: the head over it grows as they unfold.
     pub review_rect: Option<chrome::Rect>,
-    pub review_area: Option<chrome::Rect>,
+    pub review_area: Option<(chrome::Rect, bool)>,
     /// On that page, the rail has the keys, not the review (Esc there).
     pub rail_keys: bool,
     /// The last press on the page's bar: when, where, and the button's
