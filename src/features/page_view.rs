@@ -1307,15 +1307,6 @@ pub(super) fn tab_view(
             });
             strip
         });
-    // Hovered by its number: once the page's buttons are numbered anew
-    // (a check adds some before it), that number is another's, lit with
-    // the pointer elsewhere; none is, till the pointer moves again.
-    let hover = panel.tab_hover.filter(|hit| match hit {
-        FeatureTabHit::PageButton(i) => {
-            page.buttons.get(*i).map(|b| &b.label) == panel.tab_hover_label.as_ref()
-        }
-        _ => true,
-    });
     let mut view = FeatureTabView {
         review_page: crate::feature_diff::review_page(panel, feature),
         review_switch,
@@ -1347,7 +1338,7 @@ pub(super) fn tab_view(
             };
             s.map_or(0.0, |s| s.pos() - s.overscroll())
         }),
-        hover,
+        hover: panel.tab_hover,
         hints: with_ship_hints(
             tab_hints(
                 panel,

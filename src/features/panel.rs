@@ -3,6 +3,23 @@
 use super::*;
 
 impl FeaturePanel {
+    /// `view`'s hover, kept as the pointer last left it while the tab shows
+    /// the same; once it shows something else under a pointer that stayed
+    /// (buttons numbered anew, rows added, a scroll), `hit` finds it again:
+    /// kept by number, it would light whatever took that number.
+    pub fn hover_again(
+        &mut self,
+        view: &mut FeatureTabView,
+        hit: impl FnOnce(&FeatureTabView) -> Option<FeatureTabHit>,
+    ) {
+        view.hover = None;
+        if self.hovered_view.as_ref() != Some(view) {
+            self.tab_hover = hit(view);
+            self.hovered_view = Some(view.clone());
+        }
+        view.hover = self.tab_hover;
+    }
+
     /// Write the note on `on`, starting from `field`, or from the draft Esc
     /// left there.
     pub fn open_note(&mut self, on: CardNote, field: TextField) {

@@ -6679,7 +6679,7 @@ impl Gerdr {
             identity: self.identity_view(),
             machine: self.machine_view(),
             commands: self.commands_view(),
-            features: self.feature_tab_view(),
+            features: self.feature_tab_drawn(),
             project_menu: self.project_menu_view(),
             worktrees: self.worktrees_view(),
             repos: self.repos_view().filter(|_| self.repos.is_open()),

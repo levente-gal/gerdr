@@ -608,12 +608,6 @@ impl Gerdr {
         let hit = layout.hit(&view, pos.to_i32_round());
         if let Some(panel) = self.features.panel.as_mut() {
             panel.tab_hover = hit;
-            panel.tab_hover_label = match hit {
-                Some(FeatureTabHit::PageButton(i)) => {
-                    view.page.buttons.get(i).map(|b| b.label.clone())
-                }
-                _ => None,
-            };
         }
         match hit? {
             FeatureTabHit::Node(i) => {
@@ -938,6 +932,21 @@ impl Gerdr {
     }
 
     /// The feature tab's view, while a feature's tab shows.
+    /// The feature tab as it is drawn now: `feature_tab_view`, its hover
+    /// found again under the pointer if the tab changed under it.
+    pub(crate) fn feature_tab_drawn(&mut self) -> Option<chrome::FeatureTabView> {
+        let mut view = self.feature_tab_view()?;
+        let pos = self.mouse.pos;
+        let over = self.overlay_at(pos) == Some(crate::overlay::Overlay::Features);
+        let frame = self.content_rect();
+        let panel = self.features.panel.as_mut()?;
+        panel.hover_again(&mut view, |view| {
+            let layout = over.then(|| chrome::feature_tab_layout(view, frame))?;
+            layout.hit(view, pos.to_i32_round())
+        });
+        Some(view)
+    }
+
     pub fn feature_tab_view(&self) -> Option<chrome::FeatureTabView> {
         let panel = self.features.panel.as_ref()?;
         let feature = self.feature(&panel.project, &panel.slug)?;

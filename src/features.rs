@@ -1115,9 +1115,9 @@ pub struct FeaturePanel {
     /// Every key of the tab is listed in place of the page (F1).
     pub keys: bool,
     pub tab_hover: Option<FeatureTabHit>,
-    /// The label of the page button `tab_hover` is, when it is one: the
-    /// hover holds while that button keeps its number.
-    pub tab_hover_label: Option<String>,
+    /// The tab as last drawn, with no hover: `hover_again` finds the hover
+    /// anew once the tab shows something else.
+    pub hovered_view: Option<FeatureTabView>,
     /// Where the expanded repositories look (home first): the feature's
     /// project, which they offer the rest of, and those it already links,
     /// for what it holds or held of them. Read off the thread when it opens
