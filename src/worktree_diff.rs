@@ -153,6 +153,7 @@ impl DocOf {
     pub fn tab_title(&self) -> &'static str {
         match self.file {
             DocFile::Evidence => "Evidence",
+            DocFile::Decisions => "Decisions",
             DocFile::FixPlan => "Fix plan",
             DocFile::PlanChanges => "Plan changes",
             DocFile::DraftChanges(..) => "Draft changes",
@@ -165,10 +166,10 @@ impl DocOf {
         }
     }
 
-    /// Verify's `evidence.md`, only read: no comments, no Approve or Send
-    /// back.
-    pub fn evidence(&self) -> bool {
-        self.file == DocFile::Evidence
+    /// A file only to read: no comments, no Approve or Send back (see
+    /// `DocFile::only_read`).
+    pub fn only_read(&self) -> bool {
+        self.file.only_read()
     }
 
     /// Whether its stage is done: the file is only read, and has its own
@@ -244,7 +245,7 @@ enum WtKey {
 
 /// Whether `w` shows a file under review still open to its decision.
 fn deciding(w: &WorktreeDiff) -> bool {
-    w.doc.is_some() && !w.closed() && !w.evidence()
+    w.doc.is_some() && !w.closed() && !w.only_read()
 }
 
 /// Its keys before the diff's, while no comment or search has them (but
@@ -266,7 +267,7 @@ const KEYS: &[Binding<WorktreeDiff, WtKey>] = &[
     },
     Binding {
         chord: PREVIEW_KEY,
-        does: |w| (w.closed() || w.evidence()).then_some(WtKey::Mode),
+        does: |w| (w.closed() || w.only_read()).then_some(WtKey::Mode),
         footer: false,
         f1: "go to the next of Preview, Review and Split",
     },
@@ -284,7 +285,7 @@ const KEYS: &[Binding<WorktreeDiff, WtKey>] = &[
     },
     Binding {
         chord: APPROVE_KEY,
-        does: |w| (w.closed() && !w.evidence()).then_some(WtKey::GoOn),
+        does: |w| (w.closed() && !w.only_read()).then_some(WtKey::GoOn),
         footer: true,
         f1: "go to the stage the feature is at",
     },
@@ -297,7 +298,7 @@ const KEYS: &[Binding<WorktreeDiff, WtKey>] = &[
     // Evidence's refuse, unsaid.
     Binding {
         chord: APPROVE_KEY,
-        does: |w| w.evidence().then_some(WtKey::Approve),
+        does: |w| w.only_read().then_some(WtKey::Approve),
         footer: true,
         f1: "",
     },
@@ -335,7 +336,7 @@ const KEYS: &[Binding<WorktreeDiff, WtKey>] = &[
     },
     Binding {
         chord: SEND_BACK_KEY,
-        does: |w| (w.closed() && !w.evidence()).then_some(WtKey::Reopen),
+        does: |w| (w.closed() && !w.only_read()).then_some(WtKey::Reopen),
         footer: true,
         f1: "reopen the file, unless it is locked",
     },
@@ -348,7 +349,7 @@ const KEYS: &[Binding<WorktreeDiff, WtKey>] = &[
     // Evidence's refuse, unsaid.
     Binding {
         chord: SEND_BACK_KEY,
-        does: |w| w.evidence().then_some(WtKey::SendBack),
+        does: |w| w.only_read().then_some(WtKey::SendBack),
         footer: true,
         f1: "",
     },
@@ -446,7 +447,7 @@ const KEYS: &[Binding<WorktreeDiff, WtKey>] = &[
     // The diff's copy, of what this diff's comments are.
     Binding {
         chord: "Ctrl+Shift+C",
-        does: |w| (!(w.closed() || w.evidence())).then_some(WtKey::Diff),
+        does: |w| (!(w.closed() || w.only_read())).then_some(WtKey::Diff),
         footer: true,
         f1: "copy the review comments for an AI agent",
     },
@@ -1028,9 +1029,16 @@ impl WorktreeDiff {
     }
 
     /// Whether it shows a file only to read whatever its stage: Verify's
-    /// evidence, the final plan's changes.
-    fn evidence(&self) -> bool {
-        (self.doc.as_ref()).is_some_and(|d| d.evidence() || d.file.shows_changes())
+    /// evidence, the decision log, the final plan's changes.
+    fn only_read(&self) -> bool {
+        (self.doc.as_ref()).is_some_and(|d| d.only_read() || d.file.shows_changes())
+    }
+
+    /// Why the file it shows only to read takes no action: its own reason.
+    fn read_only_notice(&self) -> &'static str {
+        (self.doc.as_ref())
+            .and_then(|d| d.locked)
+            .unwrap_or(EVIDENCE_READ_ONLY)
     }
 
     /// Whether it shows a file whose stage is done.
@@ -1060,7 +1068,7 @@ impl WorktreeDiff {
     /// Whether its lines take no comments: a commit's, the evidence, a
     /// file whose stage is done.
     fn read_only(&self) -> bool {
-        self.commit.is_some() || self.evidence() || self.closed() || self.locked().is_some()
+        self.commit.is_some() || self.only_read() || self.closed() || self.locked().is_some()
     }
 
     /// Why it shows a feature's code only to read (`FeatureOf::locked`).
@@ -1094,8 +1102,8 @@ impl WorktreeDiff {
     /// Approve the file under review, unless a comment is being written.
     /// A feature's code review is checked further by its host.
     fn approve(&self) -> Option<Done> {
-        if self.evidence() {
-            return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
+        if self.only_read() {
+            return Some(Done::Diff(Outcome::Notice(self.read_only_notice())));
         }
         if let Some(closed) = self.closed_notice() {
             return Some(closed);
@@ -1109,8 +1117,8 @@ impl WorktreeDiff {
     /// Send the file under review back with its comments: there must be
     /// one, and none being written.
     fn send_back(&self, env: Env) -> Option<Done> {
-        if self.evidence() {
-            return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
+        if self.only_read() {
+            return Some(Done::Diff(Outcome::Notice(self.read_only_notice())));
         }
         if let Some(closed) = self.closed_notice() {
             return Some(closed);
@@ -1172,7 +1180,7 @@ impl WorktreeDiff {
     /// Whether it is a file under review: not the evidence, nor one whose
     /// stage is done.
     fn reviewed(&self) -> bool {
-        self.doc.is_some() && !self.evidence() && !self.closed()
+        self.doc.is_some() && !self.only_read() && !self.closed()
     }
 
     /// What the diff asked for, on a file under review: edits only while
@@ -1195,7 +1203,7 @@ impl WorktreeDiff {
         let restores = |o: &Outcome| matches!(o, Outcome::Cut(e) if e.cut.restored().is_some());
         let locked = self.doc.as_ref().and_then(|d| d.locked);
         match outcome {
-            Some(o) if self.evidence() && refused(&o) => {
+            Some(o) if self.only_read() && refused(&o) => {
                 Some(Outcome::Notice(locked.unwrap_or(EVIDENCE_READ_ONLY)))
             }
             // Its comments and edits are refused as read-only: it says why.
@@ -1233,8 +1241,8 @@ impl WorktreeDiff {
         // A file under review is edited while unlocked, never restored.
         let restore = |what: &str| what.contains("restore the change");
         let locked = self.doc.as_ref().is_some_and(|d| d.locked.is_some());
-        let read_only = self.commit.is_some() || self.feature.is_some() || self.evidence();
-        let evidence = self.evidence();
+        let read_only = self.commit.is_some() || self.feature.is_some() || self.only_read();
+        let evidence = self.only_read();
         let closed = self.closed();
         // A file under review is a page: no other file to go to, no header.
         let other_file = |what: &str| what.contains("the file before or after");
@@ -1442,8 +1450,8 @@ impl WorktreeDiff {
             return format!("Commit · {}", self.label);
         }
         if let Some(doc) = &self.doc {
-            if doc.evidence() {
-                return format!("Evidence of \u{201c}{}\u{201d}", doc.title);
+            if doc.only_read() {
+                return format!("{} of \u{201c}{}\u{201d}", doc.tab_title(), doc.title);
             }
             if doc.file == DocFile::Suggestions {
                 return format!("{REVIEW_IN_PLAN} \u{b7} {}", doc.name());
@@ -1485,7 +1493,7 @@ impl WorktreeDiff {
             return feature.summary(self.diff.review.own());
         }
         if let Some(doc) = &self.doc {
-            if doc.evidence() {
+            if doc.only_read() {
                 return doc.state.clone();
             }
             return format!("\u{201c}{}\u{201d} · {}", doc.title, doc.state);
@@ -1534,7 +1542,7 @@ impl WorktreeDiff {
             disabled: None,
             style: Default::default(),
         };
-        if self.evidence() {
+        if self.only_read() {
             return;
         }
         if let Some(fe) = &self.feature {
@@ -1978,8 +1986,8 @@ impl WorktreeDiff {
                 ReposHit::Button(ReposButton::SendBack) => return self.send_back(env),
                 ReposHit::Button(ReposButton::Reopen) => return self.reopen(),
                 ReposHit::Button(ReposButton::GoOn) => return self.go_on(),
-                ReposHit::DiffRestore(_) if self.evidence() => {
-                    return Some(Done::Diff(Outcome::Notice(EVIDENCE_READ_ONLY)));
+                ReposHit::DiffRestore(_) if self.only_read() => {
+                    return Some(Done::Diff(Outcome::Notice(self.read_only_notice())));
                 }
                 ReposHit::DiffRestore(_) => {
                     return Some(Done::Diff(Outcome::Notice(DOC_NO_RESTORE)));
@@ -2039,7 +2047,8 @@ impl WorktreeDiff {
                     match (&self.commit, &self.doc) {
                         _ if self.feature.is_some() => "Keys in a feature's code review",
                         (Some(_), _) => "Keys in a commit's diff",
-                        (_, Some(doc)) if doc.evidence() => "Keys in the evidence",
+                        (_, Some(doc)) if doc.file == DocFile::Decisions => "Keys in the decisions",
+                        (_, Some(doc)) if doc.only_read() => "Keys in the evidence",
                         (_, Some(doc)) if doc.suggestions.is_some() => {
                             "Keys in the suggestions on the plan"
                         }

@@ -387,6 +387,129 @@ pub fn unnamed_repos<'a>(text: &str, repos: &[&'a str]) -> Vec<&'a str> {
         .collect()
 }
 
+/// The decision log Discover's agent keeps beside the brief: one
+/// `## D<n>: <title>` entry per decision, with a `Decided:` line and the
+/// user's own words. The brief's lines cite them as `(D1)`.
+pub const DECISIONS: &str = "decisions.md";
+
+/// The number of decision heading `line` (trimmed): `## D3: Export` is 3.
+fn decision_number(line: &str) -> Option<u32> {
+    let text = heading(line)?;
+    let rest = text.strip_prefix('d')?;
+    let digits = rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    let after = &rest[digits..];
+    if digits == 0 || !(after.is_empty() || after.starts_with([':', ' '])) {
+        return None;
+    }
+    rest[..digits].parse().ok()
+}
+
+/// Each entry of decision log `text`, in order: its number and its lines
+/// after the heading, trimmed, blank ones and fenced code left out.
+fn decision_entries(text: &str) -> Vec<(u32, Vec<&str>)> {
+    let mut entries: Vec<(u32, Vec<&str>)> = Vec::new();
+    for line in Sections::of(text).lines {
+        let line = line.trim();
+        if let Some(n) = decision_number(line) {
+            entries.push((n, Vec::new()));
+        } else if heading(line).is_some() {
+            // Another heading ends the entry.
+            entries.push((0, Vec::new()));
+        } else if let Some((_, body)) = entries.last_mut()
+            && !line.is_empty()
+        {
+            body.push(line);
+        }
+    }
+    entries.retain(|(n, _)| *n > 0);
+    entries
+}
+
+/// The numbers of the decisions in decision log `text`.
+pub fn decision_ids(text: &str) -> BTreeSet<u32> {
+    decision_entries(text).into_iter().map(|(n, _)| n).collect()
+}
+
+/// Whether decision log `text` is good: at least one entry, none twice,
+/// each with a `Decided:` line; else what it lacks, one line each.
+pub fn check_decisions(text: &str) -> Result<(), Vec<String>> {
+    let entries = decision_entries(text);
+    let mut lacks = Vec::new();
+    if entries.is_empty() {
+        lacks.push("no decision as a \u{201c}## D1: \u{2026}\u{201d} heading".into());
+    }
+    let mut seen = BTreeSet::new();
+    for (n, body) in &entries {
+        if !seen.insert(*n) {
+            lacks.push(format!("D{n} twice"));
+        }
+        if !body.iter().any(|line| decided_line(line)) {
+            lacks.push(format!("D{n} has no \u{201c}Decided:\u{201d} line"));
+        }
+    }
+    if lacks.is_empty() { Ok(()) } else { Err(lacks) }
+}
+
+/// Whether `line` (trimmed) is a decision's `Decided:` line: as a list item
+/// or in bold too.
+fn decided_line(line: &str) -> bool {
+    let line = list_item(line)
+        .unwrap_or(line)
+        .trim_start_matches(['*', '_']);
+    let lower = line.to_lowercase();
+    lower
+        .strip_prefix("decided")
+        .is_some_and(|rest| rest.trim_start_matches(['*', '_']).starts_with(':'))
+}
+
+/// The decisions `text` cites: the `D<n>` of each parenthesised list made
+/// only of such ids (`(D1)`, `(D1, D4)`), fenced code left out. A
+/// parenthesis with other words in it (`(D3 in the old code)`) cites none.
+pub fn cited_decisions(text: &str) -> BTreeSet<u32> {
+    let mut cited = BTreeSet::new();
+    for line in Sections::of(text).lines {
+        for group in line.split('(').skip(1) {
+            let Some((inside, _)) = group.split_once(')') else {
+                continue;
+            };
+            let ids: Option<Vec<u32>> = (inside.split(','))
+                .map(|id| id.trim().strip_prefix('D')?.parse().ok())
+                .collect();
+            cited.extend(ids.unwrap_or_default());
+        }
+    }
+    cited
+}
+
+/// What is wrong with the decisions brief `text` rests on, in feature data
+/// dir `dir`: a decision log that isn't good, or a cited decision it lacks.
+/// A brief citing none, with no log, lacks nothing.
+pub fn decision_lacks(text: &str, dir: &Path) -> Vec<String> {
+    let cited = cited_decisions(text);
+    let path = dir.join(DECISIONS);
+    let log = match std::fs::read_to_string(&path) {
+        Ok(log) => log,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            return match cited.first() {
+                Some(n) => vec![format!("cites D{n}, but there is no {DECISIONS}")],
+                None => Vec::new(),
+            };
+        }
+        Err(err) => {
+            tracing::warn!("reading {}: {err}", path.display());
+            return vec![format!("couldn't read {DECISIONS}: {err}")];
+        }
+    };
+    let mut lacks: Vec<String> = (check_decisions(&log).err().unwrap_or_default().into_iter())
+        .map(|lack| format!("{DECISIONS}: {lack}"))
+        .collect();
+    let ids = decision_ids(&log);
+    for n in cited.difference(&ids) {
+        lacks.push(format!("cites D{n}, which {DECISIONS} lacks"));
+    }
+    lacks
+}
+
 /// A Markdown file cut at its headings; code fences left out.
 struct Sections<'a> {
     /// Every line outside fences.
@@ -862,5 +985,62 @@ mod tests {
             vec!["worker"]
         );
         assert_eq!(unnamed_repos("x", &["api"]), vec!["api"]);
+    }
+
+    const LOG: &str = "# Decisions\n\n## D1: Export format\nDecided: one CSV per export.\nUser said: \"CSV only\"\n\n## D2 Where it saves\n- **Decided:** the Downloads folder.\n\n```\n## D9: in a fence\n```\n";
+
+    #[test]
+    fn a_decision_log_lists_its_entries_by_number() {
+        assert_eq!(decision_ids(LOG), BTreeSet::from([1, 2]));
+        assert_eq!(check_decisions(LOG), Ok(()));
+        assert_eq!(
+            decision_ids("## Dx: no\n## Done\n## D: no\n"),
+            BTreeSet::new()
+        );
+    }
+
+    #[test]
+    fn each_decision_needs_a_decided_line_and_a_number_of_its_own() {
+        let bad =
+            "## D1: A\nWhy: none.\n## Other\nDecided: not D1's.\n## D1: B\n**Decided**: yes\n";
+        assert_eq!(
+            check_decisions(bad),
+            Err(vec![
+                "D1 has no \u{201c}Decided:\u{201d} line".to_owned(),
+                "D1 twice".to_owned()
+            ])
+        );
+        assert!(check_decisions("# Decisions\n").is_err());
+    }
+
+    #[test]
+    fn a_brief_cites_decisions_only_in_parentheses_of_ids() {
+        let brief =
+            "- Exports CSV (D1)\n- Saves (D2, D4) and more (D3 in the old code)\n```\n(D7)\n```\n";
+        assert_eq!(cited_decisions(brief), BTreeSet::from([1, 2, 4]));
+        assert!(cited_decisions("Nothing (here) (d1)").is_empty());
+    }
+
+    #[test]
+    fn a_brief_citing_a_missing_decision_lacks_it() {
+        let dir = folder("decisions");
+        assert!(decision_lacks("- plain\n", dir.path()).is_empty());
+        assert_eq!(
+            decision_lacks("- CSV (D1)\n", dir.path()),
+            vec![format!("cites D1, but there is no {DECISIONS}")]
+        );
+        std::fs::write(dir.path().join(DECISIONS), LOG).unwrap();
+        assert!(decision_lacks("- CSV (D1, D2)\n", dir.path()).is_empty());
+        assert_eq!(
+            decision_lacks("- CSV (D3)\n", dir.path()),
+            vec![format!("cites D3, which {DECISIONS} lacks")]
+        );
+        std::fs::write(dir.path().join(DECISIONS), "## D1: A\n").unwrap();
+        assert_eq!(
+            decision_lacks("- plain\n", dir.path()),
+            vec![format!(
+                "{DECISIONS}: D1 has no \u{201c}Decided:\u{201d} line"
+            )]
+        );
     }
 }

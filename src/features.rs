@@ -1367,6 +1367,8 @@ pub enum PanelOutcome {
     ChangeDecisions,
     /// Show Verify's `evidence.md`.
     Evidence,
+    /// Show Discover's decision log.
+    Decisions,
     /// Open this pull request's page.
     OpenPr(String),
     /// Open the repositories panel on the feature's worktree of this
@@ -1515,6 +1517,7 @@ impl PanelOutcome {
                 | Self::OpenDoc(_)
                 | Self::ReviewFixPlan
                 | Self::Evidence
+                | Self::Decisions
                 | Self::SetupLog
                 | Self::Findings
                 | Self::ShowFinding(_)

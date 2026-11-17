@@ -59,6 +59,9 @@ pub struct Docs {
     pub previews: BTreeMap<Stage, Arc<Vec<DocBlock>>>,
     /// How many comments the user left in the feature's diff (`notes`).
     pub comments: usize,
+    /// How many decisions Discover's decision log holds
+    /// (`artifacts::DECISIONS`); none while it isn't there.
+    pub decisions: usize,
     /// Its summary (`SUMMARY_FILE`) and when it was last written, once there;
     /// why it couldn't be read, if so.
     pub summary: Option<(Result<String, String>, u64)>,
@@ -212,6 +215,20 @@ pub fn read_summary(data: &Path) -> Option<(Result<String, String>, u64)> {
     Some((text, at))
 }
 
+/// How many decisions the decision log in feature data dir `data` holds:
+/// none when it isn't there, or can't be read (logged).
+fn read_decisions(data: &Path) -> usize {
+    let path = data.join(artifacts::DECISIONS);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => artifacts::decision_ids(&text).len(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(err) => {
+            tracing::warn!("reading {}: {err}", path.display());
+            0
+        }
+    }
+}
+
 /// Read the stage files in feature data dir `data`. A file that can't be
 /// read is still there: its stage's page shows why in its place, and Review
 /// says so too when pressed.
@@ -224,6 +241,7 @@ pub fn read_docs(data: &Path) -> Docs {
         ..Docs::default()
     };
     docs.plans = archived_plans(data);
+    docs.decisions = read_decisions(data);
     docs.plan = fix_round::path(data).exists();
     docs.summary = read_summary(data);
     docs.changed = (docs.written.iter().copied())

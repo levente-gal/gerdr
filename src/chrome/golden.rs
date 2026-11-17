@@ -3515,6 +3515,33 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
     view
 }
 
+/// Discover's brief ready with its decision log: a card of its own, with
+/// Open.
+fn feature_tab_discover_decisions() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, PageButton, PageSection};
+    let mut view = feature_tab_discover_brief();
+    view.page.buttons.insert(
+        2,
+        PageButton {
+            label: "Open".into(),
+            style: ButtonStyle::Plain,
+        },
+    );
+    let sections = &mut view.page.sections;
+    if let Some(PageSection::File { buttons, .. }) = sections.get_mut(1) {
+        *buttons = vec![0, 3];
+    }
+    sections.insert(
+        2,
+        PageSection::File {
+            name: "decisions.md".into(),
+            state: tab_line("4 decisions", CheckTone::Note),
+            buttons: vec![2],
+        },
+    );
+    view
+}
+
 /// A plan too long for its column, scrolled.
 fn feature_tab_plan_long() -> super::FeatureTabView {
     use super::{CheckTone, NodeMark, PageSection, TabColumn};
@@ -6296,7 +6323,7 @@ fn placed(mut view: super::FeatureTabView) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 57] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 58] {
     let views = [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -6348,6 +6375,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 57] {
         ("tab_locked", feature_tab_locked()),
         ("tab_start_over", feature_tab_start_over()),
         ("tab_discover_brief", feature_tab_discover_brief()),
+        ("tab_discover_decisions", feature_tab_discover_decisions()),
         ("tab_plan_long", feature_tab_plan_long()),
         ("tab_manual_test", feature_tab_manual_test(false)),
         ("tab_manual_note", feature_tab_manual_test(true)),
@@ -6369,7 +6397,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 57] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 73] = [
+const TAB_SURFACES: [(&str, i32); 74] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -6443,9 +6471,10 @@ const TAB_SURFACES: [(&str, i32); 73] = [
     ("tab_ship_checking", 1180),
     ("tab_verify_regressed", 1180),
     ("tab_verify_machine", 860),
+    ("tab_discover_decisions", 860),
 ];
 
-const FEATURE_TAB: [&str; 73] = [
+const FEATURE_TAB: [&str; 74] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -6519,10 +6548,11 @@ const FEATURE_TAB: [&str; 73] = [
     "tab_ship_checking_1180",
     "tab_verify_regressed_1180",
     "tab_verify_machine_860",
+    "tab_discover_decisions_860",
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 73]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 74]; 4] = [
     // Dark at 1
     [
         0x67093ad27ab19c53, // tab_build_860
@@ -6598,6 +6628,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 73]; 4] = [
         0x51edb1354d501bd9, // tab_ship_checking_1180
         0x8c5bfb636d72289d, // tab_verify_regressed_1180
         0x5d1528bc2cc8a559, // tab_verify_machine_860
+        0xd410f6df1fe56733, // tab_discover_decisions_860
     ],
     // Dark at 2
     [
@@ -6674,6 +6705,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 73]; 4] = [
         0x9a2f01f6f743e506, // tab_ship_checking_1180
         0xe9edacb82394691d, // tab_verify_regressed_1180
         0xd05cc43a9d172953, // tab_verify_machine_860
+        0xdb64822c21ec8637, // tab_discover_decisions_860
     ],
     // Light at 1
     [
@@ -6750,6 +6782,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 73]; 4] = [
         0xf2a063041d3ea7e4, // tab_ship_checking_1180
         0xcd5b80374b7fadce, // tab_verify_regressed_1180
         0x73e583c110a3c917, // tab_verify_machine_860
+        0x41cdcaa749a870ce, // tab_discover_decisions_860
     ],
     // Light at 2
     [
@@ -6826,6 +6859,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 73]; 4] = [
         0x57fb4f62d5c7de92, // tab_ship_checking_1180
         0xa1eb9487db0a0cd1, // tab_verify_regressed_1180
         0x44849469da4e5fdd, // tab_verify_machine_860
+        0xd656c1cb8bbb0455, // tab_discover_decisions_860
     ],
 ];
 

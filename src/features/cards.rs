@@ -364,6 +364,26 @@ pub(super) fn file_card(
     }
 }
 
+/// The card of Discover's decision log, holding `n` decisions, with its
+/// Open in `actions`; none while it holds none.
+pub(super) fn decisions_card(n: usize, actions: &[(PageButton, PanelOutcome)]) -> Option<PageSection> {
+    if n == 0 {
+        return None;
+    }
+    let said = match n {
+        1 => "1 decision".to_owned(),
+        n => format!("{n} decisions"),
+    };
+    Some(PageSection::File {
+        name: crate::feature::artifacts::DECISIONS.to_owned(),
+        state: line(said, CheckTone::Note),
+        buttons: (actions.iter().enumerate())
+            .filter(|(_, (_, o))| *o == PanelOutcome::Decisions)
+            .map(|(i, _)| i)
+            .collect(),
+    })
+}
+
 /// What round `round` of `feature` is called, as Build's page has it.
 pub(super) fn round_label(round: &FixRound) -> String {
     feature::fix_round::label(round.n)

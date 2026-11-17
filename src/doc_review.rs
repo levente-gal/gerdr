@@ -54,6 +54,9 @@ pub enum DocFile {
     /// Verify's `evidence.md`, only read: no comments, no Approve or Send
     /// back.
     Evidence,
+    /// Discover's decision log (`artifacts::DECISIONS`), only read as the
+    /// evidence is: its agent keeps it.
+    Decisions,
     /// The fix round's plan, open or the last: reviewed as a stage's file
     /// is, and Make fixes where that has Approve.
     FixPlan,
@@ -79,6 +82,7 @@ impl DocFile {
         match self {
             DocFile::Stage(stage) => stage,
             DocFile::Evidence => Stage::Verify,
+            DocFile::Decisions => Stage::Discover,
             DocFile::FixPlan => Stage::Build,
             DocFile::PlanChanges | DocFile::Suggestions => Stage::PlanReview,
             DocFile::ConflictPlan(_) => Stage::Ship,
@@ -93,6 +97,8 @@ impl DocFile {
             // Its own: the final plan's review has Plan review's.
             DocFile::Suggestions => dir.join(SUGGESTIONS_COMMENTS),
             DocFile::ConflictPlan(n) => dir.join(format!("conflicts-{n}-comments.json")),
+            // It takes none, but must not share the brief's.
+            DocFile::Decisions => dir.join("decisions-comments.json"),
             _ => comments_path(dir, self.stage()),
         }
     }
@@ -102,6 +108,7 @@ impl DocFile {
         match self {
             DocFile::Stage(stage) => artifacts::name(stage),
             DocFile::Evidence => Some(EVIDENCE),
+            DocFile::Decisions => Some(artifacts::DECISIONS),
             DocFile::FixPlan => Some(fix_round::FILE),
             DocFile::PlanChanges => artifacts::name(Stage::PlanReview),
             DocFile::DraftChanges(stage, _) => artifacts::name(stage),
@@ -117,6 +124,7 @@ impl DocFile {
         match self {
             DocFile::Stage(stage) => state(feature, stage, docs, now),
             DocFile::Evidence => evidence_state(feature, running),
+            DocFile::Decisions => decisions_state(docs.decisions),
             DocFile::FixPlan => fix_plan_state(feature, now),
             DocFile::DraftChanges(_, k) => format!("draft {k} against draft {}", k - 1),
             DocFile::PlanChanges => format!(
@@ -137,6 +145,7 @@ impl DocFile {
         match self {
             DocFile::Stage(stage) => locked(feature, stage, docs),
             DocFile::Evidence => Some(EVIDENCE_READ_ONLY),
+            DocFile::Decisions => Some(DECISIONS_READ_ONLY),
             DocFile::PlanChanges => Some(PLAN_CHANGES_READ_ONLY),
             DocFile::DraftChanges(..) => Some(DRAFT_CHANGES_READ_ONLY),
             DocFile::Suggestions => Some(SUGGESTIONS_READ_ONLY),
@@ -150,7 +159,7 @@ impl DocFile {
     /// however Verify stands, and has no actions to change.
     pub fn standing(self, feature: Option<&Feature>, docs: &Docs) -> Standing {
         // Written elsewhere, it is only read here, whichever stage it is at.
-        if !(self == DocFile::Evidence || self.shows_changes())
+        if !(self.only_read() || self.shows_changes())
             && let Some(feature) = feature.filter(|f| f.writer.is_some())
         {
             return Standing::Locked(feature.current().unwrap_or(Stage::Ship));
@@ -180,6 +189,12 @@ impl DocFile {
             DocFile::ConflictPlan(n) => Some(dir.join(format!("conflicts-{n}.md"))),
             _ => Some(dir.join(self.name()?)),
         }
+    }
+
+    /// Whether it is a file only to read, with no actions of its own: the
+    /// evidence and the decision log.
+    pub fn only_read(self) -> bool {
+        matches!(self, DocFile::Evidence | DocFile::Decisions)
     }
 
     /// Whether it shows a file as changes to another, only to read: the
@@ -551,6 +566,18 @@ fn fix_plan_locked(feature: Option<&Feature>) -> Option<&'static str> {
 
 /// Where Verify of `feature` stands, as its evidence's header says it;
 /// `running` while its checks run again.
+/// Why the decision log takes no edit or comment.
+pub const DECISIONS_READ_ONLY: &str = "The decisions are only read: Discover's agent keeps them";
+
+/// How the decision log stands, as its tab's header says it: how many
+/// decisions it holds, as last read.
+fn decisions_state(n: usize) -> String {
+    match n {
+        1 => "1 decision".to_owned(),
+        n => format!("{n} decisions"),
+    }
+}
+
 pub fn evidence_state(feature: Option<&Feature>, running: bool) -> String {
     let Some(feature) = feature else {
         return "feature gone".into();
@@ -642,6 +669,9 @@ impl Gerdr {
                 return Err(match file {
                     DocFile::Evidence => {
                         Failed::Warning("No evidence yet: Run checks first".into())
+                    }
+                    DocFile::Decisions => {
+                        Failed::Warning(format!("No decisions yet for \u{201c}{title}\u{201d}"))
                     }
                     DocFile::PlanChanges => {
                         Failed::Warning(format!("No final plan yet for \u{201c}{title}\u{201d}"))

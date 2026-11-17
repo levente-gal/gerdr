@@ -183,6 +183,8 @@ pub struct RowCtx {
     pub comments: usize,
     /// Its sandbox is open to the network (see `sandbox_lan`).
     pub lan_open: bool,
+    /// How many decisions Discover's decision log holds, as last read.
+    pub decisions: usize,
     /// A pull request's review whose worktree is at the head reviewed,
     /// nothing changed, as its code was last read: Verify goes by GitHub's
     /// checks (see `pr_watch`).
@@ -787,6 +789,7 @@ pub(super) fn works_during_checks(outcome: &PanelOutcome) -> bool {
             | PanelOutcome::StopCheck(_)
             | PanelOutcome::ShowCheck(_)
             | PanelOutcome::Evidence
+            | PanelOutcome::Decisions
             | PanelOutcome::SetupLog
             | PanelOutcome::EditCommands(_)
             | PanelOutcome::ReviewFixPlan

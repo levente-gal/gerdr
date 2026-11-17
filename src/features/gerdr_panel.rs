@@ -484,6 +484,9 @@ impl Gerdr {
                 skip,
             } => self.set_check_skipped(&project, &slug, &repo, &command, skip),
             PanelOutcome::Evidence => self.open_evidence(&project, &slug),
+            PanelOutcome::Decisions => {
+                self.open_doc_tab(&project, &slug, DocFile::Decisions);
+            }
             PanelOutcome::Findings => {
                 let first = self
                     .feature(&project, &slug)

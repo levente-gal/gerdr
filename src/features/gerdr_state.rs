@@ -1001,6 +1001,7 @@ impl Gerdr {
             lan_open: (self.features.build.sandbox_lan)
                 .contains_key(&(feature.project.clone(), feature.slug.clone())),
             on_head: on_head(feature, last.map(|p| &p.reading)),
+            decisions: docs.map_or(0, |d| d.decisions),
         }
     }
 }

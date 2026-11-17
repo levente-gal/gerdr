@@ -139,6 +139,9 @@ pub(super) fn stage_page(
             Stage::Discover | Stage::Plan => {
                 sections.extend(card());
                 sections.push(file_card(feature, stage, state.ctx, actions));
+                if stage == Stage::Discover {
+                    sections.extend(decisions_card(state.ctx.decisions, actions));
+                }
                 sections.extend(draft_cards(feature, stage, state, actions, now));
                 sections.extend(doc_of(state.probe, stage));
             }

@@ -395,9 +395,16 @@ fn rested_enough(
     now.duration_since(rested) >= REST
 }
 
-/// Whether `text` is a good `stage` file for `feature`; else what it
-/// lacks. A multi-repository plan must name the touched repositories.
-pub(crate) fn validate(feature: &Feature, stage: Stage, text: &str) -> Result<(), Vec<String>> {
+/// Whether `text` is a good `stage` file of `feature`, in feature data dir
+/// `data`; else what it lacks. A multi-repository plan must name the
+/// touched repositories; a brief's cited decisions must be in its decision
+/// log (`artifacts::decision_lacks`).
+pub(crate) fn validate(
+    feature: &Feature,
+    stage: Stage,
+    text: &str,
+    data: &Path,
+) -> Result<(), Vec<String>> {
     let review = feature
         .plan_review
         .as_ref()
@@ -406,6 +413,9 @@ pub(crate) fn validate(feature: &Feature, stage: Stage, text: &str) -> Result<()
         return plan_review::parse(text).map(drop);
     }
     let mut lacks = artifacts::check(stage, text).err().unwrap_or_default();
+    if stage == Stage::Discover {
+        lacks.extend(artifacts::decision_lacks(text, data));
+    }
     if let Some(review) = review {
         for id in plan_review::unmapped(review, text) {
             lacks.push(format!("Review changes doesn't name {id}"));
@@ -425,7 +435,12 @@ pub(crate) fn validate(feature: &Feature, stage: Stage, text: &str) -> Result<()
 
 /// Whether `stage` of `feature` can be approved with its file reading
 /// `text` (`None`: there is none); else why not.
-pub(crate) fn approval(feature: &Feature, stage: Stage, text: Option<&str>) -> Result<(), String> {
+pub(crate) fn approval(
+    feature: &Feature,
+    stage: Stage,
+    text: Option<&str>,
+    data: &Path,
+) -> Result<(), String> {
     let title = &feature.title;
     if feature.status != Status::Open {
         return Err(format!("\u{201c}{title}\u{201d} isn't open"));
@@ -448,7 +463,7 @@ pub(crate) fn approval(feature: &Feature, stage: Stage, text: Option<&str>) -> R
     let Some(text) = text else {
         return Err(format!("There's no {name} yet"));
     };
-    validate(feature, stage, text)
+    validate(feature, stage, text, data)
         .map_err(|lacks| format!("{name} isn't ready: {}", lacks.join("; ")))
 }
 
@@ -1057,6 +1072,19 @@ pub(crate) fn vars(
             ),
         ),
         ("brief.path", path(artifacts::path(data, Stage::Discover))),
+        // The decision log's path, which Discover's agent writes; "kept"
+        // only once it is there, for the stages that read it.
+        (
+            "decisions.path",
+            data.join(artifacts::DECISIONS).display().to_string(),
+        ),
+        (
+            "decisions.kept",
+            match data.join(artifacts::DECISIONS).is_file() {
+                true => "yes".to_owned(),
+                false => String::new(),
+            },
+        ),
         ("plan.path", path(artifacts::plan_for(data, stage))),
         (
             "evidence.path",
@@ -1355,7 +1383,7 @@ fn read_file(feature: &Feature, stage: Stage, path: &Path, after: u64) -> File {
         Ok(text) if stage == Stage::Build && artifacts::blocked(&text).is_some() => {
             File::Blocked(stamp, artifacts::blocked(&text).unwrap_or_default())
         }
-        Ok(text) => match validate(feature, stage, &text) {
+        Ok(text) => match validate(feature, stage, &text, path.parent().unwrap_or(path)) {
             Ok(()) => File::Good(stamp),
             Err(lacks) => match partial(stage, &text) {
                 Some((done, total)) => File::Partial(stamp, done, total),
@@ -3261,7 +3289,7 @@ impl Gerdr {
         let text = path
             .as_deref()
             .and_then(|p| std::fs::read_to_string(p).ok());
-        if let Err(why) = approval(feature, stage, text.as_deref()) {
+        if let Err(why) = approval(feature, stage, text.as_deref(), &data) {
             self.show_warning(why);
             return false;
         }
@@ -3734,8 +3762,11 @@ mod tests {
         );
         let stage = Stage::PlanReview;
         // The reviewer's, until the final plan is due.
-        assert_eq!(validate(&f, stage, r#"{"suggestions": []}"#), Ok(()));
-        assert!(validate(&f, stage, PLAN).is_err());
+        assert_eq!(
+            validate(&f, stage, r#"{"suggestions": []}"#, Path::new("")),
+            Ok(())
+        );
+        assert!(validate(&f, stage, PLAN, Path::new("")).is_err());
         let names = |f: &Feature| run_needs(f, stage).map(|n| (n.artifact, n.template));
         assert_eq!(names(&f), Some((Some("plan-review.json"), "plan-review")));
         let mut review = PlanReview::default();
@@ -3744,7 +3775,7 @@ mod tests {
         f.plan_review = Some(review);
         assert_eq!(names(&f), Some((Some("plan-final.md"), "plan-final")));
         // A plan, saying where each accepted one went.
-        let lacks = validate(&f, stage, PLAN).unwrap_err();
+        let lacks = validate(&f, stage, PLAN, Path::new("")).unwrap_err();
         assert!(
             lacks.iter().any(|l| l.contains("Review changes")),
             "{lacks:?}"
@@ -3754,8 +3785,8 @@ mod tests {
             "{lacks:?}"
         );
         let good = format!("{PLAN}\n## Review changes\n- u1: Milestones\n");
-        assert_eq!(validate(&f, stage, &good), Ok(()));
-        assert_eq!(validate(&f, Stage::Plan, PLAN), Ok(()));
+        assert_eq!(validate(&f, stage, &good, Path::new("")), Ok(()));
+        assert_eq!(validate(&f, Stage::Plan, PLAN, Path::new("")), Ok(()));
     }
 
     #[test]
@@ -3827,40 +3858,51 @@ mod tests {
     #[test]
     fn approval_refuses_and_says_why() {
         let f = feature("a", vec![repo("api", true)], 0);
-        assert_eq!(approval(&f, Stage::Discover, Some(BRIEF)), Ok(()));
         assert_eq!(
-            approval(&f, Stage::Discover, None),
+            approval(&f, Stage::Discover, Some(BRIEF), Path::new("")),
+            Ok(())
+        );
+        let cites = format!("{BRIEF}- Saves to Downloads (D1)\n");
+        assert_eq!(
+            approval(&f, Stage::Discover, Some(&cites), Path::new("/nonexistent")),
+            Err("brief.md isn't ready: cites D1, but there is no decisions.md".into())
+        );
+        assert_eq!(
+            approval(&f, Stage::Discover, None, Path::new("")),
             Err("There's no brief.md yet".into())
         );
         assert_eq!(
-            approval(&f, Stage::Discover, Some("## Outcome\nx\n")),
+            approval(&f, Stage::Discover, Some("## Outcome\nx\n"), Path::new("")),
             Err("brief.md isn't ready: no In scope section; no Out of scope section; no Acceptance criteria section".into())
         );
         assert_eq!(
-            approval(&f, Stage::Plan, Some(PLAN)),
+            approval(&f, Stage::Plan, Some(PLAN), Path::new("")),
             Err("Mark Discover done first".into())
         );
         let planned = feature("a", vec![repo("api", true)], 1);
         assert_eq!(
-            approval(&planned, Stage::Discover, Some(BRIEF)),
+            approval(&planned, Stage::Discover, Some(BRIEF), Path::new("")),
             Err("Discover is approved already".into())
         );
-        assert_eq!(approval(&planned, Stage::Plan, Some(PLAN)), Ok(()));
+        assert_eq!(
+            approval(&planned, Stage::Plan, Some(PLAN), Path::new("")),
+            Ok(())
+        );
         let mut gone = planned.clone();
         gone.status = Status::Abandoned;
-        assert!(approval(&gone, Stage::Plan, Some(PLAN)).is_err());
+        assert!(approval(&gone, Stage::Plan, Some(PLAN), Path::new("")).is_err());
         // AI review and Code review pass by their own checks only.
         let reviewing = feature("a", vec![repo("api", true)], 5);
         assert_eq!(reviewing.current(), Some(Stage::AiReview));
         let review = "{\"findings\": []}";
         assert_eq!(
-            approval(&reviewing, Stage::AiReview, Some(review)),
+            approval(&reviewing, Stage::AiReview, Some(review), Path::new("")),
             Err("AI review is done once its findings are decided".into())
         );
         let coding = feature("a", vec![repo("api", true)], 6);
         assert_eq!(coding.current(), Some(Stage::CodeReview));
         assert_eq!(
-            approval(&coding, Stage::CodeReview, None),
+            approval(&coding, Stage::CodeReview, None, Path::new("")),
             Err("Approve Code review from the feature's diff".into())
         );
     }
@@ -3873,11 +3915,11 @@ mod tests {
             1,
         );
         assert_eq!(
-            validate(&f, Stage::Plan, PLAN),
+            validate(&f, Stage::Plan, PLAN, Path::new("")),
             Err(vec!["Repositories doesn't name web".into()])
         );
         let both = PLAN.replace("- api\n", "- api\n- web\n");
-        assert_eq!(validate(&f, Stage::Plan, &both), Ok(()));
+        assert_eq!(validate(&f, Stage::Plan, &both, Path::new("")), Ok(()));
     }
 
     fn agent(name: &str, start: Start) -> CliAgent {
@@ -4024,7 +4066,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            approval(&testing, Stage::ManualTest, None),
+            approval(&testing, Stage::ManualTest, None, Path::new("")),
             Err("Mark Manual test passed from its page".into())
         );
     }

@@ -82,7 +82,10 @@ impl DocMode {
     pub fn choices(file: DocFile) -> &'static [DocMode] {
         match file {
             DocFile::Stage(_) => &[DocMode::Review, DocMode::Split],
-            DocFile::Evidence | DocFile::FixPlan | DocFile::ConflictPlan(_) => &DocMode::ALL,
+            DocFile::Evidence
+            | DocFile::Decisions
+            | DocFile::FixPlan
+            | DocFile::ConflictPlan(_) => &DocMode::ALL,
             DocFile::PlanChanges | DocFile::DraftChanges(..) | DocFile::Suggestions => {
                 &[DocMode::Review]
             }
@@ -104,7 +107,7 @@ impl DocMode {
     pub fn default_for(file: DocFile) -> DocMode {
         match file {
             DocFile::Stage(_) | DocFile::FixPlan | DocFile::ConflictPlan(_) => DocMode::Review,
-            DocFile::Evidence => DocMode::Preview,
+            DocFile::Evidence | DocFile::Decisions => DocMode::Preview,
             DocFile::PlanChanges | DocFile::DraftChanges(..) | DocFile::Suggestions => {
                 DocMode::Review
             }
@@ -536,6 +539,7 @@ impl Gerdr {
                 review::load_file(&doc.comments)
             }
             DocFile::Evidence
+            | DocFile::Decisions
             | DocFile::PlanChanges
             | DocFile::DraftChanges(..)
             | DocFile::Suggestions => Review::default(),
@@ -694,7 +698,7 @@ impl Gerdr {
             .filter_map(Tab::review)
             .map(|review| &review.wd)
             .find(|wd| wd.doc.as_ref().is_some_and(|doc| doc.path == file))?;
-        let comments = match wd.doc.as_ref().is_some_and(DocOf::evidence) {
+        let comments = match wd.doc.as_ref().is_some_and(DocOf::only_read) {
             true => Vec::new(),
             false => wd.diff.comment_lines(),
         };

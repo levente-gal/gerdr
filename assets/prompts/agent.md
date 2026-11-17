@@ -3,6 +3,7 @@ The user started you for the feature “{{feature.title}}” in project
 {{stage}} now.
 
 {{> repos}}
+{{> decisions}}
 
 The feature's own files are in {{feature.data}}: the brief is
 {{brief.path}} and the plan {{plan.path}}. Some may not be written yet.

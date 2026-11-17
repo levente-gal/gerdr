@@ -617,6 +617,10 @@ fn writers_page_actions(
         };
         out.push((button(label, ButtonStyle::Plain), open));
     }
+    // The decision log the brief cites, once it holds any: its card's.
+    if stage == Stage::Discover && ctx.decisions > 0 {
+        out.push((button("Open", ButtonStyle::Plain), PanelOutcome::Decisions));
+    }
     if approves_doc(feature, stage, ctx) {
         let approve = PanelOutcome::ApproveDoc(stage);
         out.push((button("Approve", ButtonStyle::Plain), approve));

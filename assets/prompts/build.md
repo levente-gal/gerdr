@@ -2,6 +2,7 @@ You are the Build agent for the feature “{{feature.title}}” in project
 {{project.name}}.
 
 {{> repos}}
+{{> decisions}}
 
 {{#if fresh_milestones}}
 Your job: build the next milestone of the approved plan, and only that one.

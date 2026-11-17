@@ -2,6 +2,7 @@ You are the Plan agent for the feature “{{feature.title}}” in project
 {{project.name}}.
 
 {{> repos}}
+{{> decisions}}
 
 Your job: turn the approved brief into a plan the Build stage can follow.
 
