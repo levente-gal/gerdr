@@ -932,18 +932,21 @@ impl Gerdr {
     }
 
     /// The feature tab's view, while a feature's tab shows.
-    /// The feature tab as it is drawn now: `feature_tab_view`, its hover
-    /// found again under the pointer if the tab changed under it.
+    /// The feature tab as it is drawn now: `feature_tab_view`. Once it
+    /// changed under a pointer that stayed (buttons numbered anew, rows
+    /// added, a scroll), what the pointer is over is found again, with its
+    /// tooltip, as a move there would: kept by number, the hover would
+    /// light whatever took that number.
     pub(crate) fn feature_tab_drawn(&mut self) -> Option<chrome::FeatureTabView> {
         let mut view = self.feature_tab_view()?;
+        view.hover = None;
+        let changed = self.features.panel.as_mut()?.tab_changed(&view);
         let pos = self.mouse.pos;
-        let over = self.overlay_at(pos) == Some(crate::overlay::Overlay::Features);
-        let frame = self.content_rect();
-        let panel = self.features.panel.as_mut()?;
-        panel.hover_again(&mut view, |view| {
-            let layout = over.then(|| chrome::feature_tab_layout(view, frame))?;
-            layout.hit(view, pos.to_i32_round())
-        });
+        if changed && self.overlay_at(pos) == Some(crate::overlay::Overlay::Features) {
+            let tip = self.feature_panel_hover(pos);
+            self.offer_tooltip(tip, std::time::Instant::now());
+        }
+        view.hover = self.features.panel.as_ref()?.tab_hover;
         Some(view)
     }
 

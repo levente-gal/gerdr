@@ -3,21 +3,15 @@
 use super::*;
 
 impl FeaturePanel {
-    /// `view`'s hover, kept as the pointer last left it while the tab shows
-    /// the same; once it shows something else under a pointer that stayed
-    /// (buttons numbered anew, rows added, a scroll), `hit` finds it again:
-    /// kept by number, it would light whatever took that number.
-    pub fn hover_again(
-        &mut self,
-        view: &mut FeatureTabView,
-        hit: impl FnOnce(&FeatureTabView) -> Option<FeatureTabHit>,
-    ) {
-        view.hover = None;
-        if self.hovered_view.as_ref() != Some(view) {
-            self.tab_hover = hit(view);
-            self.hovered_view = Some(view.clone());
+    /// Whether the tab shows something else than when last drawn: `view`,
+    /// its hover left out, kept for the next time.
+    pub fn tab_changed(&mut self, view: &FeatureTabView) -> bool {
+        debug_assert!(view.hover.is_none());
+        let changed = self.drawn_view.as_ref() != Some(view);
+        if changed {
+            self.drawn_view = Some(view.clone());
         }
-        view.hover = self.tab_hover;
+        changed
     }
 
     /// Write the note on `on`, starting from `field`, or from the draft Esc

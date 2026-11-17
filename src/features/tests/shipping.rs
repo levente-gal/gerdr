@@ -1999,28 +1999,17 @@ fn bases_are_fetched_from_manual_test_on() {
 }
 
 #[test]
-fn the_hover_is_found_again_once_the_tab_changes_under_the_pointer() {
+fn the_tab_says_when_it_changed_since_last_drawn() {
     let f = feature("s", vec![repo("api", true)], 8);
     let slugs = vec!["s".to_owned()];
     let state = PanelState::default();
     let mut view = tab_view(&FeaturePanel::default(), &f, &slugs, &state, 2_060);
+    view.hover = None;
     let mut panel = FeaturePanel::default();
-    let mut asked = 0;
-    let mut draw = |panel: &mut FeaturePanel, view: &FeatureTabView, at: usize| {
-        let mut view = view.clone();
-        panel.hover_again(&mut view, |_| {
-            asked += 1;
-            Some(FeatureTabHit::PageButton(at))
-        });
-        view.hover
-    };
-    // First drawn: found under the pointer.
-    assert_eq!(draw(&mut panel, &view, 0), Some(FeatureTabHit::PageButton(0)));
-    // The pointer moves to button 1: drawn the same, it stays there.
-    panel.tab_hover = Some(FeatureTabHit::PageButton(1));
-    assert_eq!(draw(&mut panel, &view, 0), Some(FeatureTabHit::PageButton(1)));
-    // A button comes before it: the pointer is over what is button 2 now.
+    assert!(panel.tab_changed(&view));
+    assert!(!panel.tab_changed(&view));
+    // A button comes before the others: what the pointer is over moved.
     view.page.buttons.insert(0, view.page.buttons[0].clone());
-    assert_eq!(draw(&mut panel, &view, 2), Some(FeatureTabHit::PageButton(2)));
-    assert_eq!(asked, 2);
+    assert!(panel.tab_changed(&view));
+    assert!(!panel.tab_changed(&view));
 }
