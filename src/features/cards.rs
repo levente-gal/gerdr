@@ -199,7 +199,11 @@ pub(super) fn research_cards(
                         Some(AgentStatus::Idle | AgentStatus::Done) => "idle, no answer yet",
                         _ => "working",
                     };
-                    let dot = status.map_or(Dot::Unknown, Dot::of_status);
+                    // Done without an answer isn't done: a ring, not a pass.
+                    let dot = match status {
+                        Some(AgentStatus::Idle | AgentStatus::Done) => Dot::Idle,
+                        _ => status.map_or(Dot::Unknown, Dot::of_status),
+                    };
                     (dot, format!("{words} \u{b7} started {}", ago(at)))
                 }
             };

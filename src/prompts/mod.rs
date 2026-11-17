@@ -9,7 +9,7 @@ pub mod render;
 /// version: bumped when its text changes meaning.
 pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
     Some(match name {
-        "discover" => (include_str!("../../assets/prompts/discover.md"), 6),
+        "discover" => (include_str!("../../assets/prompts/discover.md"), 7),
         "plan" => (include_str!("../../assets/prompts/plan.md"), 5),
         "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 3),
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
@@ -27,7 +27,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "agent" => (include_str!("../../assets/prompts/agent.md"), 2),
         "rules" => (include_str!("../../assets/prompts/rules.md"), 1),
         "repos" => (include_str!("../../assets/prompts/repos.md"), 5),
-        "decisions" => (include_str!("../../assets/prompts/decisions.md"), 1),
+        "decisions" => (include_str!("../../assets/prompts/decisions.md"), 2),
         "research" => (include_str!("../../assets/prompts/research.md"), 1),
         "summary" => (include_str!("../../assets/prompts/summary.md"), 1),
         "conflicts" => (include_str!("../../assets/prompts/conflicts.md"), 1),

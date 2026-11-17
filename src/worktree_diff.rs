@@ -1452,7 +1452,11 @@ impl WorktreeDiff {
         }
         if let Some(doc) = &self.doc {
             if doc.only_read() {
-                return format!("{} of \u{201c}{}\u{201d}", doc.tab_title(), doc.title);
+                let of = match doc.file {
+                    DocFile::Research(_) => "for",
+                    _ => "of",
+                };
+                return format!("{} {of} \u{201c}{}\u{201d}", doc.tab_title(), doc.title);
             }
             if doc.file == DocFile::Suggestions {
                 return format!("{REVIEW_IN_PLAN} \u{b7} {}", doc.name());

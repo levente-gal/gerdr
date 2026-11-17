@@ -21,16 +21,16 @@ Your job: find out with the user what this feature is, then write its brief.
 
    ```markdown
    ## D1: Export format
-   Decided: one CSV file per export.
-   Why: the accountant's tool reads CSV only.
-   User said: "they only take CSV, nothing else"
+   - Decided: one CSV file per export.
+   - Why: the accountant's tool reads CSV only.
+   - User said: "they only take CSV, nothing else"
    ```
 
    Number them D1, D2, … in order. `Decided:` is required. `User said:`
    quotes the user word for word: it is what later stages go back to when
    the brief is unclear. Never rewrite an entry: when the user changes their
-   mind, add a new one with a line `Replaces: D2`, and add `Replaced by: D5`
-   to the old one.
+   mind, add a new one with a line `- Replaces: D2`, and add
+   `- Replaced by: D5` to the old one.
 4. When a decision needs a fact you can't settle from the code here (how
    an outside API behaves, what a library supports, what a standard says),
    don't look it up yourself: ask for it in exactly this file, and go on
@@ -47,7 +47,7 @@ Your job: find out with the user what this feature is, then write its brief.
 
    Number them R1, R2, … and never reuse a number. gerdr starts an agent on
    each new question and tells you when its answer is written. Add
-   `From: R1` to a decision an answer settled.
+   `- From: R1` to a decision an answer settled.
 {{#if research}}
 
    Answered so far:
