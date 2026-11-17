@@ -56,6 +56,10 @@ pub struct Found {
 /// named in `ignore` are left out of a root of several; `bases` overrides
 /// the base branch by repository name. An error says why there is none
 /// ("~ is not in a git repository").
+///
+/// A repository with repositories right under it (a "home" repository of
+/// the team's agent files, the others ignored in it) is such a folder, not
+/// one of the repositories.
 pub fn find_root(
     dir: &Path,
     workspace_dirs: &[PathBuf],
@@ -65,13 +69,14 @@ pub fn find_root(
     // A feature's folder counts as the folder it sits under: it holds
     // worktrees, not repositories.
     let dir = above_features(dir);
-    let here = main_top(&dir);
+    let here = repo_top(&dir);
     let mut tops = Vec::new();
     let mut folders = Vec::new();
     for d in std::iter::once(&dir).chain(workspace_dirs) {
         let d = above_features(d);
         match main_top(&d) {
-            Some(top) => tops.push(top),
+            Some(top) if child_repos(&top).is_empty() => tops.push(top),
+            Some(home) => folders.push(home),
             None => folders.push(d.canonicalize().unwrap_or(d)),
         }
     }
@@ -147,11 +152,11 @@ pub fn find_project_root(
     let mut root = find_root(dir, workspace_dirs, ignore, bases)?;
     let tops = |dirs: &[PathBuf]| -> Vec<PathBuf> {
         (dirs.iter())
-            .filter_map(|d| main_top(&above_features(d)))
+            .filter_map(|d| repo_top(&above_features(d)))
             .collect()
     };
     let (own, others) = (tops(workspace_dirs), tops(other_dirs));
-    let here = main_top(&above_features(dir));
+    let here = repo_top(&above_features(dir));
     let kept: Vec<Found> = (root.repos.iter())
         .filter(|r| {
             !others.contains(&r.main)
@@ -226,6 +231,12 @@ pub(super) fn child_repos(dir: &Path) -> Vec<(String, PathBuf)> {
         .collect();
     repos.sort();
     repos
+}
+
+/// `main_top`, unless that repository holds others: such a home repository
+/// is a root's folder, not a repository of it (see `find_root`).
+fn repo_top(dir: &Path) -> Option<PathBuf> {
+    main_top(dir).filter(|top| child_repos(top).is_empty())
 }
 
 /// The top folder of the main worktree of the repository `dir` is in.
@@ -1267,11 +1278,13 @@ pub fn others_in_root(feature: &Feature) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// Keep `.features/` out of git (single repository) and the tools that
+/// Keep `.features/` out of git (a single repository, or a home one holding
+/// several) and the tools that
 /// index the root; the files that changed.
 fn keep_out(root: &Root) -> Result<Vec<PathBuf>, String> {
     let mut changed = Vec::new();
-    if !root.multi {
+    // A root of several that is a home repository keeps them out too.
+    if !root.multi || root.path.join(".git").is_dir() {
         changed.extend(exclude_line(&root.path, "/.features/")?);
     }
     match cursor_index_rule(&root.path) {
@@ -2987,6 +3000,67 @@ mod tests {
         );
         let refs = run(&repo, &["for-each-ref", "refs/gerdr"]);
         assert_eq!(refs.trim(), "", "kept refs go once restored");
+    }
+
+    #[test]
+    fn a_home_repository_holding_the_others_is_their_root() {
+        let t = Temp::new();
+        let api = t.repo("api", "main");
+        let web = t.repo("web", "main");
+        std::fs::write(t.0.join(".gitignore"), "/api/\n/web/\n").unwrap();
+        std::fs::create_dir_all(t.0.join(".claude")).unwrap();
+        std::fs::write(t.0.join(".claude/settings.json"), "{}").unwrap();
+        run(&t.0, &["init", "-q", "-b", "main"]);
+        commit(&t.0, "AGENTS.md", "home");
+        run(&t.0, &["add", "-A"]);
+        run(&t.0, &["commit", "-q", "-m", "home"]);
+        let home = t.0.canonicalize().unwrap();
+        let both = [api.clone(), web.clone()];
+        // From the home, from a repository, or with the home as a workspace.
+        for (dir, workspaces) in [
+            (&t.0, &[][..]),
+            (&t.0, std::slice::from_ref(&t.0)),
+            (&api, &both[..]),
+            (&api, &[t.0.clone(), api.clone()][..]),
+            (&t.0, &[t.0.clone(), api.clone(), web.clone()][..]),
+        ] {
+            let root = find_root(dir, workspaces, &[], &[]).unwrap();
+            assert_eq!(
+                (root.path.as_path(), root.multi),
+                (home.as_path(), true),
+                "{dir:?} {workspaces:?}"
+            );
+            assert_eq!(names(&root), ["api", "web"], "{dir:?} {workspaces:?}");
+        }
+        let root = find_root(&t.0, &[], &[], &[]).unwrap();
+        let created = create(&root, "x", &["api".into(), "web".into()]).unwrap();
+        for link in [".claude", "AGENTS.md"] {
+            assert!(
+                created
+                    .dir
+                    .join(link)
+                    .symlink_metadata()
+                    .unwrap()
+                    .is_symlink(),
+                "{link}"
+            );
+        }
+        assert!(created.dir.join(".git").symlink_metadata().is_err());
+        assert_eq!(
+            run(&t.0, &["status", "--porcelain"]),
+            "",
+            "the home stays clean"
+        );
+        assert!(
+            run(&t.0, &["branch", "--list"]).trim() == "* main",
+            "no branch in the home"
+        );
+        // From inside the feature, the same root.
+        assert_eq!(
+            find_root(&created.dir.join("api"), &[], &[], &[]).unwrap(),
+            root
+        );
+        assert_eq!(find_root(&created.dir, &[], &[], &[]).unwrap(), root);
     }
 
     #[test]
