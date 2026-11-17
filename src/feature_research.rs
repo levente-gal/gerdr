@@ -6,7 +6,10 @@
 //! and the agent at rest, gerdr closes its tab, logs it and tells
 //! Discover's agent. The brief cites an answer as `(R1)`.
 
-use std::time::{Duration, Instant};
+use std::{
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use crate::{
     Gerdr, agents,
@@ -80,6 +83,45 @@ pub(crate) fn seen(answered: bool, alive: bool, status: Option<AgentStatus>) -> 
         (false, false) => Seen::Gone,
         _ => Seen::Going,
     }
+}
+
+/// The link in `feature`'s folder to its data folder `data`
+/// (`layout::DOCS_LINK`), if it is there and leads there.
+pub(crate) fn docs_link(feature: &Feature, data: &std::path::Path) -> Option<PathBuf> {
+    let link = feature.dir.join(feature::layout::DOCS_LINK);
+    (std::fs::read_link(&link).ok().as_deref() == Some(data)).then_some(link)
+}
+
+/// Where the agent of research `id` of `feature`, its data folder `data`,
+/// writes its answer: in the feature folder's `RESEARCH_DIR` where its link
+/// to the data folder is there, kept out of git with it; else in the data
+/// folder itself. Once done it is kept at `artifacts::research_path`.
+pub(crate) fn answer_path(feature: &Feature, data: &std::path::Path, id: u32) -> PathBuf {
+    match docs_link(feature, data) {
+        Some(_) => {
+            let dir = feature.dir.join(feature::layout::RESEARCH_DIR);
+            artifacts::research_path(&dir, id)
+        }
+        None => artifacts::research_path(data, id),
+    }
+}
+
+/// Keep the answer at `from` at `to`, in the data folder, and remove it
+/// from the feature folder (`answer_path`): its folder too once empty.
+fn keep_answer(from: &std::path::Path, to: &std::path::Path) -> Result<(), String> {
+    if from == to {
+        return Ok(());
+    }
+    std::fs::copy(from, to)
+        .map_err(|err| format!("couldn't copy {} to {}: {err}", from.display(), to.display()))?;
+    if let Err(err) = std::fs::remove_file(from) {
+        tracing::warn!("removing {}: {err}", from.display());
+    }
+    // Not empty yet: other answers still to come.
+    if let Some(dir) = from.parent() {
+        let _ = std::fs::remove_dir(dir);
+    }
+    Ok(())
 }
 
 /// Why the brief can't be approved yet: research still to come in.
@@ -165,6 +207,7 @@ impl Gerdr {
             .filter(|r| r.running() && r.pane.is_none())
             .map(|r| r.id)
             .collect();
+        let feature = f.clone();
         let running: Vec<(u32, String, u64)> = (f.research.iter())
             .filter(|r| r.running())
             .filter_map(|r| Some((r.id, r.pane.clone()?, r.started?)))
@@ -178,7 +221,7 @@ impl Gerdr {
                 continue;
             }
             let (status, alive) = self.agent_key_state(&agents::AgentKey::Herdr(pane.clone()));
-            let path = artifacts::research_path(&data, id);
+            let path = answer_path(&feature, &data, id);
             let answered = stamp(&path).is_some_and(|(at, _)| at >= started)
                 && std::fs::read_to_string(&path)
                     .is_ok_and(|text| artifacts::check_research(&text).is_ok());
@@ -197,7 +240,16 @@ impl Gerdr {
             }
             self.features.research_seen.remove(&pane);
             match came {
-                Seen::Answered => self.research_answered(project, slug, id, alive.then_some(pane)),
+                Seen::Answered => {
+                    let kept = artifacts::research_path(&data, id);
+                    if let Err(why) = keep_answer(&path, &kept) {
+                        tracing::warn!("research R{id} of {slug}: {why}");
+                        self.show_error(format!("Couldn't keep the answer to R{id}: {why}"));
+                        self.research_stopped(project, slug, id, format!("its answer wasn't kept: {why}"));
+                        continue;
+                    }
+                    self.research_answered(project, slug, id, alive.then_some(pane))
+                }
                 _ => self.research_stopped(project, slug, id, "its tab closed".into()),
             }
         }
@@ -316,15 +368,40 @@ impl Gerdr {
         values.insert("research.id".into(), ask.id.to_string());
         values.insert("research.question".into(), ask.question.clone());
         values.insert("research.why".into(), ask.why.clone().unwrap_or_default());
-        let answer = artifacts::research_path(&data, ask.id);
+        // Through the feature folder's link to its data folder, where there
+        // is one: the agent then needs no `--add-dir` of the data folder,
+        // which Claude asks to trust anew each time it starts. It reads its
+        // prompt through the link, and writes its answer in the feature
+        // folder (`answer_path`), as Claude asks before it writes through.
+        let linked = docs_link(feature, &data);
+        let seen = |path: PathBuf| match &linked {
+            Some(link) => link.join(path.strip_prefix(&data).unwrap_or(&path)),
+            None => path,
+        };
+        let answer = answer_path(feature, &data, ask.id);
+        if let Some(dir) = answer.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|err| format!("Couldn't make {}: {err}", dir.display()))?;
+        }
+        // An answer of an earlier run is the old one: the new is due.
+        match std::fs::remove_file(&answer) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!("Couldn't remove {}: {err}", answer.display()));
+            }
+            _ => {}
+        }
         values.insert("artifact.path".into(), answer.display().to_string());
         let text = prompts::render_builtin("research", &values)
             .map_err(|err| format!("Couldn't write the research prompt: {err}"))?;
         let prompt = write_prompt(&data, &format!("research-R{}.md", ask.id), &text)?;
         let start = self
-            .start_line(feature, project, slug, Stage::Discover, &prompt)
+            .start_line(feature, project, slug, Stage::Discover, &seen(prompt))
             .map_err(|err| format!("Couldn't write the research prompt: {err}"))?;
-        let line = allowed_into(base, &feature.agent_dirs_for(base, &data));
+        let mut dirs = feature.agent_dirs_for(base, &data);
+        if linked.is_some() {
+            dirs.retain(|dir| *dir != data);
+        }
+        let line = allowed_into(base, &dirs);
         Ok(with_prompt(&line, &start))
     }
 
@@ -397,6 +474,35 @@ mod tests {
         assert_eq!(seen(true, false, None), Seen::Answered);
         assert_eq!(seen(false, true, Some(Idle)), Seen::Going);
         assert_eq!(seen(false, false, None), Seen::Gone);
+    }
+
+    #[test]
+    fn the_docs_link_counts_only_when_it_leads_to_the_data_folder() {
+        let dir = std::env::temp_dir().join(format!("gerdr-docs-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (work, data) = (dir.join("work"), dir.join("data"));
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        let f = Feature {
+            dir: work.clone(),
+            ..Feature::default()
+        };
+        assert_eq!(docs_link(&f, &data), None);
+        let link = work.join(feature::layout::DOCS_LINK);
+        std::os::unix::fs::symlink(&data, &link).unwrap();
+        assert_eq!(docs_link(&f, &data), Some(link));
+        assert_eq!(docs_link(&f, &dir.join("other")), None);
+        // Linked, the answer is written in the feature folder, then kept in
+        // the data folder.
+        let at = answer_path(&f, &data, 2);
+        assert_eq!(at, work.join("feature-research").join("research-R2.md"));
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, "## Answer\nYes\n").unwrap();
+        let kept = artifacts::research_path(&data, 2);
+        keep_answer(&at, &kept).unwrap();
+        assert!(!at.exists() && !at.parent().unwrap().exists());
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "## Answer\nYes\n");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

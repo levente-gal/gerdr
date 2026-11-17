@@ -71,7 +71,9 @@ pub fn blocks(text: &str) -> Vec<DocBlock> {
 
 /// Make each line break inside a list item a hard one, so lines like a plan
 /// milestone's `Files:`, `Covers:` and `Check:` under its `- [ ] Name` keep
-/// their own lines rather than running on into one. `md_preview` does the same.
+/// their own lines rather than running on into one. Elsewhere, a line that
+/// starts with such a label keeps its own line too, as a decision's
+/// `Decided:`, `Why:` and `User said:` do. `md_preview` does the same.
 pub fn hard_item_breaks<'a>(root: &'a AstNode<'a>) {
     for node in root.descendants() {
         let soft = matches!(node.data.borrow().value, NodeValue::SoftBreak);
@@ -81,10 +83,29 @@ pub fn hard_item_breaks<'a>(root: &'a AstNode<'a>) {
                 NodeValue::Item(_) | NodeValue::TaskItem(_)
             )
         });
-        if soft && in_item {
+        if soft && (in_item || node.next_sibling().is_some_and(starts_labelled)) {
             node.data.borrow_mut().value = NodeValue::LineBreak;
         }
     }
+}
+
+/// Whether inline `node` starts with a label and a colon (`Why:`,
+/// `**User said:**`): a few words, the first capitalised.
+fn starts_labelled<'a>(node: &'a AstNode<'a>) -> bool {
+    let first = node.descendants().find_map(|n| match &n.data.borrow().value {
+        NodeValue::Text(text) => Some(text.to_string()),
+        _ => None,
+    });
+    let Some(text) = first else {
+        return false;
+    };
+    let Some((label, _)) = text.split_once(':') else {
+        return false;
+    };
+    let worded = |c: char| c.is_alphanumeric() || matches!(c, ' ' | '-' | '\'');
+    label.len() <= 24
+        && label.chars().next().is_some_and(char::is_uppercase)
+        && label.chars().all(worded)
 }
 
 /// `node`'s blocks onto `out`, `depth` lists in.
@@ -215,6 +236,18 @@ mod tests {
                     text: "Two".into()
                 },
                 para("Next."),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_starting_with_a_label_keeps_its_own_line() {
+        let log = "## D1: Format\nDecided: CSV.\nWhy: the tool reads CSV.\n**User said:** \"CSV only\"\n\nWrapped prose\ngoes on: here.\n";
+        assert_eq!(
+            blocks(log)[1..],
+            [
+                para("Decided: CSV.\nWhy: the tool reads CSV.\nUser said: \"CSV only\""),
+                para("Wrapped prose goes on: here."),
             ]
         );
     }
