@@ -328,11 +328,17 @@ fn unnamed_agent_tab(card: &AgentView) -> String {
 /// says: its title and the lines under it, naming a few.
 fn close_old_agents_question(names: &[String]) -> (String, String) {
     const SHOWN: usize = 4;
-    let title = match names.len() {
-        1 => "Close 1 old agent tab?".to_owned(),
-        n => format!("Close {n} old agent tabs?"),
+    let (title, said) = match names.len() {
+        1 => (
+            "Close 1 old agent tab?".to_owned(),
+            "Its agent is done; closing the tab ends its session:",
+        ),
+        n => (
+            format!("Close {n} old agent tabs?"),
+            "Their agents are done; closing the tabs ends their sessions:",
+        ),
     };
-    let mut lines = vec!["Their agents are done; closing the tabs ends their sessions:".to_owned()];
+    let mut lines = vec![said.to_owned()];
     lines.extend(names.iter().take(SHOWN).cloned());
     if names.len() > SHOWN {
         lines.push(format!("and {} more", names.len() - SHOWN));
@@ -1062,6 +1068,7 @@ mod tests {
         let names: Vec<String> = (1..=6).map(|n| format!("claude \u{b7} {n}")).collect();
         let (title, body) = close_old_agents_question(&names[..1]);
         assert_eq!(title, "Close 1 old agent tab?");
+        assert!(body.starts_with("Its agent is done"));
         assert!(body.ends_with("\nclaude \u{b7} 1"));
         let (title, body) = close_old_agents_question(&names);
         assert_eq!(title, "Close 6 old agent tabs?");
