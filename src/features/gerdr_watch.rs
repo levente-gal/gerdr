@@ -497,12 +497,13 @@ impl Gerdr {
             return;
         }
         let now = feature::now();
+        let mut shas = std::mem::take(&mut feature.shipping.squash_shas);
         for key in feature.shipping.squash_repos.clone() {
             feature.ship_ran(feature::ShipDone {
                 at: now,
+                sha: shas.remove(&key),
                 repo: key,
                 step: ShipStep::Merge,
-                sha: None,
                 url: None,
                 undone: None,
             });

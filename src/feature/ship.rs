@@ -693,7 +693,20 @@ fn merged(feature: &Feature, reading: &Reading) -> bool {
     if shipped.peek().is_none() {
         return false;
     }
-    shipped.all(|repo| merged_into_base(repo, &branch))
+    shipped.all(|repo| {
+        squashed_into_base(repo, feature.shipping.squash_shas.get(&repo.key()))
+            || merged_into_base(repo, &branch)
+    })
+}
+
+/// Whether `repo`'s base holds commit `sha`, the squash made of it: a commit
+/// hook may have changed what that holds, so its content can't tell.
+fn squashed_into_base(repo: &Repo, sha: Option<&String>) -> bool {
+    let Some(sha) = sha else {
+        return false;
+    };
+    let args = ["merge-base", "--is-ancestor", sha, &repo.base];
+    git(&repo.main, &args).is_ok()
 }
 
 /// What can stop `feature`, at Ship, shipping as `reading` found it.
@@ -2115,6 +2128,33 @@ esac
         let p = probe(&f, &Modes::default());
         assert!(p.merged);
         f.shipping.squash_at = None;
+        assert!(!probe(&f, &Modes::default()).merged);
+    }
+
+    #[test]
+    fn a_squash_a_commit_hook_reformats_reads_as_merged_by_its_commit() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        commit(&wt(&f, "api"), "x", "feature");
+        mark_all(&mut f);
+        let main = f.repos[0].main.clone();
+        // As a formatter in lint-staged does: the squash isn't the branch.
+        let hook = main.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho formatted >> x && git add x\n").unwrap();
+        std::fs::set_permissions(&hook, PermissionsExt::from_mode(0o755)).unwrap();
+        let check = planned(&f, &Modes::default());
+        let done = squash(&f, &squash_trees(&f, &check.actions, None), "Hooked");
+        assert!(done.failed.is_none(), "{:?}", done.failed);
+        f.shipping.squash_at = Some(5);
+        f.shipping.squash_repos = vec!["api".into()];
+        assert!(
+            !probe(&f, &Modes::default()).merged,
+            "its content can't tell"
+        );
+        f.shipping.squash_shas = done.went.into_iter().collect();
+        assert!(probe(&f, &Modes::default()).merged);
+        // Taken back off the base, it isn't.
+        run(&main, &["reset", "-q", "--hard", "HEAD~1"]);
         assert!(!probe(&f, &Modes::default()).merged);
     }
 

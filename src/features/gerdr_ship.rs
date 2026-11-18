@@ -458,7 +458,8 @@ impl Gerdr {
         }
         let Some((key, why)) = done.failed else {
             feature.shipping.squash_at = Some(now);
-            feature.shipping.squash_repos = done.went.into_iter().map(|(key, _)| key).collect();
+            feature.shipping.squash_repos = done.went.iter().map(|(key, _)| key.clone()).collect();
+            feature.shipping.squash_shas = done.went.into_iter().collect();
             feature.shipping.push_base = (squash.iter())
                 .filter_map(|a| match a {
                     Action::PushBase { repo, .. } => Some(repo.clone()),

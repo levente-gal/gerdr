@@ -204,6 +204,10 @@ pub struct Shipping {
     /// touched repository with commits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub squash_repos: Vec<String>,
+    /// The commit each of them squashed to, by `Repo::key`: its base holding
+    /// it reads as merged, even when a commit hook changed what it holds.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub squash_shas: BTreeMap<String, String>,
     /// Those of them whose base goes to origin once merged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub push_base: Vec<String>,
@@ -459,6 +463,7 @@ impl Shipping {
             && self.squash_at.is_none()
             && self.pushed.is_empty()
             && self.squash_repos.is_empty()
+            && self.squash_shas.is_empty()
             && self.push_base.is_empty()
             && self.steps.is_empty()
             && self.summary.is_none()
@@ -1536,7 +1541,10 @@ impl Feature {
         match step {
             ShipStep::Push | ShipStep::PushBranch => self.shipping.pushed.retain(|r| r != repo),
             ShipStep::OpenPr => self.shipping.prs.retain(|pr| pr.repo != repo),
-            ShipStep::Merge => self.shipping.squash_repos.retain(|r| r != repo),
+            ShipStep::Merge => {
+                self.shipping.squash_repos.retain(|r| r != repo);
+                self.shipping.squash_shas.remove(repo);
+            }
             ShipStep::PushBase => self.shipping.push_base.retain(|r| r != repo),
         }
     }
