@@ -2620,6 +2620,7 @@ mod tests {
             shipping: Default::default(),
             ship_plan: Default::default(),
             runs: Default::default(),
+            t3_threads: Default::default(),
             own_agents: Vec::new(),
             research: Vec::new(),
             stage_agents: Default::default(),

@@ -872,6 +872,11 @@ pub struct Feature {
     /// The agent stages' latest runs (see `agents`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub runs: BTreeMap<Stage, agents::StageRun>,
+    /// Every T3 Code thread a stage's run followed, by its id: the stage and
+    /// agent. A run replaced keeps its thread in T3 Code, and its card goes
+    /// by its stage still.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub t3_threads: BTreeMap<String, (Stage, String)>,
     /// The agents the user started for it with its AI button, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub own_agents: Vec<agents::OwnRun>,
@@ -2118,6 +2123,7 @@ pub(crate) mod tests {
             shipping: Default::default(),
             ship_plan: Default::default(),
             runs: Default::default(),
+            t3_threads: BTreeMap::new(),
             own_agents: Vec::new(),
             research: Vec::new(),
             stage_agents: Default::default(),
@@ -2221,6 +2227,7 @@ pub(crate) mod tests {
             context: Vec::new(),
             removed: Vec::new(),
             runs: BTreeMap::new(),
+            t3_threads: BTreeMap::new(),
             own_agents: Vec::new(),
             research: Vec::new(),
             stage_agents: BTreeMap::new(),
@@ -2477,8 +2484,14 @@ pub(crate) mod tests {
         let old: Feature = serde_json::from_str(old).unwrap();
         assert!(old.links.is_empty() && old.repos[0].project.is_none());
         assert!(old.context.is_empty() && old.removed.is_empty());
+        assert!(old.t3_threads.is_empty());
         assert_eq!(old.repos[0].key(), "r");
         let json = serde_json::to_string(&f).unwrap();
+        assert_eq!(serde_json::from_str::<Feature>(&json).unwrap(), f);
+        // The T3 Code threads its runs followed go with it.
+        (f.t3_threads).insert("t1".into(), (Stage::PlanReview, "T3 Code".into()));
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(json.contains(r#""t3_threads":{"t1":["plan-review","T3 Code"]}"#));
         assert_eq!(serde_json::from_str::<Feature>(&json).unwrap(), f);
     }
 

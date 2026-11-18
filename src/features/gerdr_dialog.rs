@@ -527,6 +527,7 @@ impl Gerdr {
             shipping: Default::default(),
             ship_plan: Default::default(),
             runs: Default::default(),
+            t3_threads: BTreeMap::new(),
             own_agents: Vec::new(),
             research: Vec::new(),
             stage_agents: Default::default(),

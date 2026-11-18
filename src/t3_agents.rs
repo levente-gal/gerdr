@@ -1567,10 +1567,15 @@ impl crate::Gerdr {
         card
     }
 
-    /// The agent and stage of the feature run whose T3 Code thread is `id`.
+    /// The agent and stage of the feature run whose T3 Code thread is `id`,
+    /// now or before.
     fn t3_stage_of(&self, id: &str) -> Option<(&str, crate::feature::Stage)> {
         let all = self.features.all.get(self.project.as_ref()?)?;
         all.iter().find_map(|f| {
+            if let Some((stage, agent)) = f.t3_threads.get(id) {
+                return Some((agent.as_str(), *stage));
+            }
+            // Followed before features kept their threads.
             (f.runs.iter())
                 .find(|(_, r)| r.t3_thread() == Some(id))
                 .map(|(stage, r)| (r.agent.as_str(), *stage))
@@ -2137,10 +2142,12 @@ impl crate::Gerdr {
             return false;
         };
         r.t3 = Some(T3Run::Thread {
-            id: row.id,
+            id: row.id.clone(),
             agent: Some(agent),
         });
         r.model = row.model.clone();
+        let named = (stage, r.agent.clone());
+        f.t3_threads.insert(row.id, named);
         let model = row.model.unwrap_or_else(|| "its model".to_owned());
         f.log(
             crate::feature::now(),
