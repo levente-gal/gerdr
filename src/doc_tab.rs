@@ -932,6 +932,7 @@ mod tests {
             label: None,
             zoom: None,
             kind,
+            last_shown: None,
         };
         let panes = tab(crate::TabKind::Panes);
         assert!(panes.takes_panes() && !panes.is_feature() && panes.review().is_none());

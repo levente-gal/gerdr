@@ -286,6 +286,14 @@ const WEB_INTERVAL: Duration = Duration::from_secs(3);
 /// How long a window may still show up after the process we started exited
 /// (the `zed` CLI hands the window off to an already running editor and quits).
 const HANDOFF_GRACE: Duration = Duration::from_secs(10);
+/// How long a tab stays hidden before its terminals' windows close, their
+/// herdr panes running on: herdr draws for every attached window whenever
+/// any pane changes, so many hidden ones keep it busy. They are attached
+/// again as the tab shows (see `Gerdr::park_hidden`).
+const PARK_AFTER: Duration = Duration::from_secs(60);
+/// How long a parked terminal's window has to close: one going later went
+/// for another reason, and closes its leaf as any would.
+const PARK_CLOSE: Duration = Duration::from_secs(5);
 /// How long a pane's shell must stay idle (or the pane gone) before the
 /// command it ran is forgotten: panes dying while the machine shuts down
 /// mustn't count.
@@ -388,6 +396,9 @@ pub struct Expected {
     /// runs on (see `remove_window`). If no other comes, it quit or doesn't
     /// want one, and that is nothing to report.
     pub showed_window: bool,
+    /// A terminal of a tab hidden for `PARK_AFTER`: its window was closed,
+    /// and it is attached again once the tab shows (see `Gerdr::park_hidden`).
+    pub parked: bool,
 }
 
 impl Expected {
@@ -407,6 +418,7 @@ impl Expected {
             window_of: None,
             held: false,
             showed_window: false,
+            parked: false,
         }
     }
 
@@ -496,6 +508,8 @@ pub struct Tab {
     pub zoom: Option<Zoom>,
     /// What it holds.
     pub kind: TabKind,
+    /// When it was last seen shown (see `Gerdr::park_hidden`).
+    pub last_shown: Option<Instant>,
 }
 
 /// What a tab holds, and so the rules it goes by.
@@ -549,6 +563,16 @@ impl Tab {
     pub fn moves(&self) -> bool {
         !self.is_feature()
     }
+
+    /// Whether, at `now`, its terminals are parked: it has been hidden for
+    /// `PARK_AFTER`. Shown, or seen for the first time, it counts as seen.
+    fn park_due(&mut self, shown: bool, now: Instant) -> bool {
+        let since = self.last_shown.get_or_insert(now);
+        if shown {
+            *since = now;
+        }
+        now.duration_since(*since) >= PARK_AFTER
+    }
 }
 
 impl Default for Tab {
@@ -565,6 +589,7 @@ impl Default for Tab {
             label: None,
             zoom: None,
             kind: TabKind::Panes,
+            last_shown: None,
         }
     }
 }
@@ -1572,6 +1597,9 @@ pub struct Gerdr {
     /// Windows of panes gerdr was asked to close (see `close_panes`): a Zed
     /// one leaves no placeholder when it goes (see `remove_window`).
     pub closing: Vec<Window>,
+    /// Windows of terminals closed to park them (see `park_hidden`): each
+    /// leaves its leaf waiting for its tab to show.
+    pub parking: Vec<(Window, Instant)>,
     /// The features' AI work, kept as it happens (see `ai_work`).
     pub ai_work: ai_work::Live,
 
@@ -3263,6 +3291,7 @@ impl Gerdr {
     /// the pid of the terminal still starting for it.
     fn forget_herdr_pane(&mut self, pane_id: &str) -> Vec<(Option<Window>, u32)> {
         let mut found = Vec::new();
+        let mut dropped = false;
         let is_it = |h: &Option<herdr::PaneInfo>| h.as_ref().is_some_and(|p| p.pane_id == pane_id);
         for tab in self.workspaces.iter_mut().flat_map(|ws| &mut ws.tabs) {
             for pane in tab.panes.iter_mut().filter(|p| is_it(&p.herdr)) {
@@ -3273,6 +3302,16 @@ impl Gerdr {
                 e.herdr = None;
                 found.extend(e.pid.map(|pid| (None, pid)));
             }
+            // A parked one has nothing left to attach: its leaf goes.
+            let gone = |e: &Expected| e.parked && e.herdr.is_none();
+            for e in tab.expected.extract_if(.., |e| gone(e)) {
+                layout::remove(&mut tab.layout, e.pane);
+                dropped = true;
+            }
+        }
+        if dropped {
+            self.prune();
+            self.arrange();
         }
         found
     }
@@ -4722,6 +4761,67 @@ impl Gerdr {
         }
     }
 
+    /// Close the terminal windows of tabs hidden for `PARK_AFTER`. Their
+    /// herdr panes run on, and `unpark_shown` attaches them again.
+    fn park_hidden(&mut self) {
+        self.unpark_shown();
+        let now = Instant::now();
+        self.parking
+            .retain(|(_, at)| now.duration_since(*at) < PARK_CLOSE);
+        for (w, ws) in self.workspaces.iter_mut().enumerate() {
+            let active = ws.active_tab;
+            for (t, tab) in ws.tabs.iter_mut().enumerate() {
+                if !tab.park_due(w == self.active_workspace && t == active, now) {
+                    continue;
+                }
+                // Another machine's pane is attached another way.
+                let local = |p: &&Pane| {
+                    p.herdr
+                        .as_ref()
+                        .is_some_and(|h| machine_work::split_pane(&h.pane_id).is_none())
+                };
+                for pane in tab.panes.iter().filter(local) {
+                    let window = &pane.window;
+                    let asked = self.parking.iter().any(|(w, _)| w == window);
+                    if asked || self.closing.contains(window) {
+                        continue;
+                    }
+                    if let Some(toplevel) = window.toplevel() {
+                        toplevel.send_close();
+                        self.parking.push((window.clone(), now));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Attach again the terminals parked in the tab shown (see
+    /// `park_hidden`). One that doesn't start offers Retry.
+    fn unpark_shown(&mut self) {
+        let w = self.active_workspace;
+        let Some(ws) = self.workspaces.get(w) else {
+            return;
+        };
+        let t = ws.active_tab;
+        let Some(tab) = ws.tabs.get(t) else { return };
+        if !tab.expected.iter().any(|e| e.parked) {
+            return;
+        }
+        let dir = ws.dir.clone();
+        for i in 0..self.workspaces[w].tabs[t].expected.len() {
+            let e = &self.workspaces[w].tabs[t].expected[i];
+            let (true, Some(pane)) = (e.parked, e.herdr.clone()) else {
+                continue;
+            };
+            let pid = self.attach(&pane, &dir);
+            let e = &mut self.workspaces[w].tabs[t].expected[i];
+            e.parked = false;
+            e.started = Instant::now();
+            e.pid = pid;
+            e.timed_out = pid.is_none();
+        }
+    }
+
     /// Forget children that exited, and windows that never showed up for them.
     fn reap_children(&mut self) {
         if self.x11.reap(&self.socket_name) {
@@ -5288,6 +5388,7 @@ impl Gerdr {
     /// Size every pane to its place in its tab's layout and tell the
     /// clients; show only the active tab.
     pub fn arrange(&mut self) {
+        self.unpark_shown();
         let scale = self.scale();
         let area = self.content_rect();
         // While a divider moves, clients may skip sizes between frames (Zed
@@ -5432,11 +5533,34 @@ impl Gerdr {
         });
         let asked = self.closing.iter().any(|w| !not_it(w));
         self.closing.retain(not_it);
+        let parked = self
+            .parking
+            .iter()
+            .any(|(w, at)| !not_it(w) && at.elapsed() < PARK_CLOSE);
+        self.parking.retain(|(w, _)| not_it(w));
         let Some((w, t, p)) = found else { return };
 
         let tab = &mut self.workspaces[w].tabs[t];
         let pane = tab.panes.remove(p);
         self.space.unmap_elem(&pane.window);
+        // A terminal parked (see `park_hidden`): its leaf waits for the tab
+        // to show, as a terminal still to start. Its herdr pane runs on.
+        if parked && !asked && pane.herdr.is_some() {
+            let focus = tab.focused.as_ref() == Some(&pane.window);
+            let mut e = Expected::new(None, "", pane.id, focus);
+            e.herdr = pane.herdr;
+            e.parked = true;
+            tab.expected.push(e);
+            if focus {
+                tab.focused = tab.panes.first().map(|p| p.window.clone());
+            }
+            // Shown again meanwhile: attached again at once.
+            self.arrange();
+            if self.is_visible(w, t) {
+                self.focus(self.workspaces[w].tabs[t].focused.clone());
+            }
+            return;
+        }
         // A Zed that crashed or quit keeps its leaf, for the layout, with a
         // Retry and a Close: Zed runs every workspace's window in one
         // process, so they all go at once.
@@ -7292,6 +7416,7 @@ fn new_gerdr(
         held: HashMap::new(),
         booting: Vec::new(),
         closing: Vec::new(),
+        parking: Vec::new(),
         ai_work: ai_work::Live::off(),
         compositor_state: CompositorState::new::<Gerdr>(&dh),
         xdg_shell_state: XdgShellState::new::<Gerdr>(&dh),
@@ -7625,6 +7750,7 @@ fn register_sources(
         .insert_source(Timer::from_duration(REAP_INTERVAL), |_, _, state| {
             state.reap_children();
             state.place_booting();
+            state.park_hidden();
             TimeoutAction::ToDuration(REAP_INTERVAL)
         })?;
     // Logs still written by programs running on are cut back now and then.
@@ -7779,6 +7905,21 @@ mod tests {
         let keys = state::KeyState::default();
         let quit = keys.action_keys(Action::Quit).expect("quit has a key");
         assert!(quit.starts_with(&keys.keymap.help().prefix), "{quit}");
+    }
+
+    #[test]
+    fn a_tab_is_parked_once_hidden_for_a_while() {
+        let start = Instant::now();
+        let mut tab = Tab::default();
+        // First seen hidden: the wait starts then.
+        assert!(!tab.park_due(false, start));
+        assert!(!tab.park_due(false, start + PARK_AFTER / 2));
+        // Shown, the wait starts over from there.
+        assert!(!tab.park_due(true, start + PARK_AFTER / 2));
+        assert!(!tab.park_due(false, start + PARK_AFTER));
+        assert!(tab.park_due(false, start + PARK_AFTER * 3 / 2));
+        // A shown tab never is.
+        assert!(!tab.park_due(true, start + PARK_AFTER * 10));
     }
 
     #[test]
