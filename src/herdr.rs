@@ -38,6 +38,9 @@ const PROBE: Duration = Duration::from_millis(300);
 const STARTUP: Duration = Duration::from_secs(5);
 /// A request that takes longer is logged: it may hold up the compositor.
 const SLOW_CALL: Duration = Duration::from_millis(10);
+/// A request on the compositor's thread that takes longer is a lag the user
+/// saw: logged as a warning.
+const LAG_CALL: Duration = Duration::from_millis(500);
 /// How long after typing a line to an agent to press Enter. Any gap did on
 /// Cursor when probed; this one leaves room for a busy machine.
 const ENTER_AFTER: Duration = Duration::from_millis(50);
@@ -773,7 +776,9 @@ impl Herdr {
         let start = Instant::now();
         let result = self.request(method, params);
         let took = start.elapsed();
-        if took > SLOW_CALL {
+        if took > LAG_CALL && std::thread::current().name() == Some("main") {
+            tracing::warn!("herdr {method} held gerdr up for {took:?}");
+        } else if took > SLOW_CALL {
             tracing::debug!("herdr {method} took {took:?}");
         }
         result

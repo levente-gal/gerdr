@@ -855,7 +855,7 @@ fn try_addresses<C>(
             }
             Err(Failure::Stopped) => return Err(vec![(target.clone(), Failure::Stopped)]),
             Err(failure) => {
-                tracing::info!("machine {name}: {target}: {failure:?}");
+                tracing::debug!("machine {name}: {target}: {failure:?}");
                 tries.push((target.clone(), failure));
             }
         }
@@ -1496,11 +1496,17 @@ impl Gerdr {
                 mut failure,
                 retrying,
             } => {
-                tracing::warn!("machine {name} at {target}: {failure:?}");
                 // Its thread says the name it started under: renamed since,
                 // the machine is called as it is now.
                 if let Failure::OtherMachine(called) = &mut failure {
                     called.clone_from(&name);
+                }
+                // Away, it is tried again every minute: told once, and again
+                // only when it fails another way.
+                if matches!(&link.state, LinkState::Retrying(was) if *was == failure) {
+                    tracing::debug!("machine {name} at {target}: {failure:?}");
+                } else {
+                    tracing::warn!("machine {name} at {target}: {failure:?}");
                 }
                 link.target = target.clone();
                 link.lost |= was_up;

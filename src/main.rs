@@ -273,6 +273,10 @@ const LOG_CUT_INTERVAL: Duration = Duration::from_secs(600);
 const AGENT_INTERVAL: Duration = Duration::from_secs(1);
 /// A frame that takes longer to draw is logged.
 const SLOW_FRAME: Duration = Duration::from_millis(20);
+/// A frame that takes longer is a lag the user saw: logged as a warning, at
+/// most once every `LAG_LOG_EVERY`.
+const LAG_FRAME: Duration = Duration::from_millis(100);
+const LAG_LOG_EVERY: Duration = Duration::from_secs(10);
 /// How often the Git status of the workspace folders that could have
 /// changed is read again (see `GitWatch::due`).
 const GIT_INTERVAL: Duration = Duration::from_secs(3);
@@ -7522,6 +7526,7 @@ fn register_sources(
 
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
     let mut bench = bench::Bench::from_env();
+    let mut lag_logged: Option<Instant> = None;
     event_loop
         .handle()
         .insert_source(winit_loop, move |event, _, state| match event {
@@ -7577,7 +7582,10 @@ fn register_sources(
                 // As above: the next redraw submits again.
                 let _ = state.backend.submit(Some(&[Rectangle::from_size(size)]));
                 let took = start.elapsed();
-                if took > SLOW_FRAME {
+                if took > LAG_FRAME && lag_logged.is_none_or(|at| at.elapsed() > LAG_LOG_EVERY) {
+                    tracing::warn!("a frame took {took:?} to draw (view {viewed:?})");
+                    lag_logged = Some(Instant::now());
+                } else if took > SLOW_FRAME {
                     tracing::debug!("frame took {took:?}");
                 }
                 if let Some(bench) = &mut bench {
