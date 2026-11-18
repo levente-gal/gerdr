@@ -7394,24 +7394,45 @@ fn finding_dialog(error: bool) -> super::FindingDialogView {
             ("Shift+Enter", "new line"),
             ("Esc", "close"),
         ],
+        shot: None,
     }
 }
 
-const FINDINGS: [&str; 4] = [
+const FINDINGS: [&str; 5] = [
     "tab_findings_1180",
     "tab_findings_860",
     "finding_dialog",
     "finding_dialog_error",
+    "comment_dialog_shot",
 ];
 
+/// The dialog adding a comment from the criteria strip, its screenshot
+/// checkbox ticked.
+fn comment_dialog_shot() -> super::FindingDialogView {
+    let mut view = finding_dialog(false);
+    view.title = crate::feature::review_items::words(crate::feature::review_items::ItemOf::Finding)
+        .add_title
+        .to_owned();
+    view.about =
+        "It goes to the Build agent with the failures, and stays open until you mark it done"
+            .into();
+    view.fields[0].label = "Comment";
+    view.action = "Save";
+    view.cancel = "Discard";
+    view.shot = Some(true);
+    view.keys = vec![("Shift+Enter", "new line"), ("Esc", "close")];
+    view
+}
+
 /// The recorded hashes of `FINDINGS`, per case in `CASES`.
-const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
+const GOLDEN_FINDINGS: [[u64; 5]; 4] = [
     // Dark at 1
     [
         0x4e577012cc941f53, // tab_findings_1180
         0xe02289bc07300de4, // tab_findings_860
         0xbe15a6efe4a5304a, // finding_dialog
         0x395e21db12f14c4c, // finding_dialog_error
+        0xcb453012fab3efe2, // comment_dialog_shot
     ],
     // Dark at 2
     [
@@ -7419,6 +7440,7 @@ const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
         0x14d420a23f7a51ec, // tab_findings_860
         0x2e982fd65dcbba89, // finding_dialog
         0x1c54a50260a223cf, // finding_dialog_error
+        0x1059202c732e2641, // comment_dialog_shot
     ],
     // Light at 1
     [
@@ -7426,6 +7448,7 @@ const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
         0x6324f9eabdf85ea3, // tab_findings_860
         0xc8efa4d7ca6d61b1, // finding_dialog
         0x3068a0f01a434524, // finding_dialog_error
+        0xde5e615cb7b1ac85, // comment_dialog_shot
     ],
     // Light at 2
     [
@@ -7433,6 +7456,7 @@ const GOLDEN_FINDINGS: [[u64; 4]; 4] = [
         0x3e308f59539be47a, // tab_findings_860
         0xf28a5af0ae02e0c9, // finding_dialog
         0x00c403fa84109bce, // finding_dialog_error
+        0xab7a001cb5710a1e, // comment_dialog_shot
     ],
 ];
 
@@ -7448,11 +7472,13 @@ fn ai_reviews_findings_paint_the_same_pixels() {
             let size = IDENTITY_OUTPUT.into();
             painter.finding_dialog(&finding_dialog(error), size, scale, theme.palette())
         };
+        let size = IDENTITY_OUTPUT.into();
         hash(match surface {
             0 => tab(1180),
             1 => tab(860),
             2 => dialog(false),
-            _ => dialog(true),
+            3 => dialog(true),
+            _ => painter.finding_dialog(&comment_dialog_shot(), size, scale, theme.palette()),
         })
     });
 }
@@ -7481,6 +7507,14 @@ fn dump_findings() {
         dump(
             &dir,
             &format!("finding_dialog_error_{tag}"),
+            painter.finding_dialog(&shown, size, scale, theme.palette()),
+            px(panel.size.w + 2 * super::SHADOW),
+        );
+        let shown = comment_dialog_shot();
+        let panel = super::finding_dialog_layout(&shown, size).panel;
+        dump(
+            &dir,
+            &format!("comment_dialog_shot_{tag}"),
             painter.finding_dialog(&shown, size, scale, theme.palette()),
             px(panel.size.w + 2 * super::SHADOW),
         );
@@ -7778,6 +7812,7 @@ fn finding_dialog_reject() -> super::FindingDialogView {
         error: None,
         hover: None,
         keys: vec![("Shift+Enter", "new line"), ("Esc", "close")],
+        shot: None,
     }
 }
 
@@ -9312,6 +9347,7 @@ fn ship_squash_dialog() -> super::FindingDialogView {
         error: None,
         hover: None,
         keys: vec![("Shift+Enter", "new line"), ("Esc", "close")],
+        shot: None,
     }
 }
 

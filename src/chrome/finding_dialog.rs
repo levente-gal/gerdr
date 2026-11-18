@@ -5,9 +5,10 @@
 use std::ops::Range;
 
 use super::{
-    BUTTON_RADIUS, ButtonStyle, Canvas, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE, PADDING,
-    POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING,
-    QUIT_TITLE, Rect, Rgb, SHADOW, band, caret, dialog_buttons, measure, phys, rect_px,
+    BUTTON_RADIUS, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DIALOG_WIDTH, FONT_SIZE,
+    LABEL_FONT_SIZE, PADDING, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON_GAP,
+    QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, band, caret, dialog_buttons,
+    measure, phys, rect_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -53,7 +54,15 @@ pub struct FindingDialogView {
     pub hover: Option<FindingDialogHit>,
     /// The keys besides the buttons, said left of them.
     pub keys: Vec<(&'static str, &'static str)>,
+    /// The checkbox taking a screenshot with a comment, and whether it is
+    /// ticked; none where it isn't offered.
+    pub shot: Option<bool>,
 }
+
+/// What the screenshot checkbox says.
+pub const FINDING_DIALOG_SHOT: &str = "Add a screenshot of the page";
+/// The key ticking it, said after its label: the footer has no room left.
+pub const FINDING_DIALOG_SHOT_KEY: &str = "Alt+C";
 
 /// What the pointer is over in the dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -61,6 +70,8 @@ pub enum FindingDialogHit {
     Field(usize),
     /// 0 Cancel, 1 the action.
     Button(usize),
+    /// The screenshot checkbox.
+    Shot,
 }
 
 /// Where the dialog's parts go, in output coordinates.
@@ -72,6 +83,8 @@ pub struct FindingDialogLayout {
     pub labels: Vec<Rect>,
     pub fields: Vec<Rect>,
     pub error: Option<Rect>,
+    /// The screenshot checkbox's row.
+    pub shot: Option<Rect>,
     pub buttons: [Rect; 2],
 }
 
@@ -89,12 +102,17 @@ pub fn finding_dialog_layout(
         None => 0,
     };
     let about_h = QUIT_BODY * super::confirm_body_lines(&view.about, size) as i32;
+    let shot_h = match view.shot {
+        Some(_) => CHECKBOX_ROW + QUIT_LINE_GAP,
+        None => 0,
+    };
     let height = 2 * QUIT_PADDING
         + QUIT_TITLE
         + QUIT_LINE_GAP
         + about_h
         + QUIT_LINE_GAP
         + fields_h
+        + shot_h
         + error_h
         + super::QUIT_BUTTON;
     let width = DIALOG_WIDTH.min(size.w);
@@ -121,6 +139,7 @@ pub fn finding_dialog_layout(
         labels.push(next(QUIT_BODY));
         fields.push(next(field_h(f.rows)));
     }
+    let shot = view.shot.map(|_| next(CHECKBOX_ROW));
     let error = view.error.as_ref().map(|_| next(QUIT_BODY));
     let buttons = dialog_buttons(panel, &[view.cancel, view.action]);
     FindingDialogLayout {
@@ -130,6 +149,7 @@ pub fn finding_dialog_layout(
         labels,
         fields,
         error,
+        shot,
         buttons: [buttons[0], buttons[1]],
     }
 }
@@ -141,6 +161,9 @@ impl FindingDialogLayout {
         if let Some(button) = self.buttons.iter().position(on) {
             return Some(FindingDialogHit::Button(button));
         }
+        if self.shot.as_ref().is_some_and(on) {
+            return Some(FindingDialogHit::Shot);
+        }
         // A click on a label goes to its field, as on a form.
         let row = |i: usize| on(&self.labels[i].merge(self.fields[i]));
         (0..self.fields.len())
@@ -150,7 +173,7 @@ impl FindingDialogLayout {
 
     /// What the pointer can press.
     pub fn controls(&self) -> Vec<Rect> {
-        self.buttons.to_vec()
+        self.buttons.iter().chain(&self.shot).copied().collect()
     }
 }
 
@@ -430,6 +453,22 @@ impl Painter {
                 p,
             );
         }
+        if let (Some(rect), Some(on)) = (layout.shot, view.shot) {
+            let rect = shift(rect);
+            let state = if on { Check::On } else { Check::Off };
+            let hovered = view.hover == Some(FindingDialogHit::Shot);
+            let box_end = self.checkbox(&mut c, rect, state, hovered, scale, p);
+            let end = phys(rect, scale).1;
+            let x = box_end + (CHECKBOX_GAP as f32 * scale as f32).round();
+            let at = band(rect, scale);
+            let label = FINDING_DIALOG_SHOT;
+            let after = self.text(&mut c, label, FONT_SIZE, x, end, at, scale, p.text);
+            let from = (after as f64 / scale).round() as i32 + 2 * CHECKBOX_GAP;
+            let room = Rectangle::new((from, rect.loc.y).into(), (0, rect.size.h).into());
+            let keys = [(FINDING_DIALOG_SHOT_KEY, "toggle")];
+            let end = rect.loc.x + rect.size.w;
+            self.dialog_keys(&mut c, &keys, None, room, end, scale, p);
+        }
         if let (Some(rect), Some(error)) = (layout.error, &view.error) {
             line(&mut c, error, rect, FONT_SIZE, p.error);
         }
@@ -489,7 +528,25 @@ mod tests {
             error: error.then(|| "Say why.".to_owned()),
             hover: None,
             keys: Vec::new(),
+            shot: None,
         }
+    }
+
+    #[test]
+    fn the_screenshot_checkbox_sits_under_the_field_and_takes_clicks() {
+        let size = (1920, 1080).into();
+        let without = finding_dialog_layout(&view(&[6], false), size);
+        let mut with = view(&[6], false);
+        with.shot = Some(false);
+        let with = finding_dialog_layout(&with, size);
+        let shot = with.shot.unwrap();
+        let taller = with.panel.size.h - without.panel.size.h;
+        assert_eq!(taller, CHECKBOX_ROW + QUIT_LINE_GAP);
+        assert!(shot.loc.y >= with.fields[0].loc.y + with.fields[0].size.h);
+        assert!(shot.loc.y + shot.size.h <= with.buttons[0].loc.y);
+        let mid = shot.to_f64().loc + Point::from((4.0, shot.size.h as f64 / 2.0));
+        assert_eq!(with.hit(mid), Some(FindingDialogHit::Shot));
+        assert!(without.shot.is_none());
     }
 
     #[test]

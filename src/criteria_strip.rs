@@ -28,7 +28,8 @@
 //! Not done (Space, F) as on the page, Edit… opens the comment dialog. Add
 //! comment… (C) adds one from any row. Deleting one is on the page.
 //! Screenshot (Alt+C) on an open comment adds what the page shows to it, as
-//! to a failure's note; one done takes none.
+//! to a failure's note; one done takes none. A comment added here shows on
+//! the strip at once, and its dialog can take the screenshot with it.
 
 use std::{
     collections::HashMap,
@@ -103,6 +104,9 @@ pub struct CriteriaStrip {
     pub hover: Option<StripHit>,
     /// The screenshot asked for, until it comes.
     shot: Option<ShotWait>,
+    /// A comment added from the strip takes a screenshot too: the comment
+    /// dialog's checkbox, as last left.
+    pub(crate) shot_too: bool,
 }
 
 /// A note being written on the strip.
@@ -447,6 +451,27 @@ impl Gerdr {
             project,
             slug: feature.slug.clone(),
         })
+    }
+
+    /// Whether the strip shows over a page of feature `slug` of `project`.
+    pub(crate) fn strip_shows(&self, project: &str, slug: &str) -> bool {
+        (self.criteria_target()).is_some_and(|t| t.project == project && t.slug == slug)
+    }
+
+    /// The strip of feature `slug` of `project` shows its row `i`, the next
+    /// time it shows.
+    pub(crate) fn show_on_strip(&mut self, project: &str, slug: &str, i: usize) {
+        let key = (project.to_owned(), slug.to_owned());
+        self.criteria_strip.at.insert(key, i);
+    }
+
+    /// Take a screenshot of the page under feature `slug`'s strip, for the
+    /// row it shows (a comment just added, by `show_on_strip`).
+    pub(crate) fn strip_shot(&mut self, project: &str, slug: &str) {
+        match self.criteria_target() {
+            Some(t) if t.project == project && t.slug == slug => self.criterion_shot(&t),
+            _ => self.show_warning("The app's page is gone: no screenshot taken".into()),
+        }
     }
 
     /// The rows of the strip's feature, and the one it shows.

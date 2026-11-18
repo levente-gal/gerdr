@@ -92,6 +92,9 @@ pub struct FindingDialog {
     pub heading: Option<String>,
     /// What the message is for (`Ask::Squash`).
     pub squash: Option<Squash>,
+    /// A comment added from the criteria strip: whether a screenshot of the
+    /// page it shows goes with it. None where there is no page to take.
+    pub shot: Option<bool>,
 }
 
 /// A finding of the user's own, or a comment in the diff, with nothing typed.
@@ -205,6 +208,10 @@ impl FindingDialog {
                 }
             }
             _ if enter && !mods.shift && !others => return self.save(),
+            // `chrome::FINDING_DIALOG_SHOT_KEY`, as the strip's screenshot key.
+            Keysym::c if mods.alt && !mods.ctrl && !mods.shift && self.shot.is_some() => {
+                self.shot = self.shot.map(|on| !on);
+            }
             Keysym::Tab if !mods.shift => self.step(false),
             Keysym::ISO_Left_Tab | Keysym::Tab => self.step(true),
             Keysym::Up | Keysym::KP_Up | Keysym::Down | Keysym::KP_Down
@@ -303,6 +310,7 @@ impl FindingDialog {
             error: self.error.clone(),
             hover: self.hover,
             keys,
+            shot: self.shot,
         }
     }
 
@@ -383,6 +391,7 @@ impl Gerdr {
             note: None,
             heading: None,
             squash: None,
+            shot: None,
         });
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
@@ -576,6 +585,11 @@ impl Gerdr {
             from,
             false,
         );
+        let shot = (stage == Some(Stage::ManualTest) && self.strip_shows(project, slug))
+            .then_some(self.criteria_strip.shot_too);
+        if let Some(dialog) = self.features.finding_dialog.as_mut() {
+            dialog.shot = shot;
+        }
     }
 
     /// Ask for a suggestion of the user's own, to go into the final plan.
@@ -711,7 +725,14 @@ impl Gerdr {
                 true
             }
             (Ask::Add, _) if stage == Some(Stage::ManualTest) => {
-                self.add_manual_comment(project, slug, first)
+                let added = self.add_manual_comment(project, slug, first);
+                if let Some(shot) = dialog.shot {
+                    self.criteria_strip.shot_too = shot;
+                    if added && shot {
+                        self.strip_shot(project, slug);
+                    }
+                }
+                added
             }
             (Ask::Add, _) => {
                 self.add_finding_comment(project, slug, first);
@@ -751,6 +772,10 @@ impl Gerdr {
                 "Discard" => FindingDialogOutcome::Discard,
                 _ => FindingDialogOutcome::Cancel,
             }),
+            Some(FindingDialogHit::Shot) => {
+                dialog.shot = dialog.shot.map(|on| !on);
+                None
+            }
             Some(FindingDialogHit::Field(i)) => {
                 dialog.focus = i;
                 if let Some(at) = chrome::finding_field_at(&view, i, size, pos)
@@ -878,6 +903,7 @@ mod tests {
             note: None,
             heading: None,
             squash: None,
+            shot: None,
         }
     }
 
@@ -911,6 +937,22 @@ mod tests {
                 Some(FindingDialogOutcome::Save)
             );
         }
+    }
+
+    #[test]
+    fn alt_c_ticks_the_screenshot_only_where_it_is_offered() {
+        let alt = ModifiersState {
+            alt: true,
+            ..ModifiersState::default()
+        };
+        let mut d = dialog(Ask::Add, &["x"]);
+        assert_eq!(press(&mut d, &alt, Keysym::c), None);
+        assert_eq!(d.shot, None);
+        d.shot = Some(false);
+        press(&mut d, &alt, Keysym::c);
+        assert_eq!(d.shot, Some(true));
+        press(&mut d, &alt, Keysym::c);
+        assert_eq!((d.shot, d.texts()[0].as_str()), (Some(false), "x"));
     }
 
     #[test]

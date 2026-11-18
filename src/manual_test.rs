@@ -1479,11 +1479,8 @@ impl Gerdr {
         };
         let id = manual::add_comment(&mut f.manual, text.trim(), &patch, feature::now());
         self.comments_changed(project, slug);
-        // It lands at the end of the sheet, selected.
-        let at = (self.features.criteria(project, slug).iter()).position(|c| c.id == id);
-        if let Some(at) = at.filter(|_| self.features.panel_on(project, slug)) {
-            self.select_criterion(at);
-        }
+        // It lands at the end of the sheet, selected, and shows on the strip.
+        self.show_comment(project, slug, &id);
         self.show_success(format!(
             "Comment {id} added, to go to Build with the failures"
         ));
@@ -1580,11 +1577,21 @@ impl Gerdr {
             return self.show_warning(format!("Comment {id} is there already"));
         }
         self.comments_changed(project, slug);
-        let at = (self.features.criteria(project, slug).iter()).position(|c| c.id == id);
-        if let Some(at) = at.filter(|_| self.features.panel_on(project, slug)) {
+        self.show_comment(project, slug, &id);
+        self.show_success(format!("Comment {id} is back"));
+    }
+
+    /// Comment `id` of feature `slug` is the one selected on its page and
+    /// shown on its criteria strip.
+    fn show_comment(&mut self, project: &str, slug: &str, id: &str) {
+        let Some(at) = (self.features.criteria(project, slug).iter()).position(|c| c.id == id)
+        else {
+            return;
+        };
+        self.show_on_strip(project, slug, at);
+        if self.features.panel_on(project, slug) {
             self.select_criterion(at);
         }
-        self.show_success(format!("Comment {id} is back"));
     }
 
     /// Feature `slug`'s comments changed: saved, and its sheet reads them.
