@@ -321,12 +321,36 @@ pub fn milestones(text: &str) -> (usize, usize) {
 /// in bold too; one saying nothing doesn't count.
 pub fn blocked(text: &str) -> Option<String> {
     let body = Sections::of(text).get("Milestones")?;
-    body.iter().find_map(|line| {
-        let line = list_item(line).unwrap_or(line);
-        let rest = line.trim_start_matches('*').strip_prefix("Blocked:")?;
-        let why = rest.trim_start_matches('*').trim().trim_end_matches('*');
-        (!why.trim().is_empty()).then(|| why.trim().to_owned())
-    })
+    body.iter().find_map(|line| blocked_why(line))
+}
+
+/// What `Blocked: …` line `line` (trimmed) says, if it is one.
+fn blocked_why(line: &str) -> Option<String> {
+    let line = list_item(line).unwrap_or(line);
+    let rest = line.trim_start_matches('*').strip_prefix("Blocked:")?;
+    let why = rest.trim_start_matches('*').trim().trim_end_matches('*');
+    (!why.trim().is_empty()).then(|| why.trim().to_owned())
+}
+
+/// Build log `text` without the `Blocked: …` lines `blocked` reads: work
+/// sent since settles them, and its agent writes one again if it still
+/// can't go on.
+pub fn without_blocked(text: &str) -> String {
+    let body = Sections::of(text).get("Milestones").unwrap_or_default();
+    let lines: Vec<&str> = body
+        .into_iter()
+        .filter(|l| blocked_why(l).is_some())
+        .collect();
+    if lines.is_empty() {
+        return text.to_owned();
+    }
+    let mut kept: String = (text.split_inclusive('\n'))
+        .filter(|line| !lines.contains(&line.trim()))
+        .collect();
+    if !text.ends_with('\n') && kept.ends_with('\n') {
+        kept.pop();
+    }
+    kept
 }
 
 /// Each checkbox item of `text`'s Milestones section, in order: whether
@@ -950,6 +974,25 @@ mod tests {
         assert_eq!(
             blocked("## Milestones\n```\nBlocked: a sample\n```\n- [ ] a\n"),
             None
+        );
+    }
+
+    #[test]
+    fn work_sent_drops_the_blocked_lines_of_the_milestones() {
+        let log = "## Milestones\n- [x] API\nBlocked: no such table\n- [ ] UI\n  - Blocked: twice\n\n## Notes\nBlocked: not here\n";
+        let kept = without_blocked(log);
+        assert_eq!(
+            kept,
+            "## Milestones\n- [x] API\n- [ ] UI\n\n## Notes\nBlocked: not here\n"
+        );
+        assert_eq!(blocked(&kept), None);
+        assert_eq!(
+            without_blocked("## Milestones\n- [ ] a"),
+            "## Milestones\n- [ ] a"
+        );
+        assert_eq!(
+            without_blocked("## Milestones\n- [ ] a\nBlocked: b"),
+            "## Milestones\n- [ ] a"
         );
     }
 

@@ -1119,15 +1119,20 @@ impl Gerdr {
             return;
         };
         let title = feature.title.clone();
-        if feature.fix_round.is_none() {
+        let Some(round) = feature.fix_round.as_ref() else {
             return;
-        }
+        };
+        // Named as the dialog asking named it.
+        let what = match round.has_plan() {
+            true => "fix plan",
+            false => "fix round",
+        };
         self.end_fix_round(project, slug, true);
-        self.show_success(format!("Dropped the fix plan of \u{201c}{title}\u{201d}"));
+        self.show_success(format!("Dropped the {what} of \u{201c}{title}\u{201d}"));
     }
 
     /// End the round of feature `slug`, giving back what it took if `back`.
-    fn end_fix_round(&mut self, project: &str, slug: &str, back: bool) {
+    pub(crate) fn end_fix_round(&mut self, project: &str, slug: &str, back: bool) {
         // The criteria its agent says its fixes changed: Manual test tries
         // them again.
         let changed = match back {
@@ -1441,7 +1446,8 @@ fn build_log(data: &Path) -> PathBuf {
     data.join(feature::artifacts::name(Stage::Build).unwrap_or("build.md"))
 }
 
-/// Put round `n`'s `items` in the build log under `data`.
+/// Put round `n`'s `items` in the build log under `data`, without the
+/// `Blocked:` lines of work before.
 fn write_items(data: &Path, n: u32, items: &[String]) -> Result<(), String> {
     let path = build_log(data);
     let log = match std::fs::read_to_string(&path) {
@@ -1449,7 +1455,9 @@ fn write_items(data: &Path, n: u32, items: &[String]) -> Result<(), String> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(err) => return Err(err.to_string()),
     };
-    let with = fix_round::with_items(&log, n, items);
+    // The round's work settles what its agents were blocked on before.
+    let unblocked = feature::artifacts::without_blocked(&log);
+    let with = fix_round::with_items(&unblocked, n, items);
     if with == log {
         return Ok(());
     }

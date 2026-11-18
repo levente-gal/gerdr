@@ -1278,6 +1278,14 @@ impl Gerdr {
                 f.tick(now, "gerdr", Some(&evidence.patch));
                 self.save_feature(project, slug);
             }
+            // A round Verify asked is done with once it passes, its fixes
+            // ticked or not: nothing it was for is left.
+            let asker = (snapshot.fix_round.as_ref()).and_then(|r| {
+                feature::fix_round::asker(r.n, &snapshot.verify_fixes, &snapshot.fix_asked)
+            });
+            if asker == Some(Stage::Verify) {
+                self.end_fix_round(project, slug, false);
+            }
             self.features.build.fixing.remove(&key);
             self.feature_cursor_to_current_of(project, slug);
             return self.start_reviewer(project, slug, &title);
