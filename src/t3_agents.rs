@@ -1553,8 +1553,28 @@ impl crate::Gerdr {
             .partition(|t| t.status == AgentStatus::Idle);
         live.into_iter()
             .chain(idle.into_iter().take(HISTORY_CARDS))
-            .map(crate::chrome::AgentView::t3)
+            .map(|thread| self.t3_card(thread))
             .collect()
+    }
+
+    /// The card of T3 Code thread `thread`. A stage's thread goes by its
+    /// stage, as its tab would.
+    fn t3_card(&self, thread: &T3Thread) -> crate::chrome::AgentView {
+        let mut card = crate::chrome::AgentView::t3(thread);
+        if let Some((agent, stage)) = self.t3_stage_of(&thread.row.id) {
+            card.name = Some(crate::feature_agents::agent_tab_label(agent, stage));
+        }
+        card
+    }
+
+    /// The agent and stage of the feature run whose T3 Code thread is `id`.
+    fn t3_stage_of(&self, id: &str) -> Option<(&str, crate::feature::Stage)> {
+        let all = self.features.all.get(self.project.as_ref()?)?;
+        all.iter().find_map(|f| {
+            (f.runs.iter())
+                .find(|(_, r)| r.t3_thread() == Some(id))
+                .map(|(stage, r)| (r.agent.as_str(), *stage))
+        })
     }
 
     /// The statuses of the T3 Code threads under workspace `w`.
@@ -1575,7 +1595,7 @@ impl crate::Gerdr {
             .iter()
             .filter_map(|thread| {
                 let w = self.t3_thread_place(thread)?;
-                let card = crate::chrome::AgentView::t3(thread);
+                let card = self.t3_card(thread);
                 let mut body = vec![self.workspaces[w].name.as_str()];
                 body.extend(card.title());
                 Some(crate::agents::Watched {
@@ -2024,16 +2044,16 @@ impl crate::Gerdr {
     ) {
         let at_feature =
             (self.features.panel.as_ref()).is_some_and(|p| p.project == project && p.slug == slug);
+        let who = (self.feature(project, slug))
+            .map_or(stage.label(), |f| crate::feature_agents::run_name(f, stage));
         if at_feature {
             self.show_t3_stage(project, slug, stage);
             return self.show_success(format!(
-                "{} of \u{201c}{title}\u{201d} waits in T3 Code: pick a model and send it",
-                stage.label()
+                "{who} of \u{201c}{title}\u{201d} waits in T3 Code: pick a model and send it"
             ));
         }
         let text = format!(
-            "{} of \u{201c}{title}\u{201d} waits for you: Show agent on its page opens T3 Code",
-            stage.label()
+            "{who} of \u{201c}{title}\u{201d} waits for you: Show agent on its page opens T3 Code"
         );
         self.notify_feature(project, slug, None, &text);
         self.show_warning(text);
@@ -2098,6 +2118,7 @@ impl crate::Gerdr {
             return false;
         };
         let (project, slug) = (feature.project.clone(), feature.slug.clone());
+        let who = crate::feature_agents::run_name(feature, stage);
         let agent = row.agent();
         let same = (stage == crate::feature::Stage::AiReview)
             .then(|| self.projects.project(&project).map(|p| &p.workflow))
@@ -2123,7 +2144,7 @@ impl crate::Gerdr {
         let model = row.model.unwrap_or_else(|| "its model".to_owned());
         f.log(
             crate::feature::now(),
-            format!("{} agent runs in T3 Code: {model}", stage.label()),
+            format!("{who} agent runs in T3 Code: {model}"),
         );
         self.save_feature(&project, &slug);
         self.t3_held();
@@ -2137,6 +2158,32 @@ impl crate::Gerdr {
             ));
         }
         true
+    }
+
+    /// Follow the thread sent from each T3 Code draft of an open feature
+    /// of `project`, whatever stage it is of: a Build agent fixing what a
+    /// later stage found runs while that stage is the current one.
+    pub(crate) fn t3_drafts_tick(&mut self, project: &str) {
+        use crate::feature::agents::T3Run;
+        let Some(all) = self.features.all.get(project) else {
+            return;
+        };
+        let drafts: Vec<(String, crate::feature::Stage)> = (all.iter())
+            .filter(|f| f.status == crate::feature::Status::Open)
+            .flat_map(|f| {
+                (f.runs.iter())
+                    .filter(|(_, r)| r.t3 == Some(T3Run::Draft))
+                    .map(|(stage, _)| (f.slug.clone(), *stage))
+            })
+            .collect();
+        for (slug, stage) in drafts {
+            let Some(feature) = self.feature(project, &slug).cloned() else {
+                continue;
+            };
+            if let Some(run) = feature.runs.get(&stage) {
+                self.t3_stage_thread_sent(&feature, stage, run);
+            }
+        }
     }
 
     /// Send T3 Code thread `id` the line `told`, as its next turn when it

@@ -1344,7 +1344,7 @@ impl Gerdr {
         }
         let run = (self.feature(project, slug)).and_then(|f| f.runs.get(&Stage::AiReview));
         let agent = run.map_or("an agent", |r| r.agent.as_str());
-        let what = match run.is_some_and(|r| r.held) {
+        let what = match run.is_some_and(|r| r.unsent()) {
             true => format!("{agent} waits for its prompt"),
             false => format!("{agent} is reviewing it"),
         };

@@ -481,6 +481,12 @@ impl StageRun {
         self.held && self.live()
     }
 
+    /// Whether its prompt waits for the user to send it: held in its tab,
+    /// or a draft in T3 Code. Its work starts once it goes.
+    pub fn unsent(&self) -> bool {
+        self.held || self.t3 == Some(T3Run::Draft)
+    }
+
     /// Its T3 Code thread's id, once it was sent.
     pub fn t3_thread(&self) -> Option<&str> {
         match &self.t3 {
@@ -799,6 +805,23 @@ mod tests {
         assert_eq!(Flavor::of(""), Flavor::Other);
         assert!(Flavor::Cursor.adds_dirs());
         assert!(!Flavor::Other.adds_dirs());
+    }
+
+    #[test]
+    fn a_t3_draft_is_unsent_until_its_thread_runs() {
+        let mut run = StageRun {
+            t3: Some(T3Run::Draft),
+            ..StageRun::default()
+        };
+        assert!(run.unsent() && !run.held);
+        run.t3 = Some(T3Run::Thread {
+            id: "t".into(),
+            agent: None,
+        });
+        assert!(!run.unsent());
+        run.t3 = None;
+        run.held = true;
+        assert!(run.unsent());
     }
 
     #[test]

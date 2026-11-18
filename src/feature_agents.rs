@@ -1197,6 +1197,18 @@ pub(crate) fn agent_tab_label(agent: &str, stage: Stage) -> String {
     format!("{agent} \u{b7} {}", stage.label())
 }
 
+/// What `stage`'s agent of `feature` is called in its log and toasts:
+/// Plan review's agent writing the final plan is named for that work, not
+/// as the reviewer.
+pub(crate) fn run_name(feature: &Feature, stage: Stage) -> &'static str {
+    match stage {
+        Stage::PlanReview if feature.plan_review.as_ref().is_some_and(|r| r.writing) => {
+            "Final plan"
+        }
+        stage => stage.label(),
+    }
+}
+
 /// The name an own agent's tab goes by, and so its sidebar row: its agent
 /// and which of the feature's own agents it is ("Claude Code · Agent 2").
 pub(crate) fn own_tab_label(agent: &str, n: u32) -> String {
@@ -2463,14 +2475,7 @@ impl Gerdr {
             return false;
         };
         feature.runs.insert(stage, run);
-        // Plan review's agent writing the final plan is named for that work,
-        // not as the reviewer.
-        let who = match stage {
-            Stage::PlanReview if feature.plan_review.as_ref().is_some_and(|r| r.writing) => {
-                "Final plan".to_owned()
-            }
-            stage => stage.label().to_owned(),
-        };
+        let who = run_name(feature, stage);
         let what = match told {
             true => format!("{who} agent waiting got new work: {agent} (run {n})"),
             false => format!("{who} agent started: {agent} (run {n})"),
@@ -2526,6 +2531,7 @@ impl Gerdr {
         self.conflicts_agents_tick(&project);
         self.own_agents_tick(&project);
         self.research_tick(&project);
+        self.t3_drafts_tick(&project);
         let Some(all) = self.features.all.get(&project) else {
             return;
         };
@@ -2577,13 +2583,6 @@ impl Gerdr {
                 if alive && !listed && wrote.is_some_and(|file| file.finished().is_some()) {
                     self.held_agent_wrote(&project, &slug, stage);
                 }
-                continue;
-            }
-            // Only a run waiting on its T3 draft can follow a thread.
-            if run.t3 == Some(crate::feature::agents::T3Run::Draft)
-                && let Some(feature) = self.feature(&project, &slug).cloned()
-                && self.t3_stage_thread_sent(&feature, stage, &run)
-            {
                 continue;
             }
             let (status, alive) = self.stage_run_state(&run);

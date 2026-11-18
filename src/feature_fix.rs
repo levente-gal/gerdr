@@ -327,7 +327,9 @@ impl Gerdr {
             .build
             .fix_watches
             .insert(fix_key(project, slug), FixWatch::default());
-        self.show_success(text);
+        if !self.build_drafted(project, slug) {
+            self.show_success(text);
+        }
     }
 
     /// Why the round of feature `slug` isn't getting on, said once.
@@ -416,7 +418,7 @@ impl Gerdr {
             }
             FixPhase::Planning => {
                 // Not at work yet: picking its model isn't planning.
-                if run.is_some_and(|r| r.held) {
+                if run.is_some_and(|r| r.unsent()) {
                     let watch = self.features.build.fix_watches.entry(key).or_default();
                     watch.since = Instant::now();
                     return;
@@ -484,7 +486,7 @@ impl Gerdr {
         let run = feature.runs.get(&Stage::Build);
         let key = fix_key(project, slug);
         // A fresh agent's work starts once its prompt goes.
-        if run.is_some_and(|r| r.held) {
+        if run.is_some_and(|r| r.unsent()) {
             let watch = self.features.build.fix_watches.entry(key).or_default();
             watch.rest = Instant::now();
             return;
@@ -840,7 +842,17 @@ impl Gerdr {
         self.save_feature(project, slug);
         (self.features.build.fix_watches).insert(fix_key(project, slug), FixWatch::default());
         self.doc_done(project, slug, DocFile::FixPlan);
-        self.show_success(text);
+        if !self.build_drafted(project, slug) {
+            self.show_success(text);
+        }
+    }
+
+    /// Whether feature `slug`'s Build agent waits as a T3 Code draft: it has
+    /// its work once the user sends it, as its start said.
+    fn build_drafted(&self, project: &str, slug: &str) -> bool {
+        (self.feature(project, slug))
+            .and_then(|f| f.runs.get(&Stage::Build))
+            .is_some_and(|r| r.t3.is_some() && r.unsent())
     }
 
     /// The user approved the plan of feature `slug`, or asks for the fixes
@@ -1066,7 +1078,9 @@ impl Gerdr {
         }
         // Build's page lists them from now on.
         self.probe_feature(project, slug);
-        self.show_success(format!("Sent the fixes of \u{201c}{title}\u{201d} to {to}"));
+        if !self.build_drafted(project, slug) {
+            self.show_success(format!("Sent the fixes of \u{201c}{title}\u{201d} to {to}"));
+        }
         true
     }
 
