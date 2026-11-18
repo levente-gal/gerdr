@@ -313,7 +313,7 @@ fn judge(
         if now.duration_since(rested) < REST {
             return Verdict::Wait;
         }
-        return match file {
+        let verdict = match file {
             File::Good(_) | File::Partial(..) | File::Blocked(..) => Verdict::Wait,
             // A chat: the brief comes when the user and it agree.
             File::Absent | File::Old if chat => Verdict::Wait,
@@ -322,6 +322,11 @@ fn judge(
             File::Absent | File::Old => Verdict::Nudge { absent: true },
             File::Bad(..) => Verdict::Nudge { absent: false },
         };
+        if matches!(verdict, Verdict::Nudge { .. }) {
+            // Its rest starts over: it reads as done until it takes the nudge up.
+            watch.rested = None;
+        }
+        return verdict;
     }
     watch.rested = None;
     // herdr doesn't say, or the agent rests never seen at work (done too
@@ -739,7 +744,8 @@ fn default_pick(
 
 /// The agent `stage` starts with nothing picked for it: the fixes after
 /// Build go to the agent that built (its last run), Ship's summary and
-/// conflicts to the one fixes go to, the rest to `default_pick`.
+/// conflicts to the one fixes go to (the first CLI agent when that is T3
+/// Code, which can't write them), the rest to `default_pick`.
 fn unpicked(
     feature: &Feature,
     stage: Stage,
@@ -750,7 +756,12 @@ fn unpicked(
         Stage::Build if let Some(run) = feature.runs.get(&Stage::Build) => {
             resolve_pick(Some(&run.agent), feature, stage, workflow, installed)
         }
-        Stage::Ship => stage_pick(feature, Stage::Build, workflow, installed),
+        Stage::Ship => match stage_pick(feature, Stage::Build, workflow, installed) {
+            Pick::Agent(_, base) if Flavor::of(&base) == Flavor::T3 => {
+                resolve_pick(None, feature, stage, workflow, installed)
+            }
+            pick => pick,
+        },
         _ => default_pick(feature, stage, workflow, installed),
     }
 }
@@ -4245,15 +4256,18 @@ mod tests {
             judge(&mut w, idle, true, &File::Absent, NUDGED, t),
             Verdict::Wait
         );
+        let t = t + REST;
         let bad = File::Bad((1, 1), vec!["no Outcome section".into()]);
         assert_eq!(
             judge(&mut w, idle, true, &bad, CHAT, t),
             Verdict::Nudge { absent: false }
         );
         assert_eq!(w.missing, vec!["no Outcome section".to_owned()]);
+        // Just told, it still reads as done: it gets its rest to take it up.
+        assert_eq!(judge(&mut w, idle, true, &bad, NUDGED, t), Verdict::Wait);
         // Told once, it may rest on a file still bad: that is for the user.
         assert_eq!(
-            judge(&mut w, idle, true, &bad, NUDGED, t),
+            judge(&mut w, idle, true, &bad, NUDGED, t + REST),
             Verdict::StillBad
         );
         // A Discover chat without its brief yet is left to talk.
@@ -5299,6 +5313,20 @@ mod tests {
             who(stage_pick(&f, Stage::Ship, None, &installed)),
             "Claude Code"
         );
+        // Built in T3 Code, Ship's unpicked agent is the first CLI one.
+        f.stage_agents.clear();
+        let run = StageRun {
+            agent: "T3 Code".into(),
+            base: crate::cli_agents::T3.into(),
+            ..StageRun::default()
+        };
+        f.runs.insert(Stage::Build, run);
+        assert_eq!(
+            who(stage_pick(&f, Stage::Ship, None, &with_t3)),
+            "Claude Code"
+        );
+        let ship = stage_chips(&f, Stage::Ship, None, &with_t3);
+        assert_eq!(lit(&ship), ["Claude Code"]);
     }
 
     #[test]
