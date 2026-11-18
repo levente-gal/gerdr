@@ -929,7 +929,12 @@ impl Gerdr {
     }
 
     pub(crate) fn unbusy(&mut self, project: &str, slug: &str, job: Job) {
-        self.features.unbusy(project, slug, job)
+        self.features.unbusy(project, slug, job);
+        // Ship merges, squashes and pushes bases in the project's own
+        // checkouts, which no agent works in: their marks wait otherwise.
+        if job == Job::Ship {
+            self.refresh_git();
+        }
     }
 
     pub(crate) fn feature_busy(&self, project: &str, slug: &str) -> bool {
