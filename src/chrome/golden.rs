@@ -9028,8 +9028,9 @@ const STRIP_PANE: (i32, i32) = (1000, 640);
 
 /// The criteria strip over a sandbox's app: its row, its steps shown with
 /// the pointer on Pass, a note being written with a screenshot and the
-/// keys, a failure being fixed with its note, and folded to its chip.
-fn strip_views() -> [super::CriteriaStripView; 5] {
+/// keys, a failure being fixed with its note, folded to its chip, and a
+/// comment of the user's own with its five buttons.
+fn strip_views() -> [super::CriteriaStripView; 6] {
     use super::{ButtonStyle, CriteriaStripView, StripHit, StripTag};
     let plain = |label: &str| (label.to_owned(), ButtonStyle::Plain);
     let row = CriteriaStripView {
@@ -9086,15 +9087,32 @@ fn strip_views() -> [super::CriteriaStripView; 5] {
         tag: StripTag::Passed,
         ..row.clone()
     };
-    [row, open, writing, failed, chip]
+    let quiet = |label: &str| (label.to_owned(), ButtonStyle::Quiet);
+    let comment = CriteriaStripView {
+        open: true,
+        place: "T1 \u{b7} 8/8".into(),
+        title: "Header row is too dark".into(),
+        tag: StripTag::Failed,
+        steps: Vec::new(),
+        buttons: vec![
+            quiet("Edit\u{2026}"),
+            plain("Done"),
+            ("Not done".into(), ButtonStyle::Failed),
+            quiet("Screenshot"),
+            quiet("Add comment\u{2026}"),
+        ],
+        ..row.clone()
+    };
+    [row, open, writing, failed, chip, comment]
 }
 
-const STRIP: [&str; 5] = [
+const STRIP: [&str; 6] = [
     "strip_row",
     "strip_open",
     "strip_note",
     "strip_failed",
     "strip_chip",
+    "strip_comment",
 ];
 
 fn paint_strip(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -9105,38 +9123,42 @@ fn paint_strip(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `STRIP`, per case in `CASES`.
-const GOLDEN_STRIP: [[u64; 5]; 4] = [
+const GOLDEN_STRIP: [[u64; 6]; 4] = [
     // Dark at 1
     [
-        0x9b9e1214c2a413a5, // strip_row
-        0x499a852fd941bec8, // strip_open
-        0xf55cfa59cc50a01e, // strip_note
-        0xffb86045763e3b31, // strip_failed
+        0xdb41b4b7e4823d78, // strip_row
+        0x2e26bf447b749a68, // strip_open
+        0x8d9c47e709b73456, // strip_note
+        0x700e0bb6d80637b1, // strip_failed
         0xe134649e78702bbf, // strip_chip
+        0x7ca0160a3f8a91b8, // strip_comment
     ],
     // Dark at 2
     [
-        0x4ad958f67e705f77, // strip_row
-        0xef8be6f34fac8adf, // strip_open
-        0x4ca742e7664fdf25, // strip_note
-        0xd486a1f971ba182e, // strip_failed
+        0x2de8ce9dd2069f58, // strip_row
+        0xfd0cc9af2e4d06aa, // strip_open
+        0x230f6338de5e7a64, // strip_note
+        0xcffcd15866473ea7, // strip_failed
         0xb63f093b83828479, // strip_chip
+        0x1197f3cc963d1125, // strip_comment
     ],
     // Light at 1
     [
-        0xeec613f4ff5d62dc, // strip_row
-        0xd0f92667606918cf, // strip_open
-        0x0765d00a20ba94ad, // strip_note
-        0x447a4b6d574a4c8e, // strip_failed
+        0xfc875ee33f9f0b3c, // strip_row
+        0x03dc3231429f2cba, // strip_open
+        0x11416ed6005c650d, // strip_note
+        0x0fb808c18b78afa1, // strip_failed
         0x60faa77000796bed, // strip_chip
+        0x97e8721014730dbc, // strip_comment
     ],
     // Light at 2
     [
-        0xa66aa28d6e9e00ed, // strip_row
-        0xe0d2238f9a5d3a72, // strip_open
-        0x850a45e49126971d, // strip_note
-        0x43b8569d0a629db5, // strip_failed
+        0xce05617d665b3049, // strip_row
+        0x199252ddc99d9e09, // strip_open
+        0xe2fc5b41467fe76e, // strip_note
+        0x261bbded9fe8c6f2, // strip_failed
         0x45481f7462f5972c, // strip_chip
+        0x5bb2fe0696722c40, // strip_comment
     ],
 ];
 

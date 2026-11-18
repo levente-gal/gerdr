@@ -518,9 +518,10 @@ impl Gerdr {
                 Some(Verdict::Fail) => StripTag::Failed,
             },
             state: state.to_owned(),
+            // A one-line comment's text is its title: not said twice.
             steps: criterion_details(row)
                 .lines()
-                .filter(|l| !l.is_empty())
+                .filter(|l| !l.is_empty() && *l != row.title)
                 .map(str::to_owned)
                 .collect(),
             note: row.note.clone(),

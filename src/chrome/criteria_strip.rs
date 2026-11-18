@@ -19,8 +19,10 @@ use smithay::utils::{Logical, Point, Rectangle};
 
 /// How far the strip stays in from its pane's sides and bottom.
 const MARGIN: i32 = 12;
-/// How wide it gets at most.
-const MAX_WIDTH: i32 = 760;
+/// How wide it gets at most: room for a comment's row (five buttons) with
+/// its title still readable. One width for every row, so ‹ › stay put
+/// while stepping.
+const MAX_WIDTH: i32 = 960;
 /// The row of its buttons, and the room inside its edge.
 const ROW: i32 = 40;
 const INSET: i32 = 8;
@@ -634,6 +636,24 @@ mod tests {
             hover: None,
             keys: false,
         }
+    }
+
+    #[test]
+    fn a_comments_row_leaves_its_title_room_and_keeps_the_width() {
+        let criterion = criteria_strip_layout(&view(1400));
+        let mut v = view(1400);
+        let labels = [
+            "Edit\u{2026}",
+            "Done",
+            "Not done",
+            "Screenshot",
+            "Add comment\u{2026}",
+        ];
+        v.buttons = labels.map(|l| (l.to_owned(), ButtonStyle::Plain)).into();
+        let comment = criteria_strip_layout(&v);
+        assert_eq!(comment.panel, criterion.panel, "‹ › stay put");
+        let title = comment.rect_of(StripHit::Title).unwrap();
+        assert!(title.size.w >= 200, "{title:?}");
     }
 
     #[test]
