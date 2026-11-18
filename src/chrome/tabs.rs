@@ -55,6 +55,28 @@ pub struct TabView {
     pub running: bool,
 }
 
+/// What `TabView::derive` was given for a herdr tab, and gave.
+struct Derived {
+    label: Option<String>,
+    window: Option<String>,
+    detail: TabDetail,
+    agents: Vec<AgentInfo>,
+    view: TabView,
+}
+
+/// How many tabs `DERIVED` keeps before it starts over: every tab of a
+/// session, many times over.
+const DERIVED_MAX: usize = 512;
+
+thread_local! {
+    /// The views `TabView::derive` gave lately, by herdr tab id. The strip
+    /// and the sidebar derive every tab every frame, about a tenth of
+    /// gerdr's time with 45 panes, while herdr's report changes once a
+    /// second.
+    static DERIVED: std::cell::RefCell<std::collections::HashMap<String, Derived>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 impl TabView {
     /// The view of a tab whose first window is titled `title`, mirroring
     /// herdr tab `detail` (if any), whose agents are among `agents`. The
@@ -71,6 +93,48 @@ impl TabView {
     /// else the window's title, tidied. The window title of a bare
     /// terminal ("Alacritty") says nothing and is never used.
     pub fn derive(
+        label: Option<&str>,
+        window: Option<&str>,
+        detail: Option<&TabDetail>,
+        agents: &[AgentInfo],
+    ) -> Self {
+        let Some(detail) = detail else {
+            return Self::derive_now(label, window, None, agents);
+        };
+        // Only its panes' agents count (each found by its pane).
+        let mine: Vec<&AgentInfo> = (agents.iter())
+            .filter(|a| detail.panes.iter().any(|p| p.pane_id == a.pane_id))
+            .collect();
+        DERIVED.with_borrow_mut(|memo| {
+            if let Some(d) = memo.get(&detail.tab.tab_id)
+                && d.label.as_deref() == label
+                && d.window.as_deref() == window
+                && d.detail == *detail
+                && d.agents.iter().eq(mine.iter().copied())
+            {
+                return d.view.clone();
+            }
+            let agents: Vec<AgentInfo> = mine.into_iter().cloned().collect();
+            let view = Self::derive_now(label, window, Some(detail), &agents);
+            if memo.len() >= DERIVED_MAX {
+                memo.clear();
+            }
+            memo.insert(
+                detail.tab.tab_id.clone(),
+                Derived {
+                    label: label.map(str::to_owned),
+                    window: window.map(str::to_owned),
+                    detail: detail.clone(),
+                    agents,
+                    view: view.clone(),
+                },
+            );
+            view
+        })
+    }
+
+    /// `derive`, working it out.
+    fn derive_now(
         label: Option<&str>,
         window: Option<&str>,
         detail: Option<&TabDetail>,
@@ -1512,6 +1576,32 @@ mod tests {
         let view = TabView::derive(None, None, Some(&d), &agents);
         assert_eq!(view.activity, "claude \"auth\" blocked");
         assert_eq!(view.tooltip(), "claude · /w");
+    }
+
+    #[test]
+    fn a_tab_derived_again_follows_its_agents_and_label() {
+        let mut agent = pane(Some("/w"), true);
+        agent.agent = Some("claude".into());
+        agent.agent_status = AgentStatus::Working;
+        let d = detail(vec![agent], AgentStatus::Working);
+        let mut info = agent_info();
+        info.agent = Some("claude".into());
+        info.name = Some("auth".into());
+        info.agent_status = AgentStatus::Working;
+        let first = TabView::derive(None, None, Some(&d), std::slice::from_ref(&info));
+        assert!(first.activity.contains("\"auth\""), "{}", first.activity);
+        // An agent of another pane changes nothing; its own name does.
+        let mut other = info.clone();
+        other.pane_id = "elsewhere".into();
+        let again = TabView::derive(None, None, Some(&d), &[info.clone(), other]);
+        assert_eq!(again, first);
+        info.name = Some("billing".into());
+        let renamed = TabView::derive(None, None, Some(&d), std::slice::from_ref(&info));
+        assert!(renamed.activity.contains("billing"), "{}", renamed.activity);
+        let named = TabView::derive(Some("mine"), None, Some(&d), std::slice::from_ref(&info));
+        assert_eq!(named.title, "mine");
+        let now = TabView::derive_now(Some("mine"), None, Some(&d), &[info]);
+        assert_eq!(named, now);
     }
 
     fn agent_info() -> AgentInfo {

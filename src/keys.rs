@@ -658,6 +658,30 @@ impl Chord {
 /// its modifiers and the key's own symbol. `None` for anything else, like
 /// keys to choose from ("Up / Down").
 pub fn hint_key(keys: &str) -> Option<(ModifiersState, Keysym)> {
+    type Read = Option<(ModifiersState, Keysym)>;
+    thread_local! {
+        /// Hints read lately: a page's key table is matched every frame, and
+        /// xkb's name lookup took a tenth of gerdr's time. The layout is
+        /// read once (`layout`), so a hint always reads the same.
+        static READ: std::cell::RefCell<std::collections::HashMap<String, Read>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    if let Some(read) = READ.with_borrow(|memo| memo.get(keys).copied()) {
+        return read;
+    }
+    let read = read_hint(keys);
+    READ.with_borrow_mut(|memo| {
+        // Hints are gerdr's own keys and the settings': a few hundred.
+        if memo.len() >= 4096 {
+            memo.clear();
+        }
+        memo.insert(keys.to_owned(), read);
+    });
+    read
+}
+
+/// `hint_key`, reading `keys`.
+fn read_hint(keys: &str) -> Option<(ModifiersState, Keysym)> {
     let Chord { mods, sym } = Chord::parse_lenient(keys).ok()?;
     let mods = ModifiersState {
         ctrl: mods.ctrl,

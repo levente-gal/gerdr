@@ -274,6 +274,53 @@ fn strip_inherited(cmd: &mut Command) {
     }
 }
 
+/// The systemd user slice every herdr server gerdr starts runs in, with
+/// its agents, checks and builds. Capped at `SERVER_MEMORY_HIGH`, they give
+/// back their own memory under pressure first, so gerdr's isn't swapped out
+/// and gerdr doesn't stall faulting it back in.
+const SERVER_SLICE: &str = "gerdr-herdr.slice";
+
+/// The memory the slice keeps before the kernel reclaims from it.
+const SERVER_MEMORY_HIGH: &str = "MemoryHigh=60%";
+
+/// The command starting a herdr server: in `SERVER_SLICE` when the user's
+/// systemd takes its cap, else plain `herdr`.
+fn server_command() -> Command {
+    let capped = Command::new("systemctl")
+        .args(["--user", "set-property", "--runtime", SERVER_SLICE])
+        .arg(SERVER_MEMORY_HIGH)
+        .stdin(Stdio::null())
+        .output();
+    match capped {
+        Ok(out) if out.status.success() => in_slice(true),
+        Ok(out) => {
+            let said = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(
+                "herdr server starts without a memory cap: systemctl: {}",
+                said.trim()
+            );
+            in_slice(false)
+        }
+        Err(err) => {
+            tracing::warn!("herdr server starts without a memory cap: systemctl: {err}");
+            in_slice(false)
+        }
+    }
+}
+
+/// `herdr`, run through `systemd-run` in `SERVER_SLICE` when `slice`: a
+/// scope keeps the process, so its pid, session and env stay as spawned.
+fn in_slice(slice: bool) -> Command {
+    if !slice {
+        return Command::new("herdr");
+    }
+    let mut cmd = Command::new("systemd-run");
+    cmd.args(["--user", "--scope", "--quiet", "--collect"])
+        .arg(format!("--slice={SERVER_SLICE}"))
+        .args(["--description=herdr server started by gerdr", "--", "herdr"]);
+    cmd
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct PaneInfo {
     pub pane_id: String,
@@ -707,7 +754,7 @@ impl Herdr {
         let saved = has_saved_layout(session);
         // Its own session, out of gerdr's process groups: it outlives gerdr.
         // Shells it starts on its own still open their windows in gerdr.
-        let mut server = Command::new("herdr");
+        let mut server = server_command();
         server.args(["--session", session, "server"]);
         strip_inherited(&mut server);
         match x_display {
@@ -1601,6 +1648,22 @@ fn moved_pane(mut result: Value) -> Result<PaneInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_capped_server_runs_herdr_in_the_slice() {
+        let args = |cmd: &Command| -> Vec<String> {
+            let program = cmd.get_program().to_string_lossy().into_owned();
+            std::iter::once(program)
+                .chain(cmd.get_args().map(|a| a.to_string_lossy().into_owned()))
+                .collect()
+        };
+        let capped = args(&in_slice(true));
+        assert_eq!(capped[0], "systemd-run");
+        assert!(capped.contains(&"--scope".to_owned()));
+        assert!(capped.contains(&format!("--slice={SERVER_SLICE}")));
+        assert_eq!(capped[capped.len() - 2..], ["--", "herdr"]);
+        assert_eq!(args(&in_slice(false)), ["herdr"]);
+    }
 
     #[test]
     fn herdr_is_new_enough_from_0_9() {
