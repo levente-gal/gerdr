@@ -227,9 +227,9 @@ async function goInApp(tab, url) {
 //
 // Thread: by the app's own `handleNewThread`, which its new-thread
 // buttons call, found in React's tree next to the fields it comes with,
-// given the project: the one the shown thread or draft is of when it is
-// in the folders, else the one at a folder, else the app's default when
-// it is in them, else the first. It opens a draft of that project. With a
+// given the project: the one at a folder (the workspace's own), else the
+// one the shown thread or draft is of when it is in the folders, else the
+// app's default when it is in them, else the first. It opens a draft of that project. With a
 // `prompt` (a feature stage's) the project is the one at a folder and no
 // other, or the agent would run in another checkout; the draft says the
 // prompt, on the project's own folder, and the user sends it. The draft
@@ -404,8 +404,8 @@ function inT3(job, dirs, prompt, model) {
         picks.sort((a, b) => a.workspaceRoot.localeCompare(b.workspaceRoot));
         const shown = [app.activeThread, app.activeDraftThread];
         const project =
-          picks.find((p) => shown.some((t) => same(t, p))) ||
           picks.find((p) => want.includes(trim(p.workspaceRoot))) ||
+          picks.find((p) => shown.some((t) => same(t, p))) ||
           picks.find((p) => same(app.defaultProjectRef, p)) ||
           picks[0];
         if (prompt) {
