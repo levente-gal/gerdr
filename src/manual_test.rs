@@ -626,11 +626,13 @@ pub(crate) const NOTE_KEYS: &[Binding<NoteCtx, NoteKey>] = &[
 /// not. Esc never saves: what is written waits as a draft.
 pub(crate) fn note_hints(on: &CardNote, empty: bool) -> Vec<(String, String)> {
     let ctx = NoteCtx::of(on, empty);
+    let saved = matches!(on, CardNote::Item { saved: true, .. });
     let label = |k: &NoteKey| match k {
-        // Emptied, a finding's comment goes; a question's answer can
-        // accept it once saved.
+        // Emptied, a saved comment goes, and with none Enter only closes
+        // the field; a question's answer can accept it once saved.
         NoteKey::Save => match ctx.item {
-            Some(_) if empty => "delete".to_owned(),
+            Some(_) if empty && saved => "delete".to_owned(),
+            Some(_) if empty => "close".to_owned(),
             Some((of, true)) => crate::feature::review_items::words(of)
                 .save_want
                 .to_lowercase(),
@@ -1182,7 +1184,7 @@ impl Gerdr {
         if !note.is_empty() {
             match on {
                 CardNote::Criterion(i) => self.apply_manual_test(Outcome::Fail(i, note)),
-                CardNote::Item { of, id, accept } => {
+                CardNote::Item { of, id, accept, .. } => {
                     let names =
                         (self.features.panel.as_ref()).map(|p| (p.project.clone(), p.slug.clone()));
                     if let Some((project, slug)) = names {
@@ -1849,6 +1851,7 @@ mod tests {
             of: ItemOf::Suggestion,
             id: "r1-1".into(),
             accept,
+            saved: true,
         };
         let notes = [CardNote::Criterion(0), item(false), item(true)];
         let ctxs: Vec<NoteCtx> = (notes.iter())
@@ -1874,6 +1877,14 @@ mod tests {
             ["Enter delete", "Shift+Enter new line", "Esc cancel"]
         );
         assert_eq!(hints(&notes[2], false)[0], "Enter save and accept");
+        // With no comment saved, an empty Enter deletes nothing: it closes.
+        let unsaved = CardNote::Item {
+            of: ItemOf::Suggestion,
+            id: "r1-1".into(),
+            accept: false,
+            saved: false,
+        };
+        assert_eq!(hints(&unsaved, true)[0], "Enter close");
         // Ctrl+Enter saves too, and an empty draft discards all the same.
         let (mods, sym) = crate::keys::hint_key("Ctrl+Enter").unwrap();
         assert_eq!(

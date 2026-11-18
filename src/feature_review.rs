@@ -883,6 +883,7 @@ impl Gerdr {
             of: crate::feature::review_items::ItemOf::Finding,
             id: id.to_owned(),
             accept: false,
+            saved: !f.note.is_empty(),
         };
         panel.open_note(on, field);
         self.stop_key_repeat();

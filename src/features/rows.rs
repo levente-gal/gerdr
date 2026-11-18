@@ -672,11 +672,13 @@ pub enum CardNote {
     /// A criterion, as `FeaturePanel::finding` counts them.
     Criterion(usize),
     /// An item of a review stage, by its kind and id: the user's comment
-    /// on it, a question's answer; `accept`: accept it once saved.
+    /// on it, a question's answer; `accept`: accept it once saved;
+    /// `saved`: it had a note of the user's when the field opened.
     Item {
         of: ItemOf,
         id: String,
         accept: bool,
+        saved: bool,
     },
 }
 

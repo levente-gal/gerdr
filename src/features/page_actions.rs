@@ -116,10 +116,12 @@ pub(super) fn last_round_on(feature: &Feature, stage: Stage) -> Option<&FixRound
 }
 
 /// Whether `stage`'s page can send the fixes of the last round again: only
-/// where the feature is at, and only with nothing new of the stage's own to
-/// send, as that is what goes on then, not the old round.
+/// the stage that asked for it, where the feature is at, and only with
+/// nothing new of the stage's own to send, as that is what goes on then,
+/// not the old round. An earlier stage the feature passes back through
+/// sends its own failures, if any.
 pub(super) fn sends_round_again(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
-    last_round_on(feature, stage).is_some()
+    last_round_on(feature, stage).is_some_and(|r| r.stage == stage)
         && feature.current() == Some(stage)
         && !has_new_fixes(feature, stage, ctx)
 }

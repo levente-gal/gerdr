@@ -1385,10 +1385,12 @@ fn a_fix_plan_stays_on_the_page_once_its_fixes_went() {
         Some(("fixes made".to_owned(), vec![OPEN_PLAN.to_owned()]))
     );
     assert_eq!(held(&past, at), None);
-    // Back on a stage before the one that asked, it comes along.
+    // Back on a stage before the one that asked, it isn't sent from there:
+    // that stage sends failures of its own, if any.
     let mut back = quiet.clone();
     back.last_fix_round.as_mut().unwrap().stage = Stage::Ship;
-    assert!(sends_round_again(&back, at, none));
+    assert!(!sends_round_again(&back, at, none));
+    assert!(sends_round_again(&quiet, at, none));
     assert!(!sends_round_again(&over, at, none), "failures to send");
     // A round open has the card to itself.
     let mut both = fixing.clone();

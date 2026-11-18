@@ -948,6 +948,7 @@ impl Gerdr {
             of: ItemOf::Suggestion,
             id: id.to_owned(),
             accept,
+            saved: !s.note().is_empty(),
         };
         panel.open_note(on, field);
         self.stop_key_repeat();

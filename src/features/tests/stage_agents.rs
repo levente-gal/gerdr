@@ -770,6 +770,7 @@ fn plan_reviews_cards_refuse_deciding_while_the_final_plan_is_written() {
         of: ItemOf::Suggestion,
         id: "r1-1".into(),
         accept: false,
+        saved: false,
     };
     panel.note = Some((note, TextField::default()));
     let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
@@ -785,6 +786,7 @@ fn a_suggestions_comment_is_written_on_its_card_and_not_a_findings() {
             of,
             id: "r1-1".into(),
             accept: false,
+            saved: false,
         };
         panel.note = Some((note, TextField::default()));
         let view = tab_view(&panel, &f, &["p".to_owned()], &PanelState::default(), 2_000);
@@ -795,6 +797,7 @@ fn a_suggestions_comment_is_written_on_its_card_and_not_a_findings() {
         of: ItemOf::Suggestion,
         id: "r1-2".into(),
         accept: true,
+        saved: false,
     };
     panel.note = Some((note, TextField::multiline("Both")));
     let hints = tab_hints(
