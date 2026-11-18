@@ -571,7 +571,7 @@ impl Gerdr {
             place.as_deref(),
             fix_place.as_deref(),
         ));
-        with_pull_actions(&mut actions, feature, stage, ctx);
+        with_pull_actions(&mut actions, feature, stage, ctx, probe);
         let writing = (self.features.panel.as_ref()).is_some_and(|p| p.note.is_some() && !p.keys);
         actions.extend(editing_actions(writing));
         actions

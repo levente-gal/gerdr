@@ -333,6 +333,20 @@ impl Feature {
         self.pulls().iter().any(|p| !p.works_here())
     }
 
+    /// Its pull requests worked on here whose repository's head, as
+    /// `reading` found it, isn't theirs on GitHub: commits to push. All
+    /// worked on here while its code wasn't read.
+    pub fn unpushed(&self, reading: Option<&super::patch::Reading>) -> Vec<&PullRef> {
+        (self.pulls().iter())
+            .filter(|p| p.works_here())
+            .filter(|p| {
+                let repo = self.repo(&p.repo).or(self.repos.first());
+                let head = (reading.zip(repo)).and_then(|(r, repo)| r.heads.get(&repo.key()));
+                head != Some(&p.head_sha)
+            })
+            .collect()
+    }
+
     /// Fix here… was switched on: findings wanted hold AI review up again
     /// (as comments for GitHub they didn't), so done, it opens again for
     /// them to be sent. Whether it did.

@@ -1401,8 +1401,9 @@ pub enum PanelOutcome {
     /// A pull request's review: submit it to GitHub as this, after asking
     /// (see `pr_post`).
     SubmitReview(feature::pr_submit::Event),
-    /// The user's own pull request's review: push its commits, after asking.
-    PushPr,
+    /// The user's own pull request's review: push its commits, after asking;
+    /// only the pull request of this repository (`PullRef::repo`), when given.
+    PushPr(Option<String>),
     /// Someone else's pull request's review: fix it here, after asking, or
     /// comment on it again (see `pr_post::toggle_fix_here`).
     FixHere,

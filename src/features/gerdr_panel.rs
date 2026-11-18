@@ -591,7 +591,7 @@ impl Gerdr {
             PanelOutcome::UpdatePrHead => self.update_pr_head(&project, &slug),
             PanelOutcome::RerunCi => self.rerun_ci(&project, &slug),
             PanelOutcome::SubmitReview(event) => self.ask_submit_review(&project, &slug, event),
-            PanelOutcome::PushPr => self.ask_push_pr(&project, &slug),
+            PanelOutcome::PushPr(only) => self.ask_push_pr(&project, &slug, only.as_deref()),
             PanelOutcome::FixHere => self.toggle_fix_here(&project, &slug),
             PanelOutcome::EditPulls => self.open_review_edit(&project, &slug),
             PanelOutcome::FinishReview => self.ask_finish_pr_review(&project, &slug),

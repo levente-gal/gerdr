@@ -136,8 +136,13 @@ pub enum Then {
         slug: String,
         event: crate::feature::pr_submit::Event,
     },
-    /// Push the user's own pull request review's commits to GitHub.
-    PushPr { project: String, slug: String },
+    /// Push the user's own pull request review's commits to GitHub: only
+    /// repository `only`'s, when given.
+    PushPr {
+        project: String,
+        slug: String,
+        only: Option<String>,
+    },
     /// Fix someone else's pull requests here, each pushing to its
     /// `head_repos` entry (its `PullRef::repo`, the repository on GitHub).
     FixHere {
@@ -928,7 +933,11 @@ impl Gerdr {
                 slug,
                 event,
             } => self.submit_review(&project, &slug, event),
-            Then::PushPr { project, slug } => self.push_pr(&project, &slug),
+            Then::PushPr {
+                project,
+                slug,
+                only,
+            } => self.push_pr(&project, &slug, only.as_deref()),
             Then::FixHere {
                 project,
                 slug,

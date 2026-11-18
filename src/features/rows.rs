@@ -1768,7 +1768,7 @@ pub(super) fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::SubmitReview(feature::pr_submit::Event::RequestChanges) => {
             "request changes\u{2026}"
         }
-        PanelOutcome::PushPr => "push\u{2026}",
+        PanelOutcome::PushPr(_) => "push\u{2026}",
         PanelOutcome::FixHere => "fix here or comment",
         PanelOutcome::EditPulls => "change pull requests",
         PanelOutcome::OpenPr(_) => "open on GitHub",
@@ -1794,7 +1794,7 @@ pub(super) fn stage_button(feature: &Feature, stage: Stage, ctx: RowCtx) -> Opti
         PanelOutcome::UpdatePrHead => Some(UPDATE_HEAD),
         PanelOutcome::RerunCi => Some("Rerun failed on GitHub"),
         PanelOutcome::SubmitReview(event) => Some(event.label()),
-        PanelOutcome::PushPr => Some("Push\u{2026}"),
+        PanelOutcome::PushPr(_) => Some("Push\u{2026}"),
         PanelOutcome::OpenPr(_) => Some("Open checks"),
         PanelOutcome::FinishReview => Some("Finish\u{2026}"),
         PanelOutcome::Untick(_) => Some("Reopen"),

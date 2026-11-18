@@ -1096,7 +1096,7 @@ pub(super) fn tab_view(
                 state.place.as_deref(),
                 state.fix_place.as_deref(),
             ));
-            with_pull_actions(&mut actions, feature, stage, state.ctx);
+            with_pull_actions(&mut actions, feature, stage, state.ctx, state.probe);
             actions.extend(editing_actions(panel.note.is_some()));
             stage_page(feature, stage, state, &actions, now)
         }

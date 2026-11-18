@@ -309,8 +309,9 @@ impl Gerdr {
     }
 
     /// Ask before pushing the commits of the user's own pull request
-    /// review `slug` to its branch on GitHub.
-    pub(crate) fn ask_push_pr(&mut self, project: &str, slug: &str) {
+    /// review `slug` to its branches on GitHub: only repository `only`'s,
+    /// when given.
+    pub(crate) fn ask_push_pr(&mut self, project: &str, slug: &str, only: Option<&str>) {
         let Some(f) = self.feature(project, slug) else {
             return;
         };
@@ -320,7 +321,7 @@ impl Gerdr {
                 f.title
             ));
         }
-        let pushes = self.to_push(f);
+        let pushes = self.to_push(f, only);
         if pushes.is_empty() {
             return self.show_warning("Nothing fixed here to push".into());
         }
@@ -338,6 +339,7 @@ impl Gerdr {
         let then = Then::PushPr {
             project: project.to_owned(),
             slug: slug.to_owned(),
+            only: only.map(str::to_owned),
         };
         let to = match pushes.as_slice() {
             [(_, one)] => one.head_ref.clone(),
@@ -346,30 +348,29 @@ impl Gerdr {
         self.ask(format!("Push to {to}?"), body, "Push", then);
     }
 
-    /// The pull requests of `f` worked on here whose repository's head, as
-    /// its code was last read, isn't theirs on GitHub; all worked on here
-    /// before it was read.
-    fn to_push(&self, f: &Feature) -> Vec<(feature::Repo, feature::pr::PullRef)> {
-        let heads = (self.last_probe(&f.project, &f.slug))
-            .and_then(|p| p.reading.as_ref().ok())
-            .map(|r| &r.heads);
-        (f.pulls().iter())
-            .filter(|p| p.works_here())
-            .filter_map(|p| {
-                let repo = f.repo(&p.repo).or(f.repos.first())?;
-                let moved = heads.is_none_or(|h| h.get(&repo.key()) != Some(&p.head_sha));
-                moved.then(|| (repo.clone(), p.clone()))
-            })
+    /// The pull requests of `f` with commits to push (`Feature::unpushed`),
+    /// as its code was last read, each with its repository: only repository
+    /// `only`'s, when given.
+    fn to_push(
+        &self,
+        f: &Feature,
+        only: Option<&str>,
+    ) -> Vec<(feature::Repo, feature::pr::PullRef)> {
+        let reading = (self.last_probe(&f.project, &f.slug)).and_then(|p| p.reading.as_ref().ok());
+        (f.unpushed(reading).into_iter())
+            .filter(|p| only.is_none_or(|key| p.repo == key))
+            .filter_map(|p| Some((f.repo(&p.repo).or(f.repos.first())?.clone(), p.clone())))
             .collect()
     }
 
-    /// Push the commits of the user's own pull request review `slug`, off
-    /// the thread, with a lease on the head it was last on.
-    pub(crate) fn push_pr(&mut self, project: &str, slug: &str) {
+    /// Push the commits of the user's own pull request review `slug` (only
+    /// repository `only`'s, when given), off the thread, with a lease on the
+    /// head it was last on.
+    pub(crate) fn push_pr(&mut self, project: &str, slug: &str, only: Option<&str>) {
         let Some(f) = self.feature(project, slug) else {
             return;
         };
-        let pushes = self.to_push(f);
+        let pushes = self.to_push(f, only);
         let Some((_, first)) = pushes.first() else {
             return;
         };

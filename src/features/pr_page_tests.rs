@@ -56,7 +56,7 @@ fn card(page: &chrome::StagePage) -> (&CheckLine, Vec<&str>) {
 
 fn page_of(f: &Feature, stage: Stage) -> chrome::StagePage {
     let mut actions = page_actions(f, stage, RowCtx::default());
-    with_pull_actions(&mut actions, f, stage, RowCtx::default());
+    with_pull_actions(&mut actions, f, stage, RowCtx::default(), None);
     stage_page(f, stage, &PanelState::default(), &actions, 2_000)
 }
 
@@ -255,7 +255,7 @@ fn at_its_head_verify_goes_by_githubs_checks() {
     );
     // Its checks can run here too, asked: held over its list.
     let mut actions = page_actions(&f, Stage::Verify, ctx);
-    with_pull_actions(&mut actions, &f, Stage::Verify, ctx);
+    with_pull_actions(&mut actions, &f, Stage::Verify, ctx, None);
     let run = actions
         .iter()
         .position(|(b, _)| b.label == RUN_HERE)
@@ -410,7 +410,7 @@ fn ship_submits_the_review() {
     );
     assert_eq!(submit_line(&f, with).as_deref(), Some("2 comments to post"));
     let mut actions = page_actions(&f, Stage::Ship, with);
-    with_pull_actions(&mut actions, &f, Stage::Ship, with);
+    with_pull_actions(&mut actions, &f, Stage::Ship, with, None);
     let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
     for want in [
         "Comment\u{2026}",
@@ -476,7 +476,7 @@ fn ones_own_is_pushed_then_finished() {
     let moved = RowCtx::default();
     assert_eq!(
         page_enter(&f, Stage::Ship, moved),
-        Some(PanelOutcome::PushPr)
+        Some(PanelOutcome::PushPr(None))
     );
     let head = RowCtx {
         on_head: true,
@@ -487,7 +487,7 @@ fn ones_own_is_pushed_then_finished() {
         Some(PanelOutcome::FinishReview)
     );
     let mut actions = page_actions(&f, Stage::Ship, head);
-    with_pull_actions(&mut actions, &f, Stage::Ship, head);
+    with_pull_actions(&mut actions, &f, Stage::Ship, head, None);
     let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
     assert!(!labels.contains(&"Approve\u{2026}"), "{labels:?}");
     assert!(labels.contains(&"Comment\u{2026}"));
@@ -508,7 +508,7 @@ fn someone_elses_can_be_fixed_here_and_pushed() {
     };
     // Commented: the card offers to fix it here.
     let mut actions = page_actions(&f, Stage::Verify, head);
-    with_pull_actions(&mut actions, &f, Stage::Verify, head);
+    with_pull_actions(&mut actions, &f, Stage::Verify, head, None);
     assert!(
         actions
             .iter()
@@ -528,7 +528,7 @@ fn someone_elses_can_be_fixed_here_and_pushed() {
     // Fixed here: Ship pushes, then finishes without a review.
     assert_eq!(
         page_enter(&f, Stage::Ship, RowCtx::default()),
-        Some(PanelOutcome::PushPr)
+        Some(PanelOutcome::PushPr(None))
     );
     assert_eq!(
         page_enter(&f, Stage::Ship, head),
@@ -539,7 +539,7 @@ fn someone_elses_can_be_fixed_here_and_pushed() {
         Some("fixes here not on GitHub: push them")
     );
     let mut actions = page_actions(&f, Stage::Ship, head);
-    with_pull_actions(&mut actions, &f, Stage::Ship, head);
+    with_pull_actions(&mut actions, &f, Stage::Ship, head, None);
     let labels: Vec<&str> = actions.iter().map(|(b, _)| b.label.as_str()).collect();
     assert!(
         labels.contains(&"Push\u{2026}") && labels.contains(&"Approve\u{2026}"),
@@ -562,7 +562,7 @@ fn a_review_ended_before_ship_closes_from_where_it_ended() {
     let close = |stage: Stage| {
         let page = page_of(&f, stage);
         let mut actions = page_actions(&f, stage, RowCtx::default());
-        with_pull_actions(&mut actions, &f, stage, RowCtx::default());
+        with_pull_actions(&mut actions, &f, stage, RowCtx::default(), None);
         let row = page.sections.iter().find_map(|s| match s {
             PageSection::ShipGroup(g) if g.head == "Afterwards" => g
                 .steps
@@ -576,4 +576,66 @@ fn a_review_ended_before_ship_closes_from_where_it_ended() {
     assert_eq!(close(at), Some(PanelOutcome::CloseShipped));
     assert_eq!(close(Stage::Ship), None);
     std::fs::remove_dir_all(&f.dir).unwrap();
+}
+
+#[test]
+fn each_pull_request_with_commits_here_has_its_push() {
+    let mut f = at_ship();
+    f.repos.push(repo("web", true));
+    let Kind::PrReview(pulls) = &mut f.kind else {
+        unreachable!()
+    };
+    pulls.push(PullRef {
+        repo: "web".into(),
+        number: 13,
+        url: "https://github.com/o/web/pull/13".into(),
+        head_ref: "web-fix".into(),
+        head_sha: "abc1234567".into(),
+        ..PullRef::default()
+    });
+    for pull in f.pulls_mut() {
+        pull.fix_here = true;
+    }
+    // Read: only web's worktree moved off its head.
+    let reading = crate::feature::patch::Reading {
+        heads: [
+            ("api".to_owned(), "abc1234567".to_owned()),
+            ("web".to_owned(), "fff".to_owned()),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let numbers = |r| f.unpushed(r).iter().map(|p| p.number).collect::<Vec<_>>();
+    assert_eq!(numbers(Some(&reading)), vec![13]);
+    // Not read yet: both may have commits to push, each by its own branch.
+    assert_eq!(numbers(None), vec![12, 13]);
+    let page = page_of(&f, Stage::Ship);
+    let pushes: Vec<&str> = (page.sections.iter())
+        .filter_map(|s| match s {
+            PageSection::File { name, buttons, .. } => {
+                let mut held = buttons.iter().map(|i| &page.buttons[*i].label);
+                held.any(|l| l == PUSH).then_some(name.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        pushes,
+        vec!["Pull request #12 \u{b7} api", "Pull request #13 \u{b7} web"]
+    );
+    let branch: Vec<&str> = (page.sections.iter())
+        .find_map(|s| match s {
+            PageSection::Lines { label, lines } if label == "Branch" => {
+                Some(lines.iter().map(|l| l.text.as_str()).collect())
+            }
+            _ => None,
+        })
+        .expect("the branch line");
+    assert_eq!(
+        branch,
+        vec![
+            "#12 \u{b7} commits here not on fix yet",
+            "#13 \u{b7} commits here not on web-fix yet"
+        ]
+    );
 }

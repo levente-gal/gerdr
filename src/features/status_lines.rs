@@ -686,7 +686,7 @@ pub(super) fn submit_action(feature: &Feature, ctx: RowCtx) -> PanelOutcome {
     let works = feature.pulls().iter().any(|p| p.works_here());
     let waiting = to_post(feature, ctx) > 0;
     match () {
-        _ if works && !ctx.on_head => PanelOutcome::PushPr,
+        _ if works && !ctx.on_head => PanelOutcome::PushPr(None),
         _ if waiting => PanelOutcome::SubmitReview(Event::Comment),
         // Pushed, a review is up to the user: Finish needs none.
         _ if works || !feature.shipping.reviews.is_empty() => PanelOutcome::FinishReview,
@@ -711,10 +711,7 @@ fn submit_actions(feature: &Feature, ctx: RowCtx) -> Vec<(PageButton, PanelOutco
     };
     let mut out = Vec::new();
     if works {
-        out.push((
-            button("Push\u{2026}", ButtonStyle::Plain),
-            PanelOutcome::PushPr,
-        ));
+        out.push((button(PUSH, ButtonStyle::Plain), PanelOutcome::PushPr(None)));
     }
     let events: &[Event] = match mine {
         true => &[Event::Comment],
@@ -839,9 +836,22 @@ pub(super) fn submit_sections(
     if !done.is_empty() {
         out.push(lines("Submitted", done));
     }
-    if pull.works_here() && !state.ctx.on_head {
-        let text = format!("commits here not on {} yet", pull.head_ref);
-        out.push(lines("Branch", vec![line(text, CheckTone::Blocker)]));
+    // Each pull request with commits to push, by its own branch.
+    let reading = state.probe.and_then(|p| p.reading.as_ref().ok());
+    let mut behind: Vec<CheckLine> = (feature.unpushed(reading).iter())
+        .map(|p| {
+            let text = format!(
+                "#{} \u{b7} commits here not on {} yet",
+                p.number, p.head_ref
+            );
+            line(text, CheckTone::Blocker)
+        })
+        .collect();
+    if pull.works_here() && reading.is_some_and(|r| !r.dirty.is_empty()) {
+        behind.push(line("changes here not committed yet", CheckTone::Blocker));
+    }
+    if !behind.is_empty() {
+        out.push(lines("Branch", behind));
     }
     out
 }
@@ -853,11 +863,16 @@ pub(super) fn submit_sections(
 ///
 /// At Verify, at the head reviewed, the project's checks run here only
 /// when asked: "Run checks here" (Shift+R), as GitHub's are its Verify.
+///
+/// At Ship, with more than one pull request, each card with commits to push
+/// (`Feature::unpushed`, as `probe` read them) pushes its own: the bar's
+/// Push… pushes them all.
 pub(super) fn with_pull_actions(
     actions: &mut Vec<(PageButton, PanelOutcome)>,
     feature: &Feature,
     stage: Stage,
     ctx: RowCtx,
+    probe: Option<&Probe>,
 ) {
     if feature.pull().is_none() {
         return;
@@ -873,6 +888,17 @@ pub(super) fn with_pull_actions(
             match actions.iter_mut().find(|(_, o)| *o == outcome) {
                 Some((had, _)) => had.label = button.label,
                 None => actions.push((button, outcome)),
+            }
+        }
+        // With one, its card would only repeat the bar's.
+        if feature.pulls().len() > 1 {
+            let reading = probe.and_then(|p| p.reading.as_ref().ok());
+            for p in feature.unpushed(reading) {
+                let button = PageButton {
+                    label: PUSH.to_owned(),
+                    style: ButtonStyle::Plain,
+                };
+                actions.push((button, PanelOutcome::PushPr(Some(p.repo.clone()))));
             }
         }
     }
@@ -1070,6 +1096,8 @@ pub(super) fn changes_pulls(feature: &Feature) -> bool {
 /// going back to commenting on it.
 pub(super) const FIX_HERE: &str = "Fix here\u{2026}";
 pub(super) const COMMENT_INSTEAD: &str = "Comment instead";
+/// The label of the buttons pushing the fixes made here to GitHub.
+pub(super) const PUSH: &str = "Push\u{2026}";
 
 /// What hovering button `i` of a pull request review's page says, with its
 /// key: one its pull request's card holds.
@@ -1105,6 +1133,8 @@ pub(super) fn pull_tip(
             "Fix it here and push the fixes to its branch, instead of commenting (Alt+W)".to_owned()
         }
         COMMENT_INSTEAD => "Comment on it on GitHub instead of fixing it here (Alt+W)".to_owned(),
+        // A card's own pushes its pull request only; Enter pushes them all.
+        PUSH => "Push the commits made here to its branch on GitHub".to_owned(),
         EDIT_PULLS => {
             "Add pull requests of other repositories to the review, or leave some out (Alt+N)"
                 .to_owned()
@@ -1169,6 +1199,7 @@ pub(super) fn pull_card(
     let buttons = (actions.iter().enumerate())
         .filter(|(_, (_, o))| match o {
             PanelOutcome::OpenPr(url) => *url == pull.url,
+            PanelOutcome::PushPr(Some(repo)) => *repo == pull.repo,
             PanelOutcome::UpdatePrHead
             | PanelOutcome::FinishReview
             | PanelOutcome::FixHere
