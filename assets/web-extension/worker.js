@@ -583,7 +583,8 @@ async function startThread(tab) {
     const { url, status } = await chrome.tabs.get(tab);
     // Still loading, or at another page: tried again at its next load.
     if (status !== "complete" || !url || new URL(url).origin !== asked.origin) return;
-    const args = ["thread", asked.dirs, asked.prompt, asked.model];
+    // Absent is null: an undefined argument fails the injection.
+    const args = ["thread", asked.dirs, asked.prompt ?? null, asked.model ?? null];
     const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: inT3, args });
     result = frame?.result;
   } catch {

@@ -1196,6 +1196,9 @@ mod tests {
             new_thread,
             r#"{"type":"newthread","pane":"1.2","origin":"http://app-1.localhost:3773","dirs":["/w/app"]}"#
         );
+        // Left out, they arrive undefined, which `executeScript` refuses as
+        // an argument: the worker passes null.
+        assert!(WORKER.contains("asked.prompt ?? null, asked.model ?? null"));
         let drafted = serde_json::to_string(&ToBrowser::NewThread {
             pane: "1.2".into(),
             origin: "o",
