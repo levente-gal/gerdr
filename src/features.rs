@@ -1349,6 +1349,8 @@ pub enum PanelOutcome {
     /// Show Manual test's criterion `.0`'s screenshot `.1` in the
     /// screenshot viewer (see `shot_viewer`).
     ShowShot(usize, usize),
+    /// Ask to delete screenshot `.1` of criterion row `.0`.
+    DeleteShot(usize, usize),
     /// Open review card `.0` (true), or fold it to its line.
     FoldCard(usize, bool),
     /// Open the criteria `.0` names (true), or fold them.

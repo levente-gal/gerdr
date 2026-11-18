@@ -76,6 +76,7 @@ impl Gerdr {
             FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(..) => None,
             FeatureTabHit::MilestoneMode(i) => Some(PanelOutcome::FreshMilestones(i == 1)),
             FeatureTabHit::Shot(i, n) => Some(PanelOutcome::ShowShot(i, n)),
+            FeatureTabHit::ShotDelete(i, n) => Some(PanelOutcome::DeleteShot(i, n)),
             FeatureTabHit::Fold(i) => {
                 let card = (self.feature_tab_parts()).and_then(|(view, _)| {
                     (view.page.sections.into_iter())
@@ -639,6 +640,10 @@ impl Gerdr {
                     smithay::utils::Rectangle::new(pos.to_i32_round(), (1, 1).into()),
                 ))
             }
+            FeatureTabHit::ShotDelete(..) => Some(Tooltip::new(
+                "Delete this screenshot",
+                smithay::utils::Rectangle::new(pos.to_i32_round(), (1, 1).into()),
+            )),
             FeatureTabHit::Shot(i, n) => {
                 let shot = (self.features.panel_feature())
                     .and_then(|f| self.criterion_rows(f).into_iter().nth(i))?

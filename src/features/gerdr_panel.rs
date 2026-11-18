@@ -566,6 +566,7 @@ impl Gerdr {
             PanelOutcome::Manual(outcome) => self.apply_manual_test(outcome),
             PanelOutcome::FoldCriterion(i, open) => self.fold_criterion(i, open),
             PanelOutcome::ShowShot(i, n) => self.open_shot_viewer(i, n),
+            PanelOutcome::DeleteShot(i, n) => self.ask_delete_row_shot(i, n),
             PanelOutcome::FoldCard(i, open) => self.features.fold_card(i, open),
             PanelOutcome::FoldCriteria(scope, open) => self.fold_criteria(scope, open),
             PanelOutcome::NoteSave => {

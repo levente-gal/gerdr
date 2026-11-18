@@ -5,7 +5,7 @@
 //! one showing; Esc, Alt+I, its Close button or a press off its buttons
 //! close it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use smithay::{
     input::keyboard::{Keysym, ModifiersState},
@@ -132,13 +132,33 @@ impl Gerdr {
         let Some(viewer) = self.overlays.shot_viewer.as_ref() else {
             return;
         };
-        let Some(path) = viewer.shots.get(viewer.at) else {
+        let Some(path) = viewer.shots.get(viewer.at).cloned() else {
             return;
         };
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
-        let Some(name) = name else { return };
         let (project, slug) = viewer.feature.clone();
         let id = viewer.id.clone();
+        self.ask_delete_shot_of(project, slug, id, &path);
+    }
+
+    /// Ask to delete screenshot `n` of criterion row `i` of the feature on
+    /// the tab (its × on the page).
+    pub(crate) fn ask_delete_row_shot(&mut self, i: usize, n: usize) {
+        let Some((project, slug, id, path)) = (self.features.panel_feature()).and_then(|f| {
+            let row = self.criterion_rows(f).into_iter().nth(i)?;
+            let path = row.shots.get(n)?.clone();
+            Some((f.project.clone(), f.slug.clone(), row.id, path))
+        }) else {
+            return;
+        };
+        self.select_criterion(i);
+        self.ask_delete_shot_of(project, slug, id, &path);
+    }
+
+    /// Ask to delete screenshot `path` of criterion `id` of feature `slug`
+    /// of `project`.
+    fn ask_delete_shot_of(&mut self, project: String, slug: String, id: String, path: &Path) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+        let Some(name) = name else { return };
         self.ask(
             "Delete this screenshot?".into(),
             format!("{name} goes from {id}'s failure and from disk. This can't be undone."),

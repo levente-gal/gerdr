@@ -1466,6 +1466,8 @@ pub enum FeatureTabHit {
     /// A screenshot on a criterion's row: the row, indexed as `Finding`,
     /// then which of its `SheetRow::shots`.
     Shot(usize, usize),
+    /// The × in a screenshot's corner deleting it, indexed as `Shot`.
+    ShotDelete(usize, usize),
     /// A review summary's pill: go to the first card with its tag.
     Jump(FindingTag),
     /// A part of the criteria's search, heading their list on the page.
@@ -1739,16 +1741,22 @@ impl FeatureTabLayout {
                         })
                     })
                     .or_else(|| {
-                        let (k, n) = self.pieces[TabColumn::Page as usize].iter().find_map(
-                            |(r, piece)| match piece {
-                                Piece::Shot(k, n) if r.contains(at) => Some((*k, *n)),
+                        // The × over a screenshot before the screenshot.
+                        let (k, n, delete) = self.pieces[TabColumn::Page as usize]
+                            .iter()
+                            .rev()
+                            .find_map(|(r, piece)| match piece {
+                                Piece::ShotDelete(k, n) if r.contains(at) => Some((*k, *n, true)),
+                                Piece::Shot(k, n) if r.contains(at) => Some((*k, *n, false)),
                                 _ => None,
-                            },
-                        )?;
+                            })?;
                         let card = (view.page.sections[..k].iter())
                             .filter(|s| matches!(s, PageSection::Finding(_)))
                             .count();
-                        Some(FeatureTabHit::Shot(card, n))
+                        Some(match delete {
+                            true => FeatureTabHit::ShotDelete(card, n),
+                            false => FeatureTabHit::Shot(card, n),
+                        })
                     })
                     .or_else(|| {
                         let k = self.pieces[TabColumn::Page as usize].iter().find_map(
@@ -2171,6 +2179,9 @@ const SHEET_WORD_GAP: i32 = 10;
 const SHOT_HEIGHT: i32 = 72;
 const SHOT_MAX_WIDTH: i32 = 160;
 const SHOT_GAP: i32 = 8;
+/// The × deleting a screenshot, in its top right corner, so far in.
+const SHOT_DELETE: i32 = 18;
+const SHOT_DELETE_INSET: i32 = 4;
 /// Between a toolbar's buttons, and before its next word.
 const SHEET_BUTTON_GAP: i32 = 2;
 const TOOLBAR_GAP: i32 = 14;
@@ -2385,6 +2396,8 @@ pub(super) enum Piece {
     Fold(usize),
     /// Screenshot `.1` of the sheet row of `StagePage::sections[.0]`.
     Shot(usize, usize),
+    /// The × in its corner deleting it (painted over it).
+    ShotDelete(usize, usize),
     /// A line of text, the places saying `needle` (see `crate::find`)
     /// tinted, the `current`th of them more: the match gone to.
     Found {
@@ -3833,6 +3846,12 @@ impl Stack {
                     },
                 ));
             }
+            let d = SHOT_DELETE.min(w).min(h);
+            let inset = SHOT_DELETE_INSET.min(w - d).min(h - d).max(0);
+            self.pieces.push((
+                Rectangle::new((at + w - d - inset, self.y + inset).into(), (d, d).into()),
+                Piece::ShotDelete(k, n),
+            ));
             line = line.max(h);
             at += w + SHOT_GAP;
         }
@@ -6103,6 +6122,7 @@ fn piece_section(piece: &Piece) -> Option<usize> {
         | Piece::RecapCard(k)
         | Piece::Fold(k)
         | Piece::Shot(k, _)
+        | Piece::ShotDelete(k, _)
         | Piece::CardField(k) => Some(*k),
         _ => None,
     }
@@ -6192,10 +6212,13 @@ fn piece_hovered(
             view.page.sections.get(*k),
             Some(PageSection::Agent { stage: s, .. }) if *s == stage
         ),
-        (Piece::FindingCard(k) | Piece::Fold(k), H::Finding(n) | H::Fold(n) | H::Shot(n, _)) => {
-            finding(*k) == n
+        (
+            Piece::FindingCard(k) | Piece::Fold(k),
+            H::Finding(n) | H::Fold(n) | H::Shot(n, _) | H::ShotDelete(n, _),
+        ) => finding(*k) == n,
+        (Piece::Shot(k, m), H::Shot(n, j)) | (Piece::ShotDelete(k, m), H::ShotDelete(n, j)) => {
+            finding(*k) == n && *m == j
         }
-        (Piece::Shot(k, m), H::Shot(n, j)) => finding(*k) == n && *m == j,
         (Piece::Search { .. }, H::Search(_)) => true,
         (Piece::Repo(i), H::Repo(r) | H::RepoButton(r, _) | H::RepoRemove(r)) => r == *i,
         _ => false,
@@ -8391,7 +8414,7 @@ impl Painter {
                         .filter(|s| matches!(s, PageSection::Finding(_)))
                         .count();
                     let hovered = matches!(view.hover,
-                        Some(FeatureTabHit::Finding(i) | FeatureTabHit::Fold(i) | FeatureTabHit::Shot(i, _)) if i == n);
+                        Some(FeatureTabHit::Finding(i) | FeatureTabHit::Fold(i) | FeatureTabHit::Shot(i, _) | FeatureTabHit::ShotDelete(i, _)) if i == n);
                     let lit = (card.selected, if hovered { 1.0 } else { 0.0 });
                     self.row_highlight(c, rect, lit, scale, p);
                     // The rule under it, across the row.
@@ -8500,6 +8523,18 @@ impl Painter {
                 };
                 let b = (scale as f32).round().max(1.0) as i32;
                 c.outline(x as i32, y as i32, w as i32, h as i32, b, color);
+            }
+            Piece::ShotDelete(k, m) => {
+                let n = (view.page.sections[..*k].iter())
+                    .filter(|s| matches!(s, PageSection::Finding(_)))
+                    .count();
+                let lit = view.hover == Some(FeatureTabHit::ShotDelete(n, *m));
+                // A disc under it, so it reads on any picture.
+                let (x, y, w, h) = rect_px(rect, scale);
+                let back = if lit { p.selected } else { p.element };
+                c.rounded(x, y, w, h, w.min(h) / 2.0, back);
+                let color = if lit { p.text } else { p.muted };
+                icon_sdf(c, rect, scale, color, |x, y| cross(x, y, 0.8 * s));
             }
             Piece::Fold(k) => {
                 let Some(PageSection::Finding(card)) = view.page.sections.get(*k) else {

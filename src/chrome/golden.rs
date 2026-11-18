@@ -6695,7 +6695,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x0c7f88af5e3be46e, // tab_manual_select_860
         0x5fb5cff40a4f4b48, // tab_manual_rounds_1180
         0x22d2b561c56794c3, // tab_manual_rounds_860
-        0x160dbfffb54fefd7, // tab_manual_comment_860
+        0x8878c9eaa03e1d1f, // tab_manual_comment_860
         0x6ed0e5a54cf691c4, // tab_manual_hand_back_1180
         0x9ce2adcf3f825afa, // tab_ship_live_1180
         0x3efb6ccd9ebee607, // tab_ship_live_860
@@ -6774,7 +6774,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x70dd2852ac3327a6, // tab_manual_select_860
         0x7d5d9c7a8cbbcf12, // tab_manual_rounds_1180
         0x21f27b2f6a465d5a, // tab_manual_rounds_860
-        0x99bff877303f1a90, // tab_manual_comment_860
+        0x03c55fb99c829980, // tab_manual_comment_860
         0xc4db353623cc9ce3, // tab_manual_hand_back_1180
         0x2b0da19b5c531216, // tab_ship_live_1180
         0xfbe38a69b1b3bf5c, // tab_ship_live_860
@@ -6853,7 +6853,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xd6558fab28223313, // tab_manual_select_860
         0xb90d60f55bf1fdf2, // tab_manual_rounds_1180
         0x1055781397b52989, // tab_manual_rounds_860
-        0xc1e1122750e0c9ad, // tab_manual_comment_860
+        0xc9cbfaa0469635d5, // tab_manual_comment_860
         0x6dab8def82d1789b, // tab_manual_hand_back_1180
         0x275cb4321b786113, // tab_ship_live_1180
         0x11423d7ef57773c9, // tab_ship_live_860
@@ -6932,7 +6932,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xca950363fcc8c8c2, // tab_manual_select_860
         0xfee47052e632a9a3, // tab_manual_rounds_1180
         0x1e80bc2e4b42a162, // tab_manual_rounds_860
-        0xf8c11347d0ec5c0d, // tab_manual_comment_860
+        0x4d7929fffd5d36dd, // tab_manual_comment_860
         0x34dc7e5676e7483b, // tab_manual_hand_back_1180
         0xd33a721f5c98d9bc, // tab_ship_live_1180
         0x79e47be956ee531e, // tab_ship_live_860
@@ -9229,6 +9229,20 @@ fn a_comments_screenshots_sit_small_under_it_and_a_press_on_one_is_its_hit() {
     assert_eq!(
         layout.hit(&view, middle(small[1])),
         Some(super::FeatureTabHit::Shot(card, 1))
+    );
+    // Each has a × in its top right corner, inside it, its own hit.
+    let crosses: Vec<Rect> = (layout.pieces.iter().flatten())
+        .filter_map(|(r, p)| matches!(p, Piece::ShotDelete(..)).then_some(*r))
+        .collect();
+    assert_eq!(crosses.len(), 2);
+    for (x, shot) in crosses.iter().zip(&small) {
+        assert!(super::inside(*shot, *x), "{x:?} in {shot:?}");
+        assert!(x.loc.x + x.size.w > shot.loc.x + shot.size.w / 2);
+        assert!(x.loc.y < shot.loc.y + shot.size.h / 2);
+    }
+    assert_eq!(
+        layout.hit(&view, middle(crosses[1])),
+        Some(super::FeatureTabHit::ShotDelete(card, 1))
     );
 }
 
