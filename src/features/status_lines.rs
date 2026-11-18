@@ -94,9 +94,11 @@ pub(super) struct PanelState<'a> {
     pub(super) sandbox_lan: Option<crate::sandbox_lan::LanSeen>,
 }
 
-/// What the button picking a stage's model says.
+/// What the button picking a stage's model says: T3 Code's without its
+/// provider.
 pub(super) fn model_label(picked: Option<&str>) -> String {
-    format!("Model: {}", picked.unwrap_or("default"))
+    let model = picked.map_or("default", crate::stage_models::t3_model_name);
+    format!("Model: {model}")
 }
 
 /// `what` a task does as an inline status: "Setting up “T”" reads

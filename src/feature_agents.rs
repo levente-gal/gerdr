@@ -1802,6 +1802,9 @@ impl Gerdr {
         let draft = match waiting {
             Some(run) => {
                 run.asked_model.clone_from(&model);
+                if let Some(id) = &model {
+                    run.model = Some(crate::stage_models::t3_model_name(id).to_owned());
+                }
                 model.is_some()
             }
             None => false,

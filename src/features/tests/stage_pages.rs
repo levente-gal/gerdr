@@ -1670,6 +1670,7 @@ fn the_model_button_and_its_key_show_where_gerdr_can_tell_a_model() {
     );
     assert_eq!(model_label(None), "Model: default");
     assert_eq!(model_label(Some("opus")), "Model: opus");
+    assert_eq!(model_label(Some("claudeAgent/claude-haiku-5-5")), "Model: claude-haiku-5-5");
 
     let panel = FeaturePanel {
         slug: "a".into(),
