@@ -2241,12 +2241,14 @@ impl crate::Gerdr {
         }
     }
 
-    /// A feature's folder at `dir` goes: so does its project in T3 Code,
-    /// if T3 Code has no thread there. Those threads are the user's to
-    /// keep, so `t3 project remove` refusing is only logged, as is what
-    /// can't be tried with the server down: the project then stays, a
-    /// folder T3 Code can't open, for the user to remove there.
-    pub(crate) fn t3_forget_project(&mut self, dir: &Path) {
+    /// A feature's folder at `dir` goes: so does its project in T3 Code.
+    /// A shipped feature's (`shipped`) goes with its threads, its work
+    /// being over; any other's only if T3 Code has no thread there, as it
+    /// can come back, and those threads with it, so `t3 project remove`
+    /// refusing is only logged. What can't be tried with the server down
+    /// is logged too: the project then stays, a folder T3 Code can't open,
+    /// for the user to remove there.
+    pub(crate) fn t3_forget_project(&mut self, dir: &Path, shipped: bool) {
         let home = self.t3.home.clone();
         let server = self.t3.server.clone().filter(|_| self.t3.alive);
         self.t3.checked.remove(dir);
@@ -2266,17 +2268,27 @@ impl crate::Gerdr {
                 .args(["project", "remove", "--base-dir"])
                 .arg(&home)
                 .arg(&dir);
-            match crate::t3_update::output_within(remove, CLI_TIME) {
-                Ok(out) if out.status.success() => {
-                    tracing::info!("t3 code: removed project {}", dir.display());
-                }
-                Ok(out) => tracing::info!(
-                    "t3 code: kept project {}: {}",
-                    dir.display(),
-                    String::from_utf8_lossy(&out.stderr).trim()
-                ),
-                Err(err) => tracing::warn!("t3 code: removing {}: {err}", dir.display()),
+            if shipped {
+                remove.arg("--force");
             }
+            let why = match crate::t3_update::output_within(remove, CLI_TIME) {
+                Ok(out) if out.status.success() => {
+                    return tracing::info!("t3 code: removed project {}", dir.display());
+                }
+                Ok(out) => String::from_utf8_lossy(&out.stderr).trim().to_owned(),
+                Err(err) => err.to_string(),
+            };
+            if !shipped {
+                return tracing::info!("t3 code: kept project {}: {why}", dir.display());
+            }
+            tracing::warn!("t3 code: removing project {}: {why}", dir.display());
+            crate::problems::report(
+                "features",
+                format!(
+                    "Couldn't remove the shipped feature's project {} from T3 Code: remove it there",
+                    dir.display()
+                ),
+            );
         });
     }
 

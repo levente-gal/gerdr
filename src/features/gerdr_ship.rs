@@ -705,7 +705,9 @@ impl Gerdr {
             feature.sandbox = None;
             self.close_machine_panes_of(&feature);
         }
+        // Its worktrees removed, its T3 Code threads go too, stopped.
         let stages: Vec<Stage> = (self.feature(project, slug))
+            .filter(|_| !plan.remove_worktrees)
             .map_or_else(Vec::new, |f| f.runs.keys().copied().collect());
         let t3: Vec<String> = (stages.into_iter())
             .filter_map(|stage| self.t3_left_running(project, slug, stage))
@@ -928,9 +930,16 @@ impl Gerdr {
         let removal = sandbox
             .as_ref()
             .map(|run| self.sandbox_removal(&feature, run));
-        self.t3_forget_project(&feature.dir);
-        for stage in feature.runs.keys() {
-            if let Some(left) = self.t3_left_running(project, slug, *stage) {
+        let shipped = feature.status == crate::feature::Status::Done;
+        self.t3_forget_project(&feature.dir, shipped);
+        // A shipped feature's threads go with its project, stopped.
+        let stages = if shipped {
+            Vec::new()
+        } else {
+            feature.runs.keys().copied().collect()
+        };
+        for stage in stages {
+            if let Some(left) = self.t3_left_running(project, slug, stage) {
                 self.show_warning(left);
             }
         }
