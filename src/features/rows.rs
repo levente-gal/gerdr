@@ -341,7 +341,7 @@ impl Rework {
         match self {
             Rework::Waits => "your turn \u{b7} send the prompt",
             Rework::Closed => "its tab closed \u{b7} Start Build agent opens it again",
-            Rework::Draft => "draft in T3 Code \u{b7} pick a model and send it",
+            Rework::Draft => "draft in T3 Code \u{b7} send it",
             Rework::Runs(Dot::Blocked) => "your turn \u{b7} it asks you something",
             Rework::Runs(_) => "working again",
         }

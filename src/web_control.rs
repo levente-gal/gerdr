@@ -176,6 +176,14 @@ impl FromBrowser {
     }
 }
 
+/// A model for T3 Code's draft, as its app's `ModelSelection` has it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DraftModel<'a> {
+    instance_id: &'a str,
+    model: &'a str,
+}
+
 /// What gerdr asks the extension to do with a pane's tab.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -219,6 +227,9 @@ enum ToBrowser<'a> {
         /// project at one of `dirs` exactly, none around them.
         #[serde(skip_serializing_if = "Option::is_none")]
         prompt: Option<&'a str>,
+        /// The model its draft is set to.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<DraftModel<'a>>,
     },
     /// Show a markdown file in the pane's preview page (see
     /// `md_preview`): rendered as `html`, or `error` saying why it isn't.
@@ -847,12 +858,15 @@ impl Gerdr {
         origin: &str,
         dirs: &[PathBuf],
         prompt: Option<&str>,
+        model: Option<&str>,
     ) -> bool {
+        let model = model.and_then(crate::stage_models::t3_selection);
         let message = ToBrowser::NewThread {
             pane: pane_token(pane),
             origin,
             dirs: strings(dirs),
             prompt,
+            model: model.map(|(instance_id, model)| DraftModel { instance_id, model }),
         };
         self.send_to_browser(pane, &message)
     }
@@ -1175,11 +1189,27 @@ mod tests {
             origin: "http://app-1.localhost:3773",
             dirs: vec!["/w/app".into()],
             prompt: None,
+            model: None,
         })
         .unwrap();
         assert_eq!(
             new_thread,
             r#"{"type":"newthread","pane":"1.2","origin":"http://app-1.localhost:3773","dirs":["/w/app"]}"#
+        );
+        let drafted = serde_json::to_string(&ToBrowser::NewThread {
+            pane: "1.2".into(),
+            origin: "o",
+            dirs: vec![],
+            prompt: Some("p"),
+            model: Some(DraftModel {
+                instance_id: "cursor",
+                model: "grok-4.7",
+            }),
+        })
+        .unwrap();
+        assert!(
+            drafted
+                .ends_with(r#""prompt":"p","model":{"instanceId":"cursor","model":"grok-4.7"}}"#)
         );
         let scope = serde_json::to_string(&ToBrowser::Scope {
             pane: "1.2".into(),

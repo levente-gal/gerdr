@@ -937,11 +937,12 @@ fn typed_model(slot: &ModelPick, typed: &str) -> Item {
 }
 
 /// The rows of the picker of `slot`'s model for `pick`: the agent's own
-/// choice, then what it offers (Cursor's from `cursor`), and the model picked
-/// now if it offers none such.
-fn model_rows(slot: &ModelSlot, pick: &ModelPick, cursor: &[Offer]) -> Vec<Item> {
+/// choice, then what it offers (Cursor's from `cursor`, T3 Code's from
+/// `t3`), and the model picked now if it offers none such.
+fn model_rows(slot: &ModelSlot, pick: &ModelPick, cursor: &[Offer], t3: &[Offer]) -> Vec<Item> {
     let mut offers = match Flavor::of(&slot.base) {
         Flavor::Cursor => cursor.to_vec(),
+        Flavor::T3 => t3.to_vec(),
         _ => stage_models::claude_offers(),
     };
     if let Some(id) = &slot.picked
@@ -1280,6 +1281,7 @@ impl Gerdr {
             // default of every Cursor chat, as its own `/model` does.
             Flavor::Cursor if free => "Model for this agent; Cursor keeps it as its default…",
             Flavor::Cursor => "Model for this stage's next start; Cursor keeps it as its default…",
+            Flavor::T3 => "Model for this stage's T3 Code draft; type one as provider/model…",
             _ if free => "Model for this agent…",
             _ => "Model for this stage's next start…",
         }
@@ -1291,7 +1293,11 @@ impl Gerdr {
             return Vec::new();
         };
         let cursor = &self.features.cursor_models.offers;
-        self.weighed(model_rows(slot, pick, cursor))
+        let t3 = match Flavor::of(&slot.base) {
+            Flavor::T3 => stage_models::t3_offers(self.t3.home.as_deref(), &self.t3.rows),
+            _ => Vec::new(),
+        };
+        self.weighed(model_rows(slot, pick, cursor, &t3))
     }
 
     /// Open the switcher as the run prompt, for a command to launch in
@@ -2487,7 +2493,7 @@ mod tests {
             agent: slot.agent.clone(),
             model: None,
         };
-        let rows = model_rows(&slot, &pick, &[]);
+        let rows = model_rows(&slot, &pick, &[], &[]);
         assert_eq!(rows[0].label, "Default");
         assert_eq!(rows[0].target, Target::StageModel(pick.clone()));
         // Nothing was picked before: no row says so.

@@ -34,8 +34,8 @@ they come back when it starts again.
   errors from your services.
 - **Features** (prefix `Shift+F`). Take a feature from discovery to a merged
   branch in nine stages, with agents doing the work. A stage's agent is Claude
-  Code, Cursor or T3 Code, picked on its page. T3 Code opens its prompt as a
-  draft in its app, where you pick the model and send it.
+  Code, Cursor or T3 Code, picked on its page with its model. T3 Code opens
+  its prompt as a draft in its app, set to the model picked, and you send it.
 - **AI work stats** (prefix `U`). gerdr keeps what each feature's agents
   did: their chats, the lines typed into them, stage files, check logs. The
   stats panel shows it by feature, by agent and model, and by check. See

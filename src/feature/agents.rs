@@ -84,6 +84,12 @@ impl Flavor {
         matches!(self, Flavor::Claude | Flavor::Cursor)
     }
 
+    /// Whether a stage's model can be picked for it: one it starts on, or
+    /// T3 Code's draft set to it (see `stage_models::t3_selection`).
+    pub fn picks_model(self) -> bool {
+        self.takes_model() || self == Flavor::T3
+    }
+
     /// Whether gerdr can know its chat's id, to go back to the chat.
     pub fn resumes(self) -> bool {
         matches!(self, Flavor::Claude | Flavor::Cursor)
@@ -801,6 +807,7 @@ mod tests {
         assert_eq!(Flavor::of("t3"), Flavor::T3);
         assert!(!Flavor::T3.adds_dirs());
         assert!(!Flavor::T3.resumes());
+        assert!(Flavor::T3.picks_model() && !Flavor::T3.takes_model());
         assert_eq!(Flavor::of("aider"), Flavor::Other);
         assert_eq!(Flavor::of(""), Flavor::Other);
         assert!(Flavor::Cursor.adds_dirs());

@@ -864,7 +864,7 @@ pub(crate) fn stage_model_slot(
     let Pick::Agent(agent, base) = stage_pick(feature, stage, workflow, installed) else {
         return None;
     };
-    Flavor::of(&base).takes_model().then(|| ModelSlot {
+    Flavor::of(&base).picks_model().then(|| ModelSlot {
         picked: picked_model(feature, stage, &agent),
         agent,
         base,
@@ -1273,7 +1273,7 @@ pub(crate) fn agent_line(
         return format!("not ready: {why}");
     }
     if run.t3 == Some(T3Run::Draft) {
-        return "draft in T3 Code \u{b7} pick a model and send it".into();
+        return "draft in T3 Code \u{b7} send it".into();
     }
     if run.waits_to_send() {
         // Told something in its tab: the stage's prompt is still to send.
@@ -1585,7 +1585,10 @@ impl Gerdr {
         };
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
         match stage_pick(feature, stage, workflow, &self.launcher.cli_agents) {
-            Pick::Agent(_, base) if run.t3.is_some() => Flavor::of(&base) != Flavor::T3,
+            Pick::Agent(agent, base) if run.t3.is_some() => {
+                Flavor::of(&base) != Flavor::T3
+                    || run.asked_model != picked_model(feature, stage, &agent)
+            }
             Pick::Agent(agent, base) => {
                 run.base != base || run.asked_model != picked_model(feature, stage, &agent)
             }
@@ -1763,12 +1766,8 @@ impl Gerdr {
         let chips = self.chips_of(project, slug, stage);
         if let Some(chip) = chips.iter().find(|c| c.lit) {
             self.show_warning(format!(
-                "gerdr can't start {} on a model: pick it in {}",
-                chip.name,
-                match chip.name.as_str() {
-                    "T3 Code" => "its draft",
-                    _ => "its tab",
-                }
+                "gerdr can't start {} on a model: pick it in its tab",
+                chip.name
             ));
         }
     }
@@ -1783,8 +1782,29 @@ impl Gerdr {
         agent: &str,
         model: Option<String>,
     ) {
+        let in_t3 = (self.model_slot_of(project, slug, stage))
+            .is_some_and(|slot| Flavor::of(&slot.base) == Flavor::T3);
+        if in_t3
+            && let Some(typed) = model.as_deref()
+            && crate::stage_models::t3_selection(typed).is_none()
+        {
+            return self.show_warning(format!(
+                "T3 Code's model goes as provider/model, like claudeAgent/{typed}"
+            ));
+        }
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
+        };
+        // A draft waiting takes the new pick (see `show_t3_stage`); Default
+        // leaves it on the model it shows.
+        let waiting = (feature.runs.get_mut(&stage))
+            .filter(|r| in_t3 && r.t3 == Some(T3Run::Draft) && r.agent.eq_ignore_ascii_case(agent));
+        let draft = match waiting {
+            Some(run) => {
+                run.asked_model.clone_from(&model);
+                model.is_some()
+            }
+            None => false,
         };
         let models = feature.stage_models.entry(stage).or_default();
         models.retain(|a, _| !a.eq_ignore_ascii_case(agent));
@@ -1795,6 +1815,9 @@ impl Gerdr {
             feature.stage_models.remove(&stage);
         }
         self.save_feature(project, slug);
+        if draft {
+            return self.show_t3_stage(project, slug, stage);
+        }
         self.picked_now(project, slug, stage);
     }
 
@@ -2345,7 +2368,7 @@ impl Gerdr {
             self.plan_review_starts(project, slug);
         }
         let version = prompts::builtin(need.template).map_or(0, |(_, v)| v);
-        let asked_model = (Flavor::of(&base).takes_model())
+        let asked_model = (Flavor::of(&base).picks_model())
             .then(|| picked_model(&feature, stage, &agent))
             .flatten();
         let waiting = takes_new_work(last, &base, asked_model.as_deref(), extra)
@@ -2459,7 +2482,15 @@ impl Gerdr {
         let sent_model = asked_model.clone();
         let run = StageRun {
             // What it was asked for, until its chat says what it used.
-            model: asked_model.clone(),
+            model: (asked_model.as_deref())
+                .map(|m| {
+                    if in_t3 {
+                        crate::stage_models::t3_model_name(m)
+                    } else {
+                        m
+                    }
+                })
+                .map(str::to_owned),
             asked_model,
             n,
             agent: agent.clone(),
@@ -5164,7 +5195,7 @@ mod tests {
         assert!(run.t3_thread().is_none());
         assert!(run.agent_key().is_none());
         let line = agent_line(&run, Stage::Plan, None, None, 0);
-        assert!(line.contains("pick a model"), "{line}");
+        assert!(line.ends_with("send it"), "{line}");
     }
 
     #[test]

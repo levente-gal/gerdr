@@ -99,6 +99,8 @@ struct NewThread {
     dir: PathBuf,
     /// What its draft says (see `Page::Draft`).
     prompt: Option<String>,
+    /// The model its draft is set to, as `instance/model`.
+    model: Option<String>,
     at: Instant,
 }
 
@@ -169,8 +171,9 @@ enum Page<'a> {
     /// A new thread, in the workspace's project.
     New,
     /// A draft saying this prompt, in the project at the workspace's folder
-    /// and no other, for the user to pick a model and send.
-    Draft(&'a str),
+    /// and no other, set to the model (`instance/model`) if one, for the
+    /// user to send.
+    Draft(&'a str, Option<&'a str>),
 }
 
 /// Where T3 Code's server runs, as it says in its home.
@@ -1808,7 +1811,8 @@ impl crate::Gerdr {
             Some(_) => vec![asked.dir],
             None => self.t3_scope(w),
         };
-        if !self.new_thread_in_web_pane(pane, origin, &dirs, asked.prompt.as_deref()) {
+        let (prompt, model) = (asked.prompt.as_deref(), asked.model.as_deref());
+        if !self.new_thread_in_web_pane(pane, origin, &dirs, prompt, model) {
             self.t3_unsteered(w);
         }
     }
@@ -1845,6 +1849,13 @@ impl crate::Gerdr {
                 let text = format!(
                     "T3 Code started no thread in {name}: none of its projects is in its folder"
                 );
+                self.toast_with(text, crate::toast::Level::Warning, Some(open_log));
+            }
+            // The draft is there, on the app's own model.
+            "no-model" => {
+                tracing::warn!("t3 code: draft model not set in {where_}: {detail}");
+                let text =
+                    format!("T3 Code's draft in {name} isn't on the model picked: pick it there");
                 self.toast_with(text, crate::toast::Level::Warning, Some(open_log));
             }
             // The app went elsewhere each time it was asked.
@@ -2049,12 +2060,19 @@ impl crate::Gerdr {
     ) {
         let at_feature =
             (self.features.panel.as_ref()).is_some_and(|p| p.project == project && p.slug == slug);
-        let who = (self.feature(project, slug))
-            .map_or(stage.label(), |f| crate::feature_agents::run_name(f, stage));
+        let feature = self.feature(project, slug);
+        let who = feature.map_or(stage.label(), |f| crate::feature_agents::run_name(f, stage));
+        let modeled =
+            (feature.and_then(|f| f.runs.get(&stage))).is_some_and(|r| r.asked_model.is_some());
         if at_feature {
             self.show_t3_stage(project, slug, stage);
+            let ask = if modeled {
+                "send it"
+            } else {
+                "pick a model and send it"
+            };
             return self.show_success(format!(
-                "{who} of \u{201c}{title}\u{201d} waits in T3 Code: pick a model and send it"
+                "{who} of \u{201c}{title}\u{201d} waits in T3 Code: {ask}"
             ));
         }
         let text = format!(
@@ -2084,6 +2102,7 @@ impl crate::Gerdr {
             }
             Some(T3Run::Draft) => {
                 let path = run.prompt.clone();
+                let model = run.asked_model.clone();
                 let prompt = match std::fs::read_to_string(&path) {
                     Ok(prompt) => prompt,
                     Err(err) => {
@@ -2095,7 +2114,7 @@ impl crate::Gerdr {
                     }
                 };
                 self.in_feature_workspace(project, slug, |gerdr, w| {
-                    gerdr.show_t3(w, Page::Draft(&prompt));
+                    gerdr.show_t3(w, Page::Draft(&prompt, model.as_deref()));
                 });
             }
             None => {}
@@ -2330,11 +2349,11 @@ impl crate::Gerdr {
         };
         let link = |origin: &str| match page {
             Page::Thread(id) => server.thread_link(origin, id),
-            Page::App | Page::New | Page::Draft(_) => format!("{origin}/"),
+            Page::App | Page::New | Page::Draft(..) => format!("{origin}/"),
         };
         let w = w.min(self.workspaces.len().saturating_sub(1));
         match (page, self.workspaces.get(w)) {
-            (Page::Draft(_), Some(ws)) => self.ensure_t3_project(ws.dir.clone(), &server),
+            (Page::Draft(..), Some(ws)) => self.ensure_t3_project(ws.dir.clone(), &server),
             _ => self.add_t3_project(w, &server),
         }
         let own = self.t3_origin(w, &server);
@@ -2348,7 +2367,7 @@ impl crate::Gerdr {
             self.scope_t3(pane, &here);
             if page == Page::New {
                 let dirs = self.t3_scope(w);
-                if !self.new_thread_in_web_pane(pane, &here, &dirs, None) {
+                if !self.new_thread_in_web_pane(pane, &here, &dirs, None, None) {
                     // Without gerdr's extension in its browser it can't be
                     // told to: a tab of its own at the app's home page,
                     // which opens a draft where the app likes.
@@ -2357,9 +2376,9 @@ impl crate::Gerdr {
                 }
                 return;
             }
-            if let Page::Draft(prompt) = page {
+            if let Page::Draft(prompt, model) = page {
                 let dirs = vec![self.workspaces[w].dir.clone()];
-                if !self.new_thread_in_web_pane(pane, &here, &dirs, Some(prompt)) {
+                if !self.new_thread_in_web_pane(pane, &here, &dirs, Some(prompt), model) {
                     self.t3_unsteered(w);
                 }
                 return;
@@ -2372,9 +2391,9 @@ impl crate::Gerdr {
             }
             return;
         }
-        let prompt = match page {
-            Page::Draft(prompt) => Some(prompt),
-            _ => None,
+        let (prompt, model) = match page {
+            Page::Draft(prompt, model) => (Some(prompt), model),
+            _ => (None, None),
         };
         if (page == Page::New || prompt.is_some())
             && let Some(ws) = self.workspaces.get(w)
@@ -2382,6 +2401,7 @@ impl crate::Gerdr {
             self.t3.new_thread = Some(NewThread {
                 dir: ws.dir.clone(),
                 prompt: prompt.map(str::to_owned),
+                model: model.map(str::to_owned),
                 at: Instant::now(),
             });
         }

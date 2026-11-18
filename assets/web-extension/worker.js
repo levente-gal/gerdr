@@ -232,15 +232,18 @@ async function goInApp(tab, url) {
 // it is in them, else the first. It opens a draft of that project. With a
 // `prompt` (a feature stage's) the project is the one at a folder and no
 // other, or the agent would run in another checkout; the draft says the
-// prompt, on the project's own folder, and the user picks the model and
-// sends it. The draft shown already saying it is left as it is.
+// prompt, on the project's own folder, and the user sends it. The draft
+// shown already saying it is left as it is. With a `model`
+// ({instanceId, model}) the draft is set to it by the app's own composer
+// draft store, as its model picker does, found among the modules the page
+// loaded; one not set is told as `{ ok: true, model: { reason, detail } }`.
 //
 // None of that is T3 Code's API: a version that changes it is told of,
 // as `{ ok: true }` where it worked, else `{ reason, detail }` (see
 // gerdr's `t3_unscoped` and `t3_no_thread`). The page loading again ends
 // it unanswered, as does a page asked to scope to the same folders
 // already (undefined).
-function inT3(job, dirs, prompt) {
+function inT3(job, dirs, prompt, model) {
   if (job === "scope") {
     if (window.__gerdrScope === JSON.stringify(dirs)) return undefined;
     window.__gerdrScope = JSON.stringify(dirs);
@@ -310,6 +313,23 @@ function inT3(job, dirs, prompt) {
   }
   // How long the app may take to start, and to show the projects.
   const LOOKS = 120, EVERY = 500;
+  // The first store of the app's that `isStore` takes, from the modules
+  // the page loaded already (those at `named` first): importing one again
+  // gives the same module, not a new one.
+  async function moduleStore(isStore, named) {
+    const tags = document.querySelectorAll('script[type="module"][src], link[rel="modulepreload"][href]');
+    const loaded = performance.getEntriesByType("resource").map((e) => e.name);
+    const urls = [...new Set([...[...tags].map((t) => t.src || t.href), ...loaded])]
+      .filter((url) => /\.js$/.test(url.split(/[?#]/)[0]) && new URL(url).origin === location.origin)
+      .sort((a, b) => named.test(b) - named.test(a));
+    for (const url of urls) {
+      try {
+        const found = Object.values(await import(url)).find(isStore);
+        if (found) return found;
+      } catch {}
+    }
+    return null;
+  }
   // The page without its hash: a sign-in link's token is there.
   const failing = (done) => (reason, detail) =>
     done({ reason, detail: `${detail} (page ${location.origin}${location.pathname}, folders ${want.join(", ")})` });
@@ -318,7 +338,30 @@ function inT3(job, dirs, prompt) {
       p && typeof p.workspaceRoot === "string" && p.id != null && p.environmentId != null;
     const ref = (p) => ({ environmentId: p.environmentId, projectId: p.id });
     const same = (a, p) => a && a.environmentId === p.environmentId && a.projectId === p.id;
-    return new Promise((done) => {
+    const isDrafts = (v) => {
+      const state = v && typeof v.getState === "function" && v.getState();
+      return state && typeof state.setModelSelection === "function" && typeof state.getComposerDraft === "function";
+    };
+    // Set draft `draftId` to `model`; why it isn't, if so.
+    async function setModel(draftId) {
+      const drafts = await moduleStore(isDrafts, /\/(utils|main)-[^/]*$/);
+      if (!drafts) return { reason: "no-model", detail: "no composer draft store with setModelSelection among the page's modules" };
+      drafts.getState().setModelSelection(draftId, model, { explicit: true, replaceOptions: true });
+      const draft = drafts.getState().getComposerDraft(draftId);
+      const set = draft?.modelSelectionByProvider?.[model.instanceId];
+      if (draft?.activeProvider === model.instanceId && set?.model === model.model) return null;
+      return { reason: "no-model", detail: `draft ${draftId} reads ${JSON.stringify(set || null)} on ${draft?.activeProvider}, not ${JSON.stringify(model)}` };
+    }
+    return new Promise((resolve) => {
+      // The draft made or shown is set to the model, if one.
+      const done = (result, draftId) => {
+        if (!result.ok || !model) return resolve(result);
+        if (!draftId) return resolve({ ok: true, model: { reason: "no-model", detail: "no draft id from the app" } });
+        setModel(draftId).then(
+          (unset) => resolve(unset ? { ok: true, model: unset } : result),
+          (err) => resolve({ ok: true, model: { reason: "no-model", detail: String(err?.stack || err).slice(0, 800) } }),
+        );
+      };
       const fail = failing(done);
       let looks = 0, refused = 0;
       function look() {
@@ -369,12 +412,12 @@ function inT3(job, dirs, prompt) {
           const first = prompt.trim().split("\n")[0].trim();
           const shows = !app.activeThread && same(app.activeDraftThread, project);
           const text = document.querySelector('[contenteditable="true"]')?.textContent || "";
-          if (shows && first && text.trim().startsWith(first)) return done({ ok: true });
+          if (shows && first && text.trim().startsWith(first)) return done({ ok: true }, app.routeDraftId);
         }
         const options = prompt ? { prompt, envMode: "local", branch: null, worktreePath: null } : undefined;
         Promise.resolve(app.handleNewThread(ref(project), options)).then(
           (made) => {
-            if (made) return done({ ok: true });
+            if (made) return done({ ok: true }, made.draftId);
             // The app gives none when the page went elsewhere meanwhile,
             // as its home page does as it opens its own draft.
             if (++refused < 5) return void setTimeout(look, EVERY);
@@ -400,21 +443,6 @@ function inT3(job, dirs, prompt) {
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const isStore = (v) =>
     v && typeof v.getState === "function" && typeof v.getState()?.setSidebarProjectScopeKeys === "function";
-  // The app's ui-state store, from the modules the page loaded already:
-  // importing one again gives the same module, not a new one.
-  async function uiStore() {
-    const tags = document.querySelectorAll('script[type="module"][src], link[rel="modulepreload"][href]');
-    const loaded = performance.getEntriesByType("resource").map((e) => e.name);
-    const urls = new Set([...[...tags].map((t) => t.src || t.href), ...loaded]);
-    for (const url of urls) {
-      if (!/\/uiStateStore-[^/]*\.js$/.test(url.split(/[?#]/)[0]) || new URL(url).origin !== location.origin) continue;
-      try {
-        const found = Object.values(await import(url)).find(isStore);
-        if (found) return found;
-      } catch {}
-    }
-    return null;
-  }
   const mark = "gerdr-t3-scope";
   // How long ago a filter set and loaded again counts as just set.
   const FRESH = 15000;
@@ -497,7 +525,7 @@ function inT3(job, dirs, prompt) {
         return look();
       }
       looks = 0;
-      uiStore().then(
+      moduleStore(isStore, /\/uiStateStore-[^/]*$/).then(
         (found) => ((store = found), look()),
         () => look(),
       );
@@ -555,7 +583,8 @@ async function startThread(tab) {
     const { url, status } = await chrome.tabs.get(tab);
     // Still loading, or at another page: tried again at its next load.
     if (status !== "complete" || !url || new URL(url).origin !== asked.origin) return;
-    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: inT3, args: ["thread", asked.dirs, asked.prompt] });
+    const args = ["thread", asked.dirs, asked.prompt, asked.model];
+    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: inT3, args });
     result = frame?.result;
   } catch {
     return;
@@ -567,8 +596,9 @@ async function startThread(tab) {
   delete threads[tab];
   await save();
   const pane = panes[tab];
-  if (pane !== undefined && result.reason) {
-    send({ type: "nothread", pane, reason: result.reason, detail: result.detail });
+  const failed = result.reason ? result : result.model;
+  if (pane !== undefined && failed) {
+    send({ type: "nothread", pane, reason: failed.reason, detail: failed.detail });
   }
 }
 
@@ -632,7 +662,7 @@ async function command(message) {
         break;
       }
       case "newthread":
-        threads[tab] = { origin: message.origin, dirs: message.dirs, prompt: message.prompt, at: Date.now() };
+        threads[tab] = { origin: message.origin, dirs: message.dirs, prompt: message.prompt, model: message.model, at: Date.now() };
         await save();
         await startThread(tab);
         break;
