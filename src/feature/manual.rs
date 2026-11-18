@@ -574,6 +574,17 @@ pub fn add_shots(test: &mut Option<ManualTest>, c: &Criterion, names: &[String])
     true
 }
 
+/// Take screenshot `name` off the failure of criterion `id`; false when
+/// none of its failures has it.
+pub fn drop_shot(test: &mut Option<ManualTest>, id: &str, name: &str) -> bool {
+    let Some(k) = (test.iter_mut().flat_map(|t| &mut t.checks)).find(|k| k.id == id) else {
+        return false;
+    };
+    let before = k.shots.len();
+    k.shots.retain(|s| s != name);
+    k.shots.len() != before
+}
+
 /// The name of the next screenshot of criterion `id`, in a folder holding
 /// `taken`: `AC-3-1.png`, then `AC-3-2.png`.
 pub fn shot_name(id: &str, taken: &[String]) -> String {
@@ -1050,6 +1061,12 @@ mod tests {
         assert_eq!(check(t.as_ref(), &a).unwrap().shots, ["AC-1-1.png"]);
         // Its note edited, they stay; passed, they go with the failure.
         set(&mut t, &a, "p", Verdict::Fail, "it crashes", 2);
+        assert_eq!(check(t.as_ref(), &a).unwrap().shots, ["AC-1-1.png"]);
+        // One deleted goes; one it hasn't, or of another criterion, doesn't.
+        assert!(add_shots(&mut t, &a, &["AC-1-2.png".into()]));
+        assert!(!drop_shot(&mut t, "AC-2", "AC-1-2.png"));
+        assert!(drop_shot(&mut t, "AC-1", "AC-1-2.png"));
+        assert!(!drop_shot(&mut t, "AC-1", "AC-1-2.png"));
         assert_eq!(check(t.as_ref(), &a).unwrap().shots, ["AC-1-1.png"]);
         let (_, md) = failures_markdown(t.as_ref(), &all, "Bulk");
         assert!(md.contains("Screenshot: feature-docs/manual/AC-1-1.png"), "{md}");

@@ -99,6 +99,14 @@ pub enum Then {
         slug: String,
         title: String,
     },
+    /// Delete screenshot `name` of criterion `id` of this project's feature
+    /// (see `Gerdr::delete_shot`).
+    DeleteShot {
+        project: String,
+        slug: String,
+        id: String,
+        name: String,
+    },
     /// Remove the worktrees of this project's feature, `force`: with the
     /// work they hold; abandon it if `abandon` (see
     /// `Gerdr::remove_feature`).
@@ -889,6 +897,12 @@ impl Gerdr {
                 slug,
                 title,
             } => self.delete_ai_work(&project, &slug, title),
+            Then::DeleteShot {
+                project,
+                slug,
+                id,
+                name,
+            } => self.delete_shot(&project, &slug, &id, &name),
             Then::RemoveFeature {
                 project,
                 slug,

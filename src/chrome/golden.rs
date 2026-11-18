@@ -9237,23 +9237,23 @@ fn paint_viewer(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 const GOLDEN_VIEWER: [[u64; 2]; 4] = [
     // Dark at 1
     [
-        0x2dca2f9b4f8320f2, // viewer
-        0x405c62af7a24b25f, // viewer_gone
+        0x4bdb9f8730a1baf8, // viewer
+        0x9affc279ce8a5e83, // viewer_gone
     ],
     // Dark at 2
     [
-        0x0c52c0d6b9007e65, // viewer
-        0xc66180392eed3149, // viewer_gone
+        0xeca459e320e4eab6, // viewer
+        0x57f02f174ffb3d57, // viewer_gone
     ],
     // Light at 1
     [
-        0x9ac40c4eb9568b77, // viewer
-        0xae791f3058df83dc, // viewer_gone
+        0x3511ad2bbdd2ec85, // viewer
+        0x493fd43ff0dd76a9, // viewer_gone
     ],
     // Light at 2
     [
-        0xba0d8015d6b6a083, // viewer
-        0x49c5e27cf2e0b75f, // viewer_gone
+        0xc278c3b34fada6fc, // viewer
+        0x82798f2f32d12742, // viewer_gone
     ],
 ];
 

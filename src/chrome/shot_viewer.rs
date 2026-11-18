@@ -33,6 +33,7 @@ pub struct ShotViewerView {
 pub enum ShotViewerHit {
     Prev,
     Next,
+    Delete,
     Close,
 }
 
@@ -41,6 +42,7 @@ impl ShotViewerHit {
         match self {
             Self::Prev => "Previous",
             Self::Next => "Next",
+            Self::Delete => "Delete",
             Self::Close => "Close",
         }
     }
@@ -76,9 +78,10 @@ pub fn shot_viewer_layout(view: &ShotViewerView, size: Size<i32, Logical>) -> Sh
         true => &[
             ShotViewerHit::Prev,
             ShotViewerHit::Next,
+            ShotViewerHit::Delete,
             ShotViewerHit::Close,
         ],
-        false => &[ShotViewerHit::Close],
+        false => &[ShotViewerHit::Delete, ShotViewerHit::Close],
     };
     let mut end = right;
     let mut buttons: Vec<(ShotViewerHit, Rect)> = (hits.iter().rev())
@@ -199,8 +202,13 @@ impl Painter {
         );
         // Its keys after that, as far as they fit before its buttons.
         let hints: &[(&str, &str)] = match view.of > 1 {
-            true => &[("Left", "previous"), ("Right", "next"), ("Esc", "close")],
-            false => &[("Esc", "close")],
+            true => &[
+                ("Left", "previous"),
+                ("Right", "next"),
+                ("Del", "delete"),
+                ("Esc", "close"),
+            ],
+            false => &[("Del", "delete"), ("Esc", "close")],
         };
         let keys_x = place_rect.loc.x + place_rect.size.w + 2 * QUIT_BUTTON_GAP;
         let row = Rectangle::new((keys_x, title.loc.y).into(), (0, title.size.h).into());
@@ -283,12 +291,13 @@ mod tests {
         assert_eq!((small.image.size.w, small.image.size.h), (400, 300));
         // Previous and Next only with more than one, all right of the line.
         let hits = |l: &ShotViewerLayout| l.buttons.iter().map(|(h, _)| *h).collect::<Vec<_>>();
-        assert_eq!(hits(&small), [ShotViewerHit::Close]);
+        assert_eq!(hits(&small), [ShotViewerHit::Delete, ShotViewerHit::Close]);
         assert_eq!(
             hits(&big),
             [
                 ShotViewerHit::Prev,
                 ShotViewerHit::Next,
+                ShotViewerHit::Delete,
                 ShotViewerHit::Close
             ]
         );
