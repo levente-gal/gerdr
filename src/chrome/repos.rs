@@ -569,15 +569,12 @@ pub struct Hint {
 }
 
 /// Marks the title button to press next `Primary`, the rest `Plain`: what
-/// a feature's diff waits for (Make fixes, else Plan fixes once it can be
-/// pressed); else the rightmost of what goes on that can be pressed (a
+/// a feature's diff waits for (Plan fixes, once it can be pressed); else the rightmost of what goes on that can be pressed (a
 /// file's Approve or Send back, the fix plan's Make fixes, the plan's Write
 /// final plan). One filled button, at the right.
 pub fn mark_primary(title: &mut [Hint]) {
     let enabled = |b: ReposButton| title.iter().any(|h| h.button == b && h.disabled.is_none());
-    let main = if title.iter().any(|h| h.button == ReposButton::MakeFixes) {
-        Some(ReposButton::MakeFixes)
-    } else if enabled(ReposButton::PlanFixes) {
+    let main = if enabled(ReposButton::PlanFixes) {
         Some(ReposButton::PlanFixes)
     } else {
         (title.iter().rev())
@@ -6140,8 +6137,13 @@ mod tests {
             hint(Approve, "", Some("Decide first")),
         ];
         assert_eq!(primary(&mut waits), [SendBack]);
-        let mut fixes = vec![hint(AddComment, "", None), hint(MakeFixes, "", None)];
-        assert_eq!(primary(&mut fixes), [MakeFixes]);
+        // Fixes are planned first: Make fixes beside it is plain.
+        let mut fixes = vec![
+            hint(AddComment, "", None),
+            hint(MakeFixes, "", None),
+            hint(PlanFixes, "", None),
+        ];
+        assert_eq!(primary(&mut fixes), [PlanFixes]);
     }
 
     fn detail_line(text: &str, tone: DiffTone) -> DetailLine {

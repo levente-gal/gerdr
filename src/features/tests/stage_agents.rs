@@ -309,14 +309,10 @@ fn the_reviewer_waits_for_its_prompt_too() {
     let mut f = feature("b", vec![repo("api", true)], 5);
     assert_eq!(f.current(), Some(Stage::AiReview));
     f.runs.insert(Stage::AiReview, held_run(Some("p1")));
-    let none = RowCtx::default();
-    assert_eq!(
-        review_action(&f, none),
-        PanelOutcome::SendPrompt(Stage::AiReview)
-    );
+    assert_eq!(review_action(&f), PanelOutcome::SendPrompt(Stage::AiReview));
     f.runs.insert(Stage::AiReview, held_run(None));
     assert_eq!(
-        review_action(&f, none),
+        review_action(&f),
         PanelOutcome::StartAgent(Stage::AiReview, false)
     );
 }

@@ -330,15 +330,14 @@ impl FeatureOf {
                     buttons.push((B::FixAllFindings, None));
                 }
                 if open > 0 || fix > 0 {
-                    let direct = !self.needs_plan(own);
-                    if direct {
-                        buttons.push((B::MakeFixes, self.plan_refusal(own)));
+                    // Planned first; Make fixes skips that while nothing of
+                    // the user's needs one. Greyed, Plan fixes alone says
+                    // what they wait for, and the row is full on a small
+                    // output.
+                    if open == 0 && !self.needs_plan(own) {
+                        buttons.push((B::MakeFixes, None));
                     }
-                    // Greyed, one says what they wait for, and the row is full
-                    // on a small output.
-                    if !direct || open == 0 {
-                        buttons.push((B::PlanFixes, self.plan_refusal(own)));
-                    }
+                    buttons.push((B::PlanFixes, self.plan_refusal(own)));
                 }
                 buttons
             }
@@ -434,9 +433,9 @@ impl FeatureOf {
     /// host to say what it waits for.
     pub fn deciding_button(&self, shift: bool, own: usize) -> ReposButton {
         // Ctrl+Enter makes them, Ctrl+Shift+Enter plans them, as on every
-        // page; with findings left, Make fixes says to decide them first.
+        // page; with findings left, Plan fixes says to decide them first.
         let direct = !self.needs_plan(own);
-        match !shift || direct && self.count(FindingState::Open) > 0 {
+        match !shift && !(direct && self.count(FindingState::Open) > 0) {
             true => ReposButton::MakeFixes,
             false => ReposButton::PlanFixes,
         }
@@ -3084,7 +3083,7 @@ mod tests {
                 (B::AddComment, None),
                 (B::FixAllFindings, None),
                 (
-                    B::MakeFixes,
+                    B::PlanFixes,
                     Some("Decide the 1 finding left first".to_owned())
                 ),
             ]
@@ -3180,7 +3179,7 @@ mod tests {
             Review::default(),
         );
         let (title, hints) = offered(&wd);
-        assert_eq!(title, [B::AddComment, B::FixAllFindings, B::MakeFixes]);
+        assert_eq!(title, [B::AddComment, B::FixAllFindings, B::PlanFixes]);
         for dead in [B::Approve, B::SendBack, B::CommentFile] {
             assert!(!title.contains(&dead) && !hints.contains(&dead), "{dead:?}");
         }
@@ -3188,13 +3187,13 @@ mod tests {
         let why = |hints: Vec<Hint>| {
             hints
                 .into_iter()
-                .find(|h| h.button == B::MakeFixes)
+                .find(|h| h.button == B::PlanFixes)
                 .unwrap()
         };
         let waits = Some("Decide the 1 finding left first".to_owned());
         assert_eq!(why(wd.view(POPUP_ENV).title_buttons).disabled, waits);
         assert_eq!(why(wd.hints()).disabled, waits);
-        assert_eq!(why(wd.hints()).key, "Ctrl+Enter");
+        assert_eq!(why(wd.hints()).key, "Ctrl+Shift+Enter");
         // The summary says where they stand.
         let summary = wd.summary();
         assert!(
@@ -3204,15 +3203,15 @@ mod tests {
         // Both keys go to its host, which says what they wait for.
         assert_eq!(
             wd.key(&mods(true, false), enter, enter, POPUP_ENV),
-            Some(Done::MakeFixes)
+            Some(Done::PlanFixes)
         );
         assert_eq!(
             wd.key(&mods(true, true), enter, enter, POPUP_ENV),
-            Some(Done::MakeFixes)
+            Some(Done::PlanFixes)
         );
         assert_eq!(
-            wd.click(ReposHit::Button(B::MakeFixes), POPUP_ENV),
-            Some(Done::MakeFixes)
+            wd.click(ReposHit::Button(B::PlanFixes), POPUP_ENV),
+            Some(Done::PlanFixes)
         );
         let upper_f = Keysym::F;
         assert_eq!(
@@ -3232,6 +3231,12 @@ mod tests {
         );
         assert_eq!(offered(&wd).0, [B::AddComment, B::MakeFixes, B::PlanFixes]);
         assert_eq!(why(wd.view(POPUP_ENV).title_buttons).disabled, None);
+        // Planned first: Plan fixes is the one filled.
+        let filled = (wd.view(POPUP_ENV).title_buttons.into_iter())
+            .filter(|h| h.style == crate::chrome::ButtonStyle::Primary)
+            .map(|h| h.button)
+            .collect::<Vec<_>>();
+        assert_eq!(filled, [B::PlanFixes]);
         assert_eq!(
             wd.key(&mods(false, true), upper_f, upper_f, POPUP_ENV),
             Some(Done::Diff(crate::diff_view::Outcome::Notice(
@@ -3947,7 +3952,7 @@ mod posts_tests {
         };
         let buttons = |fe: &FeatureOf| fe.buttons(0).into_iter().map(|(b, _)| b).collect::<Vec<_>>();
         assert_eq!(buttons(&fe(Stage::AiReview, true)), vec![B::AddComment]);
-        assert!(buttons(&fe(Stage::AiReview, false)).contains(&B::MakeFixes));
+        assert!(buttons(&fe(Stage::AiReview, false)).contains(&B::PlanFixes));
         assert_eq!(
             buttons(&fe(Stage::CodeReview, true)),
             vec![B::AddComment, B::Approve]

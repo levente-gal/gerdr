@@ -15,7 +15,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
         "plan-final" => (include_str!("../../assets/prompts/plan-final.md"), 1),
         "build" => (include_str!("../../assets/prompts/build.md"), 9),
-        "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 5),
+        "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 6),
         "pr-review" => (include_str!("../../assets/prompts/pr-review.md"), 2),
         "fix-plan" => (include_str!("../../assets/prompts/fix-plan.md"), 3),
         "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 4),
@@ -105,6 +105,7 @@ mod tests {
             ("fixes.left", "r1-2: Off by one; r1-3"),
             ("fixes.criteria", ""),
             ("review.diffs", "- api: `git diff abc123...HEAD`"),
+            ("review.again", ""),
             ("review.sent", ""),
             ("review.dismissed", ""),
             ("review.open", ""),
@@ -337,6 +338,8 @@ mod tests {
             assert!(first.contains(words), "{words}: {first}");
         }
         assert!(!first.contains("Do not raise\nthem again"));
+        assert!(first.contains("criteria one by one") && !first.contains("read those files"));
+        v.insert("review.again".into(), "yes".into());
         v.insert("review.sent".into(), "- r1-1: Off by one".into());
         v.insert(
             "review.dismissed".into(),
@@ -350,9 +353,13 @@ mod tests {
             "- r1-2: Naming (by design)",
             "Do not raise\nthem again",
             "- r1-3: Slow",
+            // Later, only what changed since is read again.
+            "Don't read those files through again",
+            "criteria that the change since\n   touches",
         ] {
             assert!(later.contains(words), "{words}: {later}");
         }
+        assert!(!later.contains("criteria one by one"));
     }
 
     #[test]

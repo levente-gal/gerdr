@@ -3725,16 +3725,15 @@ fn feature_tab_verify_failed() -> super::FeatureTabView {
 }
 
 /// Verify failed by a check that passed the run before: what changed since
-/// broke it, so Make fixes, with no plan, is what comes next.
+/// broke it. Its fixes are planned first all the same.
 fn feature_tab_verify_regressed() -> super::FeatureTabView {
     use super::{CheckTone, PageSection};
     let mut view = feature_tab_verify_failed();
     view.page.status = Some(tab_line(
-        "failed: api: `cargo test` exited with 101; it passed before the last change, \
-         so its fixes need no plan",
+        "failed: api: `cargo test` exited with 101; it passed before the last change",
         CheckTone::Blocker,
     ));
-    view.page.buttons = verify_failed_buttons(0);
+    view.page.buttons = verify_failed_buttons(1);
     view.page.sections = vec![PageSection::Lines {
         label: "Checks".into(),
         lines: vec![
@@ -6711,7 +6710,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x38114a9f4a296f0b, // tab_ship_ci_860
         0x978e49f04e09a85b, // tab_ship_base_ci_1180
         0x51edb1354d501bd9, // tab_ship_checking_1180
-        0x8c5bfb636d72289d, // tab_verify_regressed_1180
+        0xbb774378749d7ec8, // tab_verify_regressed_1180
         0x5d1528bc2cc8a559, // tab_verify_machine_860
         0xd410f6df1fe56733, // tab_discover_decisions_860
         0x6e40f72150c44370, // tab_discover_research_1180
@@ -6790,7 +6789,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xa7fb449280d6136d, // tab_ship_ci_860
         0xfd8a10d5b4443322, // tab_ship_base_ci_1180
         0x9a2f01f6f743e506, // tab_ship_checking_1180
-        0xe9edacb82394691d, // tab_verify_regressed_1180
+        0xf0b2225c7506ca62, // tab_verify_regressed_1180
         0xd05cc43a9d172953, // tab_verify_machine_860
         0xdb64822c21ec8637, // tab_discover_decisions_860
         0xd4f06db6cc04bb21, // tab_discover_research_1180
@@ -6869,7 +6868,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x609f8f8fcd262491, // tab_ship_ci_860
         0x2f2bf3a05461f3b8, // tab_ship_base_ci_1180
         0xf2a063041d3ea7e4, // tab_ship_checking_1180
-        0xcd5b80374b7fadce, // tab_verify_regressed_1180
+        0x57164179f0c459f0, // tab_verify_regressed_1180
         0x73e583c110a3c917, // tab_verify_machine_860
         0x41cdcaa749a870ce, // tab_discover_decisions_860
         0x8de8bd802f466fc7, // tab_discover_research_1180
@@ -6948,7 +6947,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x9e25b62b18120c6e, // tab_ship_ci_860
         0xec6b9ed186c8fcd5, // tab_ship_base_ci_1180
         0x57fb4f62d5c7de92, // tab_ship_checking_1180
-        0xa1eb9487db0a0cd1, // tab_verify_regressed_1180
+        0x2b40fad819f042ad, // tab_verify_regressed_1180
         0x44849469da4e5fdd, // tab_verify_machine_860
         0xd656c1cb8bbb0455, // tab_discover_decisions_860
         0x086aed1decaf1d0c, // tab_discover_research_1180
@@ -8423,12 +8422,12 @@ fn findings_popup(at: u8) -> super::ReposView {
             vec![
                 button(ReposButton::AddComment, None),
                 button(ReposButton::FixAllFindings, None),
-                button(ReposButton::MakeFixes, waits),
+                button(ReposButton::PlanFixes, waits),
             ],
             vec![
                 keyed(ReposButton::AddComment, "Shift+C", None),
                 keyed(ReposButton::FixAllFindings, "Shift+F", None),
-                keyed(ReposButton::MakeFixes, "Ctrl+Enter", waits),
+                keyed(ReposButton::PlanFixes, "Ctrl+Shift+Enter", waits),
             ],
         ),
         _ => (
@@ -8640,8 +8639,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x8292cb27b4b4469c, // popup_deciding_1180
         0xa0deaec203ea0dfc, // popup_decided_1180
         0x4ceb7c285587e115, // popup_code_review_850
-        0x208b1985cb9666fb, // popup_no_comments_1180
-        0xfce62b39a33677c7, // popup_no_comments_850
+        0xc60793a35795792d, // popup_no_comments_1180
+        0x0b2834902b53dd34, // popup_no_comments_850
         0x13640f35d3608c1e, // popup_listed_1180
         0xf5da8248c27be9b1, // inline_listed_1180
     ],
@@ -8659,8 +8658,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x1875fe09a9d3994e, // popup_deciding_1180
         0x295d11fad911289b, // popup_decided_1180
         0xb9d87c4bffbeb123, // popup_code_review_850
-        0xd7ae86377c961733, // popup_no_comments_1180
-        0x072540df4268228a, // popup_no_comments_850
+        0x1fa1e9c8682154b5, // popup_no_comments_1180
+        0x57c31e39415c205f, // popup_no_comments_850
         0x36f9c43b3124040b, // popup_listed_1180
         0x15b5c80644a581ee, // inline_listed_1180
     ],
@@ -8678,8 +8677,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x48224217fb273e4b, // popup_deciding_1180
         0x9172fab2247e8779, // popup_decided_1180
         0x5cea79fd7100bca5, // popup_code_review_850
-        0x3e17a4ab1c1041c3, // popup_no_comments_1180
-        0xa91c775e71a7793f, // popup_no_comments_850
+        0xb7dc89337b21f7d4, // popup_no_comments_1180
+        0xa6f5b75a50f1071e, // popup_no_comments_850
         0x47183150fac083f6, // popup_listed_1180
         0xd0a0329e96604bb5, // inline_listed_1180
     ],
@@ -8697,8 +8696,8 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0xcefb7abe1192dd44, // popup_deciding_1180
         0xfd2a2ec9b11d7eed, // popup_decided_1180
         0x66dba65ee01fdf23, // popup_code_review_850
-        0xdc4106801cfec6a4, // popup_no_comments_1180
-        0x989bb320997e6137, // popup_no_comments_850
+        0x3d8770bd8b2750cf, // popup_no_comments_1180
+        0xe28cbafae30128da, // popup_no_comments_850
         0xe791e0cbeb751d04, // popup_listed_1180
         0xc9e03243e180d2af, // inline_listed_1180
     ],

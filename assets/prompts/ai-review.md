@@ -7,11 +7,20 @@ eyes.
 
 Your job: find what is wrong with the change before a person reviews it.
 
+{{#if review.again}}
+1. An earlier review read the whole change against the brief at
+   {{brief.path}}, the plan at {{plan.path}} and the repositories' guidance
+   files (CLAUDE.md, AGENTS.md). This one checks what changed since, and
+   the findings listed below. Don't read those files through again: open
+   one only for a part the change since the last review touches, or that a
+   finding below needs.
+{{else}}
 1. Read the brief at {{brief.path}} and the plan at {{plan.path}}: they
    say what the feature must do. Read the repositories' guidance files
    (CLAUDE.md, AGENTS.md, and what they point to) where they exist: the
    change has to follow them too. Read what the checks did in
    {{evidence.path}}, if it is there.
+{{/if}}
 2. Read the change. Run these, each in its repository's folder:
 
 {{review.diffs}}
@@ -24,8 +33,9 @@ Your job: find what is wrong with the change before a person reviews it.
    Read the files around the change too, as much as you need.
 3. Look for bugs, acceptance criteria the change doesn't meet, security
    holes, data loss, broken error handling, and broken guidance rules. Go
-   through the brief's criteria one by one. Code that goes against a
-   decision in the decision log is a finding too: name the decision (D2).
+   through the brief's criteria {{#if review.again}}that the change since
+   touches{{else}}one by one{{/if}}. Code that goes against a decision in
+   the decision log is a finding too: name the decision (D2).
    Leave out style nits and matters of taste.
 
    Check each finding in the code before you raise it. A finding needs a

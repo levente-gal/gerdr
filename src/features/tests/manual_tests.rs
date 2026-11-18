@@ -60,11 +60,11 @@ fn manual_tests_buttons_press_what_comes_next() {
     // Nothing tried and no sandbox running: Enter starts the sandbox
     // the criteria are tried in.
     assert_eq!(enter(ctx(0, 0, 0, 3)), Some(PanelOutcome::StartSandbox));
-    // A failure not sent: its fixes come next, made at once or
-    // through a plan.
+    // A failure not sent: its fixes come next, planned first (Make fixes
+    // skips the plan).
     assert_eq!(
         enter(ctx(2, 1, 0, 0)),
-        Some(PanelOutcome::Manual(Outcome::MakeFixes))
+        Some(PanelOutcome::Manual(Outcome::SendFailures))
     );
     let labels = |ctx| -> Vec<String> {
         (page_actions(&f, Stage::ManualTest, ctx).into_iter())

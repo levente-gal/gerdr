@@ -1763,8 +1763,9 @@ fn base_ci_actions(probe: Option<&Probe>) -> Vec<(PageButton, PanelOutcome)> {
 }
 
 /// The buttons of Ship's cards whose pull requests fail checks on GitHub:
-/// fix them all in one round, planned first or not, while no round is open
-/// and what failed is what was pushed; and run its failed Actions runs again.
+/// fix them all in one round, planned first (the default) or not, while no
+/// round is open and what failed is what was pushed; and run its failed
+/// Actions runs again.
 fn ship_ci_actions(
     feature: &Feature,
     probe: Option<&Probe>,
@@ -1792,11 +1793,11 @@ fn ship_ci_actions(
         // One round takes every repository's failures: each card says so.
         if feature.fix_round.is_none() {
             out.push((
-                button(fix, ButtonStyle::Primary),
+                button(fix, ButtonStyle::Quiet),
                 PanelOutcome::FixCi(repo.key.clone(), false),
             ));
             out.push((
-                button(plan, ButtonStyle::Quiet),
+                button(plan, ButtonStyle::Primary),
                 PanelOutcome::FixCi(repo.key.clone(), true),
             ));
         }

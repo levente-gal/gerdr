@@ -506,23 +506,20 @@ fn writers_page_actions(
         }
     }
     // Verify's failures hold no word of the user's: they need no plan, but
-    // planning them is what comes next by default, so the user sees the
-    // fixes before they are made (Make fixes skips that). Checks that passed
-    // the run before were broken by what changed since: the agent that
-    // changed it puts that right with no plan. Failed by the machine, they
-    // run again first (`Run failed`).
+    // planning them is what comes next, so the user sees the fixes before
+    // they are made (Make fixes skips that). Failed by the machine, they run
+    // again first (`Run failed`).
     let plan_fixes = verify_sends(feature, stage);
     if plan_fixes {
-        let run = feature.verify.as_ref();
-        let (make, plan) = match (
-            run.and_then(feature::verify::machine_failure).is_some(),
-            run.is_some_and(feature::verify::regressed),
-        ) {
-            (true, _) => (ButtonStyle::Plain, ButtonStyle::Plain),
-            (false, true) => (ButtonStyle::Primary, ButtonStyle::Plain),
-            (false, false) => (ButtonStyle::Plain, ButtonStyle::Primary),
+        let machine = (feature.verify.as_ref()).and_then(feature::verify::machine_failure);
+        let plan = match machine {
+            Some(_) => ButtonStyle::Plain,
+            None => ButtonStyle::Primary,
         };
-        out.push((button("Make fixes", make), PanelOutcome::MakeVerifyFixes));
+        out.push((
+            button("Make fixes", ButtonStyle::Plain),
+            PanelOutcome::MakeVerifyFixes,
+        ));
         out.push((button("Plan fixes", plan), PanelOutcome::PlanFixes));
     }
     let waits = feature.status == Status::Open
@@ -568,15 +565,15 @@ fn writers_page_actions(
             _ if back == Some(Rework::Waits) || round.is_some() || plan_fixes => ButtonStyle::Plain,
             _ => ButtonStyle::Primary,
         };
-        let direct = main == PanelOutcome::MakeFindingFixes;
-        out.push((button(label, style), main));
-        // Nothing asks for a plan, but one can still be wanted.
-        if direct {
+        // Findings are planned first, for the user to read; with nothing
+        // of theirs in them, Make fixes skips that.
+        if main == PanelOutcome::SendFixes && makes_findings(feature, stage, ctx) {
             out.push((
-                button("Plan fixes", ButtonStyle::Plain),
-                PanelOutcome::SendFixes,
+                button("Make fixes", ButtonStyle::Plain),
+                PanelOutcome::MakeFindingFixes,
             ));
         }
+        out.push((button(label, style), main));
     }
     if tries_criteria(feature, stage) && ctx.criteria > 0 {
         use crate::manual_test::Outcome;
@@ -587,17 +584,17 @@ fn writers_page_actions(
             false => ButtonStyle::Plain,
         };
         // Found while a round is open, they wait for the next one. As on
-        // every page: what the user wrote goes through a plan.
+        // every page: they are planned first, and what the user wrote can
+        // only go through a plan.
         if manual_sends(feature, ctx) {
-            let own = manual_own_words(ctx).is_some();
-            if !own {
+            if manual_own_words(ctx).is_none() {
                 out.push((
-                    button("Make fixes", style(true)),
+                    button("Make fixes", ButtonStyle::Plain),
                     PanelOutcome::Manual(Outcome::MakeFixes),
                 ));
             }
             out.push((
-                button("Plan fixes", style(own)),
+                button("Plan fixes", style(true)),
                 PanelOutcome::Manual(Outcome::SendFailures),
             ));
         }

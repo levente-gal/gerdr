@@ -119,25 +119,30 @@ fn ai_review_shows_its_agent_then_its_findings_never_mark_done() {
     assert!(labels(&open).contains(&"Fix all open".to_owned()));
     assert!(!labels(&open).contains(&"Plan fixes".to_owned()));
     assert!(!labels(&open).contains(&"Make fixes".to_owned()));
-    // Taken as they are, the fixes go with no plan; one can be asked for.
+    // The fixes are planned first; taken as they are, they can also go
+    // with no plan.
     let fix = reviewing(&[S::Fix, S::Dismissed], true);
     let primary = |f: &Feature, ctx| page_enter(f, Stage::AiReview, ctx);
-    let plain = (page_actions(&fix, Stage::AiReview, none).into_iter())
-        .find(|(b, _)| b.label == "Plan fixes");
+    let style = |label: &str| {
+        (page_actions(&fix, Stage::AiReview, none).into_iter())
+            .find(|(b, _)| b.label == label)
+            .map(|(b, o)| (b.style, o))
+    };
     assert_eq!(
-        plain.map(|(b, o)| (b.style, o)),
-        Some((ButtonStyle::Plain, PanelOutcome::SendFixes))
+        style("Plan fixes"),
+        Some((ButtonStyle::Primary, PanelOutcome::SendFixes))
+    );
+    assert_eq!(
+        style("Make fixes"),
+        Some((ButtonStyle::Plain, PanelOutcome::MakeFindingFixes))
     );
     // Nothing left to want: greyed, in its place.
     let all = (page_actions(&fix, Stage::AiReview, none).into_iter())
         .find(|(b, _)| b.label == "Fix all open");
     assert_eq!(all.map(|(b, _)| b.style), Some(ButtonStyle::Off));
-    assert_eq!(
-        row_action(&fix, row, none),
-        Some(PanelOutcome::MakeFindingFixes)
-    );
-    assert_eq!(primary(&fix, none), Some(PanelOutcome::MakeFindingFixes));
-    assert_eq!(row_hint(&fix, row, none), "make fixes");
+    assert_eq!(row_action(&fix, row, none), Some(PanelOutcome::SendFixes));
+    assert_eq!(primary(&fix, none), Some(PanelOutcome::SendFixes));
+    assert_eq!(row_hint(&fix, row, none), "plan fixes");
     // Ctrl+Enter sends them from the cards too, Ctrl+Shift+Enter plans.
     let mut panel = FeaturePanel {
         slug: fix.slug.clone(),

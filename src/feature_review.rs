@@ -43,7 +43,8 @@ use crate::{
 /// first time, since the last review after), and the earlier findings,
 /// sent, dismissed and still open. A repository whose HEAD in `heads` (as
 /// its code was last read) is the one the last review read is left out,
-/// and named as unchanged.
+/// and named as unchanged. After a first review, `review.again` says so:
+/// the agent reads only what the change since touches.
 pub(crate) fn review_vars(
     feature: &Feature,
     heads: Option<&BTreeMap<String, String>>,
@@ -96,8 +97,16 @@ pub(crate) fn review_vars(
             })
             .unwrap_or_default()
     };
+    let again = review.is_some_and(|r| !r.reviewed.is_empty());
     vec![
         ("review.diffs".into(), diffs),
+        (
+            "review.again".into(),
+            match again {
+                true => "yes".into(),
+                false => String::new(),
+            },
+        ),
         ("review.unchanged".into(), unchanged),
         ("review.sent".into(), list(&[FindingState::Sent])),
         ("review.dismissed".into(), list(&[FindingState::Dismissed])),
@@ -567,30 +576,15 @@ impl Gerdr {
     }
 
     /// Say `text`, with a button for what comes next: nothing is left to
-    /// decide of feature `slug`'s AI review. Nothing starts by itself.
+    /// decide of feature `slug`'s AI review. Nothing starts by itself; the
+    /// fixes are planned first, as on its page.
     fn offer_fixes(&mut self, project: &str, slug: &str, text: String) {
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        let button = match self.findings_need_plan(&project, &slug) {
-            true => (
-                "Plan fixes".to_owned(),
-                MenuAction::PlanFixes(project, slug),
-            ),
-            false => (
-                "Make fixes".to_owned(),
-                MenuAction::MakeFindingFixes(project, slug),
-            ),
-        };
+        let button = (
+            "Plan fixes".to_owned(),
+            MenuAction::PlanFixes(project, slug),
+        );
         self.toast_with(text, Level::Success, Some(button));
-    }
-
-    /// Whether the findings to fix of feature `slug` need a fix plan, as far
-    /// as is known without reading a file.
-    fn findings_need_plan(&self, project: &str, slug: &str) -> bool {
-        let Some(feature) = self.feature(project, slug) else {
-            return false;
-        };
-        let findings = feature.review.iter().flat_map(|r| &r.findings);
-        review_import::needs_plan(findings, self.row_ctx(feature).comments)
     }
 
     /// Mark every undecided finding of feature `slug`'s AI review to fix.
@@ -1259,6 +1253,7 @@ mod tests {
         );
         assert_eq!(v["review.sent"], "");
         assert_eq!(v["review.open"], "");
+        assert_eq!(v["review.again"], "");
     }
 
     #[test]
@@ -1314,6 +1309,7 @@ mod tests {
     #[test]
     fn a_later_review_reads_what_changed_and_the_earlier_findings() {
         let v: prompts::render::Vars = review_vars(&reviewed(), None).into_iter().collect();
+        assert_eq!(v["review.again"], "yes");
         assert!(
             v["review.diffs"].contains("api, in /work/.features/bulk/api: `git diff f00d..HEAD`")
         );

@@ -1277,10 +1277,9 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                     "Ctrl+Enter",
                     "make the findings' fixes when nothing you wrote needs a plan",
                     |t| {
-                        let send =
-                            sends_findings(t.feature, t.stage, t.ctx).filter(|_| t.page())?;
-                        out(match send == PanelOutcome::MakeFindingFixes {
-                            true => send,
+                        sends_findings(t.feature, t.stage, t.ctx).filter(|_| t.page())?;
+                        out(match makes_findings(t.feature, t.stage, t.ctx) {
+                            true => PanelOutcome::MakeFindingFixes,
                             false => PanelOutcome::FindingRefused(PLAN_FIRST),
                         })
                     }

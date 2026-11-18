@@ -177,7 +177,7 @@ pub(super) fn verify_line(feature: &Feature, ctx: RowCtx, running: Option<&str>)
         None => "failed".to_owned(),
     };
     if feature::verify::regressed(run) {
-        line.push_str("; it passed before the last change, so its fixes need no plan");
+        line.push_str("; it passed before the last change");
     }
     Some(line)
 }

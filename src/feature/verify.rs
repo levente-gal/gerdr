@@ -1610,8 +1610,7 @@ pub fn code_failures(run: &VerifyRun) -> Vec<String> {
 
 /// Whether the fixes of `run` are to be planned while it runs: a check failed
 /// for its code and others still run, planning reads code only. Not with a
-/// check cut short or failed by the machine, nor one that passed the run
-/// before, whose fixes need no plan (`regressed`): the run's end says then.
+/// check cut short or failed by the machine: the run's end says then.
 pub fn plans_early(run: &VerifyRun) -> bool {
     let running = run.finished.is_none() && run.checks.iter().any(|c| c.outcome.is_none());
     let failed: Vec<&CheckRun> = (run.checks.iter())
@@ -1620,15 +1619,11 @@ pub fn plans_early(run: &VerifyRun) -> bool {
     let for_code = |c: &&CheckRun| {
         (c.outcome.as_ref()).is_some_and(|o| !o.interrupted && o.machine_error().is_none())
     };
-    running
-        && !failed.is_empty()
-        && failed.iter().all(for_code)
-        && !failed.iter().any(|c| c.passed_before)
+    running && !failed.is_empty() && failed.iter().all(for_code)
 }
 
 /// Whether every failed check of `run` passed in the run before it: what
-/// changed since broke them, and the agent that changed it needs no plan to
-/// put it right.
+/// changed since broke them.
 pub fn regressed(run: &VerifyRun) -> bool {
     let mut failed = (run.checks.iter())
         .filter(|c| c.outcome.as_ref().is_some_and(|o| !o.passed()))
@@ -3196,9 +3191,9 @@ mod tests {
         };
         assert!(plans_early(&run));
         assert_eq!(code_failures(&run), ["api: `test` exited with 1"]);
-        // It passed the run before: no plan, the end says.
+        // It passed the run before: planned all the same.
         run.checks[0].passed_before = true;
-        assert!(!plans_early(&run));
+        assert!(plans_early(&run));
         run.checks[0].passed_before = false;
         // The machine failed it: nothing to plan.
         run.checks[0] = row(Some(1), "Too many open files");

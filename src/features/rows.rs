@@ -264,7 +264,7 @@ pub fn row_action(feature: &Feature, row: PanelRow, ctx: RowCtx) -> Option<Panel
             StageMark::Current if stage == Stage::Verify && ctx.on_head => ci_action(feature),
             StageMark::Current if stage == Stage::Verify && ctx.checks => PanelOutcome::RunChecks,
             StageMark::Current if stage == Stage::PlanReview => plan_review_action(feature),
-            StageMark::Current if stage == Stage::AiReview => review_action(feature, ctx),
+            StageMark::Current if stage == Stage::AiReview => review_action(feature),
             StageMark::Current if stage == Stage::CodeReview => PanelOutcome::CodeReview,
             StageMark::Current if stage == Stage::ManualTest && ctx.criteria > 0 => {
                 PanelOutcome::ManualTest
@@ -644,7 +644,16 @@ pub(super) fn earlier_reviews(
 pub(super) fn sends_findings(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<PanelOutcome> {
     row_action(feature, PanelRow::Stage(stage), ctx)
         .filter(|_| fix_round_on(feature, stage).is_none())
-        .filter(|o| matches!(o, PanelOutcome::SendFixes | PanelOutcome::MakeFindingFixes))
+        .filter(|o| *o == PanelOutcome::SendFixes)
+}
+
+/// Whether AI review's findings on `stage`'s page can also be fixed with
+/// no plan (Make fixes, beside Plan fixes): they hold no word of the
+/// user's (`review_import::needs_plan`).
+pub(super) fn makes_findings(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
+    sends_findings(feature, stage, ctx).is_some()
+        && (feature.review.as_ref())
+            .is_some_and(|r| !review_import::needs_plan(&r.findings, ctx.comments))
 }
 
 /// What `stage`'s page of `feature` offers of the reviews it shows: their
@@ -1531,10 +1540,11 @@ pub(super) fn round_card(f: &ReviewFinding, multi: bool) -> FindingCard {
 
 /// What AI review's row does: show its agent while it runs (start one
 /// when there is none), then once its findings are read, show the first
-/// to decide, or send those to fix to the Build agent, through a plan if
-/// the user wrote anything of their own. Never marked done by hand: gerdr
-/// marks it once no finding holds up.
-pub(super) fn review_action(feature: &Feature, ctx: RowCtx) -> PanelOutcome {
+/// to decide, or send those to fix to the Build agent through a plan, for
+/// the user to read first (`makes_findings` says whether Make fixes can
+/// skip it). Never marked done by hand: gerdr marks it once no finding
+/// holds up.
+pub(super) fn review_action(feature: &Feature) -> PanelOutcome {
     let stage = Stage::AiReview;
     let Some(run) = feature.runs.get(&stage) else {
         return PanelOutcome::StartAgent(stage, false);
@@ -1542,12 +1552,7 @@ pub(super) fn review_action(feature: &Feature, ctx: RowCtx) -> PanelOutcome {
     let review = feature.review.as_ref().filter(|_| run.ready.is_some());
     match review {
         Some(r) if r.count(FindingState::Open) > 0 => PanelOutcome::Findings,
-        Some(r) if r.count(FindingState::Fix) > 0 => {
-            match review_import::needs_plan(&r.findings, ctx.comments) {
-                true => PanelOutcome::SendFixes,
-                false => PanelOutcome::MakeFindingFixes,
-            }
-        }
+        Some(r) if r.count(FindingState::Fix) > 0 => PanelOutcome::SendFixes,
         _ if run.waits_to_send() => PanelOutcome::SendPrompt(stage),
         _ if run.live() => PanelOutcome::ShowAgent(stage),
         _ if run.resumes() => PanelOutcome::ResumeAgent(stage),

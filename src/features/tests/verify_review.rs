@@ -1085,7 +1085,7 @@ fn a_failed_verify_waits_for_its_fixes_on_enter() {
 }
 
 #[test]
-fn a_regression_makes_its_fixes_and_the_machine_runs_them_again_on_enter() {
+fn a_regression_plans_its_fixes_and_the_machine_runs_them_again_on_enter() {
     let mut f = verified(false);
     let run = f.verify.as_mut().unwrap();
     (run.finished, run.passed) = (Some(1_100), Some(false));
@@ -1093,14 +1093,15 @@ fn a_regression_makes_its_fixes_and_the_machine_runs_them_again_on_enter() {
         checks: true,
         ..RowCtx::default()
     };
-    // The failed check passed the run before: what changed since broke it.
+    // The failed check passed the run before: what changed since broke it,
+    // and its fixes are planned first all the same.
     f.verify.as_mut().unwrap().checks[1].passed_before = true;
     assert_eq!(
         page_enter(&f, Stage::Verify, ctx),
-        Some(PanelOutcome::MakeVerifyFixes)
+        Some(PanelOutcome::PlanFixes)
     );
     let line = verify_line(&f, ctx, None).unwrap();
-    assert!(line.contains("need no plan"), "{line}");
+    assert!(line.contains("passed before the last change"), "{line}");
     // Failed by a full disk: no fixes, the checks run again.
     let run = f.verify.as_mut().unwrap();
     let failed = run.checks[1].outcome.as_mut().unwrap();

@@ -1188,6 +1188,7 @@ pub(crate) fn vars(
         ("pr.checks", pull(&pull_checks)),
         ("pr.others", pull_others(feature)),
         ("review.diffs", String::new()),
+        ("review.again", String::new()),
         ("review.sent", String::new()),
         ("review.dismissed", String::new()),
         ("review.open", String::new()),
