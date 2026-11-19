@@ -8,8 +8,8 @@
 // forward, and when it closes, over the native messaging host; it can send
 // a pane's tab to another page (in a single-page app by the app's own
 // router, see `goInApp`), back, forward, or load it again, send back a
-// screenshot of it, keep T3
-// Code's app in it to the projects under some folders, and start a thread
+// screenshot of it, or of an area of it the user selects there (see
+// `pick`), keep T3 Code's app in it to the projects under some folders, and start a thread
 // there in one of them (see `inT3`). A pane's tab can be the extension's
 // preview page too, which shows a markdown file gerdr sends it.
 
@@ -623,6 +623,288 @@ async function startThread(tab) {
   }
 }
 
+// Let the user select an area of the page: a box dragged over it, or one
+// element clicked. What it gives: `{ url, rect, elements, view }`, the
+// elements being the page's main ones in the area (see gerdr's
+// `manual::Picked`), every number whole CSS pixels of the viewport; or
+// `{ cancelled: true }` for Esc, or another select or unselect (they call
+// `window.__gerdrPick`). Runs in the page, in its own world: React's
+// fibers are on the page's own DOM nodes.
+// shortcut: viewport only, no scrolling while selecting; upgrade if long pages need it
+function pick() {
+  window.__gerdrPick?.();
+  const MOST = 12;
+  const area = (r) => ({ x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) });
+  const shown = (el, r = el.getBoundingClientRect()) => {
+    if (!r.width || !r.height) return false;
+    const s = getComputedStyle(el);
+    return s.display !== "none" && s.visibility !== "hidden";
+  };
+  // `#id` or `[data-testid]` ends the path; else `tag.class:nth-of-type(n)`
+  // steps. Classes a build made up (`a__b`, long hashes) aren't taken.
+  function selector(el) {
+    const steps = [];
+    for (let e = el; e && steps.length < 5; e = e.parentElement) {
+      if (e.id) {
+        steps.unshift(`#${CSS.escape(e.id)}`);
+        break;
+      }
+      const test = e.getAttribute("data-testid");
+      if (test) {
+        steps.unshift(`[data-testid="${CSS.escape(test)}"]`);
+        break;
+      }
+      let step = CSS.escape(e.localName);
+      const classes = [...e.classList].filter((c) => !c.includes("__") && c.length <= 40).slice(0, 3);
+      for (const c of classes) step += `.${CSS.escape(c)}`;
+      const same = e.parentElement ? [...e.parentElement.children].filter((s) => s.localName === e.localName) : [];
+      if (same.length > 1) step += `:nth-of-type(${same.indexOf(e) + 1})`;
+      steps.unshift(step);
+    }
+    return steps.join(" > ");
+  }
+  // A component's name: memo and forwardRef wrap theirs.
+  function named(type) {
+    if (typeof type === "function") return type.displayName || type.name || null;
+    if (type && typeof type === "object") return type.displayName || named(type.type || type.render);
+    return null;
+  }
+  // The React components `el` is in, innermost first, and where its JSX
+  // (or the nearest one above with a place) is written: dev builds only.
+  function react(el) {
+    const key = Object.keys(el).find((k) => k.startsWith("__reactFiber$"));
+    const component = [];
+    let source = null;
+    for (let f = key && el[key], i = 0; f && (component.length < 2 || !source) && i < 2000; f = f.return, i++) {
+      const at = f._debugSource;
+      if (!source && at?.fileName) source = `${at.fileName}:${at.lineNumber}`;
+      const name = component.length < 2 && named(f.type);
+      // A memo's fiber and its function's both name it.
+      if (name && component[component.length - 1] !== name) component.push(name);
+    }
+    return { component, source };
+  }
+  function styles(el) {
+    const s = getComputedStyle(el);
+    const family = s.fontFamily.split(",")[0].trim().replace(/^["']|["']$/g, "");
+    const all = {
+      margin: s.margin,
+      padding: s.padding,
+      font: `${s.fontWeight} ${s.fontSize} ${family}`,
+      color: s.color,
+      background: s.backgroundColor === "rgba(0, 0, 0, 0)" ? "" : s.backgroundColor,
+      gap: s.gap === "0px" ? "" : s.gap,
+      radius: s.borderRadius === "0px" ? "" : s.borderRadius,
+    };
+    return Object.fromEntries(Object.entries(all).filter(([, v]) => v && v !== "normal"));
+  }
+  function describe(el) {
+    const out = {
+      tag: el.localName,
+      selector: selector(el),
+      text: (el.innerText ?? el.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, 200),
+      rect: area(el.getBoundingClientRect()),
+    };
+    const { component, source } = react(el);
+    if (component.length) out.component = component;
+    if (source) out.source = source;
+    out.styles = styles(el);
+    return out;
+  }
+  // The elements wholly in `box`, the outermost of them; else the smallest
+  // one holding it.
+  function inBox(box) {
+    const inside = new Set();
+    for (const el of document.body?.querySelectorAll("*") || []) {
+      const r = el.getBoundingClientRect();
+      const fits = r.left >= box.x && r.top >= box.y && r.right <= box.x + box.w && r.bottom <= box.y + box.h;
+      if (fits && shown(el, r)) inside.add(el);
+    }
+    const outer = [...inside].filter((el) => {
+      for (let p = el.parentElement; p; p = p.parentElement) if (inside.has(p)) return false;
+      return true;
+    });
+    if (outer.length) return outer;
+    let el = document.elementFromPoint(box.x + box.w / 2, box.y + box.h / 2);
+    for (; el?.parentElement; el = el.parentElement) {
+      const r = el.getBoundingClientRect();
+      if (r.left <= box.x && r.top <= box.y && r.right >= box.x + box.w && r.bottom >= box.y + box.h) break;
+    }
+    return el ? [el] : [];
+  }
+
+  // Its own styles, each kept over the page's: the page's CSS reaches it
+  // only through the host's, and the shadow root keeps out the rest.
+  const host = document.createElement("div");
+  host.style.cssText =
+    "all:initial!important;position:fixed!important;inset:0!important;z-index:2147483647!important;cursor:crosshair!important";
+  const shadow = host.attachShadow({ mode: "closed" });
+  const style = document.createElement("style");
+  style.textContent = `
+    .bar { position: fixed; top: 8px; left: 50%; transform: translateX(-50%); padding: 6px 12px;
+      border-radius: 6px; background: #1c1c1e; color: #fff; font: 13px/1.4 system-ui, sans-serif;
+      white-space: nowrap; pointer-events: none; box-shadow: 0 2px 8px rgba(0, 0, 0, .3); }
+    .box { position: fixed; display: none; outline: 2px solid #ff3b30; background: rgba(255, 59, 48, .08);
+      pointer-events: none; }`;
+  const bar = document.createElement("div");
+  bar.className = "bar";
+  bar.textContent = "Drag over an area or click an element · Esc cancels";
+  const drawn = document.createElement("div");
+  drawn.className = "box";
+  shadow.append(style, bar, drawn);
+
+  return new Promise((resolve) => {
+    let start = null;
+    const boxTo = (e) => {
+      const [x, y] = start;
+      return { x: Math.min(x, e.clientX), y: Math.min(y, e.clientY), w: Math.abs(e.clientX - x), h: Math.abs(e.clientY - y) };
+    };
+    function end() {
+      host.remove();
+      window.removeEventListener("keydown", key, true);
+      if (window.__gerdrPick === cancel) delete window.__gerdrPick;
+    }
+    function cancel() {
+      end();
+      resolve({ cancelled: true });
+    }
+    function key(e) {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      cancel();
+    }
+    // With the overlay gone, so the page shows as it is and is found under
+    // it; two frames on, so it is gone from the screen too.
+    function done(e) {
+      const moved = Math.hypot(e.clientX - start[0], e.clientY - start[1]) >= 4;
+      const box = boxTo(e);
+      end();
+      let rect, found;
+      if (moved) {
+        rect = area({ x: box.x, y: box.y, width: box.w, height: box.h });
+        found = inBox(box);
+      } else {
+        const el = document.elementsFromPoint(e.clientX, e.clientY).find((el) => el !== host && shown(el));
+        found = el ? [el] : [];
+        rect = el ? area(el.getBoundingClientRect()) : { x: Math.round(e.clientX), y: Math.round(e.clientY), w: 0, h: 0 };
+      }
+      const size = (el) => {
+        const r = el.getBoundingClientRect();
+        return r.width * r.height;
+      };
+      const elements = found.sort((a, b) => size(b) - size(a)).slice(0, MOST).map(describe);
+      const view = window.innerWidth;
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve({ url: location.href, rect, elements, view })));
+    }
+    // The page gets none of the pointer: no clicks, no hover, no scrolling.
+    for (const type of ["mousedown", "mousemove", "mouseup", "click", "dblclick", "contextmenu", "wheel", "touchstart", "touchmove"]) {
+      host.addEventListener(type, (e) => (e.preventDefault(), e.stopPropagation()), { passive: false });
+    }
+    host.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      if (e.button !== 0) return;
+      start = [e.clientX, e.clientY];
+      host.setPointerCapture(e.pointerId);
+    });
+    host.addEventListener("pointermove", (e) => {
+      e.stopPropagation();
+      if (!start) return;
+      const b = boxTo(e);
+      Object.assign(drawn.style, { display: "block", left: `${b.x}px`, top: `${b.y}px`, width: `${b.w}px`, height: `${b.h}px` });
+    });
+    host.addEventListener("pointerup", (e) => {
+      e.stopPropagation();
+      if (start) done(e);
+    });
+    window.addEventListener("keydown", key, true);
+    window.__gerdrPick = cancel;
+    document.documentElement.append(host);
+  });
+}
+
+// The selection asked of each tab, by tab id, until answered: `{ pane }`.
+// Each is answered once, as selected or unselected.
+const selecting = new Map();
+
+const why = (err) => String((err && err.message) || err);
+
+// End the selection asked of `tab` with `unselected` for `reason`, if one is
+// asked; whether one was.
+function unselect(tab, reason) {
+  const asked = selecting.get(tab);
+  if (!asked) return false;
+  selecting.delete(tab);
+  send({ type: "unselected", pane: asked.pane, reason });
+  return true;
+}
+
+// Take the page's selection away, if it is still there.
+function unpick(tab) {
+  const func = () => window.__gerdrPick?.();
+  return chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func }).catch(() => {});
+}
+
+// What the tab shows of `rect` (CSS px of a viewport `view` wide), with a
+// margin round it and the area outlined: a PNG data URL.
+async function crop(tab, rect, view) {
+  const MARGIN = 16;
+  const { windowId } = await chrome.tabs.get(tab);
+  const shot = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+  const image = await createImageBitmap(await (await fetch(shot)).blob());
+  // The shot's pixels per CSS pixel: the page's device pixel ratio, as the
+  // browser took it.
+  const scale = view > 0 ? image.width / view : 1;
+  const left = Math.max(0, Math.floor((rect.x - MARGIN) * scale));
+  const top = Math.max(0, Math.floor((rect.y - MARGIN) * scale));
+  const right = Math.min(image.width, Math.ceil((rect.x + rect.w + MARGIN) * scale));
+  const bottom = Math.min(image.height, Math.ceil((rect.y + rect.h + MARGIN) * scale));
+  if (right <= left || bottom <= top) throw new Error("the area is outside the page's view");
+  const canvas = new OffscreenCanvas(right - left, bottom - top);
+  const draw = canvas.getContext("2d");
+  draw.drawImage(image, left, top, right - left, bottom - top, 0, 0, right - left, bottom - top);
+  // Just outside the area, so none of it is hidden.
+  const line = 2 * scale;
+  draw.strokeStyle = "#ff3b30";
+  draw.lineWidth = line;
+  draw.strokeRect(rect.x * scale - left - line / 2, rect.y * scale - top - line / 2, rect.w * scale + line, rect.h * scale + line);
+  const bytes = new Uint8Array(await (await canvas.convertToBlob({ type: "image/png" })).arrayBuffer());
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return `data:image/png;base64,${btoa(binary)}`;
+}
+
+// Let the user select an area of `tab`'s page for `pane` (see `pick`), and
+// tell gerdr what was selected, with a shot of it. One asked already is
+// cancelled: the new pick takes its overlay away.
+async function select(tab, pane) {
+  unselect(tab, "cancelled");
+  const asked = { pane };
+  selecting.set(tab, asked);
+  // Answered already otherwise: cancelled, or the page went elsewhere.
+  const current = () => selecting.get(tab) === asked;
+  let picked;
+  try {
+    const [frame] = await chrome.scripting.executeScript({ target: { tabId: tab }, world: "MAIN", func: pick });
+    picked = frame?.result;
+  } catch (err) {
+    if (current()) unselect(tab, `error: ${why(err)}`);
+    return;
+  }
+  if (!current()) return;
+  if (!picked) return void unselect(tab, "error: no answer from the page");
+  if (picked.cancelled) return void unselect(tab, "cancelled");
+  selecting.delete(tab);
+  const { url, rect, elements, view } = picked;
+  const message = { type: "selected", pane, url, rect, elements };
+  try {
+    message.data = await crop(tab, rect, view);
+  } catch (err) {
+    message.error = why(err);
+  }
+  send(message);
+}
+
 async function command(message) {
   await loaded;
   // A tab is known by its boot page's code until gerdr tells it the
@@ -682,6 +964,14 @@ async function command(message) {
         }
         break;
       }
+      // An area of the pane's page, for a manual test's comment: answered
+      // once the user selected it, or gave up.
+      case "select":
+        await select(tab, message.pane);
+        break;
+      case "unselect":
+        if (unselect(tab, "cancelled")) await unpick(tab);
+        break;
       case "newthread":
         threads[tab] = { origin: message.origin, dirs: message.dirs, prompt: message.prompt, model: message.model, at: Date.now() };
         await save();
@@ -728,6 +1018,9 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (id, change, tab) => {
+  // A page that went elsewhere while selecting (in a single-page app, on
+  // its own) has no area to give.
+  if (change.url && unselect(id, "navigated")) unpick(id);
   await loaded;
   await boot(tab);
   if (change.status === "complete") await retry(tab);
@@ -742,6 +1035,7 @@ chrome.tabs.onUpdated.addListener(async (id, change, tab) => {
 });
 
 chrome.tabs.onRemoved.addListener(async (id) => {
+  unselect(id, "navigated");
   await loaded;
   const pane = panes[id];
   delete scopes[id];
