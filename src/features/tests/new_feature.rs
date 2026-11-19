@@ -1878,3 +1878,91 @@ fn the_tab_shows_repositories_the_rail_and_the_right_hints() {
         Some("Couldn't read the code: git exited with 128")
     );
 }
+
+#[test]
+fn a_failed_prepare_step_offers_an_agent_and_its_log() {
+    use feature::sandbox_run::{FailedStep, SandboxRun};
+    let mut f = feature("g", vec![repo("api", true)], Stage::ManualTest as usize);
+    let why = "`migrate` exited with 1: CommandError: two leaves (see /d/prepare.log)";
+    f.sandbox = Some(SandboxRun {
+        finished: Some(1),
+        failed: Some(why.into()),
+        failed_step: Some(Box::new(FailedStep {
+            shown: "migrate".into(),
+            line: "sh -c migrate".into(),
+            dir: "/w/g/api".into(),
+            excerpt: vec![
+                "CommandError: two leaves".into(),
+                "To fix them run x".into(),
+            ],
+            log: "/d/prepare.log".into(),
+        })),
+        ..SandboxRun::default()
+    });
+    let ctx = RowCtx {
+        criteria: 3,
+        manual: crate::feature::manual::Counts {
+            untested: 3,
+            ..Default::default()
+        },
+        ..RowCtx::default()
+    };
+    let offered = |f: &Feature| -> Vec<(String, PanelOutcome)> {
+        (page_actions(f, Stage::ManualTest, ctx).into_iter())
+            .map(|(b, o)| (b.label, o))
+            .collect()
+    };
+    let has = |f: &Feature, o: PanelOutcome| offered(f).iter().any(|(_, x)| *x == o);
+    assert!(has(&f, PanelOutcome::FixSandbox), "{:?}", offered(&f));
+    assert!(has(&f, PanelOutcome::SandboxLog));
+    assert!(has(&f, PanelOutcome::StartSandbox));
+    // Started again as it is, it fails again: the agent comes first.
+    assert_eq!(
+        page_enter(&f, Stage::ManualTest, ctx),
+        Some(PanelOutcome::FixSandbox)
+    );
+    let mut panel = FeaturePanel::default();
+    let hints = hints_at(&panel, &f, Stage::ManualTest, ctx);
+    assert_eq!(
+        hints_of(&hints, "Alt+Shift+T"),
+        ["fix with agent"],
+        "{hints:?}"
+    );
+    assert_eq!(hints_of(&hints, "Ctrl+Shift+I"), ["show log"], "{hints:?}");
+    for (chord, want) in [
+        ("Alt+Shift+T", PanelOutcome::FixSandbox),
+        ("Ctrl+Shift+I", PanelOutcome::SandboxLog),
+    ] {
+        let (mods, sym) = crate::keys::hint_key(chord).unwrap();
+        let pressed = panel.key(&mods, sym, &f, &[], ctx, &[], &[], &[]);
+        assert_eq!(pressed, Some(want), "{chord}");
+    }
+    // The card says why, then what it printed but that line.
+    let state = PanelState {
+        ctx,
+        ..PanelState::default()
+    };
+    let texts: Vec<String> = (sandbox_sections(&f, &state).into_iter())
+        .flat_map(|s| match s {
+            PageSection::Lines { lines, .. } => lines,
+            _ => Vec::new(),
+        })
+        .map(|l| l.text)
+        .collect();
+    assert_eq!(
+        texts,
+        [format!("failed: {why}"), "To fix them run x".to_owned()]
+    );
+    // On another machine its log is there: only the agent.
+    f.sandbox.as_mut().unwrap().machine = Some("w1".into());
+    assert!(has(&f, PanelOutcome::FixSandbox));
+    assert!(!has(&f, PanelOutcome::SandboxLog));
+    // Failed before its steps: no agent, Start first again.
+    let mut early = f.clone();
+    early.sandbox.as_mut().unwrap().failed_step = None;
+    assert!(!has(&early, PanelOutcome::FixSandbox));
+    assert_eq!(
+        page_enter(&early, Stage::ManualTest, ctx),
+        Some(PanelOutcome::StartSandbox)
+    );
+}

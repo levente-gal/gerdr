@@ -84,6 +84,9 @@ pub struct SandboxRun {
     /// Why it didn't start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failed: Option<String>,
+    /// The Prepare step it didn't start for, when that was why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_step: Option<Box<FailedStep>>,
     /// Its compose projects.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stacks: Vec<StackRun>,
@@ -139,6 +142,29 @@ pub struct SandboxRun {
     /// mean nothing here, so nothing is looked up or signalled by them.
     #[serde(skip)]
     pub elsewhere: Option<Elsewhere>,
+}
+
+/// A Prepare step that failed, and what it said: what an agent is told to
+/// fix it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedStep {
+    /// The command as the project wrote it.
+    pub shown: String,
+    /// The shell line that ran it.
+    pub line: String,
+    pub dir: PathBuf,
+    /// The lines of its output that say why (see `failure_excerpt`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excerpt: Vec<String>,
+    /// Its whole output, after the earlier runs': on the machine the sandbox
+    /// runs on.
+    pub log: PathBuf,
+}
+
+/// A Prepare step's failure: why, in a line, and the lines that say so.
+struct StepFailed {
+    why: String,
+    excerpt: Vec<String>,
 }
 
 /// How a sandbox on another machine stands, as last asked there.
@@ -1184,7 +1210,14 @@ fn start_into(
             i + 1,
             job.prepare.len()
         ));
-        run_inside(&holder, job, step).map_err(|why| {
+        run_inside(&holder, job, step).map_err(|StepFailed { why, excerpt }| {
+            run.failed_step = Some(Box::new(FailedStep {
+                shown: step.shown.clone(),
+                line: step.line.clone(),
+                dir: step.dir.clone(),
+                excerpt,
+                log: prepare_log(job.dir),
+            }));
             // The likely reason it failed, which its own error can't tell.
             if run.out_of_reach.is_empty() {
                 why
@@ -2000,11 +2033,27 @@ fn wait_loopback(host: &Host, holder: &Proc) {
     tracing::warn!("the sandbox's loopback address didn't show up");
 }
 
+/// The part of Prepare log `text` from the last run of shell line `line`, its
+/// `== line` header first: all of it when that isn't there.
+pub fn last_step_output<'a>(text: &'a str, line: &str) -> &'a str {
+    let head = format!("== {line}\n");
+    text.rfind(&head).map_or(text, |at| &text[at..])
+}
+
+/// Where the output of the Prepare steps of the sandbox in `dir` goes.
+pub fn prepare_log(dir: &Path) -> PathBuf {
+    dir.join("prepare.log")
+}
+
 /// Run shell `line` inside the sandbox, in `dir`, its output logged.
-fn run_inside(holder: &Proc, job: &Job, step: &PrepareStep) -> Result<(), String> {
+fn run_inside(holder: &Proc, job: &Job, step: &PrepareStep) -> Result<(), StepFailed> {
     let PrepareStep { dir, line, shown } = step;
     use std::io::Write;
-    let log = job.dir.join("prepare.log");
+    let log = prepare_log(job.dir);
+    let failed = |why: String| StepFailed {
+        why,
+        excerpt: Vec::new(),
+    };
     if let Host::There(reach) = job.host {
         return run_inside_there(reach, holder, job, step, &log);
     }
@@ -2012,12 +2061,12 @@ fn run_inside(holder: &Proc, job: &Job, step: &PrepareStep) -> Result<(), String
         .create(true)
         .append(true)
         .open(&log)
-        .map_err(|e| format!("couldn't write {}: {e}", log.display()))?;
+        .map_err(|e| failed(format!("couldn't write {}: {e}", log.display())))?;
     // A log line lost doesn't stop the sandbox.
     let _ = writeln!(file, "== {line}");
     // Where this run's output starts: the log keeps the earlier runs'.
     let from = file.metadata().map_or(0, |m| m.len() as usize);
-    let out = file.try_clone().map_err(|e| e.to_string())?;
+    let out = file.try_clone().map_err(|e| failed(e.to_string()))?;
     let command = format!("exec {}", inside_line(holder, job, line));
     let exit: Exit = setup::shell_until(
         &command,
@@ -2033,13 +2082,14 @@ fn run_inside(holder: &Proc, job: &Job, step: &PrepareStep) -> Result<(), String
     } else {
         // Unreadable, the log it points at says as much as this would.
         let said = fs::read(&log).unwrap_or_default();
-        let error = last_error(said.get(from..).unwrap_or_default())
-            .map_or_else(String::new, |error| format!(": {error}"));
-        Err(format!(
+        let excerpt = failure_excerpt(said.get(from..).unwrap_or_default());
+        let error = headline(&excerpt).map_or_else(String::new, |error| format!(": {error}"));
+        let why = format!(
             "`{shown}` {}{error} (see {})",
             exit.describe(),
             log.display()
-        ))
+        );
+        Err(StepFailed { why, excerpt })
     }
 }
 
@@ -2065,7 +2115,7 @@ fn run_inside_there(
     job: &Job,
     step: &PrepareStep,
     log: &Path,
-) -> Result<(), String> {
+) -> Result<(), StepFailed> {
     let PrepareStep { dir, line, shown } = step;
     let quoted = shell_quote(&log.to_string_lossy());
     // Where this run's output starts: the log keeps the earlier runs'.
@@ -2079,23 +2129,31 @@ fn run_inside_there(
     ran.map_err(|why| {
         // Unreadable, the log it points at says as much as this would.
         let said = job.host.read(log).unwrap_or_default();
-        let error = last_error(said.as_bytes().get(from..).unwrap_or_default())
-            .unwrap_or(why);
-        format!("`{shown}` failed: {error} (see {} there)", log.display())
+        let excerpt = failure_excerpt(said.as_bytes().get(from..).unwrap_or_default());
+        let error = headline(&excerpt).unwrap_or(why);
+        let why = format!("`{shown}` failed: {error} (see {} there)", log.display());
+        StepFailed { why, excerpt }
     })
 }
 
-/// The line of output `raw` that best says why a command failed: the last one
-/// not indented. What's indented continues it: a traceback's error comes last
-/// but for its hints.
-fn last_error(raw: &[u8]) -> Option<String> {
-    let lines = super::verify::clean_lines(raw, false);
-    let said: Vec<&String> = lines.iter().filter(|l| !l.trim().is_empty()).collect();
-    let line = said
-        .iter()
-        .rev()
+/// The lines of output `raw` that say why a command failed: from the first
+/// that says so outright, past a traceback's frames, as a failed check's (see
+/// `verify::failure_lines`); else its last lines. A hint follows its error,
+/// so the last line is often the hint.
+fn failure_excerpt(raw: &[u8]) -> Vec<String> {
+    let found = super::verify::failure_lines(&String::from_utf8_lossy(raw));
+    if !found.is_empty() {
+        return found;
+    }
+    super::verify::last_lines(&super::verify::clean_lines(raw, false).join("\n"))
+}
+
+/// The line of `excerpt` that says why, cut short: its first not indented.
+/// What's indented continues it, or is a traceback's frame.
+fn headline(excerpt: &[String]) -> Option<String> {
+    let line = (excerpt.iter())
         .find(|line| !line.starts_with(char::is_whitespace))
-        .or(said.last())?
+        .or(excerpt.first())?
         .trim();
     Some(match line.char_indices().nth(ERROR_CHARS) {
         Some((end, _)) => format!("{}\u{2026}", &line[..end]),
@@ -2704,26 +2762,70 @@ WEBHOOK_URL=https://x
 
     #[test]
     fn a_traceback_tells_its_error_not_its_hint() {
-        let log = b"Traceback (most recent call last):\n  File \"x.py\", line 1\n\
+        let log = b"Traceback (most recent call last):\n  File \"x.py\", line 1\n    connect()\n\
 django.db.utils.OperationalError: connection refused\n\
 \tIs the server running?\n\n";
+        let excerpt = failure_excerpt(log);
+        assert_eq!(excerpt[0], "  File \"x.py\", line 1");
         assert_eq!(
-            last_error(log).as_deref(),
+            headline(&excerpt).as_deref(),
             Some("django.db.utils.OperationalError: connection refused")
         );
     }
 
     #[test]
-    fn an_error_is_cut_and_nothing_said_is_none() {
-        assert_eq!(last_error(b"\n  \n"), None);
+    fn a_django_command_error_goes_before_its_hint() {
+        let log = b"Operations to perform:\n\
+CommandError: Conflicting migrations detected; multiple leaf nodes in the migration graph: (0278_a, 0280_b in api).\n\
+To fix them run 'python manage.py makemigrations --merge'\n";
+        let excerpt = failure_excerpt(log);
+        assert_eq!(excerpt.len(), 2);
+        assert!(excerpt[1].starts_with("To fix them"));
         assert_eq!(
-            last_error(b"  only indented\n").as_deref(),
+            headline(&excerpt).as_deref(),
+            Some(
+                "CommandError: Conflicting migrations detected; multiple leaf nodes in the migration graph: (0278_a, 0280_b in api)."
+            )
+        );
+    }
+
+    #[test]
+    fn an_error_is_cut_and_nothing_said_is_none() {
+        assert_eq!(headline(&failure_excerpt(b"\n  \n")), None);
+        let quiet = failure_excerpt(b"one\ntwo\n  only indented\n");
+        assert_eq!(quiet, ["one", "two", "  only indented"]);
+        assert_eq!(headline(&quiet).as_deref(), Some("one"));
+        assert_eq!(
+            headline(&failure_excerpt(b"  only indented\n")).as_deref(),
             Some("only indented")
         );
         let long = "\u{e9}".repeat(ERROR_CHARS + 1);
-        let cut = last_error(long.as_bytes()).unwrap();
+        let cut = headline(&failure_excerpt(long.as_bytes())).unwrap();
         assert_eq!(cut.chars().count(), ERROR_CHARS + 1);
         assert!(cut.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn a_steps_log_shows_from_its_last_run() {
+        let log = "== a\nold\n== b\nother\n== a\nnew\n";
+        assert_eq!(last_step_output(log, "a"), "== a\nnew\n");
+        assert_eq!(last_step_output(log, "c"), log);
+    }
+
+    #[test]
+    fn a_record_without_a_failed_step_still_reads() {
+        let old: SandboxRun = serde_json::from_str(r#"{"started": 1, "failed": "x"}"#).unwrap();
+        assert_eq!(old.failed_step, None);
+        let mut run = old.clone();
+        run.failed_step = Some(Box::new(FailedStep {
+            shown: "migrate".into(),
+            line: "sh -c migrate".into(),
+            dir: "/r".into(),
+            excerpt: vec!["CommandError: x".into()],
+            log: "/d/prepare.log".into(),
+        }));
+        let text = serde_json::to_string(&run).unwrap();
+        assert_eq!(serde_json::from_str::<SandboxRun>(&text).unwrap(), run);
     }
 
     #[test]

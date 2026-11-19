@@ -357,6 +357,38 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// Show what the failed Prepare step of feature `slug`'s sandbox printed
+    /// in its last run, in the viewer: only to read and copy from, as it
+    /// ended.
+    pub fn open_sandbox_log(&mut self, project: &str, slug: &str) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let title = feature.title.clone();
+        let Some(step) =
+            (feature.sandbox.as_ref()).and_then(|run| run.failed_step.as_deref().cloned())
+        else {
+            return self.show_warning("The sandbox has no failed step to show".into());
+        };
+        let text = match std::fs::read(&step.log) {
+            Ok(raw) => String::from_utf8_lossy(&raw).into_owned(),
+            Err(err) => {
+                tracing::warn!("reading {}: {err}", step.log.display());
+                return self.show_error(format!("Couldn't read the sandbox's log: {err}"));
+            }
+        };
+        let text = crate::feature::sandbox_run::last_step_output(&text, &step.line);
+        self.close_for_scrollback();
+        let what = format!("Sandbox: {}", step.shown);
+        self.overlays.scrollback = Some(Scrollback::of(Source::File { what }, title, text, 0));
+        if let Some((_, fit)) = self.scrollback_place()
+            && let Some(viewer) = self.overlays.scrollback.as_mut()
+        {
+            viewer.fit(fit);
+        }
+        self.refresh_pointer_focus();
+    }
+
     pub fn open_setup_log(&mut self, project: &str, slug: &str) {
         let Some(title) = self.feature(project, slug).map(|f| f.title.clone()) else {
             return;

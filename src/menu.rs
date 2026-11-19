@@ -322,6 +322,8 @@ pub enum MenuAction {
     OpenLog,
     /// Show the setup log of feature `.1` of project `.0`.
     SetupLog(String, String),
+    /// Show what the failed Prepare step of feature `.1`'s sandbox printed.
+    SandboxLog(String, String),
     /// Show tab `t` of workspace `w`.
     SwitchTab(usize, usize),
     /// Go back (`true`) or forward to tab `id`, as the back or forward
@@ -657,6 +659,7 @@ impl Gerdr {
             MenuAction::OpenSettings => self.open_settings(crate::launch::Place::Tab),
             MenuAction::OpenLog => self.open_log(crate::launch::Place::Tab),
             MenuAction::SetupLog(project, slug) => self.open_setup_log(&project, &slug),
+            MenuAction::SandboxLog(project, slug) => self.open_sandbox_log(&project, &slug),
             MenuAction::FoldAll(folded) => self.fold_all(folded),
             MenuAction::SwitchTab(w, t) => {
                 self.switch_workspace(w);

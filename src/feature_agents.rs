@@ -1488,6 +1488,18 @@ impl crate::features::Features {
     }
 }
 
+/// What an own agent is started for, past knowing the feature.
+pub(crate) struct OwnTask {
+    /// Its built-in prompt (`prompts::builtin`), in place of `agent`.
+    pub template: &'static str,
+    /// The values that prompt takes past a stage agent's.
+    pub vars: Vars,
+    /// What the feature's log calls it.
+    pub called: &'static str,
+    /// The pick it comes from, in the words of the page.
+    pub picked: &'static str,
+}
+
 impl Gerdr {
     /// Note in feature `slug`'s history, once, that run `n` of `stage`'s agent
     /// left its tab: where AI work's stats end the run, not when the next
@@ -1633,6 +1645,7 @@ impl Gerdr {
         project: &str,
         slug: &str,
         command: &str,
+        task: Option<OwnTask>,
     ) -> bool {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return false;
@@ -1654,8 +1667,16 @@ impl Gerdr {
             Flavor::of(command),
             Flavor::Claude | Flavor::Codex | Flavor::Cursor
         );
+        if !told && let Some(task) = &task {
+            self.show_warning(format!(
+                "{agent} can't be told what to do: pick Claude Code, Codex or Cursor as the {}",
+                task.picked
+            ));
+            return true;
+        }
+        let called = task.as_ref().map_or("Own agent", |t| t.called);
         let line = match told {
-            true => match self.own_agent_prompt(&feature, project, slug, n) {
+            true => match self.own_agent_prompt(&feature, project, slug, n, task) {
                 Ok(start) => with_prompt(&line, &start),
                 Err(why) => {
                     tracing::warn!("{why}");
@@ -1683,27 +1704,30 @@ impl Gerdr {
             pane: Some(pane),
             started: now,
         });
-        f.log(now, format!("Own agent started: {agent} (agent {n})"));
+        f.log(now, format!("{called} started: {agent} (agent {n})"));
         self.save_feature(project, slug);
         true
     }
 
-    /// The line that tells own agent `n` of `feature` what the feature is:
-    /// its prompt written to the feature's data folder, as stage agents'
-    /// are.
+    /// The line that tells own agent `n` of `feature` what the feature is,
+    /// and `task` if it has one: its prompt written to the feature's data
+    /// folder, as stage agents' are.
     fn own_agent_prompt(
         &self,
         feature: &Feature,
         project: &str,
         slug: &str,
         n: u32,
+        task: Option<OwnTask>,
     ) -> Result<String, String> {
         let data = store::dir(None, project, slug);
         let stage = feature.current().unwrap_or(Stage::Ship);
         let names = self.projects.names(feature);
         let mut values = vars(feature, &names, &data, stage);
         values.insert("stage".into(), stage.label().to_owned());
-        let text = prompts::render_builtin("agent", &values)
+        let template = task.as_ref().map_or("agent", |t| t.template);
+        values.extend(task.into_iter().flat_map(|t| t.vars));
+        let text = prompts::render_builtin(template, &values)
             .map_err(|err| format!("Couldn't write the agent's prompt: {err}"))?;
         let prompt = write_prompt(&data, &format!("agent-{n}.md"), &text)?;
         self.start_line(feature, project, slug, stage, &prompt)
@@ -1876,14 +1900,27 @@ impl Gerdr {
     /// the one picked on Ship (else the one fixes go to), its name and
     /// command with its model; why none can, if so.
     pub(crate) fn summary_agent(&self, feature: &Feature) -> Result<(String, String), String> {
+        self.picked_cli(feature, Stage::Ship)
+    }
+
+    /// The CLI agent picked on `stage` of `feature` (Build's: the one fixes go
+    /// to), its name and command with its model; why none can, if so.
+    pub(crate) fn picked_cli(
+        &self,
+        feature: &Feature,
+        stage: Stage,
+    ) -> Result<(String, String), String> {
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
-        match stage_pick(feature, Stage::Ship, workflow, &self.launcher.cli_agents) {
+        match stage_pick(feature, stage, workflow, &self.launcher.cli_agents) {
             Pick::Agent(agent, base) if Flavor::of(&base) != Flavor::T3 => {
-                let model = picked_model(feature, Stage::Ship, &agent);
+                let model = picked_model(feature, stage, &agent);
                 let base = with_model(&base, model.as_deref());
                 Ok((agent, base))
             }
-            Pick::Agent(..) => Err("T3 Code can't write it: pick a CLI agent on Ship".into()),
+            Pick::Agent(..) => Err(match stage {
+                Stage::Ship => "T3 Code can't write it: pick a CLI agent on Ship".into(),
+                _ => "T3 Code can't do it: pick a CLI agent as the fix agent".into(),
+            }),
             Pick::NoCli => Err("No coding agent CLI is installed".into()),
             Pick::Refused(why) => Err(why),
         }

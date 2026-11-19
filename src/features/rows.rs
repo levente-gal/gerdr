@@ -1730,6 +1730,8 @@ pub(super) fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::ResetSandbox => "reset data\u{2026}",
         PanelOutcome::StopSandbox => "stop sandbox\u{2026}",
         PanelOutcome::RemoveSandbox => "remove sandbox\u{2026}",
+        PanelOutcome::FixSandbox => "fix with agent",
+        PanelOutcome::SandboxLog => "show log",
         PanelOutcome::Findings => "review in diff",
         PanelOutcome::SendFixes | PanelOutcome::PlanFixes => "plan fixes",
         PanelOutcome::MakeFindingFixes => "make fixes",

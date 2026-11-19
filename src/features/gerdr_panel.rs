@@ -444,6 +444,8 @@ impl Gerdr {
             PanelOutcome::ResetSandbox => self.ask_reset_sandbox(&project, &slug),
             PanelOutcome::StopSandbox => self.ask_stop_sandbox(&project, &slug),
             PanelOutcome::RemoveSandbox => self.ask_remove_sandbox(&project, &slug),
+            PanelOutcome::FixSandbox => self.fix_sandbox(&project, &slug),
+            PanelOutcome::SandboxLog => self.open_sandbox_log(&project, &slug),
             PanelOutcome::StartAgent(stage, fresh) => {
                 self.start_stage_agent(&project, &slug, stage, fresh)
             }

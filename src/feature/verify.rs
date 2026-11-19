@@ -1154,7 +1154,7 @@ const WEAK: [&str; 3] = ["failed", "failure", "fail"];
 /// says so outright, else the first that says it failed, and what follows it,
 /// `PREVIEW_LINES` in all. Nothing when no line does: its last lines then say
 /// the most. A test run's last lines are its summary, not what broke.
-fn failure_lines(raw: &str) -> Vec<String> {
+pub(super) fn failure_lines(raw: &str) -> Vec<String> {
     let lines: Vec<String> = clean_lines(raw.as_bytes(), false)
         .into_iter()
         .filter(|line| !line.trim().is_empty())

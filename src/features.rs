@@ -1268,6 +1268,10 @@ pub enum PanelOutcome {
     StopSandbox,
     /// Remove the stopped sandbox with its data, asking.
     RemoveSandbox,
+    /// Have an agent of its own fix what failed the sandbox's Prepare step.
+    FixSandbox,
+    /// Show what the sandbox's failed Prepare step printed.
+    SandboxLog,
     /// Show the terminal of this one of Verify's checks.
     ShowCheck(usize),
     /// Skip this check the feature borrows, or stop skipping it.
@@ -1543,6 +1547,7 @@ impl PanelOutcome {
                 | Self::ShowResearch(_)
                 | Self::OpenResearch(_)
                 | Self::SetupLog
+                | Self::SandboxLog
                 | Self::Findings
                 | Self::ShowFinding(_)
                 | Self::ShowDiffNote(_)

@@ -334,9 +334,13 @@ fn manual_order(
     }
     let primary = out.iter().any(|(b, _)| b.style == ButtonStyle::Primary);
     if !primary && ctx.manual.untested > 0 {
-        let start = (out.iter_mut()).find(|(_, o)| *o == PanelOutcome::StartSandbox);
-        if let Some((button, _)) = start {
-            button.style = ButtonStyle::Primary;
+        // Started again as it is, it fails again.
+        let start = (out.iter().position(|(_, o)| *o == PanelOutcome::FixSandbox)).or_else(|| {
+            out.iter()
+                .position(|(_, o)| *o == PanelOutcome::StartSandbox)
+        });
+        if let Some(at) = start {
+            out[at].0.style = ButtonStyle::Primary;
         }
     }
 }
@@ -427,6 +431,20 @@ fn sandbox_actions(
             ),
         ]);
     } else {
+        // What failed it may be the code's: an agent can look.
+        if sandbox_step_failed(feature) {
+            out.push((
+                button("Fix with agent", ButtonStyle::Plain),
+                PanelOutcome::FixSandbox,
+            ));
+            // Its log is on the machine it ran on.
+            if !sandbox_elsewhere(feature) {
+                out.push((
+                    button("Show log", ButtonStyle::Quiet),
+                    PanelOutcome::SandboxLog,
+                ));
+            }
+        }
         out.push((
             button("Start sandbox\u{2026}", ButtonStyle::Plain),
             PanelOutcome::StartSandbox,
@@ -868,6 +886,14 @@ pub(super) fn sandbox_pages(feature: &Feature) -> &[feature::sandbox_pages::Page
 /// Whether `feature`'s sandbox runs.
 pub(super) fn sandbox_alive(feature: &Feature) -> bool {
     feature.sandbox.as_ref().is_some_and(|run| run.alive())
+}
+
+/// Whether `feature`'s sandbox didn't start for a Prepare step, which an agent
+/// can be sent to fix: not on someone else's pull request, which only gets a
+/// review.
+pub(super) fn sandbox_step_failed(feature: &Feature) -> bool {
+    !feature.posts_review()
+        && (feature.sandbox.as_ref()).is_some_and(|run| run.failed_step.is_some())
 }
 
 /// Whether `stage`'s page of `feature` offers to set its worktrees up, and

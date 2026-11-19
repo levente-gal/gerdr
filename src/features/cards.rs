@@ -658,10 +658,15 @@ pub(super) fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<Pag
         return vec![lines("Sandbox", vec![line(text, CheckTone::Note)])];
     };
     if let Some(why) = &run.failed {
-        return vec![lines(
-            "Sandbox",
-            vec![line(format!("failed: {why}"), CheckTone::Failed)],
-        )];
+        let mut said = vec![line(format!("failed: {why}"), CheckTone::Failed)];
+        // What it printed around why, but the line `why` has already.
+        let excerpt = (run.failed_step.iter()).flat_map(|step| &step.excerpt);
+        said.extend(
+            excerpt
+                .filter(|text| !why.contains(text.trim()))
+                .map(|text| line(text.clone(), CheckTone::Note)),
+        );
+        return vec![lines("Sandbox", said)];
     }
     let ports_text = |ports: &[u16]| -> String {
         let ports: Vec<String> = ports.iter().map(u16::to_string).collect();

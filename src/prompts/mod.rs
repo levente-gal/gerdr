@@ -32,6 +32,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "summary" => (include_str!("../../assets/prompts/summary.md"), 1),
         "conflicts" => (include_str!("../../assets/prompts/conflicts.md"), 1),
         "conflicts-plan" => (include_str!("../../assets/prompts/conflicts-plan.md"), 1),
+        "sandbox-fix" => (include_str!("../../assets/prompts/sandbox-fix.md"), 1),
         _ => return None,
     })
 }
@@ -128,6 +129,11 @@ mod tests {
                 "summary.diffs",
                 "- /w/bulk-edit/api: `git diff main...HEAD`",
             ),
+            ("sandbox.step", "python manage.py migrate"),
+            ("sandbox.dir", "/w/bulk-edit/api"),
+            ("sandbox.line", "sh -c 'python manage.py migrate'"),
+            ("sandbox.excerpt", "CommandError: Conflicting migrations detected"),
+            ("sandbox.log", "/d/bulk-edit/sandbox/prepare.log"),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -157,6 +163,7 @@ mod tests {
             "summary",
             "conflicts",
             "conflicts-plan",
+            "sandbox-fix",
             "decisions",
             "research",
         ] {

@@ -394,7 +394,7 @@ impl Gerdr {
             Some((project, slug))
         });
         if let Some((project, slug)) = own
-            && self.start_own_agent(w, &project, &slug, command)
+            && self.start_own_agent(w, &project, &slug, command, None)
         {
             return;
         }

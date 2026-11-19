@@ -676,6 +676,7 @@ impl Gerdr {
         };
         let title = feature.title.clone();
         if let Some(why) = run.failed.clone() {
+            let (has_step, elsewhere) = (run.failed_step.is_some(), run.machine.is_some());
             // Off the thread: it waits for what ran inside to end.
             let pieces = run.clone();
             if let Ok(host) = host {
@@ -698,7 +699,12 @@ impl Gerdr {
             }
             let text = failed_text(&title, &why);
             crate::problems::report(PROBLEMS, text.clone());
-            return self.show_error(text);
+            // Its log is on the machine it ran on.
+            let log = (has_step && !elsewhere).then(|| {
+                let action = MenuAction::SandboxLog(project.to_owned(), slug.to_owned());
+                ("Show log".to_owned(), action)
+            });
+            return self.toast_with(text, crate::toast::Level::Error, log);
         }
         if !run.outward.is_empty() {
             self.show_warning(format!(
@@ -947,6 +953,57 @@ impl Gerdr {
     }
 
     /// The Remove button: its containers and data go.
+    /// Have an agent of feature `slug`'s own fix what failed its sandbox's
+    /// Prepare step: told the step and what it printed, in a tab of the
+    /// feature's workspace, its card on the page. It is the fix agent picked
+    /// on the page, apart from any fix round: Start sandbox is the user's to
+    /// press again.
+    pub(crate) fn fix_sandbox(&mut self, project: &str, slug: &str) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return;
+        };
+        if feature.posts_review() {
+            return self.show_warning(
+                "On someone else's pull request, nothing goes to an agent: fix it here first"
+                    .into(),
+            );
+        }
+        let Some(run) = feature.sandbox.as_ref() else {
+            return;
+        };
+        let Some(step) = run.failed_step.as_deref().cloned() else {
+            return self.show_warning(
+                "The sandbox failed before its Prepare steps: no agent can fix that".into(),
+            );
+        };
+        let (_, command) = match self.picked_cli(&feature, feature::Stage::Build) {
+            Ok(picked) => picked,
+            Err(why) => return self.show_warning(why),
+        };
+        let log = match run.machine.as_deref() {
+            Some(id) => format!("{} on {}", step.log.display(), self.machine_name(id)),
+            None => step.log.display().to_string(),
+        };
+        let vars = [
+            ("sandbox.step", step.shown),
+            ("sandbox.dir", step.dir.display().to_string()),
+            ("sandbox.line", step.line),
+            ("sandbox.excerpt", step.excerpt.join("\n")),
+            ("sandbox.log", log),
+        ];
+        let task = crate::feature_agents::OwnTask {
+            template: "sandbox-fix",
+            vars: vars.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
+            called: "Sandbox fix agent",
+            picked: "fix agent",
+        };
+        let Some((w, _)) = self.ensure_feature_workspace(project, slug) else {
+            return;
+        };
+        // Its tab opens in front, the feature's log saying so.
+        self.start_own_agent(w, project, slug, &command, Some(task));
+    }
+
     pub(crate) fn ask_remove_sandbox(&mut self, project: &str, slug: &str) {
         let Some(title) = self.feature(project, slug).map(|f| f.title.clone()) else {
             return;

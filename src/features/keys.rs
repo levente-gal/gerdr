@@ -1478,10 +1478,17 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                 ),
                 row!(
                     "Ctrl+Shift+I",
-                    "what the setup runs and printed: Build and Verify",
+                    "what the setup runs and printed: Build and Verify; on Manual test, what the sandbox's failed Prepare step printed",
                     |t| {
-                        offers_setup_log(t.feature, t.stage)
-                            .then_some(TabKey::Out(PanelOutcome::SetupLog))
+                        let f = t.feature;
+                        if offers_setup_log(f, t.stage) {
+                            return out(PanelOutcome::SetupLog);
+                        }
+                        (offers_sandbox(f, t.stage)
+                            && !t.ctx.sandbox_busy
+                            && sandbox_step_failed(f)
+                            && !sandbox_elsewhere(f))
+                        .then_some(TabKey::Out(PanelOutcome::SandboxLog))
                     }
                 ),
                 row!(
@@ -1508,6 +1515,18 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                             true => PanelOutcome::StopSandbox,
                             false => PanelOutcome::StartSandbox,
                         })
+                    }
+                ),
+                row!(
+                    "Alt+Shift+T",
+                    "Manual test: have an agent fix what failed the sandbox's Prepare step",
+                    |t| {
+                        let f = t.feature;
+                        (offers_sandbox(f, t.stage)
+                            && !t.ctx.sandbox_busy
+                            && !sandbox_alive(f)
+                            && sandbox_step_failed(f))
+                        .then_some(TabKey::Out(PanelOutcome::FixSandbox))
                     }
                 ),
                 row!("Ctrl+Shift+Y", "Manual test: open the sandbox's app", |t| {
@@ -2235,6 +2254,8 @@ fn page_hints(f: &Footer, choices: AgentChoices) -> Vec<(String, String)> {
                         false => h.extend(f.key("Ctrl+Shift+T", sandbox)),
                     }
                 } else {
+                    h.extend(f.said_key("Alt+Shift+T", |o| *o == O::FixSandbox));
+                    h.extend(f.said_key("Ctrl+Shift+I", |o| *o == O::SandboxLog));
                     h.extend(f.key("Ctrl+Shift+T", sandbox));
                     h.extend(f.says(
                         "Ctrl+Shift+X",
