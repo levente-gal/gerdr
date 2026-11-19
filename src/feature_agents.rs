@@ -2603,6 +2603,7 @@ impl Gerdr {
     /// done without a good file is nudged once. Called after each read of
     /// herdr's agents.
     pub fn stage_agents_tick(&mut self) {
+        self.select_tick();
         let Some(project) = self.project.clone() else {
             return;
         };

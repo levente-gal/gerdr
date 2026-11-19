@@ -1199,6 +1199,35 @@ impl Gerdr {
         (self.criteria_strip.select).take_if(|w| w.pane == pane);
     }
 
+    /// A selection waiting on a page stops once its feature left Manual test,
+    /// or is gone from here: the page drops its overlay, and its `cancelled`
+    /// finds nothing waiting (C6). Run with the stage agents' tick.
+    pub(crate) fn select_tick(&mut self) {
+        let Some(wait) = &self.criteria_strip.select else {
+            return;
+        };
+        let (project, slug) = &wait.feature;
+        let feature = self.feature(project, slug);
+        if feature.is_some_and(|f| marks_criteria(f, Stage::ManualTest)) {
+            return;
+        }
+        let title = feature.map(|f| f.title.clone());
+        let Some(wait) = self.criteria_strip.select.take() else {
+            return;
+        };
+        self.unselect_web_pane(wait.pane);
+        let (project, slug) = wait.feature;
+        tracing::info!(
+            "selecting on pane {} stopped: {project}/{slug} left Manual test",
+            wait.pane
+        );
+        if let Some(title) = title {
+            self.show_warning(format!(
+                "Selecting stopped: \u{201c}{title}\u{201d} isn't at Manual test now"
+            ));
+        }
+    }
+
     /// Keep `pick` on comment `id` of feature `slug`, just added: where on
     /// the page it is, and its PNG as the comment's screenshot. One that
     /// can't be written is said, the place kept still.
