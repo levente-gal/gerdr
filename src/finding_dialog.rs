@@ -600,6 +600,11 @@ impl Gerdr {
         let shot = (stage == Some(Stage::ManualTest) && self.strip_shows(project, slug))
             .then_some(self.criteria_strip.shot_too);
         if let Some(dialog) = self.features.finding_dialog.as_mut() {
+            // A selection is of Manual test's app: kept for it, it waits there
+            // while a comment at another stage is written (they share a key).
+            if stage != Some(Stage::ManualTest) {
+                dialog.pick = None;
+            }
             // A kept selection's PNG is its screenshot.
             dialog.shot = shot.filter(|_| dialog.pick.is_none());
         }
@@ -690,7 +695,10 @@ impl Gerdr {
         let (key, texts) = (dialog.draft_key(), dialog.texts());
         let mut pick = dialog.pick.take();
         self.refresh_pointer_focus();
-        self.features.pick_drafts.remove(&key);
+        // A kept one the dialog didn't show stays kept.
+        if pick.is_some() {
+            self.features.pick_drafts.remove(&key);
+        }
         if outcome == FindingDialogOutcome::Cancel {
             if texts == dialog.from && pick.is_none() {
                 self.features.finding_drafts.remove(&key);
