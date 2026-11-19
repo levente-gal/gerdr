@@ -32,8 +32,11 @@ use crate::{
 
 /// How long a command that talks to a remote may take before it is killed.
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
-/// How long a local one may take (a commit hook, a signing prompt).
-pub const LOCAL_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a local read may take.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a local write may take: its hooks run in it, and a repository's
+/// pre-commit hook (lint-staged, formatters) can take minutes.
+pub const LOCAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// How long to wait between looks at whether a command has finished, at most.
 const POLL: Duration = Duration::from_millis(20);
@@ -225,7 +228,7 @@ pub const STOPPED: &str = "stopped";
 #[cfg(test)]
 thread_local! {
     /// A shorter time limit for the commands this test thread runs, so a
-    /// test can see a kill without waiting a minute.
+    /// test can see a kill without waiting minutes.
     static TIMEOUT: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
 
@@ -236,7 +239,8 @@ fn limit(reach: Reach) -> Duration {
         return limit;
     }
     match reach {
-        Reach::Read | Reach::Local => LOCAL_TIMEOUT,
+        Reach::Read => READ_TIMEOUT,
+        Reach::Local => LOCAL_TIMEOUT,
         Reach::Network => NETWORK_TIMEOUT,
     }
 }
@@ -1112,6 +1116,11 @@ pub fn squash_commit(dir: &Path, branch: &str, msg: &str) -> OpResult {
     if let Err(mut failed) = went {
         if let Err(undo) = op.run(&["reset", "--merge"]) {
             tracing::warn!("undoing a squash in {}: {}", dir.display(), undo.why);
+            // Not left as it was: the squash stays staged, which blocks the next try.
+            failed.why = format!(
+                "{}, and undoing it failed ({}): the squash is still staged there",
+                failed.why, undo.why
+            );
         }
         failed.log.append(&mut op.log);
         return Err(failed);
@@ -2466,6 +2475,31 @@ mod tests {
         git(&fx.repo, &["add", "a"]);
         let failed = squash_commit(&fx.repo, "feat", "m").unwrap_err();
         assert_eq!(failed.why, "it has staged changes");
+    }
+
+    #[test]
+    fn a_squash_it_cant_undo_says_so() {
+        let fx = Fx::local();
+        git(&fx.repo, &["switch", "-q", "-c", "feat"]);
+        commit(&fx.repo, "b", "new");
+        git(&fx.repo, &["switch", "-q", "main"]);
+        // Killed while a git step of the hook's (lint-staged's) holds index.lock, which stays.
+        let hook = fx.script(
+            "hooks/pre-commit",
+            ": > \"$(git rev-parse --git-dir)/index.lock\"; sleep 30",
+        );
+        let hooks = hook.parent().unwrap().to_str().unwrap();
+        git(&fx.repo, &["config", "core.hooksPath", hooks]);
+        TIMEOUT.with(|t| t.set(Some(Duration::from_millis(300))));
+        let failed = squash_commit(&fx.repo, "feat", "m").unwrap_err();
+        TIMEOUT.with(|t| t.set(None));
+        assert_eq!(failed.failure, Failure::Timeout);
+        assert!(failed.why.starts_with("timed out"), "{}", failed.why);
+        assert!(
+            failed.why.ends_with("the squash is still staged there"),
+            "{}",
+            failed.why
+        );
     }
 
     #[test]
