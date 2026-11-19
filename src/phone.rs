@@ -14,6 +14,7 @@ use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
+    os::unix::net::UnixStream,
     path::Path,
     time::Duration,
 };
@@ -22,10 +23,14 @@ use resvg::{tiny_skia, usvg};
 use serde_json::{Value, json};
 
 use crate::{
-    feature::{Feature, Stage, Status, store},
+    feature::{
+        Feature, Stage, Status,
+        review_import::{Finding, FindingState},
+        store,
+    },
     feature_agents::{self, Gate},
     herdr::{self, AgentStatus, Herdr},
-    inbox_sources, md_preview,
+    inbox_sources, md_preview, phone_control,
     projects::{self, Project},
 };
 
@@ -39,6 +44,10 @@ const HEAD_LIMIT: u64 = 16 * 1024;
 const PANE_LINES: usize = 400;
 /// How many history events a feature's page gets, latest first.
 const HISTORY: usize = 300;
+/// The most a request's body may take.
+const BODY_LIMIT: u64 = 64 * 1024;
+/// How long gerdr is given to answer.
+const GERDR_TIME: Duration = Duration::from_secs(25);
 
 const INDEX: &str = include_str!("../assets/phone/index.html");
 const APP_JS: &str = include_str!("../assets/phone/app.js");
@@ -153,15 +162,20 @@ fn serve(stream: TcpStream, icons: &Icons) {
     if let Err(err) = stream.set_read_timeout(Some(Duration::from_secs(10))) {
         tracing::warn!("Couldn't set a timeout on a connection: {err}");
     }
-    let reply = match read_head(&stream) {
-        Some((method, target, host)) => {
-            if !host_ok(&host) {
-                tracing::warn!("Refused a request for host {host:?}");
+    let reply = match read_request(&stream) {
+        Some(request) => {
+            if !host_ok(&request.host) {
+                tracing::warn!("Refused a request for host {:?}", request.host);
                 Reply::error(421, "This host isn't served")
-            } else if method != "GET" {
-                Reply::error(405, "Only GET")
+            } else if request.method == "GET" {
+                answer(&request.target, icons)
+            } else if request.method == "POST" && request.from_page {
+                act(&request.target, &request.body)
+            } else if request.method == "POST" {
+                // A form of another site can't set the header: only our page does.
+                Reply::error(403, "Not from the phone view")
             } else {
-                answer(&target, icons)
+                Reply::error(405, "Only GET and POST")
             }
         }
         None => Reply::error(400, "Bad request"),
@@ -169,6 +183,7 @@ fn serve(stream: TcpStream, icons: &Icons) {
     let reason = match reply.status {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         421 => "Misdirected Request",
@@ -194,15 +209,29 @@ fn serve(stream: TcpStream, icons: &Icons) {
     }
 }
 
-/// A request's method, target and `Host`, from its head.
-fn read_head(stream: impl Read) -> Option<(String, String, String)> {
-    let mut reader = BufReader::new(stream.take(HEAD_LIMIT));
+/// A request, as far as the phone view reads it.
+#[derive(Debug, Default, PartialEq)]
+struct Request {
+    method: String,
+    target: String,
+    host: String,
+    /// It says it comes from the phone view's page (`X-Gerdr: phone`).
+    from_page: bool,
+    body: Vec<u8>,
+}
+
+/// A request's head, and its body as long as `Content-Length` says.
+fn read_request(stream: impl Read) -> Option<Request> {
+    let mut reader = BufReader::new(stream.take(HEAD_LIMIT + BODY_LIMIT));
     let mut line = String::new();
     reader.read_line(&mut line).ok()?;
     let mut parts = line.split_whitespace();
-    let method = parts.next()?.to_owned();
-    let target = parts.next()?.to_owned();
-    let mut host = String::new();
+    let mut request = Request {
+        method: parts.next()?.to_owned(),
+        target: parts.next()?.to_owned(),
+        ..Request::default()
+    };
+    let mut length = 0;
     loop {
         line.clear();
         if reader.read_line(&mut line).ok()? == 0 {
@@ -212,13 +241,24 @@ fn read_head(stream: impl Read) -> Option<(String, String, String)> {
         if header.is_empty() {
             break;
         }
-        if let Some((name, value)) = header.split_once(':')
-            && name.eq_ignore_ascii_case("host")
-        {
-            value.trim().clone_into(&mut host);
+        let Some((name, value)) = header.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("host") {
+            value.clone_into(&mut request.host);
+        } else if name.eq_ignore_ascii_case("content-length") {
+            length = value.parse().ok()?;
+        } else if name.eq_ignore_ascii_case("x-gerdr") {
+            request.from_page = value == "phone";
         }
     }
-    Some((method, target, host))
+    if length > BODY_LIMIT {
+        return None;
+    }
+    request.body = vec![0; usize::try_from(length).ok()?];
+    reader.read_exact(&mut request.body).ok()?;
+    Some(request)
 }
 
 /// Whether a request for `host` is one to answer: this machine by itself,
@@ -286,6 +326,112 @@ fn decode(text: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// A press from the page: `/api/press`, `/api/decide` and `/api/send-back`
+/// go on to gerdr, `/api/agent` to the agent's pane.
+fn act(target: &str, body: &[u8]) -> Reply {
+    let Ok(Value::Object(mut args)) = serde_json::from_slice::<Value>(body) else {
+        return Reply::error(400, "Bad request");
+    };
+    let mut text = |name: &str| match args.remove(name) {
+        Some(Value::String(text)) => text,
+        _ => String::new(),
+    };
+    let (project, slug) = (text("p"), text("s"));
+    let op = match target {
+        "/api/press" => "press",
+        "/api/decide" => "decide",
+        "/api/send-back" => "send-back",
+        "/api/agent" => {
+            let (pane, line, key) = (text("pane"), text("text"), text("key"));
+            return agent_input(&project, &slug, &pane, &line, &key);
+        }
+        _ => return Reply::error(404, "Nothing here"),
+    };
+    let mut request = json!({ "op": op, "project": project, "slug": slug });
+    for (name, value) in args {
+        request[name] = value;
+    }
+    match gerdr(&request) {
+        Ok(answer) => Reply::json(&answer),
+        Err(why) => Reply::error(502, &why),
+    }
+}
+
+/// Ask the gerdr running here: `request` on its phone socket (see
+/// `phone_control`), the one changed last first.
+// shortcut: with several gerdrs running, the newest that answers acts; any
+// of them knows every project's features, so that holds until one doesn't.
+fn gerdr(request: &Value) -> Result<Value, String> {
+    let dir = phone_control::dir().ok_or("No runtime folder to find gerdr in")?;
+    let mut sockets: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("gerdr isn't running ({e})"))?
+        .flatten()
+        .filter(|e| phone_control::is_socket_name(&e.file_name().to_string_lossy()))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    sockets.sort_by_key(|s| std::cmp::Reverse(s.0));
+    for (_, path) in sockets {
+        let mut stream = match UnixStream::connect(&path) {
+            Ok(stream) => stream,
+            Err(err) => {
+                // Left by a gerdr that ended: nothing listens on it any more.
+                if err.kind() == std::io::ErrorKind::ConnectionRefused
+                    && let Err(err) = std::fs::remove_file(&path)
+                {
+                    tracing::warn!("Couldn't remove {}: {err}", path.display());
+                }
+                continue;
+            }
+        };
+        stream
+            .set_read_timeout(Some(GERDR_TIME))
+            .map_err(|e| e.to_string())?;
+        writeln!(stream, "{request}").map_err(|e| format!("Couldn't ask gerdr: {e}"))?;
+        let mut line = String::new();
+        BufReader::new(&stream)
+            .read_line(&mut line)
+            .map_err(|e| format!("gerdr didn't answer: {e}"))?;
+        return serde_json::from_str(&line).map_err(|e| format!("gerdr's answer: {e}"));
+    }
+    Err("gerdr isn't running".into())
+}
+
+/// The keys the phone may press in an agent's pane: herdr's names.
+const AGENT_KEYS: [&str; 4] = ["Enter", "esc", "Up", "Down"];
+
+/// Type `line` to an agent of feature `slug` (Enter after it), or press
+/// `key`, or type a menu's number.
+fn agent_input(project: &str, slug: &str, pane: &str, line: &str, key: &str) -> Reply {
+    let (project, f) = match find(project, slug) {
+        Ok(found) => found,
+        Err(reply) => return reply,
+    };
+    if !agent_panes(&f).any(|(_, p, _)| p == pane) {
+        return Reply::error(404, "Not one of this feature's agents");
+    }
+    let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
+    let sent = if !line.trim().is_empty() {
+        // A line break would go as Enter: one line it is.
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        herdr.send_agent_line(pane, &line)
+    } else if AGENT_KEYS.contains(&key) {
+        herdr.send_keys(pane, &[key])
+    } else if key.len() == 1 && key.bytes().all(|b| b.is_ascii_digit()) {
+        herdr
+            .call(
+                "pane.send_input",
+                json!({ "pane_id": pane, "text": key, "keys": [] }),
+            )
+            .map(drop)
+    } else {
+        return Reply::error(400, "Nothing to send");
+    };
+    match sent {
+        Ok(()) => Reply::json(&json!({ "said": [] })),
+        Err(err) => Reply::error(502, &format!("Couldn't reach the agent: {err}")),
+    }
 }
 
 /// The projects gerdr keeps, as saved.
@@ -453,8 +599,37 @@ fn feature_page(project: &str, slug: &str) -> Reply {
         .collect();
     page["history"] = history.into();
     page["docs"] = docs(&store::dir(None, &project.id, slug)).into();
+    page["findings"] = findings(&f).into();
+    page["offer"] = gerdr(&json!({ "op": "offer", "project": project.id, "slug": slug }))
+        .unwrap_or_else(|why| json!({ "error": why }));
     page["now"] = crate::clock::now_secs().into();
     Reply::json(&page)
+}
+
+/// Feature `f`'s AI review findings, those to decide first.
+fn findings(f: &Feature) -> Vec<Value> {
+    let Some(review) = &f.review else {
+        return Vec::new();
+    };
+    let mut all: Vec<&Finding> = review.findings.iter().collect();
+    all.sort_by_key(|x| (x.state != FindingState::Open, x.severity));
+    all.into_iter()
+        .map(|x| {
+            let at = x
+                .line
+                .map_or_else(|| x.file.clone(), |l| format!("{}:{l}", x.file));
+            json!({
+                "id": x.id,
+                "severity": x.severity,
+                "state": x.state,
+                "title": x.title,
+                "body": x.body,
+                "fix": x.fix,
+                "at": if x.repo.is_empty() { at } else { format!("{} {at}", x.repo) },
+                "reason": x.reason,
+            })
+        })
+        .collect()
 }
 
 /// The markdown files in a feature's folder, by name.
@@ -534,17 +709,35 @@ mod tests {
     }
 
     #[test]
-    fn a_request_head_gives_method_target_and_host() {
+    fn a_request_gives_method_target_host_and_body() {
         let head = "GET /api/feature?p=a&s=b HTTP/1.1\r\nhost: x.ts.net\r\nAccept: */*\r\n\r\n";
+        let request = read_request(head.as_bytes()).expect("request");
         assert_eq!(
-            read_head(head.as_bytes()),
-            Some((
-                "GET".into(),
-                "/api/feature?p=a&s=b".into(),
-                "x.ts.net".into()
-            ))
+            (
+                request.method.as_str(),
+                request.target.as_str(),
+                request.host.as_str()
+            ),
+            ("GET", "/api/feature?p=a&s=b", "x.ts.net")
         );
-        assert_eq!(read_head("GET / HTTP/1.1\r\nHost: a".as_bytes()), None);
+        assert!(!request.from_page && request.body.is_empty());
+        assert_eq!(read_request("GET / HTTP/1.1\r\nHost: a".as_bytes()), None);
+        let post = "POST /api/press HTTP/1.1\r\nHost: a\r\nX-Gerdr: phone\r\nContent-Length: 7\r\n\r\n{\"p\":1}";
+        let request = read_request(post.as_bytes()).expect("post");
+        assert!(request.from_page);
+        assert_eq!(request.body, b"{\"p\":1}");
+        let big = format!(
+            "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            BODY_LIMIT + 1
+        );
+        assert_eq!(read_request(big.as_bytes()), None);
+    }
+
+    #[test]
+    fn a_press_needs_a_body_and_a_known_route() {
+        assert_eq!(act("/api/press", b"nope").status, 400);
+        assert_eq!(act("/api/nope", b"{}").status, 404);
+        assert_eq!(act("/api/agent", br#"{"p":"no-such","s":"x"}"#).status, 404);
     }
 
     #[test]

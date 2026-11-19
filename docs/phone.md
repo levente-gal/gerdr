@@ -1,18 +1,31 @@
 # Phone view
 
-A read-only web page of your features, for a phone. It shows:
+A web page of your features, for a phone. It shows:
 
 - every open feature, those waiting for you first
 - each feature's stage, its stages, what it waits for, its history and its stage files (brief, plan, …)
 - each agent's state (working, waiting for you, idle) and the last lines of its pane, refreshed every 2 s
 
-It changes nothing. It reads the feature files on disk and asks herdr.
+It reads the feature files on disk and asks herdr.
+
+## What it can do
+
+- **Stage page buttons.** A feature's page has the same buttons as the desktop stage page, like Continue, Plan fixes, Run checks and Restart. Buttons that only show or open something on the desktop are left out, as is Ship. A brief or plan waiting for review also gets Approve.
+- **Send back.** A brief or plan waiting for review can go back to its agent with your comment.
+- **Findings.** AI review findings are listed with Fix, Dismiss (with a reason) and Reopen.
+- **Agents.** An agent's page has a reply box (one line, then Enter) and keys for its menus: Esc, 1, 2, 3, ↑, ↓ and Enter.
+
+The phone asks before every stage button. gerdr does the press as if you clicked on the desktop and its messages show on the phone. If gerdr asks for a confirmation, the phone asks you instead. The desktop dialog closes again, so nothing waits on an empty desk.
+
+Presses need a running gerdr. The phone view finds it through a socket in `$XDG_RUNTIME_DIR/gerdr/`. Without gerdr the page still shows everything, with no buttons. Typing to an agent goes straight to herdr.
 
 ## How it is reached
 
 `gerdr --phone [port]` serves the page on `127.0.0.1:8390` (or the given port). It runs on its own and opens no window. Nothing outside the machine can reach that address. `tailscale serve` puts it on your tailnet over HTTPS, so only your own devices reach it.
 
-The server answers only requests for `localhost`, `127.0.0.1` or a `*.ts.net` name. A web page that points a name of its own at your machine gets `421`.
+The server answers only requests for `localhost`, `127.0.0.1` or a `*.ts.net` name. A web page that points a name of its own at your machine gets `421`. A press must carry the `X-Gerdr: phone` header, which only the phone view's own page sends. A form on another site can't, so it gets `403`.
+
+Anyone on your tailnet can press buttons and type to your agents, and an agent can run commands on your machine. Keep the tailnet to your own devices.
 
 ## Set up the desktop (once)
 
@@ -68,6 +81,7 @@ The server answers only requests for `localhost`, `127.0.0.1` or a `*.ts.net` na
 
 ## Limits
 
-- Only this machine's features and agents. Agents running on another machine aren't listed.
+- Only this machine's features and agents. Agents running on another machine aren't listed. A feature another machine writes can't be acted on from the phone.
+- A reply to an agent is one line. Line breaks become spaces.
 - A feature at Manual test doesn't show what it waits for.
 - Pane colors come from a script on cdn.jsdelivr.net. Without it, the text shows plain.

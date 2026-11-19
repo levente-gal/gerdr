@@ -79,6 +79,7 @@ mod keys;
 mod page_actions;
 mod page_view;
 mod panel;
+mod phone_page;
 #[cfg(test)]
 mod pr_page_tests;
 mod review_page;
@@ -89,7 +90,9 @@ mod status_lines;
 pub(crate) mod tests;
 mod texts;
 
-pub(crate) use self::{cards::*, page_actions::*, page_view::*, rows::*, texts::*};
+pub(crate) use self::{
+    cards::*, page_actions::*, page_view::*, phone_page::PhoneAct, rows::*, texts::*,
+};
 use self::{ship_page::*, status_lines::*};
 
 use keys::{AgentChoices, keys_page, ship_keys, submit_key, tab_hints};

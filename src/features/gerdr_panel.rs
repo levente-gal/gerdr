@@ -409,6 +409,18 @@ impl Gerdr {
         else {
             return;
         };
+        self.apply_feature_outcome(project, slug, outcome);
+    }
+
+    /// Do `outcome` to feature `slug` of `project`, as its page's button
+    /// or key would: the open panel's, or the phone view's (see
+    /// `phone_page`).
+    pub(crate) fn apply_feature_outcome(
+        &mut self,
+        project: String,
+        slug: String,
+        outcome: PanelOutcome,
+    ) {
         if self.feature_writer(&project, &slug).is_some()
             && !outcome.reads_only()
             && !outcome.acts_on_sandbox()

@@ -108,6 +108,7 @@ mod machines_panel;
 mod manual_test;
 mod page_text;
 mod phone;
+mod phone_control;
 mod pr_review;
 mod pr_post;
 mod pr_watch;
@@ -7825,6 +7826,7 @@ fn start(
     state.watch_tasks();
     state.watch_machines(saved_machines);
     state.watch_web_control();
+    state.watch_phone();
     state.watch_web_pages();
     state.watch_ci();
     state.watch_pr_reviews();
