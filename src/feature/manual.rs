@@ -45,6 +45,86 @@ pub struct Comment {
     pub text: String,
     /// Unix seconds it was written.
     pub at: u64,
+    /// The area of the app's page it was written on, when the user selected
+    /// one there (see `criteria_strip`'s Select on page).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<Place>,
+}
+
+/// Where on the sandbox app's page a comment was written: the area the user
+/// selected there, and what of the page lies in it. It comes from the page,
+/// so `Place::kept` caps and cleans it before it is kept.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Place {
+    /// The page's address then.
+    pub url: String,
+    /// The area selected, in the page's CSS pixels.
+    #[serde(default)]
+    pub rect: Area,
+    /// The page's main elements in it, the largest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub elements: Vec<Picked>,
+}
+
+/// A rectangle of a page, in its CSS pixels, from its viewport's top left.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Area {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// An element of a page in a selected area, as its agent finds it in the
+/// code.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Picked {
+    /// Its tag name, lowercase: `table`.
+    pub tag: String,
+    /// A CSS selector that finds it: `main > div.orders > table`.
+    pub selector: String,
+    /// Its text, cut short.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    #[serde(default)]
+    pub rect: Area,
+    /// The React components it is in, innermost first, at most two.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub component: Vec<String>,
+    /// Where its JSX is written, `file:line`: relative to the feature's
+    /// folder once kept, when it lies under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// A few of its computed styles: `padding`, `font`, `gap`…
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub styles: BTreeMap<String, String>,
+}
+
+impl Place {
+    /// `self` as gerdr keeps it: capped, its text cleaned, and its sources
+    /// relative to `root`, the feature's folder, when under it.
+    pub fn kept(self, root: &std::path::Path) -> Place {
+        let _ = root;
+        unimplemented!("wave 1 B")
+    }
+
+    /// What a comment's card says of it: "On /orders: OrderTable and 2 more".
+    pub fn line(&self) -> String {
+        unimplemented!("wave 1 B")
+    }
+}
+
+/// Keep `place` on comment `id` of `test`; false when there is no such
+/// comment.
+pub fn set_place(test: &mut Option<ManualTest>, id: &str, place: Place) -> bool {
+    let _ = (test, id, place);
+    unimplemented!("wave 1 B")
+}
+
+/// The area comment `id` of `test` was written on, if it was on one.
+pub fn place_of<'a>(test: Option<&'a ManualTest>, id: &str) -> Option<&'a Place> {
+    let _ = (test, id);
+    unimplemented!("wave 1 B")
 }
 
 /// The most words of a comment its title shows.
@@ -93,6 +173,7 @@ pub fn add_comment(test: &mut Option<ManualTest>, text: &str, patch: &str, now: 
         id: id.clone(),
         text: text.to_owned(),
         at: now,
+        place: None,
     };
     t.comments.push(comment);
     let c = Criterion {
