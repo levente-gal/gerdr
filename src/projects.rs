@@ -381,6 +381,12 @@ pub struct Workflow {
     /// folder name (see `feature::setup`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub setup: std::collections::BTreeMap<String, Vec<String>>,
+    /// The commands run in a feature's worktree just before it is removed
+    /// (abandoned, or its worktrees removed once it ended), by repository
+    /// folder name: what it left outside its folder, its test databases
+    /// say (see `feature::setup::cleanup`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub cleanup: std::collections::BTreeMap<String, Vec<String>>,
     /// Ignored paths copied into a new feature's worktree besides the ones
     /// gerdr picks itself, by repository folder name (see `feature::setup`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -445,6 +451,7 @@ impl Workflow {
             && self.ship.is_none()
             && self.agents.is_empty()
             && self.setup.is_empty()
+            && self.cleanup.is_empty()
             && self.copy.is_empty()
             && self.verify.is_empty()
             && self.verify_timeout.is_none()

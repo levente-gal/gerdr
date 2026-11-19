@@ -931,6 +931,12 @@ impl Gerdr {
         let removal = sandbox
             .as_ref()
             .map(|run| self.sandbox_removal(&feature, run));
+        // What its worktrees left outside them goes with them (`workflow.cleanup`).
+        let cleanup = self.projects.workflows(&feature, |w| w.cleanup.clone());
+        let venv = self.feature_venv(project, slug);
+        let cleanup_log = crate::feature::setup::cleanup_log_path(&feature::store::dir(
+            None, project, slug,
+        ));
         let shipped = feature.status == crate::feature::Status::Done;
         self.t3_forget_project(&feature.dir, shipped);
         // A shipped feature's threads go with its project, stopped.
@@ -960,10 +966,18 @@ impl Gerdr {
                 if let Some(removal) = &removal {
                     removal.go();
                 }
+                // Only where the worktrees go: a removal refused for what it
+                // would lose leaves them as they are.
+                let clean = || match force || layout::losses(&feature).is_empty() {
+                    true => crate::feature::setup::cleanup(&feature, &cleanup, &venv, &cleanup_log),
+                    false => Vec::new(),
+                };
+                let mut cleaned = Vec::new();
                 // Abandoned, all it has is kept first: commits, changes.
                 let (heads, result) = match abandon {
                     true => match layout::keep(&feature) {
                         Ok(heads) => {
+                            cleaned = clean();
                             let result = layout::remove(&feature, force);
                             // Stopped on the way: what stays has its changes back.
                             if result.is_err() {
@@ -973,7 +987,10 @@ impl Gerdr {
                         }
                         Err(why) => (Vec::new(), Err(format!("nothing went: {why}"))),
                     },
-                    false => (layout::heads(&feature), layout::remove(&feature, force)),
+                    false => {
+                        cleaned = clean();
+                        (layout::heads(&feature), layout::remove(&feature, force))
+                    }
                 };
                 Done::Removed {
                     result,
@@ -982,9 +999,28 @@ impl Gerdr {
                     abandon,
                     heads,
                     tabs,
+                    cleanup: cleaned,
                 }
             });
         });
+    }
+
+    /// `workflow.cleanup` failed for feature `slug` as `failed` says: what
+    /// its worktrees left outside them waits for the user, and the log
+    /// says what its commands printed.
+    fn cleanup_failed(&mut self, project: &str, slug: &str, failed: &str) {
+        tracing::warn!("cleaning up after feature {project}/{slug}: {failed}");
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        feature.log(feature::now(), format!("cleanup failed: {failed}"));
+        let title = feature.title.clone();
+        self.save_feature(project, slug);
+        let log = crate::feature::setup::cleanup_log_path(&feature::store::dir(None, project, slug));
+        self.show_warning(format!(
+            "Cleanup of \u{201c}{title}\u{201d} failed: {failed}; its output is in {}",
+            crate::paths::display(&log, crate::home_dir().as_deref(), 60)
+        ));
     }
 
     pub(super) fn feature_removed(
@@ -994,7 +1030,11 @@ impl Gerdr {
         abandon: bool,
         result: Result<(), String>,
         (heads, tabs): (Vec<feature::KeptHead>, Vec<serde_json::Value>),
+        cleanup: Vec<String>,
     ) {
+        if !cleanup.is_empty() {
+            self.cleanup_failed(project, slug, &cleanup.join("; "));
+        }
         let Some(feature) = self.feature_mut(project, slug) else {
             return;
         };

@@ -174,6 +174,12 @@ and Ctrl+C or `y` copies what it says.
   its worktrees and branches go, but their commits and uncommitted changes
   are kept, and its toast's Restore, or its row in Find and switch, brings it
   back open. Abandon is an outlined danger button, never the page's loudest.
+  Just before a feature's worktrees go (abandoned, or removed once it
+  ended), the project's `workflow.cleanup` commands run in each, as setup's
+  do, for what they left outside them (test databases, say). Their output
+  goes to `cleanup.log` in the feature's data folder; one that fails says
+  so in a warning toast and the feature's activity, and the worktrees go
+  all the same. Restore doesn't bring back what they removed.
 - One exception, asked for: a repository on a feature's branch never leaves the
   feature without asking, even with nothing to lose. It takes a worktree and a
   branch with it, and agents may be working there.

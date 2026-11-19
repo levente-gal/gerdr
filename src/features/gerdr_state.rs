@@ -684,9 +684,10 @@ impl Gerdr {
                 result,
                 heads,
                 tabs,
+                cleanup,
             } => {
                 self.unbusy(&project, &slug, Job::Remove);
-                self.feature_removed(&project, &slug, abandon, result, (heads, tabs));
+                self.feature_removed(&project, &slug, abandon, result, (heads, tabs), cleanup);
             }
             Done::WorktreesRestored {
                 project,

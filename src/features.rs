@@ -610,6 +610,8 @@ pub(crate) enum Done {
         /// tabs: what restoring them takes.
         heads: Vec<feature::KeptHead>,
         tabs: Vec<serde_json::Value>,
+        /// What `workflow.cleanup` failed at, a line each.
+        cleanup: Vec<String>,
     },
     /// Restoring feature `slug`'s worktrees, removed after it shipped, ended.
     WorktreesRestored {

@@ -1059,6 +1059,40 @@ fn run_into(
     Ok(())
 }
 
+/// Run `commands` (`workflow.cleanup`) in each of `feature`'s worktrees
+/// that is there, just before they are removed, as setup runs its own: on
+/// the Node and venv a new terminal there gets, the output appended to the
+/// log at `log`. What failed, a line each: one failing stops only its
+/// repository's, and nothing stops the removal, as what is left behind is
+/// only outside the worktree.
+pub fn cleanup(feature: &Feature, commands: &PerRepo, venv: &VenvSetting, log: &Path) -> Vec<String> {
+    let mut repos: Vec<&Repo> = (feature.repos.iter())
+        .filter(|r| r.worktree.is_dir() && !lines_of(commands, r).is_empty())
+        .collect();
+    if repos.is_empty() {
+        return Vec::new();
+    }
+    repos.sort_by_key(|r| r.key());
+    let opened = (log.parent().map_or(Ok(()), std::fs::create_dir_all))
+        .and_then(|()| std::fs::OpenOptions::new().create(true).append(true).open(log));
+    let mut file = match opened {
+        Ok(file) => file,
+        Err(err) => return vec![format!("couldn't open {}: {err}", shown(log))],
+    };
+    let _ = writeln!(file, "== Cleanup {}", super::verify::utc(now()));
+    let tools = Tools::detect();
+    let mut failed = Vec::new();
+    for repo in repos {
+        for command in lines_of(commands, repo) {
+            if let Err(why) = run_command(command, repo, feature, venv, &tools, &mut file, log) {
+                failed.push(why);
+                break;
+            }
+        }
+    }
+    failed
+}
+
 /// Run setup command `command` in `repo`'s worktree, on the Node and venv a
 /// new terminal there gets, its output to `file`, the log at `log`. What ran,
 /// or why it failed: "api: `npm ci` exited with 1".
@@ -1228,6 +1262,12 @@ pub(super) fn shell_until(
 /// The log of the feature with data dir `data`.
 pub fn log_path(data: &Path) -> PathBuf {
     data.join(LOG)
+}
+
+/// Where `cleanup` writes what its commands print, in a feature's data
+/// folder `data`, which outlives its worktrees.
+pub fn cleanup_log_path(data: &Path) -> PathBuf {
+    data.join("cleanup.log")
 }
 
 #[cfg(test)]
@@ -1414,6 +1454,29 @@ mod tests {
         );
         let who = |r: usize| std::fs::read_to_string(f.repos[r].worktree.join("who")).unwrap();
         assert_eq!((who(0), who(1)), ("home\n".into(), "other\n".into()));
+    }
+
+    #[test]
+    fn cleanup_runs_in_each_worktree_there_and_a_failure_stops_only_its_own() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api", "gone", "web"], &[]);
+        std::fs::remove_dir_all(&f.repos[1].worktree).unwrap();
+        let log = t.0.join("data/cleanup.log");
+        let commands = map(&[
+            ("api", &["exit 2", "touch never"]),
+            ("gone", &["touch nowhere"]),
+            ("web", &["echo $GERDR_FEATURE > slug"]),
+        ]);
+        let failed = cleanup(&f, &commands, &VenvSetting::Auto, &log);
+        assert_eq!(failed, ["api: `exit 2` exited with 2"]);
+        assert!(!f.repos[0].worktree.join("never").exists());
+        let slug = std::fs::read_to_string(f.repos[2].worktree.join("slug")).unwrap();
+        assert_eq!(slug.trim(), f.slug);
+        assert!(std::fs::read_to_string(&log).unwrap().starts_with("== Cleanup "));
+        // With none to run, nothing is written.
+        let quiet = t.0.join("data/quiet.log");
+        assert!(cleanup(&f, &none(), &VenvSetting::Auto, &quiet).is_empty());
+        assert!(!quiet.exists());
     }
 
     #[test]
