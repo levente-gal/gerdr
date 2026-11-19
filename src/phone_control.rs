@@ -10,19 +10,28 @@ use std::{
     os::unix::net::{UnixListener, UnixStream},
     path::PathBuf,
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 use smithay::reexports::calloop::channel;
 
-use crate::{Gerdr, feature::review_import::Decision, features::PhoneAct};
+use crate::{
+    Gerdr,
+    feature::review_import::Decision,
+    features::PhoneAct,
+    host_idle,
+    web_push::{Note, Pusher},
+};
 
 /// The most a request may take.
 const REQUEST_MAX: u64 = 64 * 1024;
 /// How long a request waits for the loop to answer it.
 const ANSWER_TIME: Duration = Duration::from_secs(20);
+/// A reminder goes to the phones only if nothing with its tag went for
+/// this long.
+const REMIND_PHONE: Duration = Duration::from_secs(15 * 60);
 
 /// The folder of the sockets: `$XDG_RUNTIME_DIR/gerdr`.
 pub fn dir() -> Option<PathBuf> {
@@ -181,6 +190,38 @@ impl Gerdr {
             Ok(_) => remove_dead_sockets(&dir, &path),
             Err(err) => tracing::warn!("phone socket {}: {err}", path.display()),
         }
+    }
+
+    /// Whether the user is away from the machine: the host saw no input for
+    /// `host_idle::AWAY`; on a host that can't tell, gerdr saw none.
+    pub(crate) fn away(&mut self) -> bool {
+        match self.notices.idle.as_mut() {
+            Some(idle) => idle.away(),
+            None => self
+                .notices
+                .last_input
+                .is_none_or(|at| at.elapsed() >= host_idle::AWAY),
+        }
+    }
+
+    /// Send `note` to the phones that asked, while the user is away. A
+    /// `reminder` goes only if nothing with its tag went for
+    /// `REMIND_PHONE`.
+    pub(crate) fn push_phone(&mut self, note: Note, reminder: bool) {
+        if !self.away() {
+            return;
+        }
+        let now = Instant::now();
+        let pushed = &mut self.notices.pushed;
+        pushed.retain(|_, at| now.duration_since(*at) < REMIND_PHONE);
+        if reminder && pushed.contains_key(&note.tag) {
+            return;
+        }
+        pushed.insert(note.tag.clone(), now);
+        self.notices
+            .pusher
+            .get_or_insert_with(Pusher::start)
+            .send(note);
     }
 
     fn answer_phone(&mut self, request: Request) -> Value {

@@ -26,6 +26,9 @@ comrak = { version = "0.59.0", default-features = false }
 sha2 = "0.10.9"
 zstd = { version = "0.13", default-features = false }
 serde_norway = "0.9.42"
+p256 = { version = "0.13", features = ["ecdh", "ecdsa", "std"] }
+aes-gcm = "0.10"
+hkdf = "0.12"
 
 # For trying a change: a one-file rebuild takes about a quarter of what
 # --release does, with paint about twice as slow. install.sh stays on release.

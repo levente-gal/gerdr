@@ -321,6 +321,7 @@ impl Gerdr {
     }
 
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) {
+        self.notices.last_input = Some(Instant::now());
         // A key or a click may change the shown workspace's files.
         if matches!(
             event,

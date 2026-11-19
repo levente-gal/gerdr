@@ -3322,10 +3322,15 @@ impl Gerdr {
         summary: &str,
     ) {
         let in_sight = self.notices.host_focused
+            && !self.away()
             && pane
                 .as_deref()
                 .and_then(|p| self.herdr_pane_place(p))
                 .is_some_and(|(w, t)| self.is_visible(w, t));
+        let body = self
+            .projects
+            .project(project)
+            .map_or_else(String::new, |p| p.name.clone());
         if !in_sight
             && let Some(notifier) = self
                 .notices
@@ -3337,12 +3342,15 @@ impl Gerdr {
                 || format!("feature:{project}/{slug}"),
                 |p| agents::AgentKey::Herdr(p).to_string(),
             );
-            let body = self
-                .projects
-                .project(project)
-                .map_or_else(String::new, |p| p.name.clone());
             notifier.send(&key, summary, &body);
         }
+        let note = crate::web_push::Note {
+            title: summary.to_owned(),
+            body,
+            tag: format!("feature:{project}/{slug}"),
+            url: format!("/#/f/{project}/{slug}"),
+        };
+        self.push_phone(note, false);
     }
 
     /// The code of feature `slug` was read for run `n` of its Plan agent,

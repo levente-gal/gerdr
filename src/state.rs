@@ -423,6 +423,16 @@ pub struct Notices {
     pub activation: Option<activate::Activation>,
     /// gerdr's own window has the host's keyboard focus.
     pub host_focused: bool,
+    /// The host's word on whether the user is away; `None` on a host that
+    /// can't tell (see `host_idle`).
+    pub idle: Option<crate::host_idle::HostIdle>,
+    /// When a key or the pointer last came to gerdr: whether the user is
+    /// away, on a host that can't tell.
+    pub last_input: Option<Instant>,
+    /// Sends notes to the phones (see `web_push`), started at the first.
+    pub pusher: Option<crate::web_push::Pusher>,
+    /// When each note last went to the phones, by tag.
+    pub pushed: HashMap<String, Instant>,
     /// Brings the clipboard's text read for a paste back (see `clipboard`).
     pub paste: Option<channel::Sender<(input::Overlay, String)>>,
     /// The text copied from one of gerdr's own text fields, while gerdr

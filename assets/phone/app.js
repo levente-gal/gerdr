@@ -131,6 +131,63 @@ function card(f, now) {
   </a>`;
 }
 
+// Notifications: the service worker shows what gerdr pushes. iOS has
+// push only once the page is on the home screen.
+const sw = "serviceWorker" in navigator ? navigator.serviceWorker.register("/sw.js").catch(() => null) : Promise.resolve(null);
+navigator.serviceWorker?.addEventListener("message", (e) => { if (e.data?.go) location.hash = e.data.go; });
+
+async function pushSub() {
+  const reg = await sw;
+  return reg?.pushManager ? reg.pushManager.getSubscription() : undefined;
+}
+
+async function pushCard() {
+  const sub = await pushSub().catch(() => undefined);
+  let html = `<h2>Notifications</h2><div class="card">`;
+  if (sub === undefined) {
+    html += `<div class="quiet small">This browser can't get notifications here. On an iPhone, add gerdr to the home screen and open it from there.</div>`;
+  } else if (Notification.permission === "denied") {
+    html += `<div class="quiet small">Notifications are blocked for this page. Allow them in the phone's settings.</div>`;
+  } else if (sub) {
+    html += `<div class="small">On. While you're away from the desk, agents that need you, stage files ready for review and CI results come here.</div>
+      <div class="buttons"><button data-push="test">Send a test</button><button data-push="off">Turn off</button></div>`;
+  } else {
+    html += `<div class="small quiet">Get a notification when an agent needs you or a stage file is ready, while you're away from the desk.</div>
+      <div class="buttons"><button class="primary" data-push="on">Turn on</button></div>`;
+  }
+  return html + `</div>`;
+}
+
+const keyBytes = (b64) => Uint8Array.from(atob(b64.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+
+async function push(what) {
+  if (what === "test") {
+    const a = await post("/api/push-test", {});
+    return say(a.error ? [{ text: a.error }] : a.said, !!a.error);
+  }
+  const reg = await sw;
+  let sub = await reg.pushManager.getSubscription();
+  if (what === "on") {
+    if (await Notification.requestPermission() !== "granted") return say([{ text: "Notifications weren't allowed" }], true);
+    const { key } = await get("/api/push");
+    sub = sub || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) });
+  }
+  if (!sub) return;
+  const a = await post("/api/push", { subscription: sub.toJSON(), on: what === "on" });
+  if (what === "off") await sub.unsubscribe();
+  if (a.error) say([{ text: a.error }], true);
+  else say([{ text: what === "on" ? "Notifications on" : "Notifications off", level: "success" }]);
+  render(false, true);
+}
+
+// A note's tap on an agent: its feature's page of it.
+async function go(pane) {
+  const d = await get("/api/features");
+  const f = d.features.find((f) => f.agents.some((a) => a.pane === pane));
+  location.replace(f ? href("pane", f.project, f.slug, pane) : "#/");
+  return { title: "gerdr", html: "" };
+}
+
 async function list() {
   const d = await get("/api/features");
   const waiting = d.features.filter((f) => f.waits);
@@ -140,6 +197,7 @@ async function list() {
   const group = (name, fs) => fs.length
     ? `<h2>${name} <span class="count">${fs.length}</span></h2>` + fs.map((f) => card(f, d.now)).join("") : "";
   html += group("Waiting for you", waiting) + group("In progress", rest);
+  html += await pushCard();
   return { title: "gerdr", html };
 }
 
@@ -281,6 +339,7 @@ function route() {
     case "f": return { load: () => feature(parts[1], parts[2]), every: 5000 };
     case "doc": return { load: () => doc(parts[1], parts[2], parts[3]), every: 0 };
     case "pane": return { load: () => pane(parts[1], parts[2], parts[3]), every: 2000 };
+    case "go": return { load: () => go(parts[1]), every: 0 };
     default: return { load: list, every: 5000 };
   }
 }
@@ -344,12 +403,14 @@ async function render(fresh, force) {
 const here = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
 
 document.addEventListener("click", async (e) => {
-  const b = e.target.closest("button[data-press], button[data-decide], button[data-sendback], button[data-key]");
+  const b = e.target.closest("button[data-press], button[data-decide], button[data-sendback], button[data-key], button[data-push]");
   if (!b || b.disabled) return;
   const [, p, s, pane] = here();
   b.disabled = true;
   try {
-    if (b.dataset.press) {
+    if (b.dataset.push) {
+      await push(b.dataset.push).catch((err) => say([{ text: err.message }], true));
+    } else if (b.dataset.press) {
       const label = b.dataset.press;
       if (confirm(`${label}: ${titleEl.textContent}?`)) await ask("/api/press", { p, s, label });
     } else if (b.dataset.decide) {

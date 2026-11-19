@@ -89,6 +89,8 @@ pub struct News {
     pub blocked: bool,
     /// The user can see it: a sound, but no notification.
     pub seen: bool,
+    /// It still needs input: a reminder, not news.
+    pub reminder: bool,
 }
 
 /// What of `agents` is news, given how each was `before`: one that just
@@ -139,6 +141,7 @@ pub fn agent_news(
             body: agent.body.clone(),
             blocked: agent.status == Blocked,
             seen: agent.seen,
+            reminder: what == "still needs input",
         });
     }
     blocked_since.retain(|key, _| agents.iter().any(|a| a.key == *key && a.status == Blocked));

@@ -90,14 +90,18 @@ impl Gerdr {
         if unwatched {
             self.projects.save();
         }
-        if let Some(notifier) = self.notices.notifier.as_mut() {
-            for news in news {
-                notifier.send(
-                    &AgentKey::Ci(news.link).to_string(),
-                    &news.summary,
-                    &news.body,
-                );
+        for news in news {
+            let key = AgentKey::Ci(news.link.clone()).to_string();
+            if let Some(notifier) = self.notices.notifier.as_mut() {
+                notifier.send(&key, &news.summary, &news.body);
             }
+            let note = crate::web_push::Note {
+                title: news.summary,
+                body: news.body,
+                tag: key,
+                url: news.link,
+            };
+            self.push_phone(note, false);
         }
     }
 

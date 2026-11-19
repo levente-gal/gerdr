@@ -78,6 +78,7 @@ mod git_identity;
 mod git_ops;
 mod handlers;
 mod herdr;
+mod host_idle;
 mod hooks;
 mod inbox;
 mod inbox_panel;
@@ -109,6 +110,7 @@ mod manual_test;
 mod page_text;
 mod phone;
 mod phone_control;
+mod web_push;
 mod pr_review;
 mod pr_post;
 mod pr_watch;
@@ -3013,6 +3015,10 @@ impl Gerdr {
         watched.extend(self.cursor_watched());
         watched.extend(self.t3_watched());
         watched.extend(self.test_watched());
+        // Away from the machine, nothing is in sight.
+        if self.away() {
+            watched.iter_mut().for_each(|a| a.seen = false);
+        }
         let news = agents::agent_news(
             &self.session.agent_statuses,
             &watched,
@@ -3047,6 +3053,20 @@ impl Gerdr {
             for news in news.iter().filter(|n| !n.seen) {
                 notifier.send(&news.key.to_string(), &news.summary, &news.body);
             }
+        }
+        for news in news {
+            let url = match &news.key {
+                agents::AgentKey::Herdr(pane) => format!("/#/go/{pane}"),
+                _ => "/".to_owned(),
+            };
+            let tag = news.key.to_string();
+            let note = web_push::Note {
+                title: news.summary,
+                body: news.body,
+                tag,
+                url,
+            };
+            self.push_phone(note, news.reminder);
         }
     }
 
@@ -7594,6 +7614,10 @@ fn new_gerdr(
             notifier: None,
             activation: None,
             host_focused: true,
+            idle: None,
+            last_input: None,
+            pusher: None,
+            pushed: HashMap::new(),
             paste: None,
             copied: None,
         },
@@ -7827,6 +7851,7 @@ fn start(
     state.watch_machines(saved_machines);
     state.watch_web_control();
     state.watch_phone();
+    state.notices.idle = host_idle::HostIdle::new(state.backend.window());
     state.watch_web_pages();
     state.watch_ci();
     state.watch_pr_reviews();

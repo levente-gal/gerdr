@@ -32,6 +32,7 @@ use crate::{
     herdr::{self, AgentStatus, Herdr},
     inbox_sources, md_preview, phone_control,
     projects::{self, Project},
+    web_push,
 };
 
 /// The option that runs it in place of gerdr.
@@ -51,6 +52,7 @@ const GERDR_TIME: Duration = Duration::from_secs(25);
 
 const INDEX: &str = include_str!("../assets/phone/index.html");
 const APP_JS: &str = include_str!("../assets/phone/app.js");
+const SW_JS: &str = include_str!("../assets/phone/sw.js");
 const APP_CSS: &str = include_str!("../assets/phone/app.css");
 const ICON: &str = include_str!("../dist/gerdr.svg");
 const MANIFEST: &str = include_str!("../assets/phone/manifest.webmanifest");
@@ -170,7 +172,7 @@ fn serve(stream: TcpStream, icons: &Icons) {
             } else if request.method == "GET" {
                 answer(&request.target, icons)
             } else if request.method == "POST" && request.from_page {
-                act(&request.target, &request.body)
+                act(&request.target, &request.body, &request.host)
             } else if request.method == "POST" {
                 // A form of another site can't set the header: only our page does.
                 Reply::error(403, "Not from the phone view")
@@ -289,7 +291,46 @@ fn answer(target: &str, icons: &Icons) -> Reply {
         "/api/feature" => feature_page(arg("p"), arg("s")),
         "/api/doc" => doc(arg("p"), arg("s"), arg("f")),
         "/api/pane" => pane(arg("p"), arg("s"), arg("pane")),
+        "/sw.js" => Reply::ok("text/javascript; charset=utf-8", SW_JS),
+        "/api/push" => match web_push::public_key() {
+            Ok(key) => Reply::json(&json!({ "key": key })),
+            Err(why) => Reply::error(500, &why),
+        },
         _ => Reply::error(404, "Nothing here"),
+    }
+}
+
+/// A phone asks for notifications, or no more: `{subscription, on}`, the
+/// subscription as its browser's `toJSON` gives it. Notes go out from the
+/// phone view's address on `host`.
+fn push(body: &[u8], host: &str) -> Reply {
+    #[derive(serde::Deserialize)]
+    struct Keys {
+        p256dh: String,
+        auth: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Sub {
+        endpoint: String,
+        keys: Keys,
+    }
+    #[derive(serde::Deserialize)]
+    struct Ask {
+        subscription: Sub,
+        on: bool,
+    }
+    let Ok(ask) = serde_json::from_slice::<Ask>(body) else {
+        return Reply::error(400, "Bad request");
+    };
+    let sub = web_push::Subscription {
+        endpoint: ask.subscription.endpoint,
+        p256dh: ask.subscription.keys.p256dh,
+        auth: ask.subscription.keys.auth,
+        origin: format!("https://{host}"),
+    };
+    match web_push::subscribe(sub, ask.on) {
+        Ok(()) => Reply::json(&json!({ "on": ask.on })),
+        Err(why) => Reply::error(400, &why),
     }
 }
 
@@ -330,7 +371,25 @@ fn decode(text: &str) -> String {
 
 /// A press from the page: `/api/press`, `/api/decide` and `/api/send-back`
 /// go on to gerdr, `/api/agent` to the agent's pane.
-fn act(target: &str, body: &[u8]) -> Reply {
+fn act(target: &str, body: &[u8], host: &str) -> Reply {
+    if target == "/api/push" {
+        return push(body, host);
+    }
+    if target == "/api/push-test" {
+        let note = web_push::Note {
+            title: "gerdr".into(),
+            body: "Notifications work.".into(),
+            tag: "test".into(),
+            url: "/".into(),
+        };
+        return match web_push::send_all(&note) {
+            Ok(0) => Reply::error(400, "No phone asked for notifications"),
+            Ok(n) => Reply::json(
+                &json!({ "said": [{ "text": format!("Sent to {n}"), "level": "success" }] }),
+            ),
+            Err(why) => Reply::error(502, &format!("Couldn't send: {why}")),
+        };
+    }
     let Ok(Value::Object(mut args)) = serde_json::from_slice::<Value>(body) else {
         return Reply::error(400, "Bad request");
     };
@@ -761,9 +820,12 @@ mod tests {
 
     #[test]
     fn a_press_needs_a_body_and_a_known_route() {
-        assert_eq!(act("/api/press", b"nope").status, 400);
-        assert_eq!(act("/api/nope", b"{}").status, 404);
-        assert_eq!(act("/api/agent", br#"{"p":"no-such","s":"x"}"#).status, 404);
+        assert_eq!(act("/api/press", b"nope", "localhost").status, 400);
+        assert_eq!(act("/api/nope", b"{}", "localhost").status, 404);
+        assert_eq!(
+            act("/api/agent", br#"{"p":"no-such","s":"x"}"#, "localhost").status,
+            404
+        );
     }
 
     #[test]
