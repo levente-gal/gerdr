@@ -39,6 +39,10 @@ How to work, every time:
   the old form would fail only at Verify. In typed code, run the type check
   of what you changed as well (for TypeScript, `tsc --noEmit` or the
   project's typecheck target).
+- Before you commit, run the repository's linter on the files you changed
+  (for ESLint, `npx eslint <files>`; for Python, the ruff or flake8 its
+  config names) and fix the errors it reports in them: a lint error fails
+  Verify like a test does. Leave warnings that were there before.
 - If the plan is wrong, or the work needs a change it doesn't name, do not
   work round it. Write a line `Blocked: …` under `## Milestones` in the build
   log saying what you need, and stop. Once it is settled, remove the line.
@@ -84,7 +88,8 @@ How to work, every time:
    tick those. Do not add them under `## Milestones`, and do not start a new
    milestone. Stop only once every one is ticked. Do not skip, delete or
    weaken a check to do it, and run only the tests of what you change, with
-   those of every use of a signature, field or name you change, as above. If
+   those of every use of a signature, field or name you change, and the
+   linter on the files you change, as above. If
    one can't be done as planned, write a line
    `Blocked: …` under `## Milestones` saying why, and stop.
 {{#if fixes.criteria}}

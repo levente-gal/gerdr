@@ -14,12 +14,12 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 3),
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
         "plan-final" => (include_str!("../../assets/prompts/plan-final.md"), 1),
-        "build" => (include_str!("../../assets/prompts/build.md"), 9),
+        "build" => (include_str!("../../assets/prompts/build.md"), 10),
         "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 6),
         "pr-review" => (include_str!("../../assets/prompts/pr-review.md"), 2),
         "fix-plan" => (include_str!("../../assets/prompts/fix-plan.md"), 3),
-        "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 4),
-        "fix-on" => (include_str!("../../assets/prompts/fix-on.md"), 3),
+        "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 5),
+        "fix-on" => (include_str!("../../assets/prompts/fix-on.md"), 4),
         "continue" => (include_str!("../../assets/prompts/continue.md"), 3),
         "nudge" => (include_str!("../../assets/prompts/nudge.md"), 1),
         "send-back" => (include_str!("../../assets/prompts/send-back.md"), 1),
@@ -318,7 +318,10 @@ mod tests {
             let line = render_builtin(name, &v).unwrap();
             assert!(!line.trim_end().contains('\n'), "{line}");
             assert!(line.contains("`Criteria: AC-1, AC-3, C1`"), "{line}");
+            assert!(line.contains("Run the linter on the files you change"), "{line}");
         }
+        // Lint errors are the agent's to fix before Verify, as tests are.
+        assert!(named.contains("linter on the files you changed"), "{named}");
     }
 
     #[test]
