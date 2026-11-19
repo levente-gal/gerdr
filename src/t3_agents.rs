@@ -1962,14 +1962,19 @@ impl crate::Gerdr {
     }
 
     /// Add workspace `w`'s folder as a T3 Code project when it is a
-    /// repository T3 Code doesn't know yet (off the event loop; once per
-    /// folder): its app can only show, and start, threads of projects.
+    /// repository, or a feature's folder of worktrees, T3 Code doesn't
+    /// know yet (off the event loop; once per folder): its app can only
+    /// show, and start, threads of projects. Another folder (a parent of
+    /// repositories) is none: its app shows the projects under it.
     fn add_t3_project(&mut self, w: usize, server: &Server) {
         let Some(ws) = self.workspaces.get(w) else {
             return;
         };
         let dir = ws.dir.clone();
-        if !dir.join(".git").exists() || Some(dir.as_path()) == crate::home_dir().as_deref() {
+        let feature = self.workspace_feature(w).is_some() && dir.is_dir();
+        if !(feature || dir.join(".git").exists())
+            || Some(dir.as_path()) == crate::home_dir().as_deref()
+        {
             return;
         }
         self.ensure_t3_project(dir, server);
