@@ -3791,7 +3791,7 @@ impl Gerdr {
                     zed.arg("-n")
                         .arg("--user-data-dir")
                         .arg(&gerdr.zed_data)
-                        .arg(&dir);
+                        .args(launch::zed_roots(&dir));
                     gerdr.spawn(zed, &dir, "zed")?
                 }
             };

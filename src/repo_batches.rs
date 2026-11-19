@@ -2831,16 +2831,18 @@ impl Gerdr {
 
     /// The folders a Zed on the worktree at `root` opens: its feature's
     /// (`Feature::folders`, the home one first), so a search covers every
-    /// repository of the feature; else `root` alone.
+    /// repository of the feature; else `root` alone. Each with the ignored
+    /// repositories in it (`launch::zed_roots`).
     fn zed_folders(&self, root: &Path) -> Vec<PathBuf> {
         let features = self.features.all.values().flatten();
         let folders = features
             .map(|f| f.folders())
             .find(|folders| folders.iter().any(|(_, dir)| root.starts_with(dir)));
-        match folders {
+        let folders = match folders {
             Some(folders) => folders.into_iter().map(|(_, dir)| dir.to_owned()).collect(),
             None => vec![root.to_owned()],
-        }
+        };
+        folders.iter().flat_map(|dir| crate::launch::zed_roots(dir)).collect()
     }
 
     /// Open `file` of the checkout at `root`, at `line`, in the Zed on that
