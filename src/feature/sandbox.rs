@@ -21,7 +21,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use super::Repo;
 
@@ -42,6 +42,15 @@ const LABEL_ENV_FILE: &str = "com.docker.compose.project.environment_file";
 /// Images of message brokers. Their data doesn't copy: what waits in a queue
 /// would run a second time, on the sandbox's workers.
 const BROKERS: &[&str] = &["redis", "valkey", "keydb", "rabbitmq", "nats"];
+
+/// Images of PostgreSQL servers, which have `pg_isready`.
+const POSTGRES: &[&str] = &[
+    "postgres",
+    "postgis",
+    "pgvector",
+    "timescaledb",
+    "timescaledb-ha",
+];
 
 /// How many times `free_port` tries to find a port free on both addresses.
 const PORT_TRIES: usize = 32;
@@ -511,6 +520,7 @@ pub fn generate(config: &Value, input: Input) -> Result<Generated, String> {
                 fields.insert("labels".to_owned(), Value::Object(own));
             }
         }
+        add_health_check(fields);
         rewrite_mounts(name, fields, &input, &mut used_volumes, &mut binds);
         let own_mode = fields.contains_key("network_mode");
         match fields.get_mut("networks").and_then(Value::as_object_mut) {
@@ -792,11 +802,38 @@ fn rewrite_networks(
     Ok(out)
 }
 
+/// `image`'s name without its registry, owner and tag.
+fn image_base(image: &str) -> &str {
+    let without_tag = image.split(['@', ':']).next().unwrap_or(image);
+    without_tag.rsplit('/').next().unwrap_or(without_tag)
+}
+
 /// Whether `image` is a message broker's.
 fn is_broker(image: &str) -> bool {
-    let without_tag = image.split(['@', ':']).next().unwrap_or(image);
-    let base = without_tag.rsplit('/').next().unwrap_or(without_tag);
-    BROKERS.contains(&base)
+    BROKERS.contains(&image_base(image))
+}
+
+/// Give a PostgreSQL service with no health check of its own one, so the
+/// sandbox waits for it. A copied data folder is a crashed one to it, and while
+/// it recovers it runs but refuses connections: Prepare's migrations failed.
+/// By TCP, as the image's first-run setup listens on its socket only.
+fn add_health_check(fields: &mut Map<String, Value>) {
+    let image = fields
+        .get("image")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if fields.contains_key("healthcheck") || !POSTGRES.contains(&image_base(image)) {
+        return;
+    }
+    let check = json!({
+        "test": ["CMD", "pg_isready", "-h", "127.0.0.1"],
+        "interval": "1s",
+        "timeout": "5s",
+        "retries": 3,
+        // Failures don't count meanwhile: a long recovery isn't a sick one.
+        "start_period": "5m",
+    });
+    fields.insert("healthcheck".to_owned(), check);
 }
 
 /// Refuse a generated file that still reaches anything of main's by name. The
@@ -1459,6 +1496,31 @@ mod tests {
         );
         let network = &out.compose["services"]["db"]["networks"]["pg-network"];
         assert_eq!(network.get("ipv4_address"), None);
+    }
+
+    #[test]
+    fn a_postgres_without_a_health_check_gets_one() {
+        let mut main = config();
+        let out = generated(&main, &[]).unwrap();
+        let check = &out.compose["services"]["db"]["healthcheck"];
+        assert_eq!(
+            check["test"],
+            json!(["CMD", "pg_isready", "-h", "127.0.0.1"])
+        );
+        assert_eq!(out.compose["services"]["redis"].get("healthcheck"), None);
+
+        let own = json!({"test": ["CMD", "true"]});
+        main["services"]["db"]["healthcheck"] = own.clone();
+        let out = generated(&main, &[]).unwrap();
+        assert_eq!(out.compose["services"]["db"]["healthcheck"], own);
+
+        main["services"]["db"]["image"] = json!("prometheuscommunity/postgres-exporter");
+        main["services"]["db"]
+            .as_object_mut()
+            .unwrap()
+            .remove("healthcheck");
+        let out = generated(&main, &[]).unwrap();
+        assert_eq!(out.compose["services"]["db"].get("healthcheck"), None);
     }
 
     #[test]
