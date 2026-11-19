@@ -2829,20 +2829,25 @@ impl Gerdr {
         self.zed_open_existing(&data, root, files);
     }
 
-    /// The folders a Zed on the worktree at `root` opens: its feature's
-    /// (`Feature::folders`, the home one first), so a search covers every
-    /// repository of the feature; else `root` alone. Each with the ignored
-    /// repositories in it (`launch::zed_roots`).
-    fn zed_folders(&self, root: &Path) -> Vec<PathBuf> {
-        let features = self.features.all.values().flatten();
-        let folders = features
-            .map(|f| f.folders())
-            .find(|folders| folders.iter().any(|(_, dir)| root.starts_with(dir)));
-        let folders = match folders {
-            Some(folders) => folders.into_iter().map(|(_, dir)| dir.to_owned()).collect(),
-            None => vec![root.to_owned()],
+    /// The folders a Zed on `root` opens: when `root` is in a feature, the
+    /// whole feature, so a search covers all of it: its folders
+    /// (`Feature::folders`, the home one first) with the repositories in
+    /// them (`launch::zed_roots`), then its stage files (`DOCS_LINK`).
+    /// Else `root` with its repositories.
+    pub(crate) fn zed_folders(&self, root: &Path) -> Vec<PathBuf> {
+        let mut features = self.features.all.values().flatten();
+        let Some(feature) =
+            features.find(|f| f.folders().iter().any(|(_, dir)| root.starts_with(dir)))
+        else {
+            return crate::launch::zed_roots(root);
         };
-        folders.iter().flat_map(|dir| crate::launch::zed_roots(dir)).collect()
+        let folders = feature.folders().into_iter();
+        let mut roots: Vec<PathBuf> = folders
+            .flat_map(|(_, dir)| crate::launch::zed_roots(dir))
+            .collect();
+        let docs = feature.dir.join(crate::feature::layout::DOCS_LINK);
+        roots.extend(std::fs::canonicalize(docs).ok());
+        roots
     }
 
     /// Open `file` of the checkout at `root`, at `line`, in the Zed on that
