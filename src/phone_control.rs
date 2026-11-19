@@ -47,8 +47,14 @@ pub fn is_socket_name(name: &str) -> bool {
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Request {
-    /// What the phone may do to a feature.
-    Offer { project: String, slug: String },
+    /// What the phone may do to a feature, and the page of its `stage`
+    /// (by its place in `Stage::ALL`), else the one the desktop shows.
+    Offer {
+        project: String,
+        slug: String,
+        #[serde(default)]
+        stage: Option<usize>,
+    },
     /// How features stand, as their sidebar cards show it: `[project, slug]`
     /// pairs.
     Cards { features: Vec<(String, String)> },
@@ -226,7 +232,11 @@ impl Gerdr {
 
     fn answer_phone(&mut self, request: Request) -> Value {
         match request {
-            Request::Offer { project, slug } => self.phone_offer(&project, &slug),
+            Request::Offer {
+                project,
+                slug,
+                stage,
+            } => self.phone_offer(&project, &slug, stage),
             Request::Cards { features } => self.phone_cards(&features),
             Request::Press {
                 project,
@@ -330,7 +340,8 @@ mod tests {
             call.request,
             Request::Offer {
                 project: "p".into(),
-                slug: "s".into()
+                slug: "s".into(),
+                stage: None
             }
         );
         call.answer.send(json!({ "buttons": [] })).expect("answer");

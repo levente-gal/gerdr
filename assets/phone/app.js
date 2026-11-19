@@ -204,7 +204,7 @@ async function list() {
 // The feature tab's rail: numbered nodes joined as the desktop joins them,
 // the arch back to Build, and each stage's short line and agent.
 const NODE_W = 82;
-function rail(f) {
+function rail(f, p, s) {
   const r = f.offer?.rail || {
     nodes: f.stages.map((s, i) => ({ label: s.label, line: "", mark: marks(f)[i] })),
     back: null,
@@ -228,37 +228,157 @@ function rail(f) {
         style="left:${12 + back.to * NODE_W + NODE_W / 2}px;width:${(back.from - back.to) * NODE_W}px"></span>` : "";
   const nodes = n.map((x, i) => {
     const disc = ["done", "stale", "ran"].includes(x.mark) ? "✓" : i + 1;
-    return `<div class="node ${esc(x.mark)}${i === pulse ? " pulse" : ""}" title="${esc(x.word || x.mark)}">
+    const sel = i === f.page.stage ? " selected" : "";
+    return `<a class="node ${esc(x.mark)}${i === pulse ? " pulse" : ""}${sel}" title="${esc(x.word || x.mark)}"
+        href="${href("f", p, s, String(i))}">
       <div class="disc">${disc}</div>
       <div class="label">${esc(x.label)}</div>
       ${x.line ? `<div class="nline">${esc(x.line)}</div>` : ""}
       ${x.agent ? `<div class="agent">${esc(x.agent)}</div>` : ""}
-    </div>`;
+    </a>`;
   }).join("");
   return `<div class="rail-wrap"><div class="rail">${joins}${arch}${nodes}</div></div>`;
 }
 
-// The last few of a feature's history; the rest folded under them.
-const RECENT = 4;
+// A feature's history, folded: its last event in sight, the rest behind it.
 function history(list, now) {
-  if (!list.length) return `<p class="quiet small">Nothing yet.</p>`;
+  if (!list.length) return `<h2>History</h2><p class="quiet small">Nothing yet.</p>`;
   const item = (e) => `<li><time>${ago(e.at, now)}</time>${esc(e.what)}</li>`;
-  const older = list.slice(RECENT);
-  return `<ul class="history">${list.slice(0, RECENT).map(item).join("")}</ul>` + (older.length
-    ? `<details class="more"><summary><span class="show">Show ${older.length} older</span><span class="hide">Show fewer</span></summary>
-        <ul class="history">${older.map(item).join("")}</ul></details>`
-    : "");
+  return `<details class="fold history-fold"><summary><h2>History <span class="count">${list.length}</span></h2>
+      <div class="last small"><span class="quiet">${ago(list[0].at, now)}</span> · ${esc(list[0].what)}</div></summary>
+    <ul class="history">${list.map(item).join("")}</ul></details>`;
 }
 
-async function feature(p, s) {
-  const f = await get(`/api/feature?${q({ p, s })}`);
+const stripAnsi = (t) => String(t ?? "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+const toned = (l) => l ? `<span class="t-${esc(l.tone)}">${esc(l.text)}</span>` : "";
+const dotOf = (d) => d ? `<span class="sdot d-${esc(d)}${d === "working" ? " blink" : ""}"></span>` : "";
+// A list of things to do, ticked as they are done; those at work blink.
+const ticks = (items, running = []) => `<ul class="ticks">${items.map(([done, text], i) =>
+  `<li class="${done ? "done" : ""}${running.includes(i) ? " at" : ""}">
+    <span class="tick${running.includes(i) ? " blink" : ""}">${done ? "✓" : ""}</span><span>${esc(text)}</span></li>`).join("")}</ul>`;
+const meter = (done, total, cls = "") => total
+  ? `<div class="bar ${cls}"><span style="width:${Math.round(100 * done / total)}%"></span></div>` : "";
+
+// A section of a stage's page, as the desktop has it, in words.
+function section(x, f, p, s) {
+  switch (x.kind) {
+    case "agent": {
+      const a = f.agents.find((a) => a.label.startsWith(`${f.page.label} · `));
+      const head = `<div class="top">${dotOf(x.dot)}<span class="name">${esc(x.name || "Agent")}</span>
+        ${a ? `<span class="chev">›</span>` : ""}</div>
+        <div class="meta">${esc(x.status)}</div>
+        ${x.tail?.length ? `<pre class="tail">${esc(stripAnsi(x.tail.slice(-4).join("\n")))}</pre>` : ""}`;
+      const cls = `card agent${x.waits ? " tone-waits" : x.dot === "working" ? " tone-working" : ""}`;
+      return a ? `<a class="${cls}" href="${href("pane", p, s, a.pane)}">${head}</a>` : `<div class="${cls}">${head}</div>`;
+    }
+    case "file":
+      return `<div class="fileline small"><b>${esc(x.name)}</b> · ${toned(x.state)}</div>`;
+    case "doc":
+      return `<details class="fold doc-fold" open><summary><h2>${esc(x.name)}</h2></summary>
+        ${x.html ? `<article class="doc card">${x.html}</article>` : `<p class="error small">${esc(x.error)}</p>`}</details>`;
+    case "lines":
+      return `<h3>${esc(x.label)}</h3><ul class="lines">${x.lines.map((l) => `<li>${toned(l)}</li>`).join("")}</ul>`;
+    case "heading":
+      return `<h3>${esc(x.text)}</h3>`;
+    case "milestones":
+      return `<div class="card milestones"><div class="top"><span class="name">${esc(x.label)}</span>
+          <span class="count">${x.done} of ${x.total}</span></div>
+        ${meter(x.done, x.total, x.done === x.total ? "full" : "")}
+        ${x.state ? `<div class="meta">${toned(x.state)}</div>` : ""}
+        ${x.items.length ? ticks(x.items, x.running) : ""}</div>`;
+    case "round": {
+      const asked = x.asked.length ? `<h3>${esc(x.askedCaption)}</h3><ul class="lines">${x.asked.map((a) =>
+        `<li><b>${esc(a.id)}</b> ${esc(a.title)}${a.now ? ` · ${toned(a.now)}` : ""}
+          ${a.note ? `<div class="quiet small">${esc(a.note)}</div>` : ""}</li>`).join("")}</ul>` : "";
+      const made = x.fixes.filter(([d]) => d).length;
+      const fixes = x.fixes.length ? `<h3>Fixes <span class="count">${made} of ${x.fixes.length}</span></h3>
+        ${meter(made, x.fixes.length)}${ticks(x.fixes, x.running)}` : "";
+      const changed = x.changed.length ? `<h3>Changed</h3><ul class="lines quiet">${x.changed.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>` : "";
+      return `<details class="card round"${x.open ? " open" : ""}><summary>
+          <div class="top">${dotOf(x.dot)}<span class="name">${esc(x.label)}</span>${toned(x.state)}</div>
+          ${x.meta ? `<div class="meta">${esc(x.meta)}</div>` : ""}</summary>${asked}${fixes}${changed}</details>`;
+    }
+    case "finding": {
+      const lead = x.dot ? dotOf(x.dot) : x.tag ? `<span class="sev ${esc(x.tag)}">${esc(x.tag)}</span>` : "";
+      const more = [
+        x.body && `<p>${esc(x.body)}</p>`,
+        x.fix && `<p>${esc(x.fix)}</p>`,
+        x.note && `<p class="quiet">${esc(x.note)}</p>`,
+        x.comment && `<p><b>Your comment:</b> ${esc(x.comment)}</p>`,
+        x.preview?.length && `<pre class="tail">${esc(stripAnsi(x.preview.join("\n")))}</pre>`,
+      ].filter(Boolean).join("");
+      const meta = [x.place, x.state, x.clock].filter(Boolean).map(esc).join(" · ");
+      const body = `<div class="top">${lead}<span class="name">${esc(x.title)}</span>${x.made ? `<span class="t-ready small">made</span>` : ""}</div>
+        ${meta ? `<div class="meta">${meta}</div>` : ""}`;
+      return more
+        ? `<details class="card finding${x.faded ? " faded" : ""}"><summary>${body}</summary>${more}</details>`
+        : `<div class="card finding${x.faded ? " faded" : ""}">${body}</div>`;
+    }
+    case "review":
+      return `<div class="card"><div class="top"><span class="name">${esc(x.label)}</span>
+          <span class="count">${x.decided} of ${x.total} decided</span></div>
+        ${meter(x.decided, x.total)}<div class="meta">${esc(x.words)}</div>
+        ${x.notes.map((l) => `<div class="small">${toned(l)}</div>`).join("")}</div>`;
+    case "ship": {
+      const c = x.card;
+      const head = c
+        ? `<div class="top">${dotOf(c.dot)}<span class="name">${esc(x.head)}</span>${toned(c.state)}</div>
+           ${c.meta ? `<div class="meta">${esc(c.meta)}</div>` : ""}
+           ${[c.base, c.ci].filter(Boolean).map((l) => `<div class="small">${toned(l)}</div>`).join("")}`
+        : `<h3>${esc(x.head)}</h3>`;
+      const steps = x.steps.length ? `<ul class="ticks">${x.steps.map((st) =>
+        `<li class="${st.done ? "done" : ""}${st.off ? " off" : ""}"><span class="tick${st.done ? "" : " box"}">${st.done || st.ticked ? "✓" : ""}</span>
+          <span>${esc(st.label)}${st.detail ? `<div class="small">${toned(st.detail)}</div>` : ""}</span></li>`).join("")}</ul>` : "";
+      const note = x.note ? `<div class="meta">${esc(x.note)}</div>` : "";
+      return c ? `<div class="card">${head}${note}${steps}</div>` : head + note + steps;
+    }
+    case "recap": {
+      const figs = x.figures.length ? `<div class="figures">${x.figures.map(([v, c]) =>
+        `<div><b>${esc(v)}</b><span>${esc(c)}</span></div>`).join("")}</div>` : "";
+      return `<div class="card recap">${figs}
+        ${x.summary.map((t) => `<p>${esc(t)}</p>`).join("")}
+        ${x.summaryNote ? `<div class="meta">${esc(x.summaryNote)}</div>` : ""}
+        ${x.stages.length ? `<ul class="lines">${x.stages.map(([n, t]) => `<li><b>${esc(n)}</b> · ${esc(t)}</li>`).join("")}</ul>` : ""}
+        ${x.lines.map((l) => `<div class="small">${toned(l)}</div>`).join("")}</div>`;
+    }
+    default: return "";
+  }
+}
+
+// A stage's page: what it is for, how it stands, its sections as the
+// desktop's page has them, and its files: the one to read shown, the
+// others to open. AI review's findings can be decided here.
+function stagePage(f, p, s) {
+  const pg = f.page;
+  let html = `<div class="page-head"><h2>${esc(pg.label)}${pg.own ? "" : ` <span class="count">· it is at ${esc(f.stage)}</span>`}</h2>
+    ${pg.about ? `<div class="quiet small">${esc(pg.about)}</div>` : ""}
+    ${pg.status ? `<div class="pstatus">${toned(pg.status)}</div>` : ""}</div>`;
+  if (pg.own) html += actions(f.offer);
+  let decided = false;
+  for (const x of pg.sections) {
+    if (pg.decides && (x.kind === "finding" || x.kind === "heading")) {
+      if (!decided) html += findings(f.findings);
+      decided = true;
+      continue;
+    }
+    html += section(x, f, p, s);
+  }
+  if (pg.decides && !decided) html += findings(f.findings);
+  if (pg.files?.length) {
+    html += `<h2>Files</h2><div class="group">` + pg.files.map((d) =>
+      `<a class="row" href="${href("doc", p, s, d)}"><span>${esc(d)}</span><span class="chev">›</span></a>`).join("") + `</div>`;
+  }
+  return html;
+}
+
+async function feature(p, s, stage) {
+  const f = await get(`/api/feature?${q(stage === undefined ? { p, s } : { p, s, stage })}`);
   const tone = toneOf(f);
   let html = `<div class="meta quiet small">${esc(f.projectName)}</div>`;
   html += `<div class="status"><span class="line tone-${esc(tone)}">${esc(f.card?.line || f.stage)}</span></div>`;
-  html += rail(f);
+  html += rail(f, p, s);
   html += waitsBox(f.waits, f.now);
-  html += actions(f.offer);
-  html += findings(f.findings);
+  html += stagePage(f, p, s);
   if (f.agents.length) {
     html += `<h2>Agents <span class="count">${f.agents.length}</span></h2><div class="group">` +
       f.agents.map((a) => `<a class="row" href="${href("pane", p, s, a.pane)}">
@@ -266,12 +386,8 @@ async function feature(p, s) {
   } else {
     html += `<h2>Agents</h2><p class="quiet small">${esc(f.agentsError || "No agent running for it here.")}</p>`;
   }
-  if (f.docs.length) {
-    html += `<h2>Files</h2><div class="group">` + f.docs.map((d) =>
-      `<a class="row" href="${href("doc", p, s, d)}"><span>${esc(d)}</span><span class="chev">›</span></a>`).join("") + `</div>`;
-  }
-  html += `<h2>History</h2>` + history(f.history, f.now);
-  return { title: f.title, back: "#/", html };
+  html += history(f.history, f.now);
+  return { title: f.title, back: stage === undefined ? "#/" : href("f", p, s), html };
 }
 
 function actions(offer) {
@@ -336,7 +452,7 @@ const KEYS = [["esc", "Esc"], ["1", "1"], ["2", "2"], ["3", "3"], ["Up", "↑"],
 function route() {
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   switch (parts[0]) {
-    case "f": return { load: () => feature(parts[1], parts[2]), every: 5000 };
+    case "f": return { load: () => feature(parts[1], parts[2], parts[3]), every: 5000 };
     case "doc": return { load: () => doc(parts[1], parts[2], parts[3]), every: 0 };
     case "pane": return { load: () => pane(parts[1], parts[2], parts[3]), every: 2000 };
     case "go": return { load: () => go(parts[1]), every: 0 };
@@ -379,7 +495,8 @@ async function render(fresh, force) {
       main.querySelectorAll(".pulse .disc").forEach((e) => { e.style.animationDelay = `-${Date.now() % 1800}ms`; });
       const wrap = main.querySelector(".rail-wrap");
       if (wrap && (fresh || railX === undefined)) {
-        const at = wrap.querySelector(".node.pulse, .node.waiting, .node.failed, .node.current");
+        const at = wrap.querySelector(".node.selected") ||
+          wrap.querySelector(".node.pulse, .node.waiting, .node.failed, .node.current");
         if (at) wrap.scrollLeft = at.offsetLeft - (wrap.clientWidth - at.offsetWidth) / 2;
       } else if (wrap) wrap.scrollLeft = railX;
       if (v.pane && (fresh || atEnd)) window.scrollTo(0, document.body.scrollHeight);

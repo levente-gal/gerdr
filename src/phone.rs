@@ -288,7 +288,7 @@ fn answer(target: &str, icons: &Icons) -> Reply {
         "/icon-512.png" => Reply::ok("image/png", icons.big.clone()),
         "/manifest.webmanifest" => Reply::ok("application/manifest+json", MANIFEST),
         "/api/features" => Reply::json(&all_features()),
-        "/api/feature" => feature_page(arg("p"), arg("s")),
+        "/api/feature" => feature_page(arg("p"), arg("s"), arg("stage").parse().ok()),
         "/api/doc" => doc(arg("p"), arg("s"), arg("f")),
         "/api/pane" => pane(arg("p"), arg("s"), arg("pane")),
         "/sw.js" => Reply::ok("text/javascript; charset=utf-8", SW_JS),
@@ -666,8 +666,10 @@ fn find(project: &str, slug: &str) -> Result<(Project, Feature), Reply> {
     Ok((project, feature))
 }
 
-/// A feature's page: what the list shows, its history and its files.
-fn feature_page(project: &str, slug: &str) -> Reply {
+/// A feature's page: what the list shows, its history, and the page of
+/// its `stage` (by its place in `Stage::ALL`, else the one gerdr shows) as
+/// gerdr's feature tab says it, with that stage's files.
+fn feature_page(project: &str, slug: &str, stage: Option<usize>) -> Reply {
     let (project, f) = match find(project, slug) {
         Ok(found) => found,
         Err(reply) => return reply,
@@ -683,12 +685,96 @@ fn feature_page(project: &str, slug: &str) -> Reply {
         .map(|e| json!({ "at": e.at, "what": e.what }))
         .collect();
     page["history"] = history.into();
-    page["docs"] = docs(&store::dir(None, &project.id, slug)).into();
     page["findings"] = findings(&f).into();
-    page["offer"] = gerdr(&json!({ "op": "offer", "project": project.id, "slug": slug }))
-        .unwrap_or_else(|why| json!({ "error": why }));
+    let request = json!({ "op": "offer", "project": project.id, "slug": slug, "stage": stage });
+    let mut offer = gerdr(&request).unwrap_or_else(|why| json!({ "error": why }));
+    // Without gerdr, the stage alone, and its files.
+    let mut shown = offer["page"].take();
+    if !shown.is_object() {
+        let at = f.current().unwrap_or(Stage::Ship);
+        let stage = stage.and_then(|i| Stage::ALL.get(i).copied()).unwrap_or(at);
+        shown = json!({
+            "stage": Stage::ALL.iter().position(|s| *s == stage),
+            "label": stage.label(),
+            "own": stage == at,
+            "decides": stage == Stage::AiReview,
+            "sections": [],
+        });
+    }
+    add_files(&mut shown, &store::dir(None, &project.id, slug));
+    page["page"] = shown;
+    page["offer"] = offer;
     page["now"] = crate::clock::now_secs().into();
     Reply::json(&page)
+}
+
+/// A stage's files, the one to read first first. Those a fix round or a
+/// merge writes go with Build's and Ship's.
+fn stage_files(stage: Stage) -> &'static [&'static str] {
+    match stage {
+        Stage::Discover => &["brief.md", "decisions.md"],
+        Stage::Plan => &["plan.md"],
+        Stage::PlanReview => &["plan-final.md"],
+        Stage::Build => &["build.md", "fix-plan.md"],
+        Stage::ManualTest => &["evidence.md"],
+        Stage::Ship => &["summary.md"],
+        _ => &[],
+    }
+}
+
+/// The stage file `name` goes with, if any: research's with Discover's,
+/// a merge's conflicts with Ship's.
+fn file_stage(name: &str) -> Option<Stage> {
+    if name.starts_with("research") {
+        return Some(Stage::Discover);
+    }
+    if name.starts_with("conflicts-") {
+        return Some(Stage::Ship);
+    }
+    Stage::ALL
+        .into_iter()
+        .find(|s| stage_files(*s).contains(&name))
+}
+
+/// Put the files of stage page `page` on it: the one to read in its doc
+/// section, rendered, where gerdr's page has one; else the stage's first,
+/// after all else, unless the page already says what it holds (Build's
+/// milestones, Ship's recap). The rest are named, to open: the stage's
+/// others and those of no stage.
+fn add_files(page: &mut Value, dir: &Path) {
+    let stage = (page["stage"].as_u64()).and_then(|i| Stage::ALL.get(i as usize).copied());
+    let names = docs(dir);
+    let mut mine: Vec<&String> = names
+        .iter()
+        .filter(|n| stage.is_some_and(|s| file_stage(n) == Some(s)) || file_stage(n).is_none())
+        .collect();
+    let order = |n: &str| (stage.map(stage_files).unwrap_or_default().iter()).position(|x| *x == n);
+    mine.sort_by_key(|n| order(n).unwrap_or(usize::MAX));
+    let Some(sections) = page["sections"].as_array_mut() else {
+        return;
+    };
+    let kind = |s: &Value, k: &str| s["kind"].as_str() == Some(k);
+    let said = sections
+        .iter()
+        .any(|s| kind(s, "milestones") || kind(s, "recap"));
+    if !said && !sections.iter().any(|s| kind(s, "doc")) {
+        let first = mine.iter().find(|n| order(n).is_some());
+        sections.extend(first.map(|n| json!({ "kind": "doc", "name": n })));
+    }
+    let mut read = Vec::new();
+    for s in sections.iter_mut().filter(|s| kind(s, "doc")) {
+        let name = s["name"].as_str().unwrap_or_default().to_owned();
+        let text = (doc_name_ok(&name))
+            .then(|| std::fs::read_to_string(dir.join(&name)).ok())
+            .flatten();
+        match text {
+            Some(text) => s["html"] = md_preview::render(&text).into(),
+            None => s["error"] = format!("Couldn't read {name}").into(),
+        }
+        read.push(name);
+    }
+    mine.retain(|n| !read.contains(n));
+    page["files"] = mine.into_iter().cloned().collect::<Vec<_>>().into();
 }
 
 /// Feature `f`'s AI review findings, those to decide first.
@@ -717,7 +803,8 @@ fn findings(f: &Feature) -> Vec<Value> {
         .collect()
 }
 
-/// The markdown files in a feature's folder, by name.
+/// The markdown files in a feature's folder, by name: not the copies kept
+/// of a stage's file as written and as approved.
 fn docs(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .into_iter()
@@ -725,6 +812,7 @@ fn docs(dir: &Path) -> Vec<String> {
         .flatten()
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| doc_name_ok(n))
+        .filter(|n| !n.ends_with("-written.md") && !n.ends_with("-approved.md"))
         .collect();
     names.sort();
     names
@@ -846,6 +934,39 @@ mod tests {
         assert!(!doc_name_ok(".hidden.md"));
         assert!(!doc_name_ok("feature.json"));
         assert_eq!(doc("p", "s", "../../x.md").status, 404);
+    }
+
+    #[test]
+    fn a_stage_page_reads_its_first_file_and_names_the_rest() {
+        let dir = std::env::temp_dir().join(format!("gerdr-phone-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        for name in [
+            "brief.md",
+            "brief-written.md",
+            "research-R1.md",
+            "decisions.md",
+            "plan.md",
+            "notes.md",
+        ] {
+            std::fs::write(dir.join(name), "# Hi").expect("file");
+        }
+        let mut page = json!({ "stage": 0, "sections": [] });
+        add_files(&mut page, &dir);
+        assert_eq!(page["sections"][0]["name"], "brief.md");
+        assert!(
+            page["sections"][0]["html"]
+                .as_str()
+                .is_some_and(|h| h.contains("Hi"))
+        );
+        assert_eq!(
+            page["files"],
+            json!(["decisions.md", "notes.md", "research-R1.md"])
+        );
+        // Build's milestones say what its log holds: the log is only named.
+        let mut page = json!({ "stage": 3, "sections": [{ "kind": "milestones" }] });
+        add_files(&mut page, &dir);
+        assert_eq!(page["sections"].as_array().map(Vec::len), Some(1));
+        std::fs::remove_dir_all(&dir).expect("clean");
     }
 
     #[test]

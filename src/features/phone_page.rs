@@ -65,6 +65,142 @@ fn mark_word(mark: NodeMark) -> String {
     format!("{mark:?}").to_lowercase()
 }
 
+/// A page's line as the phone shows it: its words and their tone.
+fn check_json(line: &chrome::CheckLine) -> Value {
+    let tone = match line.tone {
+        chrome::CheckTone::Blocker => "blocker",
+        chrome::CheckTone::Ready => "ready",
+        chrome::CheckTone::Note => "note",
+        chrome::CheckTone::Failed => "failed",
+    };
+    json!({ "text": line.text, "tone": tone })
+}
+
+/// A dot as the phone's styles name it: `working`, `done`, `failed`.
+fn dot_word(dot: chrome::Dot) -> String {
+    format!("{dot:?}").to_lowercase()
+}
+
+/// A page's section as the phone shows it: what it says, not its buttons
+/// or where it goes. None for a row of buttons alone.
+fn section_json(section: &chrome::PageSection) -> Option<Value> {
+    use chrome::PageSection as S;
+    let checks = |lines: &[chrome::CheckLine]| lines.iter().map(check_json).collect::<Vec<_>>();
+    Some(match section {
+        S::Agent {
+            name,
+            dot,
+            status,
+            tail,
+            waits,
+            ..
+        } => json!({
+            "kind": "agent",
+            "name": name,
+            "dot": dot_word(*dot),
+            "status": status,
+            "waits": waits,
+            "tail": tail,
+        }),
+        S::File { name, state, .. } => {
+            json!({ "kind": "file", "name": name, "state": check_json(state) })
+        }
+        S::Finding(c) => json!({
+            "kind": "finding",
+            "tag": c.tag.word(),
+            "dot": c.tag.dot().map(dot_word),
+            "title": c.title,
+            "state": c.state,
+            "clock": c.clock,
+            "place": c.place,
+            "body": c.body,
+            "preview": c.preview,
+            "fix": c.fix,
+            "note": c.note,
+            "comment": c.comment,
+            "made": c.made,
+            "faded": c.faded,
+        }),
+        S::Round(r) => json!({
+            "kind": "round",
+            "label": r.label,
+            "dot": dot_word(r.dot),
+            "state": check_json(&r.state),
+            "meta": r.meta,
+            "askedCaption": r.asked_caption,
+            "asked": (r.asked.iter())
+                .map(|a| json!({ "id": a.id, "title": a.title, "note": a.note, "now": a.now.as_ref().map(check_json) }))
+                .collect::<Vec<_>>(),
+            "fixes": r.fixes,
+            "running": r.running,
+            "changed": r.changed,
+            "open": r.open,
+        }),
+        S::Toolbar { .. } => return None,
+        S::Lines { label, lines } => {
+            json!({ "kind": "lines", "label": label, "lines": checks(lines) })
+        }
+        S::Doc { name, .. } => json!({ "kind": "doc", "name": name }),
+        S::MilestoneMode { fresh } => {
+            let text = match fresh {
+                true => "a fresh agent for each milestone",
+                false => "one agent through all milestones",
+            };
+            json!({ "kind": "lines", "label": "Agents", "lines": [{ "text": text, "tone": "note" }] })
+        }
+        S::ShipGroup(g) => json!({
+            "kind": "ship",
+            "head": g.head,
+            "card": g.card.as_ref().map(|c| json!({
+                "dot": dot_word(c.dot),
+                "state": check_json(&c.state),
+                "meta": c.meta,
+                "base": c.base.as_ref().map(check_json),
+                "ci": c.ci.as_ref().map(check_json),
+            })),
+            "note": g.note,
+            "steps": (g.steps.iter())
+                .map(|s| json!({ "label": s.label, "detail": s.detail.as_ref().map(check_json), "ticked": s.ticked, "done": s.done, "off": s.off }))
+                .collect::<Vec<_>>(),
+        }),
+        S::Recap(r) => json!({
+            "kind": "recap",
+            "summary": r.summary,
+            "summaryNote": r.summary_note,
+            "figures": r.figures,
+            "stages": r.stages,
+            "lines": checks(&r.lines),
+        }),
+        S::Milestones {
+            label,
+            state,
+            done,
+            total,
+            items,
+            running,
+            ..
+        } => json!({
+            "kind": "milestones",
+            "label": label,
+            "state": state.as_ref().map(check_json),
+            "done": done,
+            "total": total,
+            "items": items,
+            "running": running,
+        }),
+        S::Review(r) => json!({
+            "kind": "review",
+            "label": r.label,
+            "words": r.words,
+            "decided": r.decided,
+            "refused": r.refused,
+            "total": r.total,
+            "notes": checks(&r.notes),
+        }),
+        S::Heading(text) => json!({ "kind": "heading", "text": text }),
+    })
+}
+
 /// The stage whose file waits for the user's review: the brief or a plan
 /// its agent finished.
 fn doc_waiting(feature: &Feature) -> Option<Stage> {
@@ -115,8 +251,10 @@ impl Gerdr {
         Ok(buttons)
     }
 
-    /// What the phone may do to feature `slug`, for its page.
-    pub(crate) fn phone_offer(&self, project: &str, slug: &str) -> Value {
+    /// What the phone may do to feature `slug`, for its page, with its
+    /// rail and the page of `stage` (by its place in `Stage::ALL`), the
+    /// one the desktop shows when none is asked.
+    pub(crate) fn phone_offer(&self, project: &str, slug: &str, stage: Option<usize>) -> Value {
         let buttons = match self.phone_buttons(project, slug) {
             Ok(buttons) => buttons,
             Err(why) => return json!({ "error": why }),
@@ -127,25 +265,35 @@ impl Gerdr {
             .iter()
             .map(|(b, _)| json!({ "label": b.label, "primary": b.style == ButtonStyle::Primary }))
             .collect();
+        let (rail, page) = self.phone_view(project, slug, stage).unwrap_or_default();
         json!({
             "buttons": buttons,
             "sendBack": send_back && elsewhere.is_none(),
             "elsewhere": elsewhere,
-            "rail": self.phone_rail(project, slug),
+            "rail": rail,
+            "page": page,
         })
     }
 
-    /// Feature `slug`'s rail as its feature tab draws it: each stage's
-    /// mark, short line and agent, and the line back to Build.
-    fn phone_rail(&self, project: &str, slug: &str) -> Value {
+    /// Feature `slug`'s rail as its feature tab draws it (each stage's
+    /// mark, short line and agent, and the line back to Build), and the
+    /// page of `stage` as its sections say it, in words.
+    fn phone_view(
+        &self,
+        project: &str,
+        slug: &str,
+        stage: Option<usize>,
+    ) -> Option<(Value, Value)> {
+        let feature = self.feature(project, slug)?;
         let panel = FeaturePanel {
             project: project.to_owned(),
             slug: slug.to_owned(),
+            stage: stage.and_then(|i| Stage::ALL.get(i).copied()),
+            picked_at: feature.current(),
             ..FeaturePanel::default()
         };
-        let Some(view) = self.feature_tab_view_of(&panel) else {
-            return Value::Null;
-        };
+        let shown = panel.page_stage(feature);
+        let view = self.feature_tab_view_of(&panel)?;
         let nodes: Vec<Value> = (view.rail.iter())
             .map(|n| {
                 json!({
@@ -157,10 +305,22 @@ impl Gerdr {
                 })
             })
             .collect();
-        json!({
+        let rail = json!({
             "nodes": nodes,
             "back": view.back.map(|b| json!({ "from": b.from, "to": b.to })),
-        })
+        });
+        let page = &view.page;
+        let page = json!({
+            "stage": Stage::ALL.iter().position(|s| *s == shown),
+            "label": shown.label(),
+            "own": shown == own_page(feature),
+            "decides": shown == Stage::AiReview,
+            "title": page.title,
+            "about": page.about,
+            "status": page.status.as_ref().map(check_json),
+            "sections": page.sections.iter().filter_map(section_json).collect::<Vec<_>>(),
+        });
+        Some((rail, page))
     }
 
     /// The sidebar cards of the features asked for, by `project/slug`:
