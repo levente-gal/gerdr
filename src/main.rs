@@ -7620,6 +7620,7 @@ fn new_gerdr(
             last_input: None,
             pusher: None,
             pushed: HashMap::new(),
+            held: Vec::new(),
             paste: None,
             copied: None,
         },

@@ -435,6 +435,9 @@ pub struct Notices {
     pub pusher: Option<crate::web_push::Pusher>,
     /// When each note last went to the phones, by tag.
     pub pushed: HashMap<String, Instant>,
+    /// Notes that came before the user counted as away, and when (see
+    /// `push_phone`).
+    pub held: Vec<(crate::web_push::Note, Instant)>,
     /// Brings the clipboard's text read for a paste back (see `clipboard`).
     pub paste: Option<channel::Sender<(input::Overlay, String)>>,
     /// The text copied from one of gerdr's own text fields, while gerdr

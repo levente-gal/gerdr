@@ -15,7 +15,10 @@ use std::{
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use smithay::reexports::calloop::channel;
+use smithay::reexports::calloop::{
+    channel,
+    timer::{TimeoutAction, Timer},
+};
 
 use crate::{
     Gerdr,
@@ -32,6 +35,9 @@ const ANSWER_TIME: Duration = Duration::from_secs(20);
 /// A reminder goes to the phones only if nothing with its tag went for
 /// this long.
 const REMIND_PHONE: Duration = Duration::from_secs(15 * 60);
+
+/// How often held notes look whether the user has gone (see `push_phone`).
+const HOLD_LOOK: Duration = Duration::from_secs(5);
 
 /// The folder of the sockets: `$XDG_RUNTIME_DIR/gerdr`.
 pub fn dir() -> Option<PathBuf> {
@@ -212,11 +218,43 @@ impl Gerdr {
 
     /// Send `note` to the phones that asked, while the user is away. A
     /// `reminder` goes only if nothing with its tag went for
-    /// `REMIND_PHONE`.
+    /// `REMIND_PHONE`. Before the user counts as away, a note is held: if
+    /// they went before it came (no input since), it goes once they count.
     pub(crate) fn push_phone(&mut self, note: Note, reminder: bool) {
-        if !self.away() {
+        if self.away() {
+            return self.send_phone(note, reminder);
+        }
+        if reminder {
             return;
         }
+        let watching = !self.notices.held.is_empty();
+        let held = &mut self.notices.held;
+        held.retain(|(n, _)| n.tag != note.tag);
+        held.push((note, Instant::now()));
+        if watching {
+            return;
+        }
+        let look = |_, _: &mut (), state: &mut Gerdr| {
+            let away = state.away();
+            for note in take_due(&mut state.notices.held, Instant::now(), away) {
+                state.send_phone(note, false);
+            }
+            if state.notices.held.is_empty() {
+                TimeoutAction::Drop
+            } else {
+                TimeoutAction::ToDuration(HOLD_LOOK)
+            }
+        };
+        if let Err(err) = self
+            .loop_handle
+            .insert_source(Timer::from_duration(HOLD_LOOK), look)
+        {
+            tracing::warn!("holding a phone note: {err}");
+            self.notices.held.clear();
+        }
+    }
+
+    fn send_phone(&mut self, note: Note, reminder: bool) {
         let now = Instant::now();
         let pushed = &mut self.notices.pushed;
         pushed.retain(|_, at| now.duration_since(*at) < REMIND_PHONE);
@@ -270,9 +308,44 @@ impl Gerdr {
     }
 }
 
+/// The held notes to send now, taken out of `held`: all of them once the
+/// user is `away`. Older ones go first, away or not: the user touched the
+/// machine after them. Away starts `AWAY` after the last input and is seen
+/// up to `HOLD_LOOK` late, so a note older than both came before it.
+fn take_due(held: &mut Vec<(Note, Instant)>, now: Instant, away: bool) -> Vec<Note> {
+    held.retain(|(_, at)| now.duration_since(*at) <= host_idle::AWAY + HOLD_LOOK);
+    if !away {
+        return Vec::new();
+    }
+    held.drain(..).map(|(note, _)| note).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn held_notes_go_once_away_unless_older_than_the_last_input() {
+        let note = |tag: &str| Note {
+            title: String::new(),
+            body: String::new(),
+            tag: tag.into(),
+            url: "/".into(),
+        };
+        let now = Instant::now() + host_idle::AWAY * 2;
+        let mut held = vec![
+            (note("stale"), now - host_idle::AWAY - HOLD_LOOK * 2),
+            (note("fresh"), now - host_idle::AWAY + HOLD_LOOK),
+        ];
+        assert!(take_due(&mut held, now, false).is_empty());
+        assert_eq!(held.len(), 1, "the stale note is dropped");
+        let sent = take_due(&mut held, now, true);
+        assert_eq!(
+            sent.iter().map(|n| n.tag.as_str()).collect::<Vec<_>>(),
+            ["fresh"]
+        );
+        assert!(held.is_empty());
+    }
 
     #[test]
     fn requests_read_as_the_phone_sends_them() {

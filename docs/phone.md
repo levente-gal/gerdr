@@ -33,7 +33,7 @@ The phone can get a notification when, while you're away from the desk:
 
 Tap one to open its feature or agent; a CI one opens the pull request. Turn them on at the bottom of the feature list, with Turn on; Send a test checks they arrive. Each phone turns them on for itself. On an iPhone, open gerdr from the home screen first: Safari gives a page notifications only there (iOS 16.4 or later).
 
-Away means no key or pointer on the desktop for 2 minutes, as niri (or another host with ext-idle-notify) tells gerdr; a host that can't tell counts input to gerdr only. While you're away, an agent on screen counts as unseen, so the desktop notifies of it too. An agent that still needs you is reminded of on the phone at most every 15 minutes.
+Away means no key or pointer on the desktop for 2 minutes, as niri (or another host with ext-idle-notify) tells gerdr; a host that can't tell counts input to gerdr only. While you're away, an agent on screen counts as unseen, so the desktop notifies of it too. Something that happens after your last key or pointer, before the 2 minutes are up, reaches the phone once they are. An agent that still needs you is reminded of on the phone at most every 15 minutes.
 
 gerdr sends the notifications itself, through `curl` to the push service of the phone's browser (Apple's or Google's). Each is encrypted for that phone; the push service sees only where it goes. A phone's address and gerdr's key are in `~/.local/share/gerdr/phone/`. A notification that couldn't go shows on the "!" badge.
 
@@ -117,4 +117,4 @@ Anyone on your tailnet can press buttons and type to your agents, and an agent c
 - A reply to an agent is one line. Line breaks become spaces.
 - A feature at Manual test doesn't show what it waits for.
 - Pane colors come from a script on cdn.jsdelivr.net. Without it, the text shows plain.
-- Notifications need a running gerdr, and only come while you're away. An agent that finishes in the 2 minutes after you left isn't notified on the phone.
+- Notifications need a running gerdr, and only come while you're away. What happened in the 2 minutes after you left comes up to 2 minutes late.
