@@ -250,6 +250,26 @@ function inT3(job, dirs, prompt, model) {
   }
   const trim = (path) => path.replace(/\/+$/, "") || "/";
   const want = dirs.map(trim);
+  // A feature's folder (`<root>/.features/<slug>`, gerdr's FEATURES_DIR)
+  // holds its worktrees: `git init` there would make it a repository over
+  // theirs, so the app's "Initialize Git" button is hidden while it shows,
+  // with its panel section when it is that section's only button.
+  if (job === "scope" && want.length && want.every((d) => /\/\.features\/[^/]+$/.test(d)) && !window.__gerdrNoGitInit) {
+    window.__gerdrNoGitInit = true;
+    let queued = false;
+    const hide = () => {
+      queued = false;
+      for (const button of document.querySelectorAll("button")) {
+        if (!/^(Initialize Git|Initializing\.\.\.)$/.test(button.textContent.trim())) continue;
+        const section = button.closest("section");
+        (section?.querySelectorAll("button").length === 1 ? section : button).style.display = "none";
+      }
+    };
+    new MutationObserver(() => {
+      if (!queued) (queued = true), requestAnimationFrame(hide);
+    }).observe(document.documentElement, { childList: true, subtree: true });
+    hide();
+  }
   const inside = (path, dir) => path === dir || path.startsWith(dir === "/" ? dir : dir + "/");
   const isGroup = (g) =>
     g && typeof g === "object" && typeof g.projectKey === "string" && Array.isArray(g.memberProjects);
