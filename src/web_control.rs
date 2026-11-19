@@ -41,7 +41,11 @@ use std::{
 use serde::{Deserialize, Serialize};
 use smithay::reexports::calloop::channel;
 
-use crate::{Gerdr, desktop, md_preview};
+use crate::{
+    Gerdr, desktop,
+    feature::manual::{Area, Picked},
+    md_preview,
+};
 
 /// The extension's id, which the key in its manifest fixes.
 pub const EXTENSION_ID: &str = "elaigohdbahomgbfbgmgbofdmgoejbed";
@@ -139,6 +143,25 @@ enum FromBrowser {
         #[serde(default)]
         error: Option<String>,
     },
+    /// The area of the pane's page the user selected, as gerdr asked (see
+    /// `Gerdr::select_web_pane`): its page's address, the area, the page's
+    /// main elements in it, and a PNG of it as a `data:` URL, or why there
+    /// is none.
+    Selected {
+        pane: String,
+        url: String,
+        #[serde(default)]
+        rect: Area,
+        #[serde(default)]
+        elements: Vec<Picked>,
+        #[serde(default)]
+        data: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+    },
+    /// Selecting on the pane's page stopped with nothing selected:
+    /// `cancelled`, `navigated`, or `error: …` saying why.
+    Unselected { pane: String, reason: String },
     /// A link clicked in the pane's preview (see `md_preview`).
     Open { pane: String, url: String },
     /// The pane's preview page loaded, and shows nothing yet.
@@ -167,6 +190,8 @@ impl FromBrowser {
             | Self::Unscoped { pane, .. }
             | Self::Scoped { pane }
             | Self::Shot { pane, .. }
+            | Self::Selected { pane, .. }
+            | Self::Unselected { pane, .. }
             | Self::Open { pane, .. }
             | Self::Ready { pane }
             | Self::Line { pane, .. }
@@ -258,6 +283,14 @@ enum ToBrowser<'a> {
     },
     /// Send back what the pane's tab shows, as a PNG.
     Capture {
+        pane: String,
+    },
+    /// Let the user select an area of the pane's page, and send it back.
+    Select {
+        pane: String,
+    },
+    /// Stop selecting on the pane's page.
+    Unselect {
         pane: String,
     },
 }
@@ -696,6 +729,7 @@ impl Gerdr {
                     control.panes.remove(&pane);
                     control.history.remove(&pane);
                     self.web.preview_closed(pane);
+                    self.page_closed(pane);
                 }
             }
             Event::Message(_, FromBrowser::Open { pane, url }) => {
@@ -749,6 +783,30 @@ impl Gerdr {
                         (None, error) => Err(error.unwrap_or_else(|| "no picture came".into())),
                     };
                     self.web_pane_shot(pane, shot);
+                }
+            }
+            Event::Message(
+                _,
+                FromBrowser::Selected {
+                    pane,
+                    url,
+                    rect,
+                    elements,
+                    data,
+                    error,
+                },
+            ) => {
+                if let Some(pane) = token_pane(&pane) {
+                    let shot = match (data, error) {
+                        (Some(data), _) => png_of(&data),
+                        (None, error) => Err(error.unwrap_or_else(|| "no picture came".into())),
+                    };
+                    self.page_selected(pane, url, rect, elements, shot);
+                }
+            }
+            Event::Message(_, FromBrowser::Unselected { pane, reason }) => {
+                if let Some(pane) = token_pane(&pane) {
+                    self.page_unselected(pane, &reason);
                 }
             }
             Event::Message(_, FromBrowser::Scoped { pane }) => {
@@ -920,6 +978,25 @@ impl Gerdr {
     /// it was asked. It comes back to `Gerdr::web_pane_shot`.
     pub(crate) fn capture_web_pane(&mut self, pane: u32) -> bool {
         let message = ToBrowser::Capture {
+            pane: pane_token(pane),
+        };
+        self.send_to_browser(pane, &message)
+    }
+
+    /// Let the user select an area of `pane`'s page, if the extension
+    /// follows its tab; whether it was asked. It comes back to
+    /// `Gerdr::page_selected`, or `Gerdr::page_unselected`.
+    pub(crate) fn select_web_pane(&mut self, pane: u32) -> bool {
+        let message = ToBrowser::Select {
+            pane: pane_token(pane),
+        };
+        self.send_to_browser(pane, &message)
+    }
+
+    /// Stop selecting on `pane`'s page, if the extension follows its tab;
+    /// whether it was asked.
+    pub(crate) fn unselect_web_pane(&mut self, pane: u32) -> bool {
+        let message = ToBrowser::Unselect {
             pane: pane_token(pane),
         };
         self.send_to_browser(pane, &message)
@@ -1120,6 +1197,50 @@ mod tests {
         let failed: FromBrowser =
             serde_json::from_str(r#"{"type":"shot","pane":"1.2","error":"no"}"#).unwrap();
         assert!(matches!(failed, FromBrowser::Shot { data: None, error: Some(_), .. }));
+    }
+
+    #[test]
+    fn a_selection_comes_with_its_area_and_elements() {
+        let selected: FromBrowser = serde_json::from_str(
+            r#"{"type":"selected","pane":"1.2","url":"http://localhost:4200/orders",
+                "rect":{"x":10,"y":20,"w":300,"h":120},
+                "elements":[{"tag":"table","selector":"main > table","text":"Order",
+                    "rect":{"x":12,"y":22,"w":290,"h":100},"component":["OrderTable"],
+                    "source":"src/OrderTable.tsx:42","styles":{"gap":"8px"}}],
+                "data":"data:image/png;base64,TQ=="}"#,
+        )
+        .unwrap();
+        let FromBrowser::Selected {
+            url,
+            rect,
+            elements,
+            data: Some(_),
+            error: None,
+            ..
+        } = selected
+        else {
+            panic!("not a selection: {selected:?}");
+        };
+        assert_eq!(url, "http://localhost:4200/orders");
+        assert_eq!(rect.w, 300);
+        assert_eq!(elements[0].component, ["OrderTable"]);
+        assert_eq!(elements[0].styles["gap"], "8px");
+        // A page without React, and a shot that failed.
+        let bare: FromBrowser = serde_json::from_str(
+            r#"{"type":"selected","pane":"1.2","url":"http://x","elements":[{"tag":"div","selector":"div"}],"error":"no"}"#,
+        )
+        .unwrap();
+        assert!(matches!(bare, FromBrowser::Selected { data: None, error: Some(_), .. }));
+        let stopped: FromBrowser =
+            serde_json::from_str(r#"{"type":"unselected","pane":"1.2","reason":"cancelled"}"#)
+                .unwrap();
+        assert_eq!(
+            stopped,
+            FromBrowser::Unselected {
+                pane: "1.2".into(),
+                reason: "cancelled".into()
+            }
+        );
     }
 
     #[test]

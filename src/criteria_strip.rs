@@ -30,6 +30,13 @@
 //! Screenshot (Alt+C) on an open comment adds what the page shows to it, as
 //! to a failure's note; one done takes none. A comment added here shows on
 //! the strip at once, and its dialog can take the screenshot with it.
+//!
+//! Select on page (S) lets the user select an area of the app's page, by a
+//! drag or a click on an element, through gerdr's extension in its browser:
+//! the keys and the pointer go to the page, where Esc stops it. The comment
+//! dialog then opens with the selection, and the comment keeps where on the
+//! page it was (`manual::Place`) and a screenshot of the area. While it
+//! waits, the button reads Cancel selecting.
 
 use std::{
     collections::HashMap,
@@ -60,7 +67,8 @@ use crate::{
 /// The buttons on the strip for row `i`, as `strip_buttons` lists them:
 /// those of its card, but deleting a comment, which the page does; a
 /// screenshot for an open comment; and then adding one.
-fn strip_buttons(i: usize, row: &Row) -> Vec<(chrome::PageButton, StripKey)> {
+/// `selecting`: a selection on the page waits, which the button stops.
+fn strip_buttons(i: usize, row: &Row, selecting: bool) -> Vec<(chrome::PageButton, StripKey)> {
     let mut out: Vec<_> = (criterion_buttons(i, row).into_iter())
         .filter_map(|(b, o)| match o {
             PanelOutcome::Manual(Outcome::DeleteComment(_)) => None,
@@ -75,6 +83,11 @@ fn strip_buttons(i: usize, row: &Row) -> Vec<(chrome::PageButton, StripKey)> {
     if row.comment && row.found == Some(Verdict::Fail) {
         out.push((quiet("Screenshot"), StripKey::Shot));
     }
+    let select = match selecting {
+        true => "Cancel selecting",
+        false => "Select on page",
+    };
+    out.push((quiet(select), StripKey::Select));
     out.push((quiet("Add comment\u{2026}"), StripKey::AddComment));
     out
 }
@@ -104,6 +117,8 @@ pub struct CriteriaStrip {
     pub hover: Option<StripHit>,
     /// The screenshot asked for, until it comes.
     shot: Option<ShotWait>,
+    /// The selection asked of a page, until it comes or stops.
+    select: Option<SelectWait>,
     /// A comment added from the strip takes a screenshot too: the comment
     /// dialog's checkbox, as last left.
     pub(crate) shot_too: bool,
@@ -126,6 +141,20 @@ struct ShotWait {
     feature: Key,
     criterion: Criterion,
     since: Instant,
+}
+
+/// A selection asked of a pane's page: it waits as long as the user takes.
+struct SelectWait {
+    pane: u32,
+    feature: Key,
+}
+
+/// An area of the sandbox app's page the user selected, for the comment
+/// dialog to add a comment with: where it is, and a PNG of it.
+#[derive(Clone, Debug)]
+pub(crate) struct Pick {
+    pub place: manual::Place,
+    pub png: Vec<u8>,
 }
 
 /// Where the strip shows: over `pane`, for feature `slug` of `project`.
@@ -190,6 +219,8 @@ enum StripKey {
     /// What the criterion's card does: pass, fail, clear.
     Do(Outcome),
     AddComment,
+    /// Select an area of the page to comment on, or stop selecting.
+    Select,
     /// Give the keys back to the app.
     Close,
     /// Show the criterion on Manual test's page.
@@ -274,6 +305,12 @@ const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
         does: |_| Some(StripKey::AddComment),
         footer: true,
         f1: "add a comment of your own",
+    },
+    Binding {
+        chord: "S",
+        does: |_| Some(StripKey::Select),
+        footer: true,
+        f1: "select an area of the app to comment on",
     },
     Binding {
         chord: "Esc",
@@ -416,6 +453,27 @@ fn button_tip(outcome: &Outcome, label: &str) -> (&'static str, &'static str) {
     (text, chord_of(STRIP_KEYS, &STRIP_STATES, same))
 }
 
+/// Write `png` as a screenshot of criterion or comment `id` of feature
+/// `slug`, in its data folder (`manual::SHOTS_DIR`); its file's name, or
+/// what to tell the user when it can't be written.
+fn save_manual_shot(project: &str, slug: &str, id: &str, png: &[u8]) -> Result<String, String> {
+    let dir = store::dir(None, project, slug).join(manual::SHOTS_DIR);
+    let taken: Vec<String> = match std::fs::read_dir(&dir) {
+        Ok(entries) => (entries.flatten())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    let name = manual::shot_name(id, &taken);
+    let written = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(&name), png));
+    if let Err(err) = written {
+        tracing::warn!("saving screenshot {}: {err}", dir.join(&name).display());
+        return Err(format!("gerdr couldn't save the screenshot: {err}"));
+    }
+    tracing::info!("screenshot {name} of {project}/{slug} saved");
+    Ok(name)
+}
+
 impl Gerdr {
     /// Where the strip shows now, if it does: on the shown tab's web pane at
     /// a sandbox's page (the focused one first), in a feature's workspace at
@@ -527,13 +585,18 @@ impl Gerdr {
             note: row.note.clone(),
             field: draft.map(|d| d.field.line()),
             shots,
-            buttons: (strip_buttons(i, row).into_iter())
+            buttons: (strip_buttons(i, row, self.strip_selecting(&target)).into_iter())
                 .map(|(button, _)| (button.label, button.style))
                 .collect(),
             steps_through: rows.len() > 1,
             hover: strip.hover,
             keys,
         })
+    }
+
+    /// Whether a selection on a page waits for `target`'s feature.
+    fn strip_selecting(&self, target: &Target) -> bool {
+        (self.criteria_strip.select.as_ref()).is_some_and(|w| w.feature == target.key())
     }
 
     /// The strip's layout, if it shows.
@@ -625,7 +688,8 @@ impl Gerdr {
             StripHit::Button(b) => {
                 let target = self.criteria_target()?;
                 let (rows, i) = self.strip_rows(&target)?;
-                let (button, does) = strip_buttons(i, &rows[i]).into_iter().nth(b)?;
+                let selecting = self.strip_selecting(&target);
+                let (button, does) = strip_buttons(i, &rows[i], selecting).into_iter().nth(b)?;
                 match does {
                     StripKey::Do(outcome) => {
                         let (text, key) = button_tip(&outcome, &button.label);
@@ -634,6 +698,13 @@ impl Gerdr {
                     StripKey::Shot => (
                         "Add a screenshot of the page to the comment".into(),
                         strip_chord(&StripKey::Shot),
+                    ),
+                    StripKey::Select if selecting => {
+                        ("Stop selecting".into(), strip_chord(&StripKey::Select))
+                    }
+                    StripKey::Select => (
+                        "Select an area of the app to comment on".into(),
+                        strip_chord(&StripKey::Select),
                     ),
                     _ => (
                         "Add a comment of your own: what should change".into(),
@@ -672,7 +743,8 @@ impl Gerdr {
                 let Some((rows, i)) = self.strip_rows(&target) else {
                     return;
                 };
-                let outcome = match strip_buttons(i, &rows[i]).into_iter().nth(b) {
+                let selecting = self.strip_selecting(&target);
+                let outcome = match strip_buttons(i, &rows[i], selecting).into_iter().nth(b) {
                     Some((_, StripKey::Do(outcome))) => outcome,
                     Some((_, StripKey::AddComment)) => {
                         if self.keep_strip_note(&target) {
@@ -681,6 +753,12 @@ impl Gerdr {
                         return;
                     }
                     Some((_, StripKey::Shot)) => return self.criterion_shot(&target),
+                    Some((_, StripKey::Select)) => {
+                        if self.keep_strip_note(&target) {
+                            self.strip_select(&target);
+                        }
+                        return;
+                    }
                     _ => return,
                 };
                 // A note being written is saved before what changes the
@@ -992,21 +1070,10 @@ impl Gerdr {
             }
         };
         let (project, slug) = &wait.feature;
-        let dir = store::dir(None, project, slug).join(manual::SHOTS_DIR);
-        let taken: Vec<String> = match std::fs::read_dir(&dir) {
-            Ok(entries) => (entries.flatten())
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect(),
-            Err(_) => Vec::new(),
+        let name = match save_manual_shot(project, slug, &wait.criterion.id, &png) {
+            Ok(name) => name,
+            Err(why) => return self.show_error(why),
         };
-        let name = manual::shot_name(&wait.criterion.id, &taken);
-        let written =
-            std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(dir.join(&name), &png));
-        if let Err(err) = written {
-            tracing::warn!("saving screenshot {}: {err}", dir.join(&name).display());
-            return self.show_error(format!("gerdr couldn't save the screenshot: {err}"));
-        }
-        tracing::info!("screenshot {name} of {project}/{slug} saved");
         let id = wait.criterion.id.clone();
         match self.criteria_strip.drafts.get_mut(&wait.feature) {
             Some(draft) if draft.criterion == wait.criterion => draft.shots.push(name),
@@ -1024,6 +1091,138 @@ impl Gerdr {
             }
         }
         self.show_success(format!("Screenshot added to {id}"));
+    }
+
+    /// Select on page, pressed on the strip: let the user select an area of
+    /// its page, by its browser's extension; or, while a selection waits,
+    /// stop it.
+    fn strip_select(&mut self, target: &Target) {
+        if let Some(wait) = self.criteria_strip.select.take() {
+            // The page says `cancelled`, which nobody waits for now.
+            self.unselect_web_pane(wait.pane);
+            if wait.feature == target.key() {
+                return;
+            }
+        }
+        if !self.strip_writes(target) {
+            return;
+        }
+        if !self.select_web_pane(target.pane) {
+            return self.show_warning(
+                "This page can't be selected on: its browser runs without gerdr's extension".into(),
+            );
+        }
+        self.criteria_strip.select = Some(SelectWait {
+            pane: target.pane,
+            feature: target.key(),
+        });
+        // Esc and the pointer go to the page while it selects.
+        self.drop_criteria_keys();
+        self.focus_pane(|_| Some(target.pane));
+    }
+
+    /// The user selected an area of `pane`'s page, at `url`: the comment
+    /// dialog opens with it, and its PNG, `shot`, or says why there is none.
+    pub(crate) fn page_selected(
+        &mut self,
+        pane: u32,
+        url: String,
+        rect: manual::Area,
+        elements: Vec<manual::Picked>,
+        shot: Result<Vec<u8>, String>,
+    ) {
+        // Nobody waits for one stopped here (Cancel selecting, its tab
+        // closed) that the page sent before it heard: dropped (E7).
+        let Some(wait) = (self.criteria_strip.select).take_if(|w| w.pane == pane) else {
+            return tracing::warn!("a selection on pane {pane} came unasked: dropped");
+        };
+        let (project, slug) = wait.feature;
+        let Some(feature) = self.feature(&project, &slug) else {
+            return tracing::warn!("a selection for {project}/{slug}, gone: dropped");
+        };
+        let (title, dir) = (feature.title.clone(), feature.dir.clone());
+        if !marks_criteria(feature, Stage::ManualTest) {
+            tracing::warn!("a selection for {project}/{slug}, not at Manual test: dropped");
+            return self.show_warning(format!(
+                "\u{201c}{title}\u{201d} isn't at Manual test now: the selection isn't kept"
+            ));
+        }
+        let png = match shot {
+            Ok(png) => png,
+            Err(why) => {
+                tracing::warn!("the selection's screenshot on pane {pane}: {why}");
+                return self.show_error(format!("The selection's screenshot failed: {why}"));
+            }
+        };
+        let place = manual::Place {
+            url,
+            rect,
+            elements,
+        }
+        .kept(&dir);
+        // One open on something else keeps what it holds as its draft.
+        if self.features.finding_dialog.is_some() {
+            self.apply_finding_dialog(crate::finding_dialog::FindingDialogOutcome::Cancel);
+        }
+        self.ask_add_comment(&project, &slug);
+        if let Some(dialog) = (self.features.finding_dialog.as_mut())
+            .filter(|d| d.project == project && d.slug == slug)
+        {
+            dialog.pick = Some(Box::new(Pick { place, png }));
+            // The area's PNG is its screenshot.
+            dialog.shot = None;
+        }
+    }
+
+    /// Selecting on `pane`'s page stopped with nothing selected, for
+    /// `reason`: `cancelled` by the user, `navigated` away, or `error: …`.
+    pub(crate) fn page_unselected(&mut self, pane: u32, reason: &str) {
+        if (self.criteria_strip.select)
+            .take_if(|w| w.pane == pane)
+            .is_none()
+        {
+            return;
+        }
+        match reason {
+            "cancelled" => {}
+            "navigated" => self.show_warning("Selecting stopped: the page changed".into()),
+            _ => {
+                let why = reason.strip_prefix("error: ").unwrap_or(reason);
+                tracing::warn!("selecting on pane {pane}: {why}");
+                self.show_error(format!("Selecting failed: {why}"));
+            }
+        }
+    }
+
+    /// `pane`'s tab closed: a selection it was asked for won't come.
+    pub(crate) fn page_closed(&mut self, pane: u32) {
+        (self.criteria_strip.select).take_if(|w| w.pane == pane);
+    }
+
+    /// Keep `pick` on comment `id` of feature `slug`, just added: where on
+    /// the page it is, and its PNG as the comment's screenshot. One that
+    /// can't be written is said, the place kept still.
+    pub(crate) fn keep_pick(&mut self, project: &str, slug: &str, id: &str, pick: Pick) {
+        let shot = save_manual_shot(project, slug, id, &pick.png);
+        let c = (self.features.criteria(project, slug).iter())
+            .find(|c| c.id == id)
+            .cloned();
+        let Some(f) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if !manual::set_place(&mut f.manual, id, pick.place) {
+            tracing::warn!("comment {id} of {project}/{slug} gone: its place isn't kept");
+        }
+        if let (Ok(name), Some(c)) = (&shot, &c)
+            && !manual::add_shots(&mut f.manual, c, std::slice::from_ref(name))
+        {
+            tracing::warn!("screenshot {name} of {project}/{slug} kept on no comment {id}");
+        }
+        self.save_feature(project, slug);
+        self.sync_feature_page();
+        if let Err(why) = shot {
+            self.show_error(why);
+        }
     }
 
     /// A key while the strip has the keys.
@@ -1071,6 +1270,7 @@ impl Gerdr {
             Some(StripKey::OnPage) => self.criterion_on_page(&target),
             Some(StripKey::Fold) => self.set_criteria_folded(true),
             Some(StripKey::Shot) => self.criterion_shot(&target),
+            Some(StripKey::Select) => self.strip_select(&target),
             Some(_) => {}
             // Stepping through the criteria, as a list's arrows: its
             // buttons' tooltips name Ctrl+PgUp / Ctrl+PgDn, which
@@ -1130,12 +1330,13 @@ mod tests {
             open: false,
             seen: false,
             planning: false,
+            place: String::new(),
         }
     }
 
     #[test]
     fn an_open_comment_offers_a_screenshot_a_done_one_and_criteria_dont() {
-        let shot = |r: &Row| (strip_buttons(0, r).iter()).any(|(_, k)| *k == StripKey::Shot);
+        let shot = |r: &Row| (strip_buttons(0, r, false).iter()).any(|(_, k)| *k == StripKey::Shot);
         let comment = |found| Row {
             comment: true,
             ..row(found)
@@ -1143,19 +1344,23 @@ mod tests {
         assert!(shot(&comment(Some(Verdict::Fail))));
         assert!(!shot(&comment(Some(Verdict::Pass))));
         assert!(!shot(&row(Some(Verdict::Fail))));
-        let labels: Vec<_> = (strip_buttons(0, &comment(Some(Verdict::Fail))).into_iter())
-            .map(|(b, _)| b.label)
-            .collect();
+        let labels = |selecting| -> Vec<_> {
+            (strip_buttons(0, &comment(Some(Verdict::Fail)), selecting).into_iter())
+                .map(|(b, _)| b.label)
+                .collect()
+        };
         assert_eq!(
-            labels,
+            labels(false),
             [
                 "Edit\u{2026}",
                 "Done",
                 "Not done",
                 "Screenshot",
+                "Select on page",
                 "Add comment\u{2026}"
             ]
         );
+        assert_eq!(labels(true)[4], "Cancel selecting");
     }
 
     #[test]
@@ -1214,6 +1419,11 @@ mod tests {
         let kp = key_table::press(STRIP_KEYS, untried, &alt, Keysym::KP_Down);
         assert_eq!(kp, Some(StripKey::Fold));
         assert_eq!(strip_chord(&StripKey::AddComment), "C");
+        assert_eq!(strip_chord(&StripKey::Select), "S");
+        assert_eq!(
+            key_table::press(STRIP_KEYS, untried, &bare, Keysym::s),
+            Some(StripKey::Select)
+        );
         assert_eq!(strip_chord(&StripKey::Fold), "Alt+Down");
         assert_eq!(
             chord_of(NOTE_KEYS, &[()], |k| *k == StripKey::Save),

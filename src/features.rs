@@ -202,6 +202,10 @@ pub struct Features {
     pub finding_dialog: Option<crate::finding_dialog::FindingDialog>,
     /// What was typed in it and left, for its next opening on the same.
     pub finding_drafts: crate::finding_dialog::Drafts,
+    /// The areas of the app's page selected for a comment that a draft
+    /// kept, by its draft's key (see `FindingDialog::pick`).
+    pub(crate) pick_drafts:
+        HashMap<crate::finding_dialog::DraftKey, Box<crate::criteria_strip::Pick>>,
     pub panel: Option<FeaturePanel>,
     /// The feature last shown in the panel, by project: the features key
     /// opens it again.

@@ -95,6 +95,9 @@ pub struct FindingDialog {
     /// A comment added from the criteria strip: whether a screenshot of the
     /// page it shows goes with it. None where there is no page to take.
     pub shot: Option<bool>,
+    /// A comment added on an area selected on the app's page: where, and
+    /// its screenshot. It is input as what is typed is: a draft keeps it.
+    pub(crate) pick: Option<Box<crate::criteria_strip::Pick>>,
 }
 
 /// A finding of the user's own, or a comment in the diff, with nothing typed.
@@ -293,16 +296,24 @@ impl FindingDialog {
         }
         keys.push(("Shift+Enter", "new line"));
         // Esc never throws what was typed away: it waits as a draft.
-        match self.texts() == self.from {
+        match self.texts() == self.from && self.pick.is_none() {
             true => keys.push(("Esc", "close")),
             false => {
                 keys.push((crate::text_field::DISCARD_KEY, "discard"));
                 keys.push(("Esc", "keep draft"));
             }
         }
+        let about = match &self.pick {
+            Some(pick) => format!(
+                "{}\n{} \u{b7} screenshot of the area",
+                self.about,
+                pick.place.line()
+            ),
+            None => self.about.clone(),
+        };
         FindingDialogView {
             title,
-            about: self.about.clone(),
+            about,
             fields,
             focus: self.focus,
             action,
@@ -392,6 +403,7 @@ impl Gerdr {
             heading: None,
             squash: None,
             shot: None,
+            pick: self.features.pick_drafts.get(&key).cloned(),
         });
         // It takes the pointer from the client under it.
         self.refresh_pointer_focus();
@@ -588,7 +600,8 @@ impl Gerdr {
         let shot = (stage == Some(Stage::ManualTest) && self.strip_shows(project, slug))
             .then_some(self.criteria_strip.shot_too);
         if let Some(dialog) = self.features.finding_dialog.as_mut() {
-            dialog.shot = shot;
+            // A kept selection's PNG is its screenshot.
+            dialog.shot = shot.filter(|_| dialog.pick.is_none());
         }
     }
 
@@ -671,15 +684,20 @@ impl Gerdr {
     /// Do what the dialog asked: close it keeping what was typed, or save
     /// it and close.
     pub fn apply_finding_dialog(&mut self, outcome: FindingDialogOutcome) {
-        let Some(dialog) = self.features.finding_dialog.take() else {
+        let Some(mut dialog) = self.features.finding_dialog.take() else {
             return;
         };
         let (key, texts) = (dialog.draft_key(), dialog.texts());
+        let mut pick = dialog.pick.take();
         self.refresh_pointer_focus();
+        self.features.pick_drafts.remove(&key);
         if outcome == FindingDialogOutcome::Cancel {
-            if texts == dialog.from {
+            if texts == dialog.from && pick.is_none() {
                 self.features.finding_drafts.remove(&key);
             } else {
+                if let Some(pick) = pick {
+                    self.features.pick_drafts.insert(key.clone(), pick);
+                }
                 self.features.finding_drafts.insert(key, texts);
             }
             return;
@@ -726,13 +744,16 @@ impl Gerdr {
             }
             (Ask::Add, _) if stage == Some(Stage::ManualTest) => {
                 let added = self.add_manual_comment(project, slug, first);
+                if let (Some(id), Some(pick)) = (&added, pick.take()) {
+                    self.keep_pick(project, slug, id, *pick);
+                }
                 if let Some(shot) = dialog.shot {
                     self.criteria_strip.shot_too = shot;
-                    if added && shot {
+                    if added.is_some() && shot {
                         self.strip_shot(project, slug);
                     }
                 }
-                added
+                added.is_some()
             }
             (Ask::Add, _) => {
                 self.add_finding_comment(project, slug, first);
@@ -751,6 +772,9 @@ impl Gerdr {
         };
         // Not taken: what was typed waits for the next opening.
         if !kept {
+            if let Some(pick) = pick {
+                self.features.pick_drafts.insert(key.clone(), pick);
+            }
             self.features.finding_drafts.insert(key, texts);
         }
     }
@@ -904,6 +928,7 @@ mod tests {
             heading: None,
             squash: None,
             shot: None,
+            pick: None,
         }
     }
 

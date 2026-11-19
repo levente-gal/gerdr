@@ -103,6 +103,7 @@ fn a_comment_is_done_or_not_and_its_keys_edit_and_delete_it() {
         shots: Vec::new(),
         comment: true,
         planning: false,
+        place: String::new(),
     };
     let buttons = |row: &Row| -> Vec<(String, ButtonStyle, PanelOutcome)> {
         (criterion_buttons(2, row).into_iter())
@@ -242,6 +243,7 @@ fn sheet_rows() -> (Feature, Vec<Row>, RowCtx) {
         shots: Vec::new(),
         comment: false,
         planning: false,
+        place: String::new(),
     };
     let rows = vec![
         row(
@@ -435,6 +437,7 @@ fn a_criterions_card_holds_its_keys_and_buttons() {
         shots: Vec::new(),
         comment: false,
         planning: false,
+        place: String::new(),
     };
     let rows = vec![
         row(None, ""),
@@ -595,6 +598,7 @@ fn manual_test_goes_on_while_its_fixes_are_made() {
         shots: Vec::new(),
         comment: false,
         planning: false,
+        place: String::new(),
     };
     let rows = vec![
         row(Some(Verdict::Fail), true, true),
@@ -734,6 +738,7 @@ fn an_approved_manual_test_keeps_its_criteria_to_try_more() {
         shots: Vec::new(),
         comment: false,
         planning: false,
+        place: String::new(),
     };
     let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Pass))];
     let ctx = RowCtx {
@@ -889,6 +894,7 @@ fn manual_test_back_at_verify_keeps_its_criteria_and_sandbox_to_try_more() {
         shots: Vec::new(),
         comment: false,
         planning: false,
+        place: String::new(),
     };
     let rows = vec![row(Some(Verdict::Pass)), row(Some(Verdict::Fail))];
     let ctx = RowCtx {

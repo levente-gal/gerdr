@@ -114,6 +114,9 @@ pub struct Row {
     /// The screenshots of a failure: by file name, and where they are once
     /// `ManualTest::criterion_rows` says (see `manual::SHOTS_DIR`).
     pub shots: Vec<std::path::PathBuf>,
+    /// Where on the app's page a comment was written, as its card says it
+    /// (`manual::Place::line`); empty for none.
+    pub place: String,
     /// It is a comment of the user's own: its text is what should change,
     /// passed means done.
     pub comment: bool,
@@ -241,6 +244,10 @@ fn rows(
                     .collect(),
                 comment: c.comment,
                 planning: false,
+                place: (c.comment)
+                    .then(|| manual::place_of(test, &c.id).map(manual::Place::line))
+                    .flatten()
+                    .unwrap_or_default(),
             }
         })
         .collect()
@@ -1467,18 +1474,19 @@ impl Gerdr {
     }
 
     /// Add a comment of the user's own saying `text` to feature `slug`'s
-    /// manual test: open, to go to Build with the failures. False when it
-    /// wasn't, as said, and the dialog keeps what was typed.
-    pub(crate) fn add_manual_comment(&mut self, project: &str, slug: &str, text: &str) -> bool {
+    /// manual test: open, to go to Build with the failures. Its id; none
+    /// when it wasn't, as said, and the dialog keeps what was typed.
+    pub(crate) fn add_manual_comment(
+        &mut self,
+        project: &str,
+        slug: &str,
+        text: &str,
+    ) -> Option<String> {
         if !self.comments_open_to(project, slug) {
-            return false;
+            return None;
         }
-        let Some(patch) = self.comment_patch(project, slug) else {
-            return false;
-        };
-        let Some(f) = self.feature_mut(project, slug) else {
-            return false;
-        };
+        let patch = self.comment_patch(project, slug)?;
+        let f = self.feature_mut(project, slug)?;
         let id = manual::add_comment(&mut f.manual, text.trim(), &patch, feature::now());
         self.comments_changed(project, slug);
         // It lands at the end of the sheet, selected, and shows on the strip.
@@ -1486,7 +1494,7 @@ impl Gerdr {
         self.show_success(format!(
             "Comment {id} added, to go to Build with the failures"
         ));
-        true
+        Some(id)
     }
 
     /// Ask what comment `id` of feature `slug`'s manual test, saying `text`,
@@ -1638,6 +1646,7 @@ mod tests {
             shots: Vec::new(),
             comment: false,
             planning: false,
+            place: String::new(),
         }
     }
 

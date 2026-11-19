@@ -1154,7 +1154,12 @@ pub(super) fn criterion_card(
         title: row.title.clone(),
         state,
         place: row.id.clone(),
-        body: criterion_earlier(row),
+        // Where on the app's page a comment was written, a line of its own.
+        body: [criterion_earlier(row), row.place.clone()]
+            .into_iter()
+            .filter(|l| !l.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
         sheet: Some(Box::new(chrome::SheetRow {
             open: row.open,
             steps: criterion_steps(row),

@@ -5932,7 +5932,8 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
 }
 
 /// Manual test's page with a comment of the user's own after the criteria,
-/// open and selected: Make fixes and Plan fixes over them, Add comment….
+/// open and selected, written on an area of the app's page: Make fixes and
+/// Plan fixes over them, Add comment….
 fn feature_tab_manual_comment() -> super::FeatureTabView {
     use super::{ButtonStyle, FindingCard, FindingTag, PageButton, PageSection};
     let mut view = feature_tab_manual_test(false);
@@ -5991,7 +5992,8 @@ fn feature_tab_manual_comment() -> super::FeatureTabView {
         title: "Make the settings page look better\u{2026}".into(),
         state: "open".into(),
         place: "C1".into(),
-        body: String::new(),
+        // Written on an area selected on the app's page.
+        body: "On /settings: SettingsTable and 2 more".into(),
         preview: Vec::new(),
         fix: String::new(),
         note: String::new(),
@@ -6694,7 +6696,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x0c7f88af5e3be46e, // tab_manual_select_860
         0x5fb5cff40a4f4b48, // tab_manual_rounds_1180
         0x22d2b561c56794c3, // tab_manual_rounds_860
-        0x8878c9eaa03e1d1f, // tab_manual_comment_860
+        0x2e537a1481a2c101, // tab_manual_comment_860
         0x6ed0e5a54cf691c4, // tab_manual_hand_back_1180
         0x9ce2adcf3f825afa, // tab_ship_live_1180
         0x3efb6ccd9ebee607, // tab_ship_live_860
@@ -6773,7 +6775,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x70dd2852ac3327a6, // tab_manual_select_860
         0x7d5d9c7a8cbbcf12, // tab_manual_rounds_1180
         0x21f27b2f6a465d5a, // tab_manual_rounds_860
-        0x03c55fb99c829980, // tab_manual_comment_860
+        0x1a9b6e679e8136e5, // tab_manual_comment_860
         0xc4db353623cc9ce3, // tab_manual_hand_back_1180
         0x2b0da19b5c531216, // tab_ship_live_1180
         0xfbe38a69b1b3bf5c, // tab_ship_live_860
@@ -6852,7 +6854,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xd6558fab28223313, // tab_manual_select_860
         0xb90d60f55bf1fdf2, // tab_manual_rounds_1180
         0x1055781397b52989, // tab_manual_rounds_860
-        0xc9cbfaa0469635d5, // tab_manual_comment_860
+        0x5f049233aade1f1b, // tab_manual_comment_860
         0x6dab8def82d1789b, // tab_manual_hand_back_1180
         0x275cb4321b786113, // tab_ship_live_1180
         0x11423d7ef57773c9, // tab_ship_live_860
@@ -6931,7 +6933,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xca950363fcc8c8c2, // tab_manual_select_860
         0xfee47052e632a9a3, // tab_manual_rounds_1180
         0x1e80bc2e4b42a162, // tab_manual_rounds_860
-        0x4d7929fffd5d36dd, // tab_manual_comment_860
+        0x6342468f89b236f2, // tab_manual_comment_860
         0x34dc7e5676e7483b, // tab_manual_hand_back_1180
         0xd33a721f5c98d9bc, // tab_ship_live_1180
         0x79e47be956ee531e, // tab_ship_live_860
@@ -7397,12 +7399,13 @@ fn finding_dialog(error: bool) -> super::FindingDialogView {
     }
 }
 
-const FINDINGS: [&str; 5] = [
+const FINDINGS: [&str; 6] = [
     "tab_findings_1180",
     "tab_findings_860",
     "finding_dialog",
     "finding_dialog_error",
     "comment_dialog_shot",
+    "comment_dialog_pick",
 ];
 
 /// The dialog adding a comment from the criteria strip, its screenshot
@@ -7423,8 +7426,27 @@ fn comment_dialog_shot() -> super::FindingDialogView {
     view
 }
 
+/// The dialog adding a comment on an area selected on the app's page: the
+/// line saying where under what it is for, no screenshot checkbox, and a
+/// draft to keep though nothing is typed.
+fn comment_dialog_pick() -> super::FindingDialogView {
+    let mut view = comment_dialog_shot();
+    view.about = format!(
+        "{}\nOn /orders: OrderTable and 2 more \u{b7} screenshot of the area",
+        view.about
+    );
+    view.fields[0].line = Line::default();
+    view.shot = None;
+    view.keys = vec![
+        ("Shift+Enter", "new line"),
+        (crate::text_field::DISCARD_KEY, "discard"),
+        ("Esc", "keep draft"),
+    ];
+    view
+}
+
 /// The recorded hashes of `FINDINGS`, per case in `CASES`.
-const GOLDEN_FINDINGS: [[u64; 5]; 4] = [
+const GOLDEN_FINDINGS: [[u64; 6]; 4] = [
     // Dark at 1
     [
         0x4e577012cc941f53, // tab_findings_1180
@@ -7432,6 +7454,7 @@ const GOLDEN_FINDINGS: [[u64; 5]; 4] = [
         0xbe15a6efe4a5304a, // finding_dialog
         0x395e21db12f14c4c, // finding_dialog_error
         0xcb453012fab3efe2, // comment_dialog_shot
+        0xa6b107131455e78c, // comment_dialog_pick
     ],
     // Dark at 2
     [
@@ -7440,6 +7463,7 @@ const GOLDEN_FINDINGS: [[u64; 5]; 4] = [
         0x2e982fd65dcbba89, // finding_dialog
         0x1c54a50260a223cf, // finding_dialog_error
         0x1059202c732e2641, // comment_dialog_shot
+        0xa4972c97e076b4a5, // comment_dialog_pick
     ],
     // Light at 1
     [
@@ -7448,6 +7472,7 @@ const GOLDEN_FINDINGS: [[u64; 5]; 4] = [
         0xc8efa4d7ca6d61b1, // finding_dialog
         0x3068a0f01a434524, // finding_dialog_error
         0xde5e615cb7b1ac85, // comment_dialog_shot
+        0xaa5015da2ad92fe1, // comment_dialog_pick
     ],
     // Light at 2
     [
@@ -7456,6 +7481,7 @@ const GOLDEN_FINDINGS: [[u64; 5]; 4] = [
         0xf28a5af0ae02e0c9, // finding_dialog
         0x00c403fa84109bce, // finding_dialog_error
         0xab7a001cb5710a1e, // comment_dialog_shot
+        0x4b1da9d3874cf2d4, // comment_dialog_pick
     ],
 ];
 
@@ -7477,7 +7503,8 @@ fn ai_reviews_findings_paint_the_same_pixels() {
             1 => tab(860),
             2 => dialog(false),
             3 => dialog(true),
-            _ => painter.finding_dialog(&comment_dialog_shot(), size, scale, theme.palette()),
+            4 => painter.finding_dialog(&comment_dialog_shot(), size, scale, theme.palette()),
+            _ => painter.finding_dialog(&comment_dialog_pick(), size, scale, theme.palette()),
         })
     });
 }
@@ -7509,14 +7536,18 @@ fn dump_findings() {
             painter.finding_dialog(&shown, size, scale, theme.palette()),
             px(panel.size.w + 2 * super::SHADOW),
         );
-        let shown = comment_dialog_shot();
-        let panel = super::finding_dialog_layout(&shown, size).panel;
-        dump(
-            &dir,
-            &format!("comment_dialog_shot_{tag}"),
-            painter.finding_dialog(&shown, size, scale, theme.palette()),
-            px(panel.size.w + 2 * super::SHADOW),
-        );
+        for (name, shown) in [
+            ("comment_dialog_shot", comment_dialog_shot()),
+            ("comment_dialog_pick", comment_dialog_pick()),
+        ] {
+            let panel = super::finding_dialog_layout(&shown, size).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.finding_dialog(&shown, size, scale, theme.palette()),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
     }
 }
 
@@ -9028,7 +9059,7 @@ const STRIP_PANE: (i32, i32) = (1000, 640);
 /// The criteria strip over a sandbox's app: its row, its steps shown with
 /// the pointer on Pass, a note being written with a screenshot and the
 /// keys, a failure being fixed with its note, folded to its chip, and a
-/// comment of the user's own with its five buttons.
+/// comment of the user's own with its six buttons.
 fn strip_views() -> [super::CriteriaStripView; 6] {
     use super::{ButtonStyle, CriteriaStripView, StripHit, StripTag};
     let plain = |label: &str| (label.to_owned(), ButtonStyle::Plain);
@@ -9098,6 +9129,7 @@ fn strip_views() -> [super::CriteriaStripView; 6] {
             plain("Done"),
             ("Not done".into(), ButtonStyle::Failed),
             quiet("Screenshot"),
+            quiet("Select on page"),
             quiet("Add comment\u{2026}"),
         ],
         ..row.clone()
@@ -9130,7 +9162,7 @@ const GOLDEN_STRIP: [[u64; 6]; 4] = [
         0x8d9c47e709b73456, // strip_note
         0x700e0bb6d80637b1, // strip_failed
         0xe134649e78702bbf, // strip_chip
-        0x7ca0160a3f8a91b8, // strip_comment
+        0xcacb2da23186924d, // strip_comment
     ],
     // Dark at 2
     [
@@ -9139,7 +9171,7 @@ const GOLDEN_STRIP: [[u64; 6]; 4] = [
         0x230f6338de5e7a64, // strip_note
         0xcffcd15866473ea7, // strip_failed
         0xb63f093b83828479, // strip_chip
-        0x1197f3cc963d1125, // strip_comment
+        0xbfa3f5bc89457b91, // strip_comment
     ],
     // Light at 1
     [
@@ -9148,7 +9180,7 @@ const GOLDEN_STRIP: [[u64; 6]; 4] = [
         0x11416ed6005c650d, // strip_note
         0x0fb808c18b78afa1, // strip_failed
         0x60faa77000796bed, // strip_chip
-        0x97e8721014730dbc, // strip_comment
+        0x4e76ffac82be4635, // strip_comment
     ],
     // Light at 2
     [
@@ -9157,7 +9189,7 @@ const GOLDEN_STRIP: [[u64; 6]; 4] = [
         0xe2fc5b41467fe76e, // strip_note
         0x261bbded9fe8c6f2, // strip_failed
         0x45481f7462f5972c, // strip_chip
-        0x5bb2fe0696722c40, // strip_comment
+        0x5da6827dd1a3f5c6, // strip_comment
     ],
 ];
 
