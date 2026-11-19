@@ -781,7 +781,7 @@ fn gate_file(stage: Stage) -> (&'static str, Option<&'static str>) {
 
 /// What gate `gate` says: its title, what to do next for the subtitle,
 /// and the file it is about.
-fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
+pub(crate) fn gate_words(gate: &Gate) -> (String, String, Option<&'static str>) {
     let title = &gate.title;
     match gate.kind {
         GateKind::Review => {

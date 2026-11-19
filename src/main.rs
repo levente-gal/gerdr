@@ -107,6 +107,7 @@ mod machines;
 mod machines_panel;
 mod manual_test;
 mod page_text;
+mod phone;
 mod pr_review;
 mod pr_post;
 mod pr_watch;
@@ -1194,6 +1195,7 @@ const USAGE: &str = "\
 usage: gerdr [--project <name>] [--attach] [--] [folder…]
   --project <name>  show this project (created if new)
   --attach          join a project even if another gerdr has it open
+  --phone [port]    serve the phone view on localhost (default 8390)
   -h, --help        show this help
   -V, --version     show the version
 
@@ -7166,6 +7168,12 @@ fn command_line() -> Option<Args> {
         if let Some(socket) = args.next() {
             web_control::run_host(Path::new(&socket));
         }
+        return None;
+    }
+    // The phone view, served on its own: no window, no compositor.
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some(phone::COMMAND) {
+        phone::run(args.next().as_deref());
         return None;
     }
     // Before anything starts: a mistyped option must not open a gerdr.
