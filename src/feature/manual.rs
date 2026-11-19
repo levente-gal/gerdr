@@ -100,31 +100,185 @@ pub struct Picked {
     pub styles: BTreeMap<String, String>,
 }
 
+/// The computed styles a picked element keeps, in the order its agent reads
+/// them.
+const STYLE_KEYS: [&str; 7] = [
+    "margin",
+    "padding",
+    "font",
+    "color",
+    "background",
+    "gap",
+    "radius",
+];
+
+/// The most elements a place keeps.
+const MAX_PICKED: usize = 12;
+
+/// `text` cut to at most `max` characters, with an ellipsis where cut.
+fn cap(text: String, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text;
+    }
+    let mut cut: String = text.chars().take(max - 1).collect();
+    cut.push('\u{2026}');
+    cut
+}
+
+/// A page's untrusted `text` as one line of at most `max` characters: HTML
+/// tags out (`tags`), control characters out and spaces run together.
+fn page_line(text: &str, tags: bool, max: usize) -> String {
+    let clean = match tags {
+        true => super::review_import::clean(text, false),
+        false => super::review_import::quoted(text),
+    };
+    cap(clean.split_whitespace().collect::<Vec<_>>().join(" "), max)
+}
+
+/// The source `file:line` a page gives as gerdr keeps it: a path, relative
+/// to `root` when under it.
+fn kept_source(source: &str, root: &std::path::Path) -> String {
+    let path = source.strip_prefix("file://").unwrap_or(source);
+    let path = path.strip_prefix("/@fs").unwrap_or(path);
+    let path = match std::path::Path::new(path).strip_prefix(root) {
+        Ok(rel) => rel.to_string_lossy().into_owned(),
+        Err(_) => path.to_owned(),
+    };
+    page_line(&path, false, 400)
+}
+
+impl Picked {
+    /// `self` as gerdr keeps it; `None` with no selector to find it by.
+    fn kept(self, root: &std::path::Path) -> Option<Picked> {
+        // Its tag and selector go in Markdown code spans.
+        let code = |s: &str, max| page_line(&s.replace('`', ""), false, max);
+        let selector = code(&self.selector, 300);
+        if selector.is_empty() {
+            return None;
+        }
+        let component = (self.component.iter())
+            .map(|c| page_line(c, false, 80))
+            .filter(|c| !c.is_empty())
+            .take(2)
+            .collect();
+        let styles = (self.styles.iter())
+            .filter(|(k, _)| STYLE_KEYS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), page_line(v, false, 120)))
+            .filter(|(_, v)| !v.is_empty())
+            .collect();
+        Some(Picked {
+            tag: code(&self.tag, 40).to_lowercase(),
+            selector,
+            text: page_line(&self.text, true, 200),
+            rect: self.rect,
+            component,
+            source: (self.source.as_deref())
+                .map(|s| kept_source(s, root))
+                .filter(|s| !s.is_empty()),
+            styles,
+        })
+    }
+
+    /// The line its agent reads of it: "`table` `main > table` “Order…” in
+    /// OrderTable › OrdersPage (src/OrderTable.tsx:42); padding 12px".
+    fn markdown(&self) -> String {
+        let mut md = format!("- `{}` `{}`", self.tag, self.selector);
+        if !self.text.is_empty() {
+            md.push_str(&format!(" \u{201c}{}\u{201d}", self.text));
+        }
+        if !self.component.is_empty() {
+            md.push_str(&format!(" in {}", self.component.join(" \u{203a} ")));
+        }
+        if let Some(source) = &self.source {
+            md.push_str(&format!(" ({source})"));
+        }
+        let styles: Vec<String> = (STYLE_KEYS.iter())
+            .filter_map(|k| Some(format!("{k} {}", self.styles.get(*k)?)))
+            .collect();
+        if !styles.is_empty() {
+            md.push_str(&format!("; {}", styles.join(", ")));
+        }
+        md
+    }
+}
+
 impl Place {
     /// `self` as gerdr keeps it: capped, its text cleaned, and its sources
     /// relative to `root`, the feature's folder, when under it.
     pub fn kept(self, root: &std::path::Path) -> Place {
-        let _ = root;
-        unimplemented!("wave 1 B")
+        Place {
+            url: page_line(&self.url, false, 2000),
+            rect: self.rect,
+            elements: (self.elements.into_iter())
+                .filter_map(|e| e.kept(root))
+                .take(MAX_PICKED)
+                .collect(),
+        }
     }
 
     /// What a comment's card says of it: "On /orders: OrderTable and 2 more".
     pub fn line(&self) -> String {
-        unimplemented!("wave 1 B")
+        let page = page_of(&self.url);
+        let Some(first) = self.elements.first() else {
+            return format!("On {page}");
+        };
+        let name = [
+            first.component.first(),
+            Some(&first.tag),
+            Some(&first.selector),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|s| !s.is_empty())
+        .map_or("", String::as_str);
+        match self.elements.len() - 1 {
+            0 => format!("On {page}: {name}"),
+            more => format!("On {page}: {name} and {more} more"),
+        }
+    }
+
+    /// What its agent reads of it, under the comment.
+    fn markdown(&self) -> String {
+        if self.elements.is_empty() {
+            return format!("\nSelected on {}.\n", self.url);
+        }
+        let lines: Vec<String> = self.elements.iter().map(Picked::markdown).collect();
+        format!("\nSelected on {}:\n\n{}\n", self.url, lines.join("\n"))
+    }
+}
+
+/// The page part of `url`: its path and query, no origin; its `#…` only
+/// when the path is just `/`, as a hash router keeps its page there.
+fn page_of(url: &str) -> &str {
+    let rest = match url.find("://") {
+        Some(at) => {
+            let after = &url[at + 3..];
+            after.find('/').map_or("", |slash| &after[slash..])
+        }
+        None => url,
+    };
+    let (before, hash) = rest.split_once('#').unwrap_or((rest, ""));
+    let path = before.split_once('?').map_or(before, |(p, _)| p);
+    match (path, hash.is_empty()) {
+        ("" | "/", false) => rest,
+        ("", true) => "/",
+        _ => before,
     }
 }
 
 /// Keep `place` on comment `id` of `test`; false when there is no such
 /// comment.
 pub fn set_place(test: &mut Option<ManualTest>, id: &str, place: Place) -> bool {
-    let _ = (test, id, place);
-    unimplemented!("wave 1 B")
+    let Some(c) = (test.iter_mut().flat_map(|t| &mut t.comments)).find(|c| c.id == id) else {
+        return false;
+    };
+    c.place = Some(place);
+    true
 }
 
 /// The area comment `id` of `test` was written on, if it was on one.
 pub fn place_of<'a>(test: Option<&'a ManualTest>, id: &str) -> Option<&'a Place> {
-    let _ = (test, id);
-    unimplemented!("wave 1 B")
+    (test?.comments.iter()).find(|c| c.id == id)?.place.as_ref()
 }
 
 /// The most words of a comment its title shows.
@@ -783,9 +937,16 @@ pub fn failures_markdown(
         if !k.note.is_empty() {
             md.push_str(&format!("\n{}\n", k.note));
         }
+        md.push_str(&place_markdown(test, &c.id));
         md.push_str(&shots_markdown(k));
     }
     (all.len(), md)
+}
+
+/// The area of the page comment `id` was written on, for its agent: none
+/// when it wasn't on one.
+fn place_markdown(test: Option<&ManualTest>, id: &str) -> String {
+    place_of(test, id).map(Place::markdown).unwrap_or_default()
 }
 
 /// Where the screenshots of `k` are, for its agent.
@@ -820,6 +981,10 @@ pub fn fixes_plan(test: Option<&ManualTest>, criteria: &[Criterion], title: &str
             false => md.push_str(&format!("\nWhat went wrong: {}\n", flat(&k.note))),
             true if !k.note.is_empty() => md.push_str(&format!("\n{}\n", flat(&k.note))),
             true => {}
+        }
+        let place = place_markdown(test, &c.id);
+        if !place.is_empty() {
+            md.push_str(&format!("{}\n", flat(&place)));
         }
         md.push_str(&shots_markdown(k));
     }
@@ -1121,7 +1286,11 @@ mod tests {
         // Its fix made, it waits to be tried again; failed again, even with
         // the same note, it is a new failure to send.
         mark_sent(&mut t, &all);
-        t.as_mut().unwrap().checks.iter_mut().for_each(|k| k.made = k.sent);
+        t.as_mut()
+            .unwrap()
+            .checks
+            .iter_mut()
+            .for_each(|k| k.made = k.sent);
         let n = counts(t.as_ref(), &all);
         assert_eq!((n.failed, n.sent, n.made), (1, 1, 1));
         assert!(check(t.as_ref(), &a).unwrap().fix_made());
@@ -1138,7 +1307,11 @@ mod tests {
         // Nothing failed: nothing to put them on.
         assert!(!add_shots(&mut t, &a, &["AC-1-1.png".into()]));
         set(&mut t, &a, "p", Verdict::Fail, "nothing happens", 1);
-        assert!(add_shots(&mut t, &a, &["AC-1-1.png".into(), "AC-1-1.png".into()]));
+        assert!(add_shots(
+            &mut t,
+            &a,
+            &["AC-1-1.png".into(), "AC-1-1.png".into()]
+        ));
         assert_eq!(check(t.as_ref(), &a).unwrap().shots, ["AC-1-1.png"]);
         // Its note edited, they stay; passed, they go with the failure.
         set(&mut t, &a, "p", Verdict::Fail, "it crashes", 2);
@@ -1150,7 +1323,10 @@ mod tests {
         assert!(!drop_shot(&mut t, "AC-1", "AC-1-2.png"));
         assert_eq!(check(t.as_ref(), &a).unwrap().shots, ["AC-1-1.png"]);
         let (_, md) = failures_markdown(t.as_ref(), &all, "Bulk");
-        assert!(md.contains("Screenshot: feature-docs/manual/AC-1-1.png"), "{md}");
+        assert!(
+            md.contains("Screenshot: feature-docs/manual/AC-1-1.png"),
+            "{md}"
+        );
         set(&mut t, &a, "p", Verdict::Pass, "", 3);
         assert!(check(t.as_ref(), &a).unwrap().shots.is_empty());
         assert_eq!(shot_name("AC-1", &[]), "AC-1-1.png");
@@ -1199,9 +1375,165 @@ mod tests {
         assert_eq!((tried_on(&test, k), k.made), ("p", false));
         // A new result elsewhere keeps the patch it had.
         let mut t = Some(test);
-        set(&mut t, &crit(2, "Given d, when e, then f."), "q", Verdict::Pass, "", 2);
+        set(
+            &mut t,
+            &crit(2, "Given d, when e, then f."),
+            "q",
+            Verdict::Pass,
+            "",
+            2,
+        );
         let test = t.as_ref().unwrap();
         assert_eq!(tried_on(test, check(t.as_ref(), &a).unwrap()), "p");
+    }
+
+    fn picked(tag: &str, selector: &str) -> Picked {
+        Picked {
+            tag: tag.into(),
+            selector: selector.into(),
+            ..Default::default()
+        }
+    }
+
+    fn place(url: &str, elements: Vec<Picked>) -> Place {
+        Place {
+            url: url.into(),
+            elements,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_place_from_the_page_is_capped_and_cleaned() {
+        let root = std::path::Path::new("/p/.features/redesign");
+        let mut table = picked("TABLE", "main > div.orders > `table`");
+        table.text = format!("Order\n  Date <b>Status</b>\t{}", "x".repeat(300));
+        table.component = ["OrderTable", "", "OrdersPage", "App"]
+            .map(String::from)
+            .into();
+        table.source = Some("file:///p/.features/redesign/app/src/OrderTable.tsx:42".into());
+        table.styles = [("padding", "12px\n16px"), ("onclick", "alert(1)")]
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .into();
+        let mut elements = vec![table, picked("div", " \n ")];
+        elements.extend((0..13).map(|n| picked("li", &format!("li:nth-of-type({n})"))));
+        let mut p = place("http://localhost:4200/orders", elements);
+        p.url.push_str(&"a".repeat(3000));
+        let kept = p.kept(root);
+        assert_eq!(kept.url.chars().count(), 2000);
+        assert!(kept.url.ends_with('\u{2026}'));
+        // The empty selector goes, and twelve stay.
+        assert_eq!(kept.elements.len(), 12);
+        assert_eq!(kept.elements[1].selector, "li:nth-of-type(0)");
+        let t = &kept.elements[0];
+        assert_eq!(
+            (t.tag.as_str(), t.selector.as_str()),
+            ("table", "main > div.orders > table")
+        );
+        assert!(t.text.starts_with("Order Date Status x"), "{}", t.text);
+        assert_eq!(t.text.chars().count(), 200);
+        assert!(t.text.ends_with('\u{2026}'));
+        assert_eq!(t.component, ["OrderTable", "OrdersPage"]);
+        assert_eq!(t.source.as_deref(), Some("app/src/OrderTable.tsx:42"));
+        assert_eq!(t.styles.len(), 1);
+        assert_eq!(t.styles["padding"], "12px 16px");
+        // Vite's /@fs goes; a source outside the feature stays as it is.
+        let mut vite = picked("a", "a");
+        vite.source = Some("/@fs/p/.features/redesign/src/A.tsx:3".into());
+        let mut lib = picked("b", "b");
+        lib.source = Some("/usr/lib/node_modules/x/B.js:9".into());
+        let kept = place("/", vec![vite, lib]).kept(root);
+        assert_eq!(kept.elements[0].source.as_deref(), Some("src/A.tsx:3"));
+        assert_eq!(
+            kept.elements[1].source.as_deref(),
+            Some("/usr/lib/node_modules/x/B.js:9")
+        );
+    }
+
+    #[test]
+    fn a_places_line_names_its_page_and_first_element() {
+        let mut table = picked("table", "main > table");
+        table.component = vec!["OrderTable".into(), "OrdersPage".into()];
+        let url = "http://localhost:4200/orders";
+        assert_eq!(
+            place(url, vec![table.clone()]).line(),
+            "On /orders: OrderTable"
+        );
+        assert_eq!(
+            place(url, vec![picked("div", "div")]).line(),
+            "On /orders: div"
+        );
+        let three = vec![table, picked("p", "p"), picked("a", "a")];
+        assert_eq!(
+            place(url, three).line(),
+            "On /orders: OrderTable and 2 more"
+        );
+        assert_eq!(place(url, vec![]).line(), "On /orders");
+        let on = |url: &str| place(url, vec![]).line();
+        assert_eq!(on("http://h/orders?tab=2#top"), "On /orders?tab=2");
+        assert_eq!(on("http://h/#/orders/7"), "On /#/orders/7");
+        assert_eq!(on("http://h"), "On /");
+        assert_eq!(on("http://h/"), "On /");
+    }
+
+    #[test]
+    fn a_comments_place_goes_to_build_with_it() {
+        let mut t = None;
+        add_comment(&mut t, "Too much space here", "p", 1);
+        assert!(!set_place(&mut t, "T9", Place::default()));
+        let mut table = picked("table", "main > div.orders > table");
+        table.text = "Order Date Status\u{2026}".into();
+        table.component = vec!["OrderTable".into(), "OrdersPage".into()];
+        table.source = Some("apps/ao-app/src/orders/OrderTable.tsx:42".into());
+        table.styles = [
+            ("padding", "12px 16px"),
+            ("font", "600 14px Inter"),
+            ("gap", "8px"),
+        ]
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .into();
+        let url = "http://localhost:4200/orders";
+        let p = place(url, vec![table, picked("div", "# div.x")]);
+        assert!(set_place(&mut t, "T1", p.clone()));
+        assert_eq!(place_of(t.as_ref(), "T1"), Some(&p));
+        assert_eq!(place_of(t.as_ref(), "T2"), None);
+        let criteria = comment_criteria(t.as_ref());
+        let want = "Too much space here\n\nSelected on http://localhost:4200/orders:\n\n- `table` `main > div.orders > table` \u{201c}Order Date Status\u{2026}\u{201d} in OrderTable \u{203a} OrdersPage (apps/ao-app/src/orders/OrderTable.tsx:42); padding 12px 16px, font 600 14px Inter, gap 8px\n- `div` `# div.x`\n";
+        let (_, md) = failures_markdown(t.as_ref(), &criteria, "Bulk");
+        assert!(md.ends_with(want), "{md}");
+        let plan = fixes_plan(t.as_ref(), &criteria, "Bulk");
+        assert!(plan.ends_with(want), "{plan}");
+        assert_eq!(super::super::fix_round::items(&plan, &[]).len(), 1);
+        // With nothing of React, nor any text or style, those parts are left out.
+        assert!(set_place(
+            &mut t,
+            "T1",
+            place(url, vec![picked("p", "main > p")])
+        ));
+        let (_, md) = failures_markdown(t.as_ref(), &criteria, "Bulk");
+        assert!(
+            md.ends_with("Selected on http://localhost:4200/orders:\n\n- `p` `main > p`\n"),
+            "{md}"
+        );
+        // An edit keeps it; deleted and put back, it comes back.
+        edit_comment(&mut t, "T1", "Less space here", "p", 2);
+        let before = place_of(t.as_ref(), "T1").cloned();
+        assert!(before.is_some());
+        let removed = delete_comment(&mut t, "T1").unwrap();
+        assert!(restore_comment(&mut t, removed));
+        assert_eq!(place_of(t.as_ref(), "T1").cloned(), before);
+    }
+
+    #[test]
+    fn a_comment_without_a_place_loads_and_writes_none() {
+        let json = r#"{"patch":"p","comments":[{"id":"T1","text":"x","at":1}],"comments_given":1}"#;
+        let test: ManualTest = serde_json::from_str(json).unwrap();
+        assert_eq!(test.comments[0].place, None);
+        assert!(!serde_json::to_string(&test).unwrap().contains("place"));
+        let mut t = Some(test);
+        set_place(&mut t, "T1", place("http://h/", vec![picked("a", "a")]));
+        let back: ManualTest = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(Some(back), t);
     }
 
     #[test]
