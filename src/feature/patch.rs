@@ -122,6 +122,16 @@ pub(super) fn diff_id(dir: &std::path::Path, from: &str, to: &str) -> Result<Str
         .to_owned())
 }
 
+/// The patch-id of `repo`'s own change as it stood at commit `at`, against
+/// where `at` left its base (empty when it changes nothing): a base taken in
+/// since, by a merge or a rebase, leaves it as it was.
+pub fn own_id(repo: &Repo, at: &str) -> Result<String, String> {
+    let name = repo.key();
+    let mb = git(&repo.worktree, &["merge-base", &base_ref(repo), at])
+        .map_err(|err| format!("{name}: couldn't find where it left {}: {err}", repo.base))?;
+    diff_id(&repo.worktree, mb.trim(), at).map_err(|err| format!("{name}: {err}"))
+}
+
 /// The patch-id of `repo`'s committed change against its base (empty when
 /// it changes nothing), its commits not in the base, and where it left the
 /// base.
@@ -297,6 +307,30 @@ mod tests {
         assert_ne!(two.patch, one.patch);
         assert_eq!(two.commits["api"], 2);
         assert_eq!(two.dirty, ["web"]);
+    }
+
+    #[test]
+    fn a_base_taken_in_leaves_the_own_change_and_a_review_has_nothing_new() {
+        use crate::feature::review_import::since_review;
+        let t = Temp::new();
+        let f = feature_over(&t, &["api"], &[]);
+        let api = wt(&f, "api");
+        commit(&api, "login", "log in");
+        let head = |dir: &std::path::Path| run(dir, &["rev-parse", "HEAD"]).trim().to_owned();
+        let reviewed: BTreeMap<String, String> = [("api".to_owned(), head(&api))].into();
+        let own = own_id(&f.repos[0], &head(&api)).unwrap();
+        // The base moves on and is merged in: the own change is the same.
+        commit(&f.repos[0].main, "other", "elsewhere");
+        run(&api, &["merge", "-q", "--no-edit", "main"]);
+        assert_eq!(own_id(&f.repos[0], &head(&api)).unwrap(), own);
+        let since = since_review(&f, &reviewed).unwrap();
+        assert!(since.base_only(), "{since:?}");
+        assert_eq!(since.moved, 1);
+        // A change of its own after that is the reviewer's again.
+        commit(&api, "logout", "log out");
+        let since = since_review(&f, &reviewed).unwrap();
+        assert!(!since.base_only(), "{since:?}");
+        assert!(since.files.contains(&"logout".to_owned()), "{since:?}");
     }
 
     #[test]

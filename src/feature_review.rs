@@ -76,9 +76,12 @@ pub(crate) fn review_vars(
             let whole = format!("git diff {from}...HEAD");
             let at = repo.worktree.display();
             let key = repo.key();
+            // Since the last review, only in the feature's own files: what
+            // its base brought in, by a merge, isn't its change.
+            let own = format!("$(git diff --name-only {from}...HEAD)");
             match review.and_then(|r| r.reviewed.get(&key)) {
                 Some(sha) => format!(
-                    "   - {key}, in {at}: `git diff {sha}..HEAD` (what changed since the last review; `{whole}` shows the whole change)"
+                    "   - {key}, in {at}: `git diff {sha}..HEAD -- {own}` (what changed since the last review in the feature's own files; `{whole}` shows the whole change)"
                 ),
                 None => format!("   - {key}, in {at}: `{whole}`"),
             }
@@ -226,6 +229,8 @@ impl Gerdr {
     /// Whether AI review of feature `slug` may go without its agent, so what
     /// changed since the last review is read first (`review_scope`): a
     /// later review, with no finding left to check. The HEADs it read.
+    /// A pull request's too: what only its base brought in is never the
+    /// author's to review.
     pub(crate) fn review_may_skip(
         &self,
         project: &str,
@@ -234,8 +239,7 @@ impl Gerdr {
         let feature = self.feature(project, slug)?;
         let review = feature.review.as_ref()?;
         let waits = review.findings.iter().any(|f| f.state.holds_up());
-        (feature.pull().is_none() && !waits && !review.reviewed.is_empty())
-            .then(|| review.reviewed.clone())
+        (!waits && !review.reviewed.is_empty()).then(|| review.reviewed.clone())
     }
 
     /// Read off the thread what changed in feature `slug` (`title`) since
@@ -263,8 +267,10 @@ impl Gerdr {
     }
 
     /// What changed in feature `slug` since its last review was read: only
-    /// tests, and AI review passes on that code with no agent, said in the
-    /// log and a toast; else, or if it couldn't be read, its agent starts.
+    /// its base (on a pull request too) or only tests (not on one, as the
+    /// author's tests are theirs to review), and AI review passes on that
+    /// code with no agent, said in the log and a toast; else, or if it
+    /// couldn't be read, its agent starts.
     pub(crate) fn review_scope(
         &mut self,
         project: &str,
@@ -282,8 +288,18 @@ impl Gerdr {
         if !still || self.review_may_skip(project, slug).is_none() {
             return;
         }
-        let since = match result {
-            Ok(since) if since.tests_only() => since,
+        let pull = self.feature(project, slug).is_some_and(|f| f.pull().is_some());
+        let (since, why, reopen) = match result {
+            Ok(since) if since.base_only() => (
+                since,
+                "only its base came in since the last review".to_owned(),
+                "Reopen it to review anyway",
+            ),
+            Ok(since) if !pull && since.tests_only() => {
+                let files = plural(since.files.len(), "test file");
+                let why = format!("only {files} changed since the last review");
+                (since, why, "Reopen it to have them reviewed")
+            }
             Ok(_) => return self.launch_reviewer(project, slug, title),
             Err(why) => {
                 tracing::warn!(
@@ -299,20 +315,16 @@ impl Gerdr {
         let Some(patch) = (f.marks.get(&Stage::Verify)).and_then(|m| m.patch.clone()) else {
             return self.launch_reviewer(project, slug, title);
         };
-        let files = plural(since.files.len(), "test file");
         if let Some(review) = f.review.as_mut() {
             review.reviewed = since.heads;
             review.patch = Some(patch.clone());
         }
-        f.log(
-            now,
-            format!("AI review skipped: only {files} changed since the last review"),
-        );
+        f.log(now, format!("AI review skipped: {why}"));
         f.tick(now, "gerdr", Some(&patch));
         self.save_feature(project, slug);
         self.feature_cursor_to_current_of(project, slug);
         self.show_success(format!(
-            "AI review of \u{201c}{title}\u{201d} skipped: only {files} changed since the last review; Reopen it to have them reviewed"
+            "AI review of \u{201c}{title}\u{201d} skipped: {why}; {reopen}"
         ));
     }
 
@@ -1311,7 +1323,9 @@ mod tests {
         let v: prompts::render::Vars = review_vars(&reviewed(), None).into_iter().collect();
         assert_eq!(v["review.again"], "yes");
         assert!(
-            v["review.diffs"].contains("api, in /work/.features/bulk/api: `git diff f00d..HEAD`")
+            v["review.diffs"].contains(
+                "api, in /work/.features/bulk/api: `git diff f00d..HEAD -- $(git diff --name-only abc123...HEAD)`"
+            )
         );
         assert!(v["review.diffs"].contains("`git diff abc123...HEAD` shows the whole change"));
         assert!(
@@ -1368,7 +1382,7 @@ mod tests {
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .into();
         let v: prompts::render::Vars = review_vars(&f, Some(&heads)).into_iter().collect();
-        assert!(v["review.diffs"].contains("`git diff f00d..HEAD`"));
+        assert!(v["review.diffs"].contains("`git diff f00d..HEAD -- "));
         assert_eq!(v["review.unchanged"], "");
         // Nothing moved at all: all of it is read as before.
         let mut one = feature("a", vec![repo("api", true)], 5);

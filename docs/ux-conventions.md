@@ -205,10 +205,13 @@ and Ctrl+C or `y` copies what it says.
   the AI review page comes to the front of the feature's workspace; another
   workspace keeps the screen. Discover's agent is the exception: its first
   message is a question, so Start agent shows its tab, ready to answer in.
-- A later AI review reads only what changed since the last one, and leaves
-  out the repositories that didn't change. When that is test files only and
-  no finding waits to be checked, AI review passes on it with no agent, and
-  the log and a toast say so; Reopen on its page has them reviewed.
+- A later AI review reads only what changed since the last one, in the
+  feature's own files, and leaves out the repositories that didn't change.
+  When no finding waits to be checked and only the base came in (the
+  feature's own change is the same patch, after a merge or a rebase, on a
+  pull request too) or, not on a pull request, only test files changed, AI
+  review passes on it with no agent, and the log and a toast say so; Reopen
+  on its page has it reviewed.
 - A stage agent's tab is named after its agent and stage ("claude · Plan"),
   and its sidebar row goes by its tab's name. Approving a stage closes the
   tabs of its files (its drafts' changes, Plan review's suggestions), and a

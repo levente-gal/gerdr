@@ -1038,9 +1038,19 @@ pub struct SinceReview {
     pub files: Vec<String>,
     /// A touched repository the last review didn't read: all of it is new.
     pub unreviewed: bool,
+    /// How many touched repositories moved since: only those whose own
+    /// change moved too have their files in `files`.
+    pub moved: usize,
 }
 
 impl SinceReview {
+    /// Whether the feature's own change is as the last review read it, in
+    /// every repository that moved: only its base came in, by a merge or a
+    /// rebase. Nothing for the reviewer to read.
+    pub fn base_only(&self) -> bool {
+        !self.unreviewed && self.moved > 0 && self.files.is_empty()
+    }
+
     /// Whether only tests changed: nothing for the reviewer to read.
     pub fn tests_only(&self) -> bool {
         !self.unreviewed && !self.files.is_empty() && self.files.iter().all(|f| is_test_file(f))
@@ -1048,8 +1058,9 @@ impl SinceReview {
 }
 
 /// What changed in `feature`'s touched repositories since `reviewed`, the
-/// HEADs its last review read. Runs git: call it off the UI thread
-/// (checklist D3).
+/// HEADs its last review read: of a repository whose own change is the same
+/// patch as then (its base came in, nothing else), none. Runs git: call it
+/// off the UI thread (checklist D3).
 pub fn since_review(
     feature: &Feature,
     reviewed: &BTreeMap<String, String>,
@@ -1063,6 +1074,16 @@ pub fn since_review(
         match reviewed.get(&name) {
             Some(from) if *from == head => {}
             Some(from) => {
+                out.moved += 1;
+                // One that can't be read is taken as moved: the reviewer reads it.
+                let same = matches!(
+                    (patch::own_id(repo, from), patch::own_id(repo, &head)),
+                    (Ok(then), Ok(now)) if then == now
+                );
+                if same {
+                    out.heads.insert(name, head);
+                    continue;
+                }
                 let files = git(&repo.worktree, &["diff", "--name-only", from, &head])
                     .map_err(|err| format!("{name}: couldn't read what changed: {err}"))?;
                 out.files.extend(files.lines().map(str::to_owned));
