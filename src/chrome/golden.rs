@@ -9060,7 +9060,7 @@ const STRIP_PANE: (i32, i32) = (1000, 640);
 /// the pointer on Pass, a note being written with a screenshot and the
 /// keys, a failure being fixed with its note, folded to its chip, and a
 /// comment of the user's own with its six buttons.
-fn strip_views() -> [super::CriteriaStripView; 6] {
+fn strip_views() -> [super::CriteriaStripView; 7] {
     use super::{ButtonStyle, CriteriaStripView, StripHit, StripTag};
     let plain = |label: &str| (label.to_owned(), ButtonStyle::Plain);
     let row = CriteriaStripView {
@@ -9134,16 +9134,22 @@ fn strip_views() -> [super::CriteriaStripView; 6] {
         ],
         ..row.clone()
     };
-    [row, open, writing, failed, chip, comment]
+    // On a narrow pane its buttons wrap onto a second row.
+    let narrow = CriteriaStripView {
+        pane: Rect::new((0, 0).into(), (640, STRIP_PANE.1).into()),
+        ..comment.clone()
+    };
+    [row, open, writing, failed, chip, comment, narrow]
 }
 
-const STRIP: [&str; 6] = [
+const STRIP: [&str; 7] = [
     "strip_row",
     "strip_open",
     "strip_note",
     "strip_failed",
     "strip_chip",
     "strip_comment",
+    "strip_comment_narrow",
 ];
 
 fn paint_strip(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
@@ -9154,7 +9160,7 @@ fn paint_strip(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `STRIP`, per case in `CASES`.
-const GOLDEN_STRIP: [[u64; 6]; 4] = [
+const GOLDEN_STRIP: [[u64; 7]; 4] = [
     // Dark at 1
     [
         0xdb41b4b7e4823d78, // strip_row
@@ -9163,6 +9169,7 @@ const GOLDEN_STRIP: [[u64; 6]; 4] = [
         0x700e0bb6d80637b1, // strip_failed
         0xe134649e78702bbf, // strip_chip
         0x1d17c7e2151bd9d2, // strip_comment
+        0xe92beb18ee61b97b, // strip_comment_narrow
     ],
     // Dark at 2
     [
@@ -9172,6 +9179,7 @@ const GOLDEN_STRIP: [[u64; 6]; 4] = [
         0xcffcd15866473ea7, // strip_failed
         0xb63f093b83828479, // strip_chip
         0x24945d5d11b5cc90, // strip_comment
+        0x135a74bf50297302, // strip_comment_narrow
     ],
     // Light at 1
     [
@@ -9181,6 +9189,7 @@ const GOLDEN_STRIP: [[u64; 6]; 4] = [
         0x0fb808c18b78afa1, // strip_failed
         0x60faa77000796bed, // strip_chip
         0x1d6672d9deb1e032, // strip_comment
+        0xc824ce8314863599, // strip_comment_narrow
     ],
     // Light at 2
     [
@@ -9190,6 +9199,7 @@ const GOLDEN_STRIP: [[u64; 6]; 4] = [
         0x261bbded9fe8c6f2, // strip_failed
         0x45481f7462f5972c, // strip_chip
         0x5ebe2fdc75a29acb, // strip_comment
+        0xbe49c9b786d8a01d, // strip_comment_narrow
     ],
 ];
 

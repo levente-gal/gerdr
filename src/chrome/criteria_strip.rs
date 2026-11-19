@@ -187,23 +187,45 @@ fn wrapped(text: &str, room: f32, size: f32, most: usize) -> Vec<String> {
     lines
 }
 
-/// The width the strip's row needs at least: its buttons, and room for the
-/// criterion's id.
+/// The room the bottom row of a strip `w` wide has for the criterion's
+/// buttons and its title: past ‹ › at its left, Page and the fold button at
+/// its right.
+fn row_room(w: i32) -> i32 {
+    w - 2 * INSET
+        - (2 * (ROW_BUTTON + 2) + GROUP_GAP)
+        - (GROUP_GAP + button_width("Page") + GAP + ROW_BUTTON)
+}
+
+/// The criterion's buttons of a strip `w` wide by the rows they go on, the
+/// bottom one first: as many of the last as fit on it, the rest on rows above
+/// it, so they read in order from the top. Each row holds one at least.
+fn button_rows(view: &CriteriaStripView, w: i32) -> Vec<Vec<usize>> {
+    let mut rows = Vec::new();
+    let mut row: Vec<usize> = Vec::new();
+    let (mut room, mut used) = (row_room(w), 0);
+    for (i, (label, _)) in view.buttons.iter().enumerate().rev() {
+        let bw = button_width(label);
+        if !row.is_empty() && used + bw > room {
+            rows.push(std::mem::take(&mut row));
+            (room, used) = (w - 2 * INSET, 0);
+        }
+        row.push(i);
+        used += bw + GAP;
+    }
+    if !row.is_empty() {
+        rows.push(row);
+    }
+    rows
+}
+
+/// The width the strip needs at least: its bottom row with the widest of the
+/// criterion's buttons, as the others wrap onto rows above it.
 fn least_width(view: &CriteriaStripView) -> i32 {
-    let buttons: i32 = (view.buttons.iter())
-        .map(|(label, _)| button_width(label) + GAP)
-        .sum();
-    let place = width(&view.place, SMALL_FONT_SIZE).ceil() as i32 + DOT_ROOM;
-    2 * INSET
-        + 2 * (ROW_BUTTON + 2)
-        + GROUP_GAP
-        + place
-        + GROUP_GAP
-        + buttons
-        + GROUP_GAP
-        + button_width("Page")
-        + GAP
-        + ROW_BUTTON
+    let widest = (view.buttons.iter())
+        .map(|(label, _)| button_width(label))
+        .max()
+        .unwrap_or(0);
+    widest - row_room(0)
 }
 
 /// The chip the strip folds to, at the bottom right of `pane`.
@@ -222,7 +244,7 @@ fn chip_rect(view: &CriteriaStripView) -> Rect {
 }
 
 /// Whether the strip shows folded: as asked, or as its pane is too narrow
-/// for its row.
+/// for its row with even one of the criterion's buttons (the rest wrap).
 pub fn strip_folded(view: &CriteriaStripView) -> bool {
     view.folded || view.pane.size.w - 2 * MARGIN < least_width(view)
 }
@@ -241,8 +263,17 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     }
     let w = (pane.size.w - 2 * MARGIN).min(MAX_WIDTH);
     let inner = w - 2 * INSET;
-    // The title's own line over the row, when the row leaves it too little.
-    let title_h = match w - least_width(view) < TITLE_MIN {
+    let rows = button_rows(view, w);
+    // The rows of buttons over the bottom one.
+    let above = rows.len().saturating_sub(1) as i32 * ROW;
+    // The title's own line over the rows, when the bottom one leaves it too
+    // little beside the criterion's id, or the buttons wrap.
+    let place = width(&view.place, SMALL_FONT_SIZE).ceil() as i32 + DOT_ROOM;
+    let bottom_used: i32 = (rows.first().into_iter().flatten())
+        .map(|&i| button_width(&view.buttons[i].0) + GAP)
+        .sum();
+    let in_row = row_room(w) - bottom_used - GROUP_GAP + GAP;
+    let title_h = match above > 0 || in_row - place < TITLE_MIN {
         true => ROW,
         false => 0,
     };
@@ -271,7 +302,7 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
         0 => 0,
         h => h + INSET,
     };
-    let h = ROW + title_h + top_room;
+    let h = ROW + above + title_h + top_room;
     // Never taller than the pane: the steps go before the row does.
     let h = h.min(pane.size.h - 2 * MARGIN).max(ROW);
     let panel = Rectangle::new(
@@ -284,8 +315,8 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     );
     let (x0, mut y) = (panel.loc.x + INSET, panel.loc.y + INSET);
     let bottom_row = panel.loc.y + h - ROW;
-    // Where what is over the row ends: at the title's line, when it has one.
-    let over_row = bottom_row - title_h;
+    // Where what is over the rows ends: at the title's line, when it has one.
+    let over_row = bottom_row - above - title_h;
     let mut lines = Vec::new();
     for (text, dim) in texts {
         if y + LINE > over_row - field_h {
@@ -334,7 +365,8 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
         field = Some(f);
     }
     // The row: ‹ › at the left, the fold button and Page at the right, the
-    // criterion's buttons before them, the title in what is left.
+    // criterion's buttons before them (those that don't fit on rows above),
+    // the title in what is left.
     let cy = bottom_row + (ROW - ROW_BUTTON) / 2;
     let square = |x: i32| Rectangle::new((x, cy).into(), (ROW_BUTTON, ROW_BUTTON).into());
     let prev = square(x0);
@@ -352,13 +384,26 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     hits.push((StripHit::Page, page));
     right = page.loc.x - GROUP_GAP;
     let mut buttons = Vec::new();
-    for (i, (label, _)) in view.buttons.iter().enumerate().rev() {
-        let bw = button_width(label);
-        let rect = Rectangle::new((right - bw, cy).into(), (bw, ROW_BUTTON).into());
-        buttons.push((StripHit::Button(i), rect));
-        right = rect.loc.x - GAP;
+    for (k, row) in rows.iter().enumerate() {
+        let y = cy - k as i32 * ROW;
+        let mut end = match k {
+            0 => right,
+            _ => panel.loc.x + w - INSET,
+        };
+        for &i in row {
+            let bw = button_width(&view.buttons[i].0);
+            let rect = Rectangle::new((end - bw, y).into(), (bw, ROW_BUTTON).into());
+            buttons.push((StripHit::Button(i), rect));
+            end = rect.loc.x - GAP;
+        }
+        if k == 0 {
+            right = end;
+        }
     }
-    buttons.reverse();
+    buttons.sort_by_key(|(hit, _)| match hit {
+        StripHit::Button(i) => *i,
+        _ => 0,
+    });
     hits.extend(buttons);
     let tx = next.loc.x + ROW_BUTTON + GROUP_GAP;
     let title = match title_h {
@@ -662,8 +707,7 @@ mod tests {
             "Select on page",
             "Add comment\u{2026}",
         ];
-        // Narrower than its buttons, the strip folds to its chip instead.
-        for pane_w in [1400, 1000] {
+        for pane_w in [1400, 1000, 800, 600] {
             let criterion = criteria_strip_layout(&view(pane_w));
             let mut v = view(pane_w);
             v.buttons = labels.map(|l| (l.to_owned(), ButtonStyle::Plain)).into();
@@ -678,7 +722,21 @@ mod tests {
             for (_, r) in &comment.hits {
                 assert!(comment.panel.contains_rect(*r), "{pane_w}: {r:?}");
             }
+            // The buttons never overlap, and read in order from the top.
+            let all: Vec<_> = (0..labels.len())
+                .map(|i| comment.rect_of(StripHit::Button(i)).unwrap())
+                .collect();
+            for (k, a) in all.iter().enumerate() {
+                for b in &all[k + 1..] {
+                    assert!(!a.overlaps(*b), "{pane_w}: {a:?} {b:?}");
+                    assert!(a.loc.y < b.loc.y || (a.loc.y == b.loc.y && a.loc.x < b.loc.x));
+                }
+            }
         }
+        // Too narrow for even one of them, it folds to its chip.
+        let mut v = view(200);
+        v.buttons = labels.map(|l| (l.to_owned(), ButtonStyle::Plain)).into();
+        assert!(strip_folded(&v));
         // A criterion's two buttons leave it beside them.
         let row = criteria_strip_layout(&view(1000));
         assert_eq!(row.panel.size.h, ROW);
@@ -767,7 +825,9 @@ mod tests {
             layout.panel.loc.x + layout.panel.size.w,
             pane.loc.x + pane.size.w - MARGIN
         );
-        let narrow = view(360);
+        // Its buttons wrap before it folds: at 360 it still shows.
+        assert!(!strip_folded(&view(360)));
+        let narrow = view(200);
         assert!(strip_folded(&narrow));
         assert_eq!(criteria_strip_layout(&narrow).hits[0].0, StripHit::Chip);
     }
