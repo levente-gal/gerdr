@@ -8881,7 +8881,7 @@ impl FeatureCard {
 
     /// The stage dot that is big: the stage its icon and line are about,
     /// unless the flow went back from it: then the one the rail pulses.
-    pub(super) fn big_dot(&self) -> Option<usize> {
+    pub(crate) fn big_dot(&self) -> Option<usize> {
         let stage = (self.stage).and_then(|s| Stage::ALL.iter().position(|a| *a == s));
         let left =
             stage.filter(|k| matches!(self.marks.get(*k), Some(NodeMark::Ran | NodeMark::Paused)));
@@ -8891,7 +8891,7 @@ impl FeatureCard {
     }
 
     /// The stage dot that blinks: the big one, while it runs.
-    pub(super) fn running_dot(&self) -> Option<usize> {
+    pub(crate) fn running_dot(&self) -> Option<usize> {
         self.big_dot().filter(|k| {
             self.tone == CardTone::Working || self.marks.get(*k) == Some(&NodeMark::Fixing)
         })

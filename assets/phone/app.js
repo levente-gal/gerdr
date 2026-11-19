@@ -93,23 +93,41 @@ async function ask(path, body) {
 }
 
 const STATUS = { "working": "working", "waiting for you": "waiting" };
+// An agent: a dot that blinks while it works.
+const chip = (a, text) => {
+  const cls = STATUS[a.status] || a.status;
+  return `<span class="chip ${esc(cls)}"><span class="sdot${cls === "working" ? " blink" : ""}"></span>${esc(text)}</span>`;
+};
 const chips = (agents) => agents.length
-  ? `<div class="chips">${agents.map((a) =>
-      `<span class="chip ${STATUS[a.status] || ""}">${esc(a.label)}: ${esc(a.status)}</span>`).join("")}</div>`
+  ? `<div class="chips">${agents.map((a) => chip(a, `${a.label}: ${a.status}`)).join("")}</div>`
   : "";
-const rail = (stages) =>
-  `<div class="rail">${stages.map((s) =>
-    `<span class="${s.done ? "done" : s.now ? "now" : ""}" title="${esc(s.label)}"></span>`).join("")}</div>`;
 const href = (...parts) => "#/" + parts.map(encodeURIComponent).join("/");
 
+// Each stage's mark, as gerdr's rail reads it; from the stages alone when
+// gerdr couldn't be asked.
+const marks = (f) => f.card?.marks || f.stages.map((s) => s.done ? "done" : s.now ? "current" : "later");
+
+// The stage dots of a sidebar card: the big one blinks while it runs.
+function dots(f) {
+  const big = f.card ? f.card.big : f.stages.findIndex((s) => s.now);
+  return `<span class="dots">${marks(f).map((m, i) => {
+    const run = i === big && (f.card ? f.card.running : toneOf(f) === "working") ? " blink" : "";
+    return `<span class="dot ${esc(m)}${i === big ? " big" : ""}${run}" title="${esc(f.stages[i]?.label)}"></span>`;
+  }).join("")}</span>`;
+}
+
+const toneOf = (f) => f.card?.tone ||
+  (f.waits ? "waits" : f.agents.some((a) => a.status === "working") ? "working" : "idle");
+const waitsBox = (w, now) => w
+  ? `<div class="waits"><b>${esc(w.title)}</b> · ${esc(w.next)} · ${ago(w.since, now)}</div>` : "";
+
 function card(f, now) {
-  return `<a class="card" href="${href("f", f.project, f.slug)}">
-    <div class="name">${esc(f.title)}</div>
-    <div class="meta">${esc(f.projectName)} · ${esc(f.stage)}</div>
-    ${rail(f.stages)}
-    ${f.waits ? `<div class="waits">${esc(f.waits.title)} · ${esc(f.waits.next)} · ${ago(f.waits.since, now)}</div>` : ""}
+  return `<a class="card tone-${esc(toneOf(f))}" href="${href("f", f.project, f.slug)}">
+    <div class="top"><span class="name">${esc(f.title)}</span><span class="ago">${ago(f.updated, now)}</span></div>
+    <div class="meta">${esc(f.projectName)}</div>
+    <div class="status">${dots(f)}<span class="line">${esc(f.card?.line || f.stage)}</span></div>
+    ${waitsBox(f.waits, now)}
     ${chips(f.agents)}
-    ${f.last ? `<div class="meta">${esc(f.last)} · ${ago(f.updated, now)}</div>` : ""}
   </a>`;
 }
 
@@ -119,33 +137,82 @@ async function list() {
   const rest = d.features.filter((f) => !f.waits);
   let html = d.problems.map((p) => `<p class="error">${esc(p)}</p>`).join("");
   if (!d.features.length) html += `<p class="quiet">No open features.</p>`;
-  if (waiting.length) html += `<h2>Waiting for you</h2>` + waiting.map((f) => card(f, d.now)).join("");
-  if (rest.length) html += `<h2>In progress</h2>` + rest.map((f) => card(f, d.now)).join("");
+  const group = (name, fs) => fs.length
+    ? `<h2>${name} <span class="count">${fs.length}</span></h2>` + fs.map((f) => card(f, d.now)).join("") : "";
+  html += group("Waiting for you", waiting) + group("In progress", rest);
   return { title: "gerdr", html };
+}
+
+// The feature tab's rail: numbered nodes joined as the desktop joins them,
+// the arch back to Build, and each stage's short line and agent.
+const NODE_W = 82;
+function rail(f) {
+  const r = f.offer?.rail || {
+    nodes: f.stages.map((s, i) => ({ label: s.label, line: "", mark: marks(f)[i] })),
+    back: null,
+  };
+  const n = r.nodes;
+  const mark = (i) => n[i]?.mark;
+  const ran = (i) => ["ran", "paused"].includes(mark(i));
+  const back = r.back;
+  const joins = n.slice(1).map((_, i) => {
+    // A stage with work sent back to it was passed all the same.
+    const done = ["done", "stale"].includes(mark(i)) || !["later", undefined].includes(mark(i + 1));
+    const once = (back && i >= back.to) || ran(i) || (ran(i + 1) && !(back && i + 1 === back.to));
+    const cls = !done ? "" : once ? "once" : "done";
+    const left = 12 + i * NODE_W + NODE_W / 2 + 18;
+    return `<span class="join ${cls}" style="left:${left}px;width:${NODE_W - 36}px"></span>`;
+  }).join("");
+  const pulse = n.findIndex((x) => x.mark === "fixing") >= 0
+    ? n.findIndex((x) => x.mark === "fixing") : n.findIndex((x) => x.mark === "current");
+  const arch = back
+    ? `<span class="back${[back.to, back.from].some((i) => mark(i) === "waiting") && mark(back.to) !== "fixing" ? " waits" : ""}"
+        style="left:${12 + back.to * NODE_W + NODE_W / 2}px;width:${(back.from - back.to) * NODE_W}px"></span>` : "";
+  const nodes = n.map((x, i) => {
+    const disc = ["done", "stale", "ran"].includes(x.mark) ? "✓" : i + 1;
+    return `<div class="node ${esc(x.mark)}${i === pulse ? " pulse" : ""}" title="${esc(x.word || x.mark)}">
+      <div class="disc">${disc}</div>
+      <div class="label">${esc(x.label)}</div>
+      ${x.line ? `<div class="nline">${esc(x.line)}</div>` : ""}
+      ${x.agent ? `<div class="agent">${esc(x.agent)}</div>` : ""}
+    </div>`;
+  }).join("");
+  return `<div class="rail-wrap"><div class="rail">${joins}${arch}${nodes}</div></div>`;
+}
+
+// The last few of a feature's history; the rest folded under them.
+const RECENT = 4;
+function history(list, now) {
+  if (!list.length) return `<p class="quiet small">Nothing yet.</p>`;
+  const item = (e) => `<li><time>${ago(e.at, now)}</time>${esc(e.what)}</li>`;
+  const older = list.slice(RECENT);
+  return `<ul class="history">${list.slice(0, RECENT).map(item).join("")}</ul>` + (older.length
+    ? `<details class="more"><summary><span class="show">Show ${older.length} older</span><span class="hide">Show fewer</span></summary>
+        <ul class="history">${older.map(item).join("")}</ul></details>`
+    : "");
 }
 
 async function feature(p, s) {
   const f = await get(`/api/feature?${q({ p, s })}`);
-  let html = `<div class="meta quiet">${esc(f.projectName)} · ${esc(f.stage)}</div>`;
-  if (f.waits) html += `<div class="waits">${esc(f.waits.title)} · ${esc(f.waits.next)} · ${ago(f.waits.since, f.now)}</div>`;
+  const tone = toneOf(f);
+  let html = `<div class="meta quiet small">${esc(f.projectName)}</div>`;
+  html += `<div class="status"><span class="line tone-${esc(tone)}">${esc(f.card?.line || f.stage)}</span></div>`;
+  html += rail(f);
+  html += waitsBox(f.waits, f.now);
   html += actions(f.offer);
   html += findings(f.findings);
-  html += `<h2>Agents</h2>`;
-  html += f.agents.length
-    ? f.agents.map((a) => `<a class="row" href="${href("pane", p, s, a.pane)}">
-        <span>${esc(a.label)}</span><span class="chip ${STATUS[a.status] || ""}">${esc(a.status)}</span></a>`).join("")
-    : `<p class="quiet small">${esc(f.agentsError || "No agent running for it here.")}</p>`;
-  html += `<h2>Stages</h2><ul class="stages">${f.stages.map((st) =>
-    `<li class="${st.done ? "done" : st.now ? "now" : ""}">${esc(st.label)}</li>`).join("")}</ul>`;
-  if (f.docs.length) {
-    html += `<h2>Files</h2>` + f.docs.map((d) =>
-      `<a class="row" href="${href("doc", p, s, d)}"><span>${esc(d)}</span><span class="quiet">›</span></a>`).join("");
+  if (f.agents.length) {
+    html += `<h2>Agents <span class="count">${f.agents.length}</span></h2><div class="group">` +
+      f.agents.map((a) => `<a class="row" href="${href("pane", p, s, a.pane)}">
+        <span>${esc(a.label)}</span>${chip(a, a.status)}</a>`).join("") + `</div>`;
+  } else {
+    html += `<h2>Agents</h2><p class="quiet small">${esc(f.agentsError || "No agent running for it here.")}</p>`;
   }
-  html += `<h2>History</h2>`;
-  html += f.history.length
-    ? `<ul class="history">${f.history.map((e) =>
-        `<li><time>${ago(e.at, f.now)}</time>${esc(e.what)}</li>`).join("")}</ul>`
-    : `<p class="quiet small">Nothing yet.</p>`;
+  if (f.docs.length) {
+    html += `<h2>Files</h2><div class="group">` + f.docs.map((d) =>
+      `<a class="row" href="${href("doc", p, s, d)}"><span>${esc(d)}</span><span class="chev">›</span></a>`).join("") + `</div>`;
+  }
+  html += `<h2>History</h2>` + history(f.history, f.now);
   return { title: f.title, back: "#/", html };
 }
 
@@ -244,9 +311,18 @@ async function render(fresh, force) {
     if (v.html !== shown && (fresh || force || !typing())) {
       const y = window.scrollY;
       const open = [...main.querySelectorAll("details")].map((d) => d.open);
+      const railX = main.querySelector(".rail-wrap")?.scrollLeft;
       main.innerHTML = v.html;
       if (!fresh) main.querySelectorAll("details").forEach((d, i) => { d.open = open[i] || false; });
       shown = v.html;
+      // What blinks keeps its beat across a refresh.
+      main.querySelectorAll(".blink").forEach((e) => { e.style.animationDelay = `-${Date.now() % 1600}ms`; });
+      main.querySelectorAll(".pulse .disc").forEach((e) => { e.style.animationDelay = `-${Date.now() % 1800}ms`; });
+      const wrap = main.querySelector(".rail-wrap");
+      if (wrap && (fresh || railX === undefined)) {
+        const at = wrap.querySelector(".node.pulse, .node.waiting, .node.failed, .node.current");
+        if (at) wrap.scrollLeft = at.offsetLeft - (wrap.clientWidth - at.offsetWidth) / 2;
+      } else if (wrap) wrap.scrollLeft = railX;
       if (v.pane && (fresh || atEnd)) window.scrollTo(0, document.body.scrollHeight);
       else if (!fresh) window.scrollTo(0, y);
     }

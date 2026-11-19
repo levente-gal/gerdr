@@ -2,11 +2,13 @@
 
 A web page of your features, for a phone. It shows:
 
-- every open feature, those waiting for you first
-- each feature's stage, its stages, what it waits for, its history and its stage files (brief, plan, …)
+- every open feature, those waiting for you first, as its sidebar card shows it: stage dots, the stage's line, and a coloured edge for working, waiting or failed
+- each feature's rail as its feature tab draws it (each stage's mark, short line and agent, and the line back to Build), what it waits for, its stage files (brief, plan, …) and its history: the last few events, the rest behind "Show older"
 - each agent's state (working, waiting for you, idle) and the last lines of its pane, refreshed every 2 s
 
-It reads the feature files on disk and asks herdr.
+What runs blinks: a working agent's dot, and the stage dot or rail node at work. It stays still when the phone asks for reduced motion.
+
+It reads the feature files on disk and asks herdr. The cards and the rail come from the running gerdr; without one, the page shows the stages alone.
 
 ## What it can do
 

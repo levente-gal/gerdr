@@ -482,7 +482,32 @@ fn all_features() -> Value {
         let updated = f["updated"].as_u64().unwrap_or(0);
         (waits.is_none(), waits.unwrap_or(0), u64::MAX - updated)
     });
+    add_cards(&mut features);
     json!({ "features": features, "problems": problems, "now": crate::clock::now_secs() })
+}
+
+/// Put on each of `features` its sidebar card as gerdr draws it (marks,
+/// line, tone); none when gerdr can't be asked, and the stages alone show.
+fn add_cards(features: &mut [Value]) {
+    let asked: Vec<Value> = (features.iter())
+        .map(|f| json!([f["project"], f["slug"]]))
+        .collect();
+    let mut cards = match gerdr(&json!({ "op": "cards", "features": asked })) {
+        Ok(answer) => answer,
+        Err(why) => {
+            // The page says gerdr isn't there by the actions it can't offer.
+            tracing::debug!("No cards from gerdr: {why}");
+            return;
+        }
+    };
+    for f in features {
+        let key = format!(
+            "{}/{}",
+            f["project"].as_str().unwrap_or(""),
+            f["slug"].as_str().unwrap_or("")
+        );
+        f["card"] = cards["cards"][&key].take();
+    }
 }
 
 /// What the list shows of feature `f`.
@@ -590,6 +615,7 @@ fn feature_page(project: &str, slug: &str) -> Reply {
     };
     let states = agent_states(&project.session);
     let mut page = summary(&project, &f, &states);
+    add_cards(std::slice::from_mut(&mut page));
     let history: Vec<Value> = f
         .history
         .iter()

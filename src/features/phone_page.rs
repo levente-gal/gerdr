@@ -59,6 +59,12 @@ fn phone_may(outcome: &PanelOutcome) -> bool {
     )
 }
 
+/// A stage's mark as the phone's styles name it: `done`, `current`,
+/// `waiting`.
+fn mark_word(mark: NodeMark) -> String {
+    format!("{mark:?}").to_lowercase()
+}
+
 /// The stage whose file waits for the user's review: the brief or a plan
 /// its agent finished.
 fn doc_waiting(feature: &Feature) -> Option<Stage> {
@@ -125,7 +131,63 @@ impl Gerdr {
             "buttons": buttons,
             "sendBack": send_back && elsewhere.is_none(),
             "elsewhere": elsewhere,
+            "rail": self.phone_rail(project, slug),
         })
+    }
+
+    /// Feature `slug`'s rail as its feature tab draws it: each stage's
+    /// mark, short line and agent, and the line back to Build.
+    fn phone_rail(&self, project: &str, slug: &str) -> Value {
+        let panel = FeaturePanel {
+            project: project.to_owned(),
+            slug: slug.to_owned(),
+            ..FeaturePanel::default()
+        };
+        let Some(view) = self.feature_tab_view_of(&panel) else {
+            return Value::Null;
+        };
+        let nodes: Vec<Value> = (view.rail.iter())
+            .map(|n| {
+                json!({
+                    "label": n.label,
+                    "line": n.line,
+                    "mark": mark_word(n.mark),
+                    "word": n.mark.word(),
+                    "agent": n.agent.as_ref().map(|(_, what)| what),
+                })
+            })
+            .collect();
+        json!({
+            "nodes": nodes,
+            "back": view.back.map(|b| json!({ "from": b.from, "to": b.to })),
+        })
+    }
+
+    /// The sidebar cards of the features asked for, by `project/slug`:
+    /// each stage's mark, the line, the tone, and the stage dot that is
+    /// big and whether it blinks.
+    pub(crate) fn phone_cards(&self, features: &[(String, String)]) -> Value {
+        let cards: serde_json::Map<String, Value> = (features.iter())
+            .filter_map(|(project, slug)| {
+                let card = self.feature_card(self.feature(project, slug)?);
+                let tone = match card.tone {
+                    chrome::CardTone::Idle => "idle",
+                    chrome::CardTone::Working => "working",
+                    chrome::CardTone::Waits => "waits",
+                    chrome::CardTone::Failed => "failed",
+                };
+                let marks: Vec<String> = card.marks.iter().map(|m| mark_word(*m)).collect();
+                let value = json!({
+                    "line": card.line,
+                    "tone": tone,
+                    "marks": marks,
+                    "big": card.big_dot(),
+                    "running": card.running_dot().is_some(),
+                });
+                Some((format!("{project}/{slug}"), value))
+            })
+            .collect();
+        json!({ "cards": cards })
     }
 
     /// Do `act` to feature `slug`, for the phone. `confirm`: answer a

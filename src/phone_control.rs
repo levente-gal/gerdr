@@ -40,6 +40,9 @@ pub fn is_socket_name(name: &str) -> bool {
 pub enum Request {
     /// What the phone may do to a feature.
     Offer { project: String, slug: String },
+    /// How features stand, as their sidebar cards show it: `[project, slug]`
+    /// pairs.
+    Cards { features: Vec<(String, String)> },
     /// Press a button of its page.
     Press {
         project: String,
@@ -183,6 +186,7 @@ impl Gerdr {
     fn answer_phone(&mut self, request: Request) -> Value {
         match request {
             Request::Offer { project, slug } => self.phone_offer(&project, &slug),
+            Request::Cards { features } => self.phone_cards(&features),
             Request::Press {
                 project,
                 slug,
@@ -238,6 +242,10 @@ mod tests {
         )
         .expect("send back");
         assert!(matches!(back, Request::SendBack { confirm: true, .. }));
+        let cards: Request =
+            serde_json::from_str(r#"{"op":"cards","features":[["p","s"]]}"#).expect("cards");
+        let features = vec![("p".to_owned(), "s".to_owned())];
+        assert_eq!(cards, Request::Cards { features });
     }
 
     #[test]

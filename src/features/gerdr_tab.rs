@@ -956,7 +956,15 @@ impl Gerdr {
     }
 
     pub fn feature_tab_view(&self) -> Option<chrome::FeatureTabView> {
-        let panel = self.features.panel.as_ref()?;
+        self.feature_tab_view_of(self.features.panel.as_ref()?)
+    }
+
+    /// The feature tab `panel` would show: the open one, or one the phone
+    /// view asks about (see `phone_page`).
+    pub(crate) fn feature_tab_view_of(
+        &self,
+        panel: &FeaturePanel,
+    ) -> Option<chrome::FeatureTabView> {
         let feature = self.feature(&panel.project, &panel.slug)?;
         let slugs = self.listed_slugs(&panel.project);
         let mine = || {
