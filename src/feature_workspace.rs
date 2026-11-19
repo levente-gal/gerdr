@@ -591,23 +591,27 @@ impl Gerdr {
             return Vec::new();
         };
         let in_use = panes_in_use(feature);
-        let agent = |p: &crate::Pane| {
-            let id = &p.herdr.as_ref()?.pane_id;
-            self.session.agents.iter().find(|a| a.pane_id == *id)
+        let agent = |h: &crate::herdr::PaneInfo| {
+            self.session.agents.iter().find(|a| a.pane_id == h.pane_id)
         };
-        let old = |p: &crate::Pane| match agent(p) {
+        let old = |h: &crate::herdr::PaneInfo| match agent(h) {
             Some(a) => {
                 let busy = matches!(a.agent_status, AgentStatus::Working | AgentStatus::Blocked);
                 !busy && !in_use.contains(&a.pane_id.as_str())
             }
-            // An app or a page isn't an agent's to close with it.
-            None => p.herdr.is_some() && self.running_in(p).is_none(),
+            None => {
+                self.is_machine_view(&h.pane_id) || !self.pane_bar_content(&h.pane_id).status.runs()
+            }
         };
+        // A tab hidden a while has its terminals parked (see
+        // `Gerdr::park_hidden`): their herdr panes count as its panes.
         let only_old = |tab: &Tab| {
             tab.closes()
-                && tab.expected.is_empty()
-                && tab.panes.iter().any(|p| agent(p).is_some())
-                && tab.panes.iter().all(old)
+                && tab.expected.iter().all(|e| e.parked)
+                // An app or a page isn't an agent's to close with it.
+                && tab.panes.iter().all(|p| p.herdr.is_some())
+                && tab.herdr_panes().any(|h| agent(h).is_some())
+                && tab.herdr_panes().all(old)
         };
         (ws.tabs.iter().enumerate())
             .filter(|(_, tab)| only_old(tab))
