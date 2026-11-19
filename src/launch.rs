@@ -1009,30 +1009,30 @@ pub fn worktree_zed_dir(home: &Path, instance: &Path) -> PathBuf {
     ready_zed_dir(home, instance.join("zed-worktrees"))
 }
 
-/// The folders a Zed on `dir` opens: `dir`, then, when `dir` is in a git
-/// repository, each repository right under it (a `.git` folder, or a
-/// worktree's `.git` file). Zed greys out what an outer repository ignores
-/// and leaves it out of search and the file finder: a home repository's
-/// child repositories, and all of a feature folder in its `.features/`. A
-/// repository opened as a folder of its own goes by its own rules only
-/// (Zed 1.29).
-// shortcut: a child repository the outer one doesn't ignore is searched
-// twice; ask `git check-ignore` off the UI thread if that ever matters.
+/// The folders a Zed on `dir` opens: when `dir` is not a repository but is
+/// in one, as a feature folder in a home repository's `.features/` is, the
+/// repositories right under it (a `.git` folder, or a worktree's `.git`
+/// file) instead of it. Zed greys out all of `dir` then, as the outer
+/// repository ignores it, and leaves it out of search and the file finder;
+/// a repository opened as a folder of its own goes by its own rules only.
+/// `dir` itself can't be opened beside them: Zed puts a folder inside
+/// another one it opens into that one (Zed 1.29). Else `dir` alone.
 pub fn zed_roots(dir: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![dir.to_owned()];
     let is_repo = |d: &Path| d.join(".git").symlink_metadata().is_ok();
-    if !dir.ancestors().any(is_repo) {
-        return roots;
+    if is_repo(dir) || !dir.ancestors().any(is_repo) {
+        return vec![dir.to_owned()];
     }
-    let mut repos: Vec<PathBuf> = std::fs::read_dir(dir)
+    let mut roots: Vec<PathBuf> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.is_dir() && is_repo(p))
         .collect();
-    repos.sort();
-    roots.extend(repos);
+    if roots.is_empty() {
+        return vec![dir.to_owned()];
+    }
+    roots.sort();
     roots
 }
 
@@ -2002,10 +2002,13 @@ mod tests {
         // A worktree's `.git` is a file.
         std::fs::write(feature.join("web/.git"), "gitdir: /nowhere\n").unwrap();
         std::fs::create_dir_all(feature.join("docs")).unwrap();
-        assert_eq!(super::zed_roots(&home), [home.clone(), home.join("api")]);
+        // A repository opens as itself.
+        assert_eq!(super::zed_roots(&home), [home.clone()]);
+        assert_eq!(super::zed_roots(&feature), [feature.join("web")]);
+        // In a repository with no repository in it: the folder alone.
         assert_eq!(
-            super::zed_roots(&feature),
-            [feature.clone(), feature.join("web")]
+            super::zed_roots(&home.join("tracked")),
+            [home.join("tracked")]
         );
         // Outside a repository: the folder alone.
         std::fs::remove_dir_all(home.join(".git")).unwrap();

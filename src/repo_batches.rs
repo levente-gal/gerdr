@@ -2831,9 +2831,8 @@ impl Gerdr {
 
     /// The folders a Zed on `root` opens: when `root` is in a feature, the
     /// whole feature, so a search covers all of it: its folders
-    /// (`Feature::folders`, the home one first) with the repositories in
-    /// them (`launch::zed_roots`), then its stage files (`DOCS_LINK`).
-    /// Else `root` with its repositories.
+    /// (`Feature::folders`, the home one first) as `launch::zed_roots` has
+    /// them, then its stage files (`DOCS_LINK`). Else `zed_roots` of `root`.
     pub(crate) fn zed_folders(&self, root: &Path) -> Vec<PathBuf> {
         let mut features = self.features.all.values().flatten();
         let Some(feature) =
