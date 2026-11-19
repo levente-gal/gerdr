@@ -19,8 +19,8 @@ use smithay::utils::{Logical, Point, Rectangle};
 
 /// How far the strip stays in from its pane's sides and bottom.
 const MARGIN: i32 = 12;
-/// How wide it gets at most: room for a comment's row (five buttons) with
-/// its title still readable. One width for every row, so ‹ › stay put
+/// How wide it gets at most: room for a criterion's row with its title
+/// beside its buttons (a comment's, with more, puts its title above them). One width for every row, so ‹ › stay put
 /// while stepping.
 const MAX_WIDTH: i32 = 960;
 /// The row of its buttons, and the room inside its edge.
@@ -33,6 +33,10 @@ const GROUP_GAP: i32 = 12;
 const LINE: i32 = 20;
 /// The room for the dot before the criterion's id.
 const DOT_ROOM: i32 = 14;
+/// The least room the title keeps beside the row's buttons: with less, it
+/// goes on a line of its own above them, as on a narrow pane or a row of
+/// many buttons.
+const TITLE_MIN: i32 = 220;
 /// The folded chip: its height, and the room for its chevron.
 const CHIP: i32 = 30;
 const CHIP_ICON: i32 = 18;
@@ -237,6 +241,11 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     }
     let w = (pane.size.w - 2 * MARGIN).min(MAX_WIDTH);
     let inner = w - 2 * INSET;
+    // The title's own line over the row, when the row leaves it too little.
+    let title_h = match w - least_width(view) < TITLE_MIN {
+        true => ROW,
+        false => 0,
+    };
     let room = inner as f32;
     // The lines above the row: its steps when open, what went wrong.
     let mut texts: Vec<(String, bool)> = Vec::new();
@@ -262,7 +271,7 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
         0 => 0,
         h => h + INSET,
     };
-    let h = ROW + top_room;
+    let h = ROW + title_h + top_room;
     // Never taller than the pane: the steps go before the row does.
     let h = h.min(pane.size.h - 2 * MARGIN).max(ROW);
     let panel = Rectangle::new(
@@ -275,9 +284,11 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     );
     let (x0, mut y) = (panel.loc.x + INSET, panel.loc.y + INSET);
     let bottom_row = panel.loc.y + h - ROW;
+    // Where what is over the row ends: at the title's line, when it has one.
+    let over_row = bottom_row - title_h;
     let mut lines = Vec::new();
     for (text, dim) in texts {
-        if y + LINE > bottom_row - field_h {
+        if y + LINE > over_row - field_h {
             break;
         }
         lines.push((
@@ -291,7 +302,7 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     let mut field = None;
     let mut shots = None;
     if let Some(fh) = field_lines {
-        let fy = bottom_row - fh - GAP / 2;
+        let fy = over_row - fh - GAP / 2;
         // The buttons and the count by its last line, over the row.
         let last = fy + fh - QUIT_BUTTON;
         let done_w = button_width("Done");
@@ -350,10 +361,13 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     buttons.reverse();
     hits.extend(buttons);
     let tx = next.loc.x + ROW_BUTTON + GROUP_GAP;
-    let title = Rectangle::new(
-        (tx, bottom_row).into(),
-        ((right - GROUP_GAP + GAP - tx).max(0), ROW).into(),
-    );
+    let title = match title_h {
+        0 => Rectangle::new(
+            (tx, bottom_row).into(),
+            ((right - GROUP_GAP + GAP - tx).max(0), ROW).into(),
+        ),
+        _ => Rectangle::new((x0, over_row).into(), (inner, ROW).into()),
+    };
     hits.push((StripHit::Title, title));
     StripLayout {
         panel,
@@ -640,20 +654,34 @@ mod tests {
 
     #[test]
     fn a_comments_row_leaves_its_title_room_and_keeps_the_width() {
-        let criterion = criteria_strip_layout(&view(1400));
-        let mut v = view(1400);
         let labels = [
             "Edit\u{2026}",
             "Done",
             "Not done",
             "Screenshot",
+            "Select on page",
             "Add comment\u{2026}",
         ];
-        v.buttons = labels.map(|l| (l.to_owned(), ButtonStyle::Plain)).into();
-        let comment = criteria_strip_layout(&v);
-        assert_eq!(comment.panel, criterion.panel, "‹ › stay put");
-        let title = comment.rect_of(StripHit::Title).unwrap();
-        assert!(title.size.w >= 200, "{title:?}");
+        // Narrower than its buttons, the strip folds to its chip instead.
+        for pane_w in [1400, 1000] {
+            let criterion = criteria_strip_layout(&view(pane_w));
+            let mut v = view(pane_w);
+            v.buttons = labels.map(|l| (l.to_owned(), ButtonStyle::Plain)).into();
+            let comment = criteria_strip_layout(&v);
+            assert_eq!(comment.panel.size.w, criterion.panel.size.w, "‹ › stay put");
+            assert_eq!(comment.panel.loc.x, criterion.panel.loc.x);
+            let title = comment.rect_of(StripHit::Title).unwrap();
+            assert!(title.size.w >= TITLE_MIN, "{pane_w}: {title:?}");
+            // Too little room beside the buttons: its own line above them.
+            let edit = comment.rect_of(StripHit::Button(0)).unwrap();
+            assert!(title.loc.y + title.size.h <= edit.loc.y, "{pane_w}");
+            for (_, r) in &comment.hits {
+                assert!(comment.panel.contains_rect(*r), "{pane_w}: {r:?}");
+            }
+        }
+        // A criterion's two buttons leave it beside them.
+        let row = criteria_strip_layout(&view(1000));
+        assert_eq!(row.panel.size.h, ROW);
     }
 
     #[test]

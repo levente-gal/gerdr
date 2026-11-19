@@ -9162,7 +9162,7 @@ const GOLDEN_STRIP: [[u64; 6]; 4] = [
         0x8d9c47e709b73456, // strip_note
         0x700e0bb6d80637b1, // strip_failed
         0xe134649e78702bbf, // strip_chip
-        0xcacb2da23186924d, // strip_comment
+        0x1d17c7e2151bd9d2, // strip_comment
     ],
     // Dark at 2
     [
@@ -9171,7 +9171,7 @@ const GOLDEN_STRIP: [[u64; 6]; 4] = [
         0x230f6338de5e7a64, // strip_note
         0xcffcd15866473ea7, // strip_failed
         0xb63f093b83828479, // strip_chip
-        0xbfa3f5bc89457b91, // strip_comment
+        0x24945d5d11b5cc90, // strip_comment
     ],
     // Light at 1
     [
@@ -9180,7 +9180,7 @@ const GOLDEN_STRIP: [[u64; 6]; 4] = [
         0x11416ed6005c650d, // strip_note
         0x0fb808c18b78afa1, // strip_failed
         0x60faa77000796bed, // strip_chip
-        0x4e76ffac82be4635, // strip_comment
+        0x1d6672d9deb1e032, // strip_comment
     ],
     // Light at 2
     [
@@ -9189,7 +9189,7 @@ const GOLDEN_STRIP: [[u64; 6]; 4] = [
         0xe2fc5b41467fe76e, // strip_note
         0x261bbded9fe8c6f2, // strip_failed
         0x45481f7462f5972c, // strip_chip
-        0x5da6827dd1a3f5c6, // strip_comment
+        0x5ebe2fdc75a29acb, // strip_comment
     ],
 ];
 
