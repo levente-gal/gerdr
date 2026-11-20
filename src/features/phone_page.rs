@@ -401,8 +401,13 @@ fn phone_root(
             continue;
         }
         // Offline, what git has here stands, as in the dialog.
-        let Ok(Some(branch)) = crate::git_ops::remote_default(&found.main) else {
-            continue;
+        let branch = match crate::git_ops::remote_default(&found.main) {
+            Ok(Some(branch)) => branch,
+            Ok(None) => continue,
+            Err(why) => {
+                tracing::warn!("asking origin for the default of {}: {why}", found.name);
+                continue;
+            }
         };
         if layout::branches_of(&found.main).is_ok_and(|all| all.contains(&branch)) {
             found.base = branch;
@@ -813,7 +818,7 @@ impl Gerdr {
                             g.phone_wrote(&project, &slug, shown, button.outcome, text.trim());
                         })
                     }
-                    (Some(asks), _) => json!({ "error": format!("{asks}: write it first") }),
+                    (Some(_), _) => json!({ "error": "Write what it asks for first" }),
                 }
             }
             PhoneAct::SendBack(text) => {
