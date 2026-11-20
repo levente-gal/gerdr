@@ -110,6 +110,7 @@ mod manual_test;
 mod page_text;
 mod phone;
 mod phone_control;
+mod phone_devices;
 mod web_push;
 mod pr_review;
 mod pr_post;
@@ -6847,7 +6848,7 @@ impl Gerdr {
                 false => self.pane_bar_views(),
             },
             footer: self.footer_view(&tasks),
-            tasks: self.tasks_view(&tasks),
+            tasks: self.tasks_view(),
             machines: self.machines_panel_view(),
             unzoom: self.unzoom_button().filter(|_| !flat).map(|(_, rect)| rect),
             theme: self.settings.theme(),
@@ -7570,6 +7571,7 @@ fn new_gerdr(
             apps: keep_apps,
             keeper: None,
             warned: false,
+            phone: Default::default(),
         },
         procs: state::Procs {
             children: Vec::new(),

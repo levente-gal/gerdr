@@ -1548,6 +1548,7 @@ fn status_footer() -> super::FooterView {
 
 fn status_panel() -> super::TasksView {
     super::TasksView {
+        title: "Background tasks",
         rows: status_tasks(),
         first: 0,
         selected: Some(0),
@@ -1557,6 +1558,57 @@ fn status_panel() -> super::TasksView {
             ("Up / Down", "move"),
             ("Tab", "next button"),
             ("Enter", "open"),
+            ("Esc", "close"),
+        ]
+        .map(|(k, a)| (k.to_owned(), a.to_owned()))
+        .into(),
+    }
+}
+
+/// The Phone connections dialog: the server under its unit, a phone
+/// connected, one seen an hour ago with notifications, one blocked.
+fn phones_panel() -> super::TasksView {
+    use crate::phone_devices::{Device, Seen, Server};
+    let now = 1_000_000;
+    let device = |ip: &str, name: &str, ago: u64, blocked| Device {
+        ip: ip.into(),
+        name: name.into(),
+        login: "me@example.com".into(),
+        first: 0,
+        last: now - ago,
+        blocked,
+    };
+    let seen = Seen {
+        server: Some(Server {
+            pid: 1,
+            port: 8390,
+            since: now - 7500,
+        }),
+        in_unit: true,
+        unit: true,
+        devices: vec![
+            device("100.88.1.2", "pixel-8", 3600, false),
+            device("100.88.1.3", "iphone-15", 2, false),
+            device("100.88.1.4", "old-tablet", 86_400 * 3, true),
+        ],
+        error: None,
+        notified: vec!["100.88.1.2".into()],
+    };
+    super::TasksView {
+        title: "Phone connections",
+        rows: seen
+            .rows(now)
+            .iter()
+            .map(crate::tasks::Task::view)
+            .collect(),
+        first: 0,
+        selected: Some(2),
+        button: 0,
+        hover: Some(super::TasksHit::Button(1, 0)),
+        hints: [
+            ("Up / Down", "move"),
+            ("Tab", "next button"),
+            ("Enter", "block"),
             ("Esc", "close"),
         ]
         .map(|(k, a)| (k.to_owned(), a.to_owned()))
@@ -1646,32 +1698,37 @@ fn paint_status(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
     vec![
         hash(painter.footer(&status_footer(), (STATUS_OUTPUT.0, footer).into(), scale, p)),
         hash(painter.tasks_panel(&status_panel(), STATUS_OUTPUT.into(), footer, scale, p)),
+        hash(painter.tasks_panel(&phones_panel(), STATUS_OUTPUT.into(), footer, scale, p)),
     ]
 }
 
-const STATUS: [&str; 2] = ["footer", "tasks_panel"];
+const STATUS: [&str; 3] = ["footer", "tasks_panel", "phones_panel"];
 
 /// The recorded hashes of `STATUS`, per case in `CASES`.
-const GOLDEN_STATUS: [[u64; 2]; 4] = [
+const GOLDEN_STATUS: [[u64; 3]; 4] = [
     // Dark at 1
     [
         0x3821a1cf1a7fe182, // footer
         0x4e0bb89f143ae0d2, // tasks_panel
+        0xdea107258c78f727, // phones_panel
     ],
     // Dark at 2
     [
         0x910ba2519163ffe3, // footer
         0x8fcd41618448e585, // tasks_panel
+        0x4e5a37bce3dd8acd, // phones_panel
     ],
     // Light at 1
     [
         0x8a8087fd34aec460, // footer
         0x73394c4c1f2ef470, // tasks_panel
+        0x9a3554eecf20a3d6, // phones_panel
     ],
     // Light at 2
     [
         0x28f7c3f0d800d54e, // footer
         0xfc7ddca895c0b3ab, // tasks_panel
+        0xeaca9c7ed25ac916, // phones_panel
     ],
 ];
 
@@ -1701,13 +1758,18 @@ fn dump_status() {
             painter.footer(&status_footer(), (STATUS_OUTPUT.0, footer).into(), scale, p),
             px(STATUS_OUTPUT.0),
         );
-        let panel = super::tasks_layout(&status_panel(), STATUS_OUTPUT.into(), footer).panel;
-        dump(
-            &dir,
-            &format!("tasks_panel_{tag}"),
-            painter.tasks_panel(&status_panel(), STATUS_OUTPUT.into(), footer, scale, p),
-            px(panel.size.w + 2 * super::SHADOW),
-        );
+        for (name, view) in [
+            ("tasks_panel", status_panel()),
+            ("phones_panel", phones_panel()),
+        ] {
+            let panel = super::tasks_layout(&view, STATUS_OUTPUT.into(), footer).panel;
+            dump(
+                &dir,
+                &format!("{name}_{tag}"),
+                painter.tasks_panel(&view, STATUS_OUTPUT.into(), footer, scale, p),
+                px(panel.size.w + 2 * super::SHADOW),
+            );
+        }
     }
 }
 

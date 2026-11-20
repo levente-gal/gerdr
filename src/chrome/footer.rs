@@ -238,6 +238,8 @@ const BAR_ROOM: i32 = 8;
 /// What the tasks panel shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TasksView {
+    /// "Background tasks", or the Phone connections dialog's.
+    pub title: &'static str,
     pub rows: Vec<TaskView>,
     /// The first row shown, when not all fit.
     pub first: usize,
@@ -417,7 +419,7 @@ impl Painter {
         let (tx, tend) = phys(title, scale);
         self.text(
             &mut c,
-            "Background tasks",
+            view.title,
             LABEL_FONT_SIZE,
             tx,
             tend,
@@ -585,6 +587,7 @@ mod tests {
     #[test]
     fn the_panel_sits_over_the_footer_with_buttons_right_aligned() {
         let view = TasksView {
+            title: "Background tasks",
             rows: vec![
                 task("T3 Code", &["Open", "Restart", "Stop"]),
                 task("fetch", &[]),
@@ -625,6 +628,7 @@ mod tests {
     #[test]
     fn rows_past_a_small_output_scroll() {
         let view = TasksView {
+            title: "Background tasks",
             rows: (0..30)
                 .map(|i| task(&format!("task {i}"), &["Stop"]))
                 .collect(),

@@ -37,6 +37,20 @@ Away means no key or pointer on the desktop for 2 minutes, as niri (or another h
 
 gerdr sends the notifications itself, through `curl` to the push service of the phone's browser (Apple's or Google's). Each is encrypted for that phone; the push service sees only where it goes. A phone's address and gerdr's key are in `~/.local/share/gerdr/phone/`. A notification that couldn't go shows on the "!" badge.
 
+## Phone connections in gerdr
+
+While the phone view runs, gerdr's footer shows a phone chip. The chip says "Phone view" with a grey dot when no phone is connected, and the phone's name with a green dot when one is ("Phone: pixel-8"). A phone counts as connected for 15 s after its last request. The page asks every 2 to 5 s while it shows, so a phone with gerdr open counts as connected, and one in a pocket doesn't.
+
+Click the chip, or pick Phone connections in the launcher, to open the Phone connections dialog:
+
+- **Phone view**: the server, its port and how long it has been up. Stop, Restart, or Start when it's stopped. Start and Restart go through the `gerdr-phone` user service. A server started by hand can only be stopped.
+- **One row per device** that has opened the page, the last to ask first. The row shows the device's tailnet name (`tailscale whois`), or what its browser runs on, its tailnet address, its Tailscale login, and when it was last seen.
+  - **Block** answers that device with 403 until you unblock it, and turns its notifications off.
+  - **Notifications off** stops sending it notifications. Its page shows Turn on again.
+  - **Forget** takes the device off the list and turns its notifications off. It comes back if it opens the page again.
+
+A device is known by the address `tailscale serve` passes on. Requests made on this machine without Tailscale aren't listed. The list is kept in `~/.local/share/gerdr/phone/devices.json`. If gerdr can't read it, the dialog says so, and the phone view refuses every phone until the file is fixed or deleted, so that a blocked phone isn't let in.
+
 ## How it is reached
 
 `gerdr --phone [port]` serves the page on `127.0.0.1:8390` (or the given port). It runs on its own and opens no window. Nothing outside the machine can reach that address. `tailscale serve` puts it on your tailnet over HTTPS, so only your own devices reach it.

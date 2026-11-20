@@ -124,6 +124,8 @@ pub enum Target {
     RaiseInotifyLimit,
     /// The tasks running in the background (see `tasks`).
     Tasks,
+    /// The Phone connections dialog (see `phone_devices`).
+    Phones,
     /// The stats panel on the features' AI work (see `stats_panel`).
     AiStats,
     /// The new feature dialog (see `features`).
@@ -193,6 +195,7 @@ impl Target {
             | Target::TerminalReload
             | Target::RaiseInotifyLimit
             | Target::Tasks
+            | Target::Phones
             | Target::AiStats
             | Target::NewFeature
             | Target::Features
@@ -230,6 +233,7 @@ impl Target {
             | Target::TerminalReload
             | Target::RaiseInotifyLimit
             | Target::Tasks
+            | Target::Phones
             | Target::AiStats
             | Target::NewFeature
             | Target::Features
@@ -1055,6 +1059,7 @@ fn frecency_key(
         | Target::TerminalReload
         | Target::RaiseInotifyLimit
         | Target::Tasks
+        | Target::Phones
         | Target::AiStats
         | Target::NewFeature
         | Target::Features
@@ -1378,6 +1383,7 @@ impl Gerdr {
         items.extend(self.t3_update_entries());
         items.push(self.inbox_entry());
         items.push(self.tasks_entry());
+        items.extend(self.phones_entry());
         items.push(Item::new(
             ItemIcon::Command,
             "AI work stats",
@@ -1516,6 +1522,28 @@ impl Gerdr {
                 Target::ConnectMachine,
             ),
         ]
+    }
+
+    /// The row opening the Phone connections dialog, once the phone view
+    /// is set up or ran.
+    fn phones_entry(&self) -> Option<Item> {
+        let phone = &self.keep.phone;
+        if phone.server.is_none() && !phone.unit && phone.devices.is_empty() {
+            return None;
+        }
+        let detail = match &phone.server {
+            None => "the phone view is stopped".to_owned(),
+            Some(_) => match self.keep.phone.task(crate::clock::now_secs()) {
+                Some(task) => task.detail,
+                None => String::new(),
+            },
+        };
+        Some(Item::new(
+            ItemIcon::Command,
+            "Phone connections",
+            detail,
+            Target::Phones,
+        ))
     }
 
     fn tasks_entry(&self) -> Item {
@@ -1828,6 +1856,7 @@ impl Gerdr {
             Target::TerminalReload => self.toggle_terminal_reload(),
             Target::RaiseInotifyLimit => self.ask_raise_inotify(),
             Target::Tasks => self.open_tasks(0),
+            Target::Phones => self.open_phones(),
             Target::AiStats => self.open_ai_stats(),
             Target::NewFeature => self.open_new_feature(None),
             Target::Features => self.open_features(),

@@ -47,6 +47,10 @@ pub struct Subscription {
     /// The phone view's address it asked from, like `https://desk.ts.net`:
     /// whom the push service is told the notes come from.
     pub origin: String,
+    /// The tailnet address of the phone it is for (see `phone_devices`);
+    /// empty for one that asked before gerdr wrote it down.
+    #[serde(default)]
+    pub device: String,
 }
 
 /// A note for the phones.
@@ -104,6 +108,34 @@ pub fn subscribe(sub: Subscription, on: bool) -> Result<(), String> {
             return Err(format!("{MOST} phones get notifications already"));
         }
         list.push(sub);
+    }
+    save(&list)
+}
+
+/// Whether the phone at `device` gets notifications at `endpoint`. One
+/// from before gerdr wrote devices down becomes that phone's.
+pub fn claim(endpoint: &str, device: &str) -> bool {
+    let mut list = subscriptions();
+    let Some(sub) = list.iter_mut().find(|s| s.endpoint == endpoint) else {
+        return false;
+    };
+    if sub.device.is_empty() {
+        device.clone_into(&mut sub.device);
+        if let Err(err) = save(&list) {
+            tracing::warn!("Couldn't write down whose notifications go to {endpoint}: {err}");
+        }
+        return true;
+    }
+    sub.device == device
+}
+
+/// Send the phone at `device` no more notifications.
+pub fn drop_device(device: &str) -> Result<(), String> {
+    let mut list = subscriptions();
+    let before = list.len();
+    list.retain(|s| s.device != device);
+    if list.len() == before {
+        return Ok(());
     }
     save(&list)
 }

@@ -47,7 +47,7 @@ impl Task {
         self.dot != Dot::Idle
     }
 
-    fn view(&self) -> TaskView {
+    pub fn view(&self) -> TaskView {
         TaskView {
             title: self.title.clone(),
             chip: self.chip.clone(),
@@ -75,6 +75,9 @@ pub struct TasksPanel {
     /// The first row shown, when not all fit.
     pub first: usize,
     pub hover: Option<TasksHit>,
+    /// It is the Phone connections dialog: the phone view's server and its
+    /// phones in place of the tasks (see `phone_devices`).
+    pub phones: bool,
 }
 
 /// What the tasks panel asks gerdr to do.
@@ -265,6 +268,11 @@ impl TasksPanel {
     pub fn view(&self, tasks: &[Task]) -> TasksView {
         let selected = (!tasks.is_empty()).then(|| self.selected.min(tasks.len() - 1));
         TasksView {
+            title: if self.phones {
+                "Phone connections"
+            } else {
+                "Background tasks"
+            },
             rows: tasks.iter().map(Task::view).collect(),
             first: self.first,
             selected,
@@ -395,6 +403,7 @@ impl Gerdr {
         self.t3_started = t3_server::started();
         self.settings.t3_log = launch::log_path(t3_server::LOG).exists();
         self.keep.look_at_kept(&self.projects.projects);
+        self.keep.phone = crate::phone_devices::look();
     }
 
     /// T3 Code's server and its update check, as tasks: none if T3 Code
@@ -523,7 +532,17 @@ impl Gerdr {
         tasks.extend(self.take_tasks());
         tasks.extend(self.ai_work.tasks());
         tasks.extend(self.paused_task());
+        tasks.extend(self.keep.phone.task(crate::clock::now_secs()));
         tasks
+    }
+
+    /// What the tasks panel lists: the tasks, or in the Phone connections
+    /// dialog the phone view and its phones.
+    fn panel_tasks(&self) -> Vec<Task> {
+        match &self.overlays.tasks_panel {
+            Some(panel) if panel.phones => self.keep.phone.rows(crate::clock::now_secs()),
+            _ => self.tasks(),
+        }
     }
 
     /// How many tasks run: what the footer and the launcher count.
@@ -582,18 +601,21 @@ impl Gerdr {
     }
 
     /// A press on the footer: a task or the count opens the tasks panel; a
-    /// machine's chip opens the machines panel on it.
+    /// machine's chip opens the machines panel on it, the phone view's the
+    /// Phone connections dialog.
     pub fn footer_press(&mut self, pos: Point<f64, Logical>) {
         match self.footer_hit(pos) {
             Some(FooterHit::Task(chip)) => {
                 let tasks = self.tasks();
                 let i = Self::footer_task(&tasks, chip).unwrap_or(0);
-                let machine = tasks.get(i).and_then(|t| match t.actions.first() {
-                    Some((_, MenuAction::OpenMachines(name))) => Some(name.clone()),
+                let opens = tasks.get(i).and_then(|t| match t.actions.first() {
+                    Some((_, action @ (MenuAction::OpenMachines(_) | MenuAction::OpenPhones))) => {
+                        Some(action.clone())
+                    }
                     _ => None,
                 });
-                match machine {
-                    Some(name) => self.open_machines(Some(&name)),
+                match opens {
+                    Some(action) => self.menu_action(action),
                     None => self.open_tasks(i),
                 }
             }
@@ -624,8 +646,13 @@ impl Gerdr {
     }
 
     /// Open the tasks panel at task `selected`.
-    /// The other panels close: it would cover them.
     pub fn open_tasks(&mut self, selected: usize) {
+        self.open_tasks_of(selected, false);
+    }
+
+    /// Open the tasks panel, or with `phones` the Phone connections dialog,
+    /// at row `selected`. The other panels close: it would cover them.
+    pub fn open_tasks_of(&mut self, selected: usize, phones: bool) {
         self.overlays.switcher = None;
         self.repos.close();
         self.worktrees.close();
@@ -640,6 +667,7 @@ impl Gerdr {
         self.chrome.drop_tooltip();
         self.overlays.tasks_panel = Some(TasksPanel {
             selected,
+            phones,
             ..TasksPanel::default()
         });
         self.reveal_task();
@@ -653,13 +681,18 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
-    pub fn tasks_view(&self, tasks: &[Task]) -> Option<TasksView> {
-        Some(self.overlays.tasks_panel.as_ref()?.view(tasks))
+    pub fn tasks_view(&self) -> Option<TasksView> {
+        Some(
+            self.overlays
+                .tasks_panel
+                .as_ref()?
+                .view(&self.panel_tasks()),
+        )
     }
 
     /// Scroll the tasks panel so the selected task shows.
     fn reveal_task(&mut self) {
-        let count = self.tasks().len();
+        let count = self.panel_tasks().len();
         let page = self.tasks_page(count);
         if let Some(panel) = self.overlays.tasks_panel.as_mut() {
             panel.reveal(count, page);
@@ -668,7 +701,7 @@ impl Gerdr {
 
     /// A key while the tasks panel has the keyboard (see `TasksPanel::key`).
     pub fn tasks_key(&mut self, mods: &ModifiersState, sym: Keysym) -> Option<Outcome> {
-        let tasks = self.tasks();
+        let tasks = self.panel_tasks();
         let page = self.tasks_page(tasks.len());
         let panel = self.overlays.tasks_panel.as_mut()?;
         panel.key(mods, sym, &tasks, page)
@@ -676,7 +709,7 @@ impl Gerdr {
 
     /// The wheel or touchpad over the tasks panel: `rows` rows on.
     pub fn tasks_scroll(&mut self, rows: i32) {
-        let count = self.tasks().len();
+        let count = self.panel_tasks().len();
         let page = self.tasks_page(count);
         if let Some(panel) = self.overlays.tasks_panel.as_mut() {
             panel.scroll(rows, count, page);
@@ -684,8 +717,8 @@ impl Gerdr {
     }
 
     fn tasks_layout(&self) -> Option<(Vec<Task>, TasksView, chrome::TasksLayout)> {
-        let tasks = self.tasks();
-        let view = self.tasks_view(&tasks)?;
+        let tasks = self.panel_tasks();
+        let view = self.overlays.tasks_panel.as_ref()?.view(&tasks);
         let layout = chrome::tasks_layout(&view, self.output_size(), self.footer_height());
         Some((tasks, view, layout))
     }
@@ -894,6 +927,7 @@ mod tests {
             apps: Vec::new(),
             keeper: None,
             warned: false,
+            phone: Default::default(),
         };
         keep.look_at_kept(&[]);
         assert!(keep.kept.is_empty());

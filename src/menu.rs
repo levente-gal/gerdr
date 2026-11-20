@@ -74,6 +74,10 @@ pub enum MenuAction {
     },
     /// The machines panel, on the machine of this name.
     OpenMachines(String),
+    /// The Phone connections dialog (see `phone_devices`).
+    OpenPhones,
+    /// A button of it.
+    Phone(crate::phone_devices::PhoneDo),
     /// Connect, disconnect or forget the machine of this name.
     ConnectMachine(String),
     DisconnectMachine(String),
@@ -602,6 +606,8 @@ impl Gerdr {
             MenuAction::AddMachine => self.open_machine_dialog(),
             MenuAction::AddMachineFrom { target, name } => self.add_machine_from(target, name),
             MenuAction::OpenMachines(name) => self.open_machines(Some(&name)),
+            MenuAction::OpenPhones => self.open_phones(),
+            MenuAction::Phone(what) => self.phone_do(what),
             MenuAction::ConnectMachine(name) => self.connect_machine(&name),
             MenuAction::DisconnectMachine(name) => self.disconnect_machine(&name),
             MenuAction::StopTakeOver(project, slug) => self.stop_take(&project, &slug),

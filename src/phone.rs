@@ -30,7 +30,7 @@ use crate::{
     },
     feature_agents::{self, Gate},
     herdr::{self, AgentStatus, Herdr},
-    inbox_sources, md_preview, phone_control,
+    inbox_sources, md_preview, phone_control, phone_devices,
     projects::{self, Project},
     web_push,
 };
@@ -82,6 +82,7 @@ pub fn run(port: Option<&str>) {
         }
     };
     let icons = Icons::new();
+    phone_devices::started(port);
     tracing::info!("Phone view on http://127.0.0.1:{port}");
     for stream in listener.incoming() {
         match stream {
@@ -169,10 +170,12 @@ fn serve(stream: TcpStream, icons: &Icons) {
             if !host_ok(&request.host) {
                 tracing::warn!("Refused a request for host {:?}", request.host);
                 Reply::error(421, "This host isn't served")
+            } else if let Some(refused) = refuse(&request) {
+                refused
             } else if request.method == "GET" {
-                answer(&request.target, icons)
+                answer(&request.target, icons, &request.from)
             } else if request.method == "POST" && request.from_page {
-                act(&request.target, &request.body, &request.host)
+                act(&request.target, &request.body, &request.host, &request.from)
             } else if request.method == "POST" {
                 // A form of another site can't set the header: only our page does.
                 Reply::error(403, "Not from the phone view")
@@ -186,6 +189,7 @@ fn serve(stream: TcpStream, icons: &Icons) {
         200 => "OK",
         400 => "Bad Request",
         403 => "Forbidden",
+        503 => "Service Unavailable",
         404 => "Not Found",
         405 => "Method Not Allowed",
         421 => "Misdirected Request",
@@ -219,6 +223,13 @@ struct Request {
     host: String,
     /// It says it comes from the phone view's page (`X-Gerdr: phone`).
     from_page: bool,
+    /// The tailnet address it comes from, as `tailscale serve` passes it:
+    /// empty for one from this machine itself.
+    from: String,
+    /// Who its sender is signed in to the tailnet as.
+    login: String,
+    /// What its browser says it is.
+    agent: String,
     body: Vec<u8>,
 }
 
@@ -253,6 +264,15 @@ fn read_request(stream: impl Read) -> Option<Request> {
             length = value.parse().ok()?;
         } else if name.eq_ignore_ascii_case("x-gerdr") {
             request.from_page = value == "phone";
+        } else if name.eq_ignore_ascii_case("x-forwarded-for") {
+            // The last is the one `tailscale serve` added: what came before
+            // is the sender's own say.
+            let last = value.rsplit(',').next().unwrap_or_default();
+            last.trim().clone_into(&mut request.from);
+        } else if name.eq_ignore_ascii_case("tailscale-user-login") {
+            value.clone_into(&mut request.login);
+        } else if name.eq_ignore_ascii_case("user-agent") {
+            value.clone_into(&mut request.agent);
         }
     }
     if length > BODY_LIMIT {
@@ -274,7 +294,23 @@ fn host_ok(host: &str) -> bool {
     name == "localhost" || name == "127.0.0.1" || name.ends_with(".ts.net")
 }
 
-fn answer(target: &str, icons: &Icons) -> Reply {
+/// A phone's request, written down (see `phone_devices`): refused while
+/// it is blocked. One from this machine itself isn't a phone's.
+fn refuse(request: &Request) -> Option<Reply> {
+    if request.from.is_empty() {
+        return None;
+    }
+    match phone_devices::seen(&request.from, &request.agent, &request.login) {
+        Ok(false) => None,
+        Ok(true) => Some(Reply::error(403, "This phone is blocked in gerdr")),
+        Err(err) => {
+            tracing::warn!("Couldn't read the phones: {err}");
+            Some(Reply::error(503, "gerdr can't read its list of phones"))
+        }
+    }
+}
+
+fn answer(target: &str, icons: &Icons, from: &str) -> Reply {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let query = parse_query(query);
     let arg = |name: &str| query.get(name).map(String::as_str).unwrap_or_default();
@@ -293,7 +329,7 @@ fn answer(target: &str, icons: &Icons) -> Reply {
         "/api/pane" => pane(arg("p"), arg("s"), arg("pane")),
         "/sw.js" => Reply::ok("text/javascript; charset=utf-8", SW_JS),
         "/api/push" => match web_push::public_key() {
-            Ok(key) => Reply::json(&json!({ "key": key })),
+            Ok(key) => Reply::json(&json!({ "key": key, "on": web_push::claim(arg("e"), from) })),
             Err(why) => Reply::error(500, &why),
         },
         _ => Reply::error(404, "Nothing here"),
@@ -302,8 +338,8 @@ fn answer(target: &str, icons: &Icons) -> Reply {
 
 /// A phone asks for notifications, or no more: `{subscription, on}`, the
 /// subscription as its browser's `toJSON` gives it. Notes go out from the
-/// phone view's address on `host`.
-fn push(body: &[u8], host: &str) -> Reply {
+/// phone view's address on `host`, for the phone at `from`.
+fn push(body: &[u8], host: &str, from: &str) -> Reply {
     #[derive(serde::Deserialize)]
     struct Keys {
         p256dh: String,
@@ -327,6 +363,7 @@ fn push(body: &[u8], host: &str) -> Reply {
         p256dh: ask.subscription.keys.p256dh,
         auth: ask.subscription.keys.auth,
         origin: format!("https://{host}"),
+        device: from.to_owned(),
     };
     match web_push::subscribe(sub, ask.on) {
         Ok(()) => Reply::json(&json!({ "on": ask.on })),
@@ -371,9 +408,9 @@ fn decode(text: &str) -> String {
 
 /// A press from the page: `/api/press`, `/api/decide` and `/api/send-back`
 /// go on to gerdr, `/api/agent` to the agent's pane.
-fn act(target: &str, body: &[u8], host: &str) -> Reply {
+fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
     if target == "/api/push" {
-        return push(body, host);
+        return push(body, host, from);
     }
     if target == "/api/push-test" {
         let note = web_push::Note {
@@ -882,6 +919,18 @@ mod tests {
     }
 
     #[test]
+    fn the_sender_is_the_address_tailscale_added_last() {
+        let head = "GET / HTTP/1.1\r\nHost: x.ts.net\r\nX-Forwarded-For: 1.2.3.4, 100.64.0.7\r\n\
+                    Tailscale-User-Login: me@example.com\r\nUser-Agent: Pixel\r\n\r\n";
+        let request = read_request(head.as_bytes()).expect("request");
+        assert_eq!(request.from, "100.64.0.7");
+        assert_eq!(request.login, "me@example.com");
+        assert_eq!(request.agent, "Pixel");
+        let local = read_request("GET / HTTP/1.1\r\nHost: localhost\r\n\r\n".as_bytes());
+        assert_eq!(local.expect("request").from, "");
+    }
+
+    #[test]
     fn a_request_gives_method_target_host_and_body() {
         let head = "GET /api/feature?p=a&s=b HTTP/1.1\r\nhost: x.ts.net\r\nAccept: */*\r\n\r\n";
         let request = read_request(head.as_bytes()).expect("request");
@@ -908,10 +957,10 @@ mod tests {
 
     #[test]
     fn a_press_needs_a_body_and_a_known_route() {
-        assert_eq!(act("/api/press", b"nope", "localhost").status, 400);
-        assert_eq!(act("/api/nope", b"{}", "localhost").status, 404);
+        assert_eq!(act("/api/press", b"nope", "localhost", "").status, 400);
+        assert_eq!(act("/api/nope", b"{}", "localhost", "").status, 404);
         assert_eq!(
-            act("/api/agent", br#"{"p":"no-such","s":"x"}"#, "localhost").status,
+            act("/api/agent", br#"{"p":"no-such","s":"x"}"#, "localhost", "").status,
             404
         );
     }
@@ -971,8 +1020,8 @@ mod tests {
 
     #[test]
     fn unknown_paths_are_not_found() {
-        assert_eq!(answer("/nope", &Icons::default()).status, 404);
-        assert_eq!(answer("/", &Icons::default()).status, 200);
+        assert_eq!(answer("/nope", &Icons::default(), "").status, 404);
+        assert_eq!(answer("/", &Icons::default(), "").status, 200);
     }
 
     #[test]

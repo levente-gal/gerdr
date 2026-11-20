@@ -80,7 +80,7 @@ const SERVER_LOG_MAX: u64 = 1 << 20;
 
 /// herdr's config folder's parent: `$XDG_CONFIG_HOME`, by default
 /// `~/.config`. herdr keeps its sessions under it.
-fn config_home() -> PathBuf {
+pub(crate) fn config_home() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())

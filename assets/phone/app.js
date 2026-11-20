@@ -142,7 +142,9 @@ async function pushSub() {
 }
 
 async function pushCard() {
-  const sub = await pushSub().catch(() => undefined);
+  let sub = await pushSub().catch(() => undefined);
+  // gerdr may have turned this phone's notifications off: then it's off here too.
+  if (sub && !(await get("/api/push?e=" + encodeURIComponent(sub.endpoint)).catch(() => ({}))).on) sub = null;
   let html = `<h2>Notifications</h2><div class="card">`;
   if (sub === undefined) {
     html += `<div class="quiet small">This browser can't get notifications here. On an iPhone, add gerdr to the home screen and open it from there.</div>`;

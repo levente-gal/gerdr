@@ -312,6 +312,8 @@ pub struct Keep {
     pub keeper: Option<keep::Keeper>,
     /// Whether gerdr said that keeping apps running needs wprs.
     pub warned: bool,
+    /// The phone view, as last looked at (see `phone_devices`).
+    pub phone: crate::phone_devices::Seen,
 }
 
 /// Child processes and process groups gerdr started and must end.
