@@ -236,6 +236,9 @@ pub struct Features {
     /// The feature folders whose docs link was seen to this run:
     /// `link_feature_docs` goes once for each.
     pub(crate) docs_linked: BTreeSet<PathBuf>,
+    /// The features the phone asked for, by project and slug, while their
+    /// worktrees are made: what it gave, and where the answer goes.
+    pub(crate) phone_new: BTreeMap<(String, String), phone_page::PhoneNew>,
     /// The project roots `layout::free_for_cursor` went over this run.
     pub(crate) cursor_freed: BTreeSet<PathBuf>,
     /// The code graph builds running, by project and slug, to stop.

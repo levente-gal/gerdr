@@ -636,7 +636,10 @@ impl Gerdr {
                 result,
             } => {
                 self.unbusy(&project, &slug, Job::Create);
-                self.feature_created(project, title, slug, root, result);
+                match (self.features.phone_new).remove(&(project.clone(), slug.clone())) {
+                    Some(asked) => self.phone_created(asked, project, title, slug, root, result),
+                    None => self.feature_created(project, title, slug, root, result),
+                }
             }
             Done::Touched {
                 project,

@@ -9,7 +9,7 @@ pub mod render;
 /// version: bumped when its text changes meaning.
 pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
     Some(match name {
-        "discover" => (include_str!("../../assets/prompts/discover.md"), 7),
+        "discover" => (include_str!("../../assets/prompts/discover.md"), 8),
         "plan" => (include_str!("../../assets/prompts/plan.md"), 5),
         "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 3),
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
@@ -79,6 +79,7 @@ mod tests {
             ("decisions.kept", ""),
             ("research.path", "/d/bulk-edit/research.md"),
             ("research", ""),
+            ("idea", ""),
             ("research.id", "1"),
             ("research.question", "Does the API page its results?"),
             ("research.why", ""),
@@ -180,6 +181,17 @@ mod tests {
             assert!(!text.contains("{{"), "{name}: {text}");
         }
         assert!(render_builtin("nope", &vars(false, "")).is_err());
+    }
+
+    #[test]
+    fn discover_starts_from_the_idea_the_user_gave() {
+        let asks = render_builtin("discover", &vars(false, "")).expect("discover");
+        assert!(asks.contains("Start by asking the user"));
+        let mut given = vars(false, "");
+        given.insert("idea".into(), "Edit many rows at once.".into());
+        let text = render_builtin("discover", &given).expect("discover");
+        assert!(text.contains("Edit many rows at once."), "{text}");
+        assert!(!text.contains("Start by asking the user"), "{text}");
     }
 
     #[test]

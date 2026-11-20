@@ -221,8 +221,205 @@ pub(crate) enum PhoneAct {
     SendBack(String),
 }
 
+/// A new feature the phone asked for, while its worktrees are made.
+pub(crate) struct PhoneNew {
+    /// Where the answer goes: the phone waits for it.
+    pub answer: std::sync::mpsc::Sender<Value>,
+    /// What the user said they want of it, for Discover's agent.
+    pub idea: String,
+    /// The agent to run Discover on, if not the one it gets anyway.
+    pub agent: Option<String>,
+}
+
+/// What the phone asked to start: the repositories it named of `root`, as
+/// `layout::create` takes them. A single repository is always in, a root
+/// of several needs one named.
+fn phone_touched(root: &layout::Root, named: &[String]) -> Result<Vec<String>, String> {
+    if !root.multi {
+        return Ok(Vec::new());
+    }
+    if named.is_empty() {
+        return Err("Pick a repository it changes".into());
+    }
+    match named.iter().find(|n| !root.repos.iter().any(|r| &r.name == *n)) {
+        Some(name) => Err(format!("{} has no repository {name}", root.path.display())),
+        None => Ok(named.to_vec()),
+    }
+}
+
+/// Feature `slug`'s root as the new feature dialog finds it from `from`,
+/// with each base origin says where the project's settings set none, and
+/// the repositories the phone named of it.
+fn phone_root(
+    from: &Path,
+    search: &(Vec<PathBuf>, Vec<String>, Vec<(String, String)>),
+    others: &[PathBuf],
+    named: &[String],
+) -> Result<(layout::Root, Vec<String>), String> {
+    let (dirs, ignore, bases) = search;
+    let mut root = layout::find_project_root(from, dirs, others, ignore, bases)?;
+    for found in &mut root.repos {
+        if bases.iter().any(|(name, _)| *name == found.name) {
+            continue;
+        }
+        // Offline, what git has here stands, as in the dialog.
+        let Ok(Some(branch)) = crate::git_ops::remote_default(&found.main) else {
+            continue;
+        };
+        if layout::branches_of(&found.main).is_ok_and(|all| all.contains(&branch)) {
+            found.base = branch;
+        }
+    }
+    let touched = phone_touched(&root, named)?;
+    Ok((root, touched))
+}
+
 impl Gerdr {
-    /// The buttons the phone may press on feature `slug`, as the desktop's
+    /// What a new feature of each of `projects` may start on: the agents
+    /// Discover may run on, and the one it runs unless another is picked.
+    pub(crate) fn phone_new_offer(&self, projects: &[String]) -> Value {
+        let agents: serde_json::Map<String, Value> = (projects.iter())
+            .map(|id| {
+                let workflow = self.projects.project(id).map(|p| &p.workflow);
+                let (names, default) =
+                    crate::feature_agents::new_discover_agents(workflow, &self.launcher.cli_agents);
+                (id.clone(), json!({ "agents": names, "default": default }))
+            })
+            .collect();
+        json!({ "agents": agents })
+    }
+
+    /// Start feature `title` of `project` for the phone, on the
+    /// repositories it `named`: its worktrees made off the thread, then
+    /// its Discover agent started (see `phone_created`). The phone gets
+    /// its answer once that is done, or at once if it can't be.
+    pub(crate) fn phone_create(
+        &mut self,
+        project: String,
+        title: String,
+        named: Vec<String>,
+        idea: String,
+        agent: Option<String>,
+        answer: std::sync::mpsc::Sender<Value>,
+    ) {
+        let refuse = |why: String| {
+            // The phone may have given up on it.
+            let _ = answer.send(json!({ "error": why }));
+        };
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        if title.is_empty() {
+            return refuse("Give it a title".into());
+        }
+        let Some(p) = self.projects.project(&project) else {
+            return refuse("gerdr has no such project".into());
+        };
+        let Some(from) = p.workspaces.first().map(|w| w.dir.clone()) else {
+            return refuse(format!("Add a workspace with a folder to {} first", p.name));
+        };
+        let search = root_search(p);
+        let agent = agent.filter(|a| !a.trim().is_empty());
+        if let Some(name) = &agent {
+            let workflow = Some(&p.workflow);
+            let (names, _) =
+                crate::feature_agents::new_discover_agents(workflow, &self.launcher.cli_agents);
+            if !names.contains(name) {
+                return refuse(format!("{name} can't run Discover here"));
+            }
+        }
+        let others = self.other_projects_dirs(&project);
+        let slug = self.new_feature_slug(&project, &title);
+        let key = (project.clone(), slug.clone());
+        if self.features.phone_new.contains_key(&key) {
+            return refuse(format!("\u{201c}{title}\u{201d} is being made already"));
+        }
+        let asked = PhoneNew {
+            answer,
+            idea,
+            agent,
+        };
+        self.features.phone_new.insert(key, asked);
+        let busy = Busy {
+            project: project.clone(),
+            slug: slug.clone(),
+            job: Job::Create,
+            repo: None,
+            what: format!("Creating \u{201c}{title}\u{201d}"),
+        };
+        self.feature_work(Some(busy), move |_| {
+            let (root, result) = match phone_root(&from, &search, &others, &named) {
+                Ok((root, touched)) => {
+                    let result = layout::create_spanning(&root, &slug, &touched, &[]);
+                    (root, result)
+                }
+                Err(why) => {
+                    let root = layout::Root {
+                        path: from,
+                        multi: false,
+                        repos: Vec::new(),
+                    };
+                    (root, Err(why))
+                }
+            };
+            Done::Created {
+                project,
+                title,
+                slug,
+                root,
+                result,
+            }
+        });
+    }
+
+    /// The worktrees of a feature the phone asked for were made, or not:
+    /// keep it as the dialog's are, start its Discover agent on what the
+    /// phone gave, and answer the phone with what gerdr said.
+    pub(super) fn phone_created(
+        &mut self,
+        asked: PhoneNew,
+        project: String,
+        title: String,
+        slug: String,
+        root: layout::Root,
+        result: Result<(layout::Created, Vec<(feature::Link, layout::Created)>), String>,
+    ) {
+        let PhoneNew {
+            answer,
+            idea,
+            agent,
+        } = asked;
+        let key = (project.clone(), slug.clone());
+        let (p, s) = key.clone();
+        let mut said = self.phone_said(false, move |g| {
+            g.feature_created(project, title, slug, root, result);
+            if g.feature(&p, &s).is_none() {
+                return;
+            }
+            let idea = idea.trim();
+            if !idea.is_empty() {
+                let path = store::dir(None, &p, &s).join(feature::artifacts::IDEA);
+                if let Err(err) = std::fs::write(&path, format!("{idea}\n")) {
+                    tracing::warn!("writing {}: {err}", path.display());
+                    g.show_error(format!("Couldn't keep what it is for: {err}"));
+                }
+            }
+            if let Some(name) = agent {
+                g.pick_stage_agent(&p, &s, Stage::Discover, &name);
+            }
+            g.start_stage_agent(&p, &s, Stage::Discover, false);
+        });
+        if self.feature(&key.0, &key.1).is_some() {
+            said["slug"] = key.1.into();
+        } else {
+            // Why it wasn't made is the error gerdr said.
+            let why = (said["said"].as_array().into_iter().flatten())
+                .filter(|l| l["level"] == "error")
+                .find_map(|l| l["text"].as_str().map(str::to_owned));
+            said["error"] = why.unwrap_or_else(|| "Couldn't create it".into()).into();
+        }
+        // The phone may have given up on it.
+        let _ = answer.send(said);
+    }
+
     /// page of the stage it is at shows them.
     fn phone_buttons(
         &self,
@@ -442,5 +639,28 @@ mod tests {
         assert!(!phone_may(&PanelOutcome::Ship));
         assert!(!phone_may(&PanelOutcome::TakeOver));
         assert!(!phone_may(&PanelOutcome::Remove));
+    }
+
+    #[test]
+    fn a_new_feature_of_several_repositories_names_those_it_changes() {
+        let repo = |name: &str| layout::Found {
+            name: name.into(),
+            main: PathBuf::from(format!("/w/{name}")),
+            base: "main".into(),
+        };
+        let single = layout::Root {
+            path: "/w/gerdr".into(),
+            multi: false,
+            repos: vec![repo("gerdr")],
+        };
+        assert_eq!(phone_touched(&single, &[]), Ok(Vec::new()));
+        let multi = layout::Root {
+            path: "/w".into(),
+            multi: true,
+            repos: vec![repo("api"), repo("web")],
+        };
+        assert!(phone_touched(&multi, &[]).is_err());
+        assert!(phone_touched(&multi, &["nope".into()]).is_err());
+        assert_eq!(phone_touched(&multi, &["web".into()]), Ok(vec!["web".into()]));
     }
 }

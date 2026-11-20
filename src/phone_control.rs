@@ -32,6 +32,9 @@ use crate::{
 const REQUEST_MAX: u64 = 64 * 1024;
 /// How long a request waits for the loop to answer it.
 const ANSWER_TIME: Duration = Duration::from_secs(20);
+/// How long a new feature's request waits: its worktrees are made and
+/// origin is asked for its bases first.
+pub const CREATE_TIME: Duration = Duration::from_secs(120);
 /// A reminder goes to the phones only if nothing with its tag went for
 /// this long.
 const REMIND_PHONE: Duration = Duration::from_secs(15 * 60);
@@ -91,6 +94,22 @@ pub enum Request {
         #[serde(default)]
         confirm: bool,
     },
+    /// What a new feature of each project may start on: Discover's agents.
+    NewOffer { projects: Vec<String> },
+    /// Start a feature, and its Discover agent: answered once both are.
+    Create {
+        project: String,
+        title: String,
+        /// The repositories it changes, by name: a root of several only.
+        #[serde(default)]
+        repos: Vec<String>,
+        /// What the user wants of it, for Discover's agent.
+        #[serde(default)]
+        idea: String,
+        /// The agent to run Discover on; none: the one it gets anyway.
+        #[serde(default)]
+        agent: Option<String>,
+    },
 }
 
 /// A request and where its answer goes.
@@ -131,11 +150,15 @@ fn serve(stream: UnixStream, tx: &channel::Sender<Call>) {
         serde_json::from_str::<Request>(&line).map_err(|e| format!("bad request: {e}"))
     }) {
         Ok(request) => {
+            let time = match request {
+                Request::Create { .. } => CREATE_TIME,
+                _ => ANSWER_TIME,
+            };
             let (answer, wait) = mpsc::channel();
             if tx.send(Call { request, answer }).is_err() {
                 return;
             }
-            wait.recv_timeout(ANSWER_TIME)
+            wait.recv_timeout(time)
                 .unwrap_or_else(|_| json!({ "error": "gerdr didn't answer in time" }))
         }
         Err(why) => json!({ "error": why }),
@@ -191,9 +214,7 @@ impl Gerdr {
                 self.loop_handle
                     .insert_source(rx, |event, _, state| {
                         if let channel::Event::Msg(call) = event {
-                            let answer = state.answer_phone(call.request);
-                            // The phone may have given up on it.
-                            let _ = call.answer.send(answer);
+                            state.answer_phone(call);
                         }
                     })
                     .map_err(|e| e.to_string())
@@ -268,8 +289,17 @@ impl Gerdr {
             .send(note);
     }
 
-    fn answer_phone(&mut self, request: Request) -> Value {
-        match request {
+    fn answer_phone(&mut self, call: Call) {
+        let Call { request, answer } = call;
+        let reply = match request {
+            Request::Create {
+                project,
+                title,
+                repos,
+                idea,
+                agent,
+            } => return self.phone_create(project, title, repos, idea, agent, answer),
+            Request::NewOffer { projects } => self.phone_new_offer(&projects),
             Request::Offer {
                 project,
                 slug,
@@ -300,11 +330,14 @@ impl Gerdr {
                 confirm,
             } => {
                 if text.trim().is_empty() {
-                    return json!({ "error": "Say what to change" });
+                    json!({ "error": "Say what to change" })
+                } else {
+                    self.phone_act(&project, &slug, PhoneAct::SendBack(text), confirm)
                 }
-                self.phone_act(&project, &slug, PhoneAct::SendBack(text), confirm)
             }
-        }
+        };
+        // The phone may have given up on it.
+        let _ = answer.send(reply);
     }
 }
 
@@ -370,6 +403,23 @@ mod tests {
             serde_json::from_str(r#"{"op":"cards","features":[["p","s"]]}"#).expect("cards");
         let features = vec![("p".to_owned(), "s".to_owned())];
         assert_eq!(cards, Request::Cards { features });
+        let create: Request = serde_json::from_str(
+            r#"{"op":"create","project":"p","slug":"","title":"Bulk edit","repos":["api"]}"#,
+        )
+        .expect("create");
+        assert_eq!(
+            create,
+            Request::Create {
+                project: "p".into(),
+                title: "Bulk edit".into(),
+                repos: vec!["api".into()],
+                idea: String::new(),
+                agent: None,
+            }
+        );
+        let offer: Request =
+            serde_json::from_str(r#"{"op":"new-offer","projects":["p"]}"#).expect("offer");
+        assert_eq!(offer, Request::NewOffer { projects: vec!["p".into()] });
     }
 
     #[test]

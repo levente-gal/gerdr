@@ -229,11 +229,21 @@ button:active { filter: brightness(.92); }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 650; }
 button:disabled { opacity: .5; }
 .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-textarea, input {
+textarea, input, select {
   font: inherit; font-size: 16px; color: var(--text); background: var(--card);
   border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; width: 100%;
 }
-textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+textarea:focus, input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+/* The new feature form: a label over each field. */
+.form label { display: block; margin-top: 14px; font-size: 14px; font-weight: 600; }
+.form label > input, .form label > select, .form label > textarea { margin-top: 6px; font-weight: 400; }
+.form .checks label { display: flex; align-items: center; gap: 10px; font-weight: 400; margin-top: 8px; }
+.form .checks input { width: auto; min-width: 22px; min-height: 22px; }
+.form .caption { margin-top: 14px; font-size: 14px; font-weight: 600; }
+.new-link {
+  display: block; text-align: center; margin: 4px 0 8px; padding: 10px 16px; border-radius: 10px;
+  background: var(--accent); color: var(--on-accent); font-weight: 650; text-decoration: none;
+}
 .sendback { margin-top: 12px; }
 .sendback summary { color: var(--accent); padding: 6px 0; }
 .sendback textarea { margin: 6px 0 8px; }

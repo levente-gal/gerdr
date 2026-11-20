@@ -416,6 +416,10 @@ pub fn unnamed_repos<'a>(text: &str, repos: &[&'a str]) -> Vec<&'a str> {
 /// user's own words. The brief's lines cite them as `(D1)`.
 pub const DECISIONS: &str = "decisions.md";
 
+/// What the user said they want of a feature as they started it, from the
+/// phone: Discover's agent starts from it.
+pub const IDEA: &str = "idea.md";
+
 /// The number of decision heading `line` (trimmed): `## D3: Export` is 3.
 fn decision_number(line: &str) -> Option<u32> {
     numbered_heading(line, 'd')

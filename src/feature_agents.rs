@@ -962,6 +962,35 @@ pub(crate) fn new_review_chips(
     }
 }
 
+/// The agents a new feature's Discover may run on, by name, and the one
+/// it runs unless another is picked: only those gerdr can hand its question
+/// (see `Gerdr::discover_agent`).
+pub(crate) fn new_discover_agents(
+    workflow: Option<&Workflow>,
+    installed: &[CliAgent],
+) -> (Vec<String>, Option<String>) {
+    let fresh = Feature::default();
+    let asks = |name: &str| {
+        (installed.iter()).any(|a| {
+            a.name == name
+                && matches!(
+                    Flavor::of(a.stage_base()),
+                    Flavor::Claude | Flavor::Codex | Flavor::Cursor
+                )
+        })
+    };
+    let names: Vec<String> = stage_chips(&fresh, Stage::Discover, workflow, installed)
+        .into_iter()
+        .filter(|c| !c.off && asks(&c.name))
+        .map(|c| c.name)
+        .collect();
+    let default = match default_pick(&fresh, Stage::Discover, workflow, installed) {
+        Pick::Agent(name, _) => names.iter().find(|n| **n == name).cloned(),
+        _ => None,
+    };
+    (names, default)
+}
+
 /// The program of the CLI agent T3 Code names `agent` (`ThreadRow::agent`).
 fn t3_agent_program(agent: &str) -> &str {
     match agent {
@@ -1110,6 +1139,14 @@ pub(crate) fn vars(
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
+        ),
+        // What the user said they want when they started it (the phone's
+        // new feature form), for Discover's first question.
+        (
+            "idea",
+            std::fs::read_to_string(data.join(artifacts::IDEA))
+                .map(|t| t.trim().to_owned())
+                .unwrap_or_default(),
         ),
         ("research.id", String::new()),
         ("research.question", String::new()),

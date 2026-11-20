@@ -198,6 +198,7 @@ async function list() {
   if (!d.features.length) html += `<p class="quiet">No open features.</p>`;
   const group = (name, fs) => fs.length
     ? `<h2>${name} <span class="count">${fs.length}</span></h2>` + fs.map((f) => card(f, d.now)).join("") : "";
+  html = `<a class="new-link" href="#/new">New feature</a>` + html;
   html += group("Waiting for you", waiting) + group("In progress", rest);
   html += await pushCard();
   return { title: "gerdr", html };
@@ -438,6 +439,72 @@ function findings(list) {
   }).join("");
 }
 
+// A new feature: its project, title, the repositories it changes when the
+// project has several, the agent its Discover runs on and what it is for.
+// gerdr makes it and starts Discover; its page opens once it has.
+let lastProject = "";
+try { lastProject = localStorage.getItem("newProject") || ""; } catch {}
+async function newForm() {
+  const d = await get("/api/new");
+  const ok = d.projects.filter((x) => !x.error);
+  const pick = (ok.find((x) => x.id === lastProject) || ok[0])?.id;
+  let html = d.error ? `<p class="error small">Starting a feature needs gerdr running: ${esc(d.error)}</p>` : "";
+  if (!ok.length) {
+    html += `<p class="quiet">No project can take a feature: each needs a workspace with a folder.</p>`;
+    return { title: "New feature", back: "#/", html };
+  }
+  const opts = d.projects.map((x) => `<option value="${esc(x.id)}"${x.id === pick ? " selected" : ""}${x.error ? " disabled" : ""}>
+    ${esc(x.name)}${x.error ? ` (${esc(x.error)})` : ""}</option>`).join("");
+  const parts = ok.map((x) => {
+    const repos = x.multi ? `<div class="checks"><div class="caption">Repositories it changes</div>
+      ${x.repos.map((r) => `<label><input type="checkbox" name="repo" value="${esc(r)}">${esc(r)}</label>`).join("")}</div>` : "";
+    const agents = x.agents?.agents || [];
+    const agent = agents.length
+      ? `<label>Discover runs on<select name="agent">${agents.map((a) =>
+          `<option${a === x.agents.default ? " selected" : ""}>${esc(a)}</option>`).join("")}</select></label>`
+      : `<p class="quiet small">${d.error ? "" : "No agent gerdr can start Discover on is installed."}</p>`;
+    return `<div class="for" data-for="${esc(x.id)}"${x.id === pick ? "" : " hidden"}>${repos}${agent}</div>`;
+  }).join("");
+  html += `<form id="newf" class="form card">
+    <label>Project<select name="project">${opts}</select></label>
+    <label>Title<input name="title" autocomplete="off" enterkeyhint="next" placeholder="Bulk edit"></label>
+    ${parts}
+    <label>What it is for <span class="quiet">(optional)</span>
+      <textarea name="idea" rows="5" placeholder="Discover's agent starts from this, not from its own question"></textarea></label>
+    <div class="buttons"><button class="primary" ${d.error ? "disabled" : ""}>Start feature</button></div>
+  </form>`;
+  return { title: "New feature", back: "#/", html };
+}
+
+async function startFeature(form) {
+  const f = form.elements;
+  const p = f.project.value;
+  const part = form.querySelector(`.for[data-for="${CSS.escape(p)}"]`);
+  const title = f.title.value.trim();
+  if (!title) return say([{ text: "Give it a title" }], true);
+  const boxes = [...(part?.querySelectorAll("input[name=repo]") || [])];
+  const repos = boxes.filter((b) => b.checked).map((b) => b.value);
+  if (boxes.length && !repos.length) return say([{ text: "Pick a repository it changes" }], true);
+  const agent = part?.querySelector("select[name=agent]")?.value || null;
+  const button = form.querySelector("button");
+  button.disabled = true;
+  button.textContent = "Creating…";
+  const a = await post("/api/new", { p, title, repos, idea: f.idea.value, agent });
+  button.disabled = false;
+  button.textContent = "Start feature";
+  if (a.error) return say([{ text: a.error }], true);
+  try { localStorage.setItem("newProject", p); } catch {}
+  lastProject = p;
+  say(a.said || []);
+  form.reset();
+  location.hash = href("f", p, a.slug);
+}
+
+document.addEventListener("change", (e) => {
+  if (e.target.name !== "project" || e.target.form?.id !== "newf") return;
+  e.target.form.querySelectorAll(".for").forEach((x) => { x.hidden = x.dataset.for !== e.target.value; });
+});
+
 async function doc(p, s, name) {
   const d = await get(`/api/doc?${q({ p, s, f: name })}`);
   return { title: name, back: href("f", p, s), html: `<article class="doc">${d.html}</article>`, keep: true };
@@ -466,6 +533,7 @@ function route() {
     case "doc": return { load: () => doc(parts[1], parts[2], parts[3]), every: 0 };
     case "pane": return { load: () => pane(parts[1], parts[2], parts[3]), every: 2000 };
     case "go": return { load: () => go(parts[1]), every: 0 };
+    case "new": return { load: newForm, every: 0 };
     default: return { load: list, every: 5000 };
   }
 }
@@ -563,6 +631,10 @@ document.addEventListener("click", async (e) => {
 });
 
 document.addEventListener("submit", async (e) => {
+  if (e.target.id === "newf") {
+    e.preventDefault();
+    return startFeature(e.target);
+  }
   if (e.target.id !== "say") return;
   e.preventDefault();
   const line = document.getElementById("line");

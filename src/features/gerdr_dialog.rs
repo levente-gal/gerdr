@@ -444,16 +444,7 @@ impl Gerdr {
             }
         };
         let project = dialog.project;
-        let all = self
-            .features
-            .all
-            .get(&project)
-            .map_or(&[][..], Vec::as_slice);
-        // One another machine has shown here keeps its name.
-        let shown: Vec<Feature> = (all.iter().chain(self.viewed_of(&project)))
-            .cloned()
-            .collect();
-        let slug = new_slug(&title, &shown);
+        let slug = self.new_feature_slug(&project, &title);
         let busy = Busy {
             project: project.clone(),
             slug: slug.clone(),
@@ -471,6 +462,16 @@ impl Gerdr {
                 result,
             }
         });
+    }
+
+    /// The slug a new feature of `project` titled `title` gets: one no
+    /// feature has, here or one another machine has shown here.
+    pub(crate) fn new_feature_slug(&self, project: &str, title: &str) -> String {
+        let all = (self.features.all.get(project)).map_or(&[][..], Vec::as_slice);
+        let shown: Vec<Feature> = (all.iter().chain(self.viewed_of(project)))
+            .cloned()
+            .collect();
+        new_slug(title, &shown)
     }
 
     /// A feature's worktrees were made, or not: keep it, show it, and say

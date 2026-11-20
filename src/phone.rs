@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 
 use crate::{
     feature::{
-        Feature, Stage, Status,
+        Feature, Stage, Status, layout,
         review_import::{Finding, FindingState},
         store,
     },
@@ -324,6 +324,7 @@ fn answer(target: &str, icons: &Icons, from: &str) -> Reply {
         "/icon-512.png" => Reply::ok("image/png", icons.big.clone()),
         "/manifest.webmanifest" => Reply::ok("application/manifest+json", MANIFEST),
         "/api/features" => Reply::json(&all_features()),
+        "/api/new" => Reply::json(&new_offer()),
         "/api/feature" => feature_page(arg("p"), arg("s"), arg("stage").parse().ok()),
         "/api/doc" => doc(arg("p"), arg("s"), arg("f")),
         "/api/pane" => pane(arg("p"), arg("s"), arg("pane")),
@@ -436,6 +437,7 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
     };
     let (project, slug) = (text("p"), text("s"));
     let op = match target {
+        "/api/new" => "create",
         "/api/press" => "press",
         "/api/decide" => "decide",
         "/api/send-back" => "send-back",
@@ -449,7 +451,11 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
     for (name, value) in args {
         request[name] = value;
     }
-    match gerdr(&request) {
+    let time = match op {
+        "create" => phone_control::CREATE_TIME + Duration::from_secs(5),
+        _ => GERDR_TIME,
+    };
+    match gerdr_within(&request, time) {
         Ok(answer) => Reply::json(&answer),
         Err(why) => Reply::error(502, &why),
     }
@@ -460,6 +466,11 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
 // shortcut: with several gerdrs running, the newest that answers acts; any
 // of them knows every project's features, so that holds until one doesn't.
 fn gerdr(request: &Value) -> Result<Value, String> {
+    gerdr_within(request, GERDR_TIME)
+}
+
+/// `gerdr`, given `time` to answer.
+fn gerdr_within(request: &Value, time: Duration) -> Result<Value, String> {
     let dir = phone_control::dir().ok_or("No runtime folder to find gerdr in")?;
     let mut sockets: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(&dir)
         .map_err(|e| format!("gerdr isn't running ({e})"))?
@@ -482,7 +493,7 @@ fn gerdr(request: &Value) -> Result<Value, String> {
             }
         };
         stream
-            .set_read_timeout(Some(GERDR_TIME))
+            .set_read_timeout(Some(time))
             .map_err(|e| e.to_string())?;
         writeln!(stream, "{request}").map_err(|e| format!("Couldn't ask gerdr: {e}"))?;
         let mut line = String::new();
@@ -528,6 +539,39 @@ fn agent_input(project: &str, slug: &str, pane: &str, line: &str, key: &str) -> 
         Ok(()) => Reply::json(&json!({ "said": [] })),
         Err(err) => Reply::error(502, &format!("Couldn't reach the agent: {err}")),
     }
+}
+
+/// What a new feature can be started on: each project with a workspace
+/// folder, its repositories as the new feature dialog finds them, and the
+/// agents gerdr may run its Discover on.
+fn new_offer() -> Value {
+    let all = projects();
+    let ids: Vec<&str> = all.iter().map(|p| p.id.as_str()).collect();
+    let (mut agents, error) = match gerdr(&json!({ "op": "new-offer", "projects": ids })) {
+        Ok(answer) => (answer, None),
+        Err(why) => (Value::Null, Some(why)),
+    };
+    let projects: Vec<Value> = (all.iter())
+        .map(|p| {
+            let mut entry = json!({ "id": p.id, "name": p.name });
+            let (dirs, ignore, bases) = crate::features::root_search(p);
+            let found = match dirs.first() {
+                None => Err("It has no workspace folder".to_owned()),
+                Some(from) => layout::find_project_root(from, &dirs, &[], &ignore, &bases),
+            };
+            match found {
+                Ok(root) => {
+                    entry["multi"] = root.multi.into();
+                    let names: Vec<&str> = root.repos.iter().map(|r| r.name.as_str()).collect();
+                    entry["repos"] = names.into();
+                }
+                Err(why) => entry["error"] = why.into(),
+            }
+            entry["agents"] = agents["agents"][&p.id].take();
+            entry
+        })
+        .collect();
+    json!({ "projects": projects, "error": error })
 }
 
 /// The projects gerdr keeps, as saved.
@@ -749,7 +793,7 @@ fn feature_page(project: &str, slug: &str, stage: Option<usize>) -> Reply {
 /// merge writes go with Build's and Ship's.
 fn stage_files(stage: Stage) -> &'static [&'static str] {
     match stage {
-        Stage::Discover => &["brief.md", "decisions.md"],
+        Stage::Discover => &["brief.md", "decisions.md", "idea.md"],
         Stage::Plan => &["plan.md"],
         Stage::PlanReview => &["plan-final.md"],
         Stage::Build => &["build.md", "fix-plan.md"],
