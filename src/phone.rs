@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 
 use crate::{
     feature::{
-        Feature, Stage, Status, layout,
+        Feature, Stage, Status, layout, setup,
         store,
     },
     feature_agents::{self, Gate},
@@ -42,6 +42,8 @@ const PORT: u16 = 8390;
 const HEAD_LIMIT: u64 = 16 * 1024;
 /// How many lines of an agent's pane are sent.
 const PANE_LINES: usize = 400;
+/// How many lines of a setup log are sent: its end, where it failed.
+const LOG_LINES: usize = 400;
 /// How many history events a feature's page gets, latest first.
 const HISTORY: usize = 300;
 /// The most a request's body may take.
@@ -708,7 +710,11 @@ fn agent_panes(f: &Feature) -> impl Iterator<Item = (String, &str, u64)> {
         .own_agents
         .iter()
         .filter_map(|run| Some((run.agent.clone(), run.pane.as_deref()?, run.started)));
-    stage_runs.chain(own)
+    let research = f.research.iter().filter_map(|r| {
+        let label = format!("Research R{} · {}", r.id, r.agent);
+        Some((label, r.pane.as_deref()?, r.started.unwrap_or_default()))
+    });
+    stage_runs.chain(own).chain(research)
 }
 
 /// Feature `f`'s agents still in a pane here, with how herdr says they do.
@@ -793,7 +799,9 @@ fn stage_files(stage: Stage) -> &'static [&'static str] {
         Stage::Plan => &["plan.md"],
         Stage::PlanReview => &["plan-final.md"],
         Stage::Build => &["build.md", "fix-plan.md"],
-        Stage::ManualTest => &["evidence.md"],
+        Stage::Verify => &["evidence.md", "fix-plan.md"],
+        Stage::AiReview => &["fix-plan.md"],
+        Stage::ManualTest => &["evidence.md", "fix-plan.md"],
         Stage::Ship => &["summary.md"],
         _ => &[],
     }
@@ -821,9 +829,12 @@ fn file_stage(name: &str) -> Option<Stage> {
 fn add_files(page: &mut Value, dir: &Path) {
     let stage = (page["stage"].as_u64()).and_then(|i| Stage::ALL.get(i as usize).copied());
     let names = docs(dir);
+    let mine_too = |n: &str| stage.is_some_and(|s| stage_files(s).contains(&n));
     let mut mine: Vec<&String> = names
         .iter()
-        .filter(|n| stage.is_some_and(|s| file_stage(n) == Some(s)) || file_stage(n).is_none())
+        .filter(|n| {
+            stage.is_some_and(|s| file_stage(n) == Some(s)) || file_stage(n).is_none() || mine_too(n)
+        })
         .collect();
     let order = |n: &str| (stage.map(stage_files).unwrap_or_default().iter()).position(|x| *x == n);
     mine.sort_by_key(|n| order(n).unwrap_or(usize::MAX));
@@ -831,9 +842,12 @@ fn add_files(page: &mut Value, dir: &Path) {
         return;
     };
     let kind = |s: &Value, k: &str| s["kind"].as_str() == Some(k);
-    let said = sections
-        .iter()
-        .any(|s| kind(s, "milestones") || kind(s, "recap"));
+    // Verify's and AI review's files are what a check or a fix round left:
+    // named, not shown, under their cards.
+    let said = matches!(stage, Some(Stage::Verify | Stage::AiReview))
+        || sections
+            .iter()
+            .any(|s| kind(s, "milestones") || kind(s, "recap"));
     if !said && !sections.iter().any(|s| kind(s, "doc")) {
         let first = mine.iter().find(|n| order(n).is_some());
         sections.extend(first.map(|n| json!({ "kind": "doc", "name": n })));
@@ -851,7 +865,12 @@ fn add_files(page: &mut Value, dir: &Path) {
         read.push(name);
     }
     mine.retain(|n| !read.contains(n));
-    page["files"] = mine.into_iter().cloned().collect::<Vec<_>>().into();
+    let mut files: Vec<String> = mine.into_iter().cloned().collect();
+    // What setup printed, where a failed one is set up again.
+    if matches!(stage, Some(Stage::Build | Stage::Verify)) && dir.join(setup::LOG).is_file() {
+        files.push(setup::LOG.to_owned());
+    }
+    page["files"] = files.into();
 }
 
 /// The markdown files in a feature's folder, by name: not the copies kept
@@ -878,9 +897,21 @@ fn doc_name_ok(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
 
-/// Markdown file `name` of a feature, rendered.
+/// The last lines of a log, as a block of code to render.
+fn log_block(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let last = lines[lines.len().saturating_sub(LOG_LINES)..].join("\n");
+    // A fence longer than any run of backticks in it.
+    let mut fence = "```".to_owned();
+    while last.contains(&fence) {
+        fence.push('`');
+    }
+    format!("{fence}\n{last}\n{fence}\n")
+}
+
+/// Markdown file `name` of a feature, rendered; its setup log, as code.
 fn doc(project: &str, slug: &str, name: &str) -> Reply {
-    if !doc_name_ok(name) {
+    if !doc_name_ok(name) && name != setup::LOG {
         return Reply::error(404, "No such file");
     }
     let (project, _) = match find(project, slug) {
@@ -888,6 +919,9 @@ fn doc(project: &str, slug: &str, name: &str) -> Reply {
         Err(reply) => return reply,
     };
     match std::fs::read_to_string(store::dir(None, &project.id, slug).join(name)) {
+        Ok(text) if name == setup::LOG => {
+            Reply::json(&json!({ "html": md_preview::render(&log_block(&text)) }))
+        }
         Ok(text) => Reply::json(&json!({ "html": md_preview::render(&text) })),
         Err(err) => Reply::error(404, &format!("Couldn't read {name}: {err}")),
     }
@@ -1030,6 +1064,15 @@ mod tests {
         add_files(&mut page, &dir);
         assert_eq!(page["sections"].as_array().map(Vec::len), Some(1));
         std::fs::remove_dir_all(&dir).expect("clean");
+    }
+
+    #[test]
+    fn a_log_is_its_last_lines_fenced_past_its_own_backticks() {
+        let text: String = (0..LOG_LINES + 5).map(|i| format!("line {i}\n")).collect();
+        let block = log_block(&format!("{text}```"));
+        assert!(block.starts_with("````\n"), "{}", &block[..10]);
+        assert!(!block.contains("line 4\n"));
+        assert!(block.contains(&format!("line {}", LOG_LINES + 4)));
     }
 
     #[test]

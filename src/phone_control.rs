@@ -305,11 +305,8 @@ impl Gerdr {
                 text,
                 confirm,
             } => {
-                if text.trim().is_empty() {
-                    json!({ "error": "Say what to change" })
-                } else {
-                    self.phone_act(&project, &slug, PhoneAct::SendBack(text), confirm)
-                }
+                // Empty, it may still have line comments to send.
+                self.phone_act(&project, &slug, PhoneAct::SendBack(text), confirm)
             }
         };
         // The phone may have given up on it.

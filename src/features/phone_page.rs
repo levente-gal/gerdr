@@ -15,7 +15,7 @@
 use serde_json::{Value, json};
 
 use super::*;
-use crate::{confirm::Outcome, review_cards::ItemAct, toast::Level};
+use crate::{confirm::Outcome, doc_review::DocFile, review_cards::ItemAct, toast::Level};
 
 /// Whether the phone may press a button doing `outcome`.
 fn phone_may(outcome: &PanelOutcome) -> bool {
@@ -421,6 +421,35 @@ fn phone_root(
     Ok((root, touched))
 }
 
+/// The file of `feature` waiting for the user's review: a stage's (see
+/// `doc_waiting`), or the fix plan its Build agent wrote.
+fn review_waiting(feature: &Feature) -> Option<DocFile> {
+    if let Some(stage) = doc_waiting(feature) {
+        return Some(DocFile::Stage(stage));
+    }
+    let round = feature.fix_round.as_ref()?;
+    (feature.status == Status::Open
+        && !round.fixes_stopped()
+        && round.phase == FixPhase::Ready
+        && round.ready.is_some())
+    .then_some(DocFile::FixPlan)
+}
+
+/// The line comments on a file to review, as the phone lists them.
+fn comments_json(review: &crate::review::Review) -> Vec<Value> {
+    (review.comments.iter())
+        .filter(|c| c.flag.is_none())
+        .map(|c| {
+            let line = c.lines.first();
+            json!({
+                "line": line.map(|q| q.number),
+                "quote": line.map(|q| q.text.trim()),
+                "text": c.text,
+            })
+        })
+        .collect()
+}
+
 /// What the phone asks a feature: its page's buttons, or a press.
 #[derive(Debug, PartialEq)]
 pub(crate) enum PhoneAct {
@@ -677,7 +706,17 @@ impl Gerdr {
             return json!({ "error": "gerdr has no such feature" });
         };
         let elsewhere = self.feature_writer(project, slug).map(str::to_owned);
-        let send_back = doc_waiting(feature) == Some(page.shown);
+        // The file to send back, with the line comments that go with it.
+        let send_back = (review_waiting(feature))
+            .filter(|_| page.shown == own_page(feature) && elsewhere.is_none())
+            .map(|file| {
+                let comments = self.doc_comments(project, slug, file).map(|r| comments_json(&r));
+                json!({
+                    "name": file.name(),
+                    "comments": comments.as_ref().ok(),
+                    "error": comments.err(),
+                })
+            });
         let view = &page.view;
         let nodes: Vec<Value> = (view.rail.iter())
             .map(|n| {
@@ -710,7 +749,7 @@ impl Gerdr {
         });
         json!({
             "buttons": page.loose(),
-            "sendBack": send_back && elsewhere.is_none(),
+            "sendBack": send_back,
             "elsewhere": elsewhere,
             "rail": rail,
             "page": page_json,
@@ -787,11 +826,31 @@ impl Gerdr {
                 }
             }
             PhoneAct::SendBack(text) => {
-                let Some(stage) = self.feature(&project, &slug).and_then(Feature::current) else {
-                    return json!({ "error": "gerdr has no such feature" });
+                let Some(file) = self.feature(&project, &slug).and_then(review_waiting) else {
+                    return json!({ "error": "None of its files waits for review now" });
                 };
+                let review = match self.doc_comments(&project, &slug, file) {
+                    Ok(review) => review,
+                    Err(why) => return json!({ "error": why }),
+                };
+                // The line comments go after what was typed, as the desk sends them.
+                let name = file.name().unwrap_or("its file");
+                // shortcut: none counts as outdated (the desk checks each
+                // against the file's diff); their quoted lines go with them.
+                let lines = (!review.comments.is_empty())
+                    .then(|| crate::review::doc_markdown(&review, name, |_| false));
+                let all: Vec<&str> = [Some(text.trim()), lines.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                if all.is_empty() {
+                    return json!({ "error": "Say what should change" });
+                }
+                let comments = all.join("\n\n");
+                let sent = crate::doc_review::drafts_comments(&review);
                 self.phone_said(confirm, move |g| {
-                    g.send_back_stage(&project, &slug, stage, text);
+                    g.send_back_doc(&project, &slug, file, comments, sent);
                 })
             }
         }

@@ -412,10 +412,16 @@ function actions(offer) {
   if (offer.error) return `<p class="quiet small">Actions need gerdr: ${esc(offer.error)}</p>`;
   if (offer.elsewhere) return `<p class="quiet small">${esc(offer.elsewhere)} writes it: act there.</p>`;
   let html = row(offer.buttons);
-  if (offer.sendBack) {
-    html += `<details class="sendback"><summary>Send back with a comment</summary>
+  const back = offer.sendBack;
+  if (back) {
+    // The line comments made on the desk go with what is typed here.
+    const lines = back.comments || [];
+    const said = lines.length ? `<div class="small quiet">${lines.length} line comment${lines.length > 1 ? "s" : ""} go${lines.length > 1 ? "" : "es"} with it:</div>
+      <ul class="lines small">${lines.map((c) => `<li>${c.line ? `<b>line ${c.line}</b> <span class="quiet">${esc(c.quote)}</span><br>` : ""}${esc(c.text)}</li>`).join("")}</ul>` : "";
+    html += `<details class="sendback"${lines.length ? " open" : ""}><summary>Send ${esc(back.name || "it")} back with a comment</summary>
+      ${back.error ? `<p class="error small">${esc(back.error)}</p>` : said}
       <textarea id="backText" rows="4" placeholder="What should change"></textarea>
-      <button data-sendback>Send back</button></details>`;
+      <button data-sendback data-lines="${lines.length}">Send back</button></details>`;
   }
   return html;
 }
@@ -600,7 +606,7 @@ document.addEventListener("click", async (e) => {
       await ask("/api/press", { p, s, stage, id, text });
     } else if (b.dataset.sendback !== undefined) {
       const box = document.getElementById("backText");
-      if (!box.value.trim()) { say([{ text: "Say what should change" }], true); return; }
+      if (!box.value.trim() && b.dataset.lines === "0") { say([{ text: "Say what should change" }], true); return; }
       if (await ask("/api/send-back", { p, s, text: box.value })) box.value = "";
     } else if (b.dataset.key) {
       const a = await post("/api/agent", { p, s, pane, key: b.dataset.key });

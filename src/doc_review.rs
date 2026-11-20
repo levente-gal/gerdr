@@ -927,21 +927,9 @@ impl Gerdr {
     /// the stage's page: asked first when comments on it would go unsent,
     /// refused while its tab has one being written.
     pub(crate) fn approve_doc(&mut self, project: &str, slug: &str, stage: Stage) {
-        let file = DocFile::Stage(stage);
-        let is_it = |d: &DocOf| d.project == project && d.slug == slug && d.file == file;
-        let tab = (self.workspaces.iter().flat_map(|ws| &ws.tabs))
-            .filter_map(|tab| tab.review())
-            .map(|r| &r.wd)
-            .find(|wd| wd.doc.as_ref().is_some_and(is_it));
-        if tab.is_some_and(|wd| wd.diff.editing.is_some()) {
-            return self.show_warning(crate::worktree_diff::DRAFT_OPEN.into());
-        }
-        let count = match tab {
-            Some(wd) => wd.diff.review.comments.len(),
-            None => {
-                let dir = store::dir(None, project, slug);
-                review::load_file(&file.comments(&dir)).comments.len()
-            }
+        let count = match self.doc_comments(project, slug, DocFile::Stage(stage)) {
+            Ok(review) => review.comments.len(),
+            Err(why) => return self.show_warning(why.into()),
         };
         if count > 0 {
             let name = artifacts::name(stage).unwrap_or("its file");
@@ -949,6 +937,29 @@ impl Gerdr {
             return self.ask_approve_unsent(project, slug, stage, name, count);
         }
         self.approve_doc_now(project, slug, stage);
+    }
+
+    /// The comments on `file` of feature `slug`: its open review's, else
+    /// those saved with it. Refused while its tab has one being written.
+    pub(crate) fn doc_comments(
+        &self,
+        project: &str,
+        slug: &str,
+        file: DocFile,
+    ) -> Result<Review, &'static str> {
+        let is_it = |d: &DocOf| d.project == project && d.slug == slug && d.file == file;
+        let tab = (self.workspaces.iter().flat_map(|ws| &ws.tabs))
+            .filter_map(|tab| tab.review())
+            .map(|r| &r.wd)
+            .find(|wd| wd.doc.as_ref().is_some_and(is_it));
+        match tab {
+            Some(wd) if wd.diff.editing.is_some() => Err(crate::worktree_diff::DRAFT_OPEN),
+            Some(wd) => Ok(wd.diff.review.clone()),
+            None => {
+                let dir = store::dir(None, project, slug);
+                Ok(review::load_file(&file.comments(&dir)))
+            }
+        }
     }
 
     /// Approve `stage` of feature `slug`: the stage marked done, then its
@@ -992,35 +1003,49 @@ impl Gerdr {
         let Some(doc) = self.doc_of().cloned() else {
             return;
         };
-        if doc.file == DocFile::FixPlan {
-            return self.fix_plan_send_back(&doc.project, &doc.slug, comments);
-        }
-        // The suggestions' notes go back to their reviewer.
-        if doc.file == DocFile::Suggestions {
-            return self.ask_reviewer(&doc.project, &doc.slug);
-        }
-        if let DocFile::ConflictPlan(_) = doc.file {
-            return self.send_back_conflict_plan(&doc.project, &doc.slug, doc.file, comments);
-        }
-        // What goes back is kept with the draft it is on, for its card.
-        let sent: Vec<crate::feature::fix_round::Asked> = (self.wd())
+        let sent = (self.wd())
             .map(|wd| drafts_comments(&wd.diff.review))
             .unwrap_or_default();
+        self.send_back_doc(&doc.project, &doc.slug, doc.file, comments, sent);
+    }
+
+    /// Send `file` of feature `slug` back to its agent with `comments`
+    /// (Markdown), from its review or the phone: its comments deleted, its
+    /// review closed. `sent`: the comments it holds, kept with the draft
+    /// they are on, for its card.
+    pub(crate) fn send_back_doc(
+        &mut self,
+        project: &str,
+        slug: &str,
+        file: DocFile,
+        comments: String,
+        sent: Vec<crate::feature::fix_round::Asked>,
+    ) {
+        if file == DocFile::FixPlan {
+            return self.fix_plan_send_back(project, slug, comments);
+        }
+        // The suggestions' notes go back to their reviewer.
+        if file == DocFile::Suggestions {
+            return self.ask_reviewer(project, slug);
+        }
+        if let DocFile::ConflictPlan(_) = file {
+            return self.send_back_conflict_plan(project, slug, file, comments);
+        }
         // One no longer waiting is refused there: the comments stay.
         let waiting = self
-            .feature(&doc.project, &doc.slug)
-            .is_some_and(|f| f.status == Status::Open && f.current() == Some(doc.file.stage()));
+            .feature(project, slug)
+            .is_some_and(|f| f.status == Status::Open && f.current() == Some(file.stage()));
         if waiting {
-            self.doc_done(&doc.project, &doc.slug, doc.file);
+            self.doc_done(project, slug, file);
         }
-        self.send_back_stage(&doc.project, &doc.slug, doc.file.stage(), comments);
-        let stage = doc.file.stage();
-        if let Some(f) = self.feature_mut(&doc.project, &doc.slug)
+        self.send_back_stage(project, slug, file.stage(), comments);
+        let stage = file.stage();
+        if let Some(f) = self.feature_mut(project, slug)
             && let Some(draft) = crate::feature::drafts::latest(&mut f.drafts, stage)
                 .filter(|d| d.sent_back.is_some() && d.comments.is_empty())
         {
             draft.comments = sent;
-            self.save_feature(&doc.project, &doc.slug);
+            self.save_feature(project, slug);
         }
     }
 
