@@ -9144,6 +9144,7 @@ fn strip_views() -> [super::CriteriaStripView; 7] {
         shots: String::new(),
         buttons: vec![plain("Pass"), plain("Fail\u{2026}")],
         steps_through: true,
+        passed: false,
         hover: None,
         keys: false,
     };
@@ -9165,6 +9166,8 @@ fn strip_views() -> [super::CriteriaStripView; 7] {
     };
     let failed = CriteriaStripView {
         open: true,
+        // Stepping through passed criteria too: its check button on.
+        passed: true,
         tag: StripTag::Failed,
         state: crate::feature::review_import::sent_word(false, false).into(),
         note: "the second row reverts after a reload".into(),
@@ -9226,43 +9229,43 @@ fn paint_strip(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 const GOLDEN_STRIP: [[u64; 7]; 4] = [
     // Dark at 1
     [
-        0xdb41b4b7e4823d78, // strip_row
-        0x2e26bf447b749a68, // strip_open
-        0x8d9c47e709b73456, // strip_note
-        0x700e0bb6d80637b1, // strip_failed
+        0x6397b535cd5e6084, // strip_row
+        0x8b6fb4545e8ac9ec, // strip_open
+        0x8b78f55abec898aa, // strip_note
+        0xc77d6ea5a2b0a3dd, // strip_failed
         0xe134649e78702bbf, // strip_chip
-        0x008aec71209871ff, // strip_comment
-        0xbf292de592392a11, // strip_comment_narrow
+        0x6df08774cdd11b0f, // strip_comment
+        0xb1140a83041fc565, // strip_comment_narrow
     ],
     // Dark at 2
     [
-        0x2de8ce9dd2069f58, // strip_row
-        0xfd0cc9af2e4d06aa, // strip_open
-        0x230f6338de5e7a64, // strip_note
-        0xcffcd15866473ea7, // strip_failed
+        0x3cae048d0c03a7ad, // strip_row
+        0x9e6cf44611ffde43, // strip_open
+        0xa331a018e95da99d, // strip_note
+        0xe7dd8319773fdb75, // strip_failed
         0xb63f093b83828479, // strip_chip
-        0xba4629ca56b2e3d7, // strip_comment
-        0x2bbbbfd0fc3a4b1b, // strip_comment_narrow
+        0xcbb3d445cb188176, // strip_comment
+        0xebee12d3e4e50ec6, // strip_comment_narrow
     ],
     // Light at 1
     [
-        0xfc875ee33f9f0b3c, // strip_row
-        0x03dc3231429f2cba, // strip_open
-        0x11416ed6005c650d, // strip_note
-        0x0fb808c18b78afa1, // strip_failed
+        0xbb6360cac4449a46, // strip_row
+        0x0ed1fbfb05bdf644, // strip_open
+        0xf6c21b3acb818a6b, // strip_note
+        0x32381ccfc971b0b3, // strip_failed
         0x60faa77000796bed, // strip_chip
-        0x54090f1ea73a8d12, // strip_comment
-        0xeeb16ab3e3158dc7, // strip_comment_narrow
+        0xa7b9a56fbf5c55d0, // strip_comment
+        0x70cc5fe0219adfb9, // strip_comment_narrow
     ],
     // Light at 2
     [
-        0xce05617d665b3049, // strip_row
-        0x199252ddc99d9e09, // strip_open
-        0xe2fc5b41467fe76e, // strip_note
-        0x261bbded9fe8c6f2, // strip_failed
+        0x718dd7038c7fa992, // strip_row
+        0x73ed91d0e9eb83ba, // strip_open
+        0x8398ce8dcbd9f2e5, // strip_note
+        0x68f321f64706145c, // strip_failed
         0x45481f7462f5972c, // strip_chip
-        0xcab0cdaa12cf0560, // strip_comment
-        0x312425f04d8bbdc2, // strip_comment_narrow
+        0x75654622c5795733, // strip_comment
+        0x7e536bde3016e969, // strip_comment_narrow
     ],
 ];
 

@@ -203,6 +203,20 @@ fn first_untried(rows: &[Row]) -> usize {
     rows.iter().position(|r| r.found.is_none()).unwrap_or(0)
 }
 
+/// The row `by` from `i` among `rows` not passed, going round: not tried,
+/// failed, or a comment not done. None when no other row is.
+fn step_open(rows: &[Row], i: usize, by: isize) -> Option<usize> {
+    let n = rows.len() as isize;
+    let open = |j: usize| rows[j].found != Some(Verdict::Pass);
+    let mut at = i;
+    for _ in 0..by.unsigned_abs() {
+        at = (1..n)
+            .map(|k| (at as isize + k * by.signum()).rem_euclid(n) as usize)
+            .find(|&j| open(j))?;
+    }
+    (at != i).then_some(at)
+}
+
 /// "1 screenshot", "2 screenshots".
 fn shots_text(n: usize) -> String {
     match n {
@@ -227,6 +241,8 @@ enum StripKey {
     OnPage,
     /// Fold the strip to a chip.
     Fold,
+    /// Step through passed criteria too, or skip them.
+    Passed,
     /// Add a screenshot of the page to the note.
     Shot,
     /// Save the note.
@@ -311,6 +327,12 @@ const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
         does: |_| Some(StripKey::Select),
         footer: true,
         f1: "select an area of the app to add an issue on",
+    },
+    Binding {
+        chord: "P",
+        does: |_| Some(StripKey::Passed),
+        footer: true,
+        f1: "step through passed criteria too, or skip them",
     },
     Binding {
         chord: "Esc",
@@ -598,6 +620,7 @@ impl Gerdr {
                 .map(|(button, _)| (button.label, button.style))
                 .collect(),
             steps_through: rows.len() > 1,
+            passed: self.projects.criteria_passed,
             hover: strip.hover,
             keys,
         })
@@ -674,8 +697,24 @@ impl Gerdr {
         let hit = hit?;
         let rect = layout.rect_of(hit)?;
         let (text, key): (String, &str) = match hit {
-            StripHit::Prev => ("Previous criterion".into(), "Ctrl+PgUp"),
-            StripHit::Next => ("Next criterion".into(), "Ctrl+PgDn"),
+            StripHit::Prev | StripHit::Next => {
+                let next = hit == StripHit::Next;
+                let text = match (next, self.projects.criteria_passed) {
+                    (false, true) => "Previous criterion",
+                    (true, true) => "Next criterion",
+                    (false, false) => "Previous criterion not passed",
+                    (true, false) => "Next criterion not passed",
+                };
+                (text.into(), if next { "Ctrl+PgDn" } else { "Ctrl+PgUp" })
+            }
+            StripHit::Passed => (
+                match self.projects.criteria_passed {
+                    true => "Skip passed criteria",
+                    false => "Step through passed criteria too",
+                }
+                .into(),
+                strip_chord(&StripKey::Passed),
+            ),
             StripHit::Title => ("Show its steps, or hide them".into(), ""),
             StripHit::Page => (
                 "Show it on Manual test's page".into(),
@@ -788,6 +827,7 @@ impl Gerdr {
                 }
             }
             StripHit::Chip => self.set_criteria_folded(false),
+            StripHit::Passed => self.toggle_criteria_passed(),
             // The caret goes where the click is (see `press_field`).
             StripHit::Field => self.criteria_strip.keys = Some(target.pane),
             StripHit::Shot => self.criterion_shot(&target),
@@ -806,8 +846,18 @@ impl Gerdr {
             return;
         };
         let n = rows.len() as isize;
-        let to = (i as isize + by).rem_euclid(n) as usize;
+        let to = (!self.projects.criteria_passed)
+            .then(|| step_open(&rows, i, by))
+            .flatten()
+            .unwrap_or_else(|| (i as isize + by).rem_euclid(n) as usize);
         self.criteria_strip.at.insert(target.key(), to);
+    }
+
+    /// The strip's arrows step through passed criteria too, or skip them
+    /// again; kept in `state.json`.
+    fn toggle_criteria_passed(&mut self) {
+        self.projects.criteria_passed = !self.projects.criteria_passed;
+        self.projects.save();
     }
 
     /// Show the criterion shown on Manual test's page.
@@ -1307,6 +1357,7 @@ impl Gerdr {
             Some(StripKey::Close) => self.drop_criteria_keys(),
             Some(StripKey::OnPage) => self.criterion_on_page(&target),
             Some(StripKey::Fold) => self.set_criteria_folded(true),
+            Some(StripKey::Passed) => self.toggle_criteria_passed(),
             Some(StripKey::Shot) => self.criterion_shot(&target),
             Some(StripKey::Select) => self.strip_select(&target),
             Some(_) => {}
@@ -1411,6 +1462,21 @@ mod tests {
         let done = vec![row(pass), row(pass)];
         assert_eq!(next_untried(&done, 0), None);
         assert_eq!(first_untried(&done), 0);
+    }
+
+    #[test]
+    fn stepping_skips_the_passed_going_round() {
+        let (pass, fail) = (Some(Verdict::Pass), Some(Verdict::Fail));
+        let rows = vec![row(None), row(pass), row(fail), row(pass)];
+        assert_eq!(step_open(&rows, 0, 1), Some(2));
+        assert_eq!(step_open(&rows, 2, 1), Some(0));
+        assert_eq!(step_open(&rows, 0, -1), Some(2));
+        // From a passed one, to the next not passed.
+        assert_eq!(step_open(&rows, 1, 1), Some(2));
+        assert_eq!(step_open(&rows, 3, -1), Some(2));
+        // Only the one shown is left, or none: the arrows step through all.
+        assert_eq!(step_open(&[row(None), row(pass)], 0, 1), None);
+        assert_eq!(step_open(&[row(pass), row(pass)], 0, 1), None);
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //! passed or failed there, without going back to the feature tab. It floats at
 //! the bottom of the pane, or folds to a chip in its corner.
 //!
-//! Its one row: ‹ › to step through the criteria, the criterion's dot, id and
+//! Its one row: ‹ › to step through the criteria (those not passed, unless
+//! the check beside them is on), the criterion's dot, id and
 //! title (a click shows its steps), the buttons its card on the page has, Page
 //! and the fold button. Above the row, while unfolded, its steps, what went
 //! wrong, and the note being written with the screenshot button.
@@ -11,7 +12,7 @@
 use super::{
     BUTTON_RADIUS, ButtonStyle, Canvas, FOCUS_RING, FONT_SIZE, FieldSpot, POPUP_RADIUS, Painter,
     Palette, QUIT_BUTTON, ROW_BUTTON, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, band, button_width,
-    chevron_down, chevron_side, field_lines_height, field_text, icon_sdf, measure, rect_px,
+    check, chevron_down, chevron_side, field_lines_height, field_text, icon_sdf, measure, rect_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -88,6 +89,8 @@ pub struct CriteriaStripView {
     pub buttons: Vec<(String, ButtonStyle)>,
     /// Whether it has more than one criterion to step through.
     pub steps_through: bool,
+    /// The arrows step through passed criteria too: its check button is on.
+    pub passed: bool,
     pub hover: Option<StripHit>,
     /// It has the keyboard: its edge is in the accent.
     pub keys: bool,
@@ -98,6 +101,9 @@ pub struct CriteriaStripView {
 pub enum StripHit {
     Prev,
     Next,
+    /// The check button beside the arrows: they step through passed
+    /// criteria too, or skip them.
+    Passed,
     /// The criterion's dot, id and title: its steps show, or hide.
     Title,
     /// One of the criterion's buttons, by index.
@@ -192,7 +198,7 @@ fn wrapped(text: &str, room: f32, size: f32, most: usize) -> Vec<String> {
 /// its right.
 fn row_room(w: i32) -> i32 {
     w - 2 * INSET
-        - (2 * (ROW_BUTTON + 2) + GROUP_GAP)
+        - (3 * (ROW_BUTTON + 2) + GROUP_GAP)
         - (GROUP_GAP + button_width("Page") + GAP + ROW_BUTTON)
 }
 
@@ -371,9 +377,11 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     let square = |x: i32| Rectangle::new((x, cy).into(), (ROW_BUTTON, ROW_BUTTON).into());
     let prev = square(x0);
     let next = square(x0 + ROW_BUTTON + 2);
+    let passed = square(x0 + 2 * (ROW_BUTTON + 2));
     if view.steps_through {
         hits.push((StripHit::Prev, prev));
         hits.push((StripHit::Next, next));
+        hits.push((StripHit::Passed, passed));
     }
     let mut right = panel.loc.x + w - INSET;
     let fold = square(right - ROW_BUTTON);
@@ -405,7 +413,7 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
         _ => 0,
     });
     hits.extend(buttons);
-    let tx = next.loc.x + ROW_BUTTON + GROUP_GAP;
+    let tx = passed.loc.x + ROW_BUTTON + GROUP_GAP;
     let title = match title_h {
         0 => Rectangle::new(
             (tx, bottom_row).into(),
@@ -563,13 +571,19 @@ impl Painter {
         for (hit, rect) in &layout.hits {
             let rect = here(*rect);
             match *hit {
-                StripHit::Prev | StripHit::Next | StripHit::Fold => {
-                    if lit(*hit) {
+                StripHit::Prev | StripHit::Next | StripHit::Passed | StripHit::Fold => {
+                    // The check button stays pressed while it is on.
+                    let on = *hit == StripHit::Passed && view.passed;
+                    if lit(*hit) || on {
                         let (x, y, w, h) = rect_px(rect, scale);
-                        c.rounded(x, y, w, h, BUTTON_RADIUS * s, p.element);
+                        let fill = if lit(*hit) { p.element } else { p.selected };
+                        c.rounded(x, y, w, h, BUTTON_RADIUS * s, fill);
                     }
-                    let ink = if lit(*hit) { p.text } else { p.muted };
+                    let ink = if lit(*hit) || on { p.text } else { p.muted };
                     match *hit {
+                        StripHit::Passed => {
+                            icon_sdf(&mut c, rect, scale, ink, |x, y| check(x, y, s));
+                        }
                         StripHit::Fold => {
                             icon_sdf(&mut c, rect, scale, ink, |x, y| chevron_down(x, y, s));
                         }
@@ -692,6 +706,7 @@ mod tests {
                 ("Fail\u{2026}".into(), ButtonStyle::Plain),
             ],
             steps_through: true,
+            passed: false,
             hover: None,
             keys: false,
         }
@@ -757,6 +772,8 @@ mod tests {
         let pass = row(StripHit::Button(0));
         let fail = row(StripHit::Button(1));
         assert!(row(StripHit::Prev).loc.x < row(StripHit::Next).loc.x);
+        assert!(row(StripHit::Next).loc.x < row(StripHit::Passed).loc.x);
+        assert!(row(StripHit::Passed).loc.x + ROW_BUTTON < row(StripHit::Title).loc.x);
         assert!(row(StripHit::Title).loc.x + row(StripHit::Title).size.w <= pass.loc.x);
         assert!(pass.loc.x < fail.loc.x && fail.loc.x < row(StripHit::Page).loc.x);
         assert!(row(StripHit::Page).loc.x < row(StripHit::Fold).loc.x);

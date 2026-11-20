@@ -82,6 +82,10 @@ pub struct Store {
     /// its chip (see `criteria_strip`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub criteria_folded: bool,
+    /// Whether the criteria strip's arrows step through passed criteria
+    /// too: by default they skip them (see `criteria_strip`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub criteria_passed: bool,
     /// The agents paused, to let go (see `agent_pause`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paused_agents: Vec<crate::agent_pause::Paused>,
@@ -156,6 +160,8 @@ struct State {
     open_feature_groups: BTreeMap<String, BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     criteria_folded: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    criteria_passed: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     paused_agents: Vec<crate::agent_pause::Paused>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -661,6 +667,7 @@ impl Store {
         self.repo_grouping = state.repo_grouping;
         self.open_feature_groups = state.open_feature_groups;
         self.criteria_folded = state.criteria_folded;
+        self.criteria_passed = state.criteria_passed;
         self.paused_agents = state.paused_agents;
         self.sidebar_width = state.sidebar_width;
         self.dock_share = state.dock_share;
@@ -687,6 +694,7 @@ impl Store {
             repo_grouping: self.repo_grouping,
             open_feature_groups: self.open_feature_groups.clone(),
             criteria_folded: self.criteria_folded,
+            criteria_passed: self.criteria_passed,
             paused_agents: self.paused_agents.clone(),
             sidebar_width: self.sidebar_width,
             dock_share: self.dock_share,
@@ -2110,6 +2118,7 @@ mod tests {
                 BTreeSet::from(["login".to_string()]),
             )]),
             criteria_folded: true,
+            criteria_passed: true,
             paused_agents: Vec::new(),
             sidebar_width: Some(280),
             dock_share: Some(0.6),
