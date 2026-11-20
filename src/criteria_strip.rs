@@ -6,7 +6,7 @@
 //! (the project's `sandbox_url`, else one on this machine, as the sandbox's
 //! app opens), while the feature is at Manual test and its brief has
 //! criteria. The criterion it shows starts at the first not tried; Pass marks
-//! it and moves on to the next not tried, Fail… opens a note on the strip,
+//! it and moves on to the next not passed, Fail… opens a note on the strip,
 //! written as on the criterion's card on the page (the same note: the page and
 //! the strip show one result). Screenshot adds what the page shows to the
 //! note, a PNG in the feature's data folder (`manual::SHOTS_DIR`) that the
@@ -188,14 +188,6 @@ fn sandbox_page(url: &str, set: Option<&str>) -> bool {
         Some(set) => origin(url).is_some_and(|at| at == set),
         None => crate::feature_sandbox::is_local_page(url),
     }
-}
-
-/// The first of `rows` after `i` not tried, going round; none when all were.
-fn next_untried(rows: &[Row], i: usize) -> Option<usize> {
-    let n = rows.len();
-    (1..=n)
-        .map(|k| (i + k) % n)
-        .find(|&j| rows[j].found.is_none())
 }
 
 /// Where the strip of `rows` starts: at the first not tried, else the first.
@@ -1045,10 +1037,10 @@ impl Gerdr {
                     return;
                 }
                 self.apply_manual_test_on(&target.project, &target.slug, Outcome::Toggle(i));
-                // Passed, the next not tried is up.
+                // Passed, the next not passed is up: not tried or failed.
                 if let Some((rows, _)) = self.strip_rows(target)
                     && rows.get(i).is_some_and(|r| r.found == Some(Verdict::Pass))
-                    && let Some(next) = next_untried(&rows, i)
+                    && let Some(next) = step_open(&rows, i, 1)
                 {
                     self.criteria_strip.at.insert(key, next);
                 }
@@ -1568,14 +1560,14 @@ mod tests {
     }
 
     #[test]
-    fn a_pass_moves_on_to_the_next_not_tried_going_round() {
-        let pass = Some(Verdict::Pass);
-        let rows = vec![row(None), row(pass), row(pass), row(None)];
+    fn a_pass_moves_on_to_the_next_not_passed_going_round() {
+        let (pass, fail) = (Some(Verdict::Pass), Some(Verdict::Fail));
+        let rows = vec![row(None), row(pass), row(fail), row(None)];
         assert_eq!(first_untried(&rows), 0);
-        assert_eq!(next_untried(&rows, 0), Some(3));
-        assert_eq!(next_untried(&rows, 3), Some(0));
+        assert_eq!(step_open(&rows, 0, 1), Some(2));
+        assert_eq!(step_open(&rows, 3, 1), Some(0));
         let done = vec![row(pass), row(pass)];
-        assert_eq!(next_untried(&done, 0), None);
+        assert_eq!(step_open(&done, 0, 1), None);
         assert_eq!(first_untried(&done), 0);
     }
 
