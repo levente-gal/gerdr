@@ -335,7 +335,7 @@ function section(x, f, p, s) {
       const said = (x.commentButtons || []).map((b) => ({ ...b, value: b.value || x.comment }));
       const acts = row(x.buttons) + row(said);
       return more
-        ? `<div class="card finding${x.faded ? " faded" : ""}"><details><summary>${body}</summary>${more}</details>${acts}</div>`
+        ? `<div class="card finding${x.faded ? " faded" : ""}"><details class="in"><summary>${body}</summary>${more}</details>${acts}</div>`
         : `<div class="card finding${x.faded ? " faded" : ""}">${body}${acts}</div>`;
     }
     case "review":
@@ -506,7 +506,8 @@ async function pane(p, s, id) {
   return { title: d.label, back: href("f", p, s), html: `<pre class="term">${text}</pre>`, pane: true,
     bar: `<form id="say"><input id="line" enterkeyhint="send" autocomplete="off" placeholder="Reply to the agent">
       <button>Send</button></form>
-      <div class="keys">${KEYS.map(([k, l]) => `<button data-key="${k}">${l}</button>`).join("")}</div>` };
+      <div class="keys">${KEYS.map(([k, l]) => `<button data-key="${k}">${l}</button>`).join("")}
+        <button data-key="close" title="Close its tab, as on the desktop">Close</button></div>` };
 }
 
 // Keys for an agent's menus and prompts: herdr's name, and the label.
@@ -609,8 +610,10 @@ document.addEventListener("click", async (e) => {
       if (!box.value.trim() && b.dataset.lines === "0") { say([{ text: "Say what should change" }], true); return; }
       if (await ask("/api/send-back", { p, s, text: box.value })) box.value = "";
     } else if (b.dataset.key) {
+      if (b.dataset.key === "close" && !confirm(`Close ${titleEl.textContent}? Its tab closes, as on the desktop.`)) return;
       const a = await post("/api/agent", { p, s, pane, key: b.dataset.key });
       if (a.error) say([{ text: a.error }], true);
+      if (b.dataset.key === "close" && !a.error) { location.hash = href("f", p, s); return; }
       setTimeout(() => render(false, true), 400);
     }
   } finally {

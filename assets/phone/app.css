@@ -247,8 +247,6 @@ textarea:focus, input:focus, select:focus { outline: 2px solid var(--accent); ou
 .sendback { margin-top: 12px; }
 .sendback summary { color: var(--accent); padding: 6px 0; }
 .sendback textarea { margin: 6px 0 8px; }
-.finding details { margin-top: 6px; font-size: 14px; }
-.finding details summary { color: var(--quiet); }
 .finding.dismissed .name, .finding.fixed .name { color: var(--quiet); }
 .finding.open::before { background: var(--wait); }
 .sev { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
@@ -316,13 +314,15 @@ h3 .count { font-weight: 500; }
   max-height: 240px; overflow-y: auto;
 }
 .card.faded { opacity: .6; }
-details.card > summary, details.fold > summary { list-style: none; cursor: pointer; }
-details.card > summary::-webkit-details-marker, details.fold > summary::-webkit-details-marker { display: none; }
-details.card > summary .top::after, details.fold > summary h2::after {
+details.card > summary, details.fold > summary, .card > details.in > summary { list-style: none; cursor: pointer; }
+details.card > summary::-webkit-details-marker, details.fold > summary::-webkit-details-marker,
+.card > details.in > summary::-webkit-details-marker { display: none; }
+details.card > summary .top::after, details.fold > summary h2::after, .card > details.in > summary .top::after {
   content: "›"; color: var(--dim); font-size: 18px; line-height: 1; margin-left: auto; transition: transform .15s;
 }
-details[open].card > summary .top::after, details[open].fold > summary h2::after { transform: rotate(90deg); }
-details.card > p { font-size: 14px; overflow-wrap: anywhere; }
+details[open].card > summary .top::after, details[open].fold > summary h2::after,
+.card > details[open].in > summary .top::after { transform: rotate(90deg); }
+details.card > p, .card > details.in > p { font-size: 14px; overflow-wrap: anywhere; }
 .history-fold .last { margin: -2px 0 4px; overflow-wrap: anywhere; }
 .history-fold[open] .last { display: none; }
 .doc.card { padding: 4px 16px; font-size: 15px; }

@@ -130,12 +130,13 @@ impl PhoneButton {
 
 /// A stage's page as the phone shows it: the desktop's, with the buttons
 /// the phone may press, by their place in the page's buttons, and those
-/// it adds (agent picks, a model, Approve).
+/// it adds, by the place of the section they go on (agent picks, a model,
+/// Build's choice), or on none (Approve).
 struct PhonePage {
     shown: Stage,
     view: chrome::FeatureTabView,
     buttons: Vec<Option<PhoneButton>>,
-    extra: Vec<PhoneButton>,
+    extra: Vec<(Option<usize>, PhoneButton)>,
 }
 
 impl PhonePage {
@@ -148,7 +149,12 @@ impl PhonePage {
 
     /// Every button the phone may press here.
     fn all(&self) -> impl Iterator<Item = &PhoneButton> {
-        self.buttons.iter().flatten().chain(&self.extra)
+        (self.buttons.iter().flatten()).chain(self.extra.iter().map(|(_, b)| b))
+    }
+
+    /// The buttons it adds to section `i`.
+    fn added(&self, i: usize) -> impl Iterator<Item = &PhoneButton> {
+        (self.extra.iter()).filter(move |(at, _)| *at == Some(i)).map(|(_, b)| b)
     }
 
     /// The page's buttons no section holds, for the row under its agents:
@@ -166,35 +172,24 @@ impl PhonePage {
                 _ => {}
             }
         }
-        let approve = (self.extra.iter()).filter(|b| matches!(b.outcome, PanelOutcome::ApproveDoc(_)));
+        let approve = (self.extra.iter()).filter(|(at, _)| at.is_none()).map(|(_, b)| b);
         let rest = (self.buttons.iter().enumerate())
             .filter(|(i, _)| !held.contains(&i))
             .filter_map(|(_, b)| b.as_ref());
         approve.chain(rest).map(PhoneButton::json).collect()
     }
 
-    /// The picks and model button of the agent card of `stage`.
-    fn agent_extra(&self, stage: Stage) -> (Vec<Value>, Option<Value>) {
-        let picks = (self.extra.iter())
-            .filter(|b| matches!(&b.outcome, PanelOutcome::PickAgent(s, _) if *s == stage))
-            .map(PhoneButton::json)
-            .collect();
-        let model = (self.extra.iter())
-            .find(|b| b.outcome == PanelOutcome::PickModel(stage))
-            .map(PhoneButton::json);
-        (picks, model)
-    }
-
-    /// A section as the phone shows it, with its buttons.
-    fn section(&self, section: &chrome::PageSection) -> Option<Value> {
+    /// Section `i` as the phone shows it, with its buttons.
+    fn section(&self, i: usize, section: &chrome::PageSection) -> Option<Value> {
         use chrome::PageSection as S;
         let mut value = section_json(section)?;
         match section {
-            S::Agent { stage, buttons, .. } => {
-                let (picks, model) = self.agent_extra(*stage);
+            S::Agent { buttons, .. } => {
+                let (models, picks): (Vec<&PhoneButton>, Vec<&PhoneButton>) =
+                    (self.added(i)).partition(|b| matches!(b.outcome, PanelOutcome::PickModel(_)));
                 value["buttons"] = self.at(buttons).into();
-                value["picks"] = picks.into();
-                value["model"] = model.into();
+                value["picks"] = picks.into_iter().map(PhoneButton::json).collect::<Vec<_>>().into();
+                value["model"] = models.first().map(|b| b.json()).into();
             }
             S::File { buttons, .. } | S::Milestones { buttons, .. } => {
                 value["buttons"] = self.at(buttons).into();
@@ -205,11 +200,7 @@ impl PhonePage {
             }
             S::Round(r) => value["buttons"] = self.at(&r.buttons).into(),
             S::MilestoneMode { .. } => {
-                let picks: Vec<Value> = (self.extra.iter())
-                    .filter(|b| matches!(b.outcome, PanelOutcome::FreshMilestones(_)))
-                    .map(PhoneButton::json)
-                    .collect();
-                value["buttons"] = picks.into();
+                value["buttons"] = self.added(i).map(PhoneButton::json).collect::<Vec<_>>().into();
             }
             _ => {}
         }
@@ -646,13 +637,13 @@ impl Gerdr {
             })
             .collect();
         let mut extra = Vec::new();
-        for section in &view.page.sections {
+        for (i, section) in view.page.sections.iter().enumerate() {
             // Build's choice is two segments to press on the desktop.
             if let chrome::PageSection::MilestoneMode { fresh } = section {
                 for (label, to) in [("One agent", false), ("Fresh each milestone", true)] {
                     let mut pick = PhoneButton::new(label, PanelOutcome::FreshMilestones(to), *fresh == to);
                     pick.off = *fresh == to;
-                    extra.push(pick);
+                    extra.push((Some(i), pick));
                 }
                 continue;
             }
@@ -670,13 +661,13 @@ impl Gerdr {
                 );
                 // The one it runs already is no pick to make.
                 pick.off = chip.off || chip.lit;
-                extra.push(pick);
+                extra.push((Some(i), pick));
             }
             if let Some(label) = model {
                 let mut pick = PhoneButton::new(label, PanelOutcome::PickModel(*stage), false);
                 let slot = self.model_slot_of(project, slug, *stage);
                 pick.value = slot.and_then(|s| s.picked).unwrap_or_default();
-                extra.push(pick);
+                extra.push((Some(i), pick));
             }
         }
         // The desktop approves a file in its review tab; the phone, here.
@@ -684,7 +675,7 @@ impl Gerdr {
             let approve = PanelOutcome::ApproveDoc(stage);
             let has = |b: &Option<PhoneButton>| b.as_ref().is_some_and(|b| b.outcome == approve);
             if !buttons.iter().any(has) {
-                extra.push(PhoneButton::new("Approve", approve, true));
+                extra.push((None, PhoneButton::new("Approve", approve, true)));
             }
         }
         Some(PhonePage {
@@ -735,8 +726,8 @@ impl Gerdr {
         });
         let shown = page.shown;
         let p = &view.page;
-        let sections: Vec<Value> = (p.sections.iter())
-            .filter_map(|s| page.section(s))
+        let sections: Vec<Value> = (p.sections.iter().enumerate())
+            .filter_map(|(i, s)| page.section(i, s))
             .collect();
         let page_json = json!({
             "stage": Stage::ALL.iter().position(|s| *s == shown),

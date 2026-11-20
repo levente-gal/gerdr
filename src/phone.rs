@@ -509,7 +509,8 @@ fn gerdr_within(request: &Value, time: Duration) -> Result<Value, String> {
 const AGENT_KEYS: [&str; 4] = ["Enter", "esc", "Up", "Down"];
 
 /// Type `line` to an agent of feature `slug` (Enter after it), or press
-/// `key`, or type a menu's number.
+/// `key`, or type a menu's number; `close` closes its pane, as closing its
+/// tab on the desktop does: a research agent that answered nothing.
 fn agent_input(project: &str, slug: &str, pane: &str, line: &str, key: &str) -> Reply {
     let (project, f) = match find(project, slug) {
         Ok(found) => found,
@@ -523,6 +524,8 @@ fn agent_input(project: &str, slug: &str, pane: &str, line: &str, key: &str) -> 
         // A line break would go as Enter: one line it is.
         let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
         herdr.send_agent_line(pane, &line)
+    } else if key == "close" {
+        herdr.pane_close(pane)
     } else if AGENT_KEYS.contains(&key) {
         herdr.send_keys(pane, &[key])
     } else if key.len() == 1 && key.bytes().all(|b| b.is_ascii_digit()) {

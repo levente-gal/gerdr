@@ -979,16 +979,14 @@ pub(crate) fn new_discover_agents(
                 )
         })
     };
-    let names: Vec<String> = stage_chips(&fresh, Stage::Discover, workflow, installed)
+    let chips: Vec<AgentChip> = stage_chips(&fresh, Stage::Discover, workflow, installed)
         .into_iter()
         .filter(|c| !c.off && asks(&c.name))
-        .map(|c| c.name)
         .collect();
-    let default = match default_pick(&fresh, Stage::Discover, workflow, installed) {
-        Pick::Agent(name, _) => names.iter().find(|n| **n == name).cloned(),
-        _ => None,
-    };
-    (names, default)
+    // The one lit, as the page lights it: a project's file may name it by
+    // its command.
+    let default = chips.iter().find(|c| c.lit).map(|c| c.name.clone());
+    (chips.into_iter().map(|c| c.name).collect(), default)
 }
 
 /// The program of the CLI agent T3 Code names `agent` (`ThreadRow::agent`).
