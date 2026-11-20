@@ -625,6 +625,10 @@ pub struct Check {
     /// data folder's `SHOTS_DIR`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shots: Vec<String>,
+    /// A fix of this failure was made once, and the user found it still
+    /// wrong: its agent is told to look again at that fix.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub again: bool,
 }
 
 /// The folder of a feature's data folder holding the screenshots of its
@@ -767,11 +771,11 @@ pub fn set(
         }
     }
     t.patch = patch.to_string();
-    let sent = t
-        .checks
-        .iter()
-        .find(|k| k.id == c.id && k.text == c.text)
-        .is_some_and(|k| k.sent && !k.made && k.state == state && k.note == note);
+    let old = (t.checks.iter()).find(|k| k.id == c.id && k.text == c.text);
+    let sent = old.is_some_and(|k| k.sent && !k.made && k.state == state && k.note == note);
+    // Failed again after its fix was made: that fix didn't do it.
+    let again = state == Verdict::Fail
+        && old.is_some_and(|k| k.state == Verdict::Fail && (k.made || k.again));
     // A failure's note edited keeps the screenshots of what went wrong.
     let shots = (t.checks.iter())
         .find(|k| k.id == c.id && k.text == c.text && k.state == Verdict::Fail)
@@ -790,6 +794,7 @@ pub fn set(
         patch: patch.to_string(),
         made: false,
         shots,
+        again,
     });
 }
 
@@ -929,11 +934,15 @@ pub fn failures_markdown(
     };
     for (c, k) in &fails {
         md.push_str(&format!("\n## {}: {}\n\n{}\n\n", c.id, c.title, c.text));
+        md.push_str(again_line(k));
         md.push_str(&format!("What went wrong: {}\n", k.note));
         md.push_str(&shots_markdown(k));
     }
     for (c, k) in &comments {
         md.push_str(&format!("\n## {}: Comment\n\n{}\n", c.id, c.text));
+        if k.again {
+            md.push_str(&format!("\n{}", again_line(k)));
+        }
         if !k.note.is_empty() {
             md.push_str(&format!("\n{}\n", k.note));
         }
@@ -947,6 +956,17 @@ pub fn failures_markdown(
 /// when it wasn't on one.
 fn place_markdown(test: Option<&ManualTest>, id: &str) -> String {
     place_of(test, id).map(Place::markdown).unwrap_or_default()
+}
+
+/// What its agent is told of failure `k` failed again after its fix was
+/// made: nothing for one failed the first time.
+fn again_line(k: &Check) -> &'static str {
+    match k.again {
+        true => {
+            "An earlier fix round fixed this, but the user tried it again and it is still wrong: look again at that fix.\n\n"
+        }
+        false => "",
+    }
 }
 
 /// Where the screenshots of `k` are, for its agent.
@@ -977,6 +997,9 @@ pub fn fixes_plan(test: Option<&ManualTest>, criteria: &[Criterion], title: &str
             c.title,
             flat(&c.text)
         ));
+        if k.again {
+            md.push_str(&format!("\n{}", again_line(k)));
+        }
         match c.comment {
             false => md.push_str(&format!("\nWhat went wrong: {}\n", flat(&k.note))),
             true if !k.note.is_empty() => md.push_str(&format!("\n{}\n", flat(&k.note))),
@@ -1106,6 +1129,42 @@ mod tests {
         set(&mut t, c, "p1", Verdict::Pass, "", 30);
         assert_eq!(counts(t.as_ref(), &criteria).comments_done, 1);
         assert_eq!(add_comment(&mut t, "Bigger buttons", "p1", 40), "T2");
+    }
+
+    #[test]
+    fn a_fix_made_failed_again_goes_with_the_next_fixes_saying_so() {
+        let c = Criterion {
+            id: "AC-1".into(),
+            title: "Save".into(),
+            text: "Given a form, when I save, then it is kept".into(),
+            comment: false,
+        };
+        let criteria = [c.clone()];
+        let mut test = None;
+        set(&mut test, &c, "p1", Verdict::Fail, "nothing kept", 1);
+        assert_eq!(mark_sent(&mut test, &criteria).len(), 1);
+        assert!(unsent(test.as_ref(), &criteria).is_empty());
+        // Its fix made, the user finds it still wrong, saying the same.
+        test.as_mut().unwrap().checks[0].made = true;
+        set(&mut test, &c, "p2", Verdict::Fail, "nothing kept", 2);
+        let k = check(test.as_ref(), &c).unwrap();
+        assert!(!k.sent && k.again);
+        assert_eq!(unsent(test.as_ref(), &criteria).len(), 1);
+        let (_, md) = failures_markdown(test.as_ref(), &criteria, "Forms");
+        assert!(md.contains("An earlier fix round fixed this"), "{md}");
+        let plan = fixes_plan(test.as_ref(), &criteria, "Forms");
+        assert!(plan.contains("An earlier fix round fixed this"), "{plan}");
+        // Sent again, it stays a repeat until it passes.
+        mark_sent(&mut test, &criteria);
+        test.as_mut().unwrap().checks[0].made = true;
+        set(&mut test, &c, "p3", Verdict::Fail, "still nothing", 3);
+        assert!(check(test.as_ref(), &c).unwrap().again);
+        set(&mut test, &c, "p3", Verdict::Pass, "", 4);
+        assert!(!check(test.as_ref(), &c).unwrap().again);
+        // A first failure says nothing of it.
+        set(&mut test, &c, "p3", Verdict::Fail, "broke", 5);
+        let (_, md) = failures_markdown(test.as_ref(), &criteria, "Forms");
+        assert!(!md.contains("An earlier fix round"), "{md}");
     }
 
     #[test]

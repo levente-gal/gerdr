@@ -256,7 +256,8 @@ fn rows(
 /// How far the manual test of `criteria` went, in words: "2 of 3
 /// criteria passed · 1 failed", "1 of 3 criteria passed · 1 failure
 /// being fixed" (or "in fix plan"), "… · 1 fix made: try again", "… · 1
-/// comment open".
+/// comment open"; with some sent, the rest the next fixes send: "… · 1 to
+/// fix".
 pub(crate) fn counts_text(n: manual::Counts) -> String {
     let total = n.total() - n.comments();
     let what = if total == 1 { "criterion" } else { "criteria" };
@@ -276,19 +277,26 @@ pub(crate) fn counts_text(n: manual::Counts) -> String {
     };
     if n.made > 0 {
         parts.push(format!("{} made: try again", fixes(n.made)));
-    } else if n.failed > 0 && n.sent == n.failed {
+    }
+    let being = n.sent - n.made;
+    if being > 0 {
         let word = crate::feature::review_import::sent_word(false, n.planning);
         parts.push(match sent_what {
-            "" => format!("{} {word}", n.sent),
-            what => format!("{} {word}", plural(n.sent, what)),
+            _ if n.sent < n.failed => format!("{being} {word}"),
+            "" => format!("{being} {word}"),
+            what => format!("{} {word}", plural(being, what)),
         });
-    } else {
+    }
+    // What the next fixes send: by kind while none went yet.
+    if n.sent == 0 {
         if failed > 0 {
             parts.push(format!("{failed} failed"));
         }
         if n.comments_open > 0 {
             parts.push(format!("{} open", plural(n.comments_open, "comment")));
         }
+    } else if n.failed > n.sent {
+        parts.push(format!("{} to fix", n.failed - n.sent));
     }
     let looks = n.comments_untested;
     if looks > 0 {
@@ -324,6 +332,9 @@ pub(crate) fn strip_text(n: manual::Counts) -> String {
     }
     if n.made > 0 {
         text.push_str(&format!(" \u{b7} {} made", fixes(n.made)));
+    }
+    if n.sent > 0 && n.failed > n.sent {
+        text.push_str(&format!(" \u{b7} {} to fix", n.failed - n.sent));
     }
     text
 }
@@ -1151,7 +1162,17 @@ impl Gerdr {
                         ItemOf::Suggestion => self.delete_suggestion_comment(&project, &slug, &id),
                     }
                 }
-                None => self.show_warning(NO_NOTE.into()),
+                // A comment says what to change already: Not done with no
+                // note still sends it again.
+                None => match self.note_on_comment() {
+                    Some(i) => {
+                        if let Some(panel) = self.features.panel.as_mut() {
+                            panel.note = None;
+                        }
+                        self.apply_manual_test(Outcome::Fail(i, String::new()));
+                    }
+                    None => self.show_warning(NO_NOTE.into()),
+                },
             },
             Some(NoteKey::Save) => {
                 self.keep_criterion_note();
@@ -1173,6 +1194,17 @@ impl Gerdr {
             }
         }
         true
+    }
+
+    /// The comment whose note is being written, by its row: none for a
+    /// criterion's.
+    fn note_on_comment(&self) -> Option<usize> {
+        let panel = self.features.panel.as_ref()?;
+        let Some((CardNote::Criterion(i), _)) = &panel.note else {
+            return None;
+        };
+        let criteria = self.features.criteria(&panel.project, &panel.slug);
+        criteria.get(*i).filter(|c| c.comment).map(|_| *i)
     }
 
     /// See `Features::writing_criterion_note`.
@@ -1675,7 +1707,12 @@ mod tests {
         };
         assert_eq!(
             counts_text(made),
-            "1 of 3 criteria passed \u{b7} 1 fix made: try again"
+            "1 of 3 criteria passed \u{b7} 1 fix made: try again \u{b7} 1 to fix"
+        );
+        // Some sent, the rest wait for the next fixes.
+        assert_eq!(
+            counts_text(n(0, 2, 1, 1)),
+            "0 of 3 criteria passed \u{b7} 1 being fixed \u{b7} 1 to fix"
         );
         assert_eq!(
             strip_text(n(3, 1, 0, 2)),
@@ -1683,7 +1720,7 @@ mod tests {
         );
         assert_eq!(
             strip_text(made),
-            "1 passed \u{b7} 2 failed \u{b7} 0 untested \u{b7} 1 fix made"
+            "1 passed \u{b7} 2 failed \u{b7} 0 untested \u{b7} 1 fix made \u{b7} 1 to fix"
         );
         assert_eq!(
             left_text(&[

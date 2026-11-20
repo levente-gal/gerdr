@@ -1018,16 +1018,21 @@ pub(crate) fn criterion_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOu
         Some(Verdict::Pass) => (ButtonStyle::Passed, ButtonStyle::Plain),
         Some(Verdict::Fail) => (ButtonStyle::Plain, ButtonStyle::Failed),
     };
-    // Fail asks what went wrong, unless it is what was chosen.
+    // Fail asks what went wrong, unless it is what was chosen. On a fix made
+    // it still asks: the fix didn't do it, not the failure gone.
     let (fail_label, fail_outcome) = match row.found {
-        Some(Verdict::Fail) => ("Fail", Outcome::Clear(i)),
+        Some(Verdict::Fail) if !row.made => ("Fail", Outcome::Clear(i)),
         _ => ("Fail\u{2026}", Outcome::Write(i)),
     };
     let mut out = Vec::new();
-    // To the left of the pair, so the pair stays put.
+    // To the left of the pair, so the pair stays put. Saved again, a fix
+    // made goes to the next fixes (`manual::set`).
     if row.found == Some(Verdict::Fail) {
-        let edit = button("Edit note\u{2026}", ButtonStyle::Quiet, Outcome::Write(i));
-        out.push(edit);
+        let label = match row.made {
+            true => "Still wrong\u{2026}",
+            false => "Edit note\u{2026}",
+        };
+        out.push(button(label, ButtonStyle::Quiet, Outcome::Write(i)));
     }
     out.push(button("Pass", pass, Outcome::Toggle(i)));
     out.push(button(fail_label, fail, fail_outcome));
@@ -1056,7 +1061,11 @@ fn comment_buttons(i: usize, row: &Row) -> Vec<(PageButton, PanelOutcome)> {
         button("Edit\u{2026}", ButtonStyle::Quiet, Outcome::EditComment(i)),
         button("Delete", ButtonStyle::Quiet, Outcome::DeleteComment(i)),
         button("Done", done, Outcome::Toggle(i)),
-        button("Not done", open, Outcome::Fail(i, String::new())),
+        // On a fix made: what is still wrong, to send with it again.
+        match row.made {
+            true => button("Not done\u{2026}", open, Outcome::Write(i)),
+            false => button("Not done", open, Outcome::Fail(i, String::new())),
+        },
     ]
 }
 
@@ -1109,12 +1118,14 @@ pub(crate) fn criterion_details(row: &Row) -> String {
 /// Criterion `i`'s card on Manual test's page, its buttons those in
 /// `actions`: its dot tells how it went, the note what went wrong, with the
 /// screenshots under it. While `trying`, one that passed fades: the rest
-/// are what is left to do.
+/// are what is left to do. What fails goes to Build when it `sends` (not
+/// on someone else's pull request).
 pub(super) fn criterion_card(
     i: usize,
     row: &Row,
     actions: &[(PageButton, PanelOutcome)],
     trying: bool,
+    sends: bool,
 ) -> FindingCard {
     let tag = match row.found {
         None => FindingTag::NotRun,
@@ -1125,15 +1136,16 @@ pub(super) fn criterion_card(
         true => "look again",
         false => "try again",
     };
+    let failed = row.found == Some(Verdict::Fail);
+    // What the next Plan fixes or Make fixes sends (`manual::unsent`) says so.
+    let to_fix = sends && failed && !row.sent;
     let state = match (row.made, row.sent, row.retest) {
         (true, _, _) => format!("fix made: {again}"),
         (false, true, _) => {
             crate::feature::review_import::sent_word(false, row.planning).to_owned()
         }
+        _ if to_fix => "to fix".to_owned(),
         (false, false, Some(n)) => format!("changed by fix round {n}: {again}"),
-        (false, false, None) if row.comment && row.found == Some(Verdict::Fail) => {
-            "open".to_owned()
-        }
         (false, false, None) => String::new(),
     };
     // Folded, its line still says what went wrong: the note isn't only
@@ -1143,9 +1155,11 @@ pub(super) fn criterion_card(
         .lines()
         .find(|l| !l.trim().is_empty())
         .map(str::trim);
-    let first = first.filter(|_| row.found == Some(Verdict::Fail));
+    let first = first.filter(|_| failed);
     let state = match (row.open || row.comment, first) {
         (false, Some(note)) if state.is_empty() => format!("\u{201c}{note}\u{201d}"),
+        // Bold "to fix", the note on a line of its own (`chrome` `decision`).
+        (false, Some(note)) if to_fix => format!("{state}: \u{201c}{note}\u{201d}"),
         (false, Some(note)) => format!("{state} \u{b7} \u{201c}{note}\u{201d}"),
         _ => state,
     };
@@ -1193,7 +1207,11 @@ pub(super) fn criterion_card(
         faded: trying && tag == FindingTag::Passed,
         collapsed: !row.open,
         folds: false,
-        stripe: None,
+        stripe: match (to_fix, row.sent && !row.made) {
+            (true, _) => Some(CardStripe::ToFix),
+            (false, true) => Some(CardStripe::Sent),
+            (false, false) => None,
+        },
         field: None,
         field_hint: "What went wrong",
         clock: String::new(),
@@ -1210,12 +1228,14 @@ pub(super) fn criterion_card(
 /// The cards of `state`'s criteria, in their order, after the row folding
 /// them.
 pub(super) fn criterion_sections<'a>(
+    feature: &Feature,
     state: &'a PanelState,
     actions: &'a [(PageButton, PanelOutcome)],
     trying: bool,
 ) -> impl Iterator<Item = PageSection> + 'a {
+    let sends = !feature.posts_review();
     let cards = (state.criteria.iter().enumerate())
-        .map(move |(i, row)| PageSection::Finding(criterion_card(i, row, actions, trying)));
+        .map(move |(i, row)| PageSection::Finding(criterion_card(i, row, actions, trying, sends)));
     std::iter::once(fold_toolbar(actions)).chain(cards)
 }
 

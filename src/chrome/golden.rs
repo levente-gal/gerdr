@@ -5799,7 +5799,7 @@ fn feature_tab_rail_wrap() -> super::FeatureTabView {
 }
 
 /// Manual test's page: a criterion of each kind, one long enough to wrap, a
-/// failure sent to Build; `note`: a failure's note being written on its card.
+/// fix made to try again, a failure the next fixes send; `note`: a failure's note being written on its card.
 fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
     use super::{
         ButtonStyle, CheckTone, FindingCard, FindingTag, NodeMark, PageButton, PageSection,
@@ -5840,9 +5840,9 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
         ),
         (
             &[
-                ("Edit note\u{2026}", quiet),
+                ("Still wrong\u{2026}", quiet),
                 ("Pass", plain),
-                ("Fail", fail),
+                ("Fail\u{2026}", fail),
             ],
             FindingTag::Failed,
             [
@@ -5862,7 +5862,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             FindingTag::Failed,
             [
                 "Cancelled invoices left out",
-                "",
+                "to fix",
                 "AC-3",
                 "What went wrong: It shows with a total of 0",
                 "Given a cancelled invoice\nWhen I export\nThen it is left out of the file and \
@@ -5941,7 +5941,8 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
             faded: tag == FindingTag::Passed,
             collapsed: !open,
             folds: false,
-            stripe: None,
+            // Not sent yet: the next fixes send it.
+            stripe: (i == 2).then_some(super::CardStripe::ToFix),
             field: writing.then(|| Line::from("Takes 4 seconds")),
             field_hint: "",
             clock: String::new(),
@@ -5965,7 +5966,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
         passed: 1,
         failed: 2,
         untested: 1,
-        text: "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 fix made".into(),
+        text: "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 fix made \u{b7} 1 to fix".into(),
     });
     if note {
         // Placed before the note's Save and Discard join its card, as the
@@ -6052,7 +6053,7 @@ fn feature_tab_manual_comment() -> super::FeatureTabView {
         })),
         tag: FindingTag::Failed,
         title: "Make the settings page look better\u{2026}".into(),
-        state: "open".into(),
+        state: "to fix".into(),
         place: "C1".into(),
         // Written on an area selected on the app's page.
         body: "On /settings: SettingsTable and 2 more".into(),
@@ -6066,7 +6067,7 @@ fn feature_tab_manual_comment() -> super::FeatureTabView {
         faded: false,
         collapsed: false,
         folds: false,
-        stripe: None,
+        stripe: Some(super::CardStripe::ToFix),
         field: None,
         field_hint: "",
         clock: String::new(),
@@ -6076,7 +6077,7 @@ fn feature_tab_manual_comment() -> super::FeatureTabView {
     if let Some(strip) = view.test_strip.as_mut() {
         strip.failed = 3;
         strip.text =
-            "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 comment open \u{b7} 1 fix made"
+            "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 comment open \u{b7} 1 fix made \u{b7} 2 to fix"
                 .into();
     }
     view
@@ -6745,21 +6746,21 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x3f77911973f85c94, // tab_discover_brief_1180
         0x55e7529dadcda5ec, // tab_discover_brief_860
         0x94664f46f7727d5d, // tab_plan_long_1180
-        0x828dca7b4aef3cbf, // tab_manual_test_1180
-        0x38eefbce9a3eb92f, // tab_manual_note_860
+        0x2aebca42cdf46638, // tab_manual_test_1180
+        0x91d53b765bc5256b, // tab_manual_note_860
         0x1ce8024e5011c12c, // tab_review_rounds_1180
         0xbb31db5a866ed93f, // tab_verify_fixes_1180
         0x32019da3a89bc7b5, // tab_verify_fixes_860
         0xe129bc56c6fa9fd0, // tab_review_page_1180
         0x1a31cf8b893d2b5d, // tab_open_round_1180
         0x67a2ecc2615c41e7, // tab_open_round_860
-        0x66fec166914319c9, // tab_manual_pages_860
-        0x6b55bdb44b4d3ddc, // tab_manual_search_860
-        0x0c7f88af5e3be46e, // tab_manual_select_860
-        0x5fb5cff40a4f4b48, // tab_manual_rounds_1180
-        0x22d2b561c56794c3, // tab_manual_rounds_860
-        0x2e537a1481a2c101, // tab_manual_comment_860
-        0x6ed0e5a54cf691c4, // tab_manual_hand_back_1180
+        0x0a27a08a747b1576, // tab_manual_pages_860
+        0x310b7b478ccdef65, // tab_manual_search_860
+        0x4abafa993c45c21d, // tab_manual_select_860
+        0x4aaf173ab9c864f5, // tab_manual_rounds_1180
+        0xa5181f9a0fbb5022, // tab_manual_rounds_860
+        0x3a52dc02370254b7, // tab_manual_comment_860
+        0x1fa0d34e7da5a97f, // tab_manual_hand_back_1180
         0x9ce2adcf3f825afa, // tab_ship_live_1180
         0x3efb6ccd9ebee607, // tab_ship_live_860
         0x9539d685750af545, // tab_ship_cards_1180
@@ -6824,21 +6825,21 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xf2c02321cef0dc80, // tab_discover_brief_1180
         0x4c01dea7b96abbd2, // tab_discover_brief_860
         0x72a69fd9c7901533, // tab_plan_long_1180
-        0xbd2dd1c6340dd3e9, // tab_manual_test_1180
-        0x14b076dddc2d4e81, // tab_manual_note_860
+        0x73861140f2c89bff, // tab_manual_test_1180
+        0x50f5b054bcd9d478, // tab_manual_note_860
         0x0f9b84d0d1d98b41, // tab_review_rounds_1180
         0xdc71a782cda558e4, // tab_verify_fixes_1180
         0x0774e11aceba2265, // tab_verify_fixes_860
         0xbe07126fef3de974, // tab_review_page_1180
         0x22326408bd63ac69, // tab_open_round_1180
         0x66721fab2851c39e, // tab_open_round_860
-        0x74e50a6836be3ed0, // tab_manual_pages_860
-        0xca8673b0f194dd28, // tab_manual_search_860
-        0x70dd2852ac3327a6, // tab_manual_select_860
-        0x7d5d9c7a8cbbcf12, // tab_manual_rounds_1180
-        0x21f27b2f6a465d5a, // tab_manual_rounds_860
-        0x1a9b6e679e8136e5, // tab_manual_comment_860
-        0xc4db353623cc9ce3, // tab_manual_hand_back_1180
+        0x89f7582708699792, // tab_manual_pages_860
+        0x079dc2b3f83af973, // tab_manual_search_860
+        0x8726a17d25221ad0, // tab_manual_select_860
+        0x2d8b43b284f055f4, // tab_manual_rounds_1180
+        0x1ca880952be9e128, // tab_manual_rounds_860
+        0xf78e69da2c64354e, // tab_manual_comment_860
+        0xb4594d69f6d37c09, // tab_manual_hand_back_1180
         0x2b0da19b5c531216, // tab_ship_live_1180
         0xfbe38a69b1b3bf5c, // tab_ship_live_860
         0x0e15492b79ae2e04, // tab_ship_cards_1180
@@ -6903,21 +6904,21 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x8732f3c8e06fec8b, // tab_discover_brief_1180
         0x98eaa3e0de965a5a, // tab_discover_brief_860
         0xe321dd2e16218ccd, // tab_plan_long_1180
-        0x745b4f1b4989fbd4, // tab_manual_test_1180
-        0x412595edea30edd0, // tab_manual_note_860
+        0xc8ecf7ca5b4506d3, // tab_manual_test_1180
+        0x68ff8b63279b3f06, // tab_manual_note_860
         0xa2b4b8874a641138, // tab_review_rounds_1180
         0x923eeef7c7449a5b, // tab_verify_fixes_1180
         0x11adcee532b5f561, // tab_verify_fixes_860
         0xf66783d528f2aae2, // tab_review_page_1180
         0xa0a65a902a90b68f, // tab_open_round_1180
         0x915423272277d9f6, // tab_open_round_860
-        0x28a05ee8eb1ccf06, // tab_manual_pages_860
-        0xdb8c906bcbe53cd6, // tab_manual_search_860
-        0xd6558fab28223313, // tab_manual_select_860
-        0xb90d60f55bf1fdf2, // tab_manual_rounds_1180
-        0x1055781397b52989, // tab_manual_rounds_860
-        0x5f049233aade1f1b, // tab_manual_comment_860
-        0x6dab8def82d1789b, // tab_manual_hand_back_1180
+        0xec202b10fecb1161, // tab_manual_pages_860
+        0xce096ec478f95158, // tab_manual_search_860
+        0x3249c1bd61f78d04, // tab_manual_select_860
+        0xf0406ac502e099ba, // tab_manual_rounds_1180
+        0x0a9c3e52d26037a1, // tab_manual_rounds_860
+        0xdefeb1e1a32d4970, // tab_manual_comment_860
+        0x1ea30ed8e28461e4, // tab_manual_hand_back_1180
         0x275cb4321b786113, // tab_ship_live_1180
         0x11423d7ef57773c9, // tab_ship_live_860
         0x96eb14372e714e03, // tab_ship_cards_1180
@@ -6982,21 +6983,21 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x879946254d64f68e, // tab_discover_brief_1180
         0x58117ef1fd06cd93, // tab_discover_brief_860
         0xae847127e4d722c6, // tab_plan_long_1180
-        0x6ca3664d4eb1d62f, // tab_manual_test_1180
-        0x32913c22f9916651, // tab_manual_note_860
+        0xa67e892385b9cb5d, // tab_manual_test_1180
+        0xee3c9c869176ddb4, // tab_manual_note_860
         0x640176aa3c978657, // tab_review_rounds_1180
         0xcb29634426bdd5ab, // tab_verify_fixes_1180
         0x5964e6d88c5d5133, // tab_verify_fixes_860
         0x243426599397bf03, // tab_review_page_1180
         0xb78a657e03634234, // tab_open_round_1180
         0x3e020527413f244b, // tab_open_round_860
-        0xfa808ddf60282f72, // tab_manual_pages_860
-        0xa02bbd3aae8f8ad4, // tab_manual_search_860
-        0xca950363fcc8c8c2, // tab_manual_select_860
-        0xfee47052e632a9a3, // tab_manual_rounds_1180
-        0x1e80bc2e4b42a162, // tab_manual_rounds_860
-        0x6342468f89b236f2, // tab_manual_comment_860
-        0x34dc7e5676e7483b, // tab_manual_hand_back_1180
+        0x4abee99a3a63d674, // tab_manual_pages_860
+        0xd10526f7f2a92b40, // tab_manual_search_860
+        0x6e9fd9ffce0e60cc, // tab_manual_select_860
+        0x9ca94d04bf27cf24, // tab_manual_rounds_1180
+        0x658aed2a87091325, // tab_manual_rounds_860
+        0xef6aef09eeaee8f5, // tab_manual_comment_860
+        0x61649857978f9109, // tab_manual_hand_back_1180
         0xd33a721f5c98d9bc, // tab_ship_live_1180
         0x79e47be956ee531e, // tab_ship_live_860
         0xee663baaddfbfe9e, // tab_ship_cards_1180

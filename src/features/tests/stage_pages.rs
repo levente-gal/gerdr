@@ -2016,6 +2016,7 @@ fn a_criterion_a_round_asked_says_how_it_stands_since() {
         patch: String::new(),
         made,
         shots: Vec::new(),
+        again: false,
     };
     let now = |f: &Feature| asked_now(f, &round, "AC-1", false).map(|l| l.text);
     assert_eq!(now(&f).as_deref(), Some("not tried since"));

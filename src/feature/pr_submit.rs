@@ -464,6 +464,7 @@ mod tests {
             patch: String::new(),
             made: false,
             shots: Vec::new(),
+            again: false,
         };
         let all = items(&feature, &own, &[(&ac, &check)]);
         assert_eq!(all.len(), 6);

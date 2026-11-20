@@ -135,10 +135,14 @@ fn a_comment_is_done_or_not_and_its_keys_edit_and_delete_it() {
     );
     let done = buttons(&comment(Some(Verdict::Pass)));
     assert_eq!(done[2].1, ButtonStyle::Passed);
-    // Its card: its lines as its steps, "open" until it goes to Build.
+    // Its card: its lines as its steps, "to fix" until it goes to Build.
     let row = comment(Some(Verdict::Fail));
-    let card = criterion_card(2, &row, &[], true);
-    assert_eq!(card.state, "open");
+    let card = criterion_card(2, &row, &[], true, true);
+    assert_eq!(card.state, "to fix");
+    assert_eq!(card.stripe, Some(CardStripe::ToFix));
+    // On someone else's pull request it goes to GitHub, not to Build.
+    let card = criterion_card(2, &row, &[], true, false);
+    assert_eq!((card.state.as_str(), card.stripe), ("", None));
     assert_eq!(
         card.sheet.as_ref().unwrap().steps,
         [
@@ -152,8 +156,48 @@ fn a_comment_is_done_or_not_and_its_keys_edit_and_delete_it() {
         ..row
     };
     assert_eq!(
-        criterion_card(2, &made, &[], true).state,
+        criterion_card(2, &made, &[], true, true).state,
         "fix made: look again"
+    );
+    // Not done on a fix made says what is still wrong, to send again.
+    assert_eq!(
+        buttons(&made)[3],
+        (
+            "Not done\u{2026}".into(),
+            ButtonStyle::Failed,
+            on(Outcome::Write(2))
+        )
+    );
+    let sent = Row {
+        made: false,
+        ..made.clone()
+    };
+    let card = criterion_card(2, &sent, &[], true, true);
+    assert_eq!(
+        (card.state.as_str(), card.stripe),
+        ("being fixed", Some(CardStripe::Sent))
+    );
+    // A criterion's fix made: Still wrong… and Fail… both ask what is still
+    // wrong; Fail no longer takes the failure back.
+    let fixed = Row {
+        comment: false,
+        ..made.clone()
+    };
+    assert_eq!(
+        buttons(&fixed),
+        [
+            (
+                "Still wrong\u{2026}".into(),
+                ButtonStyle::Quiet,
+                on(Outcome::Write(2))
+            ),
+            ("Pass".into(), ButtonStyle::Plain, on(Outcome::Toggle(2))),
+            (
+                "Fail\u{2026}".into(),
+                ButtonStyle::Failed,
+                on(Outcome::Write(2))
+            ),
+        ]
     );
     // Its keys: two criteria and the comment, open and not sent.
     let ctx = RowCtx {
@@ -667,14 +711,16 @@ fn manual_test_goes_on_while_its_fixes_are_made() {
         "fix made: try again \u{b7} \u{201c}x\u{201d}"
     );
     assert!(cards[0].made);
-    assert_eq!(cards[1].state, "\u{201c}x\u{201d}");
+    // Marked while the round is open, it goes with the next fixes.
+    assert_eq!(cards[1].state, "to fix: \u{201c}x\u{201d}");
+    assert_eq!(cards[1].stripe, Some(CardStripe::ToFix));
     // The counts go in the bar over the page, not its status.
     assert!(page.status.is_none());
     let strip = test_strip(&rows).unwrap();
     assert_eq!((strip.passed, strip.failed, strip.untested), (1, 2, 1));
     assert_eq!(
         strip.text,
-        "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 fix made"
+        "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 fix made \u{b7} 1 to fix"
     );
     assert_eq!(test_strip(&[]), None);
     // A pass tried before the fixes says so once selected; a made fix
@@ -688,7 +734,7 @@ fn manual_test_goes_on_while_its_fixes_are_made() {
     };
     assert!(criterion_details(&changed).ends_with("Changed by fix round 3: try it again"));
     assert_eq!(
-        criterion_card(0, &changed, &[], true).state,
+        criterion_card(0, &changed, &[], true, true).state,
         "changed by fix round 3: try again"
     );
     // Fixes landed that Verify hasn't run on: the page says marking it

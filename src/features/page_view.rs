@@ -93,7 +93,7 @@ pub(super) fn stage_page(
         if shows_criteria(feature, stage) && !state.criteria.is_empty() {
             let said = failures_waiting(state, "for Manual test");
             sections.push(lines("Criteria", said.into_iter().collect()));
-            sections.extend(criterion_sections(state, actions, false));
+            sections.extend(criterion_sections(feature, state, actions, false));
         }
         if offers_sandbox(feature, stage) {
             sections.extend(sandbox_sections(feature, state));
@@ -249,7 +249,7 @@ pub(super) fn stage_page(
                         said.push(line(text, CheckTone::Ready));
                     }
                     sections.push(lines("Criteria", said));
-                    sections.extend(criterion_sections(state, actions, true));
+                    sections.extend(criterion_sections(feature, state, actions, true));
                 }
                 sections.extend(sandbox_sections(feature, state));
             }
@@ -260,7 +260,7 @@ pub(super) fn stage_page(
                 let said = by_hand.then(|| line("marked done by hand, not tried", CheckTone::Note));
                 let waiting = failures_waiting(state, "since it was done: reopen it to send them");
                 sections.push(lines("Criteria", said.into_iter().chain(waiting).collect()));
-                sections.extend(criterion_sections(state, actions, false));
+                sections.extend(criterion_sections(feature, state, actions, false));
                 if offers_sandbox(feature, stage) {
                     sections.extend(sandbox_sections(feature, state));
                 }

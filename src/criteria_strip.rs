@@ -445,6 +445,10 @@ fn button_tip(outcome: &Outcome, label: &str) -> (&'static str, &'static str) {
         Outcome::Toggle(_) if label == "Pass" => "Mark it passed, and go to the next",
         Outcome::Toggle(_) => "Take the pass back",
         Outcome::Write(_) if label.starts_with("Edit") => "Edit what went wrong",
+        // On a fix made: it goes with the next fixes.
+        Outcome::Write(_) if label.starts_with("Still") || label.starts_with("Not done") => {
+            "Say what is still wrong: it goes with the next fixes"
+        }
         Outcome::Write(_) => "Mark it failed and say what went wrong",
         Outcome::Clear(_) => "Take the failure back",
         _ => return ("", ""),
@@ -558,9 +562,14 @@ impl Gerdr {
             true => "taking a screenshot\u{2026}".to_owned(),
             false => shots_text(draft.map_or(saved, |d| saved + d.shots.len())),
         };
+        let sends = self
+            .feature(&target.project, &target.slug)
+            .is_some_and(|f| !f.posts_review());
         let state = match (row.made, row.sent) {
             (true, _) => "fix made: try again",
             (false, true) => crate::feature::review_import::sent_word(false, row.planning),
+            // The next fixes send it (`manual::unsent`).
+            (false, false) if sends && row.found == Some(Verdict::Fail) => "to fix",
             (false, false) => "",
         };
         let keys = self.criteria_strip_has_keys();

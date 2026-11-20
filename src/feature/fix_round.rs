@@ -1412,6 +1412,7 @@ mod tests {
             patch: "p".into(),
             made: false,
             shots: Vec::new(),
+            again: false,
         };
         let mut test = ManualTest {
             patch: "p".into(),
