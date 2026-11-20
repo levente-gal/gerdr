@@ -1,18 +1,21 @@
 //! What the phone view may do to a feature (see `phone` and
-//! `phone_control`): press the buttons of the page of the stage it is at,
-//! as the desktop shows them, decide its AI review's findings, and send a
-//! stage's file back to its agent.
+//! `phone_control`): press the buttons of a stage's page as the desktop
+//! shows them, each by what it does, on the card that holds it; pick its
+//! agents and models; write what a card's field takes; and send a stage's
+//! file back to its agent.
 //!
 //! Only buttons that act without a desk: none that shows or opens
-//! something here, or edits in a dialog. What gerdr says while it acts
-//! (its toasts) goes back as the answer. A confirm it asks is put to the
-//! phone: cancelled here, and pressed again with `confirm` it is answered
-//! Go, so no dialog waits on an empty desk.
+//! something here. One whose desktop opens a field to write in (a reason,
+//! an answer, a comment) asks for the text on the phone, and gets it with
+//! the press. What gerdr says while it acts (its toasts) goes back as the
+//! answer. A confirm it asks is put to the phone: cancelled here, and
+//! pressed again with `confirm` it is answered Go, so no dialog waits on
+//! an empty desk.
 
 use serde_json::{Value, json};
 
 use super::*;
-use crate::{confirm::Outcome, toast::Level};
+use crate::{confirm::Outcome, review_cards::ItemAct, toast::Level};
 
 /// Whether the phone may press a button doing `outcome`.
 fn phone_may(outcome: &PanelOutcome) -> bool {
@@ -56,7 +59,162 @@ fn phone_may(outcome: &PanelOutcome) -> bool {
             | O::FreshMilestones(_)
             | O::StartOver(_)
             | O::NotYet(_)
+            | O::DecideFinding(..)
+            | O::DeleteFindingComment(_)
+            | O::DeleteOwnFinding(_)
+            | O::OnSuggestion(_, ItemAct::Decide(_) | ItemAct::DeleteComment | ItemAct::DeleteOwn)
+            | O::ChangeDecisions
+            | O::SkipCheck { .. }
+            | O::PickAgent(..)
+            | O::CycleMachine(_)
+            | O::StopOnMachine(_)
     )
+}
+
+/// What the phone asks the user before it presses a button whose desktop
+/// opens a field: the field's question. None for one that acts at once.
+fn phone_asks(outcome: &PanelOutcome) -> Option<&'static str> {
+    use PanelOutcome as O;
+    Some(match outcome {
+        O::OnSuggestion(_, ItemAct::AskRefuse) => "Why reject it?",
+        O::OnSuggestion(_, ItemAct::Answer) => "Your answer",
+        O::OnSuggestion(_, ItemAct::Comment) | O::CommentFinding(_) => "Your comment",
+        O::AskDismiss(_) => "Why dismiss it?",
+        O::AddComment => "What should change?",
+        O::PickModel(_) => "The model to start it on (none: the agent's own default)",
+        _ => return None,
+    })
+}
+
+/// A button as the phone has it: what it says and does, how it stands, and
+/// what it asks first, if anything, with the text to start from.
+#[derive(Clone, Debug)]
+struct PhoneButton {
+    label: String,
+    outcome: PanelOutcome,
+    primary: bool,
+    off: bool,
+    asks: Option<&'static str>,
+    value: String,
+}
+
+impl PhoneButton {
+    fn new(label: &str, outcome: PanelOutcome, primary: bool) -> Self {
+        Self {
+            label: label.to_owned(),
+            asks: phone_asks(&outcome),
+            outcome,
+            primary,
+            off: false,
+            value: String::new(),
+        }
+    }
+
+    /// How the phone names it, to press it: what it does, so two of one
+    /// label ("Run again" on each check) are told apart.
+    fn id(&self) -> String {
+        format!("{:?}", self.outcome)
+    }
+
+    fn json(&self) -> Value {
+        json!({
+            "label": self.label,
+            "id": self.id(),
+            "primary": self.primary,
+            "off": self.off,
+            "asks": self.asks,
+            "value": self.value,
+        })
+    }
+}
+
+/// A stage's page as the phone shows it: the desktop's, with the buttons
+/// the phone may press, by their place in the page's buttons, and those
+/// it adds (agent picks, a model, Approve).
+struct PhonePage {
+    shown: Stage,
+    view: chrome::FeatureTabView,
+    buttons: Vec<Option<PhoneButton>>,
+    extra: Vec<PhoneButton>,
+}
+
+impl PhonePage {
+    fn at(&self, indices: &[usize]) -> Vec<Value> {
+        (indices.iter())
+            .filter_map(|i| self.buttons.get(*i)?.as_ref())
+            .map(PhoneButton::json)
+            .collect()
+    }
+
+    /// Every button the phone may press here.
+    fn all(&self) -> impl Iterator<Item = &PhoneButton> {
+        self.buttons.iter().flatten().chain(&self.extra)
+    }
+
+    /// The page's buttons no section holds, for the row under its agents:
+    /// Approve first.
+    fn loose(&self) -> Vec<Value> {
+        use chrome::PageSection as S;
+        let mut held = Vec::new();
+        for section in &self.view.page.sections {
+            match section {
+                S::Agent { buttons, .. }
+                | S::File { buttons, .. }
+                | S::Milestones { buttons, .. } => held.extend(buttons),
+                S::Finding(c) => held.extend(c.buttons.iter().chain(&c.comment_buttons)),
+                S::Round(r) => held.extend(&r.buttons),
+                _ => {}
+            }
+        }
+        let approve = (self.extra.iter()).filter(|b| matches!(b.outcome, PanelOutcome::ApproveDoc(_)));
+        let rest = (self.buttons.iter().enumerate())
+            .filter(|(i, _)| !held.contains(&i))
+            .filter_map(|(_, b)| b.as_ref());
+        approve.chain(rest).map(PhoneButton::json).collect()
+    }
+
+    /// The picks and model button of the agent card of `stage`.
+    fn agent_extra(&self, stage: Stage) -> (Vec<Value>, Option<Value>) {
+        let picks = (self.extra.iter())
+            .filter(|b| matches!(&b.outcome, PanelOutcome::PickAgent(s, _) if *s == stage))
+            .map(PhoneButton::json)
+            .collect();
+        let model = (self.extra.iter())
+            .find(|b| b.outcome == PanelOutcome::PickModel(stage))
+            .map(PhoneButton::json);
+        (picks, model)
+    }
+
+    /// A section as the phone shows it, with its buttons.
+    fn section(&self, section: &chrome::PageSection) -> Option<Value> {
+        use chrome::PageSection as S;
+        let mut value = section_json(section)?;
+        match section {
+            S::Agent { stage, buttons, .. } => {
+                let (picks, model) = self.agent_extra(*stage);
+                value["buttons"] = self.at(buttons).into();
+                value["picks"] = picks.into();
+                value["model"] = model.into();
+            }
+            S::File { buttons, .. } | S::Milestones { buttons, .. } => {
+                value["buttons"] = self.at(buttons).into();
+            }
+            S::Finding(c) => {
+                value["buttons"] = self.at(&c.buttons).into();
+                value["commentButtons"] = self.at(&c.comment_buttons).into();
+            }
+            S::Round(r) => value["buttons"] = self.at(&r.buttons).into(),
+            S::MilestoneMode { .. } => {
+                let picks: Vec<Value> = (self.extra.iter())
+                    .filter(|b| matches!(b.outcome, PanelOutcome::FreshMilestones(_)))
+                    .map(PhoneButton::json)
+                    .collect();
+                value["buttons"] = picks.into();
+            }
+            _ => {}
+        }
+        Some(value)
+    }
 }
 
 /// A stage's mark as the phone's styles name it: `done`, `current`,
@@ -210,17 +368,6 @@ fn doc_waiting(feature: &Feature) -> Option<Stage> {
     .then_some(stage)
 }
 
-/// What the phone asks a feature: its page's buttons, or a press.
-#[derive(Debug, PartialEq)]
-pub(crate) enum PhoneAct {
-    /// The button labelled so on the page of the stage it is at.
-    Press(String),
-    /// Decide finding `id` of its AI review.
-    Decide(String, Decision),
-    /// Send the current stage's file back to its agent, with these words.
-    SendBack(String),
-}
-
 /// A new feature the phone asked for, while its worktrees are made.
 pub(crate) struct PhoneNew {
     /// Where the answer goes: the phone waits for it.
@@ -272,6 +419,21 @@ fn phone_root(
     }
     let touched = phone_touched(&root, named)?;
     Ok((root, touched))
+}
+
+/// What the phone asks a feature: its page's buttons, or a press.
+#[derive(Debug, PartialEq)]
+pub(crate) enum PhoneAct {
+    /// Press button `id` (see `PhoneButton::id`) of the page of stage
+    /// `stage` (its place in `Stage::ALL`; none: the one the desktop
+    /// shows), with the text it asked for, if it asks.
+    Press {
+        stage: Option<usize>,
+        id: String,
+        text: Option<String>,
+    },
+    /// Send the current stage's file back to its agent, with these words.
+    SendBack(String),
 }
 
 impl Gerdr {
@@ -420,66 +582,9 @@ impl Gerdr {
         let _ = answer.send(said);
     }
 
-    /// page of the stage it is at shows them.
-    fn phone_buttons(
-        &self,
-        project: &str,
-        slug: &str,
-    ) -> Result<Vec<(PageButton, PanelOutcome)>, String> {
-        let feature = self
-            .feature(project, slug)
-            .ok_or_else(|| "gerdr has no such feature".to_owned())?;
-        let ctx = self.row_ctx(feature);
-        let mut buttons = page_actions(feature, own_page(feature), ctx);
-        buttons.retain(|(_, outcome)| phone_may(outcome));
-        // The desktop approves a file in its review tab; the phone, here.
-        if let Some(stage) = doc_waiting(feature)
-            && !buttons
-                .iter()
-                .any(|(_, o)| *o == PanelOutcome::ApproveDoc(stage))
-        {
-            let button = PageButton {
-                label: "Approve".to_owned(),
-                style: ButtonStyle::Primary,
-            };
-            buttons.insert(0, (button, PanelOutcome::ApproveDoc(stage)));
-        }
-        Ok(buttons)
-    }
-
-    /// What the phone may do to feature `slug`, for its page, with its
-    /// rail and the page of `stage` (by its place in `Stage::ALL`), the
-    /// one the desktop shows when none is asked.
-    pub(crate) fn phone_offer(&self, project: &str, slug: &str, stage: Option<usize>) -> Value {
-        let buttons = match self.phone_buttons(project, slug) {
-            Ok(buttons) => buttons,
-            Err(why) => return json!({ "error": why }),
-        };
-        let elsewhere = self.feature_writer(project, slug).map(str::to_owned);
-        let send_back = self.feature(project, slug).and_then(doc_waiting).is_some();
-        let buttons: Vec<Value> = buttons
-            .iter()
-            .map(|(b, _)| json!({ "label": b.label, "primary": b.style == ButtonStyle::Primary }))
-            .collect();
-        let (rail, page) = self.phone_view(project, slug, stage).unwrap_or_default();
-        json!({
-            "buttons": buttons,
-            "sendBack": send_back && elsewhere.is_none(),
-            "elsewhere": elsewhere,
-            "rail": rail,
-            "page": page,
-        })
-    }
-
-    /// Feature `slug`'s rail as its feature tab draws it (each stage's
-    /// mark, short line and agent, and the line back to Build), and the
-    /// page of `stage` as its sections say it, in words.
-    fn phone_view(
-        &self,
-        project: &str,
-        slug: &str,
-        stage: Option<usize>,
-    ) -> Option<(Value, Value)> {
+    /// The page of `stage` (by its place in `Stage::ALL`; none: the one
+    /// the desktop shows) of feature `slug`, as the phone shows it.
+    fn phone_page(&self, project: &str, slug: &str, stage: Option<usize>) -> Option<PhonePage> {
         let feature = self.feature(project, slug)?;
         let panel = FeaturePanel {
             project: project.to_owned(),
@@ -490,6 +595,90 @@ impl Gerdr {
         };
         let shown = panel.page_stage(feature);
         let view = self.feature_tab_view_of(&panel)?;
+        let ctx = self.row_ctx(feature);
+        let actions = self.page_button_actions(feature, shown, ctx);
+        let buttons: Vec<Option<PhoneButton>> = (actions.into_iter().enumerate())
+            .map(|(i, (b, outcome))| {
+                let mut button = PhoneButton::new(
+                    &b.label,
+                    outcome,
+                    b.style == ButtonStyle::Primary || view.page.primary == Some(i),
+                );
+                button.off = b.style == ButtonStyle::Off;
+                // A question is accepted by answering it: the desk opens its field.
+                if let PanelOutcome::OnSuggestion(id, ItemAct::Decide(_)) = &button.outcome
+                    && self
+                        .suggestion_of(project, slug, id)
+                        .is_some_and(|s| s.unanswered())
+                {
+                    button.asks = Some("Your answer");
+                }
+                (phone_may(&button.outcome) || button.asks.is_some()).then_some(button)
+            })
+            .collect();
+        let mut extra = Vec::new();
+        for section in &view.page.sections {
+            // Build's choice is two segments to press on the desktop.
+            if let chrome::PageSection::MilestoneMode { fresh } = section {
+                for (label, to) in [("One agent", false), ("Fresh each milestone", true)] {
+                    let mut pick = PhoneButton::new(label, PanelOutcome::FreshMilestones(to), *fresh == to);
+                    pick.off = *fresh == to;
+                    extra.push(pick);
+                }
+                continue;
+            }
+            let chrome::PageSection::Agent {
+                stage, picks, model, ..
+            } = section
+            else {
+                continue;
+            };
+            for chip in picks {
+                let mut pick = PhoneButton::new(
+                    &chip.name,
+                    PanelOutcome::PickAgent(*stage, chip.name.clone()),
+                    chip.lit,
+                );
+                // The one it runs already is no pick to make.
+                pick.off = chip.off || chip.lit;
+                extra.push(pick);
+            }
+            if let Some(label) = model {
+                let mut pick = PhoneButton::new(label, PanelOutcome::PickModel(*stage), false);
+                let slot = self.model_slot_of(project, slug, *stage);
+                pick.value = slot.and_then(|s| s.picked).unwrap_or_default();
+                extra.push(pick);
+            }
+        }
+        // The desktop approves a file in its review tab; the phone, here.
+        if let Some(stage) = doc_waiting(feature).filter(|s| *s == shown) {
+            let approve = PanelOutcome::ApproveDoc(stage);
+            let has = |b: &Option<PhoneButton>| b.as_ref().is_some_and(|b| b.outcome == approve);
+            if !buttons.iter().any(has) {
+                extra.push(PhoneButton::new("Approve", approve, true));
+            }
+        }
+        Some(PhonePage {
+            shown,
+            view,
+            buttons,
+            extra,
+        })
+    }
+
+    /// What the phone may do to feature `slug`, for its page, with its
+    /// rail and the page of `stage` (by its place in `Stage::ALL`), the
+    /// one the desktop shows when none is asked.
+    pub(crate) fn phone_offer(&self, project: &str, slug: &str, stage: Option<usize>) -> Value {
+        let (Some(feature), Some(page)) = (
+            self.feature(project, slug),
+            self.phone_page(project, slug, stage),
+        ) else {
+            return json!({ "error": "gerdr has no such feature" });
+        };
+        let elsewhere = self.feature_writer(project, slug).map(str::to_owned);
+        let send_back = doc_waiting(feature) == Some(page.shown);
+        let view = &page.view;
         let nodes: Vec<Value> = (view.rail.iter())
             .map(|n| {
                 json!({
@@ -503,20 +692,29 @@ impl Gerdr {
             .collect();
         let rail = json!({
             "nodes": nodes,
-            "back": view.back.map(|b| json!({ "from": b.from, "to": b.to })),
+            "back": view.back.as_ref().map(|b| json!({ "from": b.from, "to": b.to })),
         });
-        let page = &view.page;
-        let page = json!({
+        let shown = page.shown;
+        let p = &view.page;
+        let sections: Vec<Value> = (p.sections.iter())
+            .filter_map(|s| page.section(s))
+            .collect();
+        let page_json = json!({
             "stage": Stage::ALL.iter().position(|s| *s == shown),
             "label": shown.label(),
             "own": shown == own_page(feature),
-            "decides": shown == Stage::AiReview,
-            "title": page.title,
-            "about": page.about,
-            "status": page.status.as_ref().map(check_json),
-            "sections": page.sections.iter().filter_map(section_json).collect::<Vec<_>>(),
+            "title": p.title,
+            "about": p.about,
+            "status": p.status.as_ref().map(check_json),
+            "sections": sections,
         });
-        Some((rail, page))
+        json!({
+            "buttons": page.loose(),
+            "sendBack": send_back && elsewhere.is_none(),
+            "elsewhere": elsewhere,
+            "rail": rail,
+            "page": page_json,
+        })
     }
 
     /// The sidebar cards of the features asked for, by `project/slug`:
@@ -559,35 +757,96 @@ impl Gerdr {
             let why = format!("{machine} writes it: act there, or take it over on the desktop");
             return json!({ "error": why });
         }
-        let outcome = match act {
-            PhoneAct::Press(label) => {
-                let buttons = match self.phone_buttons(project, slug) {
-                    Ok(buttons) => buttons,
-                    Err(why) => return json!({ "error": why }),
-                };
-                match buttons.into_iter().find(|(b, _)| b.label == label) {
-                    Some((_, outcome)) => outcome,
-                    None => {
-                        let why = format!("“{label}” isn't on its page any more");
-                        return json!({ "error": why });
-                    }
-                }
-            }
-            PhoneAct::Decide(id, decision) => PanelOutcome::DecideFinding(id, decision),
-            PhoneAct::SendBack(text) => {
-                let Some(stage) = self.feature(project, slug).and_then(Feature::current) else {
+        // Its answer would be taken for the one this asks.
+        if self.overlays.confirm.is_some() {
+            return json!({ "error": "A dialog is open on the desktop: answer it there first" });
+        }
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        match act {
+            PhoneAct::Press { stage, id, text } => {
+                let Some(page) = self.phone_page(&project, &slug, stage) else {
                     return json!({ "error": "gerdr has no such feature" });
                 };
-                let (project, slug) = (project.to_owned(), slug.to_owned());
-                return self.phone_said(confirm, move |g| {
-                    g.send_back_stage(&project, &slug, stage, text);
-                });
+                let Some(button) = page.all().find(|b| b.id() == id && !b.off).cloned() else {
+                    return json!({ "error": "That button isn't on its page any more" });
+                };
+                let shown = page.shown;
+                match (button.asks, text) {
+                    (None, _) => self.phone_said(confirm, move |g| {
+                        g.apply_feature_outcome(project, slug, button.outcome);
+                    }),
+                    (Some(_), Some(text))
+                        if !text.trim().is_empty()
+                            || matches!(button.outcome, PanelOutcome::PickModel(_)) =>
+                    {
+                        self.phone_said(confirm, move |g| {
+                            g.phone_wrote(&project, &slug, shown, button.outcome, text.trim());
+                        })
+                    }
+                    (Some(asks), _) => json!({ "error": format!("{asks}: write it first") }),
+                }
             }
-        };
-        let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.phone_said(confirm, move |g| {
-            g.apply_feature_outcome(project, slug, outcome)
-        })
+            PhoneAct::SendBack(text) => {
+                let Some(stage) = self.feature(&project, &slug).and_then(Feature::current) else {
+                    return json!({ "error": "gerdr has no such feature" });
+                };
+                self.phone_said(confirm, move |g| {
+                    g.send_back_stage(&project, &slug, stage, text);
+                })
+            }
+        }
+    }
+
+    /// Do what the field `outcome` opens on the desktop does once `text` is
+    /// written in it, on page `shown` of feature `slug`.
+    fn phone_wrote(
+        &mut self,
+        project: &str,
+        slug: &str,
+        shown: Stage,
+        outcome: PanelOutcome,
+        text: &str,
+    ) {
+        use PanelOutcome as O;
+        match outcome {
+            O::OnSuggestion(id, ItemAct::AskRefuse) => {
+                self.reject_suggestion(project, slug, &id, text);
+            }
+            O::OnSuggestion(id, ItemAct::Comment) => {
+                self.keep_suggestion_note(project, slug, &id, text, false);
+            }
+            O::OnSuggestion(id, ItemAct::Answer | ItemAct::Decide(_)) => {
+                self.keep_suggestion_note(project, slug, &id, text, true);
+            }
+            O::AskDismiss(id) => {
+                let why = Decision::Dismiss(text.to_owned());
+                self.decide_finding(project, slug, &id, why);
+                self.feature_findings_changed(project, slug);
+            }
+            O::CommentFinding(id) => {
+                self.note_finding(project, slug, &id, text);
+            }
+            O::AddComment => match self.feature(project, slug).and_then(Feature::current) {
+                Some(Stage::PlanReview) => {
+                    self.add_suggestion(project, slug, text);
+                }
+                Some(Stage::ManualTest) => {
+                    self.add_manual_comment(project, slug, text);
+                }
+                _ => self.add_finding_comment(project, slug, text),
+            },
+            O::PickModel(stage) => {
+                let Some(slot) = self.model_slot_of(project, slug, stage) else {
+                    return self.show_warning(format!(
+                        "gerdr can't start {}'s agent on a model",
+                        stage.label()
+                    ));
+                };
+                let model = (!text.is_empty()).then(|| text.to_owned());
+                self.set_stage_model(project, slug, stage, &slot.agent, model);
+            }
+            other => tracing::warn!("the phone wrote for {other:?} on {}", shown.label()),
+        }
     }
 
     /// Run `act`, and say what gerdr said while it did: its toasts, and
@@ -598,6 +857,7 @@ impl Gerdr {
         let asking = self.overlays.confirm.is_some();
         act(self);
         let mut asks = Value::Null;
+        // One open before was the desk's own, not this act's.
         let asked = (self.overlays.confirm.as_ref())
             .filter(|_| !asking)
             .map(|d| json!({ "title": d.title, "body": d.body, "go": d.go }));
@@ -639,6 +899,30 @@ mod tests {
         assert!(!phone_may(&PanelOutcome::Ship));
         assert!(!phone_may(&PanelOutcome::TakeOver));
         assert!(!phone_may(&PanelOutcome::Remove));
+        assert!(!phone_may(&PanelOutcome::EditCommands(Default::default())));
+        assert!(phone_may(&PanelOutcome::PickAgent(Stage::Plan, "Codex".into())));
+        assert!(phone_may(&PanelOutcome::FreshMilestones(true)));
+        let accept = PanelOutcome::OnSuggestion("s1-1".into(), ItemAct::Decide(Decision::Fix));
+        assert!(phone_may(&accept));
+        assert!(!phone_may(&PanelOutcome::OnSuggestion("s1-1".into(), ItemAct::OpenCode)));
+    }
+
+    #[test]
+    fn a_field_the_desk_opens_is_asked_on_the_phone() {
+        let reject = PanelOutcome::OnSuggestion("s1-1".into(), ItemAct::AskRefuse);
+        assert!(phone_asks(&reject).is_some());
+        assert!(phone_asks(&PanelOutcome::AskDismiss("r1-1".into())).is_some());
+        assert!(phone_asks(&PanelOutcome::PickModel(Stage::Build)).is_some());
+        assert!(phone_asks(&PanelOutcome::RunChecks).is_none());
+        assert!(!phone_may(&reject));
+    }
+
+    #[test]
+    fn buttons_of_one_label_are_told_apart_by_what_they_do() {
+        let first = PhoneButton::new("Run again", PanelOutcome::RerunCheck(0), false);
+        let second = PhoneButton::new("Run again", PanelOutcome::RerunCheck(1), false);
+        assert_ne!(first.id(), second.id());
+        assert_eq!(second.json()["id"], "RerunCheck(1)");
     }
 
     #[test]

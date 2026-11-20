@@ -25,7 +25,6 @@ use serde_json::{Value, json};
 use crate::{
     feature::{
         Feature, Stage, Status, layout,
-        review_import::{Finding, FindingState},
         store,
     },
     feature_agents::{self, Gate},
@@ -407,7 +406,7 @@ fn decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// A press from the page: `/api/press`, `/api/decide` and `/api/send-back`
+/// A press from the page: `/api/new`, `/api/press` and `/api/send-back`
 /// go on to gerdr, `/api/agent` to the agent's pane.
 fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
     if target == "/api/push" {
@@ -439,7 +438,6 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
     let op = match target {
         "/api/new" => "create",
         "/api/press" => "press",
-        "/api/decide" => "decide",
         "/api/send-back" => "send-back",
         "/api/agent" => {
             let (pane, line, key) = (text("pane"), text("text"), text("key"));
@@ -766,7 +764,6 @@ fn feature_page(project: &str, slug: &str, stage: Option<usize>) -> Reply {
         .map(|e| json!({ "at": e.at, "what": e.what }))
         .collect();
     page["history"] = history.into();
-    page["findings"] = findings(&f).into();
     let request = json!({ "op": "offer", "project": project.id, "slug": slug, "stage": stage });
     let mut offer = gerdr(&request).unwrap_or_else(|why| json!({ "error": why }));
     // Without gerdr, the stage alone, and its files.
@@ -778,7 +775,6 @@ fn feature_page(project: &str, slug: &str, stage: Option<usize>) -> Reply {
             "stage": Stage::ALL.iter().position(|s| *s == stage),
             "label": stage.label(),
             "own": stage == at,
-            "decides": stage == Stage::AiReview,
             "sections": [],
         });
     }
@@ -856,32 +852,6 @@ fn add_files(page: &mut Value, dir: &Path) {
     }
     mine.retain(|n| !read.contains(n));
     page["files"] = mine.into_iter().cloned().collect::<Vec<_>>().into();
-}
-
-/// Feature `f`'s AI review findings, those to decide first.
-fn findings(f: &Feature) -> Vec<Value> {
-    let Some(review) = &f.review else {
-        return Vec::new();
-    };
-    let mut all: Vec<&Finding> = review.findings.iter().collect();
-    all.sort_by_key(|x| (x.state != FindingState::Open, x.severity));
-    all.into_iter()
-        .map(|x| {
-            let at = x
-                .line
-                .map_or_else(|| x.file.clone(), |l| format!("{}:{l}", x.file));
-            json!({
-                "id": x.id,
-                "severity": x.severity,
-                "state": x.state,
-                "title": x.title,
-                "body": x.body,
-                "fix": x.fix,
-                "at": if x.repo.is_empty() { at } else { format!("{} {at}", x.repo) },
-                "reason": x.reason,
-            })
-        })
-        .collect()
 }
 
 /// The markdown files in a feature's folder, by name: not the copies kept

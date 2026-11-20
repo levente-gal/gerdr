@@ -490,7 +490,7 @@ impl Gerdr {
     }
 
     /// Suggestion `id` of feature `slug`, as it is now.
-    fn suggestion_of(&self, project: &str, slug: &str, id: &str) -> Option<&Suggestion> {
+    pub(crate) fn suggestion_of(&self, project: &str, slug: &str, id: &str) -> Option<&Suggestion> {
         self.feature(project, slug)?
             .plan_review
             .as_ref()?

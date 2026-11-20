@@ -22,7 +22,6 @@ use smithay::reexports::calloop::{
 
 use crate::{
     Gerdr,
-    feature::review_import::Decision,
     features::PhoneAct,
     host_idle,
     web_push::{Note, Pusher},
@@ -67,22 +66,16 @@ pub enum Request {
     /// How features stand, as their sidebar cards show it: `[project, slug]`
     /// pairs.
     Cards { features: Vec<(String, String)> },
-    /// Press a button of its page.
+    /// Press button `id` of a stage's page (see `features::PhoneAct`),
+    /// with the text it asks for, if it asks.
     Press {
         project: String,
         slug: String,
-        label: String,
         #[serde(default)]
-        confirm: bool,
-    },
-    /// Decide a finding: `fix`, `dismiss` (with a reason) or `reopen`.
-    Decide {
-        project: String,
-        slug: String,
+        stage: Option<usize>,
         id: String,
-        decision: String,
         #[serde(default)]
-        reason: String,
+        text: Option<String>,
         #[serde(default)]
         confirm: bool,
     },
@@ -186,17 +179,6 @@ fn remove_dead_sockets(dir: &std::path::Path, mine: &std::path::Path) {
         {
             tracing::warn!("phone socket {}: {err}", path.display());
         }
-    }
-}
-
-/// A decision in the phone's words.
-fn decision(word: &str, reason: String) -> Result<Decision, String> {
-    match word {
-        "fix" => Ok(Decision::Fix),
-        "reopen" => Ok(Decision::Reopen),
-        "dismiss" if reason.trim().is_empty() => Err("A dismissal needs a reason".into()),
-        "dismiss" => Ok(Decision::Dismiss(reason.trim().to_owned())),
-        _ => Err(format!("No such decision: {word}")),
     }
 }
 
@@ -309,20 +291,14 @@ impl Gerdr {
             Request::Press {
                 project,
                 slug,
-                label,
-                confirm,
-            } => self.phone_act(&project, &slug, PhoneAct::Press(label), confirm),
-            Request::Decide {
-                project,
-                slug,
+                stage,
                 id,
-                decision: word,
-                reason,
+                text,
                 confirm,
-            } => match decision(&word, reason) {
-                Ok(d) => self.phone_act(&project, &slug, PhoneAct::Decide(id, d), confirm),
-                Err(why) => json!({ "error": why }),
-            },
+            } => {
+                let act = PhoneAct::Press { stage, id, text };
+                self.phone_act(&project, &slug, act, confirm)
+            }
             Request::SendBack {
                 project,
                 slug,
@@ -382,15 +358,18 @@ mod tests {
 
     #[test]
     fn requests_read_as_the_phone_sends_them() {
-        let press: Request =
-            serde_json::from_str(r#"{"op":"press","project":"p","slug":"s","label":"Approve"}"#)
-                .expect("press");
+        let press: Request = serde_json::from_str(
+            r#"{"op":"press","project":"p","slug":"s","id":"RerunCheck(1)","stage":4}"#,
+        )
+        .expect("press");
         assert_eq!(
             press,
             Request::Press {
                 project: "p".into(),
                 slug: "s".into(),
-                label: "Approve".into(),
+                stage: Some(4),
+                id: "RerunCheck(1)".into(),
+                text: None,
                 confirm: false
             }
         );
@@ -439,17 +418,6 @@ mod tests {
         assert!(!dead.exists());
         assert!(live.exists() && mine.exists() && dir.join("other.sock").exists());
         std::fs::remove_dir_all(&dir).expect("clean");
-    }
-
-    #[test]
-    fn a_dismissal_needs_a_reason() {
-        assert_eq!(decision("fix", String::new()), Ok(Decision::Fix));
-        assert!(decision("dismiss", "  ".into()).is_err());
-        assert_eq!(
-            decision("dismiss", " not real ".into()),
-            Ok(Decision::Dismiss("not real".into()))
-        );
-        assert!(decision("maybe", String::new()).is_err());
     }
 
     #[test]

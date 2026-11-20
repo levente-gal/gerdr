@@ -334,3 +334,10 @@ details.card > p { font-size: 14px; overflow-wrap: anywhere; }
 .figures b { font-size: 18px; }
 .figures span { font-size: 12px; color: var(--quiet); }
 .recap p { font-size: 14px; margin: 6px 0; }
+
+/* An agent card: its head opens the pane, its picks sit under it. */
+.card.agent .open { display: block; color: inherit; text-decoration: none; }
+.buttons.picks { margin-top: 8px; gap: 6px; }
+.buttons.picks button { font-size: 13px; min-height: 34px; padding: 5px 11px; border-radius: 999px; }
+.buttons.picks button.lit { border-color: var(--accent); color: var(--accent); font-weight: 650; opacity: 1; }
+.finding .buttons { margin-top: 8px; }

@@ -1,6 +1,6 @@
 // The phone view: features, their stages and agents, read from gerdr's
 // `--phone` server, which it polls while shown. Its presses go back there:
-// a stage page's buttons, findings' decisions and send-backs to gerdr,
+// a new feature, a stage page's buttons and send-backs to gerdr,
 // lines and keys to an agent's pane.
 
 const main = document.getElementById("main");
@@ -262,6 +262,15 @@ const ticks = (items, running = []) => `<ul class="ticks">${items.map(([done, te
 const meter = (done, total, cls = "") => total
   ? `<div class="bar ${cls}"><span style="width:${Math.round(100 * done / total)}%"></span></div>` : "";
 
+// A button of gerdr's page, pressed by what it does. One whose desk opens
+// a field asks for its text first; picks press without a confirm.
+const btn = (b, cls = "") => {
+  const dots = b.asks && !b.label.endsWith("…") ? "…" : "";
+  const asks = b.asks ? ` data-asks="${esc(b.asks)}" data-value="${esc(b.value || "")}"` : "";
+  return `<button class="${b.primary ? "primary " : ""}${cls}" data-press="${esc(b.id)}"${asks}${b.off ? " disabled" : ""}>${esc(b.label)}${dots}</button>`;
+};
+const row = (bs, cls = "") => bs?.length ? `<div class="buttons">${bs.map((b) => btn(b, cls)).join("")}</div>` : "";
+
 // A section of a stage's page, as the desktop has it, in words.
 function section(x, f, p, s) {
   switch (x.kind) {
@@ -272,15 +281,19 @@ function section(x, f, p, s) {
         <div class="meta">${esc(x.status)}</div>
         ${x.tail?.length ? `<pre class="tail">${esc(stripAnsi(x.tail.slice(-4).join("\n")))}</pre>` : ""}`;
       const cls = `card agent${x.waits ? " tone-waits" : x.dot === "working" ? " tone-working" : ""}`;
-      return a ? `<a class="${cls}" href="${href("pane", p, s, a.pane)}">${head}</a>` : `<div class="${cls}">${head}</div>`;
+      const top = a ? `<a class="open" href="${href("pane", p, s, a.pane)}">${head}</a>` : head;
+      // The agent its next start runs on is lit; its model, after them.
+      const picks = (x.picks || []).map((b) => btn({ ...b, primary: false }, `quiet-press pick${b.primary ? " lit" : ""}`));
+      if (x.model) picks.push(btn(x.model, "quiet-press pick"));
+      return `<div class="${cls}">${top}${row(x.buttons)}${picks.length ? `<div class="buttons picks">${picks.join("")}</div>` : ""}</div>`;
     }
     case "file":
-      return `<div class="fileline small"><b>${esc(x.name)}</b> · ${toned(x.state)}</div>`;
+      return `<div class="fileline small"><b>${esc(x.name)}</b> · ${toned(x.state)}</div>${row(x.buttons)}`;
     case "doc":
       return `<details class="fold doc-fold" open><summary><h2>${esc(x.name)}</h2></summary>
         ${x.html ? `<article class="doc card">${x.html}</article>` : `<p class="error small">${esc(x.error)}</p>`}</details>`;
     case "lines":
-      return `<h3>${esc(x.label)}</h3><ul class="lines">${x.lines.map((l) => `<li>${toned(l)}</li>`).join("")}</ul>`;
+      return `<h3>${esc(x.label)}</h3><ul class="lines">${x.lines.map((l) => `<li>${toned(l)}</li>`).join("")}</ul>${row(x.buttons, "quiet-press")}`;
     case "heading":
       return `<h3>${esc(x.text)}</h3>`;
     case "milestones":
@@ -290,9 +303,9 @@ function section(x, f, p, s) {
           <span class="count">${x.done} of ${x.total}</span></div>
         ${meter(x.done, x.total, x.done === x.total ? "full" : "")}
         ${x.state ? `<div class="meta">${toned(x.state)}</div>` : ""}`;
-      return x.items.length
+      return (x.items.length
         ? `<details class="card milestones"><summary>${head}</summary>${ticks(x.items, x.running)}</details>`
-        : `<div class="card milestones">${head}</div>`;
+        : `<div class="card milestones">${head}</div>`) + row(x.buttons);
     }
     case "round": {
       const asked = x.asked.length ? `<h3>${esc(x.askedCaption)}</h3><ul class="lines">${x.asked.map((a) =>
@@ -304,7 +317,7 @@ function section(x, f, p, s) {
       const changed = x.changed.length ? `<h3>Changed</h3><ul class="lines quiet">${x.changed.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>` : "";
       return `<details class="card round"><summary>
           <div class="top">${dotOf(x.dot)}<span class="name">${esc(x.label)}</span>${toned(x.state)}</div>
-          ${x.meta ? `<div class="meta">${esc(x.meta)}</div>` : ""}</summary>${asked}${fixes}${changed}</details>`;
+          ${x.meta ? `<div class="meta">${esc(x.meta)}</div>` : ""}</summary>${asked}${fixes}${changed}</details>${row(x.buttons)}`;
     }
     case "finding": {
       const lead = x.dot ? dotOf(x.dot) : x.tag ? `<span class="sev ${esc(x.tag)}">${esc(x.tag)}</span>` : "";
@@ -318,9 +331,12 @@ function section(x, f, p, s) {
       const meta = [x.place, x.state, x.clock].filter(Boolean).map(esc).join(" · ");
       const body = `<div class="top">${lead}<span class="name">${esc(x.title)}</span>${x.made ? `<span class="t-ready small">made</span>` : ""}</div>
         ${meta ? `<div class="meta">${meta}</div>` : ""}`;
+      // A comment's buttons edit what it says: it starts from that.
+      const said = (x.commentButtons || []).map((b) => ({ ...b, value: b.value || x.comment }));
+      const acts = row(x.buttons) + row(said);
       return more
-        ? `<details class="card finding${x.faded ? " faded" : ""}"><summary>${body}</summary>${more}</details>`
-        : `<div class="card finding${x.faded ? " faded" : ""}">${body}</div>`;
+        ? `<div class="card finding${x.faded ? " faded" : ""}"><details><summary>${body}</summary>${more}</details>${acts}</div>`
+        : `<div class="card finding${x.faded ? " faded" : ""}">${body}${acts}</div>`;
     }
     case "review":
       return `<div class="card"><div class="top"><span class="name">${esc(x.label)}</span>
@@ -354,8 +370,8 @@ function section(x, f, p, s) {
 }
 
 // A stage's page: what it is for, how it stands, its sections as the
-// desktop's page has them, and its files: the one to read shown, the
-// others to open. AI review's findings can be decided here.
+// desktop's page has them, each with its buttons, and its files: the one
+// to read shown, the others to open.
 function stagePage(f, p, s) {
   const pg = f.page;
   let html = `<div class="page-head"><h2>${esc(pg.label)}${pg.own ? "" : ` <span class="count">· it is at ${esc(f.stage)}</span>`}</h2>
@@ -364,17 +380,8 @@ function stagePage(f, p, s) {
   // The stage's agents first, as they're what's at work.
   const agents = pg.sections.filter((x) => x.kind === "agent");
   for (const x of agents) html += section(x, f, p, s);
-  if (pg.own) html += actions(f.offer);
-  let decided = false;
-  for (const x of pg.sections.filter((x) => x.kind !== "agent")) {
-    if (pg.decides && (x.kind === "finding" || x.kind === "heading")) {
-      if (!decided) html += findings(f.findings);
-      decided = true;
-      continue;
-    }
-    html += section(x, f, p, s);
-  }
-  if (pg.decides && !decided) html += findings(f.findings);
+  html += actions(f.offer);
+  for (const x of pg.sections.filter((x) => x.kind !== "agent")) html += section(x, f, p, s);
   if (pg.files?.length) {
     html += `<h2>Files</h2><div class="group">` + pg.files.map((d) =>
       `<a class="row" href="${href("doc", p, s, d)}"><span>${esc(d)}</span><span class="chev">›</span></a>`).join("") + `</div>`;
@@ -404,39 +411,13 @@ async function feature(p, s, stage) {
 function actions(offer) {
   if (offer.error) return `<p class="quiet small">Actions need gerdr: ${esc(offer.error)}</p>`;
   if (offer.elsewhere) return `<p class="quiet small">${esc(offer.elsewhere)} writes it: act there.</p>`;
-  let html = "";
-  if (offer.buttons.length) {
-    html += `<div class="buttons">${offer.buttons.map((b) =>
-      `<button class="${b.primary ? "primary" : ""}" data-press="${esc(b.label)}">${esc(b.label)}</button>`).join("")}</div>`;
-  }
+  let html = row(offer.buttons);
   if (offer.sendBack) {
     html += `<details class="sendback"><summary>Send back with a comment</summary>
       <textarea id="backText" rows="4" placeholder="What should change"></textarea>
       <button data-sendback>Send back</button></details>`;
   }
   return html;
-}
-
-const SETTLED = { fix: "to fix", sent: "sent to fix", fixed: "fixed", posted: "on GitHub" };
-function findings(list) {
-  if (!list.length) return "";
-  const open = list.filter((x) => x.state === "open").length;
-  return `<h2>Findings${open ? ` · ${open} to decide` : ""}</h2>` + list.map((x) => {
-    const moves = x.state === "open"
-      ? `<button class="primary" data-decide="fix" data-id="${esc(x.id)}">Fix</button>
-         <button data-decide="dismiss" data-id="${esc(x.id)}">Dismiss…</button>`
-      : x.state === "fix" || x.state === "dismissed"
-        ? `<button data-decide="reopen" data-id="${esc(x.id)}">Reopen</button>`
-        : "";
-    const state = x.state === "open" ? "" : (SETTLED[x.state] || x.state);
-    return `<div class="card finding ${esc(x.state)}">
-      <div class="meta"><span class="sev ${esc(x.severity)}">${esc(x.severity)}</span> ${esc(x.at)}${state ? ` · ${esc(state)}` : ""}</div>
-      <div class="name">${esc(x.title)}</div>
-      ${x.reason ? `<div class="meta">Dismissed: ${esc(x.reason)}</div>` : ""}
-      <details><summary>Details</summary><p>${esc(x.body)}</p>${x.fix ? `<p><b>Fix:</b> ${esc(x.fix)}</p>` : ""}</details>
-      ${moves ? `<div class="buttons">${moves}</div>` : ""}
-    </div>`;
-  }).join("");
 }
 
 // A new feature: its project, title, the repositories it changes when the
@@ -598,24 +579,25 @@ async function render(fresh, force) {
 const here = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
 
 document.addEventListener("click", async (e) => {
-  const b = e.target.closest("button[data-press], button[data-decide], button[data-sendback], button[data-key], button[data-push]");
+  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push]");
   if (!b || b.disabled) return;
   const [, p, s, pane] = here();
+  // The feature's page names its stage where the address does.
+  const stage = here()[0] === "f" && here()[3] !== undefined ? Number(here()[3]) : undefined;
   b.disabled = true;
   try {
     if (b.dataset.push) {
       await push(b.dataset.push).catch((err) => say([{ text: err.message }], true));
     } else if (b.dataset.press) {
-      const label = b.dataset.press;
-      if (confirm(`${label}: ${titleEl.textContent}?`)) await ask("/api/press", { p, s, label });
-    } else if (b.dataset.decide) {
-      const decision = b.dataset.decide;
-      let reason = "";
-      if (decision === "dismiss") {
-        reason = prompt("Why dismiss it?") || "";
-        if (!reason.trim()) return;
+      const id = b.dataset.press;
+      let text;
+      if (b.dataset.asks !== undefined) {
+        text = prompt(b.dataset.asks, b.dataset.value || "");
+        if (text === null) return;
+      } else if (!b.classList.contains("quiet-press") && !confirm(`${b.textContent.trim()}: ${titleEl.textContent}?`)) {
+        return;
       }
-      await ask("/api/decide", { p, s, id: b.dataset.id, decision, reason });
+      await ask("/api/press", { p, s, stage, id, text });
     } else if (b.dataset.sendback !== undefined) {
       const box = document.getElementById("backText");
       if (!box.value.trim()) { say([{ text: "Say what should change" }], true); return; }

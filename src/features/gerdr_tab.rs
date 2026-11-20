@@ -548,7 +548,7 @@ impl Gerdr {
     /// lights up, and a stage's node tells what is done in it.
     /// The buttons of `stage`'s page of `feature`, in the order the page
     /// lays them out, with what each asks.
-    fn page_button_actions(
+    pub(super) fn page_button_actions(
         &self,
         feature: &Feature,
         stage: Stage,
