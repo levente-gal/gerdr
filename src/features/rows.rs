@@ -1273,7 +1273,7 @@ pub(super) fn check_buttons(
 /// the user's own instructions (a failure's note only says what went wrong).
 pub(super) fn manual_own_words(ctx: RowCtx) -> Option<String> {
     (ctx.manual.comments_open > 0)
-        .then(|| review_import::own_words(&plural(ctx.manual.comments_open, "comment")))
+        .then(|| review_import::own_words(&plural(ctx.manual.comments_open, "issue")))
 }
 
 pub(super) fn manual_sends(feature: &Feature, ctx: RowCtx) -> bool {

@@ -889,14 +889,14 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                         })
                     }
                 ),
-                row!("Ctrl+E", "a comment of yours: edit it", |t| {
+                row!("Ctrl+E", "an issue of yours: edit it", |t| {
                     (t.findings() && t.comment_at().is_some()).then_some(TabKey::Out(
                         PanelOutcome::Manual(Outcome::EditComment(t.finding)),
                     ))
                 }),
                 row!(
                     "Del",
-                    "clear its result; a comment of yours: press twice to delete",
+                    "clear its result; an issue of yours: press twice to delete",
                     |t| {
                         if !(t.findings() && t.marking > 0) {
                             return None;
@@ -1215,11 +1215,15 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                         None => TabKey::Swallow,
                     })
                 }),
-                row!("c", "off the cards, add a comment of your own", |t| {
-                    let own = t.stage != Stage::PlanReview && t.stage != Stage::CodeReview;
-                    (own && t.page() && can_add_comment(t.feature, t.stage))
-                        .then_some(TabKey::Out(PanelOutcome::AddComment))
-                }),
+                row!(
+                    "c",
+                    "off the cards, add a comment of your own (on Manual test, an issue)",
+                    |t| {
+                        let own = t.stage != Stage::PlanReview && t.stage != Stage::CodeReview;
+                        (own && t.page() && can_add_comment(t.feature, t.stage))
+                            .then_some(TabKey::Out(PanelOutcome::AddComment))
+                    }
+                ),
             ],
         ),
         Link::Rows(
@@ -2044,7 +2048,7 @@ fn page_hints(f: &Footer, choices: AgentChoices) -> Vec<(String, String)> {
                 TabKey::Out(O::Manual(_)) | TabKey::Arm(_) => f.delete("delete"),
                 _ => String::new(),
             }));
-            h.extend(f.says("c", "add comment\u{2026}", is(TabKey::Out(O::AddComment))));
+            h.extend(f.says("c", "add issue\u{2026}", is(TabKey::Out(O::AddComment))));
             h.extend(crate::manual_test::search_hints(panel.search.as_ref()));
             h.extend(f.manual_gate());
             h.extend(f.reopen(None));

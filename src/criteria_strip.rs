@@ -88,7 +88,7 @@ fn strip_buttons(i: usize, row: &Row, selecting: bool) -> Vec<(chrome::PageButto
         false => "Select on page",
     };
     out.push((quiet(select), StripKey::Select));
-    out.push((quiet("Add comment\u{2026}"), StripKey::AddComment));
+    out.push((quiet("Add issue\u{2026}"), StripKey::AddComment));
     out
 }
 
@@ -275,7 +275,7 @@ const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
         chord: "Space",
         does: |c| Some(StripKey::Do(Outcome::Toggle(c.i))),
         footer: true,
-        f1: "pass it and go to the next, or take the pass back; a comment: done",
+        f1: "pass it and go to the next, or take the pass back; an issue: done",
     },
     Binding {
         chord: "Enter",
@@ -292,7 +292,7 @@ const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
             }))
         },
         footer: true,
-        f1: "fail it, saying what went wrong; a comment: not done",
+        f1: "fail it, saying what went wrong; an issue: not done",
     },
     Binding {
         chord: "Del",
@@ -304,13 +304,13 @@ const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
         chord: "C",
         does: |_| Some(StripKey::AddComment),
         footer: true,
-        f1: "add a comment of your own",
+        f1: "add an issue of your own",
     },
     Binding {
         chord: "S",
         does: |_| Some(StripKey::Select),
         footer: true,
-        f1: "select an area of the app to comment on",
+        f1: "select an area of the app to add an issue on",
     },
     Binding {
         chord: "Esc",
@@ -364,7 +364,7 @@ const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
         chord: "Alt+C",
         does: |_| Some(StripKey::Shot),
         footer: true,
-        f1: "add a screenshot of the page to the note, or to an open comment",
+        f1: "add a screenshot of the page to the note, or to an open issue",
     },
     Binding {
         chord: "Alt+Super+C",
@@ -439,9 +439,9 @@ fn strip_chord(key: &StripKey) -> &'static str {
 /// What a button of a criterion's strip says it does, and its key.
 fn button_tip(outcome: &Outcome, label: &str) -> (&'static str, &'static str) {
     let text = match outcome {
-        Outcome::Toggle(_) if label == "Done" => "Mark the comment done",
-        Outcome::Fail(..) => "Mark the comment not done: it goes to Build",
-        Outcome::EditComment(_) => "Edit the comment",
+        Outcome::Toggle(_) if label == "Done" => "Mark the issue done",
+        Outcome::Fail(..) => "Mark the issue not done: it goes to Build",
+        Outcome::EditComment(_) => "Edit the issue",
         Outcome::Toggle(_) if label == "Pass" => "Mark it passed, and go to the next",
         Outcome::Toggle(_) => "Take the pass back",
         Outcome::Write(_) if label.starts_with("Edit") => "Edit what went wrong",
@@ -705,18 +705,18 @@ impl Gerdr {
                         (text.into(), key)
                     }
                     StripKey::Shot => (
-                        "Add a screenshot of the page to the comment".into(),
+                        "Add a screenshot of the page to the issue".into(),
                         strip_chord(&StripKey::Shot),
                     ),
                     StripKey::Select if selecting => {
                         ("Stop selecting".into(), strip_chord(&StripKey::Select))
                     }
                     StripKey::Select => (
-                        "Select an area of the app to comment on".into(),
+                        "Select an area of the app to add an issue on".into(),
                         strip_chord(&StripKey::Select),
                     ),
                     _ => (
-                        "Add a comment of your own: what should change".into(),
+                        "Add an issue of your own: what should change".into(),
                         strip_chord(&StripKey::AddComment),
                     ),
                 }
@@ -1395,7 +1395,7 @@ mod tests {
                 "Not done",
                 "Screenshot",
                 "Select on page",
-                "Add comment\u{2026}"
+                "Add issue\u{2026}"
             ]
         );
         assert_eq!(labels(true)[4], "Cancel selecting");

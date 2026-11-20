@@ -882,7 +882,7 @@ pub fn criteria_block(criteria: &[Criterion]) -> String {
         return String::new();
     }
     let what = match criteria.iter().any(|c| c.comment) {
-        true => "acceptance criteria, and the user's comments (`C1`…),",
+        true => "acceptance criteria, and the user's own issues (`T1`…),",
         false => "acceptance criteria,",
     };
     let mut md = format!(
@@ -926,10 +926,10 @@ pub fn failures_markdown(
             "# Manual test failures\n\nThe user tried \u{201c}{title}\u{201d} by hand against its acceptance criteria, and these failed. Fix each one.\n"
         ),
         (true, false) => format!(
-            "# Manual test comments\n\nThe user tried \u{201c}{title}\u{201d} by hand, and wants these changes. Make each one.\n"
+            "# Manual test issues\n\nThe user tried \u{201c}{title}\u{201d} by hand, and wants these changes. Make each one.\n"
         ),
         _ => format!(
-            "# Manual test failures and comments\n\nThe user tried \u{201c}{title}\u{201d} by hand against its acceptance criteria. Fix each failure, and make each change their comments ask for.\n"
+            "# Manual test failures and issues\n\nThe user tried \u{201c}{title}\u{201d} by hand against its acceptance criteria. Fix each failure, and make each change their issues ask for.\n"
         ),
     };
     for (c, k) in &fails {
@@ -939,7 +939,7 @@ pub fn failures_markdown(
         md.push_str(&shots_markdown(k));
     }
     for (c, k) in &comments {
-        md.push_str(&format!("\n## {}: Comment\n\n{}\n", c.id, c.text));
+        md.push_str(&format!("\n## {}: Issue\n\n{}\n", c.id, c.text));
         if k.again {
             md.push_str(&format!("\n{}", again_line(k)));
         }
@@ -1109,12 +1109,12 @@ mod tests {
         let (sent, md) = failures_markdown(t.as_ref(), &criteria, "Bulk");
         assert_eq!(sent, 2);
         assert!(
-            md.starts_with("# Manual test failures and comments"),
+            md.starts_with("# Manual test failures and issues"),
             "{md}"
         );
         let at = |s: &str| md.find(s).unwrap();
         assert!(
-            at("## AC-1:") < at("## T1: Comment\n\nMake the settings page"),
+            at("## AC-1:") < at("## T1: Issue\n\nMake the settings page"),
             "{md}"
         );
         let plan = fixes_plan(t.as_ref(), &criteria, "Bulk");
@@ -1124,7 +1124,7 @@ mod tests {
         assert!(criteria_block(&criteria).contains("- T1: Make the settings"));
         // Only comments: said so.
         let (_, md) = failures_markdown(t.as_ref(), &comments, "Bulk");
-        assert!(md.starts_with("# Manual test comments"), "{md}");
+        assert!(md.starts_with("# Manual test issues"), "{md}");
         // Done, it passes; the next gets the next number.
         set(&mut t, c, "p1", Verdict::Pass, "", 30);
         assert_eq!(counts(t.as_ref(), &criteria).comments_done, 1);

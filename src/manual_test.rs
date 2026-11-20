@@ -272,7 +272,7 @@ pub(crate) fn counts_text(n: manual::Counts) -> String {
     // What is sent or made counts failures and comments alike.
     let sent_what = match (failed, n.comments_open) {
         (_, 0) => "failure",
-        (0, _) => "comment",
+        (0, _) => "issue",
         _ => "",
     };
     if n.made > 0 {
@@ -293,18 +293,18 @@ pub(crate) fn counts_text(n: manual::Counts) -> String {
             parts.push(format!("{failed} failed"));
         }
         if n.comments_open > 0 {
-            parts.push(format!("{} open", plural(n.comments_open, "comment")));
+            parts.push(format!("{} open", plural(n.comments_open, "issue")));
         }
     } else if n.failed > n.sent {
         parts.push(format!("{} to fix", n.failed - n.sent));
     }
     let looks = n.comments_untested;
     if looks > 0 {
-        parts.push(format!("{} to look at", plural(looks, "comment")));
+        parts.push(format!("{} to look at", plural(looks, "issue")));
     }
     // Only comments, all done.
     if parts.is_empty() {
-        parts.push(format!("{} done", plural(n.comments_done, "comment")));
+        parts.push(format!("{} done", plural(n.comments_done, "issue")));
     }
     parts.join(" \u{b7} ")
 }
@@ -328,7 +328,7 @@ pub(crate) fn strip_text(n: manual::Counts) -> String {
     );
     let open = n.comments_open + n.comments_untested;
     if open > 0 {
-        text.push_str(&format!(" \u{b7} {} open", plural(open, "comment")));
+        text.push_str(&format!(" \u{b7} {} open", plural(open, "issue")));
     }
     if n.made > 0 {
         text.push_str(&format!(" \u{b7} {} made", fixes(n.made)));
@@ -1427,7 +1427,7 @@ impl Gerdr {
         let asked = manual::asked(test, &criteria);
         if n == 0 {
             return self.show_warning(
-                "Nothing to send: mark a criterion failed or add a comment first".into(),
+                "Nothing to send: mark a criterion failed or add an issue first".into(),
             );
         }
         let comments = (criteria.iter())
@@ -1435,8 +1435,8 @@ impl Gerdr {
             .count();
         let what = match (n - comments, comments) {
             (_, 0) => "manual test failures",
-            (0, _) => "manual test comments",
-            _ => "manual test failures and comments",
+            (0, _) => "manual test issues",
+            _ => "manual test failures and issues",
         };
         // The user's comments go through a plan, even if one came since the
         // button was shown: as findings with their words do.
@@ -1572,7 +1572,7 @@ impl Gerdr {
             self.projects.save();
         }
         self.comments_changed(project, slug);
-        self.show_success(format!("Comment {id} changed: open again"));
+        self.show_success(format!("Issue {id} changed: open again"));
         true
     }
 
@@ -1586,7 +1586,7 @@ impl Gerdr {
             return;
         };
         let Some(removed) = manual::delete_comment(&mut f.manual, id) else {
-            return self.show_warning(format!("There's no comment {id}"));
+            return self.show_warning(format!("There's no issue {id}"));
         };
         self.comments_changed(project, slug);
         let undo = crate::menu::MenuAction::RestoreManualComment {
@@ -1595,7 +1595,7 @@ impl Gerdr {
             removed: Box::new(removed),
         };
         self.toast_with(
-            format!("Comment {id} deleted"),
+            format!("Issue {id} deleted"),
             crate::toast::Level::Success,
             Some(("Undo".to_owned(), undo)),
         );
@@ -1616,11 +1616,11 @@ impl Gerdr {
             return self.show_warning("That feature is gone".into());
         };
         if !manual::restore_comment(&mut f.manual, removed) {
-            return self.show_warning(format!("Comment {id} is there already"));
+            return self.show_warning(format!("Issue {id} is there already"));
         }
         self.comments_changed(project, slug);
         self.show_comment(project, slug, &id);
-        self.show_success(format!("Comment {id} is back"));
+        self.show_success(format!("Issue {id} is back"));
     }
 
     /// Comment `id` of feature `slug` is the one selected on its page and
@@ -1746,25 +1746,25 @@ mod tests {
         // Two criteria passed, a comment open.
         assert_eq!(
             counts_text(n(2, 1, 0, 0, 0, 1)),
-            "2 of 2 criteria passed \u{b7} 1 comment open"
+            "2 of 2 criteria passed \u{b7} 1 issue open"
         );
         assert_eq!(
             counts_text(n(1, 2, 0, 0, 0, 1)),
-            "1 of 2 criteria passed \u{b7} 1 failed \u{b7} 1 comment open"
+            "1 of 2 criteria passed \u{b7} 1 failed \u{b7} 1 issue open"
         );
         assert_eq!(
             counts_text(n(2, 1, 1, 0, 0, 1)),
-            "2 of 2 criteria passed \u{b7} 1 comment being fixed"
+            "2 of 2 criteria passed \u{b7} 1 issue being fixed"
         );
         assert_eq!(
             counts_text(n(1, 2, 2, 0, 0, 1)),
             "1 of 2 criteria passed \u{b7} 2 being fixed"
         );
         // Only comments, all done.
-        assert_eq!(counts_text(n(2, 0, 0, 0, 2, 0)), "2 comments done");
+        assert_eq!(counts_text(n(2, 0, 0, 0, 2, 0)), "2 issues done");
         assert_eq!(
             strip_text(n(2, 1, 0, 1, 1, 1)),
-            "1 passed \u{b7} 0 failed \u{b7} 1 untested \u{b7} 1 comment open"
+            "1 passed \u{b7} 0 failed \u{b7} 1 untested \u{b7} 1 issue open"
         );
         let mut c = row("C1", Some(Verdict::Fail));
         c.comment = true;

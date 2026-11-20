@@ -103,6 +103,10 @@ pub struct FindingDialog {
 /// A finding of the user's own, or a comment in the diff, with nothing typed.
 const FINDING_SAY_WHAT: &str = "Say what to fix.";
 
+/// What a Manual test issue's field is called: one of the user's own,
+/// apart from the criteria.
+const ISSUE: &str = "Issue";
+
 /// An item a dialog or a card's comment is on, as it was when asked.
 #[derive(Clone, Debug)]
 pub(crate) enum Asked {
@@ -263,14 +267,18 @@ impl FindingDialog {
                 [("Comment", "What should change", 6)],
                 "Save",
             ),
-            Ask::Add => (
-                w.add_title.to_owned(),
-                [(w.own_label, w.own_placeholder, 6)],
-                "Save",
-            ),
+            // Manual test's own is an issue, under its own heading.
+            Ask::Add => match &self.heading {
+                Some(heading) => (heading.clone(), [(ISSUE, w.own_placeholder, 6)], "Save"),
+                None => (
+                    w.add_title.to_owned(),
+                    [(w.own_label, w.own_placeholder, 6)],
+                    "Save",
+                ),
+            },
             Ask::EditComment => (
-                format!("Edit comment {id}"),
-                [("Comment", "What should change", 6)],
+                format!("Edit issue {id}"),
+                [(ISSUE, "What should change", 6)],
                 "Save",
             ),
             Ask::Squash => (
@@ -602,8 +610,9 @@ impl Gerdr {
         if let Some(dialog) = self.features.finding_dialog.as_mut() {
             // A selection is of Manual test's app: kept for it, it waits there
             // while a comment at another stage is written (they share a key).
-            if stage != Some(Stage::ManualTest) {
-                dialog.pick = None;
+            match stage == Some(Stage::ManualTest) {
+                true => dialog.heading = Some("Add issue".to_owned()),
+                false => dialog.pick = None,
             }
             // A kept selection's PNG is its screenshot.
             dialog.shot = shot.filter(|_| dialog.pick.is_none());

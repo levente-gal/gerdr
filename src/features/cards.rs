@@ -2137,8 +2137,8 @@ pub(super) fn failures_waiting(state: &PanelState, when: &str) -> Option<CheckLi
         .min(n);
     let what = match (n - comments, comments) {
         (_, 0) => plural(n, "failure"),
-        (0, _) => plural(n, "comment"),
-        (f, c) => format!("{} and {}", plural(f, "failure"), plural(c, "comment")),
+        (0, _) => plural(n, "issue"),
+        (f, c) => format!("{} and {}", plural(f, "failure"), plural(c, "issue")),
     };
     let wait = if n == 1 { "waits" } else { "wait" };
     Some(line(format!("{what} {wait} {when}"), CheckTone::Note))

@@ -705,7 +705,7 @@ mod tests {
             "Not done",
             "Screenshot",
             "Select on page",
-            "Add comment\u{2026}",
+            "Add issue\u{2026}",
         ];
         for pane_w in [1400, 1000, 800, 600] {
             let criterion = criteria_strip_layout(&view(pane_w));

@@ -713,10 +713,12 @@ fn writers_page_actions(
     out.extend(sandbox_actions(feature, stage, ctx));
     // The review pages' are with their own, above.
     if can_add_comment(feature, stage) && !is_review_stage(stage) {
-        out.push((
-            button("Add comment\u{2026}", ButtonStyle::Plain),
-            PanelOutcome::AddComment,
-        ));
+        // Manual test's is a row of its own, not a note on a criterion.
+        let label = match stage {
+            Stage::ManualTest => "Add issue\u{2026}",
+            _ => "Add comment\u{2026}",
+        };
+        out.push((button(label, ButtonStyle::Plain), PanelOutcome::AddComment));
     }
     let current = mark == StageMark::Current;
     out.extend(review_actions(feature, stage));

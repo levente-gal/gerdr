@@ -5996,7 +5996,7 @@ fn feature_tab_manual_test(note: bool) -> super::FeatureTabView {
 
 /// Manual test's page with a comment of the user's own after the criteria,
 /// open and selected, written on an area of the app's page: Make fixes and
-/// Plan fixes over them, Add comment….
+/// Plan fixes over them, Add issue….
 fn feature_tab_manual_comment() -> super::FeatureTabView {
     use super::{ButtonStyle, FindingCard, FindingTag, PageButton, PageSection};
     let mut view = feature_tab_manual_test(false);
@@ -6009,7 +6009,7 @@ fn feature_tab_manual_comment() -> super::FeatureTabView {
     page.buttons
         .insert(1, button("Plan fixes", ButtonStyle::Plain));
     page.buttons
-        .insert(3, button("Add comment\u{2026}", ButtonStyle::Plain));
+        .insert(3, button("Add issue\u{2026}", ButtonStyle::Plain));
     // What the cards and the toolbar name moved on by the two.
     for section in &mut page.sections {
         let ids = match section {
@@ -6077,7 +6077,7 @@ fn feature_tab_manual_comment() -> super::FeatureTabView {
     if let Some(strip) = view.test_strip.as_mut() {
         strip.failed = 3;
         strip.text =
-            "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 comment open \u{b7} 1 fix made \u{b7} 2 to fix"
+            "1 passed \u{b7} 2 failed \u{b7} 1 untested \u{b7} 1 issue open \u{b7} 1 fix made \u{b7} 2 to fix"
                 .into();
     }
     view
@@ -6759,7 +6759,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x4abafa993c45c21d, // tab_manual_select_860
         0x4aaf173ab9c864f5, // tab_manual_rounds_1180
         0xa5181f9a0fbb5022, // tab_manual_rounds_860
-        0x3a52dc02370254b7, // tab_manual_comment_860
+        0x66da2399ad71792a, // tab_manual_comment_860
         0x1fa0d34e7da5a97f, // tab_manual_hand_back_1180
         0x9ce2adcf3f825afa, // tab_ship_live_1180
         0x3efb6ccd9ebee607, // tab_ship_live_860
@@ -6838,7 +6838,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x8726a17d25221ad0, // tab_manual_select_860
         0x2d8b43b284f055f4, // tab_manual_rounds_1180
         0x1ca880952be9e128, // tab_manual_rounds_860
-        0xf78e69da2c64354e, // tab_manual_comment_860
+        0x99931855ea45f911, // tab_manual_comment_860
         0xb4594d69f6d37c09, // tab_manual_hand_back_1180
         0x2b0da19b5c531216, // tab_ship_live_1180
         0xfbe38a69b1b3bf5c, // tab_ship_live_860
@@ -6917,7 +6917,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x3249c1bd61f78d04, // tab_manual_select_860
         0xf0406ac502e099ba, // tab_manual_rounds_1180
         0x0a9c3e52d26037a1, // tab_manual_rounds_860
-        0xdefeb1e1a32d4970, // tab_manual_comment_860
+        0xdbb6b128153d73ba, // tab_manual_comment_860
         0x1ea30ed8e28461e4, // tab_manual_hand_back_1180
         0x275cb4321b786113, // tab_ship_live_1180
         0x11423d7ef57773c9, // tab_ship_live_860
@@ -6996,7 +6996,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x6e9fd9ffce0e60cc, // tab_manual_select_860
         0x9ca94d04bf27cf24, // tab_manual_rounds_1180
         0x658aed2a87091325, // tab_manual_rounds_860
-        0xef6aef09eeaee8f5, // tab_manual_comment_860
+        0x33cb3458d1d48fa4, // tab_manual_comment_860
         0x61649857978f9109, // tab_manual_hand_back_1180
         0xd33a721f5c98d9bc, // tab_ship_live_1180
         0x79e47be956ee531e, // tab_ship_live_860
@@ -9193,7 +9193,7 @@ fn strip_views() -> [super::CriteriaStripView; 7] {
             ("Not done".into(), ButtonStyle::Failed),
             quiet("Screenshot"),
             quiet("Select on page"),
-            quiet("Add comment\u{2026}"),
+            quiet("Add issue\u{2026}"),
         ],
         ..row.clone()
     };
@@ -9231,8 +9231,8 @@ const GOLDEN_STRIP: [[u64; 7]; 4] = [
         0x8d9c47e709b73456, // strip_note
         0x700e0bb6d80637b1, // strip_failed
         0xe134649e78702bbf, // strip_chip
-        0x1d17c7e2151bd9d2, // strip_comment
-        0xe92beb18ee61b97b, // strip_comment_narrow
+        0x008aec71209871ff, // strip_comment
+        0xbf292de592392a11, // strip_comment_narrow
     ],
     // Dark at 2
     [
@@ -9241,8 +9241,8 @@ const GOLDEN_STRIP: [[u64; 7]; 4] = [
         0x230f6338de5e7a64, // strip_note
         0xcffcd15866473ea7, // strip_failed
         0xb63f093b83828479, // strip_chip
-        0x24945d5d11b5cc90, // strip_comment
-        0x135a74bf50297302, // strip_comment_narrow
+        0xba4629ca56b2e3d7, // strip_comment
+        0x2bbbbfd0fc3a4b1b, // strip_comment_narrow
     ],
     // Light at 1
     [
@@ -9251,8 +9251,8 @@ const GOLDEN_STRIP: [[u64; 7]; 4] = [
         0x11416ed6005c650d, // strip_note
         0x0fb808c18b78afa1, // strip_failed
         0x60faa77000796bed, // strip_chip
-        0x1d6672d9deb1e032, // strip_comment
-        0xc824ce8314863599, // strip_comment_narrow
+        0x54090f1ea73a8d12, // strip_comment
+        0xeeb16ab3e3158dc7, // strip_comment_narrow
     ],
     // Light at 2
     [
@@ -9261,8 +9261,8 @@ const GOLDEN_STRIP: [[u64; 7]; 4] = [
         0xe2fc5b41467fe76e, // strip_note
         0x261bbded9fe8c6f2, // strip_failed
         0x45481f7462f5972c, // strip_chip
-        0x5ebe2fdc75a29acb, // strip_comment
-        0xbe49c9b786d8a01d, // strip_comment_narrow
+        0xcab0cdaa12cf0560, // strip_comment
+        0x312425f04d8bbdc2, // strip_comment_narrow
     ],
 ];
 

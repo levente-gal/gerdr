@@ -706,7 +706,7 @@ impl Gerdr {
                 if !passed {
                     let comments = criteria.iter().any(|c| c.comment);
                     self.show_warning(match comments {
-                        true => "Not every criterion passed and comment is done yet".into(),
+                        true => "Not every criterion passed and issue is done yet".into(),
                         false => "Not every criterion passed yet; try them first".into(),
                     });
                 } else if fixed {
@@ -722,7 +722,7 @@ impl Gerdr {
                         n => format!("all {n} criteria"),
                     };
                     if comments > 0 {
-                        let done = format!("{} done", plural(comments, "comment"));
+                        let done = format!("{} done", plural(comments, "issue"));
                         all = match all.is_empty() {
                             true => done,
                             false => format!("{all}, {done}"),
