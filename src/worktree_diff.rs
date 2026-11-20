@@ -155,6 +155,7 @@ impl DocOf {
             DocFile::Evidence => "Evidence",
             DocFile::Decisions => "Decisions",
             DocFile::Research(_) => "Research",
+            DocFile::Findings => "Findings",
             DocFile::FixPlan => "Fix plan",
             DocFile::PlanChanges => "Plan changes",
             DocFile::DraftChanges(..) => "Draft changes",

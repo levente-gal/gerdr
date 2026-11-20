@@ -6765,8 +6765,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x9539d685750af545, // tab_ship_cards_1180
         0x032d96d2629e8c9c, // tab_ship_conflicts_860
         0x0ad8968f49d14890, // tab_ship_after_1180
-        0xe4762ba84bff7753, // tab_ai_review_history_1920
-        0x798e6fd0f997c8c6, // tab_ai_review_history_860
+        0x26a614ac6e02e701, // tab_ai_review_history_1920
+        0xdbbe4fb31398ad0e, // tab_ai_review_history_860
         0x19e01bd9cccc3257, // tab_fix_picks_1180
         0xa0d26ec63cc51a63, // tab_fix_picks_860
         0x1f976fa729a294ff, // tab_ship_picks_1180
@@ -6844,8 +6844,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x0e15492b79ae2e04, // tab_ship_cards_1180
         0x4a20b80d083bace5, // tab_ship_conflicts_860
         0x6a5ff153e0c64b91, // tab_ship_after_1180
-        0x47d13bfbb815948a, // tab_ai_review_history_1920
-        0xe43808387279d4e9, // tab_ai_review_history_860
+        0xa70ec1d69350a7da, // tab_ai_review_history_1920
+        0xcd9d2ac637a6108d, // tab_ai_review_history_860
         0x505cde8d175ac6c6, // tab_fix_picks_1180
         0x09852451e87ba5e6, // tab_fix_picks_860
         0x8f76a0566543e10f, // tab_ship_picks_1180
@@ -6923,8 +6923,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x96eb14372e714e03, // tab_ship_cards_1180
         0x42693ee5537b413b, // tab_ship_conflicts_860
         0xf9807cdad2d4db26, // tab_ship_after_1180
-        0x61b9d1348da8af7d, // tab_ai_review_history_1920
-        0xae63ac6a14fad9d6, // tab_ai_review_history_860
+        0xd8f65af8238d9c4a, // tab_ai_review_history_1920
+        0x317ab76773a8f593, // tab_ai_review_history_860
         0x03f3ba4e310062a1, // tab_fix_picks_1180
         0x7ad10051024455cd, // tab_fix_picks_860
         0xa5a03e984a200d3a, // tab_ship_picks_1180
@@ -7002,8 +7002,8 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xee663baaddfbfe9e, // tab_ship_cards_1180
         0x5ae9ded43c6f9c00, // tab_ship_conflicts_860
         0xb735d9925afcb817, // tab_ship_after_1180
-        0x6210f6d25e980e87, // tab_ai_review_history_1920
-        0x32807b5ab2f5f884, // tab_ai_review_history_860
+        0x0164b3b9c72b9d70, // tab_ai_review_history_1920
+        0xff555b25c4a333a3, // tab_ai_review_history_860
         0xd6e8a080af2f8ccd, // tab_fix_picks_1180
         0x6801ce36ffc42ca8, // tab_fix_picks_860
         0x1e98b8867198f7f7, // tab_ship_picks_1180

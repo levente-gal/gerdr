@@ -1289,6 +1289,8 @@ pub enum PanelOutcome {
     SetupLog,
     /// Show the diff at AI review's first finding to decide.
     Findings,
+    /// Open AI review's findings as a page, in their own tab.
+    FindingsDoc,
     /// Send AI review's findings to fix to the Build agent, through a plan.
     SendFixes,
     /// The same with no plan: nothing of the user's asks for one.
@@ -1552,6 +1554,7 @@ impl PanelOutcome {
                 | Self::SetupLog
                 | Self::SandboxLog
                 | Self::Findings
+                | Self::FindingsDoc
                 | Self::ShowFinding(_)
                 | Self::ShowDiffNote(_)
                 | Self::ReviewInPlan

@@ -1733,6 +1733,7 @@ pub(super) fn action_hint(action: &PanelOutcome) -> &'static str {
         PanelOutcome::FixSandbox => "fix with agent",
         PanelOutcome::SandboxLog => "show log",
         PanelOutcome::Findings => "review in diff",
+        PanelOutcome::FindingsDoc => "open the findings as a page",
         PanelOutcome::SendFixes | PanelOutcome::PlanFixes => "plan fixes",
         PanelOutcome::MakeFindingFixes => "make fixes",
         PanelOutcome::FixAllFindings => "fix all open",

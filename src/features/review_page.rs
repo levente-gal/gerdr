@@ -325,6 +325,10 @@ pub(super) fn review_page_actions(
     if in_diff {
         out.push((button("Review in diff", true), PanelOutcome::Findings));
     }
+    // All of them, decided or not, as one page to read.
+    if stage == Stage::AiReview && review_read(feature, stage) && feature.review.is_some() {
+        out.push((button("Open findings", true), PanelOutcome::FindingsDoc));
+    }
     if can_add_comment(feature, stage) {
         out.push((button(w.add_own, true), PanelOutcome::AddComment));
     }

@@ -527,6 +527,7 @@ impl Gerdr {
             PanelOutcome::OpenRoundPlan(n) => self.open_round_plan(&project, &slug, n),
             PanelOutcome::RoundDiff(n) => self.open_round_diff(&project, &slug, n),
             PanelOutcome::PlanChanges => self.open_doc_tab(&project, &slug, DocFile::PlanChanges),
+            PanelOutcome::FindingsDoc => self.open_doc_tab(&project, &slug, DocFile::Findings),
             PanelOutcome::DraftChanges(stage, k) => {
                 self.open_doc_tab(&project, &slug, DocFile::DraftChanges(stage, k));
             }

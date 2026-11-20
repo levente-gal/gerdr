@@ -1184,9 +1184,125 @@ pub fn asked(review: Option<&AiReview>, ids: &[String]) -> Vec<super::fix_round:
         .collect()
 }
 
+/// The file gerdr writes AI review's findings to, to read in a tab (see
+/// `markdown`): its own, never the agent's `REVIEW`.
+pub const FINDINGS: &str = "findings.md";
+
+/// AI review's findings of feature `title` as a page to read: those its page
+/// lists, grouped by where they stand as the page says it, `planning` while
+/// their fix plan is written.
+pub fn markdown(title: &str, review: &AiReview, planning: bool) -> String {
+    let mut out = format!(
+        "# AI review of \u{201c}{title}\u{201d}\n\nReview {}",
+        review.n
+    );
+    let shown = review.shown();
+    if shown.is_empty() {
+        out.push_str(": no findings\n");
+        return out;
+    }
+    out.push('\n');
+    let sent = match planning {
+        true => "In the fix plan",
+        false => "Being fixed",
+    };
+    let groups = [
+        (FindingState::Open, "To decide"),
+        (FindingState::Fix, "To fix"),
+        (FindingState::Sent, sent),
+        (FindingState::Fixed, "Fixed"),
+        (FindingState::Dismissed, "Dismissed"),
+        (FindingState::Posted, "On GitHub"),
+    ];
+    for (state, heading) in groups {
+        let of: Vec<&&Finding> = shown.iter().filter(|f| f.state == state).collect();
+        if of.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("\n## {heading} ({})\n", of.len()));
+        for f in of {
+            let place = match (f.file.as_str(), f.line) {
+                ("", _) => String::new(),
+                (file, Some(line)) => format!("`{file}:{line}`"),
+                (file, None) => format!("`{file}`"),
+            };
+            let place = match (f.repo.as_str(), place.is_empty()) {
+                (_, true) => place,
+                ("", false) => format!(" \u{b7} {place}"),
+                (repo, false) => format!(" \u{b7} {repo}: {place}"),
+            };
+            let made = match f.fix_made() {
+                true => " \u{b7} fix made",
+                false => "",
+            };
+            out.push_str(&format!(
+                "\n### {}\n\n{} \u{b7} {}{place}{made}\n",
+                f.title.trim(),
+                f.id,
+                f.severity.label()
+            ));
+            for (label, text) in [
+                ("", f.body.as_str()),
+                ("**Fix:** ", f.fix_text()),
+                ("**Dismissed:** ", f.reason.as_str()),
+                ("**Note:** ", f.note.as_str()),
+            ] {
+                if !text.trim().is_empty() {
+                    out.push_str(&format!("\n{label}{}\n", text.trim()));
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn findings_read_as_a_page_grouped_as_their_page_has_them() {
+        let finding = |id: &str, state, title: &str| Finding {
+            id: id.into(),
+            state,
+            title: title.into(),
+            repo: "api".into(),
+            file: "src/a.rs".into(),
+            line: Some(12),
+            fix: "Check it".into(),
+            ..Finding::default()
+        };
+        let review = AiReview {
+            n: 2,
+            findings: vec![
+                finding("r2-1", FindingState::Open, "Off by one"),
+                Finding {
+                    reason: "Not ours".into(),
+                    file: String::new(),
+                    ..finding("r1-1", FindingState::Dismissed, "Whole feature")
+                },
+            ],
+            ..AiReview::default()
+        };
+        let page = markdown("Logins", &review, false);
+        assert!(page.starts_with("# AI review of \u{201c}Logins\u{201d}\n\nReview 2\n"));
+        let open = page.find("## To decide (1)").unwrap();
+        let dismissed = page.find("## Dismissed (1)").unwrap();
+        assert!(open < dismissed);
+        assert!(page.contains("### Off by one\n\nr2-1 \u{b7} medium \u{b7} api: `src/a.rs:12`\n"));
+        assert!(page.contains("### Whole feature\n\nr1-1 \u{b7} medium\n"));
+        assert!(page.contains("**Fix:** Check it"));
+        assert!(page.contains("**Dismissed:** Not ours"));
+        assert!(!page.contains("To fix"));
+        let first = AiReview {
+            n: 1,
+            ..AiReview::default()
+        };
+        assert_eq!(
+            markdown("Logins", &first, false),
+            "# AI review of \u{201c}Logins\u{201d}\n\nReview 1: no findings\n"
+        );
+    }
 
     fn raw(id: Option<&str>, file: &str, line: Option<usize>, title: &str) -> Raw {
         Raw {

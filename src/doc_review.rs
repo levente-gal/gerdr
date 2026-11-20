@@ -36,7 +36,7 @@ use crate::{
         Feature, Stage, Standing, Status, artifacts,
         fix_round::{self, FixPhase},
         page::Docs,
-        store,
+        review_import, store,
         verify::EVIDENCE,
     },
     features::{Job, lock_why},
@@ -77,6 +77,10 @@ pub enum DocFile {
     /// (`conflicts-<n>.md`): Approve resolves as planned, Send back has its
     /// agent write it again with the comments.
     ConflictPlan(u32),
+    /// AI review's findings as a page (`review_import::markdown`), written
+    /// by gerdr as it opens: only read, as the evidence is; they are
+    /// decided on AI review's page.
+    Findings,
 }
 
 impl DocFile {
@@ -90,6 +94,7 @@ impl DocFile {
             DocFile::PlanChanges | DocFile::Suggestions => Stage::PlanReview,
             DocFile::ConflictPlan(_) => Stage::Ship,
             DocFile::DraftChanges(stage, _) => stage,
+            DocFile::Findings => Stage::AiReview,
         }
     }
 
@@ -102,6 +107,7 @@ impl DocFile {
             DocFile::ConflictPlan(n) => dir.join(format!("conflicts-{n}-comments.json")),
             // It takes none, but must not share the brief's.
             DocFile::Decisions => dir.join("decisions-comments.json"),
+            DocFile::Findings => dir.join("findings-comments.json"),
             DocFile::Research(id) => dir.join(format!("research-R{id}-comments.json")),
             _ => comments_path(dir, self.stage()),
         }
@@ -117,6 +123,7 @@ impl DocFile {
             DocFile::PlanChanges => artifacts::name(Stage::PlanReview),
             DocFile::DraftChanges(stage, _) => artifacts::name(stage),
             DocFile::Suggestions => artifacts::name(Stage::Plan),
+            DocFile::Findings => Some(review_import::FINDINGS),
             // Named by its turn or its number: its path says it.
             DocFile::ConflictPlan(_) | DocFile::Research(_) => None,
         }
@@ -139,6 +146,10 @@ impl DocFile {
             ),
             DocFile::Suggestions => suggestions_state(feature),
             DocFile::ConflictPlan(n) => conflict_plan_state(feature, n),
+            DocFile::Findings => match feature.and_then(|f| f.review.as_ref()) {
+                Some(review) => format!("review {}", review.n),
+                None => "no review yet".into(),
+            },
         }
     }
 
@@ -152,6 +163,7 @@ impl DocFile {
             DocFile::Evidence => Some(EVIDENCE_READ_ONLY),
             DocFile::Decisions => Some(DECISIONS_READ_ONLY),
             DocFile::Research(_) => Some(RESEARCH_READ_ONLY),
+            DocFile::Findings => Some(FINDINGS_READ_ONLY),
             DocFile::PlanChanges => Some(PLAN_CHANGES_READ_ONLY),
             DocFile::DraftChanges(..) => Some(DRAFT_CHANGES_READ_ONLY),
             DocFile::Suggestions => Some(SUGGESTIONS_READ_ONLY),
@@ -194,16 +206,17 @@ impl DocFile {
             DocFile::DraftChanges(stage, k) => crate::feature::drafts::path(dir, stage, k),
             DocFile::ConflictPlan(n) => Some(dir.join(format!("conflicts-{n}.md"))),
             DocFile::Research(id) => Some(artifacts::research_path(dir, id)),
+            DocFile::Findings => Some(findings_path(dir)),
             _ => Some(dir.join(self.name()?)),
         }
     }
 
     /// Whether it is a file only to read, with no actions of its own: the
-    /// evidence and the decision log.
+    /// evidence, the decision log, AI review's findings.
     pub fn only_read(self) -> bool {
         matches!(
             self,
-            DocFile::Evidence | DocFile::Decisions | DocFile::Research(_)
+            DocFile::Evidence | DocFile::Decisions | DocFile::Research(_) | DocFile::Findings
         )
     }
 
@@ -582,6 +595,25 @@ pub const DECISIONS_READ_ONLY: &str = "The decisions are only read: Discover's a
 /// Why a research answer takes no edit or comment.
 pub const RESEARCH_READ_ONLY: &str = "The answer is only read: its research agent wrote it";
 
+/// Why AI review's findings page takes no edit or comment.
+pub const FINDINGS_READ_ONLY: &str =
+    "The findings are only read here: decide them on AI review's page";
+
+/// Where AI review's findings of the feature in data folder `dir` are written
+/// to be read: in the runtime folder, as the folder of a feature another
+/// machine writes is a copy that its next copy wipes; there without one.
+fn findings_path(dir: &Path) -> PathBuf {
+    let runtime = crate::herdr::runtime_dir().map(|r| r.join("gerdr").join("findings"));
+    let project = dir.parent().and_then(Path::file_name);
+    match (runtime, project, dir.file_name()) {
+        (Some(runtime), Some(project), Some(slug)) => {
+            let name = format!("{}-{}", slug.to_string_lossy(), review_import::FINDINGS);
+            runtime.join(project).join(name)
+        }
+        _ => dir.join(review_import::FINDINGS),
+    }
+}
+
 /// What research answer `id` of `feature` answers, as its tab's header says
 /// it.
 fn research_state(feature: Option<&Feature>, id: u32) -> String {
@@ -617,6 +649,24 @@ pub fn evidence_state(feature: Option<&Feature>, running: bool) -> String {
         Some(false) => format!("run {} failed", run.n),
         None => format!("run {}", run.n),
     }
+}
+
+/// AI review's findings of `feature` written to `path` as a page to read;
+/// with no review read in yet, nothing is, and it says so.
+fn write_findings(feature: &Feature, path: &Path) -> Result<(), Failed> {
+    let Some(review) = feature.review.as_ref() else {
+        let title = &feature.title;
+        let text = format!("No AI review yet for \u{201c}{title}\u{201d}");
+        return Err(Failed::Warning(text));
+    };
+    let planning = fix_round::planning(feature.fix_round.as_ref(), Stage::AiReview);
+    let text = review_import::markdown(&feature.title, review, planning);
+    let wrote = (path.parent().map_or(Ok(()), std::fs::create_dir_all))
+        .and_then(|()| std::fs::write(path, text));
+    wrote.map_err(|err| {
+        tracing::warn!("writing {}: {err}", path.display());
+        Failed::Error(format!("Couldn't write the findings: {err}"))
+    })
 }
 
 /// The file `path` read, or why it couldn't be, as the review says it.
@@ -689,6 +739,9 @@ impl Gerdr {
         let name = (file.name().map(str::to_owned))
             .or_else(|| Some(path.file_name()?.to_string_lossy().into_owned()))
             .unwrap_or_default();
+        if file == DocFile::Findings {
+            write_findings(feature, &path)?;
+        }
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(err) if err.kind() == ErrorKind::NotFound => {
@@ -710,6 +763,9 @@ impl Gerdr {
                     }
                     DocFile::DraftChanges(_, k) => {
                         Failed::Warning(format!("Draft {k} of {name} wasn't kept"))
+                    }
+                    DocFile::Findings => {
+                        Failed::Warning(format!("No AI review yet for \u{201c}{title}\u{201d}"))
                     }
                     DocFile::ConflictPlan(_) => {
                         Failed::Warning("The plan isn't written yet".into())
@@ -772,6 +828,16 @@ impl Gerdr {
     /// Read the file under review again, and where its stage stands: a
     /// new text is shown where it stood, its comments found again.
     pub(crate) fn doc_review_read(&mut self) {
+        let Some(doc) = self.doc_of() else {
+            return;
+        };
+        // Written again from the record: its findings may be decided since.
+        if doc.file == DocFile::Findings
+            && let Some(feature) = self.feature(&doc.project, &doc.slug)
+            && let Err(failed) = write_findings(feature, &doc.path)
+        {
+            return self.show_failed(failed);
+        }
         let Some(doc) = self.doc_of() else {
             return;
         };
@@ -1196,6 +1262,24 @@ mod tests {
         assert_eq!(locked(Some(&f)), None);
         f.status = Status::Abandoned;
         assert_eq!(locked(Some(&f)), Some("The feature is closed"));
+    }
+
+    #[test]
+    fn the_findings_page_is_only_read_and_kept_out_of_the_feature_folder() {
+        let file = DocFile::Findings;
+        let f = crate::features::tests::feature("login", Vec::new(), 4);
+        let docs = Docs::default();
+        assert!(file.only_read());
+        assert_eq!(file.stage(), Stage::AiReview);
+        assert_eq!(file.locked(Some(&f), &docs), Some(FINDINGS_READ_ONLY));
+        assert_eq!(file.state(Some(&f), false, &docs, 0), "no review yet");
+        let dir = Path::new("/data/features/home/login");
+        let path = file.path(dir).unwrap();
+        match crate::herdr::runtime_dir() {
+            Some(run) => assert_eq!(path, run.join("gerdr/findings/home/login-findings.md")),
+            None => assert_eq!(path, dir.join("findings.md")),
+        }
+        assert_ne!(file.comments(dir), comments_path(dir, Stage::AiReview));
     }
 
     #[test]
