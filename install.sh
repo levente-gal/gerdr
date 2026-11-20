@@ -20,4 +20,7 @@ sed "s|@BIN@|$bin_dir/gerdr|g" dist/gerdr.desktop > "$apps_dir/gerdr.desktop"
 command -v update-desktop-database >/dev/null && update-desktop-database "$apps_dir" || true
 command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -t "${data_dir}/icons/hicolor" 2>/dev/null || true
 
+# A running phone view (docs/phone.md) keeps the old binary until restarted.
+systemctl --user try-restart gerdr-phone 2>/dev/null || true
+
 echo "installed: $bin_dir/gerdr, $apps_dir/gerdr.desktop"

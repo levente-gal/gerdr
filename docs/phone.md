@@ -93,7 +93,7 @@ Anyone on your tailnet can press buttons and type to your agents, and an agent c
    systemctl --user enable --now gerdr-phone
    ```
 
-   Its log: `journalctl --user -u gerdr-phone`. After `install.sh`, run `systemctl --user restart gerdr-phone` to pick up the new binary.
+   Its log: `journalctl --user -u gerdr-phone`. `install.sh` restarts it, so it runs the new binary.
 
 4. Put it on the tailnet:
 
