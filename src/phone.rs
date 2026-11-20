@@ -787,7 +787,7 @@ fn feature_page(project: &str, slug: &str, stage: Option<usize>) -> Reply {
             "sections": [],
         });
     }
-    add_files(&mut shown, &store::dir(None, &project.id, slug));
+    add_files(&mut shown, &store::dir(None, &project.id, slug), fix_plan_waits(&f));
     page["page"] = shown;
     page["offer"] = offer;
     page["now"] = crate::clock::now_secs().into();
@@ -805,8 +805,8 @@ fn stage_files(stage: Stage) -> &'static [&'static str] {
         Stage::Verify => &["evidence.md", "fix-plan.md"],
         Stage::AiReview => &["fix-plan.md"],
         Stage::ManualTest => &["evidence.md", "fix-plan.md"],
+        Stage::CodeReview => &["fix-plan.md"],
         Stage::Ship => &["summary.md"],
-        _ => &[],
     }
 }
 
@@ -824,12 +824,25 @@ fn file_stage(name: &str) -> Option<Stage> {
         .find(|s| stage_files(*s).contains(&name))
 }
 
+/// The files shown folded under Latest files, not as a page's doc: what
+/// a check or a fix round left, the fix plan first.
+const FOLDED: [&str; 2] = [crate::feature::fix_round::FILE, "evidence.md"];
+
+/// Whether `f`'s fix plan waits for the user: written, not yet made.
+fn fix_plan_waits(f: &Feature) -> bool {
+    f.fix_round.as_ref().is_some_and(|r| {
+        !r.fixes_stopped() && r.phase == crate::feature::fix_round::FixPhase::Ready
+    })
+}
+
 /// Put the files of stage page `page` on it: the one to read in its doc
 /// section, rendered, where gerdr's page has one; else the stage's first,
 /// after all else, unless the page already says what it holds (Build's
-/// milestones, Ship's recap). The rest are named, to open: the stage's
-/// others and those of no stage.
-fn add_files(page: &mut Value, dir: &Path) {
+/// milestones, Ship's recap). The others go under Latest files: the fix
+/// plan and evidence there rendered, folded, the plan open while it
+/// `waits`; the rest named, to open: the stage's others and those of no
+/// stage.
+fn add_files(page: &mut Value, dir: &Path, waits: bool) {
     let stage = (page["stage"].as_u64()).and_then(|i| Stage::ALL.get(i as usize).copied());
     let names = docs(dir);
     let mine_too = |n: &str| stage.is_some_and(|s| stage_files(s).contains(&n));
@@ -840,38 +853,54 @@ fn add_files(page: &mut Value, dir: &Path) {
         })
         .collect();
     let order = |n: &str| (stage.map(stage_files).unwrap_or_default().iter()).position(|x| *x == n);
-    mine.sort_by_key(|n| order(n).unwrap_or(usize::MAX));
+    let first = |n: &str| (FOLDED.iter().position(|x| *x == n)).unwrap_or(usize::MAX);
+    mine.sort_by_key(|n| (first(n), order(n).unwrap_or(usize::MAX)));
     let Some(sections) = page["sections"].as_array_mut() else {
         return;
     };
     let kind = |s: &Value, k: &str| s["kind"].as_str() == Some(k);
+    let folded = |s: &Value| FOLDED.contains(&s["name"].as_str().unwrap_or_default());
+    // Code review's fix plan goes with the files, as on the other pages.
+    sections.retain(|s| !(kind(s, "doc") && folded(s)));
     // Verify's and AI review's files are what a check or a fix round left:
-    // named, not shown, under their cards.
+    // under Latest files, not shown as the page's.
     let said = matches!(stage, Some(Stage::Verify | Stage::AiReview))
         || sections
             .iter()
             .any(|s| kind(s, "milestones") || kind(s, "recap"));
     if !said && !sections.iter().any(|s| kind(s, "doc")) {
-        let first = mine.iter().find(|n| order(n).is_some());
+        let first = (mine.iter()).find(|n| order(n).is_some() && !FOLDED.contains(&n.as_str()));
         sections.extend(first.map(|n| json!({ "kind": "doc", "name": n })));
     }
-    let mut read = Vec::new();
-    for s in sections.iter_mut().filter(|s| kind(s, "doc")) {
-        let name = s["name"].as_str().unwrap_or_default().to_owned();
-        let text = (doc_name_ok(&name))
-            .then(|| std::fs::read_to_string(dir.join(&name)).ok())
+    let read_into = |s: &mut Value, name: &str| {
+        let text = (doc_name_ok(name))
+            .then(|| std::fs::read_to_string(dir.join(name)).ok())
             .flatten();
         match text {
             Some(text) => s["html"] = md_preview::render(&text).into(),
             None => s["error"] = format!("Couldn't read {name}").into(),
         }
+    };
+    let mut read = Vec::new();
+    for s in sections.iter_mut().filter(|s| kind(s, "doc")) {
+        let name = s["name"].as_str().unwrap_or_default().to_owned();
+        read_into(s, &name);
         read.push(name);
     }
     mine.retain(|n| !read.contains(n));
-    let mut files: Vec<String> = mine.into_iter().cloned().collect();
+    let mut files: Vec<Value> = (mine.into_iter())
+        .map(|n| {
+            let mut file = json!({ "name": n });
+            if FOLDED.contains(&n.as_str()) {
+                read_into(&mut file, n);
+                file["open"] = (waits && n == crate::feature::fix_round::FILE).into();
+            }
+            file
+        })
+        .collect();
     // What setup printed, where a failed one is set up again.
     if matches!(stage, Some(Stage::Build | Stage::Verify)) && dir.join(setup::LOG).is_file() {
-        files.push(setup::LOG.to_owned());
+        files.push(json!({ "name": setup::LOG }));
     }
     page["files"] = files.into();
 }
@@ -1051,7 +1080,7 @@ mod tests {
             std::fs::write(dir.join(name), "# Hi").expect("file");
         }
         let mut page = json!({ "stage": 0, "sections": [] });
-        add_files(&mut page, &dir);
+        add_files(&mut page, &dir, false);
         assert_eq!(page["sections"][0]["name"], "brief.md");
         assert!(
             page["sections"][0]["html"]
@@ -1060,12 +1089,30 @@ mod tests {
         );
         assert_eq!(
             page["files"],
-            json!(["decisions.md", "notes.md", "research-R1.md"])
+            json!([{ "name": "decisions.md" }, { "name": "notes.md" }, { "name": "research-R1.md" }])
         );
         // Build's milestones say what its log holds: the log is only named.
         let mut page = json!({ "stage": 3, "sections": [{ "kind": "milestones" }] });
-        add_files(&mut page, &dir);
+        add_files(&mut page, &dir, false);
         assert_eq!(page["sections"].as_array().map(Vec::len), Some(1));
+        // Manual test's evidence folds under the fix plan, open while it waits.
+        std::fs::write(dir.join("evidence.md"), "# Ev").expect("file");
+        std::fs::write(dir.join("fix-plan.md"), "# Fix").expect("file");
+        let mut page = json!({ "stage": 7, "sections": [] });
+        add_files(&mut page, &dir, true);
+        assert_eq!(page["sections"], json!([]));
+        let files = page["files"].as_array().expect("files");
+        let names: Vec<&str> = files.iter().filter_map(|f| f["name"].as_str()).collect();
+        assert_eq!(names[..2], ["fix-plan.md", "evidence.md"]);
+        assert_eq!((files[0]["open"].clone(), files[1]["open"].clone()), (json!(true), json!(false)));
+        assert!(files[1]["html"].as_str().is_some_and(|h| h.contains("Ev")));
+        // Code review's fix plan leaves the page for the files, folded once made.
+        let doc = json!({ "kind": "doc", "name": "fix-plan.md" });
+        let mut page = json!({ "stage": 6, "sections": [doc] });
+        add_files(&mut page, &dir, false);
+        assert_eq!(page["sections"], json!([]));
+        assert_eq!(page["files"][0]["name"], "fix-plan.md");
+        assert_eq!(page["files"][0]["open"], false);
         std::fs::remove_dir_all(&dir).expect("clean");
     }
 

@@ -15,7 +15,10 @@
 use serde_json::{Value, json};
 
 use super::*;
-use crate::{confirm::Outcome, doc_review::DocFile, review_cards::ItemAct, toast::Level};
+use crate::{
+    confirm::Outcome, doc_review::DocFile, manual_test::Outcome as Manual, review_cards::ItemAct,
+    toast::Level,
+};
 
 /// Whether the phone may press a button doing `outcome`.
 fn phone_may(outcome: &PanelOutcome) -> bool {
@@ -68,6 +71,24 @@ fn phone_may(outcome: &PanelOutcome) -> bool {
             | O::PickAgent(..)
             | O::CycleMachine(_)
             | O::StopOnMachine(_)
+            | O::Manual(
+                Manual::Toggle(_)
+                    | Manual::Clear(_)
+                    | Manual::Fail(..)
+                    | Manual::DeleteComment(_)
+                    | Manual::MarkPassed
+                    | Manual::SendFailures
+                    | Manual::MakeFixes
+            )
+    )
+}
+
+/// Whether a button doing `outcome` is pressed without a confirm: marking
+/// a criterion, undone as easily.
+fn phone_quick(outcome: &PanelOutcome) -> bool {
+    matches!(
+        outcome,
+        PanelOutcome::Manual(Manual::Toggle(_) | Manual::Clear(_) | Manual::Fail(..))
     )
 }
 
@@ -82,6 +103,7 @@ fn phone_asks(outcome: &PanelOutcome) -> Option<&'static str> {
         O::AskDismiss(_) => "Why dismiss it?",
         O::AddComment => "What should change?",
         O::PickModel(_) => "The model to start it on (none: the agent's own default)",
+        O::Manual(Manual::Write(_)) => "What went wrong?",
         _ => return None,
     })
 }
@@ -94,6 +116,8 @@ struct PhoneButton {
     outcome: PanelOutcome,
     primary: bool,
     off: bool,
+    /// How a pair's chosen one shows: `passed`, `failed`.
+    tone: Option<&'static str>,
     asks: Option<&'static str>,
     value: String,
 }
@@ -106,6 +130,7 @@ impl PhoneButton {
             outcome,
             primary,
             off: false,
+            tone: None,
             value: String::new(),
         }
     }
@@ -122,6 +147,8 @@ impl PhoneButton {
             "id": self.id(),
             "primary": self.primary,
             "off": self.off,
+            "tone": self.tone,
+            "quick": phone_quick(&self.outcome),
             "asks": self.asks,
             "value": self.value,
         })
@@ -131,12 +158,14 @@ impl PhoneButton {
 /// A stage's page as the phone shows it: the desktop's, with the buttons
 /// the phone may press, by their place in the page's buttons, and those
 /// it adds, by the place of the section they go on (agent picks, a model,
-/// Build's choice), or on none (Approve).
+/// Build's choice), or on none (Approve); and the pane of each agent card's
+/// agent, by the card's place, where the phone can show it.
 struct PhonePage {
     shown: Stage,
     view: chrome::FeatureTabView,
     buttons: Vec<Option<PhoneButton>>,
     extra: Vec<(Option<usize>, PhoneButton)>,
+    panes: Vec<(usize, String)>,
 }
 
 impl PhonePage {
@@ -157,8 +186,14 @@ impl PhonePage {
         (self.extra.iter()).filter(move |(at, _)| *at == Some(i)).map(|(_, b)| b)
     }
 
-    /// The page's buttons no section holds, for the row under its agents:
-    /// Approve first.
+    /// The page's rare buttons, in the `⋯` menu at its top right as on the
+    /// desktop: starting over, setting up again.
+    fn menu(&self) -> Vec<Value> {
+        self.at(&self.view.page.menu)
+    }
+
+    /// The page's buttons no section or the menu holds, for the row under
+    /// its agents: Approve first.
     fn loose(&self) -> Vec<Value> {
         use chrome::PageSection as S;
         let mut held = Vec::new();
@@ -172,6 +207,7 @@ impl PhonePage {
                 _ => {}
             }
         }
+        held.extend(&self.view.page.menu);
         let approve = (self.extra.iter()).filter(|(at, _)| at.is_none()).map(|(_, b)| b);
         let rest = (self.buttons.iter().enumerate())
             .filter(|(i, _)| !held.contains(&i))
@@ -190,6 +226,8 @@ impl PhonePage {
                 value["buttons"] = self.at(buttons).into();
                 value["picks"] = picks.into_iter().map(PhoneButton::json).collect::<Vec<_>>().into();
                 value["model"] = models.first().map(|b| b.json()).into();
+                let pane = self.panes.iter().find(|(at, _)| *at == i);
+                value["pane"] = pane.map(|(_, pane)| pane.as_str()).into();
             }
             S::File { buttons, .. } | S::Milestones { buttons, .. } => {
                 value["buttons"] = self.at(buttons).into();
@@ -267,6 +305,7 @@ fn section_json(section: &chrome::PageSection) -> Option<Value> {
             "fix": c.fix,
             "note": c.note,
             "comment": c.comment,
+            "steps": c.sheet.as_ref().map(|s| &s.steps),
             "made": c.made,
             "faded": c.faded,
         }),
@@ -622,6 +661,35 @@ impl Gerdr {
         let view = self.feature_tab_view_of(&panel)?;
         let ctx = self.row_ctx(feature);
         let actions = self.page_button_actions(feature, shown, ctx);
+        // The pane of the agent a card's Show agent goes to.
+        let pane_of = |buttons: &[usize]| {
+            buttons.iter().find_map(|i| match &actions.get(*i)?.1 {
+                PanelOutcome::ShowAgent(s) => feature.runs.get(s)?.pane.clone(),
+                PanelOutcome::ShowOwnAgent(n) => {
+                    (feature.own_agents.iter()).find(|a| a.n == *n)?.pane.clone()
+                }
+                PanelOutcome::ShowResearch(id) => {
+                    (feature.research.iter()).find(|r| r.id == *id)?.pane.clone()
+                }
+                _ => None,
+            })
+        };
+        let panes: Vec<(usize, String)> = (view.page.sections.iter().enumerate())
+            .filter_map(|(i, s)| match s {
+                // Build's card on a later page has no Show agent: its run's.
+                chrome::PageSection::Agent {
+                    buttons,
+                    stage,
+                    name,
+                    ..
+                } => {
+                    let run = (feature.runs.get(stage)).filter(|r| r.agent == *name);
+                    Some((i, pane_of(buttons).or_else(|| run?.pane.clone())?))
+                }
+                _ => None,
+            })
+            .collect();
+        let criteria = self.features.criteria(project, slug);
         let buttons: Vec<Option<PhoneButton>> = (actions.into_iter().enumerate())
             .map(|(i, (b, outcome))| {
                 let mut button = PhoneButton::new(
@@ -630,6 +698,18 @@ impl Gerdr {
                     b.style == ButtonStyle::Primary || view.page.primary == Some(i),
                 );
                 button.off = b.style == ButtonStyle::Off;
+                button.tone = match b.style {
+                    ButtonStyle::Passed => Some("passed"),
+                    ButtonStyle::Failed => Some("failed"),
+                    _ => None,
+                };
+                // What went wrong is edited from what was written.
+                if let PanelOutcome::Manual(Manual::Write(i)) = &button.outcome
+                    && let Some(c) = criteria.get(*i)
+                    && let Some(check) = crate::feature::manual::check(feature.manual.as_ref(), c)
+                {
+                    button.value.clone_from(&check.note);
+                }
                 // A question is accepted by answering it: the desk opens its field.
                 if let PanelOutcome::OnSuggestion(id, ItemAct::Decide(_)) = &button.outcome
                     && self
@@ -653,11 +733,29 @@ impl Gerdr {
                 continue;
             }
             let chrome::PageSection::Agent {
-                stage, picks, model, ..
+                stage,
+                picks,
+                model,
+                name,
+                dot,
+                ..
             } = section
             else {
                 continue;
             };
+            // An agent at work or done is no pick to make, but where the
+            // next fixes go is.
+            let next_fixes = *stage == Stage::Build
+                && shown != Stage::Build
+                && !shows_build_card(feature, shown, ctx);
+            let ran = !name.is_empty()
+                && matches!(
+                    dot,
+                    chrome::Dot::Working | chrome::Dot::Blocked | chrome::Dot::Idle | chrome::Dot::Done
+                );
+            if ran && !next_fixes {
+                continue;
+            }
             for chip in picks {
                 let mut pick = PhoneButton::new(
                     &chip.name,
@@ -688,6 +786,7 @@ impl Gerdr {
             view,
             buttons,
             extra,
+            panes,
         })
     }
 
@@ -745,6 +844,7 @@ impl Gerdr {
         });
         json!({
             "buttons": page.loose(),
+            "menu": page.menu(),
             "sendBack": send_back,
             "elsewhere": elsewhere,
             "rail": rail,
@@ -890,6 +990,9 @@ impl Gerdr {
                 }
                 _ => self.add_finding_comment(project, slug, text),
             },
+            O::Manual(Manual::Write(i)) => {
+                self.apply_manual_test_on(project, slug, Manual::Fail(i, text.to_owned()));
+            }
             O::PickModel(stage) => {
                 let Some(slot) = self.model_slot_of(project, slug, stage) else {
                     return self.show_warning(format!(
@@ -960,6 +1063,13 @@ mod tests {
         let accept = PanelOutcome::OnSuggestion("s1-1".into(), ItemAct::Decide(Decision::Fix));
         assert!(phone_may(&accept));
         assert!(!phone_may(&PanelOutcome::OnSuggestion("s1-1".into(), ItemAct::OpenCode)));
+        // Criteria are marked from the phone, at once; what went wrong is asked.
+        let pass = PanelOutcome::Manual(Manual::Toggle(0));
+        assert!(phone_may(&pass) && phone_quick(&pass));
+        assert!(phone_may(&PanelOutcome::Manual(Manual::MarkPassed)));
+        assert!(!phone_quick(&PanelOutcome::Manual(Manual::MarkPassed)));
+        assert!(!phone_may(&PanelOutcome::Manual(Manual::EditComment(0))));
+        assert!(phone_asks(&PanelOutcome::Manual(Manual::Write(0))).is_some());
     }
 
     #[test]

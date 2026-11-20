@@ -578,7 +578,7 @@ impl Gerdr {
             }
             PanelOutcome::CodeReview => self.open_feature_diff(&project, &slug, None),
             PanelOutcome::ManualTest => self.focus_criteria(&project, &slug),
-            PanelOutcome::Manual(outcome) => self.apply_manual_test(outcome),
+            PanelOutcome::Manual(outcome) => self.apply_manual_test_on(&project, &slug, outcome),
             PanelOutcome::FoldCriterion(i, open) => self.fold_criterion(i, open),
             PanelOutcome::ShowShot(i, n) => self.open_shot_viewer(i, n),
             PanelOutcome::DeleteShot(i, n) => self.ask_delete_row_shot(i, n),

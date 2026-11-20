@@ -263,11 +263,13 @@ const meter = (done, total, cls = "") => total
   ? `<div class="bar ${cls}"><span style="width:${Math.round(100 * done / total)}%"></span></div>` : "";
 
 // A button of gerdr's page, pressed by what it does. One whose desk opens
-// a field asks for its text first; picks press without a confirm.
+// a field asks for its text first; picks and marks press without a
+// confirm. A pair's chosen one (Pass, Fail) shows in its tone.
 const btn = (b, cls = "") => {
   const dots = b.asks && !b.label.endsWith("…") ? "…" : "";
   const asks = b.asks ? ` data-asks="${esc(b.asks)}" data-value="${esc(b.value || "")}"` : "";
-  return `<button class="${b.primary ? "primary " : ""}${cls}" data-press="${esc(b.id)}"${asks}${b.off ? " disabled" : ""}>${esc(b.label)}${dots}</button>`;
+  const more = [b.primary && "primary", b.tone, b.quick && "quiet-press", cls].filter(Boolean).join(" ");
+  return `<button class="${esc(more)}" data-press="${esc(b.id)}"${asks}${b.off ? " disabled" : ""}>${esc(b.label)}${dots}</button>`;
 };
 const row = (bs, cls = "") => bs?.length ? `<div class="buttons">${bs.map((b) => btn(b, cls)).join("")}</div>` : "";
 
@@ -275,7 +277,8 @@ const row = (bs, cls = "") => bs?.length ? `<div class="buttons">${bs.map((b) =>
 function section(x, f, p, s) {
   switch (x.kind) {
     case "agent": {
-      const a = f.agents.find((a) => a.label.startsWith(`${f.page.label} · `));
+      // The pane of this card's own agent, while herdr has it.
+      const a = x.pane && f.agents.find((a) => a.pane === x.pane);
       const head = `<div class="top">${dotOf(x.dot)}<span class="name">${esc(x.name || "Agent")}</span>
         ${a ? `<span class="chev">›</span>` : ""}</div>
         <div class="meta">${esc(x.status)}</div>
@@ -321,7 +324,11 @@ function section(x, f, p, s) {
     }
     case "finding": {
       const lead = x.dot ? dotOf(x.dot) : x.tag ? `<span class="sev ${esc(x.tag)}">${esc(x.tag)}</span>` : "";
+      // A criterion's steps in full: its Given, When and Then.
+      const steps = x.steps?.length && `<dl class="steps">${x.steps.map(([w, t]) =>
+        `<div>${w ? `<dt>${esc(w)}</dt>` : ""}<dd>${esc(t)}</dd></div>`).join("")}</dl>`;
       const more = [
+        steps,
         x.body && `<p>${esc(x.body)}</p>`,
         x.fix && `<p>${esc(x.fix)}</p>`,
         x.note && `<p class="quiet">${esc(x.note)}</p>`,
@@ -369,22 +376,38 @@ function section(x, f, p, s) {
   }
 }
 
-// A stage's page: what it is for, how it stands, its sections as the
-// desktop's page has them, each with its buttons, and its files: the one
-// to read shown, the others to open.
+// A stage's page: what it is for, how it stands, its rare buttons in a
+// menu at its top right, its sections as the desktop's page has them,
+// each with its buttons, and its latest files: the fix plan and evidence
+// folded open there, the others to open.
 function stagePage(f, p, s) {
   const pg = f.page;
-  let html = `<div class="page-head"><h2>${esc(pg.label)}${pg.own ? "" : ` <span class="count">· it is at ${esc(f.stage)}</span>`}</h2>
+  const menu = f.offer.menu?.length ? `<details class="menu"><summary aria-label="More">⋯</summary>
+    <div class="menu-list">${f.offer.menu.map((b) => btn(b)).join("")}</div></details>` : "";
+  let html = `<div class="page-head">${menu}<h2>${esc(pg.label)}${pg.own ? "" : ` <span class="count">· it is at ${esc(f.stage)}</span>`}</h2>
     ${pg.about ? `<div class="quiet small">${esc(pg.about)}</div>` : ""}
     ${pg.status ? `<div class="pstatus">${toned(pg.status)}</div>` : ""}</div>`;
   // The stage's agents first, as they're what's at work.
   const agents = pg.sections.filter((x) => x.kind === "agent");
   for (const x of agents) html += section(x, f, p, s);
-  html += actions(f.offer);
-  for (const x of pg.sections.filter((x) => x.kind !== "agent")) html += section(x, f, p, s);
+  // Adding an issue goes under the criteria it joins.
+  const rest = pg.sections.filter((x) => x.kind !== "agent");
+  const last = rest.map((x) => !!x.steps).lastIndexOf(true);
+  const adds = (b) => last >= 0 && b.id === "AddComment";
+  html += actions({ ...f.offer, buttons: (f.offer.buttons || []).filter((b) => !adds(b)) });
+  rest.forEach((x, i) => {
+    html += section(x, f, p, s);
+    if (i === last) html += row((f.offer.buttons || []).filter(adds));
+  });
   if (pg.files?.length) {
-    html += `<h2>Files</h2><div class="group">` + pg.files.map((d) =>
-      `<a class="row" href="${href("doc", p, s, d)}"><span>${esc(d)}</span><span class="chev">›</span></a>`).join("") + `</div>`;
+    html += `<h2>Latest files</h2>` + pg.files.filter((d) => d.html || d.error).map((d) =>
+      `<details class="fold file-fold"${d.open ? " open" : ""}><summary><h3>${esc(d.name)}</h3></summary>
+        ${d.html ? `<article class="doc card">${d.html}</article>` : `<p class="error small">${esc(d.error)}</p>`}</details>`).join("");
+    const links = pg.files.filter((d) => !d.html && !d.error);
+    if (links.length) {
+      html += `<div class="group">` + links.map((d) =>
+        `<a class="row" href="${href("doc", p, s, d.name)}"><span>${esc(d.name)}</span><span class="chev">›</span></a>`).join("") + `</div>`;
+    }
   }
   return html;
 }
@@ -592,6 +615,7 @@ document.addEventListener("click", async (e) => {
   // The feature's page names its stage where the address does.
   const stage = here()[0] === "f" && here()[3] !== undefined ? Number(here()[3]) : undefined;
   b.disabled = true;
+  b.closest("details.menu")?.removeAttribute("open");
   try {
     if (b.dataset.push) {
       await push(b.dataset.push).catch((err) => say([{ text: err.message }], true));

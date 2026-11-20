@@ -4,7 +4,7 @@ A web page of your features, for a phone. It shows:
 
 - every open feature, those waiting for you first, as its sidebar card shows it: stage dots, the stage's line, and a coloured edge for working, waiting or failed
 - each feature's rail as its feature tab draws it (each stage's mark, short line and agent, and the line back to Build), and what it waits for
-- the page of the stage it is at, as the desktop's stage page says it in words: its agent, the stage's file to read (the brief, the plan, the final plan), Build's progress (tap it for the milestones, ticked as they are made), fix rounds (folded: tap one for what it fixes), Verify's checks, AI review's findings, the Ship check. Tap a stage on the rail for its page. A stage's other files (decisions, research, the build log) are links
+- the page of the stage it is at, as the desktop's stage page says it in words: its agent, the stage's file to read (the brief, the plan, the final plan), Build's progress (tap it for the milestones, ticked as they are made), fix rounds (folded: tap one for what it fixes), Verify's checks, AI review's findings, the Ship check. Tap a stage on the rail for its page. The fix plan and Verify's evidence are folded under Latest files, the fix plan open while it waits to be made. A stage's other files (decisions, research, the build log) are links there
 - its history, folded: the last event shows, tap for all
 - each agent's state (working, waiting for you, idle) and the last lines of its pane, refreshed every 2 s
 
@@ -17,8 +17,9 @@ It reads the feature files on disk and asks herdr. The cards, the rail and the s
 From a new feature to Code review, every step can be done on the phone. Code review, Manual test and Ship are desk work.
 
 - **New feature.** The list's New feature button asks for the project, a title, the repositories it changes (for a project of several), the agent Discover runs on and, if you like, what it is for. gerdr makes the feature as its New feature dialog does and starts Discover. Discover's agent starts from what you wrote, else from its own question. The feature's page opens once it runs.
-- **Stage page buttons.** A feature's page has the same buttons as the desktop stage page, each on the card that holds it: Continue, Plan fixes, Run checks, Run again on one check, Restart, Skip review and the rest. Buttons that only show or open something on the desktop are left out, as is Ship. A brief or plan waiting for review also gets Approve.
-- **Agents and models.** An agent card has the agents to pick for the stage's next start, and its model (type its name; empty is the agent's own default). Build's card picks one agent for all milestones or a fresh one each.
+- **Stage page buttons.** A feature's page has the same buttons as the desktop stage page, each on the card that holds it: Continue, Plan fixes, Run checks, Run again on one check, Restart, Skip review and the rest. Buttons that only show or open something on the desktop are left out, as is Ship. A brief or plan waiting for review also gets Approve. The rare ones, Start over… and Set up again, are in the ⋯ menu at the page's top right.
+- **Manual test.** Each criterion opens to its steps in full, with Pass and Fail… (which asks what went wrong). Add issue… sits under the criteria.
+- **Agents and models.** An agent card that hasn't run, or the Build card saying where the next fixes go, has the agents to pick for the next start, and its model (type its name; empty is the agent's own default). Build's card picks one agent for all milestones or a fresh one each.
 - **Text the desktop asks in a field.** A button whose desktop opens a field asks on the phone first: Dismiss… and Reject… ask why, Comment and Answer ask for the text, Add comment… or Add suggestion… asks what should change.
 - **Findings and suggestions.** AI review's findings and Plan review's suggestions are decided on their cards: Fix or Accept, Dismiss… or Reject…, Reopen, a comment, deleting your own.
 - **Send back.** A brief, plan or fix plan waiting for review can go back to its agent with your comment. Line comments made on the desktop go with it, and are listed above the box.
