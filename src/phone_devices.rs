@@ -271,10 +271,10 @@ pub fn look() -> Seen {
     }
 }
 
-/// How long ago `at` is, shortly: "now", "5m ago".
+/// How long ago `at` is, shortly: "just now", "5m ago".
 fn ago(at: u64, now: u64) -> String {
     match now.saturating_sub(at) {
-        0..CONNECTED => "now".to_owned(),
+        0..CONNECTED => "just now".to_owned(),
         secs => format!("{} ago", crate::tasks::uptime(secs)),
     }
 }
@@ -516,7 +516,11 @@ impl Gerdr {
                     out.status
                         .success()
                         .then_some(())
-                        .ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_owned())
+                        // Toasts have no full stop; systemctl's lines do.
+                        .ok_or_else(|| {
+                            let said = String::from_utf8_lossy(&out.stderr);
+                            said.trim().trim_end_matches('.').to_owned()
+                        })
                 });
             // The loop ends only with gerdr.
             let _ = tx.send(result);
