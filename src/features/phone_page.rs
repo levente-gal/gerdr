@@ -134,7 +134,6 @@ fn section_json(section: &chrome::PageSection) -> Option<Value> {
             "fixes": r.fixes,
             "running": r.running,
             "changed": r.changed,
-            "open": r.open,
         }),
         S::Toolbar { .. } => return None,
         S::Lines { label, lines } => {

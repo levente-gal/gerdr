@@ -301,7 +301,7 @@ function section(x, f, p, s) {
       const fixes = x.fixes.length ? `<h3>Fixes <span class="count">${made} of ${x.fixes.length}</span></h3>
         ${meter(made, x.fixes.length)}${ticks(x.fixes, x.running)}` : "";
       const changed = x.changed.length ? `<h3>Changed</h3><ul class="lines quiet">${x.changed.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>` : "";
-      return `<details class="card round"${x.open ? " open" : ""}><summary>
+      return `<details class="card round"><summary>
           <div class="top">${dotOf(x.dot)}<span class="name">${esc(x.label)}</span>${toned(x.state)}</div>
           ${x.meta ? `<div class="meta">${esc(x.meta)}</div>` : ""}</summary>${asked}${fixes}${changed}</details>`;
     }
