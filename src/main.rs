@@ -3804,7 +3804,11 @@ impl Gerdr {
         }
         self.launch_next(launch::ZED_APP_ID, |gerdr, w, t, i| {
             let dir = gerdr.workspaces[w].dir.clone();
-            let command = gerdr.workspaces[w].tabs[t].expected[i].app_command.clone();
+            let mut command = gerdr.workspaces[w].tabs[t].expected[i].app_command.clone();
+            if let Some(now) = command.as_deref().and_then(|c| gerdr.zed_on_now(c)) {
+                gerdr.workspaces[w].tabs[t].expected[i].app_command = Some(now.clone());
+                command = Some(now);
+            }
             let pid = match command {
                 Some(command) => gerdr.start_app(w, t, &command, None)?,
                 None => {
@@ -4181,10 +4185,7 @@ impl Gerdr {
     /// `dir` on top, a terminal in `dir` below, and show it. The Zed is
     /// launched by command, so the tab brings it back on `dir` when restored.
     pub fn new_project_tab(&mut self, w: usize, dir: &Path) {
-        let command = format!(
-            "zed -n {}",
-            crate::desktop::shell_quote(&dir.to_string_lossy())
-        );
+        let command = self.zed_on(dir);
         let Some((t, zed)) = self.push_zed_tab(w, command) else {
             return;
         };
@@ -4202,6 +4203,21 @@ impl Gerdr {
         self.launch_next_zed();
         self.prune();
         self.show_active();
+    }
+
+    /// The command of a project tab's Zed on `dir`: `zed -n` on the folders
+    /// `zed_folders` has for it.
+    fn zed_on(&self, dir: &Path) -> String {
+        let quote = |p: &PathBuf| crate::desktop::shell_quote(&p.to_string_lossy());
+        let folders: Vec<String> = self.zed_folders(dir).iter().map(quote).collect();
+        format!("zed -n {}", folders.join(" "))
+    }
+
+    /// `command` as `zed_on` has it now, when it is a `zed -n <folder>` that
+    /// a project tab saved before Zed opened a feature's repositories: Zed
+    /// greys out all of a feature folder opened alone.
+    fn zed_on_now(&self, command: &str) -> Option<String> {
+        zed_n_folder(command).map(|dir| self.zed_on(dir))
     }
 
     /// Open a tab in workspace `w` with a Zed alone, launched by `command`
@@ -7887,9 +7903,35 @@ fn shut_down(mut state: Gerdr, event_loop: &mut EventLoop<'static, Gerdr>) {
     }
 }
 
+/// The folder of a `zed -n <folder>` command, as `shell_quote` writes it,
+/// when it is one.
+fn zed_n_folder(command: &str) -> Option<&Path> {
+    let word = command.strip_prefix("zed -n ")?;
+    let folder = word.strip_prefix('\'').and_then(|w| w.strip_suffix('\'')).unwrap_or(word);
+    let dir = Path::new(folder);
+    (crate::desktop::shell_quote(folder) == word && dir.is_dir()).then_some(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_zed_on_one_folder_is_told_by_its_command() {
+        let tmp = std::env::temp_dir();
+        let plain = format!("zed -n {}", tmp.display());
+        assert_eq!(zed_n_folder(&plain), Some(tmp.as_path()));
+        let spaced = tmp.join("a b");
+        std::fs::create_dir_all(&spaced).unwrap();
+        let quoted = format!("zed -n {}", crate::desktop::shell_quote(&spaced.to_string_lossy()));
+        assert_eq!(zed_n_folder(&quoted), Some(spaced.as_path()));
+        let _ = std::fs::remove_dir(&spaced);
+        // A file, two folders, flags or another program aren't.
+        assert_eq!(zed_n_folder("zed -n /etc/hostname"), None);
+        assert_eq!(zed_n_folder("zed -n /tmp /etc"), None);
+        assert_eq!(zed_n_folder("zed --user-data-dir /tmp -n /tmp"), None);
+        assert_eq!(zed_n_folder("code -n /tmp"), None);
+    }
 
     #[test]
     fn settings_resolve_the_look_by_what_the_system_prefers() {
