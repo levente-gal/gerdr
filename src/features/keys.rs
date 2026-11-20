@@ -2455,6 +2455,7 @@ pub(super) fn keys_page() -> StagePage {
             .into_iter()
             .map(|(k, w)| (k, format!("writing a note on a card: {w}"))),
     );
+    rows[CRITERIA].extend(crate::criteria_strip::f1_rows());
     // Not a key of the tab's: the prefix's (`keys::ACTIONS`).
     rows[ANYWHERE].push((
         "Prefix, then U",

@@ -245,6 +245,8 @@ enum StripKey {
     Passed,
     /// Show the criterion this many from the one shown.
     Step(isize),
+    /// List every key of the strip, on the feature tab.
+    Keys,
     /// Add a screenshot of the page to the note.
     Shot,
     /// Save the note.
@@ -372,6 +374,12 @@ const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
         does: |_| Some(StripKey::Close),
         footer: false,
         f1: "",
+    },
+    Binding {
+        chord: "F1",
+        does: |_| Some(StripKey::Keys),
+        footer: true,
+        f1: "list these keys, on the feature tab",
     },
     Binding {
         chord: "Ctrl+O",
@@ -538,6 +546,7 @@ fn strip_hint(
         StripKey::OnPage => "page",
         StripKey::Fold => "fold",
         StripKey::Shot => "screenshot",
+        StripKey::Keys => "keys",
         _ => {
             let label = (buttons.iter())
                 .find(|(_, k)| k == key)
@@ -546,6 +555,20 @@ fn strip_hint(
         }
     };
     words.to_owned()
+}
+
+/// The strip's keys as the feature tab's F1 page lists them, under
+/// Manual test's criteria: its own, then while a note is written.
+pub(crate) fn f1_rows() -> Vec<(&'static str, String)> {
+    let tables = [
+        ("on the strip over the app", key_table::f1_rows(STRIP_KEYS)),
+        ("writing a note on the strip", key_table::f1_rows(NOTE_KEYS)),
+    ];
+    let mut rows = Vec::new();
+    for (on, table) in tables {
+        rows.extend(table.into_iter().map(|(k, w)| (k, format!("{on}: {w}"))));
+    }
+    rows
 }
 
 /// What the footer says `key` does while a note is written.
@@ -961,6 +984,19 @@ impl Gerdr {
             .is_some_and(|p| p.project == target.project && p.slug == target.slug)
         {
             self.select_criterion(i);
+        }
+    }
+
+    /// List every key on the feature tab (its F1 page), where the strip's
+    /// are under Manual test's criteria.
+    fn strip_keys_page(&mut self, target: &Target) {
+        self.drop_criteria_keys();
+        self.open_feature_at(&target.project, &target.slug, Stage::ManualTest);
+        if let Some(panel) = self.features.panel.as_mut()
+            && panel.project == target.project
+            && panel.slug == target.slug
+        {
+            panel.keys = true;
         }
     }
 
@@ -1451,6 +1487,7 @@ impl Gerdr {
             Some(StripKey::Shot) => self.criterion_shot(&target),
             Some(StripKey::Select) => self.strip_select(&target),
             Some(StripKey::Step(by)) => self.step_criterion(&target, by),
+            Some(StripKey::Keys) => self.strip_keys_page(&target),
             Some(_) | None => {}
         }
     }
@@ -1649,6 +1686,15 @@ mod tests {
             Some(StripKey::Select)
         );
         assert_eq!(strip_chord(&StripKey::Fold), "Alt+Down");
+        // F1 lists them on the feature tab's keys page, with the note's.
+        assert_eq!(press(untried, "F1"), Some(StripKey::Keys));
+        let listed = f1_rows();
+        let on = |key: &str, start: &str| {
+            (listed.iter()).any(|(k, w)| *k == key && w.starts_with(start))
+        };
+        assert!(on("P", "on the strip over the app: "));
+        assert!(on("Alt+C", "writing a note on the strip: "));
+        assert!(!(listed.iter()).any(|(k, _)| *k == "Ctrl+PgUp"), "an alias");
         // Up / Down step, as do Ctrl+PgUp / Ctrl+PgDn and the keypad's.
         assert_eq!(press(untried, "Down"), Some(StripKey::Step(1)));
         assert_eq!(press(tried, "Ctrl+PgUp"), Some(StripKey::Step(-1)));
