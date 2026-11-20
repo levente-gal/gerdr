@@ -17,8 +17,8 @@
 //! (`state.json`). It takes what lands on it; the keys only once given them,
 //! by the prefix and Shift+C, a click on its note field or Fail…, and back to
 //! the app by Esc, the same chord, or a press on the app. With the keys:
-//! Space or Enter passes, F fails, Del clears, Ctrl+PgUp / Ctrl+PgDn (or Up /
-//! Down) step through the criteria, Alt+C takes a screenshot, Ctrl+O shows the
+//! Space or Enter passes, F fails, Del clears, Up / Down (or Ctrl+PgUp /
+//! Ctrl+PgDn) step through the criteria, Alt+C takes a screenshot, Ctrl+O shows the
 //! page, Alt+Down folds it. Writing a note, Enter saves it; Esc never does:
 //! it leaves the criterion as it was, what is written kept as a draft for its
 //! next note (Ctrl+Shift+Del discards it), Shift+Enter breaks
@@ -243,6 +243,8 @@ enum StripKey {
     Fold,
     /// Step through passed criteria too, or skip them.
     Passed,
+    /// Show the criterion this many from the one shown.
+    Step(isize),
     /// Add a screenshot of the page to the note.
     Shot,
     /// Save the note.
@@ -283,9 +285,8 @@ const STRIP_STATES: [StripCtx; 3] = [
     },
 ];
 
-/// The strip's keys on a criterion; its tooltips say them. Up / Down and
-/// Ctrl+PgUp / Ctrl+PgDn step through the criteria after it. Aliases
-/// (no footer, no F1) keep the presses that worked before the table.
+/// The strip's keys on a criterion; its footer and tooltips say them.
+/// Aliases (no footer, no F1) keep the presses that worked before the table.
 const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
     Binding {
         chord: "Space",
@@ -316,6 +317,20 @@ const STRIP_KEYS: &[Binding<StripCtx, StripKey>] = &[
         footer: true,
         f1: "take its result back",
     },
+    Binding {
+        chord: "Up",
+        does: |_| Some(StripKey::Step(-1)),
+        footer: true,
+        f1: "the previous criterion not passed; all, with the check button on",
+    },
+    Binding {
+        chord: "Down",
+        does: |_| Some(StripKey::Step(1)),
+        footer: true,
+        f1: "the next criterion not passed; all, with the check button on",
+    },
+    key_table::alias("Ctrl+PgUp", |_| Some(StripKey::Step(-1))),
+    key_table::alias("Ctrl+PgDn", |_| Some(StripKey::Step(1))),
     Binding {
         chord: "C",
         does: |_| Some(StripKey::AddComment),
@@ -500,6 +515,50 @@ fn save_manual_shot(project: &str, slug: &str, id: &str, png: &[u8]) -> Result<S
     Ok(name)
 }
 
+/// What the footer says `key` does on `row` of the strip, whose buttons are
+/// `buttons`: a button's label when one does it (K3), lowercase.
+/// `passed`: the arrows step through passed criteria too.
+fn strip_hint(
+    key: &StripKey,
+    row: &Row,
+    buttons: &[(chrome::PageButton, StripKey)],
+    passed: bool,
+) -> String {
+    let done = row.found == Some(Verdict::Pass);
+    let words = match key {
+        // Its button stands pressed: the key takes it back.
+        StripKey::Do(Outcome::Toggle(_)) if done && row.comment => "reopen",
+        StripKey::Do(Outcome::Toggle(_)) if done => "take back",
+        StripKey::Do(Outcome::Clear(_)) => "take back",
+        StripKey::Do(Outcome::Fail(..)) => "not done",
+        StripKey::Step(_) => "step",
+        StripKey::Passed if passed => "skip passed",
+        StripKey::Passed => "show passed",
+        StripKey::Close => "back",
+        StripKey::OnPage => "page",
+        StripKey::Fold => "fold",
+        StripKey::Shot => "screenshot",
+        _ => {
+            let label = (buttons.iter())
+                .find(|(_, k)| k == key)
+                .map(|(b, _)| b.label.as_str());
+            return label.unwrap_or_default().to_lowercase();
+        }
+    };
+    words.to_owned()
+}
+
+/// What the footer says `key` does while a note is written.
+fn note_hint(key: &StripKey) -> &'static str {
+    match key {
+        StripKey::Save => "save",
+        StripKey::Newline => "new line",
+        StripKey::Park => "keep draft",
+        StripKey::Discard => "discard",
+        _ => "screenshot",
+    }
+}
+
 impl Gerdr {
     /// Where the strip shows now, if it does: on the shown tab's web pane at
     /// a sandbox's page (the focused one first), in a feature's workspace at
@@ -595,6 +654,25 @@ impl Gerdr {
             (false, false) => "",
         };
         let keys = self.criteria_strip_has_keys();
+        let selecting = self.strip_selecting(&target);
+        let hints = match (keys, draft.is_some()) {
+            (false, _) => Vec::new(),
+            (true, true) => key_table::joined(key_table::hints(NOTE_KEYS, &(), |k| {
+                note_hint(k).to_owned()
+            })),
+            (true, false) => {
+                let ctx = StripCtx {
+                    i,
+                    comment: row.comment,
+                    found: row.found.is_some(),
+                };
+                let buttons = strip_buttons(i, row, selecting);
+                let passed = self.projects.criteria_passed;
+                key_table::joined(key_table::hints(STRIP_KEYS, &ctx, |k| {
+                    strip_hint(k, row, &buttons, passed)
+                }))
+            }
+        };
         Some(CriteriaStripView {
             pane: target.rect,
             folded: self.projects.criteria_folded && draft.is_none(),
@@ -616,13 +694,14 @@ impl Gerdr {
             note: row.note.clone(),
             field: draft.map(|d| d.field.line()),
             shots,
-            buttons: (strip_buttons(i, row, self.strip_selecting(&target)).into_iter())
+            buttons: (strip_buttons(i, row, selecting).into_iter())
                 .map(|(button, _)| (button.label, button.style))
                 .collect(),
             steps_through: rows.len() > 1,
             passed: self.projects.criteria_passed,
             hover: strip.hover,
             keys,
+            hints,
         })
     }
 
@@ -705,7 +784,10 @@ impl Gerdr {
                     (false, false) => "Previous criterion not passed",
                     (true, false) => "Next criterion not passed",
                 };
-                (text.into(), if next { "Ctrl+PgDn" } else { "Ctrl+PgUp" })
+                (
+                    text.into(),
+                    strip_chord(&StripKey::Step(if next { 1 } else { -1 })),
+                )
             }
             StripHit::Passed => (
                 match self.projects.criteria_passed {
@@ -760,7 +842,7 @@ impl Gerdr {
                     ),
                 }
             }
-            StripHit::Field | StripHit::Panel => return None,
+            StripHit::Field | StripHit::Panel | StripHit::Hint(_) => return None,
         };
         if text.is_empty() {
             return None;
@@ -775,6 +857,14 @@ impl Gerdr {
         let Some(hit) = self.criteria_strip_hit(pos) else {
             return;
         };
+        // A key hint presses its key.
+        if let StripHit::Hint(i) = hit {
+            let keys = (self.criteria_strip_view()).and_then(|v| v.hints.get(i).cloned());
+            if let Some((keys, _)) = keys {
+                self.press_hint(crate::input::Overlay::Criteria, &keys, pos);
+            }
+            return;
+        }
         self.criteria_strip_press(hit);
     }
 
@@ -832,7 +922,7 @@ impl Gerdr {
             StripHit::Field => self.criteria_strip.keys = Some(target.pane),
             StripHit::Shot => self.criterion_shot(&target),
             StripHit::Done => _ = self.keep_strip_note(&target),
-            StripHit::Panel => {}
+            StripHit::Panel | StripHit::Hint(_) => {}
         }
     }
 
@@ -1360,20 +1450,8 @@ impl Gerdr {
             Some(StripKey::Passed) => self.toggle_criteria_passed(),
             Some(StripKey::Shot) => self.criterion_shot(&target),
             Some(StripKey::Select) => self.strip_select(&target),
-            Some(_) => {}
-            // Stepping through the criteria, as a list's arrows: its
-            // buttons' tooltips name Ctrl+PgUp / Ctrl+PgDn, which
-            // `hint_key` doesn't read.
-            None => {
-                let bare = !(mods.ctrl || mods.alt || mods.shift || mods.logo);
-                match sym {
-                    Keysym::Page_Up if mods.ctrl => self.step_criterion(&target, -1),
-                    Keysym::Page_Down if mods.ctrl => self.step_criterion(&target, 1),
-                    Keysym::Up | Keysym::KP_Up if bare => self.step_criterion(&target, -1),
-                    Keysym::Down | Keysym::KP_Down if bare => self.step_criterion(&target, 1),
-                    _ => {}
-                }
-            }
+            Some(StripKey::Step(by)) => self.step_criterion(&target, by),
+            Some(_) | None => {}
         }
     }
 
@@ -1480,6 +1558,48 @@ mod tests {
     }
 
     #[test]
+    fn the_footer_says_the_buttons_words_and_what_a_pressed_one_does() {
+        let hints = |r: &Row, passed| -> Vec<(String, String)> {
+            let ctx = StripCtx {
+                i: 0,
+                comment: r.comment,
+                found: r.found.is_some(),
+            };
+            let buttons = strip_buttons(0, r, false);
+            key_table::joined(key_table::hints(STRIP_KEYS, &ctx, |k| {
+                strip_hint(k, r, &buttons, passed)
+            }))
+        };
+        let said = |h: &[(String, String)], keys: &str| {
+            (h.iter()).find(|(k, _)| k == keys).map(|(_, w)| w.clone())
+        };
+        let untried = hints(&row(None), false);
+        assert_eq!(said(&untried, "Space").as_deref(), Some("pass"));
+        assert_eq!(said(&untried, "F").as_deref(), Some("fail\u{2026}"));
+        assert_eq!(said(&untried, "Up / Down").as_deref(), Some("step"));
+        assert_eq!(said(&untried, "P").as_deref(), Some("show passed"));
+        assert_eq!(said(&untried, "C").as_deref(), Some("add issue\u{2026}"));
+        assert_eq!(said(&untried, "Esc").as_deref(), Some("back"));
+        assert_eq!(said(&untried, "Del"), None);
+        let passed = hints(&row(Some(Verdict::Pass)), true);
+        assert_eq!(said(&passed, "Space").as_deref(), Some("take back"));
+        assert_eq!(said(&passed, "Del").as_deref(), Some("take back"));
+        assert_eq!(said(&passed, "P").as_deref(), Some("skip passed"));
+        let failed = hints(&row(Some(Verdict::Fail)), false);
+        assert_eq!(said(&failed, "Space").as_deref(), Some("pass"));
+        assert_eq!(said(&failed, "F").as_deref(), Some("edit note\u{2026}"));
+        let issue = Row {
+            comment: true,
+            ..row(Some(Verdict::Fail))
+        };
+        let open = hints(&issue, false);
+        assert_eq!(said(&open, "Space").as_deref(), Some("done"));
+        assert_eq!(said(&open, "F").as_deref(), Some("not done"));
+        // Every hint says something.
+        assert!(untried.iter().chain(&open).all(|(_, w)| !w.is_empty()));
+    }
+
+    #[test]
     fn buttons_say_their_keys() {
         assert_eq!(button_tip(&Outcome::Toggle(0), "Pass").1, "Space");
         assert_eq!(button_tip(&Outcome::Write(0), "Fail\u{2026}").1, "F");
@@ -1529,6 +1649,13 @@ mod tests {
             Some(StripKey::Select)
         );
         assert_eq!(strip_chord(&StripKey::Fold), "Alt+Down");
+        // Up / Down step, as do Ctrl+PgUp / Ctrl+PgDn and the keypad's.
+        assert_eq!(press(untried, "Down"), Some(StripKey::Step(1)));
+        assert_eq!(press(tried, "Ctrl+PgUp"), Some(StripKey::Step(-1)));
+        assert_eq!(
+            key_table::press(STRIP_KEYS, untried, &bare, Keysym::KP_Up),
+            Some(StripKey::Step(-1))
+        );
         assert_eq!(
             chord_of(NOTE_KEYS, &[()], |k| *k == StripKey::Save),
             "Enter"

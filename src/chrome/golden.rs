@@ -9147,10 +9147,25 @@ fn strip_views() -> [super::CriteriaStripView; 7] {
         passed: false,
         hover: None,
         keys: false,
+        hints: Vec::new(),
     };
+    let hint = |k: &str, w: &str| (k.to_owned(), w.to_owned());
     let open = CriteriaStripView {
         open: true,
         hover: Some(StripHit::Button(0)),
+        keys: true,
+        hints: vec![
+            hint("Space", "pass"),
+            hint("F", "fail\u{2026}"),
+            hint("Up / Down", "step"),
+            hint("P", "show passed"),
+            hint("C", "add issue\u{2026}"),
+            hint("S", "select on page"),
+            hint("Esc", "back"),
+            hint("Ctrl+O", "page"),
+            hint("Alt+Down", "fold"),
+            hint("Alt+C", "screenshot"),
+        ],
         ..row.clone()
     };
     let mut note = Line::default();
@@ -9162,6 +9177,13 @@ fn strip_views() -> [super::CriteriaStripView; 7] {
         field: Some(note),
         shots: "1 screenshot".into(),
         keys: true,
+        hints: vec![
+            hint("Enter", "save"),
+            hint("Shift+Enter", "new line"),
+            hint("Esc", "keep draft"),
+            hint("Ctrl+Shift+Del", "discard"),
+            hint("Alt+C", "screenshot"),
+        ],
         ..row.clone()
     };
     let failed = CriteriaStripView {
@@ -9230,8 +9252,8 @@ const GOLDEN_STRIP: [[u64; 7]; 4] = [
     // Dark at 1
     [
         0x6397b535cd5e6084, // strip_row
-        0x8b6fb4545e8ac9ec, // strip_open
-        0x8b78f55abec898aa, // strip_note
+        0x0d8014af7dd644fb, // strip_open
+        0x30181cf3a0aa07b0, // strip_note
         0xc77d6ea5a2b0a3dd, // strip_failed
         0xe134649e78702bbf, // strip_chip
         0x6df08774cdd11b0f, // strip_comment
@@ -9240,8 +9262,8 @@ const GOLDEN_STRIP: [[u64; 7]; 4] = [
     // Dark at 2
     [
         0x3cae048d0c03a7ad, // strip_row
-        0x9e6cf44611ffde43, // strip_open
-        0xa331a018e95da99d, // strip_note
+        0xea163ad3b5eb5217, // strip_open
+        0xe9588ae1a5f7e238, // strip_note
         0xe7dd8319773fdb75, // strip_failed
         0xb63f093b83828479, // strip_chip
         0xcbb3d445cb188176, // strip_comment
@@ -9250,8 +9272,8 @@ const GOLDEN_STRIP: [[u64; 7]; 4] = [
     // Light at 1
     [
         0xbb6360cac4449a46, // strip_row
-        0x0ed1fbfb05bdf644, // strip_open
-        0xf6c21b3acb818a6b, // strip_note
+        0xb3dd16fd70dd1b45, // strip_open
+        0x0f619265c270168c, // strip_note
         0x32381ccfc971b0b3, // strip_failed
         0x60faa77000796bed, // strip_chip
         0xa7b9a56fbf5c55d0, // strip_comment
@@ -9260,8 +9282,8 @@ const GOLDEN_STRIP: [[u64; 7]; 4] = [
     // Light at 2
     [
         0x718dd7038c7fa992, // strip_row
-        0x73ed91d0e9eb83ba, // strip_open
-        0x8398ce8dcbd9f2e5, // strip_note
+        0x6719b7df9cf387f9, // strip_open
+        0x5690b34fb48debff, // strip_note
         0x68f321f64706145c, // strip_failed
         0x45481f7462f5972c, // strip_chip
         0x75654622c5795733, // strip_comment

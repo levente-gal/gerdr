@@ -12,7 +12,8 @@
 use super::{
     BUTTON_RADIUS, ButtonStyle, Canvas, FOCUS_RING, FONT_SIZE, FieldSpot, POPUP_RADIUS, Painter,
     Palette, QUIT_BUTTON, ROW_BUTTON, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, band, button_width,
-    check, chevron_down, chevron_side, field_lines_height, field_text, icon_sdf, measure, rect_px,
+    check, chevron_down, chevron_side, field_lines_height, field_text, hint_at, hint_spots,
+    hint_strs, icon_sdf, measure, rect_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -29,6 +30,8 @@ const ROW: i32 = 40;
 const INSET: i32 = 8;
 /// The gap between buttons, and before the ones at the right end.
 const GAP: i32 = 6;
+/// The key hints' row under the row, while the strip has the keys.
+const HINTS_H: i32 = 24;
 const GROUP_GAP: i32 = 12;
 /// A line of its steps or note.
 const LINE: i32 = 20;
@@ -94,6 +97,9 @@ pub struct CriteriaStripView {
     pub hover: Option<StripHit>,
     /// It has the keyboard: its edge is in the accent.
     pub keys: bool,
+    /// The key hints under its row while it has the keys: keys, what they
+    /// do.
+    pub hints: Vec<(String, String)>,
 }
 
 /// What the pointer is over on the strip.
@@ -115,6 +121,8 @@ pub enum StripHit {
     Field,
     Shot,
     Done,
+    /// Key hint `.0`: a click presses its key.
+    Hint(usize),
     /// Anywhere else on it.
     Panel,
 }
@@ -133,6 +141,8 @@ pub struct StripLayout {
     pub field: Option<Rect>,
     /// Where "1 screenshot" goes, by the field's buttons.
     pub shots: Option<Rect>,
+    /// The key hints under the row, as (index into the view's hints, rect).
+    pub hints: Vec<(usize, Rect)>,
 }
 
 impl StripLayout {
@@ -308,9 +318,13 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
         0 => 0,
         h => h + INSET,
     };
-    let h = ROW + above + title_h + top_room;
+    let hints_h = match view.hints.is_empty() {
+        true => 0,
+        false => HINTS_H,
+    };
+    let h = ROW + above + title_h + top_room + hints_h;
     // Never taller than the pane: the steps go before the row does.
-    let h = h.min(pane.size.h - 2 * MARGIN).max(ROW);
+    let h = h.min(pane.size.h - 2 * MARGIN).max(ROW + hints_h);
     let panel = Rectangle::new(
         (
             pane.loc.x + (pane.size.w - w) / 2,
@@ -320,7 +334,7 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
         (w, h).into(),
     );
     let (x0, mut y) = (panel.loc.x + INSET, panel.loc.y + INSET);
-    let bottom_row = panel.loc.y + h - ROW;
+    let bottom_row = panel.loc.y + h - hints_h - ROW;
     // Where what is over the rows ends: at the title's line, when it has one.
     let over_row = bottom_row - above - title_h;
     let mut lines = Vec::new();
@@ -422,6 +436,19 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
         _ => Rectangle::new((x0, over_row).into(), (inner, ROW).into()),
     };
     hits.push((StripHit::Title, title));
+    // The key hints under the row; those offering keys to choose from
+    // (`Up / Down`) can't be clicked.
+    let strs = hint_strs(&view.hints);
+    let hints_rect = Rectangle::new((x0, bottom_row + ROW).into(), (inner, HINTS_H).into());
+    let hints = match hints_h {
+        0 => Vec::new(),
+        _ => hint_spots(&strs, hints_rect),
+    };
+    for (i, spot) in &hints {
+        if hint_at(&strs, &[(*i, *spot)], spot.loc.to_f64()).is_some() {
+            hits.push((StripHit::Hint(*i), *spot));
+        }
+    }
     StripLayout {
         panel,
         hits,
@@ -429,6 +456,7 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
         lines,
         field,
         shots,
+        hints,
     }
 }
 
@@ -673,9 +701,23 @@ impl Painter {
                         );
                     }
                 }
-                StripHit::Field | StripHit::Chip | StripHit::Panel => {}
+                StripHit::Field | StripHit::Chip | StripHit::Panel | StripHit::Hint(_) => {}
             }
         }
+        let hints: Vec<(usize, Rect)> =
+            (layout.hints.iter()).map(|(i, r)| (*i, here(*r))).collect();
+        let hint_hover = match view.hover {
+            Some(StripHit::Hint(i)) => Some(i),
+            _ => None,
+        };
+        self.hints(
+            &mut c,
+            &hint_strs(&view.hints),
+            &hints,
+            hint_hover,
+            scale,
+            p,
+        );
         c.into_buffer(false)
     }
 }
@@ -709,6 +751,7 @@ mod tests {
             passed: false,
             hover: None,
             keys: false,
+            hints: Vec::new(),
         }
     }
 
@@ -828,6 +871,33 @@ mod tests {
         let done = three.rect_of(StripHit::Done).unwrap();
         assert!(done.loc.y > f3.loc.y + f3.size.h - QUIT_BUTTON);
         assert!(done.loc.y + done.size.h <= f3.loc.y + f3.size.h);
+    }
+
+    #[test]
+    fn with_the_keys_its_hints_go_under_the_row_and_press_one_key_each() {
+        let mut v = view(1200);
+        let plain = criteria_strip_layout(&v);
+        assert!(plain.hints.is_empty());
+        v.keys = true;
+        v.hints = vec![
+            ("Space".into(), "pass".into()),
+            ("Up / Down".into(), "step".into()),
+            ("Esc".into(), "back".into()),
+        ];
+        let layout = criteria_strip_layout(&v);
+        assert_eq!(layout.panel.size.h, plain.panel.size.h + HINTS_H);
+        assert_eq!(layout.hints.len(), 3);
+        let row = layout.rect_of(StripHit::Title).unwrap();
+        for (_, r) in &layout.hints {
+            assert!(r.loc.y >= row.loc.y + row.size.h, "{r:?} over the row");
+            assert!(layout.panel.contains_rect(*r), "{r:?}");
+        }
+        // Up / Down offers two keys: not one to click.
+        assert!(layout.rect_of(StripHit::Hint(0)).is_some());
+        assert!(layout.rect_of(StripHit::Hint(1)).is_none());
+        let esc = layout.hints[2].1;
+        let at = Point::from((esc.loc.x as f64 + 3.0, esc.loc.y as f64 + 3.0));
+        assert_eq!(layout.hit(at), Some(StripHit::Hint(2)));
     }
 
     #[test]
