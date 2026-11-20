@@ -4,7 +4,7 @@ A web page of your features, for a phone. It shows:
 
 - every open feature, those waiting for you first, as its sidebar card shows it: stage dots, the stage's line, and a coloured edge for working, waiting or failed
 - each feature's rail as its feature tab draws it (each stage's mark, short line and agent, and the line back to Build), and what it waits for
-- the page of the stage it is at, as the desktop's stage page says it in words: its agent, the stage's file to read (the brief, the plan, the final plan), Build's milestones ticked as they are made, fix rounds, Verify's checks, AI review's findings, the Ship check. Tap a stage on the rail for its page. A stage's other files (decisions, research, the build log) are links
+- the page of the stage it is at, as the desktop's stage page says it in words: its agent, the stage's file to read (the brief, the plan, the final plan), Build's progress (tap it for the milestones, ticked as they are made), fix rounds, Verify's checks, AI review's findings, the Ship check. Tap a stage on the rail for its page. A stage's other files (decisions, research, the build log) are links
 - its history, folded: the last event shows, tap for all
 - each agent's state (working, waiting for you, idle) and the last lines of its pane, refreshed every 2 s
 

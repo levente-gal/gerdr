@@ -281,11 +281,16 @@ function section(x, f, p, s) {
     case "heading":
       return `<h3>${esc(x.text)}</h3>`;
     case "milestones":
-      return `<div class="card milestones"><div class="top"><span class="name">${esc(x.label)}</span>
+    {
+      // The count, bar and state show; the milestones fold, as they're long.
+      const head = `<div class="top"><span class="name">${esc(x.label)}</span>
           <span class="count">${x.done} of ${x.total}</span></div>
         ${meter(x.done, x.total, x.done === x.total ? "full" : "")}
-        ${x.state ? `<div class="meta">${toned(x.state)}</div>` : ""}
-        ${x.items.length ? ticks(x.items, x.running) : ""}</div>`;
+        ${x.state ? `<div class="meta">${toned(x.state)}</div>` : ""}`;
+      return x.items.length
+        ? `<details class="card milestones"><summary>${head}</summary>${ticks(x.items, x.running)}</details>`
+        : `<div class="card milestones">${head}</div>`;
+    }
     case "round": {
       const asked = x.asked.length ? `<h3>${esc(x.askedCaption)}</h3><ul class="lines">${x.asked.map((a) =>
         `<li><b>${esc(a.id)}</b> ${esc(a.title)}${a.now ? ` · ${toned(a.now)}` : ""}
@@ -353,9 +358,12 @@ function stagePage(f, p, s) {
   let html = `<div class="page-head"><h2>${esc(pg.label)}${pg.own ? "" : ` <span class="count">· it is at ${esc(f.stage)}</span>`}</h2>
     ${pg.about ? `<div class="quiet small">${esc(pg.about)}</div>` : ""}
     ${pg.status ? `<div class="pstatus">${toned(pg.status)}</div>` : ""}</div>`;
+  // The stage's agents first, as they're what's at work.
+  const agents = pg.sections.filter((x) => x.kind === "agent");
+  for (const x of agents) html += section(x, f, p, s);
   if (pg.own) html += actions(f.offer);
   let decided = false;
-  for (const x of pg.sections) {
+  for (const x of pg.sections.filter((x) => x.kind !== "agent")) {
     if (pg.decides && (x.kind === "finding" || x.kind === "heading")) {
       if (!decided) html += findings(f.findings);
       decided = true;
