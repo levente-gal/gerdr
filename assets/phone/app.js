@@ -55,15 +55,19 @@ async function get(url) {
   return body;
 }
 
-// Say what gerdr said, for a few seconds.
+// Say what gerdr said, for a few seconds: a warning longer, an error
+// longest, as the desktop's toasts. A tap puts it away.
 let noteTimer = null;
 function say(lines, bad) {
   if (!lines.length) return;
-  note.innerHTML = lines.map((l) => `<div class="${esc(l.level || (bad ? "error" : ""))}">${esc(l.text)}</div>`).join("");
+  const level = (l) => l.level || (bad ? "error" : "");
+  note.innerHTML = lines.map((l) => `<div class="${esc(level(l))}">${esc(l.text)}</div>`).join("");
   note.hidden = false;
   clearTimeout(noteTimer);
-  noteTimer = setTimeout(() => { note.hidden = true; }, 6000);
+  const worst = lines.some((l) => level(l) === "error") ? 10000 : lines.some((l) => level(l) === "warning") ? 7000 : 6000;
+  noteTimer = setTimeout(() => { note.hidden = true; }, worst);
 }
+note.addEventListener("click", () => { note.hidden = true; });
 
 async function post(path, body) {
   let res;
@@ -85,7 +89,7 @@ async function ask(path, body) {
   let answer = await post(path, body);
   if (answer.asks) {
     const a = answer.asks;
-    if (!confirm(`${a.title}${a.body ? "\n\n" + a.body : ""}`)) return false;
+    if (!(await sheetAsk({ title: a.title, body: a.body, go: a.go || "Go" }))) return false;
     answer = await post(path, { ...body, confirm: true });
   }
   if (answer.error) { say([{ text: answer.error }], true); return false; }
@@ -121,8 +125,17 @@ function dots(f) {
 
 const toneOf = (f) => f.card?.tone ||
   (f.waits ? "waits" : f.agents.some((a) => a.status === "working") ? "working" : "idle");
-const waitsBox = (w, now) => w
-  ? `<div class="waits"><b>${esc(w.title)}</b> · ${esc(w.next)} · ${ago(w.since, now)}</div>` : "";
+// The stage it is at: gerdr's card says, else its file.
+const atStage = (f) => f.card ? f.stages[f.card.big]?.label ?? f.stage : f.stage;
+
+// What it waits for, from another stage's page: that stage, what to do and
+// since when, a tap away. Its own page says it in full.
+function waitsLink(f, p, s) {
+  const w = f.waits;
+  const at = f.card ? f.card.big : f.stages.findIndex((x) => x.now);
+  if (!w || at < 0 || at === f.page.stage) return "";
+  return `<a class="waits" href="${href("f", p, s, String(at))}"><span><b>${esc(f.stages[at].label)} waits</b> · ${esc(w.next)} · ${ago(w.since, f.now)}</span><span class="chev">›</span></a>`;
+}
 
 // A sidebar card: its line says what it waits for, its page says more;
 // only agents at work or waiting show.
@@ -171,10 +184,13 @@ async function push(what) {
     const a = await post("/api/push-test", {});
     return say(a.error ? [{ text: a.error }] : a.said, !!a.error);
   }
+  // Asked before any wait: iOS allows it only straight from the tap.
+  if (what === "on" && await Notification.requestPermission() !== "granted") {
+    return say([{ text: "Notifications weren't allowed" }], true);
+  }
   const reg = await sw;
   let sub = await reg.pushManager.getSubscription();
   if (what === "on") {
-    if (await Notification.requestPermission() !== "granted") return say([{ text: "Notifications weren't allowed" }], true);
     const { key } = await get("/api/push");
     sub = sub || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: keyBytes(key) });
   }
@@ -231,7 +247,7 @@ function rail(f, p, s) {
   const pulse = n.findIndex((x) => x.mark === "fixing") >= 0
     ? n.findIndex((x) => x.mark === "fixing") : n.findIndex((x) => x.mark === "current");
   const arch = back
-    ? `<span class="back${[back.to, back.from].some((i) => mark(i) === "waiting") && mark(back.to) !== "fixing" ? " waits" : ""}"
+    ? `<span class="back${[back.to, back.from].some((i) => mark(i) === "waiting") && mark(back.to) !== "fixing" ? " held" : ""}"
         style="left:${12 + back.to * NODE_W + NODE_W / 2}px;width:${(back.from - back.to) * NODE_W}px"></span>` : "";
   const nodes = n.map((x, i) => {
     const disc = ["done", "stale", "ran"].includes(x.mark) ? "✓" : i + 1;
@@ -258,7 +274,10 @@ function history(list, now) {
 
 const stripAnsi = (t) => String(t ?? "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
 const toned = (l) => l ? `<span class="t-${esc(l.tone)}">${esc(l.text)}</span>` : "";
-const dotOf = (d) => d ? `<span class="sdot d-${esc(d)}${d === "working" ? " blink" : ""}"></span>` : "";
+// A dot's state, in words, for those who don't see its colour.
+const DOT_WORD = { blocked: "waiting", done: "done", failed: "failed", working: "working", idle: "idle" };
+const dotOf = (d) => d
+  ? `<span class="sdot d-${esc(d)}${d === "working" ? " blink" : ""}" role="img" aria-label="${esc(DOT_WORD[d] || d)}"></span>` : "";
 // A list of things to do, ticked as they are done; those at work blink.
 const ticks = (items, running = []) => `<ul class="ticks">${items.map(([done, text], i) =>
   `<li class="${done ? "done" : ""}${running.includes(i) ? " at" : ""}">
@@ -267,15 +286,18 @@ const meter = (done, total, cls = "") => total
   ? `<div class="meter ${cls}"><span style="width:${Math.round(100 * done / total)}%"></span></div>` : "";
 
 // A button of gerdr's page, pressed by what it does. One whose desk opens
-// a field asks for its text first; picks and marks press without a
-// confirm. A pair's chosen one (Pass, Fail) shows in its tone.
+// a field asks for its text first; a quick one (picks, marks, one gerdr
+// confirms itself) presses without a confirm here. A pair's chosen one
+// (Pass, Fail) shows in its tone. None while another machine writes it.
+let writable = true;
 const btn = (b, cls = "") => {
+  if (!writable) return "";
   const dots = b.asks && !b.label.endsWith("…") ? "…" : "";
   const asks = b.asks ? ` data-asks="${esc(b.asks)}" data-value="${esc(b.value || "")}"` : "";
   const more = [b.primary && "primary", b.tone, b.quick && "quiet-press", cls].filter(Boolean).join(" ");
   return `<button class="${esc(more)}" data-press="${esc(b.id)}"${asks}${b.off ? " disabled" : ""}>${esc(b.label)}${dots}</button>`;
 };
-const row = (bs, cls = "") => bs?.length ? `<div class="buttons">${bs.map((b) => btn(b, cls)).join("")}</div>` : "";
+const row = (bs, cls = "") => writable && bs?.length ? `<div class="buttons">${bs.map((b) => btn(b, cls)).join("")}</div>` : "";
 
 // A section of a stage's page, as the desktop has it, in words.
 function section(x, f, p, s) {
@@ -290,9 +312,9 @@ function section(x, f, p, s) {
       const cls = `card agent${x.waits ? " tone-waits" : x.dot === "working" ? " tone-working" : ""}`;
       const top = a ? `<a class="open" href="${href("pane", p, s, a.pane)}">${head}</a>` : head;
       // The agent its next start runs on is lit; its model, after them.
-      const picks = (x.picks || []).map((b) => btn({ ...b, primary: false }, `quiet-press pick${b.primary ? " lit" : ""}`));
-      if (x.model) picks.push(btn(x.model, "quiet-press pick"));
-      return `<div class="${cls}">${top}${row(x.buttons)}${picks.length ? `<div class="buttons picks">${picks.join("")}</div>` : ""}</div>`;
+      const picks = (x.picks || []).map((b) => btn({ ...b, primary: false }, `pick${b.primary ? " lit" : ""}`));
+      if (x.model) picks.push(btn(x.model, "pick"));
+      return `<div class="${cls}">${top}${row(x.buttons)}${writable && picks.length ? `<div class="buttons picks">${picks.join("")}</div>` : ""}</div>`;
     }
     case "file":
       return `<div class="fileline small"><b>${esc(x.name)}</b> · ${toned(x.state)}</div>${row(x.buttons)}`;
@@ -300,7 +322,7 @@ function section(x, f, p, s) {
       return `<details class="fold doc-fold" open><summary><h2>${esc(x.name)}</h2></summary>
         ${x.html ? `<article class="doc card">${x.html}</article>` : `<p class="error small">${esc(x.error)}</p>`}</details>`;
     case "lines":
-      return `<h3>${esc(x.label)}</h3><ul class="lines">${x.lines.map((l) => `<li>${toned(l)}</li>`).join("")}</ul>${row(x.buttons, "quiet-press")}`;
+      return `<h3>${esc(x.label)}</h3><ul class="lines">${x.lines.map((l) => `<li>${toned(l)}</li>`).join("")}</ul>${row(x.buttons)}`;
     case "heading":
       return `<h3>${esc(x.text)}</h3>`;
     case "milestones":
@@ -394,9 +416,13 @@ const settledWord = (xs) => [...new Set(xs.map((x) =>
 // folded open there, the others to open.
 function stagePage(f, p, s) {
   const pg = f.page;
-  const menu = f.offer.menu?.length ? `<details class="menu"><summary aria-label="More">⋯</summary>
+  writable = !f.offer.elsewhere;
+  const menu = writable && f.offer.menu?.length ? `<details class="menu"><summary aria-label="More">⋯</summary>
     <div class="menu-list">${f.offer.menu.map((b) => btn(b)).join("")}</div></details>` : "";
-  let html = `<div class="page-head">${menu}<h2>${esc(pg.label)}${pg.own ? "" : ` <span class="count">· it is at ${esc(f.stage)}</span>`}</h2>
+  const at = f.card ? f.card.big : f.stages.findIndex((x) => x.now);
+  const where = pg.own || at < 0 ? ""
+    : `<div class="quiet small">The feature is at <a href="${href("f", p, s, String(at))}">${esc(atStage(f))}</a></div>`;
+  let html = `<div class="page-head">${menu}<h2>${esc(pg.label)}</h2>${where}
     ${pg.about ? `<div class="quiet small">${esc(pg.about)}</div>` : ""}
     ${pg.status ? `<div class="pstatus">${toned(pg.status)}</div>` : ""}</div>`;
   // The stage's agents first, as they're what's at work.
@@ -412,26 +438,33 @@ function stagePage(f, p, s) {
   let settled = [], rounds = [], addHere = false;
   const flush = () => {
     if (settled.length) html += fold(settledWord(settled), settled.length, settled.map((x) => section(x, f, p, s)).join(""));
-    if (rounds.length) html += fold("Earlier rounds", rounds.length, rounds.map((x) => section(x, f, p, s)).join(""));
+    // Named for what they are: "Fix round 17" folds under Earlier fix rounds.
+    const kind = rounds[0]?.label.replace(/\s*\d+$/, "").toLowerCase();
+    if (rounds.length) html += fold(`Earlier ${kind}s`, rounds.length, rounds.map((x) => section(x, f, p, s)).join(""));
     if (addHere) html += row((f.offer.buttons || []).filter(adds));
     settled = []; rounds = []; addHere = false;
   };
+  // A heading is a lines section with no lines: one over nothing is left
+  // out. Over fix rounds, "History" says what they are: the feature's own
+  // History is further down.
+  const heading = (x) => x?.kind === "lines" && !x.lines.length && !x.buttons?.length;
+  const bare = (i) => heading(rest[i]) && (!rest[i + 1] || ["lines", "heading"].includes(rest[i + 1].kind));
   rest.forEach((x, i) => {
-    if (x.kind === "finding" && x.faded) settled.push(x);
+    if (bare(i)) return;
+    if (heading(x) && x.label === "History" && rest[i + 1]?.kind === "round") html += `<h3>Fix rounds</h3>`;
+    else if (x.kind === "finding" && x.faded) settled.push(x);
     else if (x.kind === "round" && rest[i - 1]?.kind === "round") rounds.push(x);
     else html += section(x, f, p, s);
     if (i === last) addHere = true;
     if (rest[i + 1]?.kind !== x.kind) flush();
   });
+  // Latest files, one list: those read here unfold in place, the others
+  // open on their own page.
   if (pg.files?.length) {
-    html += `<h2>Latest files</h2>` + pg.files.filter((d) => d.html || d.error).map((d) =>
-      `<details class="fold file-fold"${d.open ? " open" : ""}><summary><h3>${esc(d.name)}</h3></summary>
-        ${d.html ? `<article class="doc card">${d.html}</article>` : `<p class="error small">${esc(d.error)}</p>`}</details>`).join("");
-    const links = pg.files.filter((d) => !d.html && !d.error);
-    if (links.length) {
-      html += `<div class="group">` + links.map((d) =>
-        `<a class="row" href="${href("doc", p, s, d.name)}"><span>${esc(d.name)}</span><span class="chev">›</span></a>`).join("") + `</div>`;
-    }
+    html += `<h2>Latest files</h2><div class="group">` + pg.files.map((d) => d.html || d.error
+      ? `<details class="file-row"${d.open ? " open" : ""}><summary class="row"><span>${esc(d.name)}</span><span class="mark"></span></summary>
+          ${d.html ? `<article class="doc">${d.html}</article>` : `<p class="error small">${esc(d.error)}</p>`}</details>`
+      : `<a class="row" href="${href("doc", p, s, d.name)}"><span>${esc(d.name)}</span><span class="chev">›</span></a>`).join("") + `</div>`;
   }
   return html;
 }
@@ -441,7 +474,7 @@ async function feature(p, s, stage) {
   // The rail, the waits box and the page say where it stands.
   let html = `<div class="meta quiet small">${esc(f.projectName)}</div>`;
   html += rail(f, p, s);
-  html += waitsBox(f.waits, f.now);
+  html += waitsLink(f, p, s);
   html += stagePage(f, p, s);
   // Agents the stage page has no card for: the page's own show there.
   const onPage = new Set(f.page.sections.filter((x) => x.kind === "agent").map((x) => x.pane));
@@ -469,7 +502,7 @@ function actions(offer) {
       <ul class="lines small">${lines.map((c) => `<li>${c.line ? `<b>line ${c.line}</b> <span class="quiet">${esc(c.quote)}</span><br>` : ""}${esc(c.text)}</li>`).join("")}</ul>` : "";
     html += `<details class="sendback"${lines.length ? " open" : ""}><summary>Send ${esc(back.name || "it")} back with a comment</summary>
       ${back.error ? `<p class="error small">${esc(back.error)}</p>` : said}
-      <textarea id="backText" rows="1" placeholder="What should change"></textarea>
+      <textarea id="backText" rows="1" aria-label="What should change" placeholder="What should change"></textarea>
       <button data-sendback data-lines="${lines.length}">Send back</button></details>`;
   }
   return html;
@@ -536,6 +569,15 @@ async function startFeature(form) {
   location.hash = href("f", p, a.slug);
 }
 
+// Enter in a one-line field of the new feature form goes to the next
+// field, as its key says: only Start feature starts it.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || !e.target.matches?.("#newf input:not([type=checkbox])")) return;
+  e.preventDefault();
+  const all = [...e.target.form.elements].filter((x) => !x.disabled && x.offsetParent !== null && x.type !== "checkbox");
+  all[all.indexOf(e.target) + 1]?.focus();
+});
+
 document.addEventListener("change", (e) => {
   if (e.target.name !== "project" || e.target.form?.id !== "newf") return;
   e.target.form.querySelectorAll(".for").forEach((x) => { x.hidden = x.dataset.for !== e.target.value; });
@@ -561,9 +603,9 @@ async function pane(p, s, id) {
   const text = readable(new AnsiUp().ansi_to_html(raw));
   const above = depth.more ? `<div class="above quiet small">Scroll up for earlier output</div>` : "";
   return { title: d.label, back: href("f", p, s), html: `${above}<pre class="term">${text}</pre>`, pane: true,
-    bar: `<form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" placeholder="Reply to the agent"></textarea>
+    bar: `<form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>
-      <div class="keys">${KEYS.map(([k, l]) => `<button data-key="${k}">${l}</button>`).join("")}
+      <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
         <button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button></div>` };
 }
 
@@ -576,18 +618,20 @@ const readable = (html) => html.replace(/<span style="([^"]*)">/g, (m, st) => {
   return `<span style="${st};color:${light ? "#2a2c33" : "#dce0e5"}">`;
 });
 
-// Keys for an agent's menus and prompts: herdr's name, and the label.
-const KEYS = [["esc", "Esc"], ["1", "1"], ["2", "2"], ["3", "3"], ["Up", "↑"], ["Down", "↓"], ["Enter", "⏎"]];
+// Keys for an agent's menus and prompts: herdr's name, the label, and
+// the name a screen reader says.
+const KEYS = [["esc", "Esc", "Escape"], ["1", "1", "1"], ["2", "2", "2"], ["3", "3", "3"],
+  ["Up", "↑", "Up"], ["Down", "↓", "Down"], ["Enter", "⏎", "Enter"]];
 
 // The view the address names, and how often it is read again.
 function route() {
   const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
   switch (parts[0]) {
     case "f": return { load: () => feature(parts[1], parts[2], parts[3]), every: 5000 };
-    case "doc": return { load: () => doc(parts[1], parts[2], parts[3]), every: 0 };
+    case "doc": return { load: () => doc(parts[1], parts[2], parts[3]), every: 10000 };
     case "pane": return { load: () => pane(parts[1], parts[2], parts[3]), every: 2000 };
     case "go": return { load: () => go(parts[1]), every: 0 };
-    case "new": return { load: newForm, every: 0 };
+    case "new": return { load: newForm, every: 10000 };
     default: return { load: list, every: 5000 };
   }
 }
@@ -608,8 +652,12 @@ const foldsOpen = () => {
 let timer = null;
 let shown = "";
 let barFor = null;
-// Something typed on the page: a refresh would lose it.
-const typing = () => [...main.querySelectorAll("textarea, input")].some((e) => e.value || e === document.activeElement);
+// Something typed on the page: a refresh would lose it. A checkbox (a
+// doc's task list) is no typing.
+const fields = () => [...main.querySelectorAll("textarea, input:not([type=checkbox]):not([type=radio])")];
+const typing = () => fields().some((e) => e.value || e === document.activeElement);
+// Presses on their way: their buttons stay off across a refresh.
+const pressing = new Set();
 // Only the latest read is shown: an earlier one may come back after it.
 let reads = 0;
 async function render(fresh, force, keepBottom) {
@@ -636,7 +684,14 @@ async function render(fresh, force, keepBottom) {
       const y = window.scrollY;
       const open = foldsOpen();
       const railX = main.querySelector(".rail-wrap")?.scrollLeft;
+      // What is written in a box goes on in it, a forced refresh too.
+      const written = fields().filter((e) => e.id && e.value).map((e) => [e.id, e.value]);
       main.innerHTML = v.html;
+      for (const [id, value] of written) {
+        const e = document.getElementById(id);
+        if (e && !e.value) { e.value = value; if (e.matches("textarea")) fit(e); }
+      }
+      main.querySelectorAll("button[data-press]").forEach((x) => { if (pressing.has(x.dataset.press)) x.disabled = true; });
       if (!fresh) {
         const seen = new Map();
         main.querySelectorAll("details").forEach((d) => {
@@ -662,7 +717,10 @@ async function render(fresh, force, keepBottom) {
     if (fresh && !v.pane) window.scrollTo(0, 0);
   } catch (e) {
     if (hash !== location.hash || read !== reads) return;
-    if (fresh || e.message !== "offline") {
+    if (!fresh && typing()) {
+      // What is being written stays: the failure is said instead.
+      if (e.message !== "offline") say([{ text: e.message }], true);
+    } else if (fresh || e.message !== "offline") {
       // Home-screen apps have no browser Back: always a way out.
       back.hidden = route().load === list;
       back.href = "#/";
@@ -676,23 +734,36 @@ async function render(fresh, force, keepBottom) {
 // The route's feature and pane: `#/f/<p>/<s>` or `#/pane/<p>/<s>/<pane>`.
 const here = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
 
-// What a button asks for, in a box that shows all of it. Enter sends, as
-// the desktop's field does; line breaks become spaces. Null on Cancel.
+// A question in a sheet over the page: a confirm with the button that
+// does it (`go`), or, with `field`, the text a button asks for. Its box
+// grows as every box does; Enter breaks the line, the button sends, and
+// line breaks become spaces. Cancel (or Esc) keeps what was written as a
+// draft for the next time the same button asks. True, the text, or null.
 const sheet = document.getElementById("sheet");
-function askText(question, value, action) {
-  sheet.innerHTML = `<form method="dialog"><label for="sheetText">${esc(question)}</label>
-    <textarea id="sheetText" rows="4" enterkeyhint="send">${esc(value)}</textarea>
-    <div class="buttons"><button value="">Cancel</button><button class="primary" value="ok">${esc(action)}</button></div></form>`;
+const drafts = new Map();
+function sheetAsk({ title, body, go, field, value = "", draft }) {
+  const start = drafts.get(draft) ?? value;
+  sheet.innerHTML = `<form method="dialog">${field ? `<label for="sheetText">${esc(title)}</label>
+      <textarea id="sheetText" rows="1">${esc(start)}</textarea>`
+    : `<h3 class="ask">${esc(title)}</h3>${body ? `<p>${esc(body)}</p>` : ""}`}
+    <div class="buttons"><button value="">Cancel</button><button class="primary" value="ok">${esc(go)}</button></div></form>`;
   const box = sheet.querySelector("textarea");
-  box.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sheet.querySelector("button.primary").click(); }
-  });
   sheet.returnValue = "";
   sheet.showModal();
-  box.focus();
-  box.setSelectionRange(box.value.length, box.value.length);
-  return new Promise((done) => sheet.addEventListener("close", () =>
-    done(sheet.returnValue === "ok" ? box.value.replace(/\s*\n\s*/g, " ").trim() : null), { once: true }));
+  if (box) {
+    fit(box);
+    box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
+  }
+  return new Promise((done) => sheet.addEventListener("close", () => {
+    const ok = sheet.returnValue === "ok";
+    if (!box) return done(ok || null);
+    if (draft !== undefined) {
+      if (ok || box.value === value) drafts.delete(draft);
+      else drafts.set(draft, box.value);
+    }
+    done(ok ? box.value.replace(/\s*\n\s*/g, " ").trim() : null);
+  }, { once: true }));
 }
 
 // A tap outside an open ⋯ menu closes it. A pointer, not a click: iOS
@@ -716,20 +787,27 @@ document.addEventListener("click", async (e) => {
       await push(b.dataset.push).catch((err) => say([{ text: err.message }], true));
     } else if (b.dataset.press) {
       const id = b.dataset.press;
+      const label = b.textContent.trim().replace(/…$/, "");
       let text;
       if (b.dataset.asks !== undefined) {
-        text = await askText(b.dataset.asks, b.dataset.value || "", b.textContent.trim().replace(/…$/, ""));
+        // "Model: default…" sets a value: its sheet saves.
+        const go = label.includes(":") ? "Save" : label;
+        text = await sheetAsk({ title: b.dataset.asks, field: true, value: b.dataset.value || "", go, draft: `${location.hash} ${id}` });
         if (text === null) return;
-      } else if (!b.classList.contains("quiet-press") && !confirm(`${b.textContent.trim()}: ${titleEl.textContent}?`)) {
+      } else if (!b.classList.contains("quiet-press") &&
+          !(await sheetAsk({ title: `${label}?`, body: titleEl.textContent, go: label }))) {
         return;
       }
-      await ask("/api/press", { p, s, stage, id, text });
+      if (pressing.has(id)) return;
+      pressing.add(id);
+      try { await ask("/api/press", { p, s, stage, id, text }); } finally { pressing.delete(id); }
     } else if (b.dataset.sendback !== undefined) {
       const box = document.getElementById("backText");
       if (!box.value.trim() && b.dataset.lines === "0") { say([{ text: "Say what should change" }], true); return; }
       if (await ask("/api/send-back", { p, s, text: box.value })) { box.value = ""; fit(box); }
     } else if (b.dataset.key) {
-      if (b.dataset.key === "close" && !confirm(`Close ${titleEl.textContent}? Its tab closes, as on the desktop.`)) return;
+      if (b.dataset.key === "close" &&
+          !(await sheetAsk({ title: `Close ${titleEl.textContent}?`, body: "Its tab closes, as on the desktop.", go: "Close" }))) return;
       const a = await post("/api/agent", { p, s, pane, key: b.dataset.key });
       if (a.error) say([{ text: a.error }], true);
       if (b.dataset.key === "close" && !a.error) { location.hash = href("f", p, s); return; }
@@ -782,14 +860,25 @@ document.addEventListener("scroll", (e) => { if (e.target.matches?.("textarea"))
 // The page's end stays clear of the bar as its box grows.
 new ResizeObserver(() => document.body.style.setProperty("--bar-h", `${bar.offsetHeight}px`)).observe(bar);
 
-// At the top of a pane's output, read more of it.
+// At the top of a pane's output, read more of it; back at its end, only
+// its last lines again.
 window.addEventListener("scroll", async () => {
+  if (depth.at && window.innerHeight + window.scrollY >= document.body.scrollHeight - 40) depth.at = 0;
   if (window.scrollY > 80 || !depth.more || depth.loading || here()[0] !== "pane") return;
   depth.loading = true;
   depth.at += 1;
   try { await render(false, true, true); } finally { depth.loading = false; }
 }, { passive: true });
 
-window.addEventListener("hashchange", () => render(true));
+// Another page: the reply bar goes with the pane it was for, and a pane
+// shown again starts from its last lines.
+window.addEventListener("hashchange", () => {
+  bar.innerHTML = "";
+  bar.hidden = true;
+  document.body.classList.remove("with-bar");
+  barFor = null;
+  depth.pane = "";
+  render(true);
+});
 document.addEventListener("visibilitychange", () => { if (!document.hidden) render(false); });
 render(true);

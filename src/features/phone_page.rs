@@ -83,12 +83,19 @@ fn phone_may(outcome: &PanelOutcome) -> bool {
     )
 }
 
-/// Whether a button doing `outcome` is pressed without a confirm: marking
-/// a criterion, undone as easily.
+/// Whether a button doing `outcome` is pressed without a confirm on the
+/// phone: marking a criterion and picking an agent or model, undone as
+/// easily, and Start over, which gerdr confirms itself (its confirm is put
+/// to the phone), so it isn't asked twice.
 fn phone_quick(outcome: &PanelOutcome) -> bool {
+    use PanelOutcome as O;
     matches!(
         outcome,
-        PanelOutcome::Manual(Manual::Toggle(_) | Manual::Clear(_) | Manual::Fail(..))
+        O::Manual(Manual::Toggle(_) | Manual::Clear(_) | Manual::Fail(..))
+            | O::PickAgent(..)
+            | O::PickModel(_)
+            | O::FreshMilestones(_)
+            | O::StartOver(_)
     )
 }
 
@@ -1070,6 +1077,10 @@ mod tests {
         assert!(!phone_quick(&PanelOutcome::Manual(Manual::MarkPassed)));
         assert!(!phone_may(&PanelOutcome::Manual(Manual::EditComment(0))));
         assert!(phone_asks(&PanelOutcome::Manual(Manual::Write(0))).is_some());
+        // Picks press at once; Start over is confirmed by gerdr alone.
+        assert!(phone_quick(&PanelOutcome::PickAgent(Stage::Plan, "Codex".into())));
+        assert!(phone_quick(&PanelOutcome::StartOver(Stage::Build)));
+        assert!(!phone_quick(&PanelOutcome::RunChecks));
     }
 
     #[test]

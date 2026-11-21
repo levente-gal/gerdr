@@ -124,10 +124,13 @@ a.card:active { background: var(--raised); }
 .dot.later { background: transparent; box-shadow: inset 0 0 0 1.5px var(--dim); }
 .dot.paused { background: transparent; box-shadow: inset 0 0 0 2px var(--accent); }
 
-.waits {
+/* What it waits for, a tap from its stage's page. */
+a.waits {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
   background: color-mix(in srgb, var(--wait) var(--tint), var(--card)); color: var(--wait);
   border-radius: 10px; padding: 7px 10px; margin-top: 10px; font-size: 14px; overflow-wrap: anywhere;
 }
+a.waits:active { filter: brightness(.95); }
 .waits b { font-weight: 650; }
 
 /* Agents: a dot that blinks while one works. */
@@ -188,7 +191,7 @@ a.node:active { background: var(--raised); }
   position: absolute; top: 4px; height: 12px; border: 2px solid var(--accent); border-bottom: 0;
   border-radius: 10px 10px 0 0; opacity: .85;
 }
-.back.waits { border-color: var(--wait); }
+.back.held { border-color: var(--wait); }
 
 .row {
   display: flex; justify-content: space-between; align-items: center; gap: 10px;
@@ -210,11 +213,6 @@ a.row:active { background: var(--raised); }
 }
 .history li:first-child::before { box-shadow: inset 0 0 0 2px var(--accent); background: color-mix(in srgb, var(--accent) 25%, var(--bg)); }
 .history time { color: var(--quiet); font-size: 12px; display: block; }
-details.more > summary {
-  list-style: none; cursor: pointer; color: var(--accent); font-size: 14px; padding: 6px 0 6px 18px;
-}
-details.more > summary::-webkit-details-marker { display: none; }
-details.more[open] > summary .show, details.more:not([open]) > summary .hide { display: none; }
 
 .doc { overflow-wrap: anywhere; }
 .doc pre, .doc code { font: 13px/1.4 ui-monospace, "SF Mono", Menlo, monospace; }
@@ -242,6 +240,13 @@ textarea, input, select {
   border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; width: 100%;
 }
 textarea:focus, input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+input[type=checkbox] { width: auto; }
+/* Keys reach every button, link and fold: they show where they are. */
+:is(a, button, summary):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* A doc's task list: the box in the bullet's place, its text beside it. */
+.doc li:has(> input[type=checkbox]) { list-style: none; }
+.doc li > input[type=checkbox] { margin: 0 6px 0 -22px; vertical-align: -2px; }
+.doc li > input[type=checkbox] + p { display: inline; }
 /* A box grows to five rows (see fit in app.js), then scrolls: shaded
    edges say there is more above or below. */
 textarea { line-height: 1.4; resize: none; overflow-y: auto; scrollbar-width: thin; }
@@ -262,8 +267,6 @@ textarea.more-above.more-below { box-shadow: inset 0 12px 10px -10px rgba(0,0,0,
 .sendback { margin-top: 12px; }
 .sendback summary { color: var(--accent); padding: 6px 0; }
 .sendback textarea { margin: 6px 0 8px; }
-.finding.dismissed .name, .finding.fixed .name { color: var(--quiet); }
-.finding.open::before { background: var(--wait); }
 .sev { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .sev.high { color: var(--bad); }
 .sev.medium { color: var(--wait); }
@@ -281,7 +284,7 @@ body.with-bar #note { bottom: calc(var(--bar-h, calc(104px + env(safe-area-inset
 }
 #bar form { display: flex; gap: 8px; align-items: flex-end; }
 #bar .keys { display: flex; gap: 6px; margin-top: 8px; }
-#bar .keys button { flex: 1; min-width: 0; padding: 6px 0; min-height: 40px; }
+#bar .keys button { flex: 1; min-width: 0; padding: 6px 0; min-height: 44px; }
 body.with-bar main { padding-bottom: calc(var(--bar-h, 110px) + 20px); }
 
 /* A stage's page, as the desktop has it, in words. */
@@ -358,7 +361,7 @@ details.card > p, .card > details.in > p { font-size: 14px; overflow-wrap: anywh
 /* An agent card: its head opens the pane, its picks sit under it. */
 .card.agent .open { display: block; color: inherit; text-decoration: none; }
 .buttons.picks { margin-top: 8px; gap: 6px; }
-.buttons.picks button { font-size: 13px; min-height: 34px; padding: 5px 11px; border-radius: 999px; }
+.buttons.picks button { font-size: 13px; min-height: 40px; padding: 5px 11px; border-radius: 999px; }
 .buttons.picks button.lit { border-color: var(--accent); color: var(--accent); font-weight: 650; opacity: 1; }
 .finding .buttons { margin-top: 8px; }
 
@@ -372,21 +375,28 @@ button.failed { border-color: var(--bad); color: var(--bad); background: color-m
 .steps dt { flex: none; width: 3.4em; color: var(--quiet); font-weight: 600; }
 .steps dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 
-/* Latest files: each folded under its name. */
-.file-fold > summary h3 { display: flex; align-items: center; margin: 10px 0 6px; font-size: 14px; color: var(--text); }
-.file-fold + .group { margin-top: 10px; }
+/* Latest files, one list: a file read here unfolds under its row. */
+.file-row > summary { list-style: none; cursor: pointer; }
+.file-row > summary::-webkit-details-marker { display: none; }
+.file-row .mark {
+  flex: none; width: 7px; height: 7px; margin: 0 4px 4px 0; border: solid var(--dim); border-width: 0 2px 2px 0;
+  transform: rotate(45deg); transition: transform .15s;
+}
+.file-row[open] .mark { transform: translateY(4px) rotate(-135deg); }
+.file-row > .doc { padding: 4px 14px 8px; font-size: 15px; background: var(--card); border-bottom: 1px solid var(--line-soft); }
+.group > .file-row:last-child > .doc, .group > .file-row:last-child:not([open]) > summary { border-bottom: 0; }
 
 /* The page's rare buttons: a menu at its top right. */
 .page-head { position: relative; padding-right: 48px; margin-bottom: 10px; }
 .menu { position: absolute; top: -3px; right: 0; z-index: 2; }
 .menu > summary {
-  list-style: none; cursor: pointer; width: 40px; height: 36px; border-radius: 10px;
+  list-style: none; cursor: pointer; width: 44px; height: 40px; border-radius: 10px;
   display: flex; align-items: center; justify-content: center; font-size: 20px; color: var(--quiet);
   background: var(--raised); border: 1px solid var(--line);
 }
 .menu > summary::-webkit-details-marker { display: none; }
 .menu-list {
-  position: absolute; right: 0; top: 42px; min-width: 190px; display: flex; flex-direction: column; gap: 6px;
+  position: absolute; right: 0; top: 46px; min-width: 190px; display: flex; flex-direction: column; gap: 6px;
   padding: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.2);
 }
 .menu-list button { text-align: left; }
@@ -398,10 +408,13 @@ button.failed { border-color: var(--bad); color: var(--bad); background: color-m
 #bar .keys button.close { flex: none; margin-left: 10px; padding: 6px 12px; color: var(--bad); background: transparent; }
 
 /* The text a button asks for. */
+/* High on the screen: the keyboard takes its lower half. */
 #sheet {
-  width: min(100vw - 24px, 560px); max-width: none; padding: 16px; color: var(--text); background: var(--card);
+  width: min(100vw - 24px, 560px); max-width: none; margin: 10vh auto auto; padding: 16px; color: var(--text); background: var(--card);
   border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 8px 32px rgba(0,0,0,.3);
 }
 #sheet::backdrop { background: rgba(0,0,0,.45); }
 #sheet label { display: block; font-weight: 600; margin-bottom: 8px; }
 #sheet .buttons { justify-content: flex-end; }
+#sheet h3.ask { font-size: 17px; color: var(--text); margin: 0 0 6px; }
+#sheet p { margin: 0 0 4px; color: var(--quiet); overflow-wrap: anywhere; }
