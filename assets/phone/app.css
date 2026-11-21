@@ -14,8 +14,8 @@
   --wait: #725800;
   --bad: #b03e30;
   --tint: 12%;
-  --term-bg: #282c34;
-  --term-text: #abb2bf;
+  --term-bg: #fafafa;
+  --term-text: #2a2c33;
   --shadow: 0 1px 2px rgba(0,0,0,.06), 0 2px 8px rgba(0,0,0,.05);
   color-scheme: light dark;
 }
@@ -35,6 +35,8 @@
     --wait: #dec184;
     --bad: #e08a8e;
     --tint: 16%;
+    --term-bg: #282c34;
+    --term-text: #abb2bf;
     --shadow: 0 1px 2px rgba(0,0,0,.3);
   }
 }
@@ -55,17 +57,21 @@ header {
   -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--line-soft);
 }
-header h1 { font-size: 17px; font-weight: 650; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A long title takes two lines, then ends in an ellipsis. */
+header h1 {
+  font-size: 17px; font-weight: 650; line-height: 1.25; margin: 0; flex: 1; min-width: 0; overflow: hidden;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere;
+}
 #back { font-size: 30px; line-height: 1; padding: 0 8px 3px 0; margin-left: -4px; }
 #seen { color: var(--quiet); font-size: 12px; white-space: nowrap; }
-#offline { background: var(--bad); color: #fff; padding: 8px 16px; font-size: 14px; }
+#offline { background: var(--bad); color: var(--on-accent); padding: 8px 16px; font-size: 14px; }
 main { padding: 8px 16px 32px; max-width: 760px; margin: 0 auto; }
 h2 {
   display: flex; align-items: baseline; gap: 6px;
-  font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em;
-  color: var(--quiet); margin: 22px 0 8px;
+  font-size: 15px; font-weight: 650; color: var(--text); margin: 24px 0 8px;
 }
-h2 .count { font-weight: 500; letter-spacing: 0; text-transform: none; }
+h2 .count { font-weight: 500; color: var(--quiet); }
+main > h2:first-child { margin-top: 12px; }
 .quiet { color: var(--quiet); }
 .small { font-size: 13px; }
 .error { color: var(--bad); }
@@ -101,9 +107,9 @@ a.card:active { background: var(--raised); }
 .card .meta { color: var(--quiet); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
 .status { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 14px; }
 .status .line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tone-working .line, .line.tone-working { color: var(--accent); }
-.tone-waits .line, .line.tone-waits { color: var(--wait); }
-.tone-failed .line, .line.tone-failed { color: var(--bad); }
+.tone-working .line { color: var(--accent); }
+.tone-waits .line { color: var(--wait); }
+.tone-failed .line { color: var(--bad); }
 
 /* Stage dots, as on a sidebar card: the big one is the card's stage. */
 .dots { display: flex; align-items: center; gap: 3px; flex: none; }
@@ -230,6 +236,7 @@ button:active { filter: brightness(.92); }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 650; }
 button:disabled { opacity: .5; }
 .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.buttons + .card { margin-top: 10px; }
 textarea, input, select {
   font: inherit; font-size: 16px; color: var(--text); background: var(--card);
   border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; width: 100%;
@@ -238,9 +245,9 @@ textarea:focus, input:focus, select:focus { outline: 2px solid var(--accent); ou
 /* A box grows to five rows (see fit in app.js), then scrolls: shaded
    edges say there is more above or below. */
 textarea { line-height: 1.4; resize: none; overflow-y: auto; scrollbar-width: thin; }
-textarea.above { box-shadow: inset 0 12px 10px -10px rgba(0,0,0,.45); }
-textarea.below { box-shadow: inset 0 -12px 10px -10px rgba(0,0,0,.45); }
-textarea.above.below { box-shadow: inset 0 12px 10px -10px rgba(0,0,0,.45), inset 0 -12px 10px -10px rgba(0,0,0,.45); }
+textarea.more-above { box-shadow: inset 0 12px 10px -10px rgba(0,0,0,.45); }
+textarea.more-below { box-shadow: inset 0 -12px 10px -10px rgba(0,0,0,.45); }
+textarea.more-above.more-below { box-shadow: inset 0 12px 10px -10px rgba(0,0,0,.45), inset 0 -12px 10px -10px rgba(0,0,0,.45); }
 /* The new feature form: a label over each field. */
 .form label { display: block; margin-top: 14px; font-size: 14px; font-weight: 600; }
 .form label > input, .form label > select, .form label > textarea { margin-top: 6px; font-weight: 400; }
@@ -248,9 +255,10 @@ textarea.above.below { box-shadow: inset 0 12px 10px -10px rgba(0,0,0,.45), inse
 .form .checks input { width: auto; min-width: 22px; min-height: 22px; }
 .form .caption { margin-top: 14px; font-size: 14px; font-weight: 600; }
 .new-link {
-  display: block; text-align: center; margin: 4px 0 8px; padding: 10px 16px; border-radius: 10px;
-  background: var(--accent); color: var(--on-accent); font-weight: 650; text-decoration: none;
+  display: block; text-align: center; margin: 16px 0 8px; padding: 10px 16px; border-radius: 10px;
+  background: var(--raised); border: 1px solid var(--line); color: var(--text); font-weight: 550;
 }
+.new-link:active { filter: brightness(.92); }
 .sendback { margin-top: 12px; }
 .sendback summary { color: var(--accent); padding: 6px 0; }
 .sendback textarea { margin: 6px 0 8px; }
@@ -261,8 +269,8 @@ textarea.above.below { box-shadow: inset 0 12px 10px -10px rgba(0,0,0,.45), inse
 .sev.medium { color: var(--wait); }
 #note {
   position: fixed; left: 12px; right: 12px; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 3;
-  background: var(--text); color: var(--bg); border-radius: 12px; padding: 10px 14px; font-size: 14px;
-  box-shadow: 0 4px 16px rgba(0,0,0,.25);
+  background: #282c34; color: #dce0e5; border: 1px solid #464b57; border-radius: 12px;
+  padding: 10px 14px; font-size: 14px; box-shadow: 0 4px 16px rgba(0,0,0,.25);
 }
 #note .error { color: #ff8787; }
 #note .warning { color: #ffc078; }
@@ -277,7 +285,7 @@ body.with-bar #note { bottom: calc(var(--bar-h, calc(104px + env(safe-area-inset
 body.with-bar main { padding-bottom: calc(var(--bar-h, 110px) + 20px); }
 
 /* A stage's page, as the desktop has it, in words. */
-.page-head h2 { margin-top: 18px; }
+.page-head h2 { font-size: 20px; margin: 18px 0 2px; }
 .page-head .count { color: var(--dim); }
 .pstatus { font-size: 15px; margin-top: 4px; overflow-wrap: anywhere; }
 h3 { font-size: 13px; font-weight: 650; margin: 14px 0 6px; color: var(--quiet); }
@@ -316,26 +324,29 @@ h3 .count { font-weight: 500; }
 .done > .tick { background: var(--ok); box-shadow: none; }
 .at > .tick { box-shadow: inset 0 0 0 2px var(--accent); background: color-mix(in srgb, var(--accent) 25%, transparent); }
 .tail {
-  margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--term-bg); color: var(--term-text);
+  border: 1px solid var(--line-soft); margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--term-bg); color: var(--term-text);
   font: 11.5px/1.35 ui-monospace, "SF Mono", Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 240px; overflow-y: auto;
 }
-.card.faded { opacity: .6; }
+/* Settled: its words fade, its buttons stay as they work. */
+.card.faded > :not(.buttons) { opacity: .6; }
 details.card > summary, details.fold > summary, .card > details.in > summary { list-style: none; cursor: pointer; }
 details.card > summary::-webkit-details-marker, details.fold > summary::-webkit-details-marker,
 .card > details.in > summary::-webkit-details-marker { display: none; }
 details.card > summary .top::after, details.fold > summary h2::after, details.fold > summary h3::after,
 .card > details.in > summary .top::after {
-  content: "›"; color: var(--dim); font-size: 18px; line-height: 1; margin-left: auto; transition: transform .15s;
+  content: ""; flex: none; align-self: center; width: 7px; height: 7px; margin: 0 4px 4px auto;
+  border: solid var(--dim); border-width: 0 2px 2px 0; transform: rotate(45deg); transition: transform .15s;
 }
 details[open].card > summary .top::after, details[open].fold > summary h2::after,
 details[open].fold > summary h3::after,
-.card > details[open].in > summary .top::after { transform: rotate(90deg); }
+.card > details[open].in > summary .top::after { transform: translateY(4px) rotate(-135deg); }
+details.fold > summary h3 { display: flex; align-items: center; gap: 6px; }
 details.card > p, .card > details.in > p { font-size: 14px; overflow-wrap: anywhere; }
 .history-fold .last { margin: -2px 0 4px; overflow-wrap: anywhere; }
 .history-fold[open] .last { display: none; }
 .doc.card { padding: 4px 16px; font-size: 15px; }
-.doc h1 { font-size: 20px; } .doc h2 { font-size: 13px; margin: 18px 0 6px; } .doc h3 { font-size: 15px; color: var(--text); }
+.doc h1 { font-size: 20px; } .doc h2 { font-size: 16px; margin: 18px 0 6px; } .doc h3 { font-size: 15px; color: var(--text); }
 .doc h2::after { content: none; }
 .doc ul, .doc ol { padding-left: 22px; }
 .figures { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-bottom: 8px; }
@@ -366,8 +377,8 @@ button.failed { border-color: var(--bad); color: var(--bad); background: color-m
 .file-fold + .group { margin-top: 10px; }
 
 /* The page's rare buttons: a menu at its top right. */
-.page-head { position: relative; padding-right: 48px; }
-.menu { position: absolute; top: -4px; right: 0; z-index: 2; }
+.page-head { position: relative; padding-right: 48px; margin-bottom: 10px; }
+.menu { position: absolute; top: -3px; right: 0; z-index: 2; }
 .menu > summary {
   list-style: none; cursor: pointer; width: 40px; height: 36px; border-radius: 10px;
   display: flex; align-items: center; justify-content: center; font-size: 20px; color: var(--quiet);
@@ -379,3 +390,18 @@ button.failed { border-color: var(--bad); color: var(--bad); background: color-m
   padding: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.2);
 }
 .menu-list button { text-align: left; }
+
+/* Over a pane's output, while more of it can be read. */
+.above { text-align: center; padding: 8px 0; }
+
+/* Close sits apart from the keys, in its tone. */
+#bar .keys button.close { flex: none; margin-left: 10px; padding: 6px 12px; color: var(--bad); background: transparent; }
+
+/* The text a button asks for. */
+#sheet {
+  width: min(100vw - 24px, 560px); max-width: none; padding: 16px; color: var(--text); background: var(--card);
+  border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 8px 32px rgba(0,0,0,.3);
+}
+#sheet::backdrop { background: rgba(0,0,0,.45); }
+#sheet label { display: block; font-weight: 600; margin-bottom: 8px; }
+#sheet .buttons { justify-content: flex-end; }

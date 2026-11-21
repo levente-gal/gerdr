@@ -11,22 +11,25 @@ const offline = document.getElementById("offline");
 const note = document.getElementById("note");
 const bar = document.getElementById("bar");
 
-// Colours an agent pane's output; plain text if the library can't load.
-let ansi = null;
-import("https://cdn.jsdelivr.net/npm/ansi_up@6.0.2/ansi_up.js")
-  .then((m) => { ansi = new m.AnsiUp(); ansi.use_classes = false; })
-  .catch(() => {});
+// Colours an agent pane's output. Served from here: no outside script
+// runs on a page that can type to agents.
+import { AnsiUp } from "/ansi_up.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const q = (o) => new URLSearchParams(o).toString();
 
+// As the desktop says it (clock.rs): "5m ago", "3h ago", "yesterday".
 function ago(at, now) {
   const s = Math.max(0, now - at);
+  const DAY = 86400;
   if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-  return `${Math.floor(s / 86400)} d ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < DAY) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 2 * DAY) return "yesterday";
+  if (s < 7 * DAY) return `${Math.floor(s / DAY)}d ago`;
+  if (s < 35 * DAY) return `${Math.floor(s / (7 * DAY))}w ago`;
+  return `${Math.floor(s / (30 * DAY))}mo ago`;
 }
 
 let lastOk = 0;
@@ -121,13 +124,14 @@ const toneOf = (f) => f.card?.tone ||
 const waitsBox = (w, now) => w
   ? `<div class="waits"><b>${esc(w.title)}</b> · ${esc(w.next)} · ${ago(w.since, now)}</div>` : "";
 
+// A sidebar card: its line says what it waits for, its page says more;
+// only agents at work or waiting show.
 function card(f, now) {
   return `<a class="card tone-${esc(toneOf(f))}" href="${href("f", f.project, f.slug)}">
     <div class="top"><span class="name">${esc(f.title)}</span><span class="ago">${ago(f.updated, now)}</span></div>
     <div class="meta">${esc(f.projectName)}</div>
     <div class="status">${dots(f)}<span class="line">${esc(f.card?.line || f.stage)}</span></div>
-    ${waitsBox(f.waits, now)}
-    ${chips(f.agents)}
+    ${chips(f.agents.filter((a) => !["idle", "unknown"].includes(a.status)))}
   </a>`;
 }
 
@@ -198,8 +202,8 @@ async function list() {
   if (!d.features.length) html += `<p class="quiet">No open features.</p>`;
   const group = (name, fs) => fs.length
     ? `<h2>${name} <span class="count">${fs.length}</span></h2>` + fs.map((f) => card(f, d.now)).join("") : "";
-  html = `<a class="new-link" href="#/new">New feature</a>` + html;
   html += group("Waiting for you", waiting) + group("In progress", rest);
+  html += `<a class="new-link" href="#/new">New feature</a>`;
   html += await pushCard();
   return { title: "gerdr", html };
 }
@@ -260,7 +264,7 @@ const ticks = (items, running = []) => `<ul class="ticks">${items.map(([done, te
   `<li class="${done ? "done" : ""}${running.includes(i) ? " at" : ""}">
     <span class="tick${running.includes(i) ? " blink" : ""}">${done ? "✓" : ""}</span><span>${esc(text)}</span></li>`).join("")}</ul>`;
 const meter = (done, total, cls = "") => total
-  ? `<div class="bar ${cls}"><span style="width:${Math.round(100 * done / total)}%"></span></div>` : "";
+  ? `<div class="meter ${cls}"><span style="width:${Math.round(100 * done / total)}%"></span></div>` : "";
 
 // A button of gerdr's page, pressed by what it does. One whose desk opens
 // a field asks for its text first; picks and marks press without a
@@ -376,6 +380,14 @@ function section(x, f, p, s) {
   }
 }
 
+const fold = (label, n, inner) =>
+  `<details class="fold"><summary><h3>${esc(label)} <span class="count">${n}</span></h3></summary>${inner}</details>`;
+// What settled findings are, by their lit button: Passed, Done, else Decided.
+const SETTLED = { Pass: "Passed", Done: "Done" };
+const settledWord = (xs) => [...new Set(xs.map((x) =>
+  SETTLED[x.buttons?.find((b) => b.tone === "passed")?.label] || "Decided"))]
+  .map((w, i) => i ? w.toLowerCase() : w).join(" or ");
+
 // A stage's page: what it is for, how it stands, its rare buttons in a
 // menu at its top right, its sections as the desktop's page has them,
 // each with its buttons, and its latest files: the fix plan and evidence
@@ -395,9 +407,21 @@ function stagePage(f, p, s) {
   const last = rest.map((x) => !!x.steps).lastIndexOf(true);
   const adds = (b) => last >= 0 && b.id === "AddComment";
   html += actions({ ...f.offer, buttons: (f.offer.buttons || []).filter((b) => !adds(b)) });
+  // Settled findings fold under the open ones, earlier fix rounds under
+  // the latest: what is still to do stays in sight.
+  let settled = [], rounds = [], addHere = false;
+  const flush = () => {
+    if (settled.length) html += fold(settledWord(settled), settled.length, settled.map((x) => section(x, f, p, s)).join(""));
+    if (rounds.length) html += fold("Earlier rounds", rounds.length, rounds.map((x) => section(x, f, p, s)).join(""));
+    if (addHere) html += row((f.offer.buttons || []).filter(adds));
+    settled = []; rounds = []; addHere = false;
+  };
   rest.forEach((x, i) => {
-    html += section(x, f, p, s);
-    if (i === last) html += row((f.offer.buttons || []).filter(adds));
+    if (x.kind === "finding" && x.faded) settled.push(x);
+    else if (x.kind === "round" && rest[i - 1]?.kind === "round") rounds.push(x);
+    else html += section(x, f, p, s);
+    if (i === last) addHere = true;
+    if (rest[i + 1]?.kind !== x.kind) flush();
   });
   if (pg.files?.length) {
     html += `<h2>Latest files</h2>` + pg.files.filter((d) => d.html || d.error).map((d) =>
@@ -414,17 +438,19 @@ function stagePage(f, p, s) {
 
 async function feature(p, s, stage) {
   const f = await get(`/api/feature?${q(stage === undefined ? { p, s } : { p, s, stage })}`);
-  const tone = toneOf(f);
+  // The rail, the waits box and the page say where it stands.
   let html = `<div class="meta quiet small">${esc(f.projectName)}</div>`;
-  html += `<div class="status"><span class="line tone-${esc(tone)}">${esc(f.card?.line || f.stage)}</span></div>`;
   html += rail(f, p, s);
   html += waitsBox(f.waits, f.now);
   html += stagePage(f, p, s);
-  if (f.agents.length) {
-    html += `<h2>Agents <span class="count">${f.agents.length}</span></h2><div class="group">` +
-      f.agents.map((a) => `<a class="row" href="${href("pane", p, s, a.pane)}">
+  // Agents the stage page has no card for: the page's own show there.
+  const onPage = new Set(f.page.sections.filter((x) => x.kind === "agent").map((x) => x.pane));
+  const others = f.agents.filter((a) => !onPage.has(a.pane));
+  if (others.length) {
+    html += `<h2>${onPage.size ? "Other agents" : "Agents"} <span class="count">${others.length}</span></h2><div class="group">` +
+      others.map((a) => `<a class="row" href="${href("pane", p, s, a.pane)}">
         <span>${esc(a.label)}</span>${chip(a, a.status)}</a>`).join("") + `</div>`;
-  } else {
+  } else if (!f.agents.length && (!onPage.size || f.agentsError)) {
     html += `<h2>Agents</h2><p class="quiet small">${esc(f.agentsError || "No agent running for it here.")}</p>`;
   }
   html += history(f.history, f.now);
@@ -520,18 +546,35 @@ async function doc(p, s, name) {
   return { title: name, back: href("f", p, s), html: `<article class="doc">${d.html}</article>`, keep: true };
 }
 
+// How much of a pane is read: its last lines, more of them, then all its
+// scrollback. Each scroll to the top reads the next; a new pane starts over.
+const DEPTHS = [400, 1000, "all"];
+let depth = { pane: "", at: 0, more: false, loading: false };
+
 async function pane(p, s, id) {
-  const d = await get(`/api/pane?${q({ p, s, pane: id })}`);
+  if (depth.pane !== id) depth = { pane: id, at: 0, more: false, loading: false };
+  const d = await get(`/api/pane?${q({ p, s, pane: id, lines: DEPTHS[depth.at] })}`);
+  depth.more = d.more && depth.at < DEPTHS.length - 1;
   // TUIs pad lines to their width: on a phone those runs wrap into blank rows.
   const raw = d.text.replace(/\r\n/g, "\n").replace(/ {6,}/g, "   ")
     .replace(/([─━═▀▄])\1{29,}/g, (_, c) => c.repeat(30));
-  const text = ansi ? ansi.ansi_to_html(raw) : esc(raw.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ""));
-  return { title: d.label, back: href("f", p, s), html: `<pre class="term">${text}</pre>`, pane: true,
+  const text = readable(new AnsiUp().ansi_to_html(raw));
+  const above = depth.more ? `<div class="above quiet small">Scroll up for earlier output</div>` : "";
+  return { title: d.label, back: href("f", p, s), html: `${above}<pre class="term">${text}</pre>`, pane: true,
     bar: `<form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l]) => `<button data-key="${k}">${l}</button>`).join("")}
-        <button data-key="close" title="Close its tab, as on the desktop">Close</button></div>` };
+        <button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button></div>` };
 }
+
+// A program with a light theme paints light rows: text on them in the
+// terminal's own colour gets one that reads there, and so on dark rows.
+const readable = (html) => html.replace(/<span style="([^"]*)">/g, (m, st) => {
+  const bg = /background-color:rgb\((\d+),(\d+),(\d+)\)/.exec(st);
+  if (!bg || /(^|;)color:/.test(st)) return m;
+  const light = 0.299 * bg[1] + 0.587 * bg[2] + 0.114 * bg[3] > 140;
+  return `<span style="${st};color:${light ? "#2a2c33" : "#dce0e5"}">`;
+});
 
 // Keys for an agent's menus and prompts: herdr's name, and the label.
 const KEYS = [["esc", "Esc"], ["1", "1"], ["2", "2"], ["3", "3"], ["Up", "↑"], ["Down", "↓"], ["Enter", "⏎"]];
@@ -549,20 +592,37 @@ function route() {
   }
 }
 
+// A fold is known by its title, so one added above it opens no other.
+function foldKey(d, seen) {
+  const s = d.querySelector(":scope > summary");
+  const k = (s?.querySelector(".name, h2, h3")?.firstChild?.textContent || s?.textContent || "").trim();
+  const n = seen.get(k) || 0;
+  seen.set(k, n + 1);
+  return `${k}#${n}`;
+}
+const foldsOpen = () => {
+  const seen = new Map();
+  return new Map([...main.querySelectorAll("details")].map((d) => [foldKey(d, seen), d.open]));
+};
+
 let timer = null;
 let shown = "";
 let barFor = null;
 // Something typed on the page: a refresh would lose it.
 const typing = () => [...main.querySelectorAll("textarea, input")].some((e) => e.value || e === document.activeElement);
-async function render(fresh, force) {
+// Only the latest read is shown: an earlier one may come back after it.
+let reads = 0;
+async function render(fresh, force, keepBottom) {
   clearTimeout(timer);
+  const read = ++reads;
   const r = route();
   const hash = location.hash;
   // A pane read follows the end unless the user scrolled up from it.
   const atEnd = window.innerHeight + window.scrollY >= document.body.scrollHeight - 40;
+  const fromBottom = document.body.scrollHeight - window.scrollY;
   try {
     const v = await r.load();
-    if (hash !== location.hash) return;
+    if (hash !== location.hash || read !== reads) return;
     titleEl.textContent = v.title;
     back.hidden = !v.back;
     if (v.back) back.href = v.back;
@@ -574,10 +634,16 @@ async function render(fresh, force) {
     }
     if (v.html !== shown && (fresh || force || !typing())) {
       const y = window.scrollY;
-      const open = [...main.querySelectorAll("details")].map((d) => d.open);
+      const open = foldsOpen();
       const railX = main.querySelector(".rail-wrap")?.scrollLeft;
       main.innerHTML = v.html;
-      if (!fresh) main.querySelectorAll("details").forEach((d, i) => { d.open = open[i] || false; });
+      if (!fresh) {
+        const seen = new Map();
+        main.querySelectorAll("details").forEach((d) => {
+          const k = foldKey(d, seen);
+          if (open.has(k)) d.open = open.get(k);
+        });
+      }
       shown = v.html;
       // What blinks keeps its beat across a refresh.
       main.querySelectorAll(".blink").forEach((e) => { e.style.animationDelay = `-${Date.now() % 1600}ms`; });
@@ -589,11 +655,13 @@ async function render(fresh, force) {
         if (at) wrap.scrollLeft = at.offsetLeft - (wrap.clientWidth - at.offsetWidth) / 2;
       } else if (wrap) wrap.scrollLeft = railX;
       if (v.pane && (fresh || atEnd)) window.scrollTo(0, document.body.scrollHeight);
+      // Earlier output came in above: what was read stays in view.
+      else if (keepBottom) window.scrollTo(0, document.body.scrollHeight - fromBottom);
       else if (!fresh) window.scrollTo(0, y);
     }
     if (fresh && !v.pane) window.scrollTo(0, 0);
   } catch (e) {
-    if (hash !== location.hash) return;
+    if (hash !== location.hash || read !== reads) return;
     if (fresh || e.message !== "offline") {
       // Home-screen apps have no browser Back: always a way out.
       back.hidden = route().load === list;
@@ -607,6 +675,33 @@ async function render(fresh, force) {
 
 // The route's feature and pane: `#/f/<p>/<s>` or `#/pane/<p>/<s>/<pane>`.
 const here = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+
+// What a button asks for, in a box that shows all of it. Enter sends, as
+// the desktop's field does; line breaks become spaces. Null on Cancel.
+const sheet = document.getElementById("sheet");
+function askText(question, value, action) {
+  sheet.innerHTML = `<form method="dialog"><label for="sheetText">${esc(question)}</label>
+    <textarea id="sheetText" rows="4" enterkeyhint="send">${esc(value)}</textarea>
+    <div class="buttons"><button value="">Cancel</button><button class="primary" value="ok">${esc(action)}</button></div></form>`;
+  const box = sheet.querySelector("textarea");
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sheet.querySelector("button.primary").click(); }
+  });
+  sheet.returnValue = "";
+  sheet.showModal();
+  box.focus();
+  box.setSelectionRange(box.value.length, box.value.length);
+  return new Promise((done) => sheet.addEventListener("close", () =>
+    done(sheet.returnValue === "ok" ? box.value.replace(/\s*\n\s*/g, " ").trim() : null), { once: true }));
+}
+
+// A tap outside an open ⋯ menu closes it. A pointer, not a click: iOS
+// sends no click for a tap on the page's plain parts.
+document.addEventListener("pointerdown", (e) => {
+  document.querySelectorAll("details.menu[open]").forEach((m) => {
+    if (!m.contains(e.target)) m.removeAttribute("open");
+  });
+});
 
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push]");
@@ -623,7 +718,7 @@ document.addEventListener("click", async (e) => {
       const id = b.dataset.press;
       let text;
       if (b.dataset.asks !== undefined) {
-        text = prompt(b.dataset.asks, b.dataset.value || "");
+        text = await askText(b.dataset.asks, b.dataset.value || "", b.textContent.trim().replace(/…$/, ""));
         if (text === null) return;
       } else if (!b.classList.contains("quiet-press") && !confirm(`${b.textContent.trim()}: ${titleEl.textContent}?`)) {
         return;
@@ -679,13 +774,21 @@ function shade(box) {
   // padding out of view hides no text.
   const cs = getComputedStyle(box);
   const [top, bottom] = [parseFloat(cs.paddingTop) || 0, parseFloat(cs.paddingBottom) || 0];
-  box.classList.toggle("above", box.scrollTop > top + 1);
-  box.classList.toggle("below", box.scrollTop + box.clientHeight < box.scrollHeight - bottom - 1);
+  box.classList.toggle("more-above", box.scrollTop > top + 1);
+  box.classList.toggle("more-below", box.scrollTop + box.clientHeight < box.scrollHeight - bottom - 1);
 }
 document.addEventListener("input", (e) => { if (e.target.matches("textarea")) fit(e.target); });
 document.addEventListener("scroll", (e) => { if (e.target.matches?.("textarea")) shade(e.target); }, true);
 // The page's end stays clear of the bar as its box grows.
 new ResizeObserver(() => document.body.style.setProperty("--bar-h", `${bar.offsetHeight}px`)).observe(bar);
+
+// At the top of a pane's output, read more of it.
+window.addEventListener("scroll", async () => {
+  if (window.scrollY > 80 || !depth.more || depth.loading || here()[0] !== "pane") return;
+  depth.loading = true;
+  depth.at += 1;
+  try { await render(false, true, true); } finally { depth.loading = false; }
+}, { passive: true });
 
 window.addEventListener("hashchange", () => render(true));
 document.addEventListener("visibilitychange", () => { if (!document.hidden) render(false); });
