@@ -238,11 +238,17 @@ impl Painter {
         }
     }
 
-    /// A field's scrollbar: its track, faint, and its thumb.
+    /// A field's scrollbar: its track, faint, and its thumb in the muted
+    /// ink, stronger than a list's, as it is all that says the field holds
+    /// more than it shows.
     pub(super) fn wrap_bar(&self, c: &mut Canvas, thumb: &Thumb, scale: f64, p: &Palette) {
         let (x, y, w, h) = rect_px(thumb.track, scale);
-        c.rounded(x, y, w, h, w / 2.0, mix(p.element, p.muted, 0.18));
-        self.thumb_in(c, thumb, scale, p);
+        c.rounded(x, y, w, h, w / 2.0, mix(p.element, p.muted, 0.2));
+        let (ty, th) = (
+            (thumb.top * scale).round() as f32,
+            (thumb.h * scale).round() as f32,
+        );
+        c.rounded(x, ty, w, th, w / 2.0, p.muted);
     }
 }
 
