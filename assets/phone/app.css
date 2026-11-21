@@ -55,17 +55,21 @@ header {
   -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--line-soft);
 }
-header h1 { font-size: 17px; font-weight: 650; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A long title takes two lines, then ends in an ellipsis. */
+header h1 {
+  font-size: 17px; font-weight: 650; line-height: 1.25; margin: 0; flex: 1; min-width: 0; overflow: hidden;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere;
+}
 #back { font-size: 30px; line-height: 1; padding: 0 8px 3px 0; margin-left: -4px; }
 #seen { color: var(--quiet); font-size: 12px; white-space: nowrap; }
 #offline { background: var(--bad); color: #fff; padding: 8px 16px; font-size: 14px; }
 main { padding: 8px 16px 32px; max-width: 760px; margin: 0 auto; }
 h2 {
   display: flex; align-items: baseline; gap: 6px;
-  font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .06em;
-  color: var(--quiet); margin: 22px 0 8px;
+  font-size: 15px; font-weight: 650; color: var(--text); margin: 24px 0 8px;
 }
-h2 .count { font-weight: 500; letter-spacing: 0; text-transform: none; }
+h2 .count { font-weight: 500; color: var(--quiet); }
+main > h2:first-child { margin-top: 12px; }
 .quiet { color: var(--quiet); }
 .small { font-size: 13px; }
 .error { color: var(--bad); }
@@ -101,9 +105,9 @@ a.card:active { background: var(--raised); }
 .card .meta { color: var(--quiet); font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
 .status { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 14px; }
 .status .line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tone-working .line, .line.tone-working { color: var(--accent); }
-.tone-waits .line, .line.tone-waits { color: var(--wait); }
-.tone-failed .line, .line.tone-failed { color: var(--bad); }
+.tone-working .line { color: var(--accent); }
+.tone-waits .line { color: var(--wait); }
+.tone-failed .line { color: var(--bad); }
 
 /* Stage dots, as on a sidebar card: the big one is the card's stage. */
 .dots { display: flex; align-items: center; gap: 3px; flex: none; }
@@ -242,9 +246,10 @@ textarea:focus, input:focus, select:focus { outline: 2px solid var(--accent); ou
 .form .checks input { width: auto; min-width: 22px; min-height: 22px; }
 .form .caption { margin-top: 14px; font-size: 14px; font-weight: 600; }
 .new-link {
-  display: block; text-align: center; margin: 4px 0 8px; padding: 10px 16px; border-radius: 10px;
-  background: var(--accent); color: var(--on-accent); font-weight: 650; text-decoration: none;
+  display: block; text-align: center; margin: 16px 0 8px; padding: 10px 16px; border-radius: 10px;
+  background: var(--raised); border: 1px solid var(--line); color: var(--text); font-weight: 550;
 }
+.new-link:active { filter: brightness(.92); }
 .sendback { margin-top: 12px; }
 .sendback summary { color: var(--accent); padding: 6px 0; }
 .sendback textarea { margin: 6px 0 8px; }
@@ -271,7 +276,7 @@ body.with-bar #note { bottom: calc(120px + env(safe-area-inset-bottom)); }
 body.with-bar main { padding-bottom: 130px; }
 
 /* A stage's page, as the desktop has it, in words. */
-.page-head h2 { margin-top: 18px; }
+.page-head h2 { font-size: 20px; margin: 18px 0 2px; }
 .page-head .count { color: var(--dim); }
 .pstatus { font-size: 15px; margin-top: 4px; overflow-wrap: anywhere; }
 h3 { font-size: 13px; font-weight: 650; margin: 14px 0 6px; color: var(--quiet); }
@@ -329,7 +334,7 @@ details.card > p, .card > details.in > p { font-size: 14px; overflow-wrap: anywh
 .history-fold .last { margin: -2px 0 4px; overflow-wrap: anywhere; }
 .history-fold[open] .last { display: none; }
 .doc.card { padding: 4px 16px; font-size: 15px; }
-.doc h1 { font-size: 20px; } .doc h2 { font-size: 13px; margin: 18px 0 6px; } .doc h3 { font-size: 15px; color: var(--text); }
+.doc h1 { font-size: 20px; } .doc h2 { font-size: 16px; margin: 18px 0 6px; } .doc h3 { font-size: 15px; color: var(--text); }
 .doc h2::after { content: none; }
 .doc ul, .doc ol { padding-left: 22px; }
 .figures { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-bottom: 8px; }
@@ -360,8 +365,8 @@ button.failed { border-color: var(--bad); color: var(--bad); background: color-m
 .file-fold + .group { margin-top: 10px; }
 
 /* The page's rare buttons: a menu at its top right. */
-.page-head { position: relative; padding-right: 48px; }
-.menu { position: absolute; top: -4px; right: 0; z-index: 2; }
+.page-head { position: relative; padding-right: 48px; margin-bottom: 10px; }
+.menu { position: absolute; top: -3px; right: 0; z-index: 2; }
 .menu > summary {
   list-style: none; cursor: pointer; width: 40px; height: 36px; border-radius: 10px;
   display: flex; align-items: center; justify-content: center; font-size: 20px; color: var(--quiet);

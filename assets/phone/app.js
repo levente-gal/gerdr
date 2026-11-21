@@ -198,8 +198,8 @@ async function list() {
   if (!d.features.length) html += `<p class="quiet">No open features.</p>`;
   const group = (name, fs) => fs.length
     ? `<h2>${name} <span class="count">${fs.length}</span></h2>` + fs.map((f) => card(f, d.now)).join("") : "";
-  html = `<a class="new-link" href="#/new">New feature</a>` + html;
   html += group("Waiting for you", waiting) + group("In progress", rest);
+  html += `<a class="new-link" href="#/new">New feature</a>`;
   html += await pushCard();
   return { title: "gerdr", html };
 }
@@ -260,7 +260,7 @@ const ticks = (items, running = []) => `<ul class="ticks">${items.map(([done, te
   `<li class="${done ? "done" : ""}${running.includes(i) ? " at" : ""}">
     <span class="tick${running.includes(i) ? " blink" : ""}">${done ? "✓" : ""}</span><span>${esc(text)}</span></li>`).join("")}</ul>`;
 const meter = (done, total, cls = "") => total
-  ? `<div class="bar ${cls}"><span style="width:${Math.round(100 * done / total)}%"></span></div>` : "";
+  ? `<div class="meter ${cls}"><span style="width:${Math.round(100 * done / total)}%"></span></div>` : "";
 
 // A button of gerdr's page, pressed by what it does. One whose desk opens
 // a field asks for its text first; picks and marks press without a
@@ -414,9 +414,8 @@ function stagePage(f, p, s) {
 
 async function feature(p, s, stage) {
   const f = await get(`/api/feature?${q(stage === undefined ? { p, s } : { p, s, stage })}`);
-  const tone = toneOf(f);
+  // The rail, the waits box and the page say where it stands.
   let html = `<div class="meta quiet small">${esc(f.projectName)}</div>`;
-  html += `<div class="status"><span class="line tone-${esc(tone)}">${esc(f.card?.line || f.stage)}</span></div>`;
   html += rail(f, p, s);
   html += waitsBox(f.waits, f.now);
   html += stagePage(f, p, s);
