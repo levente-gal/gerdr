@@ -5991,6 +5991,9 @@ impl Gerdr {
         self.features.dialog = None;
         self.features.panel = None;
         self.project = Some(id.to_owned());
+        // Another gerdr may have shown it since they were read: what it
+        // saved is what shows, and what saves from here.
+        self.load_features();
         let instance = if alongside {
             format!("{id}@{}", self.socket_name.to_string_lossy())
         } else {

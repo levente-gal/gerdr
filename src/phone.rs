@@ -464,22 +464,22 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
         "create" => phone_control::CREATE_TIME + Duration::from_secs(5),
         _ => GERDR_TIME,
     };
-    match gerdr_within(&request, time) {
+    match gerdr_within(Some(&project), &request, time) {
         Ok(answer) => Reply::json(&answer),
         Err(why) => Reply::error(502, &why),
     }
 }
 
 /// Ask the gerdr running here: `request` on its phone socket (see
-/// `phone_control`), the one changed last first.
-// shortcut: with several gerdrs running, the newest that answers acts; any
-// of them knows every project's features, so that holds until one doesn't.
-fn gerdr(request: &Value) -> Result<Value, String> {
-    gerdr_within(request, GERDR_TIME)
+/// `phone_control`). For `project`, the gerdr showing it first: another
+/// gerdr's copy of its features is as of when that one read them. Then the
+/// one changed last first.
+fn gerdr(project: Option<&str>, request: &Value) -> Result<Value, String> {
+    gerdr_within(project, request, GERDR_TIME)
 }
 
 /// `gerdr`, given `time` to answer.
-fn gerdr_within(request: &Value, time: Duration) -> Result<Value, String> {
+fn gerdr_within(project: Option<&str>, request: &Value, time: Duration) -> Result<Value, String> {
     let dir = phone_control::dir().ok_or("No runtime folder to find gerdr in")?;
     let mut sockets: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(&dir)
         .map_err(|e| format!("gerdr isn't running ({e})"))?
@@ -488,6 +488,11 @@ fn gerdr_within(request: &Value, time: Duration) -> Result<Value, String> {
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
         .collect();
     sockets.sort_by_key(|s| std::cmp::Reverse(s.0));
+    let lock = project.and_then(|id| Some(crate::project_lock::dir()?.join(format!("{id}.lock"))));
+    if let Some(lock) = lock {
+        // Stable: newest first still, among those that don't show it.
+        sockets.sort_by_key(|(_, path)| !socket_holds(path, &lock));
+    }
     for (_, path) in sockets {
         let mut stream = match UnixStream::connect(&path) {
             Ok(stream) => stream,
@@ -512,6 +517,23 @@ fn gerdr_within(request: &Value, time: Duration) -> Result<Value, String> {
         return serde_json::from_str(&line).map_err(|e| format!("gerdr's answer: {e}"));
     }
     Err("gerdr isn't running".into())
+}
+
+/// Whether the gerdr listening on phone socket `socket` (`phone-<pid>.sock`)
+/// holds file `lock` open: shows its project.
+fn socket_holds(socket: &Path, lock: &Path) -> bool {
+    let name = socket.file_name().map(|n| n.to_string_lossy().into_owned());
+    let pid = name
+        .as_deref()
+        .and_then(|n| n.strip_prefix("phone-")?.strip_suffix(".sock"));
+    let Some(pid) = pid.filter(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())) else {
+        return false;
+    };
+    let mut fds = std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .into_iter()
+        .flatten()
+        .flatten();
+    fds.any(|fd| std::fs::read_link(fd.path()).is_ok_and(|to| to == lock))
 }
 
 /// The keys the phone may press in an agent's pane: herdr's names.
@@ -559,7 +581,7 @@ fn agent_input(project: &str, slug: &str, pane: &str, line: &str, key: &str) -> 
 fn new_offer() -> Value {
     let all = projects();
     let ids: Vec<&str> = all.iter().map(|p| p.id.as_str()).collect();
-    let (mut agents, error) = match gerdr(&json!({ "op": "new-offer", "projects": ids })) {
+    let (mut agents, error) = match gerdr(None, &json!({ "op": "new-offer", "projects": ids })) {
         Ok(answer) => (answer, None),
         Err(why) => (Value::Null, Some(why)),
     };
@@ -640,25 +662,34 @@ fn all_features() -> Value {
 
 /// Put on each of `features` its sidebar card as gerdr draws it (marks,
 /// line, tone); none when gerdr can't be asked, and the stages alone show.
+/// Each project's are asked of the gerdr showing it, if one does.
 fn add_cards(features: &mut [Value]) {
-    let asked: Vec<Value> = (features.iter())
-        .map(|f| json!([f["project"], f["slug"]]))
-        .collect();
-    let mut cards = match gerdr(&json!({ "op": "cards", "features": asked })) {
-        Ok(answer) => answer,
-        Err(why) => {
-            // The page says gerdr isn't there by the actions it can't offer.
-            tracing::debug!("No cards from gerdr: {why}");
-            return;
+    let mut by_project: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
+    for f in features.iter() {
+        let project = f["project"].as_str().unwrap_or("").to_owned();
+        (by_project.entry(project).or_default()).push(json!([f["project"], f["slug"]]));
+    }
+    let mut cards = serde_json::Map::new();
+    for (project, asked) in by_project {
+        match gerdr(Some(&project), &json!({ "op": "cards", "features": asked })) {
+            Ok(mut answer) => {
+                if let Value::Object(got) = answer["cards"].take() {
+                    cards.extend(got);
+                }
+            }
+            Err(why) => {
+                // The page says gerdr isn't there by the actions it can't offer.
+                tracing::debug!("No cards of {project} from gerdr: {why}");
+            }
         }
-    };
+    }
     for f in features {
         let key = format!(
             "{}/{}",
             f["project"].as_str().unwrap_or(""),
             f["slug"].as_str().unwrap_or("")
         );
-        f["card"] = cards["cards"][&key].take();
+        f["card"] = cards.remove(&key).unwrap_or(Value::Null);
     }
 }
 
@@ -783,7 +814,8 @@ fn feature_page(project: &str, slug: &str, stage: Option<usize>) -> Reply {
         .collect();
     page["history"] = history.into();
     let request = json!({ "op": "offer", "project": project.id, "slug": slug, "stage": stage });
-    let mut offer = gerdr(&request).unwrap_or_else(|why| json!({ "error": why }));
+    let mut offer =
+        gerdr(Some(&project.id), &request).unwrap_or_else(|why| json!({ "error": why }));
     // Without gerdr, the stage alone, and its files.
     let mut shown = offer["page"].take();
     if !shown.is_object() {
@@ -1052,6 +1084,20 @@ fn chat_tail(path: &Path, limit: u64) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_socket_holds_the_lock_its_gerdr_has_open() {
+        let dir = std::env::temp_dir().join(format!("gerdr-socket-holds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let lock = dir.join("p.lock");
+        let _open = std::fs::File::create(&lock).expect("lock");
+        let mine = dir.join(format!("phone-{}.sock", std::process::id()));
+        assert!(socket_holds(&mine, &lock));
+        assert!(!socket_holds(&mine, &dir.join("q.lock")));
+        assert!(!socket_holds(&dir.join("phone-.sock"), &lock));
+        assert!(!socket_holds(&dir.join("phone-../1.sock"), &lock));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_transcript_cut_short_is_read_from_its_first_whole_line() {
