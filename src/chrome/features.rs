@@ -19,9 +19,9 @@ use super::{
     ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP,
     QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, agent_icon,
     band, button_width, check, chevron_down, chevron_side, coverage, cross, dialog_buttons,
-    field_lines_height, field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs,
-    icon_sdf, measure, measure_bold, measured_footer_height, mix, phys, physical, rect_px, segment,
-    segment_tint, status_dot,
+    field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs, icon_sdf, measure,
+    measure_bold, measured_footer_height, mix, phys, physical, rect_px, segment, segment_tint,
+    status_dot, wrap_field_height,
 };
 use super::{
     Standing, code_mark, ellipsis, eye, flask, magnifier, plan_review_mark, repos::draw_counted,
@@ -3176,7 +3176,7 @@ impl Stack {
         }
         if let Some(field) = &card.field {
             self.y += FINDING_GAP;
-            let h = field_lines_height(field.text.split('\n').count());
+            let h = wrap_field_height(field, self.w);
             let rect = Rectangle::new((self.x, self.y).into(), (self.w, h).into());
             self.pieces.push((rect, Piece::CardField(k)));
             self.y += h;
@@ -3801,10 +3801,10 @@ impl Stack {
                 self.y += FINDING_GAP;
                 self.sheet_shots(k, &sheet.shots, text_x, right);
             }
-            // As tall as its lines, as on a card.
+            // As tall as its rows wrapped, up to five, as on a card.
             if let Some(field) = &card.field {
                 self.y += FINDING_GAP;
-                let h = field_lines_height(field.text.split('\n').count());
+                let h = wrap_field_height(field, self.w);
                 let rect = Rectangle::new((self.x, self.y).into(), (self.w, h).into());
                 self.pieces.push((rect, Piece::CardField(k)));
                 self.y += h;
@@ -8605,7 +8605,7 @@ impl Painter {
                     return;
                 };
                 let hint = card.field_hint;
-                self.field_of_lines(c, text, hint, rect, true, scale, p);
+                self.wrap_field(c, text, hint, rect, true, scale, p);
             }
             Piece::Search { bar, open } => {
                 let (parts, count) = criteria_search_parts(rect, *open);
@@ -9075,7 +9075,7 @@ mod tests {
     use super::*;
     use crate::chrome::sidebar::feature_dots_rect as feature_row_dots;
     use crate::chrome::{
-        FIELD_LINE, ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, contrast, field_line_spot, inside,
+        FIELD_LINE, ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, contrast, inside, wrap_field_spot,
     };
 
     #[test]
@@ -11171,12 +11171,19 @@ mod tests {
         };
         let at = |y: i32| Point::from((three.loc.x as f64 + 5.0, (three.loc.y + y) as f64));
         let line_at = |y: i32| {
-            let (spot, base) = field_line_spot(three, three, &whole, at(y), 1.0);
+            let (spot, base) = wrap_field_spot(three, &whole, at(y), 1.0);
             (spot.line.text, base)
         };
         assert_eq!(line_at(5), ("first".to_owned(), 0));
         assert_eq!(line_at(FIELD_LINE + 5), ("second".to_owned(), 6));
         assert_eq!(line_at(three.size.h + 40), ("third".to_owned(), 13));
+        // A long note wraps to the card, five rows at most.
+        note(&mut view, &"word ".repeat(400));
+        let (long, _, _) = field_of(&view);
+        assert_eq!(
+            long.size.h,
+            one.size.h + (crate::chrome::WRAP_MAX_ROWS as i32 - 1) * FIELD_LINE
+        );
     }
 
     #[test]

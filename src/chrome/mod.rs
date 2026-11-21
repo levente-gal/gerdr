@@ -57,6 +57,7 @@ mod toast;
 mod tooltip;
 mod welcome;
 mod worktrees;
+mod wrap_field;
 
 use std::time::Instant;
 
@@ -113,6 +114,7 @@ pub use toast::*;
 pub use tooltip::*;
 pub use welcome::*;
 pub use worktrees::*;
+pub use wrap_field::*;
 
 pub(crate) type Rect = Rectangle<i32, Logical>;
 

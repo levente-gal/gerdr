@@ -2,13 +2,12 @@
 //! why it is dismissed, its fix and the user's comment, or a comment of the
 //! user's own. Its fields hold lines, wrapped to the field.
 
-use std::ops::Range;
-
+use super::wrap_field::{byte_at, first_shown, row_of, row_step, soft_rows, wrap_thumb};
 use super::{
     BUTTON_RADIUS, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DIALOG_WIDTH, FONT_SIZE,
     LABEL_FONT_SIZE, PADDING, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON_GAP,
-    QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, band, caret, dialog_buttons,
-    measure, phys, rect_px,
+    QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, band, caret, dialog_buttons, phys,
+    rect_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -182,78 +181,10 @@ fn text_width(size: Size<i32, Logical>) -> f32 {
     (DIALOG_WIDTH.min(size.w) - 2 * QUIT_PADDING - 2 * PADDING as i32 - CARET_ROOM).max(1) as f32
 }
 
-/// How wide `text` is, guessed when there is no font.
-fn width(text: &str) -> f32 {
-    measure(text, FONT_SIZE).unwrap_or(text.chars().count() as f32 * FONT_SIZE * 0.55)
-}
-
-/// `text`'s lines as shown in a field `room` wide, as byte ranges: at its
-/// line breaks, and at the last space that fits, else the last character.
-fn soft_rows(text: &str, room: f32) -> Vec<Range<usize>> {
-    let mut rows = Vec::new();
-    let mut at = 0;
-    for part in text.split('\n') {
-        let end = at + part.len();
-        let mut start = at;
-        let mut space = None;
-        for (i, c) in part.char_indices() {
-            let (here, after) = (at + i, at + i + c.len_utf8());
-            if width(&text[start..after]) > room && here > start {
-                let to = space.filter(|s| *s > start).unwrap_or(here);
-                rows.push(start..to);
-                start = to;
-            }
-            if c == ' ' {
-                space = Some(after);
-            }
-        }
-        rows.push(start..end);
-        at = end + 1;
-    }
-    rows
-}
-
-/// The row of `rows` byte `caret` is on: at a wrap, the one it starts.
-fn row_of(rows: &[Range<usize>], caret: usize) -> usize {
-    rows.iter()
-        .rposition(|r| r.start <= caret)
-        .unwrap_or_default()
-}
-
-/// The byte of `text` in `row` nearest `x` from the row's start.
-fn byte_at(text: &str, row: &Range<usize>, x: f32) -> usize {
-    let line = &text[row.clone()];
-    let mut best = (row.start, f32::MAX);
-    let ends = line.char_indices().map(|(i, _)| i).chain([line.len()]);
-    for i in ends {
-        let off = (width(&line[..i]) - x).abs();
-        if off < best.1 {
-            best = (row.start + i, off);
-        }
-    }
-    best.0
-}
-
 /// Where Up (`up`) or Down moves the caret of `line`, in a field on an
 /// output of `size`; none on the first or the last line shown.
 pub fn finding_field_step(line: &Line, up: bool, size: Size<i32, Logical>) -> Option<usize> {
-    let rows = soft_rows(line, text_width(size));
-    let at = row_of(&rows, line.caret);
-    let to = if up { at.checked_sub(1)? } else { at + 1 };
-    let row = rows.get(to)?;
-    let x = width(&line[rows[at].start..line.caret]);
-    Some(byte_at(line, row, x))
-}
-
-/// The first of `rows` a field showing `shown` of them shows: the one its
-/// view started at (`Line::scroll`), moved only as far as the caret's row
-/// needs to be among them, and back for the last row to fill the field.
-fn first_shown(rows: &[Range<usize>], line: &Line, shown: i32) -> usize {
-    let shown = shown.max(1) as usize;
-    let caret = row_of(rows, line.caret);
-    let from = row_of(rows, line.scroll);
-    let fill = rows.len().saturating_sub(shown);
-    from.clamp(caret.saturating_sub(shown - 1), caret).min(fill)
+    row_step(line, &soft_rows(line, text_width(size)), up)
 }
 
 /// The byte field `i`'s view starts at as it is drawn (see `Line::scroll`):
@@ -408,6 +339,10 @@ impl Painter {
                 caret(c, text_x + upto(line.caret), row_band, scale, p.accent);
             }
         }
+        let shown = (field.rows.max(1) as usize).min(rows.len());
+        if let Some(thumb) = wrap_thumb(rect, first, shown, rows.len()) {
+            self.wrap_bar(c, &thumb, scale, p);
+        }
     }
 
     /// The dialog for an output of `size`, inside a margin of `SHADOW`
@@ -559,47 +494,6 @@ mod tests {
         assert_eq!(three.about.size.h, 3 * one.about.size.h);
         assert_eq!(three.panel.size.h - one.panel.size.h, 2 * QUIT_BODY);
         assert!(three.labels[0].loc.y >= three.about.loc.y + three.about.size.h);
-    }
-
-    #[test]
-    fn lines_break_at_line_breaks_and_spaces_and_cover_the_text() {
-        let rows = soft_rows("one two\n\nthree", 10_000.0);
-        assert_eq!(rows, [0..7, 8..8, 9..14]);
-        let text = "aaaa bbbb cccc dddd";
-        let room = width("aaaa bbbb ");
-        let rows = soft_rows(text, room);
-        assert!(rows.len() > 1, "{rows:?}");
-        assert_eq!(rows.first().unwrap().start, 0);
-        assert_eq!(rows.last().unwrap().end, text.len());
-        for pair in rows.windows(2) {
-            assert_eq!(pair[0].end, pair[1].start, "nothing lost at a wrap");
-        }
-        // A word wider than the field breaks anyway, and ends.
-        let long = "x".repeat(40);
-        let rows = soft_rows(&long, width("xxxxx"));
-        assert!(rows.len() > 2);
-        assert_eq!(rows.last().unwrap().end, long.len());
-    }
-
-    #[test]
-    fn the_caret_stays_among_the_lines_shown() {
-        let text = "a\nb\nc\nd\ne";
-        let rows = soft_rows(text, 10_000.0);
-        let at = |caret: usize, scroll: usize| Line {
-            text: text.into(),
-            caret,
-            anchor: caret,
-            scroll,
-        };
-        assert_eq!(first_shown(&rows, &at(0, 0), 3), 0);
-        assert_eq!(first_shown(&rows, &at(4, 0), 3), 0);
-        assert_eq!(first_shown(&rows, &at(8, 0), 3), 2);
-        // Started from "c": with the caret on "c" it stays there, on "b"
-        // it goes one row up, no further.
-        assert_eq!(first_shown(&rows, &at(4, 4), 3), 2);
-        assert_eq!(first_shown(&rows, &at(2, 4), 3), 1);
-        // Never past the last row's filling the field.
-        assert_eq!(first_shown(&rows, &at(8, 8), 3), 2);
     }
 
     #[test]

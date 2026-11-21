@@ -297,6 +297,17 @@ impl TextField {
         self.typing = false;
     }
 
+    /// Move the caret to byte `at`, the selection reaching it when
+    /// `extend`, as an arrow key does: for keys a field's view moves the
+    /// caret by, Up and Down in a field wrapped to its width.
+    pub fn move_to(&mut self, at: usize, extend: bool) -> Edit {
+        let edit = self.go(at.min(self.line.text.len()), extend);
+        if edit != Edit::Ignored {
+            TOOK.set(true);
+        }
+        edit
+    }
+
     /// Where its view starts, as `chrome` last showed it: see `Line`.
     pub fn set_scroll(&mut self, at: usize) {
         self.line.scroll = at.min(self.line.text.len());

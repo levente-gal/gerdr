@@ -144,7 +144,7 @@ pub(super) fn sub_lines(whole: &Line) -> Vec<SubLine> {
 }
 
 /// The band of line `i` of a field of lines in `field`.
-fn field_line_rect(field: Rect, i: usize) -> Rect {
+pub(super) fn field_line_rect(field: Rect, i: usize) -> Rect {
     Rectangle::new(
         (field.loc.x, field.loc.y + i as i32 * FIELD_LINE).into(),
         (field.size.w, super::QUIT_BUTTON).into(),
@@ -773,14 +773,39 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
+        self.field_box(c, rect, scale, p);
+        let subs = sub_lines(whole);
+        self.sub_lines_in(c, &subs, placeholder, rect, focused, scale, p);
+    }
+
+    /// A field's box in `rect`: its border, and the element colour in it.
+    pub(super) fn field_box(&self, c: &mut Canvas, rect: Rect, scale: f64, p: &Palette) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let (x, y, w, h) = rect_px(rect, scale);
         let (b, r) = (px(1).max(1) as f32, BUTTON_RADIUS * s);
         c.rounded(x, y, w, h, r, p.border);
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
+    }
+
+    /// `subs`, lines of a field of several, one under the other from the
+    /// top of the field in `rect`: the caret and selection where they are
+    /// when `focused`, and `placeholder` on the first while it is empty.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn sub_lines_in(
+        &self,
+        c: &mut Canvas,
+        subs: &[SubLine],
+        placeholder: &str,
+        rect: Rect,
+        focused: bool,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let px = |v: i32| (v as f64 * scale).round() as i32;
+        let s = scale as f32;
         let text = field_text(rect, scale);
-        for (i, sub) in sub_lines(whole).iter().enumerate() {
+        for (i, sub) in subs.iter().enumerate() {
             let line_band = band(field_line_rect(rect, i), scale);
             let selection = sub.line.selection();
             if focused && !sub.has_caret && !selection.is_empty() {

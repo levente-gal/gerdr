@@ -12,8 +12,8 @@
 use super::{
     BUTTON_RADIUS, ButtonStyle, Canvas, FOCUS_RING, FONT_SIZE, FieldSpot, POPUP_RADIUS, Painter,
     Palette, QUIT_BUTTON, ROW_BUTTON, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, band, button_width,
-    check, chevron_down, chevron_side, field_lines_height, field_text, hint_at, hint_spots,
-    hint_strs, icon_sdf, measure, rect_px,
+    check, chevron_down, chevron_side, field_text, hint_at, hint_spots, hint_strs, icon_sdf,
+    measure, rect_px, wrap_field_height,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -309,9 +309,15 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
             texts.push((line, true));
         }
     }
-    // The note's field holds its lines, as a card's on the page does.
+    // The note's field holds its lines wrapped to its width, as a card's on
+    // the page does: left of Screenshot and Done, and of the count of shots.
+    let fw = inner - button_width("Done") - GAP - button_width("Screenshot") - GROUP_GAP;
+    let label = match view.shots.is_empty() {
+        true => 0,
+        false => (width(&view.shots, SMALL_FONT_SIZE).ceil() as i32 + GAP).min(fw / 3),
+    };
     let field_lines =
-        (view.field.as_ref()).map(|line| field_lines_height(line.text.split('\n').count()));
+        (view.field.as_ref()).map(|line| wrap_field_height(line, (fw - label).max(0)));
     let field_h = field_lines.map_or(0, |h| h + GAP);
     let lines_h = texts.len() as i32 * LINE;
     let top_room = match lines_h + field_h {
@@ -367,11 +373,7 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
         let end = panel.loc.x + w - INSET;
         let done = bx(done_w, end);
         let shot = bx(shot_w, done.loc.x - GAP);
-        let fw = shot.loc.x - GROUP_GAP - x0;
-        let label = match view.shots.is_empty() {
-            true => 0,
-            false => (width(&view.shots, SMALL_FONT_SIZE).ceil() as i32 + GAP).min(fw / 3),
-        };
+        debug_assert_eq!(fw, shot.loc.x - GROUP_GAP - x0);
         let f = Rectangle::new((x0, fy).into(), ((fw - label).max(0), fh).into());
         if label > 0 {
             shots = Some(Rectangle::new(
@@ -572,7 +574,7 @@ impl Painter {
             );
         }
         if let (Some(field), Some(line)) = (layout.field, &view.field) {
-            self.field_of_lines(
+            self.wrap_field(
                 &mut c,
                 line,
                 "What went wrong",
@@ -725,6 +727,7 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chrome::field_lines_height;
 
     pub(crate) fn view(pane_w: i32) -> CriteriaStripView {
         CriteriaStripView {
@@ -865,6 +868,13 @@ mod tests {
         let (f1, f3) = (one.field.unwrap(), three.field.unwrap());
         assert_eq!(f1.size.h, field_lines_height(1));
         assert_eq!(f3.size.h, field_lines_height(3));
+        // A long note wraps, and grows no taller than five rows.
+        v.field = Some(line(&"word ".repeat(400)));
+        let long = criteria_strip_layout(&v).field.unwrap();
+        assert_eq!(
+            long.size.h,
+            field_lines_height(crate::chrome::WRAP_MAX_ROWS)
+        );
         assert_eq!(three.panel.size.h - one.panel.size.h, f3.size.h - f1.size.h);
         let row = three.rect_of(StripHit::Title).unwrap();
         assert!(f3.loc.y + f3.size.h <= row.loc.y);

@@ -443,7 +443,7 @@ function actions(offer) {
       <ul class="lines small">${lines.map((c) => `<li>${c.line ? `<b>line ${c.line}</b> <span class="quiet">${esc(c.quote)}</span><br>` : ""}${esc(c.text)}</li>`).join("")}</ul>` : "";
     html += `<details class="sendback"${lines.length ? " open" : ""}><summary>Send ${esc(back.name || "it")} back with a comment</summary>
       ${back.error ? `<p class="error small">${esc(back.error)}</p>` : said}
-      <textarea id="backText" rows="4" placeholder="What should change"></textarea>
+      <textarea id="backText" rows="1" placeholder="What should change"></textarea>
       <button data-sendback data-lines="${lines.length}">Send back</button></details>`;
   }
   return html;
@@ -480,7 +480,7 @@ async function newForm() {
     <label>Title<input name="title" autocomplete="off" enterkeyhint="next" placeholder="Bulk edit"></label>
     ${parts}
     <label>What it is for <span class="quiet">(optional)</span>
-      <textarea name="idea" rows="5" placeholder="Discover's agent starts from this, not from its own question"></textarea></label>
+      <textarea name="idea" rows="1" placeholder="Discover's agent starts from this, not from its own question"></textarea></label>
     <div class="buttons"><button class="primary" ${d.error ? "disabled" : ""}>Start feature</button></div>
   </form>`;
   return { title: "New feature", back: "#/", html };
@@ -527,7 +527,7 @@ async function pane(p, s, id) {
     .replace(/([─━═▀▄])\1{29,}/g, (_, c) => c.repeat(30));
   const text = ansi ? ansi.ansi_to_html(raw) : esc(raw.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ""));
   return { title: d.label, back: href("f", p, s), html: `<pre class="term">${text}</pre>`, pane: true,
-    bar: `<form id="say"><input id="line" enterkeyhint="send" autocomplete="off" placeholder="Reply to the agent">
+    bar: `<form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l]) => `<button data-key="${k}">${l}</button>`).join("")}
         <button data-key="close" title="Close its tab, as on the desktop">Close</button></div>` };
@@ -632,7 +632,7 @@ document.addEventListener("click", async (e) => {
     } else if (b.dataset.sendback !== undefined) {
       const box = document.getElementById("backText");
       if (!box.value.trim() && b.dataset.lines === "0") { say([{ text: "Say what should change" }], true); return; }
-      if (await ask("/api/send-back", { p, s, text: box.value })) box.value = "";
+      if (await ask("/api/send-back", { p, s, text: box.value })) { box.value = ""; fit(box); }
     } else if (b.dataset.key) {
       if (b.dataset.key === "close" && !confirm(`Close ${titleEl.textContent}? Its tab closes, as on the desktop.`)) return;
       const a = await post("/api/agent", { p, s, pane, key: b.dataset.key });
@@ -657,9 +657,31 @@ document.addEventListener("submit", async (e) => {
   const [, p, s, pane] = here();
   const a = await post("/api/agent", { p, s, pane, text: line.value });
   if (a.error) say([{ text: a.error }], true);
-  else line.value = "";
+  else { line.value = ""; fit(line); }
   setTimeout(() => render(false, true), 600);
 });
+
+// A box grows with what is written in it, up to five rows, then scrolls:
+// a shade along its top or bottom edge says there is more that way. Enter
+// in it breaks the line; its button sends.
+const ROWS = 5;
+function fit(box) {
+  const cs = getComputedStyle(box);
+  const px = (k) => parseFloat(cs[k]) || 0;
+  const edges = px("paddingTop") + px("paddingBottom") + px("borderTopWidth") + px("borderBottomWidth");
+  box.style.height = "auto";
+  const most = px("lineHeight") * ROWS + edges;
+  box.style.height = `${Math.min(box.scrollHeight + px("borderTopWidth") + px("borderBottomWidth"), most)}px`;
+  shade(box);
+}
+function shade(box) {
+  box.classList.toggle("above", box.scrollTop > 1);
+  box.classList.toggle("below", box.scrollTop + box.clientHeight < box.scrollHeight - 1);
+}
+document.addEventListener("input", (e) => { if (e.target.matches("textarea")) fit(e.target); });
+document.addEventListener("scroll", (e) => { if (e.target.matches?.("textarea")) shade(e.target); }, true);
+// The page's end stays clear of the bar as its box grows.
+new ResizeObserver(() => document.body.style.setProperty("--bar-h", `${bar.offsetHeight}px`)).observe(bar);
 
 window.addEventListener("hashchange", () => render(true));
 document.addEventListener("visibilitychange", () => { if (!document.hidden) render(false); });

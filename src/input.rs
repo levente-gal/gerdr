@@ -1442,6 +1442,9 @@ impl Gerdr {
         sym: Keysym,
         typed: Keysym,
     ) -> Option<Intercepted> {
+        if matches!(into, Overlay::Features | Overlay::Criteria) && self.wrapped_step(mods, sym) {
+            return None;
+        }
         match into {
             Overlay::Welcome => self.welcome_key(mods, sym, typed).map(Intercepted::Welcome),
             Overlay::ProjectMenu => self
@@ -1577,22 +1580,51 @@ impl Gerdr {
             return chrome::commands_field_at(&self.commands_view()?, size, scale, pos, held);
         }
         let spot = self.field_spot()?;
-        // A card's note holds lines, as the criteria strip's does; one line,
-        // as Code review's search, is the field as it is.
-        if matches!(
-            self.text_overlay(),
-            Some(Overlay::Features | Overlay::Criteria)
-        ) && spot.line.contains('\n')
-        {
-            return Some(chrome::field_line_spot(
-                spot.area,
-                spot.area,
-                &spot.line,
-                pos,
-                self.scale(),
-            ));
+        // A card's note holds lines wrapped to it, as the criteria strip's
+        // does; one line, as Code review's search, is the field as it is.
+        if self.field_wraps() {
+            let scale = self.scale();
+            return Some(chrome::wrap_field_spot(spot.area, &spot.line, pos, scale));
         }
         Some((spot, 0))
+    }
+
+    /// Whether the text field with the keyboard wraps its lines to its
+    /// width (`chrome::wrap_field_height`): a note being written on the
+    /// feature tab or the criteria strip.
+    fn field_wraps(&self) -> bool {
+        match self.text_overlay() {
+            Some(Overlay::Criteria) => true,
+            Some(Overlay::Features) => {
+                !(self.inline_wd()).is_some_and(|wd| wd.diff.search_focused())
+                    && (self.features.panel.as_ref()).is_some_and(|p| p.note.is_some())
+            }
+            _ => false,
+        }
+    }
+
+    /// Up or Down in a field wrapped to its width: the caret goes a row up
+    /// or down as it wraps, not a line. Whether it went; on its first row
+    /// up or last down, the field and its overlay have the key as before.
+    fn wrapped_step(&mut self, mods: &ModifiersState, sym: Keysym) -> bool {
+        let up = match sym {
+            Keysym::Up | Keysym::KP_Up => true,
+            Keysym::Down | Keysym::KP_Down => false,
+            _ => return false,
+        };
+        if mods.ctrl || mods.alt || mods.logo || !self.field_wraps() {
+            return false;
+        }
+        let Some(at) = (self.field_spot()).and_then(|spot| chrome::wrap_field_step(&spot, up))
+        else {
+            return false;
+        };
+        let Some(field) = self.field_mut() else {
+            return false;
+        };
+        field.move_to(at, mods.shift);
+        self.mouse.field_scroll_due = true;
+        true
     }
 
     /// The text field with the keyboard, in the overlay that has it.
@@ -1678,6 +1710,12 @@ impl Gerdr {
         self.overlays.rename.is_none() && self.text_overlay() == Some(Overlay::FindingDialog)
     }
 
+    /// Whether a press is held in a field wrapped to its width (see
+    /// `field_wraps`).
+    fn holds_wrapped_field(&self) -> bool {
+        self.overlays.rename.is_none() && self.field_wraps()
+    }
+
     /// The pointer moved to `pos` holding a press in a text field: the
     /// selection reaches the character there, of the text in view (held
     /// past it, `field_edge_tick` scrolls).
@@ -1707,6 +1745,10 @@ impl Gerdr {
         if self.holds_finding_field() {
             return self.finding_dialog_edge(pos);
         }
+        // A field wrapped to its width scrolls by rows, held over or under it.
+        if self.holds_wrapped_field() {
+            return (self.field_spot()).map_or(0.0, |spot| chrome::wrap_field_edge(&spot, pos));
+        }
         let Some((field, _)) = self.held_field_at(pos) else {
             return 0.0;
         };
@@ -1734,6 +1776,12 @@ impl Gerdr {
             self.mouse.field_scroll_due = true;
             if self.holds_finding_field() {
                 self.finding_dialog_past(by);
+            } else if self.holds_wrapped_field() {
+                let x = self.mouse.pos.x;
+                let at = (self.field_spot()).and_then(|spot| chrome::wrap_field_past(&spot, by, x));
+                if let (Some(at), Some(field)) = (at, self.field_mut()) {
+                    field.drag_to(at);
+                }
             } else if let Some((field, base)) = self.held_field_at(self.mouse.pos) {
                 let line = &field.line;
                 let at = base + text_field::chars_from(line, line.caret.min(line.len()), by);
@@ -1763,7 +1811,11 @@ impl Gerdr {
         if self.text_overlay() == Some(Overlay::FindingDialog) {
             return self.finding_dialog_keep_scroll();
         }
-        let at = (self.field_spot()).map(|spot| self.chrome.field_first(&spot, scale));
+        let wraps = self.field_wraps();
+        let at = (self.field_spot()).map(|spot| match wraps {
+            true => chrome::wrap_field_first(&spot),
+            false => self.chrome.field_first(&spot, scale),
+        });
         if let (Some(at), Some(field)) = (at, self.field_mut()) {
             field.set_scroll(at);
         }

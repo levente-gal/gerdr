@@ -23,7 +23,9 @@ From a new feature to Code review, every step can be done on the phone. Code rev
 - **Text the desktop asks in a field.** A button whose desktop opens a field asks on the phone first: Dismiss… and Reject… ask why, Comment and Answer ask for the text, Add comment… or Add suggestion… asks what should change.
 - **Findings and suggestions.** AI review's findings and Plan review's suggestions are decided on their cards: Fix or Accept, Dismiss… or Reject…, Reopen, a comment, deleting your own.
 - **Send back.** A brief, plan or fix plan waiting for review can go back to its agent with your comment. Line comments made on the desktop go with it, and are listed above the box.
-- **Agents.** An agent's page has a reply box (one line, then Enter), keys for its menus (Esc, 1, 2, 3, ↑, ↓ and Enter) and Close, which closes its tab as on the desktop: a research agent that stopped without an answer holds up Approve until then.
+- **Agents.** An agent's page has a reply box (Enter breaks the line, Send sends it), keys for its menus (Esc, 1, 2, 3, ↑, ↓ and Enter) and Close, which closes its tab as on the desktop: a research agent that stopped without an answer holds up Approve until then.
+
+Every text box grows with what is written in it, up to five rows. Past that it scrolls, and a shade along its top or bottom edge shows there is more that way.
 
 The phone asks before every stage button, and before Close. gerdr does the press as if you clicked on the desktop and its messages show on the phone. If gerdr asks for a confirmation, the phone asks you instead. The desktop dialog closes again, so nothing waits on an empty desk. While a dialog is open on the desktop, the phone's presses are refused: answer it there first.
 
@@ -120,7 +122,7 @@ Anyone on your tailnet can press buttons and type to your agents, and an agent c
 ## Limits
 
 - Only this machine's features and agents. Agents running on another machine aren't listed. A feature another machine writes can't be acted on from the phone.
-- A reply to an agent is one line. Line breaks become spaces. So is the text a button asks for.
+- A reply to an agent goes as one line: line breaks written in its box become spaces. So does the text a button asks for.
 - A new feature can't link other projects or pick its base branch: it starts from each repository's default, as the dialog's would.
 - The model is typed: the phone has no list of the models an agent offers.
 - A feature at Manual test doesn't show what it waits for.
