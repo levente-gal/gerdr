@@ -373,3 +373,6 @@ button.failed { border-color: var(--bad); color: var(--bad); background: color-m
   padding: 8px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,.2);
 }
 .menu-list button { text-align: left; }
+
+/* Over a pane's output, while more of it can be read. */
+.above { text-align: center; padding: 8px 0; }

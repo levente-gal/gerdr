@@ -520,13 +520,21 @@ async function doc(p, s, name) {
   return { title: name, back: href("f", p, s), html: `<article class="doc">${d.html}</article>`, keep: true };
 }
 
+// How much of a pane is read: its last lines, more of them, then all its
+// scrollback. Each scroll to the top reads the next; a new pane starts over.
+const DEPTHS = [400, 1000, "all"];
+let depth = { pane: "", at: 0, more: false, loading: false };
+
 async function pane(p, s, id) {
-  const d = await get(`/api/pane?${q({ p, s, pane: id })}`);
+  if (depth.pane !== id) depth = { pane: id, at: 0, more: false, loading: false };
+  const d = await get(`/api/pane?${q({ p, s, pane: id, lines: DEPTHS[depth.at] })}`);
+  depth.more = d.more && depth.at < DEPTHS.length - 1;
   // TUIs pad lines to their width: on a phone those runs wrap into blank rows.
   const raw = d.text.replace(/\r\n/g, "\n").replace(/ {6,}/g, "   ")
     .replace(/([─━═▀▄])\1{29,}/g, (_, c) => c.repeat(30));
   const text = ansi ? ansi.ansi_to_html(raw) : esc(raw.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ""));
-  return { title: d.label, back: href("f", p, s), html: `<pre class="term">${text}</pre>`, pane: true,
+  const above = depth.more ? `<div class="above quiet small">Scroll up for earlier output</div>` : "";
+  return { title: d.label, back: href("f", p, s), html: `${above}<pre class="term">${text}</pre>`, pane: true,
     bar: `<form id="say"><input id="line" enterkeyhint="send" autocomplete="off" placeholder="Reply to the agent">
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l]) => `<button data-key="${k}">${l}</button>`).join("")}
@@ -554,15 +562,19 @@ let shown = "";
 let barFor = null;
 // Something typed on the page: a refresh would lose it.
 const typing = () => [...main.querySelectorAll("textarea, input")].some((e) => e.value || e === document.activeElement);
-async function render(fresh, force) {
+// Only the latest read is shown: an earlier one may come back after it.
+let reads = 0;
+async function render(fresh, force, keepBottom) {
   clearTimeout(timer);
+  const read = ++reads;
   const r = route();
   const hash = location.hash;
   // A pane read follows the end unless the user scrolled up from it.
   const atEnd = window.innerHeight + window.scrollY >= document.body.scrollHeight - 40;
+  const fromBottom = document.body.scrollHeight - window.scrollY;
   try {
     const v = await r.load();
-    if (hash !== location.hash) return;
+    if (hash !== location.hash || read !== reads) return;
     titleEl.textContent = v.title;
     back.hidden = !v.back;
     if (v.back) back.href = v.back;
@@ -589,11 +601,13 @@ async function render(fresh, force) {
         if (at) wrap.scrollLeft = at.offsetLeft - (wrap.clientWidth - at.offsetWidth) / 2;
       } else if (wrap) wrap.scrollLeft = railX;
       if (v.pane && (fresh || atEnd)) window.scrollTo(0, document.body.scrollHeight);
+      // Earlier output came in above: what was read stays in view.
+      else if (keepBottom) window.scrollTo(0, document.body.scrollHeight - fromBottom);
       else if (!fresh) window.scrollTo(0, y);
     }
     if (fresh && !v.pane) window.scrollTo(0, 0);
   } catch (e) {
-    if (hash !== location.hash) return;
+    if (hash !== location.hash || read !== reads) return;
     if (fresh || e.message !== "offline") {
       // Home-screen apps have no browser Back: always a way out.
       back.hidden = route().load === list;
@@ -660,6 +674,14 @@ document.addEventListener("submit", async (e) => {
   else line.value = "";
   setTimeout(() => render(false, true), 600);
 });
+
+// At the top of a pane's output, read more of it.
+window.addEventListener("scroll", async () => {
+  if (window.scrollY > 80 || !depth.more || depth.loading || here()[0] !== "pane") return;
+  depth.loading = true;
+  depth.at += 1;
+  try { await render(false, true, true); } finally { depth.loading = false; }
+}, { passive: true });
 
 window.addEventListener("hashchange", () => render(true));
 document.addEventListener("visibilitychange", () => { if (!document.hidden) render(false); });

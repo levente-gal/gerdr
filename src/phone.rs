@@ -40,8 +40,11 @@ pub const COMMAND: &str = "--phone";
 const PORT: u16 = 8390;
 /// The most a request's head may take.
 const HEAD_LIMIT: u64 = 16 * 1024;
-/// How many lines of an agent's pane are sent.
+/// How many lines of an agent's pane are sent, unless more are asked.
 const PANE_LINES: usize = 400;
+/// The most lines herdr reads with their colours; past that, all of the
+/// pane's scrollback is read, plain.
+const PANE_STYLED_MAX: usize = 1000;
 /// How many lines of a setup log are sent: its end, where it failed.
 const LOG_LINES: usize = 400;
 /// How many history events a feature's page gets, latest first.
@@ -328,7 +331,7 @@ fn answer(target: &str, icons: &Icons, from: &str) -> Reply {
         "/api/new" => Reply::json(&new_offer()),
         "/api/feature" => feature_page(arg("p"), arg("s"), arg("stage").parse().ok()),
         "/api/doc" => doc(arg("p"), arg("s"), arg("f")),
-        "/api/pane" => pane(arg("p"), arg("s"), arg("pane")),
+        "/api/pane" => pane(arg("p"), arg("s"), arg("pane"), arg("lines")),
         "/sw.js" => Reply::ok("text/javascript; charset=utf-8", SW_JS),
         "/api/push" => match web_push::public_key() {
             Ok(key) => Reply::json(&json!({ "key": key, "on": web_push::claim(arg("e"), from) })),
@@ -959,9 +962,11 @@ fn doc(project: &str, slug: &str, name: &str) -> Reply {
     }
 }
 
-/// The last lines of an agent's pane, with their colours. Only a pane one
-/// of the feature's agents runs in: not the user's own shells.
-fn pane(project: &str, slug: &str, pane: &str) -> Reply {
+/// The last lines of an agent's pane, with their colours: `lines` of them
+/// (`PANE_LINES` when not a number), or `all` its scrollback, plain. Only
+/// a pane one of the feature's agents runs in: not the user's own shells.
+/// `more`: its scrollback holds more than was sent.
+fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     let (project, f) = match find(project, slug) {
         Ok(found) => found,
         Err(reply) => return reply,
@@ -970,15 +975,24 @@ fn pane(project: &str, slug: &str, pane: &str) -> Reply {
         return Reply::error(404, "Not one of this feature's agents");
     };
     let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
-    let text = herdr.pane_styled(pane, PANE_LINES).and_then(|text| {
-        if text.trim().is_empty() {
-            herdr.pane_read(pane, "visible", PANE_LINES)
-        } else {
-            Ok(text)
-        }
+    let all = lines == "all";
+    let want = lines.parse().unwrap_or(PANE_LINES).clamp(1, PANE_STYLED_MAX);
+    let text = match all {
+        true => herdr.pane_scrollback(pane).map(|(text, _)| text),
+        false => herdr.pane_styled(pane, want),
+    };
+    // An app on the alternate screen has no scrollback: its screen.
+    let text = text.and_then(|text| match text.trim().is_empty() {
+        true => herdr.pane_read(pane, "visible", PANE_LINES),
+        false => Ok(text),
     });
     match text {
-        Ok(text) => Reply::json(&json!({ "label": label, "text": text })),
+        Ok(text) => {
+            // The rows above its screen, wrapped: at worst one more read, of all.
+            let rows = (!all).then(|| herdr.pane_scrollback_rows(pane).ok()).flatten();
+            let more = rows.is_some_and(|rows| rows > text.lines().count() as u64);
+            Reply::json(&json!({ "label": label, "text": text, "more": more }))
+        }
         Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
     }
 }
