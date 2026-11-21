@@ -622,6 +622,14 @@ async function render(fresh, force, keepBottom) {
 // The route's feature and pane: `#/f/<p>/<s>` or `#/pane/<p>/<s>/<pane>`.
 const here = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
 
+// A tap outside an open ⋯ menu closes it. A pointer, not a click: iOS
+// sends no click for a tap on the page's plain parts.
+document.addEventListener("pointerdown", (e) => {
+  document.querySelectorAll("details.menu[open]").forEach((m) => {
+    if (!m.contains(e.target)) m.removeAttribute("open");
+  });
+});
+
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push]");
   if (!b || b.disabled) return;
