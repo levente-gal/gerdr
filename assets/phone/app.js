@@ -675,8 +675,12 @@ function fit(box) {
   shade(box);
 }
 function shade(box) {
-  box.classList.toggle("above", box.scrollTop > 1);
-  box.classList.toggle("below", box.scrollTop + box.clientHeight < box.scrollHeight - 1);
+  // Typing scrolls the caret's line into view, not the padding past it: a
+  // padding out of view hides no text.
+  const cs = getComputedStyle(box);
+  const [top, bottom] = [parseFloat(cs.paddingTop) || 0, parseFloat(cs.paddingBottom) || 0];
+  box.classList.toggle("above", box.scrollTop > top + 1);
+  box.classList.toggle("below", box.scrollTop + box.clientHeight < box.scrollHeight - bottom - 1);
 }
 document.addEventListener("input", (e) => { if (e.target.matches("textarea")) fit(e.target); });
 document.addEventListener("scroll", (e) => { if (e.target.matches?.("textarea")) shade(e.target); }, true);
