@@ -6,7 +6,7 @@ A web page of your features, for a phone. It shows:
 - each feature's rail as its feature tab draws it (each stage's mark, short line and agent, and the line back to Build), and what it waits for
 - the page of the stage it is at, as the desktop's stage page says it in words: its agent, the stage's file to read (the brief, the plan, the final plan), Build's progress (tap it for the milestones, ticked as they are made), fix rounds (folded: tap one for what it fixes), Verify's checks, AI review's findings, the Ship check. Tap a stage on the rail for its page. The fix plan and Verify's evidence are folded under Latest files, the fix plan open while it waits to be made. A stage's other files (decisions, research, the build log) are links there
 - its history, folded: the last event shows, tap for all
-- each agent's state (working, waiting for you, idle) and the last lines of its pane, refreshed every 2 s; scrolled to the top, it reads more (1000 lines, then all it keeps, without colours)
+- each agent's state (working, waiting for you, idle) and the last lines of its pane, refreshed every 2 s; scrolled to the top, it reads more (1000 lines, then all it keeps, without colours). Claude Code on the alternate screen keeps nothing above its screen: scrolled to the top, its chat's transcript shows, who said what, above its screen
 
 What runs blinks: a working agent's dot, and the stage dot or rail node at work. It stays still when the phone asks for reduced motion.
 

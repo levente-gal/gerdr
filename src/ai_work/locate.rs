@@ -175,7 +175,7 @@ fn found(agent: AgentKind, id: &str, main: PathBuf, form: Form) -> Found {
 
 /// Claude Code chat `id`: `projects/<folder>/<id>.jsonl` of a config
 /// folder, and its `<id>/tool-results` and `<id>/subagents`.
-fn claude(homes: &Homes, id: &str) -> Option<Found> {
+pub fn claude(homes: &Homes, id: &str) -> Option<Found> {
     let name = format!("{id}.jsonl");
     homes.claude.iter().find_map(|config| {
         let folders = std::fs::read_dir(config.join("projects")).ok()?;
