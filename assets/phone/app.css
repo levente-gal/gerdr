@@ -14,8 +14,8 @@
   --wait: #725800;
   --bad: #b03e30;
   --tint: 12%;
-  --term-bg: #282c34;
-  --term-text: #abb2bf;
+  --term-bg: #fafafa;
+  --term-text: #2a2c33;
   --shadow: 0 1px 2px rgba(0,0,0,.06), 0 2px 8px rgba(0,0,0,.05);
   color-scheme: light dark;
 }
@@ -35,6 +35,8 @@
     --wait: #dec184;
     --bad: #e08a8e;
     --tint: 16%;
+    --term-bg: #282c34;
+    --term-text: #abb2bf;
     --shadow: 0 1px 2px rgba(0,0,0,.3);
   }
 }
@@ -62,7 +64,7 @@ header h1 {
 }
 #back { font-size: 30px; line-height: 1; padding: 0 8px 3px 0; margin-left: -4px; }
 #seen { color: var(--quiet); font-size: 12px; white-space: nowrap; }
-#offline { background: var(--bad); color: #fff; padding: 8px 16px; font-size: 14px; }
+#offline { background: var(--bad); color: var(--on-accent); padding: 8px 16px; font-size: 14px; }
 main { padding: 8px 16px 32px; max-width: 760px; margin: 0 auto; }
 h2 {
   display: flex; align-items: baseline; gap: 6px;
@@ -234,6 +236,7 @@ button:active { filter: brightness(.92); }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 650; }
 button:disabled { opacity: .5; }
 .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.buttons + .card { margin-top: 10px; }
 textarea, input, select {
   font: inherit; font-size: 16px; color: var(--text); background: var(--card);
   border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; width: 100%;
@@ -260,8 +263,8 @@ textarea:focus, input:focus, select:focus { outline: 2px solid var(--accent); ou
 .sev.medium { color: var(--wait); }
 #note {
   position: fixed; left: 12px; right: 12px; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 3;
-  background: var(--text); color: var(--bg); border-radius: 12px; padding: 10px 14px; font-size: 14px;
-  box-shadow: 0 4px 16px rgba(0,0,0,.25);
+  background: #282c34; color: #dce0e5; border: 1px solid #464b57; border-radius: 12px;
+  padding: 10px 14px; font-size: 14px; box-shadow: 0 4px 16px rgba(0,0,0,.25);
 }
 #note .error { color: #ff8787; }
 #note .warning { color: #ffc078; }
@@ -315,21 +318,24 @@ h3 .count { font-weight: 500; }
 .done > .tick { background: var(--ok); box-shadow: none; }
 .at > .tick { box-shadow: inset 0 0 0 2px var(--accent); background: color-mix(in srgb, var(--accent) 25%, transparent); }
 .tail {
-  margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--term-bg); color: var(--term-text);
+  border: 1px solid var(--line-soft); margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--term-bg); color: var(--term-text);
   font: 11.5px/1.35 ui-monospace, "SF Mono", Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 240px; overflow-y: auto;
 }
-.card.faded { opacity: .6; }
+/* Settled: its words fade, its buttons stay as they work. */
+.card.faded > :not(.buttons) { opacity: .6; }
 details.card > summary, details.fold > summary, .card > details.in > summary { list-style: none; cursor: pointer; }
 details.card > summary::-webkit-details-marker, details.fold > summary::-webkit-details-marker,
 .card > details.in > summary::-webkit-details-marker { display: none; }
 details.card > summary .top::after, details.fold > summary h2::after, details.fold > summary h3::after,
 .card > details.in > summary .top::after {
-  content: "›"; color: var(--dim); font-size: 18px; line-height: 1; margin-left: auto; transition: transform .15s;
+  content: ""; flex: none; align-self: center; width: 7px; height: 7px; margin: 0 4px 4px auto;
+  border: solid var(--dim); border-width: 0 2px 2px 0; transform: rotate(45deg); transition: transform .15s;
 }
 details[open].card > summary .top::after, details[open].fold > summary h2::after,
 details[open].fold > summary h3::after,
-.card > details[open].in > summary .top::after { transform: rotate(90deg); }
+.card > details[open].in > summary .top::after { transform: translateY(4px) rotate(-135deg); }
+details.fold > summary h3 { display: flex; align-items: center; gap: 6px; }
 details.card > p, .card > details.in > p { font-size: 14px; overflow-wrap: anywhere; }
 .history-fold .last { margin: -2px 0 4px; overflow-wrap: anywhere; }
 .history-fold[open] .last { display: none; }
@@ -381,3 +387,15 @@ button.failed { border-color: var(--bad); color: var(--bad); background: color-m
 
 /* Over a pane's output, while more of it can be read. */
 .above { text-align: center; padding: 8px 0; }
+
+/* Close sits apart from the keys, in its tone. */
+#bar .keys button.close { flex: none; margin-left: 10px; padding: 6px 12px; color: var(--bad); background: transparent; }
+
+/* The text a button asks for. */
+#sheet {
+  width: min(100vw - 24px, 560px); max-width: none; padding: 16px; color: var(--text); background: var(--card);
+  border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 8px 32px rgba(0,0,0,.3);
+}
+#sheet::backdrop { background: rgba(0,0,0,.45); }
+#sheet label { display: block; font-weight: 600; margin-bottom: 8px; }
+#sheet .buttons { justify-content: flex-end; }

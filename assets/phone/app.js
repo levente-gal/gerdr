@@ -11,22 +11,25 @@ const offline = document.getElementById("offline");
 const note = document.getElementById("note");
 const bar = document.getElementById("bar");
 
-// Colours an agent pane's output; plain text if the library can't load.
-let ansi = null;
-import("https://cdn.jsdelivr.net/npm/ansi_up@6.0.2/ansi_up.js")
-  .then((m) => { ansi = new m.AnsiUp(); ansi.use_classes = false; })
-  .catch(() => {});
+// Colours an agent pane's output. Served from here: no outside script
+// runs on a page that can type to agents.
+import { AnsiUp } from "/ansi_up.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 const q = (o) => new URLSearchParams(o).toString();
 
+// As the desktop says it (clock.rs): "5m ago", "3h ago", "yesterday".
 function ago(at, now) {
   const s = Math.max(0, now - at);
+  const DAY = 86400;
   if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-  return `${Math.floor(s / 86400)} d ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < DAY) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 2 * DAY) return "yesterday";
+  if (s < 7 * DAY) return `${Math.floor(s / DAY)}d ago`;
+  if (s < 35 * DAY) return `${Math.floor(s / (7 * DAY))}w ago`;
+  return `${Math.floor(s / (30 * DAY))}mo ago`;
 }
 
 let lastOk = 0;
@@ -121,13 +124,14 @@ const toneOf = (f) => f.card?.tone ||
 const waitsBox = (w, now) => w
   ? `<div class="waits"><b>${esc(w.title)}</b> · ${esc(w.next)} · ${ago(w.since, now)}</div>` : "";
 
+// A sidebar card: its line says what it waits for, its page says more;
+// only agents at work or waiting show.
 function card(f, now) {
   return `<a class="card tone-${esc(toneOf(f))}" href="${href("f", f.project, f.slug)}">
     <div class="top"><span class="name">${esc(f.title)}</span><span class="ago">${ago(f.updated, now)}</span></div>
     <div class="meta">${esc(f.projectName)}</div>
     <div class="status">${dots(f)}<span class="line">${esc(f.card?.line || f.stage)}</span></div>
-    ${waitsBox(f.waits, now)}
-    ${chips(f.agents)}
+    ${chips(f.agents.filter((a) => !["idle", "unknown"].includes(a.status)))}
   </a>`;
 }
 
@@ -376,6 +380,14 @@ function section(x, f, p, s) {
   }
 }
 
+const fold = (label, n, inner) =>
+  `<details class="fold"><summary><h3>${esc(label)} <span class="count">${n}</span></h3></summary>${inner}</details>`;
+// What settled findings are, by their lit button: Passed, Done, else Decided.
+const SETTLED = { Pass: "Passed", Done: "Done" };
+const settledWord = (xs) => [...new Set(xs.map((x) =>
+  SETTLED[x.buttons?.find((b) => b.tone === "passed")?.label] || "Decided"))]
+  .map((w, i) => i ? w.toLowerCase() : w).join(" or ");
+
 // A stage's page: what it is for, how it stands, its rare buttons in a
 // menu at its top right, its sections as the desktop's page has them,
 // each with its buttons, and its latest files: the fix plan and evidence
@@ -395,9 +407,21 @@ function stagePage(f, p, s) {
   const last = rest.map((x) => !!x.steps).lastIndexOf(true);
   const adds = (b) => last >= 0 && b.id === "AddComment";
   html += actions({ ...f.offer, buttons: (f.offer.buttons || []).filter((b) => !adds(b)) });
+  // Settled findings fold under the open ones, earlier fix rounds under
+  // the latest: what is still to do stays in sight.
+  let settled = [], rounds = [], addHere = false;
+  const flush = () => {
+    if (settled.length) html += fold(settledWord(settled), settled.length, settled.map((x) => section(x, f, p, s)).join(""));
+    if (rounds.length) html += fold("Earlier rounds", rounds.length, rounds.map((x) => section(x, f, p, s)).join(""));
+    if (addHere) html += row((f.offer.buttons || []).filter(adds));
+    settled = []; rounds = []; addHere = false;
+  };
   rest.forEach((x, i) => {
-    html += section(x, f, p, s);
-    if (i === last) html += row((f.offer.buttons || []).filter(adds));
+    if (x.kind === "finding" && x.faded) settled.push(x);
+    else if (x.kind === "round" && rest[i - 1]?.kind === "round") rounds.push(x);
+    else html += section(x, f, p, s);
+    if (i === last) addHere = true;
+    if (rest[i + 1]?.kind !== x.kind) flush();
   });
   if (pg.files?.length) {
     html += `<h2>Latest files</h2>` + pg.files.filter((d) => d.html || d.error).map((d) =>
@@ -419,11 +443,14 @@ async function feature(p, s, stage) {
   html += rail(f, p, s);
   html += waitsBox(f.waits, f.now);
   html += stagePage(f, p, s);
-  if (f.agents.length) {
-    html += `<h2>Agents <span class="count">${f.agents.length}</span></h2><div class="group">` +
-      f.agents.map((a) => `<a class="row" href="${href("pane", p, s, a.pane)}">
+  // Agents the stage page has no card for: the page's own show there.
+  const onPage = new Set(f.page.sections.filter((x) => x.kind === "agent").map((x) => x.pane));
+  const others = f.agents.filter((a) => !onPage.has(a.pane));
+  if (others.length) {
+    html += `<h2>${onPage.size ? "Other agents" : "Agents"} <span class="count">${others.length}</span></h2><div class="group">` +
+      others.map((a) => `<a class="row" href="${href("pane", p, s, a.pane)}">
         <span>${esc(a.label)}</span>${chip(a, a.status)}</a>`).join("") + `</div>`;
-  } else {
+  } else if (!f.agents.length && (!onPage.size || f.agentsError)) {
     html += `<h2>Agents</h2><p class="quiet small">${esc(f.agentsError || "No agent running for it here.")}</p>`;
   }
   html += history(f.history, f.now);
@@ -531,14 +558,23 @@ async function pane(p, s, id) {
   // TUIs pad lines to their width: on a phone those runs wrap into blank rows.
   const raw = d.text.replace(/\r\n/g, "\n").replace(/ {6,}/g, "   ")
     .replace(/([─━═▀▄])\1{29,}/g, (_, c) => c.repeat(30));
-  const text = ansi ? ansi.ansi_to_html(raw) : esc(raw.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ""));
+  const text = readable(new AnsiUp().ansi_to_html(raw));
   const above = depth.more ? `<div class="above quiet small">Scroll up for earlier output</div>` : "";
   return { title: d.label, back: href("f", p, s), html: `${above}<pre class="term">${text}</pre>`, pane: true,
     bar: `<form id="say"><input id="line" enterkeyhint="send" autocomplete="off" placeholder="Reply to the agent">
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l]) => `<button data-key="${k}">${l}</button>`).join("")}
-        <button data-key="close" title="Close its tab, as on the desktop">Close</button></div>` };
+        <button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button></div>` };
 }
+
+// A program with a light theme paints light rows: text on them in the
+// terminal's own colour gets one that reads there, and so on dark rows.
+const readable = (html) => html.replace(/<span style="([^"]*)">/g, (m, st) => {
+  const bg = /background-color:rgb\((\d+),(\d+),(\d+)\)/.exec(st);
+  if (!bg || /(^|;)color:/.test(st)) return m;
+  const light = 0.299 * bg[1] + 0.587 * bg[2] + 0.114 * bg[3] > 140;
+  return `<span style="${st};color:${light ? "#2a2c33" : "#dce0e5"}">`;
+});
 
 // Keys for an agent's menus and prompts: herdr's name, and the label.
 const KEYS = [["esc", "Esc"], ["1", "1"], ["2", "2"], ["3", "3"], ["Up", "↑"], ["Down", "↓"], ["Enter", "⏎"]];
@@ -555,6 +591,19 @@ function route() {
     default: return { load: list, every: 5000 };
   }
 }
+
+// A fold is known by its title, so one added above it opens no other.
+function foldKey(d, seen) {
+  const s = d.querySelector(":scope > summary");
+  const k = (s?.querySelector(".name, h2, h3")?.firstChild?.textContent || s?.textContent || "").trim();
+  const n = seen.get(k) || 0;
+  seen.set(k, n + 1);
+  return `${k}#${n}`;
+}
+const foldsOpen = () => {
+  const seen = new Map();
+  return new Map([...main.querySelectorAll("details")].map((d) => [foldKey(d, seen), d.open]));
+};
 
 let timer = null;
 let shown = "";
@@ -585,10 +634,16 @@ async function render(fresh, force, keepBottom) {
     }
     if (v.html !== shown && (fresh || force || !typing())) {
       const y = window.scrollY;
-      const open = [...main.querySelectorAll("details")].map((d) => d.open);
+      const open = foldsOpen();
       const railX = main.querySelector(".rail-wrap")?.scrollLeft;
       main.innerHTML = v.html;
-      if (!fresh) main.querySelectorAll("details").forEach((d, i) => { d.open = open[i] || false; });
+      if (!fresh) {
+        const seen = new Map();
+        main.querySelectorAll("details").forEach((d) => {
+          const k = foldKey(d, seen);
+          if (open.has(k)) d.open = open.get(k);
+        });
+      }
       shown = v.html;
       // What blinks keeps its beat across a refresh.
       main.querySelectorAll(".blink").forEach((e) => { e.style.animationDelay = `-${Date.now() % 1600}ms`; });
@@ -621,6 +676,25 @@ async function render(fresh, force, keepBottom) {
 // The route's feature and pane: `#/f/<p>/<s>` or `#/pane/<p>/<s>/<pane>`.
 const here = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
 
+// What a button asks for, in a box that shows all of it. Enter sends, as
+// the desktop's field does; line breaks become spaces. Null on Cancel.
+const sheet = document.getElementById("sheet");
+function askText(question, value, action) {
+  sheet.innerHTML = `<form method="dialog"><label for="sheetText">${esc(question)}</label>
+    <textarea id="sheetText" rows="4" enterkeyhint="send">${esc(value)}</textarea>
+    <div class="buttons"><button value="">Cancel</button><button class="primary" value="ok">${esc(action)}</button></div></form>`;
+  const box = sheet.querySelector("textarea");
+  box.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sheet.querySelector("button.primary").click(); }
+  });
+  sheet.returnValue = "";
+  sheet.showModal();
+  box.focus();
+  box.setSelectionRange(box.value.length, box.value.length);
+  return new Promise((done) => sheet.addEventListener("close", () =>
+    done(sheet.returnValue === "ok" ? box.value.replace(/\s*\n\s*/g, " ").trim() : null), { once: true }));
+}
+
 // A tap outside an open ⋯ menu closes it. A pointer, not a click: iOS
 // sends no click for a tap on the page's plain parts.
 document.addEventListener("pointerdown", (e) => {
@@ -644,7 +718,7 @@ document.addEventListener("click", async (e) => {
       const id = b.dataset.press;
       let text;
       if (b.dataset.asks !== undefined) {
-        text = prompt(b.dataset.asks, b.dataset.value || "");
+        text = await askText(b.dataset.asks, b.dataset.value || "", b.textContent.trim().replace(/…$/, ""));
         if (text === null) return;
       } else if (!b.classList.contains("quiet-press") && !confirm(`${b.textContent.trim()}: ${titleEl.textContent}?`)) {
         return;

@@ -62,6 +62,7 @@ const INDEX: &str = include_str!("../assets/phone/index.html");
 const APP_JS: &str = include_str!("../assets/phone/app.js");
 const SW_JS: &str = include_str!("../assets/phone/sw.js");
 const APP_CSS: &str = include_str!("../assets/phone/app.css");
+const ANSI_UP: &str = include_str!("../assets/phone/ansi_up.js");
 const ICON: &str = include_str!("../dist/gerdr.svg");
 const MANIFEST: &str = include_str!("../assets/phone/manifest.webmanifest");
 
@@ -207,7 +208,7 @@ fn serve(stream: TcpStream, icons: &Icons) {
         "HTTP/1.1 {} {reason}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\
          Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\
          Referrer-Policy: no-referrer\r\n\
-         Content-Security-Policy: default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; \
+         Content-Security-Policy: default-src 'self'; script-src 'self'; \
          style-src 'self' 'unsafe-inline'; img-src 'self' data:\r\n\
          Connection: close\r\n\r\n",
         reply.status,
@@ -326,6 +327,7 @@ fn answer(target: &str, icons: &Icons, from: &str) -> Reply {
         "/" => Reply::ok("text/html; charset=utf-8", INDEX),
         "/app.js" => Reply::ok("text/javascript; charset=utf-8", APP_JS),
         "/app.css" => Reply::ok("text/css; charset=utf-8", APP_CSS),
+        "/ansi_up.js" => Reply::ok("text/javascript; charset=utf-8", ANSI_UP),
         "/icon.svg" => Reply::ok("image/svg+xml", ICON),
         "/icon-180.png" => Reply::ok("image/png", icons.touch.clone()),
         "/icon-192.png" => Reply::ok("image/png", icons.small.clone()),
