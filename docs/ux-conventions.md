@@ -332,6 +332,8 @@ and Ctrl+C or `y` copies what it says.
   instruction (an edited fix, an item or a comment of their own) goes
   through a plan, and the page says so in plain words ("Your own words are in
   these fixes …"). A failure's note only says what went wrong and needs none.
+  Manual test is the exception: its Make fixes takes the user's own issues
+  too, for quick prototyping where they let the agent do as it sees fit.
 - Build's page keeps a "Verify failures" section for the fix rounds Verify's
   failures started: what the newest one was sent, then a line for each older
   one (its run, its agent, how it stands, how the next run went). It only

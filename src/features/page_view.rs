@@ -232,10 +232,6 @@ pub(super) fn stage_page(
                     if feature.posts_review() {
                         said.extend(failures_waiting(state, "for the review on GitHub"));
                     }
-                    if manual_sends(feature, state.ctx) {
-                        let why = manual_own_words(state.ctx);
-                        said.extend(why.map(|why| line(why, CheckTone::Note)));
-                    }
                     if fixes_unverified(feature, stage) {
                         let cause = (feature.fix_asked.iter().rev())
                             .find(|(_, s)| **s == Stage::ManualTest)

@@ -486,8 +486,8 @@ impl<'a> TabCtx<'a> {
         (page && !self.panel.expanded && folds).then_some(TabKey::ToggleRounds)
     }
 
-    /// Ctrl+Enter on the criteria tried: the user's comments go through a
-    /// plan, so it never plans them; Ctrl+Shift+Enter plans the fixes.
+    /// Ctrl+Enter on the criteria tried makes the fixes, the user's own
+    /// issues too, with no plan; Ctrl+Shift+Enter plans them.
     fn manual_gate(&self, plans: bool) -> Option<TabKey> {
         use crate::manual_test::Outcome;
         let on =
@@ -498,9 +498,6 @@ impl<'a> TabCtx<'a> {
         let sends = manual_sends(self.feature, self.ctx);
         Some(TabKey::Out(match plans {
             true => PanelOutcome::Manual(Outcome::SendFailures),
-            false if sends && manual_own_words(self.ctx).is_some() => {
-                PanelOutcome::FindingRefused(PLAN_FIRST)
-            }
             false if sends => PanelOutcome::Manual(Outcome::MakeFixes),
             false => PanelOutcome::Manual(Outcome::MarkPassed),
         }))

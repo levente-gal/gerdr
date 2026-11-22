@@ -244,11 +244,11 @@ fn a_comment_is_done_or_not_and_its_keys_edit_and_delete_it() {
         go(&mut panel, bare, Keysym::c),
         Some(PanelOutcome::AddComment)
     );
-    // It is to send, and the user's own: Ctrl+Shift+Enter plans,
-    // Ctrl+Enter says a plan comes first.
+    // It is to send, the user's own too: Ctrl+Shift+Enter plans,
+    // Ctrl+Enter makes the fixes with no plan.
     assert_eq!(
         go(&mut panel, ctrl, Keysym::Return),
-        Some(PanelOutcome::FindingRefused(PLAN_FIRST))
+        Some(on(Outcome::MakeFixes))
     );
     let shift = ModifiersState {
         shift: true,

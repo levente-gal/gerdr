@@ -602,15 +602,13 @@ fn writers_page_actions(
             false => ButtonStyle::Plain,
         };
         // Found while a round is open, they wait for the next one. As on
-        // every page: they are planned first, and what the user wrote can
-        // only go through a plan.
+        // every page they are planned first; unlike elsewhere, the user's
+        // own issues can skip that too, for quick prototyping.
         if manual_sends(feature, ctx) {
-            if manual_own_words(ctx).is_none() {
-                out.push((
-                    button("Make fixes", ButtonStyle::Plain),
-                    PanelOutcome::Manual(Outcome::MakeFixes),
-                ));
-            }
+            out.push((
+                button("Make fixes", ButtonStyle::Plain),
+                PanelOutcome::Manual(Outcome::MakeFixes),
+            ));
             out.push((
                 button("Plan fixes", style(true)),
                 PanelOutcome::Manual(Outcome::SendFailures),
