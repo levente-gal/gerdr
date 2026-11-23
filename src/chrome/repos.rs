@@ -119,8 +119,8 @@ const COMMENT_TAG_PAD: i32 = 6;
 const DIFF_FOLD: i32 = 18;
 const DIFF_CHECK: i32 = 26;
 const DIFF_BADGE: i32 = 18;
-const DIFF_INSET: i32 = 8;
-const DIFF_BAR: i32 = 3;
+pub(super) const DIFF_INSET: i32 = 8;
+pub(super) const DIFF_BAR: i32 = 3;
 /// A review comment's text, in from its card's edge.
 const COMMENT_INDENT: i32 = 12;
 /// How far the line and shadow under the pinned header reach down.

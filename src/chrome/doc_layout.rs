@@ -373,6 +373,13 @@ pub(super) fn laid_out(blocks: &Arc<Vec<DocBlock>>, w: i32) -> (Rc<Vec<(Rect, Do
     })
 }
 
+/// `blocks` laid out for a column `w` wide as `laid_out` does, not kept:
+/// for what keeps its own (a chat's items).
+pub(super) fn stack_of(blocks: &[DocBlock], w: i32) -> (Vec<(Rect, DocPiece)>, i32) {
+    let s = stack(blocks, w);
+    (s.pieces, s.y)
+}
+
 /// `pieces` (as `laid_out` gives them) painted with their `(0, 0)` at `at`.
 #[cfg_attr(not(test), expect(dead_code, reason = "the agent chat paints with it"))]
 pub(super) fn paint(
