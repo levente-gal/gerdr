@@ -319,6 +319,7 @@ fn probe(ship: Option<ShipCheck>) -> Probe {
         }),
         guards: BTreeMap::new(),
         models: BTreeMap::new(),
+        contexts: BTreeMap::new(),
         prs: None,
         bases: BTreeMap::new(),
         resolution: None,

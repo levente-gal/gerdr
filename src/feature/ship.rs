@@ -369,6 +369,9 @@ pub struct Probe {
     /// The models its stages' agents use, with the run each read was of
     /// (`agents::read_models`).
     pub models: BTreeMap<Stage, (u32, String)>,
+    /// How full its open agents' contexts are, with the run each read was
+    /// of (`ai_work::context::read_contexts`).
+    pub contexts: BTreeMap<Stage, (u32, crate::ai_work::context::Context)>,
     /// Its pull requests as GitHub has them, by `Repo::key`, when read this
     /// time (`read_prs`): read less often than the rest.
     pub prs: Option<BTreeMap<String, Result<PrState, String>>>,
@@ -603,6 +606,7 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
         rounds: page::round_stats(feature),
         docs: page::Docs::default(),
         models: BTreeMap::new(),
+        contexts: BTreeMap::new(),
         prs: None,
         bases: BTreeMap::new(),
         resolution: None,
@@ -623,6 +627,7 @@ pub fn probe_seen(feature: &Feature) -> Probe {
         rounds: page::round_stats(feature),
         docs: page::Docs::default(),
         models: BTreeMap::new(),
+        contexts: BTreeMap::new(),
         prs: None,
         bases: BTreeMap::new(),
         resolution: None,
@@ -646,6 +651,7 @@ pub fn probe_finished(feature: &Feature) -> Probe {
         rounds: page::round_stats(feature),
         docs: page::Docs::default(),
         models: BTreeMap::new(),
+        contexts: BTreeMap::new(),
         prs: None,
         bases: BTreeMap::new(),
         resolution: None,

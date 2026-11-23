@@ -341,9 +341,13 @@ and Ctrl+C or `y` copies what it says.
   A fix round has one name everywhere, "Fix round N", N counting the feature's
   rounds: its card, its plan's tab, its buttons ("Send fix round N again"),
   the activity and the rows it changed. Its card's meta line says which stage
-  asked it and that the Build agent makes it. Each round starts a fresh Build
-  agent of the pick, which writes its plan and makes its fixes, so no chat
-  grows over the rounds; the fixes' agent card says "next fixes: a fresh …".
+  asked it and that the Build agent makes it. The Build agent open writes its
+  plan and makes its fixes ("Same agent", the default), or each round starts
+  a fresh one of the pick ("Fresh agent", so no chat grows over the rounds);
+  the fixes' agent card says "next fixes: this agent" or "next fixes: a fresh
+  …". An open Claude Code or Codex agent's card also says how full its
+  context is, as its transcript last told ("context 84k / 1M", "nearly full"
+  from 80%); Cursor's and T3 Code's say nothing of it.
   Its plan opens by "Open plan",
   shown only when an agent wrote one. On Verify's, AI review's, Code
   review's and Manual test's pages a round open (in progress) is on top,

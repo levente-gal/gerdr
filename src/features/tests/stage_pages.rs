@@ -1467,6 +1467,58 @@ fn a_blocked_build_says_why_on_its_page_and_rail() {
 }
 
 #[test]
+fn an_open_agents_card_says_how_full_its_context_is() {
+    use crate::ai_work::context::Context;
+    let mut f = feature("b", vec![repo("api", true)], 5);
+    f.runs.insert(Stage::Build, agent_run(Some("p1"), None));
+    let n = f.runs[&Stage::Build].n;
+    let probe = |n: u32, used: u64| Probe {
+        contexts: [(
+            Stage::Build,
+            (
+                n,
+                Context {
+                    used,
+                    window: Some(1_000_000),
+                },
+            ),
+        )]
+        .into(),
+        ..ship::probe_seen(&f)
+    };
+    let status = |probe: &Probe| {
+        let state = PanelState {
+            probe: Some(probe),
+            fix_picks: vec![AgentChip {
+                icon: AgentIcon::from_agent("Claude Code"),
+                name: "Claude Code".into(),
+                lit: true,
+                off: false,
+            }],
+            ..PanelState::default()
+        };
+        let actions = page_actions(&f, Stage::AiReview, RowCtx::default());
+        let page = stage_page(&f, Stage::AiReview, &state, &actions, 2_000);
+        page.sections.iter().find_map(|s| match s {
+            PageSection::Agent {
+                stage: Stage::Build,
+                status,
+                ..
+            } => Some(status.clone()),
+            _ => None,
+        })
+    };
+    let said = |what: &str| Some(format!("Build agent \u{b7} next fixes: this agent{what}"));
+    assert_eq!(status(&probe(n, 84_002)), said(" \u{b7} context 84k / 1M"));
+    assert_eq!(
+        status(&probe(n, 850_000)),
+        said(" \u{b7} context 850k / 1M, nearly full")
+    );
+    // Read of another run: not this agent's.
+    assert_eq!(status(&probe(n + 1, 84_002)), said(""));
+}
+
+#[test]
 fn fix_pages_choose_the_open_build_agent_or_a_fresh_one() {
     let chip = AgentChip {
         icon: AgentIcon::from_agent("Claude Code"),
