@@ -912,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn other_agents_read_nothing_yet() {
+    fn a_claude_line_means_nothing_to_codex() {
         let mut reader = Reader::new(AgentKind::Codex);
         reader.feed(&jsonl(&[user("u1", "hi")]));
         assert!(reader.items().is_empty());
