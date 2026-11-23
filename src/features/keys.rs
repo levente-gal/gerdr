@@ -1393,7 +1393,7 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                 ),
                 row!(
                     "Ctrl+Shift+R",
-                    "show the stage's agent, or resume its chat",
+                    "show the stage's agent or the Build agent its fixes go to, or resume its chat",
                     |t| {
                         Some(
                             agent_key(t.feature, t.stage, t.ctx)

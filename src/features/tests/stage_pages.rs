@@ -1565,6 +1565,27 @@ fn fix_pages_choose_the_open_build_agent_or_a_fresh_one() {
             Some(false)
         )
     );
+    // Its card shows that agent's tab, as Build's page does.
+    let actions = page_actions(&f, Stage::AiReview, RowCtx::default());
+    let page = stage_page(&f, Stage::AiReview, &state, &actions, 2_000);
+    let held: Vec<&PanelOutcome> = (page.sections.iter())
+        .find_map(|s| match s {
+            PageSection::Agent {
+                stage: Stage::Build,
+                buttons,
+                ..
+            } => Some(buttons.iter().map(|&i| &actions[i].1).collect()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert_eq!(held, [&PanelOutcome::ShowAgent(Stage::Build)]);
+    // Verify has no agent of its own: its key goes to that one.
+    let mut v = feature("v", vec![repo("api", true)], stage_index(Stage::Verify));
+    v.runs.insert(Stage::Build, agent_run(Some("p1"), None));
+    assert_eq!(
+        super::super::rows::agent_key(&v, Stage::Verify, RowCtx::default()).map(|(_, o)| o),
+        Some(PanelOutcome::ShowAgent(Stage::Build))
+    );
     let mods = ModifiersState {
         ctrl: true,
         shift: true,

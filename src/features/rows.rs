@@ -502,7 +502,8 @@ pub(super) fn rework_on(feature: &Feature, stage: Stage, ctx: RowCtx) -> Option<
 }
 
 /// What the key for an agent's tab does on `stage`'s page: the Build agent's
-/// while work sent back to it is under way, else what `agent_button` says.
+/// while work sent back to it is under way, else what `agent_button` says;
+/// with none of the stage's own, that of the Build agent its fixes go to.
 pub(super) fn agent_key(
     feature: &Feature,
     stage: Stage,
@@ -511,6 +512,11 @@ pub(super) fn agent_key(
     rework_on(feature, stage, ctx)
         .and_then(|_| agent_button(feature, Stage::Build, ctx))
         .or_else(|| agent_button(feature, stage, ctx))
+        .or_else(|| {
+            keys::fix_page(feature, stage)
+                .then(|| agent_button(feature, Stage::Build, ctx))
+                .flatten()
+        })
         .filter(|(_, o)| !verify_going(feature, stage, ctx) || works_during_checks(o))
 }
 
