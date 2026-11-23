@@ -1510,7 +1510,7 @@ fn words(content: &Value, out: &mut Vec<String>) {
 /// What a tool was called with, in one line: its command, its file, what
 /// it looked for; else the first text it was given. JSON given as text
 /// (Codex's arguments) is read first.
-fn tool_gist(input: &Value) -> Option<String> {
+pub(crate) fn tool_gist(input: &Value) -> Option<String> {
     let parsed;
     let input = match input {
         Value::String(text) => match serde_json::from_str::<Value>(text) {
