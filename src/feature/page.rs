@@ -731,7 +731,7 @@ mod tests {
         );
         let heading = |text: &str| DocBlock::Heading {
             level: 1,
-            text: text.to_owned(),
+            text: text.into(),
         };
         assert_eq!(
             docs.previews.get(&Stage::Discover).map(|b| b.as_slice()),

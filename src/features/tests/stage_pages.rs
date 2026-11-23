@@ -1133,7 +1133,7 @@ fn a_written_plan_offers_review() {
 fn a_stage_page_reads_its_file_last() {
     use crate::md_blocks::DocBlock;
     use std::sync::Arc;
-    let blocks = Arc::new(vec![DocBlock::Para("why".to_owned())]);
+    let blocks = Arc::new(vec![DocBlock::Para("why".into())]);
     let mut p = probe(None);
     p.docs.previews.insert(Stage::Plan, blocks.clone());
     let state = PanelState {
@@ -1170,7 +1170,7 @@ fn a_stage_page_reads_its_file_last() {
     assert!(!has_doc(&none));
     // A stage with no file of its own reads none, whatever was read.
     let mut p = probe(None);
-    let read = Arc::new(vec![DocBlock::Para("why".to_owned())]);
+    let read = Arc::new(vec![DocBlock::Para("why".into())]);
     p.docs.previews.insert(Stage::Build, read);
     let state = PanelState {
         probe: Some(&p),

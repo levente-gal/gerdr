@@ -98,6 +98,10 @@ pub struct ScrollbackRow {
     pub styles: Vec<(Range<usize>, Style)>,
 }
 
+/// A terminal row as `Painter::paint_styled_rows` paints it: its text and
+/// the runs of it drawn other than plainly, by character of it.
+pub type StyledRow<'a> = (&'a str, &'a [(Range<usize>, Style)]);
+
 /// Where the viewer's parts go, in output coordinates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScrollbackLayout {
@@ -578,20 +582,13 @@ impl Painter {
                 p,
             );
         }
-        if row.styles.is_empty() {
-            self.mono_text(
-                &mut c,
-                &row.text,
-                MONO_SIZE,
-                0.0,
-                f32::MAX,
-                band(rect, scale),
-                scale,
-                p.terminal_foreground,
-            );
-        } else {
-            self.styled_row(&mut c, row, adv, band(rect, scale), scale, p);
-        }
+        self.paint_styled_rows(
+            &mut c,
+            &[(row.text.as_str(), row.styles.as_slice())],
+            rect,
+            scale,
+            p,
+        );
         if let Some(word) = &row.word {
             let width = |t: &str| t.chars().count() as f32 * adv;
             let x = (0.0, c.w as f32);
@@ -609,57 +606,70 @@ impl Painter {
         c
     }
 
-    /// The text of `row` in the colours, bold (in the bold monospace
-    /// face) and dim of its runs, each run where its first character goes
-    /// (`adv` apart), the rest in the terminal's colour.
-    fn styled_row(
+    /// Terminal rows, as `crate::scrollback::parse_ansi` reads them, in the
+    /// monospace font `ROW` apart down from the top left of `rect` and cut
+    /// to it, over a ground the caller fills: each run in its colour, bold
+    /// (in the bold monospace face) and dim, where its first character
+    /// goes, the rest in the terminal's colour.
+    pub(super) fn paint_styled_rows(
         &self,
         c: &mut super::Canvas,
-        row: &ScrollbackRow,
-        adv: f32,
-        row_band: (i32, i32),
+        rows: &[StyledRow],
+        rect: Rect,
         scale: f64,
         p: &Palette,
     ) {
-        let chars: Vec<(usize, char)> = row.text.char_indices().collect();
-        let byte = |n: usize| chars.get(n).map_or(row.text.len(), |(b, _)| *b);
-        // The runs with those drawn plainly between them.
-        let mut runs = Vec::new();
-        let mut at = 0;
-        for (r, style) in &row.styles {
-            if r.start > at {
-                runs.push((at..r.start, Style::default()));
-            }
-            runs.push((r.clone(), *style));
-            at = r.end;
-        }
-        if at < chars.len() {
-            runs.push((at..chars.len(), Style::default()));
-        }
-        for (r, style) in runs {
-            let text = &row.text[byte(r.start)..byte(r.end)];
-            let mut color = style
-                .fg
-                .map_or(p.terminal_foreground, |ink| ink_color(ink, p));
-            if style.dim {
-                color = mix(color, p.terminal_background, DIM);
-            }
-            let x = r.start as f32 * adv;
-            let size = MONO_SIZE;
-            match style.bold {
-                true if self.has_mono_bold() => {
-                    self.mono_bold_text(c, text, size, x, f32::MAX, row_band, scale, color);
+        let adv = self.mono_width("0", MONO_SIZE, scale);
+        let (left, top, w, h) = rect_px(rect, scale);
+        let shown = (rect.size.h.max(0) as usize).div_ceil(ROW as usize);
+        c.clipped(left as i32, top as i32, w as i32, h as i32, |c| {
+            for (i, (text, styles)) in rows.iter().take(shown).enumerate() {
+                let line = Rectangle::new(
+                    (rect.loc.x, rect.loc.y + i as i32 * ROW).into(),
+                    (rect.size.w, ROW).into(),
+                );
+                let row_band = band(line, scale);
+                let chars: Vec<(usize, char)> = text.char_indices().collect();
+                let byte = |n: usize| chars.get(n).map_or(text.len(), |(b, _)| *b);
+                // The runs with those drawn plainly between them.
+                let mut runs = Vec::new();
+                let mut at = 0;
+                for (r, style) in styles.iter() {
+                    if r.start > at {
+                        runs.push((at..r.start, Style::default()));
+                    }
+                    runs.push((r.clone(), *style));
+                    at = r.end;
                 }
-                bold => {
-                    self.mono_text(c, text, size, x, f32::MAX, row_band, scale, color);
-                    // No bold face: struck again a little to the right.
-                    if bold {
-                        let x = x + BOLD_SHIFT * scale as f32;
-                        self.mono_text(c, text, size, x, f32::MAX, row_band, scale, color);
+                if at < chars.len() {
+                    runs.push((at..chars.len(), Style::default()));
+                }
+                for (r, style) in runs {
+                    let text = &text[byte(r.start)..byte(r.end)];
+                    let mut color = style
+                        .fg
+                        .map_or(p.terminal_foreground, |ink| ink_color(ink, p));
+                    if style.dim {
+                        color = mix(color, p.terminal_background, DIM);
+                    }
+                    let x = left + r.start as f32 * adv;
+                    let size = MONO_SIZE;
+                    match style.bold {
+                        true if self.has_mono_bold() => {
+                            self.mono_bold_text(c, text, size, x, f32::MAX, row_band, scale, color);
+                        }
+                        bold => {
+                            self.mono_text(c, text, size, x, f32::MAX, row_band, scale, color);
+                            // No bold face: struck again a little to the right.
+                            if bold {
+                                let x = x + BOLD_SHIFT * scale as f32;
+                                self.mono_text(c, text, size, x, f32::MAX, row_band, scale, color);
+                            }
+                        }
                     }
                 }
             }
-        }
+        });
     }
 
     /// The scrollbar's thumb, of `size`.
@@ -1110,6 +1120,45 @@ mod tests {
             let file = format!("{name}_{}_{scale}.ppm", theme.name());
             let _ = std::fs::write(dir.join(file), out);
         }
+    }
+
+    #[test]
+    fn styled_rows_paint_inside_their_rect_only() {
+        let painter = Painter::new();
+        if !painter.has_font() {
+            return;
+        }
+        let p = super::super::Theme::Dark.palette();
+        // Three rows too long for the rect, two of them high: the rest is cut.
+        let long = "x".repeat(80);
+        let ansi = format!("\x1b[1;31mbold red\x1b[0m {long}\n\x1b[2mdim\x1b[0m {long}\n{long}");
+        let parsed = crate::scrollback::parse_ansi(&ansi);
+        assert_eq!(parsed[0].1.len(), 1);
+        let rows: Vec<StyledRow> = parsed
+            .iter()
+            .map(|(t, s)| (t.as_str(), s.as_slice()))
+            .collect();
+        let rect = Rectangle::new((20, 10).into(), (120, 2 * ROW).into());
+        let mut c = super::super::Canvas::new((200, 100).into());
+        painter.paint_styled_rows(&mut c, &rows, rect, 1.0, p);
+        let inked = |x: i32, y: i32| c.px[((y * c.w + x) * 4 + 3) as usize] > 0;
+        let (mut inside, mut outside) = (0, 0);
+        for y in 0..c.h {
+            for x in 0..c.w {
+                match (rect.contains((x, y)), inked(x, y)) {
+                    (true, true) => inside += 1,
+                    (false, true) => outside += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(inside > 0);
+        assert_eq!(outside, 0);
+        // The second row is drawn too, under the first.
+        assert!(
+            (rect.loc.y + ROW..rect.loc.y + 2 * ROW)
+                .any(|y| (rect.loc.x..rect.loc.x + rect.size.w).any(|x| inked(x, y)))
+        );
     }
 
     #[test]

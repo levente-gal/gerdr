@@ -1659,7 +1659,7 @@ impl Scrollback {
 /// plainly. Colours, bold and dim are kept, going on past a line's end
 /// as a terminal's do; other sequences are dropped, but a move of the
 /// cursor forward, which stands for blanks.
-fn parse_ansi(text: &str) -> Vec<(String, Styled)> {
+pub(crate) fn parse_ansi(text: &str) -> Vec<(String, Styled)> {
     let mut out = Vec::new();
     let (mut line, mut runs, mut n) = (String::new(), Styled::new(), 0);
     let mut style = Style::default();
