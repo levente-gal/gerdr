@@ -15,8 +15,9 @@
 use super::{
     BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, Dot,
     PANE_BAR_HEIGHT, Painter, Palette, ROW_HIGHLIGHT_RADIUS, Rect, Rgb, SHADOW, STATUS_GAP,
-    STATUS_WIDTH, band, centred_dot, chevron_side, copy, cross, icon_sdf, mix, physical, rect_px,
-    restart_arrow, send, status_dot, status_mark, stop, text_lines, zoom_corners,
+    STATUS_WIDTH, STROKE, band, centred_dot, chevron_side, copy, cross, icon_sdf, mix, physical,
+    rect_px, restart_arrow, rounded_rect, segment, send, status_dot, status_mark, stop, terminal,
+    text_lines, zoom_corners,
 };
 use crate::herdr::AgentStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -84,6 +85,18 @@ pub fn unzoom_button_rect(pane: Rect) -> Option<Rect> {
             (UNZOOM_BUTTON, UNZOOM_BUTTON).into(),
         )
     })
+}
+
+/// Signed distance to a speech bubble with two lines of text in it,
+/// centred on the origin: a chat.
+fn bubble(x: f32, y: f32, s: f32) -> f32 {
+    let body = rounded_rect(x, y, -6.5 * s, -5.5 * s, 13.0 * s, 9.5 * s, 2.5 * s);
+    let tail = segment(x, y, -3.0 * s, 4.0 * s, -4.5 * s, 6.5 * s) - STROKE * s;
+    let line = |y0: f32, x1: f32| segment(x, y, -3.5 * s, y0 * s, x1 * s, y0 * s) - STROKE * s;
+    (body.abs() - STROKE * s)
+        .min(tail)
+        .min(line(-2.5, 3.5))
+        .min(line(0.5, 1.0))
 }
 
 /// Where the buttons of a bar with `kind`'s sit, left to right: those
@@ -188,6 +201,10 @@ pub fn pane_bar_hit(
 pub enum BarButton {
     /// Tell the agent waiting in this terminal to read its stage's prompt.
     SendPrompt,
+    /// Show the agent in this terminal as a chat (see `crate::chat`).
+    Chat,
+    /// Show the terminal's own screen again, in its chat's place.
+    Screen,
     Scrollback,
     Restart,
     Stop,
@@ -213,6 +230,9 @@ pub enum BarButtons {
     Terminal,
     /// A terminal whose stage agent waits for its prompt: that to send too.
     Waiting,
+    /// A terminal herdr found an agent in: its chat (`chat`: shown) or its
+    /// screen to show too, and the prompt to send while it `waiting`s for it.
+    Agent { chat: bool, waiting: bool },
     /// A web page: back and forward (while its page has a `history` to
     /// go through) and reload at the start, its address in a field
     /// filling the rest, and copy it at the end.
@@ -238,6 +258,24 @@ impl BarButtons {
                 BarButton::CopyUrl,
             ],
             Self::Web { history: false } => &[BarButton::Reload, BarButton::CopyUrl],
+            Self::Agent { chat, waiting } => {
+                const AGENT: [BarButton; 5] = [
+                    BarButton::SendPrompt,
+                    BarButton::Chat,
+                    BarButton::Scrollback,
+                    BarButton::Restart,
+                    BarButton::Stop,
+                ];
+                const CHAT: [BarButton; 5] = [
+                    BarButton::SendPrompt,
+                    BarButton::Screen,
+                    BarButton::Scrollback,
+                    BarButton::Restart,
+                    BarButton::Stop,
+                ];
+                let all: &'static [BarButton] = if chat { &CHAT } else { &AGENT };
+                if waiting { all } else { &all[1..] }
+            }
         }
     }
 
@@ -247,7 +285,7 @@ impl BarButtons {
         match self {
             Self::Web { history: true } => 3,
             Self::Web { history: false } => 1,
-            Self::None | Self::Terminal | Self::Waiting => 0,
+            Self::None | Self::Terminal | Self::Waiting | Self::Agent { .. } => 0,
         }
     }
 }
@@ -311,8 +349,10 @@ impl PaneBarView {
     /// Whether it starts with a mark saying how its command is: a
     /// terminal's, once something has run in it.
     fn has_mark(&self) -> bool {
-        matches!(self.buttons, BarButtons::Terminal | BarButtons::Waiting)
-            && self.status != BarStatus::Idle
+        matches!(
+            self.buttons,
+            BarButtons::Terminal | BarButtons::Waiting | BarButtons::Agent { .. }
+        ) && self.status != BarStatus::Idle
     }
 
     /// Where its mark goes, in the bar at `bar`.
@@ -543,6 +583,8 @@ impl Painter {
                 BarButton::Back => view.can_back,
                 BarButton::Forward => view.can_forward,
                 BarButton::SendPrompt
+                | BarButton::Chat
+                | BarButton::Screen
                 | BarButton::Scrollback
                 | BarButton::Reload
                 | BarButton::CopyUrl
@@ -584,6 +626,10 @@ impl Painter {
                     icon_sdf(c, rect, scale, color, |x, y| zoom_corners(unzoom, x, y, s))
                 }
                 BarButton::Close => icon_sdf(c, rect, scale, color, |x, y| cross(x, y, 0.8 * s)),
+                BarButton::Chat => icon_sdf(c, rect, scale, color, |x, y| bubble(x, y, s)),
+                BarButton::Screen => {
+                    icon_sdf(c, rect, scale, color, |x, y| terminal(x, y, 0.8 * s))
+                }
             }
         }
     }
@@ -851,6 +897,12 @@ mod tests {
         );
         // A waiting agent's bar leads what stays at its end with the arrow.
         assert_eq!(order(BarButtons::Waiting)[0], BarButton::SendPrompt,);
+        // An agent's bar flips it between chat and screen, after the arrow.
+        let agent = |chat, waiting| order(BarButtons::Agent { chat, waiting });
+        assert_eq!(agent(false, false)[0], BarButton::Chat);
+        assert_eq!(agent(true, false)[0], BarButton::Screen);
+        assert_eq!(agent(true, true)[..2], [BarButton::SendPrompt, BarButton::Screen]);
+        assert_eq!(agent(false, false)[1..], order(BarButtons::Terminal));
     }
 
     #[test]

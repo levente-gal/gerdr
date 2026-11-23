@@ -2089,6 +2089,7 @@ mod tests {
                 ratio: 0.5,
                 first: Box::new(SavedNode::Leaf(SavedLeaf::Herdr {
                     pane_id: "w1:p1".into(),
+                    chat: false,
                 })),
                 second: Box::new(SavedNode::Leaf(SavedLeaf::App {
                     command: "firefox https://a.b".into(),

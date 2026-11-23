@@ -361,6 +361,36 @@ pub struct Pane {
     pub chat: Option<Box<chat::PaneChat>>,
 }
 
+/// A pane's screen rows with their colours, as `scrollback::parse_ansi`
+/// reads them.
+pub type ChatRows = Vec<(String, scrollback::Styled)>;
+
+/// What reads the chats panes show in their place (see `chat`), by herdr
+/// pane. Their items, scroll and draft are each pane's own (`Pane::chat`).
+#[derive(Default)]
+pub struct Chats {
+    /// The thread reading transcripts, started the first time a chat shows.
+    pub tail: Option<chat::tail::Tail>,
+    /// The panes it follows, with the agent session herdr said each holds
+    /// when it was asked to: another one is followed afresh.
+    pub followed: HashMap<String, Option<herdr::AgentSession>>,
+    /// How each chat's list moves (see `scroll`): its `top` follows it.
+    pub scrolls: HashMap<String, scroll::Scroll>,
+    /// The screen rows each chat shows while its agent waits on the user,
+    /// as handed to the painter (see `chat::PaneChat::waiting`).
+    pub waiting: HashMap<String, Arc<ChatRows>>,
+    /// Where the reads of those rows come back; set up the first time.
+    pub rows_tx: Option<channel::Sender<(String, Result<ChatRows, String>)>>,
+    /// The panes whose rows are being read, and when each was last asked.
+    pub reading: HashSet<String>,
+    pub read_at: HashMap<String, Instant>,
+    /// The pane whose list's scrollbar is held.
+    pub bar_drag: Option<String>,
+    /// The panes showing their chat as last arranged: an agent coming or
+    /// going changes that.
+    pub shown: HashSet<String>,
+}
+
 /// A process we started for a tab whose window hasn't shown up yet.
 pub struct Expected {
     /// `None` while queued: windows told apart by app_id only are started
@@ -408,6 +438,9 @@ pub struct Expected {
     /// A terminal of a tab hidden for `PARK_AFTER`: its window was closed,
     /// and it is attached again once the tab shows (see `Gerdr::park_hidden`).
     pub parked: bool,
+    /// The pane's chat (see `Pane::chat`), kept while its window is to come:
+    /// parked, or restored shown as a chat.
+    pub chat: Option<Box<chat::PaneChat>>,
 }
 
 impl Expected {
@@ -428,6 +461,7 @@ impl Expected {
             held: false,
             showed_window: false,
             parked: false,
+            chat: None,
         }
     }
 
@@ -704,6 +738,7 @@ impl Tab {
                     p.herdr.as_ref(),
                     p.app_command.as_deref(),
                     is_zed(&p.window),
+                    p.chat.as_ref().is_some_and(|c| c.shown),
                 ),
             },
             None => {
@@ -717,6 +752,7 @@ impl Tab {
                         e.herdr.as_ref(),
                         e.app_command.as_deref(),
                         e.app_id == "zed",
+                        e.chat.as_ref().is_some_and(|c| c.shown),
                     ),
                 }
             }
@@ -905,17 +941,19 @@ impl Tab {
     }
 }
 
-/// How a leaf is remembered: by the herdr pane it shows, the command an app
-/// was launched with, or as the workspace's Zed. A plain terminal (without
-/// herdr) can't come back.
+/// How a leaf is remembered: by the herdr pane it shows (and whether as
+/// its `chat`), the command an app was launched with, or as the
+/// workspace's Zed. A plain terminal (without herdr) can't come back.
 fn saved_leaf(
     herdr: Option<&herdr::PaneInfo>,
     app_command: Option<&str>,
     zed: bool,
+    chat: bool,
 ) -> Option<SavedLeaf> {
     if let Some(pane) = herdr {
         Some(SavedLeaf::Herdr {
             pane_id: pane.pane_id.clone(),
+            chat,
         })
     } else if let Some(command) = app_command {
         Some(SavedLeaf::App {
@@ -999,6 +1037,8 @@ struct RestoredTab {
     /// The leaves kept for other windows of apps kept running, with the
     /// command that started the app and the window's title.
     windows: Vec<(u32, String, String)>,
+    /// The herdr panes' leaves saved shown as chats.
+    chats: Vec<u32>,
 }
 
 /// Rebuild a tab from `saved`: each herdr pane in the leaf `ids` gives it,
@@ -1011,7 +1051,11 @@ fn restore_tab(saved: &SavedNode, ids: &HashMap<String, u32>, next: &mut u32) ->
         *next
     };
     restored.layout = saved.restore(&mut |leaf| match leaf {
-        SavedLeaf::Herdr { pane_id } => ids.get(pane_id).copied(),
+        SavedLeaf::Herdr { pane_id, chat } => {
+            let id = ids.get(pane_id).copied();
+            restored.chats.extend(id.filter(|_| *chat));
+            id
+        }
         SavedLeaf::Zed => {
             let id = new_leaf();
             restored.zed.push(id);
@@ -1571,6 +1615,8 @@ pub struct Gerdr {
     pub inbox: inbox::Inbox,
     /// The criteria strip over a sandbox's app, and what it holds.
     pub criteria_strip: criteria_strip::CriteriaStrip,
+    /// What reads the chats panes show in their place (see `chat`).
+    pub chats: Chats,
     /// What each agent is doing, and since when it has been, for the
     /// inbox's ages.
     pub agent_since: HashMap<agents::AgentKey, (herdr::AgentStatus, Instant)>,
@@ -2473,6 +2519,7 @@ impl Gerdr {
                     state.mark_paused_agents();
                     state.notify_agents();
                     state.stage_agents_tick();
+                    state.chats_refresh();
                 }
             }
         });
@@ -2980,6 +3027,7 @@ impl Gerdr {
                 self.mark_paused_agents();
                 self.notify_agents();
                 self.stage_agents_tick();
+                self.chats_refresh();
             }
             Err(err) => tracing::debug!("herdr: {err}"),
         }
@@ -3327,10 +3375,12 @@ impl Gerdr {
         for tab in self.workspaces.iter_mut().flat_map(|ws| &mut ws.tabs) {
             for pane in tab.panes.iter_mut().filter(|p| is_it(&p.herdr)) {
                 pane.herdr = None;
+                pane.chat = None;
                 found.push((Some(pane.window.clone()), 0));
             }
             for e in tab.expected.iter_mut().filter(|e| is_it(&e.herdr)) {
                 e.herdr = None;
+                e.chat = None;
                 found.extend(e.pid.map(|pid| (None, pid)));
             }
             // A parked one has nothing left to attach: its leaf goes.
@@ -3536,8 +3586,12 @@ impl Gerdr {
                 {
                     tab.split(None, id, None, area);
                 }
-                tab.expected
-                    .push(Expected::terminal(pid, id, false, Some(pane)));
+                let mut e = Expected::terminal(pid, id, false, Some(pane));
+                // Followed once its tab shows (see `chats_sync`).
+                if restored.chats.contains(&id) {
+                    e.chat = Some(chat::PaneChat::opened());
+                }
+                tab.expected.push(e);
             }
             for command in extra_apps {
                 let id = self.new_pane_id();
@@ -5304,7 +5358,7 @@ impl Gerdr {
             stray: false,
             window_of: e.window_of.map(|(command, _)| command),
             x11_app: e.pid.filter(|_| from_bridge),
-            chat: None,
+            chat: e.chat,
         };
         self.add_pane(w, t, pane, e.focus);
         if dropped {
@@ -5519,6 +5573,12 @@ impl Gerdr {
             if tab.review().is_some_and(|review| review.page.is_none()) {
                 hidden.extend(tab.panes.iter().map(|p| p.window.clone()));
             }
+            // A pane shown as a chat: the chat is painted in its place.
+            hidden.extend(
+                (tab.panes.iter())
+                    .filter(|p| self.chat_shown(p))
+                    .map(|p| p.window.clone()),
+            );
         }
         for window in hidden {
             if let Some(toplevel) = window.toplevel() {
@@ -5526,11 +5586,15 @@ impl Gerdr {
             }
             self.space.unmap_elem(&window);
         }
+        self.chats_sync();
     }
 
     /// Give `window` the keyboard. Focusing a pane under a zoomed one ends
     /// the zoom.
     pub fn focus(&mut self, window: Option<Window>) {
+        // A pane shown as a chat keeps the keys off its window: the chat has
+        // them (see `chat::view`).
+        let chat = window.as_ref().is_some_and(|w| self.window_shows_chat(w));
         let mut unzoomed = false;
         for tab in self.workspaces.iter_mut().flat_map(|ws| ws.tabs.iter_mut()) {
             let zoomed = tab.zoomed();
@@ -5557,7 +5621,7 @@ impl Gerdr {
         if unzoomed {
             self.arrange();
         }
-        let surface = window.and_then(|w| Some(w.toplevel()?.wl_surface().clone()));
+        let surface = (window.filter(|_| !chat)).and_then(|w| Some(w.toplevel()?.wl_surface().clone()));
         let keyboard = self
             .seat
             .get_keyboard()
@@ -5600,6 +5664,7 @@ impl Gerdr {
             let mut e = Expected::new(None, "", pane.id, focus);
             e.herdr = pane.herdr;
             e.parked = true;
+            e.chat = pane.chat;
             tab.expected.push(e);
             if focus {
                 tab.focused = tab.panes.first().map(|p| p.window.clone());
@@ -6769,6 +6834,7 @@ impl Gerdr {
     fn chrome_view(&mut self) -> ChromeView {
         let now = Instant::now();
         self.tick_scrolls(now);
+        self.chat_scroll_tick(now);
         self.hover.tooltip.tick(now);
         self.expire_toasts(now);
         self.t3_seen();
@@ -6841,7 +6907,10 @@ impl Gerdr {
             focused_pane,
             pane_drop: self.pane_drop_rect(),
             placeholders,
-            chats: Vec::new(),
+            chats: match flat {
+                true => Vec::new(),
+                false => self.chat_views(),
+            },
             context_menu: self.overlays.context_menu.as_ref().map(ContextMenu::view),
             tooltip: self.hover.tooltip.view(),
             switcher: self.overlays.switcher_view(),
@@ -7468,6 +7537,7 @@ fn new_gerdr(
         project: None,
         doc_tab_shown: None,
         criteria_strip: Default::default(),
+        chats: Default::default(),
         toasts: VecDeque::new(),
         shared_generation: 0,
         order_pending: HashSet::new(),
@@ -8125,7 +8195,10 @@ mod tests {
     }
 
     fn herdr_leaf(id: &str) -> SavedNode {
-        SavedNode::Leaf(SavedLeaf::Herdr { pane_id: id.into() })
+        SavedNode::Leaf(SavedLeaf::Herdr {
+            pane_id: id.into(),
+            chat: false,
+        })
     }
 
     fn split(first: SavedNode, second: SavedNode) -> SavedNode {
@@ -8186,6 +8259,29 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_saved_as_a_chat_comes_back_as_one() {
+        let chat = SavedNode::Leaf(SavedLeaf::Herdr {
+            pane_id: "w1:p2".into(),
+            chat: true,
+        });
+        let saved = split(herdr_leaf("w1:p1"), chat);
+        let ids = HashMap::from([("w1:p1".to_owned(), 3), ("w1:p2".to_owned(), 4)]);
+        let restored = restore_tab(&saved, &ids, &mut 0);
+        assert_eq!(restored.chats, [4]);
+        // Saved before chats, a leaf reads as a terminal's screen.
+        let old: SavedLeaf = serde_json::from_str(r#"{"kind":"herdr","pane_id":"w1:p1"}"#).unwrap();
+        assert_eq!(
+            old,
+            SavedLeaf::Herdr {
+                pane_id: "w1:p1".into(),
+                chat: false
+            }
+        );
+        let json = serde_json::to_string(&old).unwrap();
+        assert!(!json.contains("chat"), "{json}");
+    }
+
+    #[test]
     fn a_terminal_that_is_gone_leaves_its_space_to_its_sibling() {
         let saved = split(herdr_leaf("w1:p1"), herdr_leaf("w1:p2"));
         let ids = HashMap::from([("w1:p2".to_owned(), 3)]);
@@ -8217,19 +8313,20 @@ mod tests {
             cwd: None,
         };
         assert_eq!(
-            saved_leaf(Some(&pane), None, false),
+            saved_leaf(Some(&pane), None, false, true),
             Some(SavedLeaf::Herdr {
-                pane_id: "w1:p4".into()
+                pane_id: "w1:p4".into(),
+                chat: true,
             })
         );
         assert_eq!(
-            saved_leaf(None, Some("zathura"), false),
+            saved_leaf(None, Some("zathura"), false, false),
             Some(SavedLeaf::App {
                 command: "zathura".into()
             })
         );
-        assert_eq!(saved_leaf(None, None, true), Some(SavedLeaf::Zed));
-        assert_eq!(saved_leaf(None, None, false), None);
+        assert_eq!(saved_leaf(None, None, true, false), Some(SavedLeaf::Zed));
+        assert_eq!(saved_leaf(None, None, false, false), None);
     }
 
     #[test]

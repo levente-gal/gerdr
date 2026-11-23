@@ -215,6 +215,8 @@ pub enum Overlay {
     /// The criteria strip over a sandbox's app, once given the keys: what is
     /// typed into the note being written there.
     Criteria,
+    /// The focused pane's chat (see `crate::chat`), with its reply box.
+    Chat,
 }
 
 /// Whether `action`, picked with the prefix, works over the welcome screen:
@@ -498,6 +500,18 @@ impl Gerdr {
                             state.key_state.suppressed_keys.push(code);
                             return FilterResult::Intercept(None);
                         }
+                        // A pane shown as a chat has the keys, not its
+                        // window, repeating what its reply box takes.
+                        if state.text_overlay() == Some(Overlay::Chat) {
+                            state.key_state.suppressed_keys.push(code);
+                            state.hover.tooltip.hide();
+                            let typed = handle.modified_sym();
+                            text_field::took_key();
+                            let out = state.overlay_key(Overlay::Chat, mods, sym, typed);
+                            let took = text_field::took_key();
+                            state.repeat_key(code, *mods, sym, typed, took);
+                            return FilterResult::Intercept(out);
+                        }
                         // A file's tab showing its page takes what acts on
                         // the file: the page has all else.
                         if state.review_tab().is_some()
@@ -546,7 +560,9 @@ impl Gerdr {
                     self.mouse.repos_editor_drag = false;
                     self.overlays.scrollback_release();
                     self.release_page_text();
-                    if self.mouse.thumb_drag.take().is_some() {
+                    if self.mouse.thumb_drag.take().is_some()
+                        || self.chats.bar_drag.take().is_some()
+                    {
                         return;
                     }
                 }
@@ -667,6 +683,10 @@ impl Gerdr {
                 // Over a toast, the help panel or the footer, nothing
                 // moves.
                 if at.is_some() || self.on_footer(self.mouse.pos) {
+                    return;
+                }
+                // Over a chat, its items move.
+                if self.chat_scroll(self.mouse.pos, motion) {
                     return;
                 }
                 // Over the sidebar, its rows scroll.
@@ -844,6 +864,10 @@ impl Gerdr {
                 chrome::PlaceholderButton::Retry => MenuAction::RetryExpected(pane),
                 chrome::PlaceholderButton::Close => MenuAction::CloseExpected(pane),
             });
+            return true;
+        }
+        // A pane shown as a chat: the chat has the press.
+        if self.chat_press(location, button, |state| state.press_field(location)) {
             return true;
         }
         // Click to focus a pane.
@@ -1219,6 +1243,9 @@ impl Gerdr {
         if self.mouse.thumb_drag.is_some() {
             self.drag_thumb(pos);
         }
+        if self.chats.bar_drag.is_some() {
+            self.chat_drag(pos);
+        }
         // The overlay on top at the pointer takes the hover from
         // everything under it; its icons have tooltips of their own.
         let at = self.overlay_at(pos);
@@ -1393,7 +1420,10 @@ impl Gerdr {
                 Some(O::Criteria) => return Some(Overlay::Criteria),
                 _ => {}
             }
-            return self.is_open(O::Features).then_some(Overlay::Features);
+            if self.is_open(O::Features) {
+                return Some(Overlay::Features);
+            }
+            return self.chat_has_keys().then_some(Overlay::Chat);
         };
         match top {
             O::Welcome => Some(Overlay::Welcome),
@@ -1442,7 +1472,9 @@ impl Gerdr {
         sym: Keysym,
         typed: Keysym,
     ) -> Option<Intercepted> {
-        if matches!(into, Overlay::Features | Overlay::Criteria) && self.wrapped_step(mods, sym) {
+        if matches!(into, Overlay::Features | Overlay::Criteria | Overlay::Chat)
+            && self.wrapped_step(mods, sym)
+        {
             return None;
         }
         match into {
@@ -1488,6 +1520,10 @@ impl Gerdr {
                 .map(Intercepted::Features),
             Overlay::Criteria => {
                 self.criteria_strip_key(mods, sym, typed);
+                None
+            }
+            Overlay::Chat => {
+                self.chat_key(mods, sym, typed);
                 None
             }
         }
@@ -1568,6 +1604,7 @@ impl Gerdr {
             Overlay::Identity => chrome::identity_field(&self.identity_view()?, size, scale),
             Overlay::Machine => chrome::machine_field(&self.machine_view()?, size, scale),
             Overlay::Commands => chrome::commands_field(&self.commands_view()?, size, scale),
+            Overlay::Chat => self.chat_field_spot(),
         }
     }
 
@@ -1594,7 +1631,7 @@ impl Gerdr {
     /// feature tab or the criteria strip.
     fn field_wraps(&self) -> bool {
         match self.text_overlay() {
-            Some(Overlay::Criteria) => true,
+            Some(Overlay::Criteria | Overlay::Chat) => true,
             Some(Overlay::Features) => {
                 !(self.inline_wd()).is_some_and(|wd| wd.diff.search_focused())
                     && (self.features.panel.as_ref()).is_some_and(|p| p.note.is_some())
@@ -1660,6 +1697,7 @@ impl Gerdr {
             Overlay::Identity => self.identity_field_mut(),
             Overlay::Machine => self.machine_field_mut(),
             Overlay::Commands => self.commands_field_mut(),
+            Overlay::Chat => self.chat_field_mut(),
         }
     }
 
