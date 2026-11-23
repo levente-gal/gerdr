@@ -35,6 +35,7 @@ mod layers;
 mod machines;
 mod machines_panel;
 mod menu;
+mod glyphs;
 mod painter;
 mod pane_bar;
 mod placeholder;

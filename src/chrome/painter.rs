@@ -1,6 +1,7 @@
 //! Drawing text, fields, keycaps and buttons into a `Canvas` with the
 //! system font.
 
+use super::glyphs::{self, Face};
 use super::{
     BUTTON_RADIUS, CAP_GAP, CAP_PADDING, CAP_RADIUS, CARET_HEIGHT, CARET_WIDTH, CHECKBOX_SIZE,
     Canvas, Check, DETAIL_FONT_SIZE, FOCUS_GAP, FOCUS_RING, FONT_SIZE, GIT_MARK_GAP,
@@ -9,7 +10,6 @@ use super::{
 };
 use crate::git::{Change, GitStatus};
 use crate::text_field::Line;
-use ab_glyph::{Font, FontVec, PxScale, ScaleFont, VariableFont};
 use smithay::utils::{Logical, Rectangle, Size};
 use std::cell::RefCell;
 
@@ -22,17 +22,9 @@ const BADGE_PAD: i32 = 4;
 /// one drawn.
 const POPUP_CACHE_BYTES: usize = 64 << 20;
 
+/// Text is shaped and drawn by `glyphs`, in the UI font, its bold, the
+/// monospace font and its bold.
 pub(super) struct Painter {
-    pub(super) font: Option<FontVec>,
-    /// The monospace font, for diffs and logs; `None` when there is none,
-    /// and the font above is used instead.
-    pub(super) mono: Option<FontVec>,
-    /// The UI font in bold, for names that head a group (a repository's);
-    /// `None` when there is none, and the UI font is used instead.
-    pub(super) bold: Option<FontVec>,
-    /// The monospace font in bold, for terminal text drawn bold; `None`
-    /// when there is none (bold is then struck twice, see `mono_bold`).
-    pub(super) mono_bold: Option<FontVec>,
     /// Popup backgrounds drawn lately, the last used first: a popup drawn
     /// again, say as its list scrolls, starts from a copy.
     popups: RefCell<Vec<(PopupKey, Canvas)>>,
@@ -69,8 +61,10 @@ pub(super) fn rect_px(rect: Rect, scale: f64) -> (f32, f32, f32, f32) {
 }
 
 /// A logical rectangle's rows as the band `(top, height)` text is centred in.
+/// Halves round up, also below zero: a piece drawn in a band of the page
+/// above its top lands on the rows it does on the page drawn whole.
 pub(super) fn band(rect: Rect, scale: f64) -> (i32, i32) {
-    let px = |v: i32| (v as f64 * scale).round() as i32;
+    let px = |v: i32| (v as f64 * scale + 0.5).floor() as i32;
     (
         px(rect.loc.y),
         px(rect.loc.y + rect.size.h) - px(rect.loc.y),
@@ -281,18 +275,8 @@ pub(super) fn physical(size: Size<i32, Logical>, scale: f64) -> Size<i32, Logica
     (px(size.w), px(size.h)).into()
 }
 
-/// The file of the system's sans-serif font, as fontconfig picks it.
-pub(super) fn find_font() -> Option<String> {
-    find_family("sans-serif")
-}
-
-/// The file of the system's monospace font, as fontconfig picks it.
-fn find_mono_font() -> Option<String> {
-    find_family("monospace")
-}
-
 /// The file fontconfig picks for `family`.
-fn find_family(family: &str) -> Option<String> {
+pub(super) fn find_family(family: &str) -> Option<String> {
     let out = std::process::Command::new("fc-match")
         .args(["-f", "%{file}", family])
         .output()
@@ -301,207 +285,65 @@ fn find_family(family: &str) -> Option<String> {
     (!path.is_empty()).then_some(path)
 }
 
-/// The UI font in bold: the UI font's own file at a bold weight when it
-/// has a weight axis, else the bold face fontconfig picks.
-fn load_bold() -> Option<FontVec> {
-    if let Some(mut font) = load_font(find_font())
-        && font.set_variation(b"wght", BOLD_WEIGHT)
-    {
-        return Some(font);
-    }
-    load_font(find_family("sans-serif:bold"))
-}
-
-/// The weight bold text is drawn at, from a font with a weight axis.
-const BOLD_WEIGHT: f32 = 650.0;
-
-/// The monospace font in bold: its own file at a terminal's bold weight
-/// when it has a weight axis, else the bold face fontconfig picks, if
-/// that is another file than the regular one (else there is no bold).
-fn load_mono_bold() -> Option<FontVec> {
-    let regular = find_mono_font();
-    if let Some(mut font) = load_font(regular.clone())
-        && font.set_variation(b"wght", MONO_BOLD_WEIGHT)
-    {
-        return Some(font);
-    }
-    let bold = find_family("monospace:bold")?;
-    if Some(&bold) == regular.as_ref() {
-        return None;
-    }
-    load_font(Some(bold))
-}
-
-/// The weight terminal bold is drawn at, from a font with a weight axis.
-const MONO_BOLD_WEIGHT: f32 = 700.0;
-
-/// The font in the file at `path`, if it can be read.
-fn load_font(path: Option<String>) -> Option<FontVec> {
-    let data = std::fs::read(path?).ok()?;
-    FontVec::try_from_vec(data).ok()
-}
-
-/// The fonts that draw what the UI or monospace font lacks (a TUI's `❯`,
-/// `⏺`, `✓`), by character: as fontconfig picks them, each font loaded once
-/// and kept; `None` when no font has it.
-type Fallbacks = std::collections::HashMap<char, Option<&'static FontVec>>;
-
-/// The font to draw each of `chars` with, which the drawing font lacks:
-/// looked up the first time (one `fc-match` for all those new, then one
-/// for those its pick lacks, while picks help), then remembered.
-fn fallbacks(chars: &[char]) -> Vec<Option<&'static FontVec>> {
-    use std::sync::{Mutex, OnceLock};
-    static FOUND: OnceLock<Mutex<Fallbacks>> = OnceLock::new();
-    static FILES: OnceLock<Mutex<Vec<(String, &'static FontVec)>>> = OnceLock::new();
-    let found = FOUND.get_or_init(Mutex::default);
-    let mut found = found.lock().unwrap_or_else(|e| e.into_inner());
-    let mut new: Vec<char> = chars
-        .iter()
-        .copied()
-        .filter(|ch| !found.contains_key(ch))
-        .collect();
-    new.sort_unstable();
-    new.dedup();
-    let files = FILES.get_or_init(Mutex::default);
-    let mut files = files.lock().unwrap_or_else(|e| e.into_inner());
-    while !new.is_empty() {
-        let charset: Vec<String> = new.iter().map(|ch| format!("{:x}", *ch as u32)).collect();
-        let file = find_family(&format!("monospace:charset={}", charset.join(" ")));
-        let font = file.and_then(|file| match files.iter().find(|(f, _)| *f == file) {
-            Some((_, font)) => Some(*font),
-            None => {
-                let font: &'static FontVec = Box::leak(Box::new(load_font(Some(file.clone()))?));
-                files.push((file, font));
-                Some(font)
-            }
-        });
-        let has = |ch: char| font.filter(|font| font.glyph_id(ch).0 != 0);
-        let (drawn, rest): (Vec<char>, Vec<char>) = new.iter().partition(|&&ch| has(ch).is_some());
-        // No font has the rest.
-        let last = drawn.is_empty();
-        for ch in drawn {
-            found.insert(ch, has(ch));
-        }
-        if last {
-            for ch in rest {
-                found.insert(ch, None);
-            }
-            break;
-        }
-        new = rest;
-    }
-    chars
-        .iter()
-        .map(|ch| found.get(ch).copied().flatten())
-        .collect()
-}
-
 /// How wide `text` is in the UI font at `size`, in logical pixels, for a
-/// layout that has no painter at hand; `None` without a font. The font is
-/// loaded the first time.
+/// layout that has no painter at hand; `None` without a font.
 pub(super) fn measure(text: &str, size: f32) -> Option<f32> {
-    static FONT: std::sync::OnceLock<Option<FontVec>> = std::sync::OnceLock::new();
-    let font = FONT.get_or_init(|| load_font(find_font())).as_ref()?;
-    Some(width_in(font, text, size, 1.0))
+    glyphs::available().then(|| glyphs::width(text, Face::Ui, size))
 }
 
 /// Width of `text` in the bold UI font (else the UI font) at `size`, at
 /// scale 1, as `measure` has it.
 pub(super) fn measure_bold(text: &str, size: f32) -> Option<f32> {
-    static FONT: std::sync::OnceLock<Option<FontVec>> = std::sync::OnceLock::new();
-    let font = FONT
-        .get_or_init(|| load_bold().or_else(|| load_font(find_font())))
-        .as_ref()?;
-    Some(width_in(font, text, size, 1.0))
+    glyphs::available().then(|| glyphs::width(text, Face::Bold, size))
 }
 
 /// Width of `text` in the monospace font (else the UI font) at `size`,
 /// at scale 1, as `measure` has it.
 pub(super) fn measure_mono(text: &str, size: f32) -> Option<f32> {
-    static FONT: std::sync::OnceLock<Option<FontVec>> = std::sync::OnceLock::new();
-    let font = FONT
-        .get_or_init(|| load_font(find_mono_font()).or_else(|| load_font(find_font())))
-        .as_ref()?;
-    Some(width_in(font, text, size, 1.0))
+    glyphs::available().then(|| glyphs::width(text, Face::Mono, size))
 }
 
-/// Width of `text` in `font` at `size` (logical) and `scale`, in physical
-/// pixels.
-fn width_in(font: &FontVec, text: &str, size: f32, scale: f64) -> f32 {
-    let px = PxScale::from(size * scale as f32);
-    (text.chars())
-        .map(|c| {
-            let font = font_for(font, c).as_scaled(px);
-            font.h_advance(font.glyph_id(c))
-        })
-        .sum()
+/// The line text in `face` at `px` pixels sits on, centred on its cap
+/// height in the band `(top, height)`: a font's ascent and descent include
+/// line gap padding.
+fn baseline(face: Face, px: f32, (top, height): (i32, i32)) -> f32 {
+    // Halves up, below zero too, as `band` rounds.
+    (top as f32 + (height as f32 + glyphs::cap_height(face, px)) / 2.0 + 0.5).floor()
 }
 
-/// The font to draw `ch` in: `font`, unless it lacks it (`✓`, `⋯` in the
-/// UI font) and fontconfig has one that doesn't.
-fn font_for(font: &FontVec, ch: char) -> &FontVec {
-    if ch.is_whitespace() || font.glyph_id(ch).0 != 0 {
-        return font;
-    }
-    fallbacks(&[ch])[0].unwrap_or(font)
-}
-
-/// Draw `text` in `font` as `Painter::text` does.
+/// Draw `text` in `face` as `Painter::text` does.
 #[allow(clippy::too_many_arguments)]
 fn text_in(
-    font: &FontVec,
+    face: Face,
     c: &mut Canvas,
     text: &str,
     size: f32,
     x: f32,
     max_x: f32,
-    (top, height): (i32, i32),
+    band: (i32, i32),
     scale: f64,
     color: Rgb,
 ) -> f32 {
-    let scaled = font.as_scaled(PxScale::from(size * scale as f32));
-    // Centre on the cap height; the font's ascent/descent include line gap padding.
-    let cap_height = font
-        .outline_glyph(scaled.scaled_glyph('H'))
-        .map_or(scaled.ascent(), |o| -o.px_bounds().min.y);
-    let baseline = (top as f32 + (height as f32 + cap_height) / 2.0).round();
-
-    let (mut shown, mut cut) = (text, false);
-    if x + width_in(font, text, size, scale) > max_x {
-        // The longest start of `text` that fits with an ellipsis after it.
-        let ellipsis = width_in(font, "…", size, scale);
-        let mut width = 0.0;
-        let mut end = 0;
-        for (i, ch) in text.char_indices() {
-            width += width_in(font, &text[i..i + ch.len_utf8()], size, scale);
-            if x + width + ellipsis > max_x {
-                break;
-            }
-            end = i + ch.len_utf8();
-        }
-        (shown, cut) = (&text[..end], true);
+    if !glyphs::available() {
+        return x;
     }
-
-    let mut pen = x;
-    for ch in shown.chars().chain(cut.then_some('…')) {
-        let font = font_for(font, ch);
-        let scaled = font.as_scaled(scaled.scale());
-        let id = scaled.glyph_id(ch);
-        let glyph = id.with_scale_and_position(scaled.scale(), ab_glyph::point(pen, baseline));
-        pen += scaled.h_advance(id);
-        if let Some(outline) = font.outline_glyph(glyph) {
-            let bounds = outline.px_bounds();
-            outline.draw(|gx, gy, coverage| {
-                c.blend(
-                    bounds.min.x as i32 + gx as i32,
-                    bounds.min.y as i32 + gy as i32,
-                    color,
-                    coverage,
-                );
-            });
-        }
+    let px = size * scale as f32;
+    let baseline = baseline(face, px, band);
+    let shaped = glyphs::shaped(text, face, px);
+    if x + shaped.w <= max_x {
+        return glyphs::draw(c, text, face, px, x, baseline, None, color);
     }
-    pen
+    // The longest start of `text` whose glyphs fit with an ellipsis after it.
+    let room = max_x - x - glyphs::width("…", face, px);
+    let mut end = 0;
+    for glyph in &shaped.glyphs {
+        if glyph.x + glyph.w > room {
+            break;
+        }
+        end = end.max(glyph.end);
+    }
+    let cut = format!("{}…", &text[..end]);
+    glyphs::draw(c, &cut, face, px, x, baseline, None, color)
 }
 
 /// The colour of what segment `i` of a segmented control holds: `on` is
@@ -516,21 +358,15 @@ pub(super) fn segment_tint(i: usize, on: usize, off: &[usize], p: &Palette) -> R
 
 impl Painter {
     pub(super) fn new() -> Self {
-        let font = load_font(find_font());
-        if font.is_none() {
-            tracing::warn!("chrome: no usable font found, labels will be blank");
-        }
-        let mono = load_font(find_mono_font());
-        if mono.is_none() {
-            tracing::warn!("chrome: no monospace font found, diffs use the UI font");
-        }
         Self {
-            font,
-            mono,
-            bold: load_bold(),
-            mono_bold: load_mono_bold(),
             popups: RefCell::default(),
         }
+    }
+
+    /// Whether there is a font to draw text with: without, labels are blank.
+    #[cfg(test)]
+    pub(super) fn has_font(&self) -> bool {
+        glyphs::available()
     }
 
     /// A canvas for a popup panel of logical `size` with its shadow, border
@@ -573,22 +409,14 @@ impl Painter {
         popups[0].1.clone()
     }
 
-    /// The monospace font, else the UI font.
-    fn mono_font(&self) -> Option<&FontVec> {
-        self.mono.as_ref().or(self.font.as_ref())
-    }
-
-    /// Whether the UI font has a glyph for `ch`.
+    /// Whether the UI font itself has a glyph for `ch` (not a fallback).
     pub(super) fn has_glyph(&self, ch: char) -> bool {
-        self.font
-            .as_ref()
-            .is_some_and(|font| font.glyph_id(ch).0 != 0)
+        glyphs::has_glyph(Face::Ui, ch)
     }
 
     /// Width of `text` in the monospace font, in physical pixels.
     pub(super) fn mono_width(&self, text: &str, size: f32, scale: f64) -> f32 {
-        self.mono_font()
-            .map_or(0.0, |font| width_in(font, text, size, scale))
+        glyphs::width(text, Face::Mono, size * scale as f32)
     }
 
     /// Draw `text` in the monospace font as `text` does. Returns where it
@@ -605,16 +433,13 @@ impl Painter {
         scale: f64,
         color: Rgb,
     ) -> f32 {
-        let Some(font) = self.mono_font() else {
-            return x;
-        };
-        text_in(font, c, text, size, x, max_x, band, scale, color)
+        text_in(Face::Mono, c, text, size, x, max_x, band, scale, color)
     }
 
     /// Whether the monospace font has a bold face of its own, which
     /// `mono_bold_text` draws in.
     pub(super) fn has_mono_bold(&self) -> bool {
-        self.mono_bold.is_some()
+        glyphs::has_mono_bold()
     }
 
     /// Draw `text` in the bold monospace font as `mono_text` does, else
@@ -631,9 +456,9 @@ impl Painter {
         scale: f64,
         color: Rgb,
     ) -> f32 {
-        match &self.mono_bold {
-            Some(font) => text_in(font, c, text, size, x, max_x, band, scale, color),
-            None => self.mono_text(c, text, size, x, max_x, band, scale, color),
+        match self.has_mono_bold() {
+            true => text_in(Face::MonoBold, c, text, size, x, max_x, band, scale, color),
+            false => self.mono_text(c, text, size, x, max_x, band, scale, color),
         }
     }
 
@@ -1200,21 +1025,12 @@ impl Painter {
     }
 
     pub(super) fn text_width(&self, text: &str, size: f32, scale: f64) -> f32 {
-        let Some(font) = &self.font else { return 0.0 };
-        width_in(font, text, size, scale)
-    }
-
-    /// The bold UI font, else the UI font.
-    fn bold_font(&self) -> Option<&FontVec> {
-        self.bold.as_ref().or(self.font.as_ref())
+        glyphs::width(text, Face::Ui, size * scale as f32)
     }
 
     /// Width of `text` in the bold UI font, in physical pixels.
     pub(super) fn bold_width(&self, text: &str, size: f32, scale: f64) -> f32 {
-        let Some(font) = self.bold_font() else {
-            return 0.0;
-        };
-        width_in(font, text, size, scale)
+        glyphs::width(text, Face::Bold, size * scale as f32)
     }
 
     /// Draw `text` centred in a logical rectangle.
@@ -1364,12 +1180,11 @@ impl Painter {
         size: f32,
         x: f32,
         max_x: f32,
-        (top, height): (i32, i32),
+        band: (i32, i32),
         scale: f64,
         color: Rgb,
     ) -> f32 {
-        let Some(font) = &self.font else { return x };
-        text_in(font, c, text, size, x, max_x, (top, height), scale, color)
+        text_in(Face::Ui, c, text, size, x, max_x, band, scale, color)
     }
 
     /// Draw `text` in the bold UI font as `text` does. Returns where it
@@ -1386,10 +1201,7 @@ impl Painter {
         scale: f64,
         color: Rgb,
     ) -> f32 {
-        let Some(font) = self.bold_font() else {
-            return x;
-        };
-        text_in(font, c, text, size, x, max_x, band, scale, color)
+        text_in(Face::Bold, c, text, size, x, max_x, band, scale, color)
     }
 
     /// The byte `line`'s view starts at in a field `room` physical pixels
@@ -1454,40 +1266,15 @@ impl Painter {
         text: &str,
         x: f32,
         (min_x, max_x): (f32, f32),
-        (top, height): (i32, i32),
+        band: (i32, i32),
         size: f32,
         scale: f64,
         color: Rgb,
     ) {
-        let Some(font) = &self.font else { return };
-        let scaled = font.as_scaled(PxScale::from(size * scale as f32));
-        let cap_height = font
-            .outline_glyph(scaled.scaled_glyph('H'))
-            .map_or(scaled.ascent(), |o| -o.px_bounds().min.y);
-        let baseline = (top as f32 + (height as f32 + cap_height) / 2.0).round();
-        let mut pen = x;
-        for ch in text.chars() {
-            let id = scaled.glyph_id(ch);
-            let advance = scaled.h_advance(id);
-            if pen + advance > max_x {
-                break;
-            }
-            let glyph = id.with_scale_and_position(scaled.scale(), ab_glyph::point(pen, baseline));
-            if pen >= min_x
-                && let Some(outline) = font.outline_glyph(glyph)
-            {
-                let bounds = outline.px_bounds();
-                outline.draw(|gx, gy, coverage| {
-                    c.blend(
-                        bounds.min.x as i32 + gx as i32,
-                        bounds.min.y as i32 + gy as i32,
-                        color,
-                        coverage,
-                    );
-                });
-            }
-            pen += advance;
-        }
+        let px = size * scale as f32;
+        let clip = Some((min_x, max_x));
+        let baseline = baseline(Face::Ui, px, band);
+        glyphs::draw(c, text, Face::Ui, px, x, baseline, clip, color);
     }
 }
 
@@ -1497,7 +1284,6 @@ mod tests {
     use crate::chrome::{Check, FONT_SIZE, Theme};
     use crate::git::{Change, GitStatus, InProgress};
     use crate::text_field::Line;
-    use ab_glyph::Font;
 
     #[test]
     fn a_conflict_or_an_operation_half_done_adds_a_mark_before_the_dirty_dot() {
@@ -1527,20 +1313,28 @@ mod tests {
         assert_eq!(end(&merging), end(&conflicted));
     }
 
+    /// Ink drawn for `text` in the UI font (`mono`: the monospace one).
+    fn ink(painter: &Painter, text: &str, mono: bool) -> u64 {
+        let mut c = Canvas::new((80, 30).into());
+        let p = Theme::Dark.palette();
+        match mono {
+            true => painter.mono_text(&mut c, text, 14.0, 4.0, 80.0, (0, 30), 1.0, p.text),
+            false => painter.text(&mut c, text, 14.0, 4.0, 80.0, (0, 30), 1.0, p.text),
+        };
+        c.px.iter().map(|&b| b as u64).sum()
+    }
+
     /// A mark the UI font lacks (`✓` in a severity pill, `⋯` in the keys
-    /// sheet) is drawn from a font that has it, not as a box.
+    /// sheet) is drawn from a font that has it, not as a box or blank.
     #[test]
     fn marks_the_ui_font_lacks_come_from_a_font_that_has_them() {
         let painter = Painter::new();
-        let Some(font) = painter.font.as_ref() else {
+        if !painter.has_font() {
             return;
-        };
-        for ch in ['\u{2713}', '\u{22ef}'] {
-            let from = super::font_for(font, ch);
-            let found = super::fallbacks(&[ch])[0].is_some();
-            assert!(from.glyph_id(ch).0 != 0 || !found, "{ch} drawn as a box");
         }
-        assert!(std::ptr::eq(super::font_for(font, 'a'), font));
+        for ch in ['\u{2713}', '\u{22ef}'] {
+            assert!(ink(&painter, &ch.to_string(), false) > 0, "{ch} not drawn");
+        }
     }
 
     #[test]
@@ -1556,7 +1350,7 @@ mod tests {
         assert_eq!(super::keycap_text("Shift+Delete"), "Shift+Del");
         assert_eq!(super::keycap_text("KP_Delete"), "KP_Delete");
         let painter = Painter::new();
-        if painter.font.is_none() {
+        if !painter.has_font() {
             return;
         }
         assert_eq!(painter.button_width("Quit"), super::BUTTON_MIN_WIDTH);
@@ -1580,16 +1374,37 @@ mod tests {
         let painter = Painter::new();
         // `❯`: what Claude Code marks the chosen answer with.
         let lacked = '❯';
-        let Some(mono) = painter.mono.as_ref() else {
-            return;
-        };
-        if mono.glyph_id(lacked).0 != 0 || super::fallbacks(&[lacked])[0].is_none() {
+        if !painter.has_font() || super::glyphs::has_glyph(super::Face::Mono, lacked) {
             return;
         }
-        let mut c = Canvas::new((60, 30).into());
+        assert!(ink(&painter, "❯", true) > 0);
+    }
+
+    /// Shaped text: an emoji draws (in colour when its font has colour),
+    /// and a right-to-left line is as wide as its letters.
+    #[test]
+    fn emoji_and_right_to_left_text_draw() {
+        let painter = Painter::new();
+        if !painter.has_font() {
+            return;
+        }
+        assert!(ink(&painter, "✅", false) > 0);
+        assert!(painter.text_width("שלום", 14.0, 1.0) > 0.0);
+    }
+
+    #[test]
+    fn a_line_too_long_ends_in_an_ellipsis_within_its_room() {
+        let painter = Painter::new();
+        if !painter.has_font() {
+            return;
+        }
+        let text = "a line far too long for the room it has to be drawn in";
+        let max_x = 4.0 + painter.text_width("a line far", 14.0, 1.0);
+        let mut c = Canvas::new((400, 30).into());
         let p = Theme::Dark.palette();
-        painter.mono_text(&mut c, "❯", 14.0, 4.0, 60.0, (0, 30), 1.0, p.text);
-        assert!(c.px.iter().any(|&b| b != 0));
+        let end = painter.text(&mut c, text, 14.0, 4.0, max_x, (0, 30), 1.0, p.text);
+        assert!(end <= max_x + 0.5, "{end} past {max_x}");
+        assert!(end > 4.0);
     }
 
     #[test]
@@ -1616,7 +1431,7 @@ mod tests {
     #[test]
     fn a_click_puts_the_caret_by_the_nearest_character() {
         let painter = Painter::new();
-        if painter.font.is_none() {
+        if !painter.has_font() {
             return;
         }
         let width = |text: &str| painter.text_width(text, super::FONT_SIZE, 1.0);
@@ -1638,7 +1453,7 @@ mod tests {
     #[test]
     fn a_long_lines_view_moves_only_as_far_as_its_caret_needs() {
         let painter = Painter::new();
-        if painter.font.is_none() {
+        if !painter.has_font() {
             return;
         }
         let width = |text: &str| painter.text_width(text, FONT_SIZE, 1.0);

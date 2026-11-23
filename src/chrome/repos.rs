@@ -7687,7 +7687,7 @@ mod tests {
     #[test]
     fn what_the_ui_font_lacks_is_drawn_in_the_monospace_one() {
         let painter = Painter::new();
-        if painter.font.is_none() || painter.has_glyph('→') {
+        if !painter.has_font() || painter.has_glyph('→') {
             return;
         }
         let runs = painter.runs("a.rs → b.rs");

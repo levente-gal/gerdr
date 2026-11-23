@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn the_pinned_panel_is_taller_by_its_title() {
         let painter = Painter::new();
-        if painter.font.is_none() {
+        if !painter.has_font() {
             return;
         }
         let help = Help {
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn a_short_area_splits_the_panel_and_then_cuts_it() {
         let painter = Painter::new();
-        if painter.font.is_none() {
+        if !painter.has_font() {
             return;
         }
         let help = Help {
@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn a_greyed_row_takes_no_click_and_draws_another_panel() {
         let painter = Painter::new();
-        if painter.font.is_none() {
+        if !painter.has_font() {
             return;
         }
         let quit = Some(HelpPress::Action(Action::Quit));
@@ -571,7 +571,7 @@ mod tests {
     #[test]
     fn rows_doing_one_thing_click_whole_and_others_by_key() {
         let painter = Painter::new();
-        if painter.font.is_none() {
+        if !painter.has_font() {
             return;
         }
         let new_tab = Some(HelpPress::Action(Action::NewTab));

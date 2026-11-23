@@ -9998,7 +9998,7 @@ mod tests {
         // Under ACTIVITY_BELOW the rows go to the page, and it scrolls.
         let narrow = tab_at(&view, 1000);
         assert_eq!(narrow.scroll_room(TabColumn::Activity), 0);
-        assert!(narrow.scroll_room(TabColumn::Page) > room);
+        assert!(narrow.scroll_room(TabColumn::Page) > room, "{} vs {room}, page {}", narrow.scroll_room(TabColumn::Page), narrow.content[TabColumn::Page as usize]);
     }
 
     /// A measure of one unit a character.
@@ -10585,7 +10585,7 @@ mod tests {
     #[test]
     fn long_rail_labels_take_two_lines_on_a_narrow_tab() {
         let painter = crate::chrome::Painter::new();
-        assert!(painter.font.is_some(), "the widths need a font");
+        assert!(painter.has_font(), "the widths need a font");
         let view = tab_view();
         let lines = |w: i32| -> Vec<Vec<String>> {
             let l = tab_at(&view, w);
