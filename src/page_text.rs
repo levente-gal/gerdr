@@ -310,9 +310,23 @@ impl Gerdr {
         edge != 0.0
     }
 
-    /// See `Features::release_page_text`.
+    /// See `Features::release_page_text`. A click on a web link in a file
+    /// on the page, not a drag from it, opens its page in the feature's
+    /// workspace.
     pub(crate) fn release_page_text(&mut self) {
-        self.features.release_page_text()
+        let click = (self.features.panel.as_ref())
+            .filter(|p| p.picking && p.pick.as_ref().is_none_or(|k| k.anchor == k.cursor))
+            .map(|p| (p.project.clone(), p.slug.clone()));
+        self.features.release_page_text();
+        let Some((project, slug)) = click else {
+            return;
+        };
+        let pos = self.pointer().current_location().to_i32_round();
+        let url = (self.feature_tab_parts())
+            .and_then(|(view, layout)| layout.link_at(&view, pos).map(str::to_owned));
+        if let Some(url) = url {
+            self.open_feature_page(&project, &slug, url);
+        }
     }
 
     /// A key for the text selected on the feature tab's page: Ctrl+C and

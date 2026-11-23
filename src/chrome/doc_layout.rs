@@ -1,15 +1,18 @@
 //! A markdown file's blocks (`md_blocks`) laid out in a column and painted:
 //! the copy of a stage's file on its feature page. What is laid out is
 //! pieces from `(0, 0)`, kept for a width (`laid_out`), so a page can put
-//! them where it will.
+//! them where it will. Runs of a line (`md_blocks::Inline`) are set in
+//! their own face: bold in bold, code in the monospace font, a link in the
+//! accent.
 
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc};
 
 use smithay::utils::{Logical, Point, Rectangle};
 
 use super::features::{BODY_LINE, Font, Ink, SMALL_LINE, StageMark, stage_dot, width_of};
-use super::{Canvas, Painter, Palette, Rect, Rgb, band, check, icon_sdf, measure_bold, rect_px};
-use crate::md_blocks::{DocBlock, ItemMark};
+use super::glyphs::{self, Face};
+use super::{Canvas, Painter, Palette, Rect, Rgb, band, check, icon_sdf, rect_px};
+use crate::md_blocks::{DocBlock, Inline, ItemMark, Styled, spans};
 
 /// A file's blocks: the room above a block, its list items' indent and
 /// gutter, a quote's indent and bar, a code block's inner room, and how
@@ -31,9 +34,10 @@ const DOC_WIDTH_SLACK: f32 = 8.0;
 /// A thing a file's blocks paint, in its place.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum DocPiece {
-    /// A line of text.
+    /// A line of text, with its runs (as `Styled` has them).
     Text {
         text: String,
+        runs: Vec<(Range<usize>, Inline)>,
         font: Font,
         ink: Ink,
         bold: bool,
@@ -49,46 +53,108 @@ pub(super) enum DocPiece {
     Rule,
 }
 
+/// How a line's run `on` is set, the line bold or not.
+pub(super) fn face(on: Option<&Inline>, bold: bool) -> Face {
+    match on {
+        Some(Inline::Code) => Face::Mono,
+        Some(Inline::Bold) => Face::Bold,
+        _ if bold => Face::Bold,
+        _ => Face::Ui,
+    }
+}
+
+/// How wide `text` is in `face` at `size`, in logical pixels, guessed when
+/// there is no font.
+pub(super) fn width_in(text: &str, face: Face, size: f32) -> f32 {
+    match glyphs::available() {
+        true => glyphs::width(text, face, size),
+        false => text.chars().count() as f32 * size * 0.55,
+    }
+}
+
+/// How wide line `text` with `runs` is, bold or not, each run measured by
+/// `width` in its face.
+pub(super) fn line_width(
+    text: &str,
+    runs: &[(Range<usize>, Inline)],
+    bold: bool,
+    width: impl Fn(&str, Face) -> f32,
+) -> f32 {
+    (spans(text, runs))
+        .map(|(range, on)| width(&text[range], face(on, bold)))
+        .sum()
+}
+
+/// The web link `x` logical pixels into line `text` with `runs`, in `font`,
+/// bold or not.
+pub(super) fn link_at<'a>(
+    text: &str,
+    runs: &'a [(Range<usize>, Inline)],
+    font: Font,
+    bold: bool,
+    x: f32,
+) -> Option<&'a str> {
+    let mut pen = 0.0;
+    for (range, on) in spans(text, runs) {
+        pen += width_in(&text[range], face(on, bold), font.size());
+        if x < pen {
+            return match on {
+                Some(Inline::Link(url)) => Some(url),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
 /// `text` broken into lines no wider than `width` by `measure`, all of it
-/// kept: a word wider than a line (a URL) breaks where it must. A long file
-/// has many words: a line's width is added up word by word, and measured
-/// whole only when that comes within `DOC_WIDTH_SLACK` of the edge.
-fn doc_lines(text: &str, width: i32, measure: impl Fn(&str) -> f32) -> Vec<String> {
+/// kept: a word wider than a line (a URL) breaks where it must. Runs go on
+/// over the lines they are cut into, and a space between two words of one
+/// run is in it. A long file has many words: a line's width is added up
+/// word by word, and measured whole only when that comes within
+/// `DOC_WIDTH_SLACK` of the edge.
+fn doc_lines(text: &Styled, width: i32, measure: impl Fn(&Styled) -> f32) -> Vec<Styled> {
     let width = width as f32;
-    let space = measure("a a") - 2.0 * measure("a");
+    let space = measure(&"a a".into()) - 2.0 * measure(&"a".into());
     let mut lines = Vec::new();
-    let mut line = String::new();
+    let mut line = Styled::default();
     let mut used = 0.0;
-    for word in text.split_whitespace() {
-        let wide = measure(word);
-        if !line.is_empty() {
+    // Where the line's last word ended in `text`.
+    let mut last = 0;
+    for word in text.text.split_whitespace() {
+        let at = word.as_ptr() as usize - text.text.as_ptr() as usize;
+        let word = text.slice(at..at + word.len());
+        let wide = measure(&word);
+        if !line.text.is_empty() {
+            let gap = text.at(last).filter(|on| text.at(at) == Some(*on));
             let about = used + space + wide;
             if about < width - DOC_WIDTH_SLACK {
-                line.push(' ');
-                line.push_str(word);
-                used = about;
+                line.push(" ", gap);
+                line.append(&word);
+                (used, last) = (about, at + word.text.len());
                 continue;
             }
             if about <= width + DOC_WIDTH_SLACK {
-                let longer = format!("{line} {word}");
+                let mut longer = line.clone();
+                longer.push(" ", gap);
+                longer.append(&word);
                 let whole = measure(&longer);
                 if whole <= width {
-                    line = longer;
-                    used = whole;
+                    (line, used, last) = (longer, whole, at + word.text.len());
                     continue;
                 }
             }
             lines.push(std::mem::take(&mut line));
         }
+        last = at + word.text.len();
         if wide <= width {
-            line = word.to_owned();
-            used = wide;
+            (line, used) = (word, wide);
             continue;
         }
         let mut rest = word;
-        while measure(rest) > width {
-            let ends: Vec<usize> = rest.char_indices().skip(1).map(|(i, _)| i).collect();
-            let fit = ends.partition_point(|end| measure(&rest[..*end]) <= width);
+        while measure(&rest) > width {
+            let ends: Vec<usize> = (rest.text.char_indices()).skip(1).map(|(i, _)| i).collect();
+            let fit = ends.partition_point(|end| measure(&rest.slice(0..*end)) <= width);
             let Some(end) = fit
                 .checked_sub(1)
                 .map(|i| ends[i])
@@ -96,13 +162,13 @@ fn doc_lines(text: &str, width: i32, measure: impl Fn(&str) -> f32) -> Vec<Strin
             else {
                 break;
             };
-            lines.push(rest[..end].to_owned());
-            rest = &rest[end..];
+            lines.push(rest.slice(0..end));
+            rest = rest.slice(end..rest.text.len());
         }
-        line = rest.to_owned();
-        used = measure(rest);
+        used = measure(&rest);
+        line = rest;
     }
-    if !line.is_empty() {
+    if !line.text.is_empty() {
         lines.push(line);
     }
     lines
@@ -129,21 +195,23 @@ impl Column {
     }
 
     /// `text` as a file's text: all of its lines, a line `h` high each.
-    fn text(&mut self, text: &str, font: Font, ink: Ink, bold: bool, h: i32) {
+    fn text(&mut self, text: &Styled, font: Font, ink: Ink, bold: bool, h: i32) {
         let size = font.size();
+        let measure = |t: &Styled| line_width(&t.text, &t.runs, bold, |t, f| width_in(t, f, size));
         // A hard break (`md_blocks`) starts a line of its own.
-        let w = self.w;
-        let lines = text.split('\n').flat_map(|text| match bold {
-            true => doc_lines(text, w, |t| {
-                measure_bold(t, size).unwrap_or_else(|| width_of(t, size))
-            }),
-            false => doc_lines(text, w, |t| width_of(t, size)),
-        });
-        for text in lines {
+        let mut from = 0;
+        let mut lines = Vec::new();
+        for part in text.text.split('\n') {
+            let part_at = from..from + part.len();
+            lines.extend(doc_lines(&text.slice(part_at), self.w, measure));
+            from += part.len() + 1;
+        }
+        for Styled { text, runs } in lines {
             self.put(
                 h,
                 DocPiece::Text {
                     text,
+                    runs,
                     font,
                     ink,
                     bold,
@@ -164,7 +232,7 @@ impl Column {
     }
 
     /// A list item, its text hanging right of its mark.
-    fn item(&mut self, depth: u8, mark: ItemMark, text: &str) {
+    fn item(&mut self, depth: u8, mark: ItemMark, text: &Styled) {
         let gutter = match mark {
             ItemMark::Number(n) => {
                 let w = width_of(&number_mark(n), Font::Body.size()).ceil() as i32 + 6;
@@ -197,7 +265,15 @@ impl Column {
                 self.text(text, Font::Body, Ink::Text, true, BODY_LINE);
             }
             DocBlock::Para(text) => self.text(text, Font::Body, Ink::Text, false, BODY_LINE),
-            DocBlock::Note(text) => self.text(text, Font::Body, Ink::Muted, false, BODY_LINE),
+            DocBlock::Note(text) => {
+                self.text(
+                    &text.as_str().into(),
+                    Font::Body,
+                    Ink::Muted,
+                    false,
+                    BODY_LINE,
+                );
+            }
             DocBlock::Item { depth, mark, text } => self.item(*depth, *mark, text),
             DocBlock::Code(lines) => {
                 let edge =
@@ -327,12 +403,30 @@ impl Painter {
         match piece {
             DocPiece::Text {
                 text,
+                runs,
                 font,
                 ink,
                 bold,
             } => {
-                let at = (super::phys(rect, scale), band(rect, scale));
-                self.page_text(c, text, (font.size(), *bold), at, scale, (ink.color(p), p));
+                let ((x, end), b) = (super::phys(rect, scale), band(rect, scale));
+                let (size, color) = (font.size(), ink.color(p));
+                if runs.is_empty() {
+                    let at = ((x, end), b);
+                    return self.page_text(c, text, (size, *bold), at, scale, (color, p));
+                }
+                let mut pen = x;
+                for (range, on) in spans(text, runs) {
+                    let run = &text[range];
+                    let color = match on {
+                        Some(Inline::Link(_)) => p.accent,
+                        _ => color,
+                    };
+                    pen = match face(on, *bold) {
+                        Face::Mono => self.mono_text(c, run, size, pen, end, b, scale, color),
+                        Face::Bold => self.bold_text(c, run, size, pen, end, b, scale, color),
+                        _ => self.text(c, run, size, pen, end, b, scale, color),
+                    };
+                }
             }
             DocPiece::ItemMark(mark) => {
                 let spot = Rectangle::new(
@@ -400,28 +494,118 @@ impl Painter {
 mod tests {
     use super::*;
 
-    /// A measure of one unit a character.
-    fn chars(text: &str) -> f32 {
-        text.chars().count() as f32
+    /// A measure of one unit a character, two in the monospace font.
+    fn chars(text: &Styled) -> f32 {
+        line_width(&text.text, &text.runs, false, |t, face| {
+            let unit = if face == Face::Mono { 2.0 } else { 1.0 };
+            t.chars().count() as f32 * unit
+        })
+    }
+
+    /// `text`'s plain lines `width` wide by `chars`.
+    fn lines(text: &str, width: i32) -> Vec<String> {
+        let lines = doc_lines(&text.into(), width, chars);
+        lines.into_iter().map(|line| line.text).collect()
+    }
+
+    /// Markdown `md`'s paragraph broken into lines `width` wide by `chars`.
+    fn styled_lines(md: &str, width: i32) -> Vec<Styled> {
+        let Some(DocBlock::Para(text)) = crate::md_blocks::blocks(md).into_iter().next() else {
+            panic!("a paragraph");
+        };
+        doc_lines(&text, width, chars)
+    }
+
+    /// `text` with `runs`.
+    fn run(text: &str, runs: &[(Range<usize>, Inline)]) -> Styled {
+        Styled {
+            text: text.into(),
+            runs: runs.to_vec(),
+        }
     }
 
     #[test]
     fn a_files_lines_keep_all_of_it_and_break_a_long_word() {
-        assert_eq!(doc_lines("a bb ccc", 4, chars), ["a bb", "ccc"]);
+        assert_eq!(lines("a bb ccc", 4), ["a bb", "ccc"]);
         // Brackets don't hold words together, as they do on a card's line.
-        assert_eq!(doc_lines("x [a b c]", 4, chars), ["x [a", "b c]"]);
+        assert_eq!(lines("x [a b c]", 4), ["x [a", "b c]"]);
         assert_eq!(
-            doc_lines("see abcdefghij end", 4, chars),
+            lines("see abcdefghij end", 4),
             ["see", "abcd", "efgh", "ij", "end"]
         );
-        assert!(doc_lines("", 4, chars).is_empty());
+        assert!(lines("", 4).is_empty());
         // Too narrow for a character: still all of it, one to a line.
-        assert_eq!(doc_lines("abc", 0, chars), ["a", "b", "c"]);
+        assert_eq!(lines("abc", 0), ["a", "b", "c"]);
         // Wider than one unit a byte can't split a character.
         assert_eq!(
-            doc_lines("\u{e9}\u{e9}\u{e9}", 2, chars).concat(),
+            lines("\u{e9}\u{e9}\u{e9}", 2).concat(),
             "\u{e9}\u{e9}\u{e9}"
         );
+    }
+
+    /// A run cut by a line's end goes on on the next; a space inside a run
+    /// is in it, one between two runs isn't.
+    #[test]
+    fn runs_wrap_across_lines_and_keep_their_spaces() {
+        let bold = Inline::Bold;
+        assert_eq!(
+            styled_lines("a **bb cc** dd", 5),
+            [
+                run("a bb", &[(2..4, bold.clone())]),
+                run("cc dd", &[(0..2, bold.clone())])
+            ]
+        );
+        assert_eq!(
+            styled_lines("a **bb cc** dd", 7),
+            [run("a bb cc", &[(2..7, bold.clone())]), run("dd", &[])]
+        );
+        assert_eq!(
+            styled_lines("**a** **b**", 9),
+            [run("a b", &[(0..1, bold.clone()), (2..3, bold.clone())])]
+        );
+        // A word in two runs, broken where it must, keeps both.
+        assert_eq!(
+            styled_lines("**abc**d", 2),
+            [
+                run("ab", &[(0..2, bold.clone())]),
+                run("cd", &[(0..1, bold)])
+            ]
+        );
+    }
+
+    /// A line is as wide as its runs in their faces: code takes more here.
+    #[test]
+    fn a_runs_face_sets_how_much_fits() {
+        let code = Inline::Code;
+        assert_eq!(
+            styled_lines("ab `cd` ef", 7),
+            [run("ab cd", &[(3..5, code.clone())]), run("ef", &[])]
+        );
+        assert_eq!(lines("ab cd ef", 7), ["ab cd", "ef"]);
+        assert_eq!(styled_lines("ab `cd` ef", 6).len(), 3);
+        assert_eq!(lines("ab cd ef", 6).len(), 2);
+    }
+
+    /// A press finds the link it is on, by the runs' widths.
+    #[test]
+    fn a_link_is_found_where_it_is_drawn() {
+        let url = || Inline::Link("https://x.y".into());
+        let text = "go **there** now";
+        let Some(DocBlock::Para(line)) =
+            crate::md_blocks::blocks("go [**there**](https://x.y) now")
+                .into_iter()
+                .next()
+        else {
+            panic!("a paragraph");
+        };
+        assert_eq!(line, run(text.replace("**", "").as_str(), &[(3..8, url())]));
+        let at = |x: f32| link_at(&line.text, &line.runs, Font::Body, false, x);
+        let start = width_in("go ", Face::Ui, Font::Body.size());
+        let end = start + width_in("there", Face::Ui, Font::Body.size());
+        assert_eq!(at(start - 1.0), None);
+        assert_eq!(at(start + 1.0), Some("https://x.y"));
+        assert_eq!(at(end - 1.0), Some("https://x.y"));
+        assert_eq!(at(end + 1.0), None);
     }
 
     /// A list item's lines all start right of its mark, deeper the deeper.
@@ -431,7 +615,7 @@ mod tests {
         let item = |depth, mark| DocBlock::Item {
             depth,
             mark,
-            text: long.clone(),
+            text: long.as_str().into(),
         };
         let blocks = [item(0, ItemMark::Bullet), item(1, ItemMark::Number(3))];
         let s = stack(&blocks, 300);
@@ -467,7 +651,7 @@ mod tests {
     /// read, equal or not, is another `Arc` and laid out anew.
     #[test]
     fn a_file_is_laid_out_once_a_width() {
-        let blocks = Arc::new(vec![DocBlock::Para("words to lay out".to_owned())]);
+        let blocks = Arc::new(vec![DocBlock::Para("words to lay out".into())]);
         let (first, h) = laid_out(&blocks, 300);
         let (again, same) = laid_out(&blocks, 300);
         assert!(Rc::ptr_eq(&first, &again));

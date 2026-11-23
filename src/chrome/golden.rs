@@ -3484,22 +3484,27 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
 
 /// A brief as a file's page shows it, every kind of block in it.
 fn doc_blocks() -> Vec<crate::md_blocks::DocBlock> {
-    use crate::md_blocks::{DocBlock, ItemMark};
+    use crate::md_blocks::{DocBlock, ItemMark, Styled, blocks};
+    // Markdown's words with their runs: bold, code and links.
+    let styled = |md: &str| match blocks(md).remove(0) {
+        DocBlock::Para(text) => text,
+        _ => Styled::from(md),
+    };
     let item = |depth, mark, text: &str| DocBlock::Item {
         depth,
         mark,
-        text: text.into(),
+        text: styled(text),
     };
     vec![
         DocBlock::Heading {
             level: 1,
             text: "Log in with a password".into(),
         },
-        DocBlock::Para(
-            "People sign in with an email and a password, and stay signed in. A wrong \
-             password says so, without saying which of the two it was."
-                .into(),
-        ),
+        DocBlock::Para(styled(
+            "People sign in with an email and a **password**, and stay signed in. A wrong \
+             password says so, without saying which of the two it was: `POST /login` \
+             answers 401, as [the spec](https://example.com/spec) has it.",
+        )),
         DocBlock::Heading {
             level: 2,
             text: "What it does".into(),
@@ -6748,12 +6753,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xd024de9bb585c62d, // tab_fixing_1180
         0x3f139903ca661bb7, // tab_fixed_code_1180
         0x3046cb28ea77b5fc, // tab_fixed_code_860
-        0xb22eeed98a12a671, // tab_approved_1180
-        0x69491a91a1440e89, // tab_locked_1180
-        0x1971c2a89ddc29ce, // tab_start_over_1180
-        0xb56a06004aeeea98, // tab_discover_brief_1180
-        0xbcf019b80184379b, // tab_discover_brief_860
-        0x03d3e1005280b9ad, // tab_plan_long_1180
+        0x38e7b821160786ef, // tab_approved_1180
+        0xec4208f86b1c1997, // tab_locked_1180
+        0x26d51cb53d7e4d00, // tab_start_over_1180
+        0xab5669ae5394ca1a, // tab_discover_brief_1180
+        0x8f8dca3f45c0a5b6, // tab_discover_brief_860
+        0xb618a4be8eba7553, // tab_plan_long_1180
         0xac0eb08268edc41c, // tab_manual_test_1180
         0xbede5cfd6df78131, // tab_manual_note_860
         0x6bdff1fd0f428d80, // tab_review_rounds_1180
@@ -6785,9 +6790,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xcb391c6b50a5439b, // tab_ship_checking_1180
         0x5f10380de01a4001, // tab_verify_regressed_1180
         0x405a64daca585d25, // tab_verify_machine_860
-        0xadb84bb9fd6d6f72, // tab_discover_decisions_860
-        0x7f0dbab05b3d085d, // tab_discover_research_1180
-        0xb2bec3f200c6e438, // tab_discover_research_860
+        0xc02fd44c59f1817d, // tab_discover_decisions_860
+        0x878e242f81cfa762, // tab_discover_research_1180
+        0xf8416bc1381078e8, // tab_discover_research_860
     ],
     // Dark at 2
     [
@@ -6827,12 +6832,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xab56b50dde24115b, // tab_fixing_1180
         0xa5a153854fd1a6c6, // tab_fixed_code_1180
         0x9180cbf82040a2c8, // tab_fixed_code_860
-        0xf1cddabd014da5f0, // tab_approved_1180
-        0x2489f2e970be01fc, // tab_locked_1180
-        0x5b70e6fa04a8cb98, // tab_start_over_1180
-        0x61ea31e92479694d, // tab_discover_brief_1180
-        0xa40b793749f22be1, // tab_discover_brief_860
-        0xfe2105252c3b57f6, // tab_plan_long_1180
+        0x7d32b26b562b0b1f, // tab_approved_1180
+        0x0a2d4f92f2c0806b, // tab_locked_1180
+        0xc22403c096c4bfa9, // tab_start_over_1180
+        0x80d0c80f22dd27e8, // tab_discover_brief_1180
+        0x02784473a0c8a40b, // tab_discover_brief_860
+        0xba17c2ea1a1fb6bc, // tab_plan_long_1180
         0xf1266011e641fb17, // tab_manual_test_1180
         0x2e099ff24a7861a8, // tab_manual_note_860
         0xb46a1386da791237, // tab_review_rounds_1180
@@ -6864,9 +6869,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x00b7512f2689577c, // tab_ship_checking_1180
         0x08e329c2e485b1b1, // tab_verify_regressed_1180
         0x936d5fa7516ab83c, // tab_verify_machine_860
-        0xad89a2a91240a177, // tab_discover_decisions_860
-        0xec9a2aa99156178e, // tab_discover_research_1180
-        0x698642179037c925, // tab_discover_research_860
+        0x77cc6ba05bdfa799, // tab_discover_decisions_860
+        0xd7280798cb8fc290, // tab_discover_research_1180
+        0x2817b4785fd73625, // tab_discover_research_860
     ],
     // Light at 1
     [
@@ -6906,12 +6911,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xc87e4326b71cb165, // tab_fixing_1180
         0x41a92f14cf448f86, // tab_fixed_code_1180
         0x3828d19537cc366f, // tab_fixed_code_860
-        0xe088dc09ef145118, // tab_approved_1180
-        0xc50e4baedb967452, // tab_locked_1180
-        0x736b118cb6675482, // tab_start_over_1180
-        0x2dc5781038afc7c7, // tab_discover_brief_1180
-        0xd5b6b226d7d3a6c3, // tab_discover_brief_860
-        0x0c5735f9f1dd9b7a, // tab_plan_long_1180
+        0x60e04980259fea37, // tab_approved_1180
+        0xe4e27adb13c519b1, // tab_locked_1180
+        0x2fcdf5fead835b45, // tab_start_over_1180
+        0x0f9749d068bb4710, // tab_discover_brief_1180
+        0x6f190229b462a55e, // tab_discover_brief_860
+        0xedede4b83a9834b7, // tab_plan_long_1180
         0xafac33b43d05dd31, // tab_manual_test_1180
         0x144d64a66f4ccbf0, // tab_manual_note_860
         0x1eecb730ffc67054, // tab_review_rounds_1180
@@ -6943,9 +6948,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xce539cd52726928a, // tab_ship_checking_1180
         0x5a5c42a44b55e314, // tab_verify_regressed_1180
         0x44e5e54eca80e4fa, // tab_verify_machine_860
-        0x8bd023bbf81d14ec, // tab_discover_decisions_860
-        0x942ad1dac8b431b6, // tab_discover_research_1180
-        0x4ef6d49788a3ee09, // tab_discover_research_860
+        0xe802443e8960699c, // tab_discover_decisions_860
+        0x378dd92ab460c435, // tab_discover_research_1180
+        0x787e6c5af4c604e9, // tab_discover_research_860
     ],
     // Light at 2
     [
@@ -6985,12 +6990,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xe2683eafeffa8156, // tab_fixing_1180
         0x46fabd4cad14e180, // tab_fixed_code_1180
         0xbe83375734694824, // tab_fixed_code_860
-        0x9adb7a5ea39860b1, // tab_approved_1180
-        0xcd9d58704cfdf6ac, // tab_locked_1180
-        0x9f12b41b8617ce1b, // tab_start_over_1180
-        0x85845712b257a51e, // tab_discover_brief_1180
-        0xd2a33e52b004ee48, // tab_discover_brief_860
-        0x168489f88654fc42, // tab_plan_long_1180
+        0x8a229572b0d1343e, // tab_approved_1180
+        0x0538a5ca95e0f847, // tab_locked_1180
+        0xf8209dfaaa232747, // tab_start_over_1180
+        0x98f1c142d02b50ea, // tab_discover_brief_1180
+        0x846835587b4cf500, // tab_discover_brief_860
+        0x4bce9c60d18154cc, // tab_plan_long_1180
         0x25099c253cb07c52, // tab_manual_test_1180
         0x04eec880e0a1a35a, // tab_manual_note_860
         0x58e2a54063660b22, // tab_review_rounds_1180
@@ -7022,9 +7027,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x71c6638afcfafccc, // tab_ship_checking_1180
         0x2235737b9da7ca31, // tab_verify_regressed_1180
         0x04abe83eb15f1b42, // tab_verify_machine_860
-        0x540ec65c1708d662, // tab_discover_decisions_860
-        0x9edce102d24ec779, // tab_discover_research_1180
-        0xc7f0312c62400f5e, // tab_discover_research_860
+        0xb2c2e8e88cca6db2, // tab_discover_decisions_860
+        0xcf517a196a26571b, // tab_discover_research_1180
+        0xc0b04c75ad6dfdfe, // tab_discover_research_860
     ],
 ];
 
@@ -8129,7 +8134,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
         0x815e901f1d8e4fe0, // doc_suggestions_1180
         0x59f281bf28ed7dac, // doc_suggestions_850
         0x7f648d66690b003d, // finding_dialog_reject
-        0x25399878723fc4d3, // tab_plan_review_final_1180
+        0x7e362b5b997463c8, // tab_plan_review_final_1180
     ],
     // Dark at 2
     [
@@ -8139,7 +8144,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
         0xf48a17f0412cd294, // doc_suggestions_1180
         0x91f2fcf67a8903e4, // doc_suggestions_850
         0x70ae54d36dcb758a, // finding_dialog_reject
-        0x7846418619a7e676, // tab_plan_review_final_1180
+        0xeb074af1a3a89dd1, // tab_plan_review_final_1180
     ],
     // Light at 1
     [
@@ -8149,7 +8154,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
         0x26c531c8e712d2da, // doc_suggestions_1180
         0xe1fcfbf7d2ce9a8a, // doc_suggestions_850
         0xd69c8f32127bc516, // finding_dialog_reject
-        0xc8606991f769fe24, // tab_plan_review_final_1180
+        0x88e1957207880d0d, // tab_plan_review_final_1180
     ],
     // Light at 2
     [
@@ -8159,7 +8164,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
         0xba7a64f2307640dc, // doc_suggestions_1180
         0xa4da7f4b763bbc4c, // doc_suggestions_850
         0xfcab7499868adbe3, // finding_dialog_reject
-        0xc898738f15387348, // tab_plan_review_final_1180
+        0xfda9cd1d16169d37, // tab_plan_review_final_1180
     ],
 ];
 

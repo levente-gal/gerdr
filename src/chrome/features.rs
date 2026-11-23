@@ -26,7 +26,7 @@ use super::{
 use super::{
     Standing, code_mark,
     doc_layout::{self, DOC_CODE_PAD, DocPiece},
-    ellipsis, eye, flask, magnifier, plan_review_mark,
+    ellipsis, eye, flask, glyphs, magnifier, plan_review_mark,
     repos::draw_counted,
     ship_arrow, sparkle, text_lines,
 };
@@ -34,7 +34,7 @@ use crate::text_field::Line;
 use crate::{
     agent_icons::AgentIcon,
     feature::{Stage, page::Stat},
-    md_blocks::DocBlock,
+    md_blocks::{DocBlock, Inline, spans},
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -1875,9 +1875,9 @@ impl FeatureTabLayout {
         let apart = |t: &PageText| {
             let r = rect(t);
             let dy = (r.loc.y - at.y).max(at.y - (r.loc.y + r.size.h - 1)).max(0);
-            let (text, font, bold) =
-                piece_text(&pieces[t.piece].1).unwrap_or(("", Font::Body, false));
-            let end = r.loc.x + text_width_of(text, font, bold).ceil() as i32;
+            let (text, font, bold, runs) =
+                piece_text(&pieces[t.piece].1).unwrap_or(("", Font::Body, false, &[]));
+            let end = r.loc.x + text_width_of(text, font, bold, runs).ceil() as i32;
             let dx = (r.loc.x - at.x).max(at.x - end).max(0);
             (dy, dx)
         };
@@ -1885,8 +1885,8 @@ impl FeatureTabLayout {
         if !near && apart(t) != (0, 0) {
             return None;
         }
-        let (r, (text, font, bold)) = (rect(t), piece_text(&pieces[t.piece].1)?);
-        let ch = char_at_x(text, font, bold, (at.x - r.loc.x) as f32);
+        let (r, (text, font, bold, runs)) = (rect(t), piece_text(&pieces[t.piece].1)?);
+        let ch = char_at_x(text, font, bold, runs, (at.x - r.loc.x) as f32);
         Some(TextSpot { line, ch })
     }
 
@@ -1894,6 +1894,23 @@ impl FeatureTabLayout {
     pub fn line_text(&self, line: usize) -> Option<&str> {
         let t = self.texts.get(line)?;
         piece_text(&self.pieces[TabColumn::Page as usize].get(t.piece)?.1).map(|(text, ..)| text)
+    }
+
+    /// The web link a file's text on the page has at `pos`, if any.
+    pub fn link_at(&self, view: &FeatureTabView, pos: Point<i32, Logical>) -> Option<&str> {
+        let t = self.texts.get(self.text_at(view, pos, false)?.line)?;
+        let (rect, piece) = self.pieces[TabColumn::Page as usize].get(t.piece)?;
+        let Piece::Doc(DocPiece::Text {
+            text,
+            runs,
+            font,
+            bold,
+            ..
+        }) = piece
+        else {
+            return None;
+        };
+        doc_layout::link_at(text, runs, *font, *bold, (pos.x - rect.loc.x) as f32)
     }
 
     /// The text `view` has selected, as it goes on the clipboard: lines
@@ -2424,11 +2441,13 @@ pub(super) enum Piece {
         current: Option<usize>,
     },
     /// The ground of the chars `range` of the line of text after it,
-    /// selected: `text` in `font`, bold or not, as that line has it.
+    /// selected: `text` in `font`, bold or not, with `runs`, as that line
+    /// has it.
     Picked {
         text: String,
         font: Font,
         bold: bool,
+        runs: Vec<(std::ops::Range<usize>, Inline)>,
         range: std::ops::Range<usize>,
     },
     /// The card of the user's comment on a finding, behind its text.
@@ -5243,7 +5262,7 @@ fn mark_page(
                 .count();
             card = Some((n, rect));
         }
-        let Some((text, font, bold)) = piece_text(&piece) else {
+        let Some((text, font, bold, runs)) = piece_text(&piece) else {
             out.push((rect, piece));
             continue;
         };
@@ -5257,13 +5276,14 @@ fn mark_page(
                 text.chars().count()
             };
             if start < end {
-                let (text, range) = (text.to_owned(), start..end);
+                let (text, runs, range) = (text.to_owned(), runs.to_vec(), start..end);
                 out.push((
                     rect,
                     Piece::Picked {
                         text,
                         font,
                         bold,
+                        runs,
                         range,
                     },
                 ));
@@ -5301,43 +5321,55 @@ fn mark_page(
     (out, texts, matches)
 }
 
-/// A piece's line of text, its font and whether bold: what can be
-/// selected on the page.
-fn piece_text(piece: &Piece) -> Option<(&str, Font, bool)> {
+/// A line's runs, as `md_blocks::Styled` has them.
+type Runs = [(std::ops::Range<usize>, Inline)];
+
+/// A piece's line of text, its font, whether bold and its runs: what can
+/// be selected on the page.
+fn piece_text(piece: &Piece) -> Option<(&str, Font, bool, &Runs)> {
     match piece {
         Piece::Text {
             text, font, bold, ..
         }
-        | Piece::Doc(DocPiece::Text {
-            text, font, bold, ..
-        })
         | Piece::Found {
             text, font, bold, ..
-        } => Some((text, *font, *bold)),
+        } => Some((text, *font, *bold, &[])),
+        Piece::Doc(DocPiece::Text {
+            text,
+            runs,
+            font,
+            bold,
+            ..
+        }) => Some((text, *font, *bold, runs)),
         _ => None,
     }
 }
 
-/// How wide `text` is in `font`, bold or not, in logical pixels.
-fn text_width_of(text: &str, font: Font, bold: bool) -> f32 {
-    match bold {
-        true => measure_bold(text, font.size()).unwrap_or_else(|| width_of(text, font.size())),
-        false => width_of(text, font.size()),
-    }
+/// How wide `text` with `runs` is in `font`, bold or not, in logical
+/// pixels.
+fn text_width_of(text: &str, font: Font, bold: bool, runs: &Runs) -> f32 {
+    doc_layout::line_width(text, runs, bold, |t, face| {
+        doc_layout::width_in(t, face, font.size())
+    })
 }
 
-/// The char of `text` nearest `x`, its first at 0: the one whose middle
-/// `x` is before, else past the last.
-fn char_at_x(text: &str, font: Font, bold: bool, x: f32) -> usize {
+/// The char of `text` (with `runs`) nearest `x`, its first at 0: the one
+/// whose middle `x` is before, else past the last.
+fn char_at_x(text: &str, font: Font, bold: bool, runs: &Runs, x: f32) -> usize {
     let mut pen = 0.0;
-    for (i, ch) in text.chars().enumerate() {
-        let advance = text_width_of(ch.encode_utf8(&mut [0; 4]), font, bold);
-        if x < pen + advance / 2.0 {
-            return i;
+    let mut i = 0;
+    for (range, on) in spans(text, runs) {
+        let face = doc_layout::face(on, bold);
+        for ch in text[range].chars() {
+            let advance = doc_layout::width_in(ch.encode_utf8(&mut [0; 4]), face, font.size());
+            if x < pen + advance / 2.0 {
+                return i;
+            }
+            pen += advance;
+            i += 1;
         }
-        pen += advance;
     }
-    text.chars().count()
+    i
 }
 
 /// What the strip's chip standing for `n` hidden repositories says: "+N"
@@ -8292,14 +8324,14 @@ impl Painter {
                 text,
                 font,
                 bold,
+                runs,
                 range,
             } => {
                 let (x, end) = phys(rect, scale);
                 let (y, h) = band(rect, scale);
-                let size = font.size();
-                let width = |t: &str| match bold {
-                    true => self.bold_width(t, size, scale),
-                    false => self.text_width(t, size, scale),
+                let px = font.size() * s;
+                let width = |t: &str| {
+                    doc_layout::line_width(t, runs, *bold, |t, face| glyphs::width(t, face, px))
                 };
                 let byte = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(b, _)| b);
                 let x0 = x + width(&text[..byte(range.start)]);
@@ -9716,7 +9748,7 @@ mod tests {
     /// activity that came in beside it, with its name over it.
     #[test]
     fn a_file_reads_under_all_else_on_its_page() {
-        let blocks = vec![DocBlock::Para("the-doc-text".to_owned())];
+        let blocks = vec![DocBlock::Para("the-doc-text".into())];
         let view = with_doc(tab_view(), blocks);
         let page = TabColumn::Page as usize;
         let place = |l: &FeatureTabLayout, what: &dyn Fn(&Piece) -> bool| {
@@ -9896,7 +9928,7 @@ mod tests {
         use crate::chrome::Theme;
         use std::time::{Duration, Instant};
         // Each line its own: a band like one drawn already is not drawn.
-        let lines = (0..500).map(|i| DocBlock::Para(format!("line {i} of the plan")));
+        let lines = (0..500).map(|i| DocBlock::Para(format!("line {i} of the plan").into()));
         let view = with_doc(tab_view(), lines.collect());
         let plain = tab_at(&tab_view(), 1920);
         let l = tab_at(&view, 1920);
@@ -10065,7 +10097,7 @@ mod tests {
                     long enough to wrap in a column of the tab at this width.";
         // 500 lines, and as much as `FILE_MAX` lets through.
         for n in [500, 512 * 1024 / para.len()] {
-            let view = with_doc(tab_view(), vec![DocBlock::Para(para.to_owned()); n]);
+            let view = with_doc(tab_view(), vec![DocBlock::Para(para.into()); n]);
             let start = Instant::now();
             let l = feature_tab_layout(&view, area);
             eprintln!("{n} blocks, first layout: {:?}", start.elapsed());
