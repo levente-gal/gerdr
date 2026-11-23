@@ -949,7 +949,12 @@ impl Gerdr {
                 let label = match &chat.source {
                     Some(source) => {
                         let short: String = source.id.chars().take(8).collect();
-                        format!("{} · {short}", agent.label())
+                        // herdr named no chat: it may be the wrong one.
+                        let how = match source.guessed {
+                            true => " · found by folder and time",
+                            false => "",
+                        };
+                        format!("{} · {short}{how}", agent.label())
                     }
                     None => agent.label().to_owned(),
                 };
