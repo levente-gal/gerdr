@@ -24,14 +24,17 @@ use super::{
     status_dot, wrap_field_height,
 };
 use super::{
-    Standing, code_mark, ellipsis, eye, flask, magnifier, plan_review_mark, repos::draw_counted,
+    Standing, code_mark,
+    doc_layout::{self, DOC_CODE_PAD, DocPiece},
+    ellipsis, eye, flask, magnifier, plan_review_mark,
+    repos::draw_counted,
     ship_arrow, sparkle, text_lines,
 };
 use crate::text_field::Line;
 use crate::{
     agent_icons::AgentIcon,
     feature::{Stage, page::Stat},
-    md_blocks::{DocBlock, ItemMark},
+    md_blocks::DocBlock,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -2136,7 +2139,7 @@ const DOT_ROOM: i32 = 18;
 const LINE_LEAD: i32 = 7;
 const TAIL_LEAD: i32 = 5;
 /// A line of small text, of body text, and of an agent's pane.
-const SMALL_LINE: i32 = Font::Small.size() as i32 + LINE_LEAD;
+pub(super) const SMALL_LINE: i32 = Font::Small.size() as i32 + LINE_LEAD;
 pub(crate) const BODY_LINE: i32 = Font::Body.size() as i32 + LINE_LEAD;
 /// How high a stage page's title is.
 const TITLE_LINE: i32 = BODY_LINE + 6;
@@ -2306,7 +2309,7 @@ impl Font {
     /// Its size: the one the page's text is measured and painted at, and
     /// its lines (`BODY_LINE`, `SMALL_LINE`, `TAIL_LINE`) grow from. A step
     /// over the chrome's own, as the page is read, not glanced at.
-    const fn size(self) -> f32 {
+    pub(super) const fn size(self) -> f32 {
         match self {
             Self::Heading => TAB_TITLE_FONT,
             Self::Body => LABEL_FONT_SIZE,
@@ -2326,7 +2329,7 @@ pub(super) enum Ink {
 }
 
 impl Ink {
-    fn color(self, p: &Palette) -> Rgb {
+    pub(super) fn color(self, p: &Palette) -> Rgb {
         match self {
             Self::Text => p.text,
             // The page's secondary text, a step nearer the text than the
@@ -2449,23 +2452,16 @@ pub(super) enum Piece {
     Button(usize),
     /// `FeatureTabView::activity[row]`, its `what` wrapped in `lines`.
     Activity { row: usize, lines: Vec<String> },
-    /// What a file's list item starts with, right in its gutter.
-    ItemMark(ItemMark),
-    /// A line of a file's code block, cut where the column ends, on the
-    /// block's ground; an empty one is the block's edge.
-    CodeLine(String),
     /// A line of a check's output on its card: a code block's, on a ground
     /// that shows on the card in either theme.
     OutputLine(String),
-    /// The bar beside a file's quote.
-    QuoteBar,
-    /// A file's thematic break.
-    Rule,
+    /// A piece of a file's blocks (see `doc_layout`).
+    Doc(DocPiece),
 }
 
 /// How wide `text` is at `size`, in logical pixels, guessed when there is
 /// no font.
-fn width_of(text: &str, size: f32) -> f32 {
+pub(super) fn width_of(text: &str, size: f32) -> f32 {
     measure(text, size).unwrap_or(text.chars().count() as f32 * size * 0.55)
 }
 
@@ -2660,158 +2656,9 @@ fn activity_dot(c: &mut Canvas, spot: Rect, tone: CheckTone, scale: f64, p: &Pal
 /// The most lines an activity row takes; the last ends in "…".
 const ACTIVITY_LINES: usize = 2;
 
-/// A file's blocks on the page: the room above a block, its list items'
-/// indent and gutter, a quote's indent and bar, a code block's inner room,
-/// and how far in lists stop indenting more.
-const DOC_GAP: i32 = 8;
-const DOC_HEADING_GAP: i32 = 14;
-const DOC_ITEM_GAP: i32 = 2;
-const DOC_INDENT: i32 = 16;
-const DOC_MARK: i32 = 20;
-const DOC_QUOTE: i32 = 12;
-const DOC_QUOTE_BAR: i32 = 3;
-const DOC_CODE_PAD: i32 = 8;
 /// How far the ground of a check's output goes from the card's towards its
 /// text.
 const OUTPUT_GROUND: f32 = 0.06;
-const DOC_DEPTH_MAX: u8 = 4;
-const DOC_RULE: i32 = 13;
-/// How far off a line's width added up by word may be from it measured
-/// whole, in logical pixels: kerning and rounding at each space.
-const DOC_WIDTH_SLACK: f32 = 8.0;
-
-/// `text` broken into lines no wider than `width` by `measure`, all of it
-/// kept: a word wider than a line (a URL) breaks where it must. A long file
-/// has many words: a line's width is added up word by word, and measured
-/// whole only when that comes within `DOC_WIDTH_SLACK` of the edge.
-fn doc_lines(text: &str, width: i32, measure: impl Fn(&str) -> f32) -> Vec<String> {
-    let width = width as f32;
-    let space = measure("a a") - 2.0 * measure("a");
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    let mut used = 0.0;
-    for word in text.split_whitespace() {
-        let wide = measure(word);
-        if !line.is_empty() {
-            let about = used + space + wide;
-            if about < width - DOC_WIDTH_SLACK {
-                line.push(' ');
-                line.push_str(word);
-                used = about;
-                continue;
-            }
-            if about <= width + DOC_WIDTH_SLACK {
-                let longer = format!("{line} {word}");
-                let whole = measure(&longer);
-                if whole <= width {
-                    line = longer;
-                    used = whole;
-                    continue;
-                }
-            }
-            lines.push(std::mem::take(&mut line));
-        }
-        if wide <= width {
-            line = word.to_owned();
-            used = wide;
-            continue;
-        }
-        let mut rest = word;
-        while measure(rest) > width {
-            let ends: Vec<usize> = rest.char_indices().skip(1).map(|(i, _)| i).collect();
-            let fit = ends.partition_point(|end| measure(&rest[..*end]) <= width);
-            let Some(end) = fit
-                .checked_sub(1)
-                .map(|i| ends[i])
-                .or(ends.first().copied())
-            else {
-                break;
-            };
-            lines.push(rest[..end].to_owned());
-            rest = &rest[end..];
-        }
-        line = rest.to_owned();
-        used = measure(rest);
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
-/// What a number mark says.
-fn number_mark(n: usize) -> String {
-    format!("{n}.")
-}
-
-/// A file's blocks laid out for a column `w` wide, from `(0, 0)`.
-fn doc_stack(blocks: &[DocBlock], w: i32) -> Stack {
-    let mut s = Stack {
-        x: 0,
-        w,
-        y: 0,
-        pieces: Vec::new(),
-        joins: Vec::new(),
-    };
-    for (i, block) in blocks.iter().enumerate() {
-        if i > 0 {
-            s.y += match block {
-                DocBlock::Heading { .. } => DOC_HEADING_GAP,
-                DocBlock::Item {
-                    mark: ItemMark::Under,
-                    ..
-                } => DOC_GAP / 2,
-                DocBlock::Item { .. } if matches!(blocks[i - 1], DocBlock::Item { .. }) => {
-                    DOC_ITEM_GAP
-                }
-                _ => DOC_GAP,
-            };
-        }
-        s.doc_block(block);
-    }
-    s
-}
-
-/// The latest file laid out, with the width: laying one out measures its
-/// every word, and the tab is laid out every frame. It holds on to what it
-/// was laid out from, so that can't be another's at the same address.
-struct DocMemo {
-    blocks: Arc<Vec<DocBlock>>,
-    w: i32,
-    pieces: Rc<Vec<(Rect, Piece)>>,
-    h: i32,
-}
-
-/// How many files `DOC_MEMO` holds: the stages looked between.
-const DOC_MEMOS: usize = 2;
-
-thread_local! {
-    static DOC_MEMO: RefCell<Vec<DocMemo>> = const { RefCell::new(Vec::new()) };
-}
-
-/// `blocks` laid out for a column `w` wide: the pieces from `(0, 0)`, and
-/// how high they all are.
-fn doc_laid_out(blocks: &Arc<Vec<DocBlock>>, w: i32) -> (Rc<Vec<(Rect, Piece)>>, i32) {
-    DOC_MEMO.with_borrow_mut(|memo| {
-        let found = (memo.iter()).position(|m| m.w == w && Arc::ptr_eq(&m.blocks, blocks));
-        let entry = match found {
-            Some(i) => memo.remove(i),
-            None => {
-                let s = doc_stack(blocks, w);
-                DocMemo {
-                    blocks: blocks.clone(),
-                    w,
-                    h: s.y,
-                    pieces: Rc::new(s.pieces),
-                }
-            }
-        };
-        let laid = (entry.pieces.clone(), entry.h);
-        memo.insert(0, entry);
-        memo.truncate(DOC_MEMOS);
-        laid
-    })
-}
 
 /// A column's contents, stacked from its top.
 struct Stack {
@@ -4067,112 +3914,13 @@ impl Stack {
         }
     }
 
-    /// `text` as a file's text: all of its lines, a line `h` high each.
-    fn doc_text(&mut self, text: &str, font: Font, ink: Ink, bold: bool, h: i32) {
-        let size = font.size();
-        // A hard break (`md_blocks`) starts a line of its own.
-        let w = self.w;
-        let lines = text.split('\n').flat_map(|text| match bold {
-            true => doc_lines(text, w, |t| {
-                measure_bold(t, size).unwrap_or_else(|| width_of(t, size))
-            }),
-            false => doc_lines(text, w, |t| width_of(t, size)),
-        });
-        for text in lines {
-            self.put(
-                h,
-                Piece::Text {
-                    text,
-                    font,
-                    ink,
-                    bold,
-                },
-            );
-        }
-    }
-
-    /// Run `body` in the column `by` further in.
-    fn doc_indented(&mut self, by: i32, body: impl FnOnce(&mut Stack)) {
-        let (x, w) = (self.x, self.w);
-        let by = by.min(w - 1).max(0);
-        self.x += by;
-        self.w -= by;
-        body(self);
-        self.x = x;
-        self.w = w;
-    }
-
-    /// A list item, its text hanging right of its mark.
-    fn doc_item(&mut self, depth: u8, mark: ItemMark, text: &str) {
-        let gutter = match mark {
-            ItemMark::Number(n) => {
-                let w = width_of(&number_mark(n), Font::Body.size()).ceil() as i32 + 6;
-                w.max(DOC_MARK)
-            }
-            _ => DOC_MARK,
-        };
-        let indent = i32::from(depth.min(DOC_DEPTH_MAX)) * DOC_INDENT;
-        let top = self.y;
-        self.doc_indented(indent, |s| {
-            if mark != ItemMark::Under {
-                let spot = Rectangle::new((s.x, s.y).into(), (gutter, BODY_LINE).into());
-                s.pieces.push((spot, Piece::ItemMark(mark)));
-            }
-            s.doc_indented(gutter, |s| {
-                s.doc_text(text, Font::Body, Ink::Text, false, BODY_LINE);
-            });
-        });
-        // A mark with no words of its own still takes its line.
-        self.y = self.y.max(top + BODY_LINE);
-    }
-
-    /// A file's block, from here down.
-    fn doc_block(&mut self, block: &DocBlock) {
-        match block {
-            DocBlock::Heading { level: 1, text } => {
-                self.doc_text(text, Font::Heading, Ink::Text, true, BODY_LINE + 6);
-            }
-            DocBlock::Heading { text, .. } => {
-                self.doc_text(text, Font::Body, Ink::Text, true, BODY_LINE);
-            }
-            DocBlock::Para(text) => self.doc_text(text, Font::Body, Ink::Text, false, BODY_LINE),
-            DocBlock::Note(text) => self.doc_text(text, Font::Body, Ink::Muted, false, BODY_LINE),
-            DocBlock::Item { depth, mark, text } => self.doc_item(*depth, *mark, text),
-            DocBlock::Code(lines) => {
-                let edge = |s: &mut Stack| s.put(DOC_CODE_PAD / 2, Piece::CodeLine(String::new()));
-                edge(self);
-                for code in lines {
-                    self.put(SMALL_LINE, Piece::CodeLine(code.clone()));
-                }
-                edge(self);
-            }
-            DocBlock::Quote(text) => {
-                let top = self.y;
-                self.doc_indented(DOC_QUOTE, |s| {
-                    s.doc_text(text, Font::Body, Ink::Muted, false, BODY_LINE);
-                });
-                let bar =
-                    Rectangle::new((self.x, top).into(), (DOC_QUOTE_BAR, self.y - top).into());
-                self.pieces.push((bar, Piece::QuoteBar));
-            }
-            DocBlock::Table(rows) => {
-                for (i, row) in rows.iter().enumerate() {
-                    self.doc_text(row, Font::Small, Ink::Text, i == 0, SMALL_LINE);
-                }
-            }
-            DocBlock::Rule => {
-                self.put(DOC_RULE, Piece::Rule);
-            }
-        }
-    }
-
     /// A file's blocks, from here down.
     fn doc(&mut self, blocks: &Arc<Vec<DocBlock>>) {
-        let (laid, h) = doc_laid_out(blocks, self.w);
+        let (laid, h) = doc_layout::laid_out(blocks, self.w);
         let (x, y) = (self.x, self.y);
         self.pieces.extend(laid.iter().map(|(rect, piece)| {
             let at = Rectangle::new((rect.loc.x + x, rect.loc.y + y).into(), rect.size);
-            (at, piece.clone())
+            (at, Piece::Doc(piece.clone()))
         }));
         self.y += h;
     }
@@ -5560,6 +5308,9 @@ fn piece_text(piece: &Piece) -> Option<(&str, Font, bool)> {
         Piece::Text {
             text, font, bold, ..
         }
+        | Piece::Doc(DocPiece::Text {
+            text, font, bold, ..
+        })
         | Piece::Found {
             text, font, bold, ..
         } => Some((text, *font, *bold)),
@@ -7997,28 +7748,7 @@ impl Painter {
                     c.rounded(x, y, (w * f).max(h), h, h / 2.0, p.success);
                 }
             }
-            Piece::ItemMark(mark) => {
-                let spot = Rectangle::new(
-                    (rect.loc.x, rect.loc.y + (BODY_LINE - 14) / 2).into(),
-                    (14, 14).into(),
-                );
-                match mark {
-                    ItemMark::Bullet => {
-                        icon_sdf(c, spot, scale, p.muted, |x, y| x.hypot(y) - 2.0 * s)
-                    }
-                    ItemMark::Task(true) => {
-                        icon_sdf(c, spot, scale, p.success, |x, y| check(x, y, s));
-                    }
-                    ItemMark::Task(false) => icon_sdf(c, spot, scale, p.muted, |x, y| {
-                        stage_dot(StageMark::Later, x, y, 9.0 * s)
-                    }),
-                    ItemMark::Number(n) => {
-                        line(c, &number_mark(*n), rect, Font::Body.size(), p.muted);
-                    }
-                    ItemMark::Under => {}
-                }
-            }
-            Piece::CodeLine(text) => self.code_line(c, rect, text, p.element, scale, p),
+            Piece::Doc(piece) => self.doc_piece(c, rect, piece, scale, p),
             Piece::OutputLine(text) => {
                 let ground = mix(p.background, p.text, OUTPUT_GROUND);
                 self.code_line(c, rect, text, ground, scale, p);
@@ -8041,20 +7771,6 @@ impl Painter {
                 let (x, y, w, h) = rect_px(rect, scale);
                 let ground = mix(p.background, p.text, OUTPUT_GROUND);
                 c.rounded(x, y, w, h, AGENT_RADIUS * s, ground);
-            }
-            Piece::QuoteBar => {
-                let (x, y, w, h) = rect_px(rect, scale);
-                c.rounded(x, y, w, h, w / 2.0, p.border);
-            }
-            Piece::Rule => {
-                let (x, y, w, h) = rect_px(rect, scale);
-                c.fill(
-                    x as i32,
-                    (y + h / 2.0) as i32,
-                    w as i32,
-                    s.ceil() as i32,
-                    p.border,
-                );
             }
             Piece::Milestone {
                 done,
@@ -8674,7 +8390,7 @@ impl Painter {
     /// A page's line `text` at `size`, bold or not, from `x` to before
     /// `end` in `band`, in `color` but for its diff counts ("+12 −3"),
     /// which take the repositories panel's colours.
-    fn page_text(
+    pub(super) fn page_text(
         &self,
         c: &mut Canvas,
         text: &str,
@@ -8739,25 +8455,6 @@ impl Painter {
             from += w + gap;
         }
         Some((start / s).floor() as i32)
-    }
-
-    /// A line of a code block in `rect`, on `ground`. On whole pixels, so a
-    /// block's lines meet with no seam.
-    fn code_line(
-        &self,
-        c: &mut Canvas,
-        rect: Rect,
-        text: &str,
-        ground: Rgb,
-        scale: f64,
-        p: &Palette,
-    ) {
-        let (x, y, w, h) = rect_px(rect, scale);
-        c.fill(x as i32, y as i32, w as i32, h as i32, ground);
-        let pad = (f64::from(DOC_CODE_PAD) * scale) as f32;
-        let (from, to) = (x + pad, x + w - pad);
-        let b = band(rect, scale);
-        self.mono_text(c, text, Font::Small.size(), from, to, b, scale, p.text);
     }
 
     /// The page's button `i` in `rect`, on a card or in the page's column:
@@ -10001,30 +9698,6 @@ mod tests {
         assert!(narrow.scroll_room(TabColumn::Page) > room, "{} vs {room}, page {}", narrow.scroll_room(TabColumn::Page), narrow.content[TabColumn::Page as usize]);
     }
 
-    /// A measure of one unit a character.
-    fn chars(text: &str) -> f32 {
-        text.chars().count() as f32
-    }
-
-    #[test]
-    fn a_files_lines_keep_all_of_it_and_break_a_long_word() {
-        assert_eq!(doc_lines("a bb ccc", 4, chars), ["a bb", "ccc"]);
-        // Brackets don't hold words together, as they do on a card's line.
-        assert_eq!(doc_lines("x [a b c]", 4, chars), ["x [a", "b c]"]);
-        assert_eq!(
-            doc_lines("see abcdefghij end", 4, chars),
-            ["see", "abcd", "efgh", "ij", "end"]
-        );
-        assert!(doc_lines("", 4, chars).is_empty());
-        // Too narrow for a character: still all of it, one to a line.
-        assert_eq!(doc_lines("abc", 0, chars), ["a", "b", "c"]);
-        // Wider than one unit a byte can't split a character.
-        assert_eq!(
-            doc_lines("\u{e9}\u{e9}\u{e9}", 2, chars).concat(),
-            "\u{e9}\u{e9}\u{e9}"
-        );
-    }
-
     /// `view`'s page carrying `blocks` as its file.
     fn with_doc(mut view: FeatureTabView, blocks: Vec<DocBlock>) -> FeatureTabView {
         view.page.sections.push(PageSection::Doc {
@@ -10036,7 +9709,7 @@ mod tests {
     }
 
     fn says(piece: &Piece, what: &str) -> bool {
-        matches!(piece, Piece::Text { text, .. } if text == what)
+        matches!(piece, Piece::Doc(DocPiece::Text { text, .. }) if text == what)
     }
 
     /// The file goes last wherever it is put; on a narrow tab, under the
@@ -10060,62 +9733,6 @@ mod tests {
         assert_eq!(caption, Some(text - 1));
         let activity = place(&narrow, &|p| *p == Piece::Caption("ACTIVITY".into()));
         assert!(activity.expect("its activity") < text - 1);
-    }
-
-    /// A list item's lines all start right of its mark, deeper the deeper.
-    #[test]
-    fn a_list_items_text_hangs_right_of_its_mark() {
-        let long = "word ".repeat(80);
-        let item = |depth, mark| DocBlock::Item {
-            depth,
-            mark,
-            text: long.clone(),
-        };
-        let blocks = [item(0, ItemMark::Bullet), item(1, ItemMark::Number(3))];
-        let s = doc_stack(&blocks, 300);
-        let marks: Vec<Rect> = (s.pieces.iter())
-            .filter(|(_, p)| matches!(p, Piece::ItemMark(_)))
-            .map(|(r, _)| *r)
-            .collect();
-        assert_eq!(marks.len(), 2);
-        assert_eq!(marks[0].loc.x, 0);
-        assert_eq!(marks[1].loc.x, DOC_INDENT);
-        let lines = |under: i32, to: i32| -> Vec<Rect> {
-            (s.pieces.iter())
-                .filter(|(r, p)| {
-                    matches!(p, Piece::Text { .. }) && r.loc.y >= under && r.loc.y < to
-                })
-                .map(|(r, _)| *r)
-                .collect()
-        };
-        let first = lines(0, marks[1].loc.y);
-        assert!(first.len() > 1, "it wraps");
-        assert!(first.iter().all(|r| r.loc.x == DOC_MARK));
-        let second = lines(marks[1].loc.y, s.y);
-        assert!(second.len() > 1, "it wraps");
-        let x = second[0].loc.x;
-        assert!(x >= DOC_INDENT + DOC_MARK);
-        assert!(second.iter().all(|r| r.loc.x == x));
-        for r in first.iter().chain(&second) {
-            assert!(r.loc.x + r.size.w <= 300);
-        }
-    }
-
-    /// Laid out every frame, a file is measured once a width; its next
-    /// read, equal or not, is another `Arc` and laid out anew.
-    #[test]
-    fn a_file_is_laid_out_once_a_width() {
-        let blocks = Arc::new(vec![DocBlock::Para("words to lay out".to_owned())]);
-        let (first, h) = doc_laid_out(&blocks, 300);
-        let (again, same) = doc_laid_out(&blocks, 300);
-        assert!(Rc::ptr_eq(&first, &again));
-        assert_eq!(h, same);
-        let (wider, _) = doc_laid_out(&blocks, 400);
-        assert!(!Rc::ptr_eq(&first, &wider));
-        // Going between two widths, both are kept.
-        assert!(Rc::ptr_eq(&first, &doc_laid_out(&blocks, 300).0));
-        let other = Arc::new(blocks.as_ref().clone());
-        assert!(!Rc::ptr_eq(&first, &doc_laid_out(&other, 300).0));
     }
 
     fn running_view() -> FeatureTabView {

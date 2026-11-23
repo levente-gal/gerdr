@@ -21,6 +21,7 @@ mod checkout;
 mod confirm;
 mod consts;
 mod criteria_strip;
+mod doc_layout;
 mod drop;
 mod features;
 mod finding_dialog;
