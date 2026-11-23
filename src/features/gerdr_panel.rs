@@ -387,6 +387,8 @@ impl Gerdr {
     /// does: a file approved, a stage bound to its output read first.
     pub(crate) fn tick_current(&mut self, project: &str, slug: &str) {
         match self.feature(project, slug).and_then(Feature::current) {
+            // Done by its findings, not by a file to approve.
+            Some(Stage::AiReview) => self.read_and_tick(project, slug, Stage::AiReview),
             Some(stage) if needs(stage).is_some() => {
                 self.approve_stage(project, slug, stage);
             }
