@@ -638,7 +638,10 @@ fn writers_page_actions(
         out.push((button(label, ButtonStyle::Plain), outcome));
     }
     // Named apart from this stage's own agent's button on the same page.
-    if back.is_some()
+    // Changes not committed after Build bring it back too: they stop a stage
+    // from being marked done.
+    let left = ctx.dirty && stage > Stage::Build && mark == StageMark::Current;
+    if (back.is_some() || left)
         && let Some((label, outcome)) =
             agent_button(feature, Stage::Build, ctx).filter(|(_, o)| !has(&out, o))
     {

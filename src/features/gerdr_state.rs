@@ -1011,6 +1011,8 @@ impl Gerdr {
                 .contains_key(&(feature.project.clone(), feature.slug.clone())),
             on_head: on_head(feature, last.map(|p| &p.reading)),
             decisions: docs.map_or(0, |d| d.decisions),
+            dirty: (self.feature_reading(&feature.project, &feature.slug))
+                .is_some_and(|r| !r.dirty.is_empty()),
         }
     }
 }
