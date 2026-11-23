@@ -453,16 +453,23 @@ fn opencode(db: &Path, chat: &Chat, claimed: &HashSet<String>) -> Result<Option<
             Ok(want.iter().all(|w| cols.iter().any(|c| c == w)))
         };
         let need = ["id", "directory", "time_created"];
-        let (session, v2) = if has("session", &need)? && has("message", &["session_id", "data"])? {
-            ("session", false)
-        } else if has("session_v2", &need)?
-            && has("session_message", &["session_id", "seq", "data"])?
-        {
-            ("session_v2", true)
-        } else {
-            return Ok(None);
-        };
-        let Some(session_row) = opencode_session(&conn, session, chat, claimed)? else {
+        // OpenCode 2 keeps both: older chats in the first tables, newer
+        // ones only in the second.
+        let mut schemas = Vec::new();
+        if has("session", &need)? && has("message", &["session_id", "data"])? {
+            schemas.push(("session", false));
+        }
+        if has("session_v2", &need)? && has("session_message", &["session_id", "seq", "data"])? {
+            schemas.push(("session_v2", true));
+        }
+        let mut hit = None;
+        for (session, v2) in schemas {
+            if let Some(row) = opencode_session(&conn, session, chat, claimed)? {
+                hit = Some((row, v2));
+                break;
+            }
+        }
+        let Some((session_row, v2)) = hit else {
             return Ok(None);
         };
         let id = session_row["id"].as_str().unwrap_or_default().to_owned();
@@ -1173,6 +1180,44 @@ mod tests {
         assert_eq!(line["data"]["role"], "user");
         assert_eq!(line["parts"][0]["data"]["text"], "hi");
         assert_eq!(f.rows[0].0, "opencode/session.json");
+    }
+
+    #[test]
+    fn a_newer_opencode_chat_is_found_beside_older_ones() {
+        let home = scratch("locate-opencode2");
+        let homes = Homes::under(&home);
+        std::fs::create_dir_all(homes.opencode.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&homes.opencode).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, time_created INTEGER);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, time_created INTEGER);
+             CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT);
+             INSERT INTO session VALUES ('ses_old', NULL, '/w/x', 100500);
+             INSERT INTO session_v2 VALUES ('ses_old', NULL, '/w/x', 100500);
+             INSERT INTO session_v2 VALUES ('ses_new', NULL, '/w/y', 200500);
+             INSERT INTO session_message VALUES ('m1', 'ses_new', 'user', 1, '{\"text\":\"hi\"}');",
+        )
+        .unwrap();
+        drop(conn);
+        let mut c = chat(AgentKind::OpenCode, None, 200, &[Path::new("/w/y")]);
+        c.id = Some("ses_new".into());
+        let f = find(&homes, &c, &HashSet::new()).unwrap().unwrap();
+        let Form::Made(lines) = &f.form else {
+            panic!("{:?}", f.form)
+        };
+        let line: Value =
+            serde_json::from_slice(lines.split(|b| *b == b'\n').next().unwrap()).unwrap();
+        assert_eq!(
+            (line["type"].as_str(), line["data"]["text"].as_str()),
+            (Some("user"), Some("hi"))
+        );
+        // By folder and time too.
+        c.id = None;
+        assert_eq!(
+            find(&homes, &c, &HashSet::new()).unwrap().unwrap().id,
+            "ses_new"
+        );
     }
 
     #[test]
