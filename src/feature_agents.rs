@@ -2306,7 +2306,11 @@ impl Gerdr {
         // Its tab back since the page was drawn only shows it: that changes
         // nothing. A chat to go on with would.
         let live = (run.pane.as_deref()).is_some_and(|p| self.pane_there(p));
-        if !live && let Some(why) = self.stage_lock_warning(project, slug, stage) {
+        let ctx = self.row_ctx(&feature);
+        if !live
+            && !crate::features::build_left_changes(stage, ctx)
+            && let Some(why) = self.stage_lock_warning(project, slug, stage)
+        {
             return self.show_warning(why);
         }
         // Its tab came back since the page was drawn: one chat, one tab.

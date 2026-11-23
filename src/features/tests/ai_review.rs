@@ -1265,3 +1265,39 @@ fn code_review_shows_the_diff() {
         lines("Files", vec![line("3 of 7 files viewed", CheckTone::Note)])
     );
 }
+
+/// Changes left not committed after Build: the Build agent's chat comes
+/// back from the stage the feature is at, past Build's lock.
+#[test]
+fn changes_not_committed_bring_back_the_build_agent() {
+    use crate::feature::agents::StageRun;
+    let mut f = reviewing(&[FindingState::Dismissed], true);
+    f.runs.insert(
+        Stage::Build,
+        StageRun {
+            n: 1,
+            agent: "Claude Code".into(),
+            base: "claude".into(),
+            started: 1_000,
+            ..StageRun::default()
+        },
+    );
+    let resume = PanelOutcome::ResumeAgent(Stage::Build);
+    let offers = |ctx: RowCtx| {
+        (page_actions(&f, Stage::AiReview, ctx).into_iter())
+            .find(|(_, o)| *o == resume)
+            .map(|(b, _)| b.label)
+    };
+    assert_eq!(offers(RowCtx::default()), None);
+    // Locked by AI review's findings without them.
+    assert_eq!(agent_button(&f, Stage::Build, RowCtx::default()), None);
+    let dirty = RowCtx {
+        dirty: true,
+        ..RowCtx::default()
+    };
+    assert_eq!(offers(dirty).as_deref(), Some("Resume Build agent"));
+    assert_eq!(
+        agent_button(&f, Stage::Build, dirty),
+        Some(("Resume agent", resume))
+    );
+}

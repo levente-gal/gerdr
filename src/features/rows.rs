@@ -189,6 +189,9 @@ pub struct RowCtx {
     /// nothing changed, as its code was last read: Verify goes by GitHub's
     /// checks (see `pr_watch`).
     pub on_head: bool,
+    /// Its worktrees have changes not committed, as its code was last read:
+    /// the Build agent's chat comes back to commit them, Build locked or not.
+    pub dirty: bool,
 }
 
 impl RowCtx {
@@ -297,8 +300,15 @@ pub(super) fn agent_button(
         return (feature.status == Status::Open)
             .then_some(("Start agent", PanelOutcome::StartAgent(stage, false)));
     }
-    (feature.status == Status::Open && run.resumes() && ctx.locked_by(feature, stage).is_none())
+    let unlocked = ctx.locked_by(feature, stage).is_none() || build_left_changes(stage, ctx);
+    (feature.status == Status::Open && run.resumes() && unlocked)
         .then_some(("Resume agent", PanelOutcome::ResumeAgent(stage)))
+}
+
+/// Whether `stage` is Build and its agent left changes not committed: its
+/// chat resumes past the lock, as committing them changes nothing reviewed.
+pub(crate) fn build_left_changes(stage: Stage, ctx: RowCtx) -> bool {
+    stage == Stage::Build && ctx.dirty
 }
 
 /// Where a done Build's agent stands with work sent back to it: fixes,
