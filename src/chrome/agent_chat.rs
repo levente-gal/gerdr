@@ -969,11 +969,18 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
                     .push((rect(ix, row.loc.y, wide.min(iw), SMALL_LINE), Spot::Fold));
             }
         }
-        Item::Subagent { title, items, .. } => {
+        Item::Subagent {
+            title,
+            items,
+            output,
+            ..
+        } => {
             let steps = match items.len() {
                 1 => "1 step".to_owned(),
                 n => format!("{n} steps"),
             };
+            let mut tail = vec![(steps, Mark::Muted)];
+            tail.extend(outcome(output));
             l.head(Head {
                 x,
                 w: cw,
@@ -981,18 +988,25 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
                 name: "Subagent",
                 bold: true,
                 gist: title,
-                tail: vec![(steps, Mark::Muted)],
-                running: false,
+                tail,
+                running: output.is_none(),
                 path: false,
                 mono: false,
             });
             if open {
-                // Its own items, in from the card: what they paint, not
-                // what presses on them do.
+                // Its own rows, in from the card, its steps folded as the
+                // chat's are: what they paint, not what presses on them do.
                 let (nx, nw) = (x + NEST, (cw - NEST).max(1));
                 let mut y = l.below();
-                for inner in items.iter() {
-                    let laid = laid(inner, nw, 0, unfolded, cwd);
+                for row in rows::rows(items, unfolded) {
+                    let laid = match row {
+                        Row::Item(i) | Row::Step(i) => laid(&items[i], nw, 0, unfolded, cwd),
+                        Row::Steps { from, to, open } => {
+                            let mut s = rows::summary(&items[from..to]);
+                            s.running = (s.running.take()).map(|gist| short(&gist, cwd));
+                            laid_steps(items[from].id(), s, open, nw)
+                        }
+                    };
                     for (r, bit) in &laid.bits {
                         let at = Rectangle::new(r.loc + Point::from((nx, y)), r.size);
                         l.put(at, bit.clone());

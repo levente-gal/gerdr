@@ -50,11 +50,14 @@ pub enum Item {
         diff: Vec<DiffLine>,
         output: Option<ToolOut>,
     },
-    /// A subagent's work, folded under one card.
+    /// A subagent's work, folded under one card in the place of the call
+    /// that started it.
     Subagent {
         id: String,
         title: String,
         items: Arc<Vec<Item>>,
+        /// That call's result, once it came.
+        output: Option<ToolOut>,
     },
     /// What gerdr says in the chat's place: compaction, an interruption, a
     /// line it couldn't read (naming its type).

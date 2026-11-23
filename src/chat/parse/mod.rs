@@ -111,6 +111,35 @@ impl Reader {
                 }
             }
         }
+        self.sync_subs();
+    }
+
+    /// Whole lines of subagent `agent`'s own transcript: Claude Code keeps
+    /// each in `<chat>/subagents/agent-<id>.jsonl`, apart from the chat's.
+    /// `call` is the call that started it, as the file's meta says; its
+    /// work goes under it once that call is read.
+    pub fn feed_subagent(&mut self, agent: &str, call: &str, lines: &[u8]) {
+        (self.agent_calls).insert(agent.to_owned(), call.to_owned());
+        for raw in lines.split(|b| *b == b'\n') {
+            // A first line cut short, where reading began mid-file.
+            let Ok(mut line) = serde_json::from_slice::<Value>(raw) else {
+                continue;
+            };
+            line["isSidechain"] = true.into();
+            line["agentId"] = agent.into();
+            self.route(&line);
+        }
+        self.sync_subs();
+    }
+
+    /// Whether tool call `call` was read: a subagent it started has a
+    /// place to show.
+    pub fn knows_call(&self, call: &str) -> bool {
+        self.calls.contains_key(call)
+    }
+
+    /// The subagents' items, as their readers have them now.
+    fn sync_subs(&mut self) {
         for sub in self.subs.iter_mut().filter(|s| s.changed) {
             sub.changed = false;
             if let Item::Subagent { items, .. } = &mut self.items[sub.at] {
@@ -137,7 +166,10 @@ impl Reader {
         let Some(&(index, _)) = self.calls.get(call) else {
             return false;
         };
-        if let Item::Tool { output, .. } | Item::Edit { output, .. } = &mut self.items[index] {
+        if let Item::Tool { output, .. }
+        | Item::Edit { output, .. }
+        | Item::Subagent { output, .. } = &mut self.items[index]
+        {
             *output = Some(out);
         }
         true
@@ -176,17 +208,24 @@ impl Reader {
             found.map(|(id, _)| id.clone())
         })?;
         let (_, title) = self.tasks.remove(&call)?;
+        // In the place of its call's card, with its result.
+        let at = self.calls.get(&call).map(|&(at, _)| at)?;
+        let Item::Tool { output, .. } = &self.items[at] else {
+            return None;
+        };
+        let output = output.clone();
         self.subs.push(Sub {
-            at: self.items.len(),
+            at,
             reader: Reader::new(self.agent),
             changed: false,
         });
         let id = format!("agent:{call}");
-        self.push(Item::Subagent {
+        self.items[at] = Item::Subagent {
             id,
             title,
             items: Arc::default(),
-        });
+            output,
+        };
         let sub = self.subs.len() - 1;
         if let Some(agent) = agent {
             self.sub_of.insert(agent.to_owned(), sub);
@@ -270,7 +309,10 @@ impl Reader {
             failed: part["is_error"] == true,
             ms,
         };
-        if let Item::Tool { output, .. } | Item::Edit { output, .. } = &mut self.items[index] {
+        if let Item::Tool { output, .. }
+        | Item::Edit { output, .. }
+        | Item::Subagent { output, .. } = &mut self.items[index]
+        {
             *output = Some(out);
         }
         if let Some(agent) = done["agentId"].as_str() {
@@ -815,14 +857,17 @@ mod tests {
             side(user("s4", "Someone else's"), "ag2"),
         ]);
         let items = reader.items();
-        assert_eq!(items.len(), 2, "{items:?}");
-        let Item::Tool { output, .. } = &items[0] else {
+        assert_eq!(items.len(), 1, "{items:?}");
+        let Item::Subagent {
+            id,
+            title,
+            items,
+            output,
+        } = &items[0]
+        else {
             panic!()
         };
         assert_eq!(output.as_ref().and_then(|o| o.ms), Some(4200));
-        let Item::Subagent { id, title, items } = &items[1] else {
-            panic!()
-        };
         assert_eq!(
             (id.as_str(), title.as_str()),
             ("agent:task_1", "Find the parser")
@@ -841,10 +886,43 @@ mod tests {
         work["isSidechain"] = true.into();
         work["agentId"] = "ag1".into();
         let reader = read(&[call("a1", "task_1", "Task", task), done, work]);
-        let Item::Subagent { items, .. } = &reader.items()[1] else {
+        let Item::Subagent { items, .. } = &reader.items()[0] else {
             panic!()
         };
         assert!(matches!(&items[0], Item::Assistant { .. }));
+    }
+
+    #[test]
+    fn a_subagents_own_file_goes_under_its_call() {
+        let task = serde_json::json!({ "description": "Read the docs", "prompt": "Read them" });
+        let mut reader = read(&[call("a1", "toolu_1", "Agent", task)]);
+        assert!(reader.knows_call("toolu_1") && !reader.knows_call("toolu_9"));
+        // Its file: lines of its own, no sidechain marks needed; begun
+        // mid-line where only its end was read.
+        let own = jsonl(&[user("s1", "Read them"), said("s2", "m1", text("Reading."))]);
+        let cut = [&b"tail of a line\n"[..], &own].concat();
+        reader.feed_subagent("ag1", "toolu_1", &cut);
+        let Item::Subagent {
+            title,
+            items,
+            output,
+            ..
+        } = &reader.items()[0]
+        else {
+            panic!("{:?}", reader.items())
+        };
+        assert_eq!(title, "Read the docs");
+        assert_eq!(items.len(), 2);
+        assert!(output.is_none(), "still running");
+        // It grows; its call's result comes.
+        reader.feed_subagent("ag1", "toolu_1", &jsonl(&[said("s3", "m2", text("Done."))]));
+        reader.feed(&jsonl(&[result("r1", "toolu_1", "Report", false)]));
+        let Item::Subagent { items, output, .. } = &reader.items()[0] else {
+            panic!()
+        };
+        assert_eq!(items.len(), 3);
+        assert_eq!(output.as_ref().map(|o| o.text.as_str()), Some("Report"));
+        assert_eq!(reader.items().len(), 1);
     }
 
     #[test]

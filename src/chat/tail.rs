@@ -410,6 +410,11 @@ struct Chat {
     from: u64,
     /// How much a read from the end, or further back, takes.
     chunk: u64,
+    /// Claude Code's subagents' own transcripts, by file: how far each is
+    /// read (see `read_subagents`).
+    subagents: HashMap<PathBuf, u64>,
+    /// The calls that started them, by file, as their meta files say.
+    started_by: HashMap<PathBuf, String>,
     /// Whether `offset` is at a line's start: not when the first read began
     /// mid-line.
     whole: bool,
@@ -472,6 +477,8 @@ impl Chat {
             offset: 0,
             from: 0,
             chunk: CHAT_TAIL,
+            subagents: HashMap::new(),
+            started_by: HashMap::new(),
             whole: true,
             prev: Vec::new(),
             sent: None,
@@ -484,7 +491,9 @@ impl Chat {
     fn poll(&mut self, homes: &Homes, pane_id: &str, out: &mut Vec<Event>) {
         let read = match in_database(self.source.agent) {
             true => self.read_rows(homes),
-            false => self.read().map_err(|err| err.to_string()),
+            false => {
+                (self.read().and_then(|()| self.read_subagents())).map_err(|err| err.to_string())
+            }
         };
         if let Err(err) = read {
             if !self.failed {
@@ -616,9 +625,85 @@ impl Chat {
         let mut reader = Reader::new(self.source.agent);
         reader.feed(&bytes[start..]);
         self.reader = reader;
+        self.subagents.clear();
         self.from = from;
         self.whole = true;
         self.sent = None;
+        Ok(())
+    }
+
+    /// Feed the reader what Claude Code's subagents wrote since the last
+    /// read, each in its own file beside the chat's
+    /// (`<chat>/subagents/agent-<id>.jsonl`), the call that started it named
+    /// in its `.meta.json`. Only those whose call was read: their work has a
+    /// place to show. A file is read from its last `chunk` bytes.
+    fn read_subagents(&mut self) -> std::io::Result<()> {
+        if self.source.agent != AgentKind::Claude {
+            return Ok(());
+        }
+        let dir = self.source.path.with_extension("").join("subagents");
+        let files = match std::fs::read_dir(&dir) {
+            Ok(files) => files,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err),
+        };
+        for entry in files.flatten() {
+            let path = entry.path();
+            let Some(agent) = (path.file_name().and_then(|n| n.to_str()))
+                .and_then(|n| n.strip_prefix("agent-")?.strip_suffix(".jsonl"))
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let Some(call) = self.started_by(&path) else {
+                continue;
+            };
+            if !self.reader.knows_call(&call) {
+                continue;
+            }
+            if let Err(err) = self.read_subagent(&path, &agent, &call) {
+                // One subagent unread leaves the chat as it is.
+                tracing::warn!("agent chat: can't read {}: {err}", path.display());
+            }
+        }
+        Ok(())
+    }
+
+    /// The call that started the subagent of file `path`, as its meta file
+    /// says; asked again until it says.
+    fn started_by(&mut self, path: &Path) -> Option<String> {
+        if let Some(call) = self.started_by.get(path) {
+            return Some(call.clone());
+        }
+        let meta = std::fs::read(path.with_extension("meta.json")).ok()?;
+        let meta: Value = serde_json::from_slice(&meta).ok()?;
+        let call = meta["toolUseId"].as_str()?.to_owned();
+        self.started_by.insert(path.to_owned(), call.clone());
+        Some(call)
+    }
+
+    /// The whole lines subagent `agent`'s file `path` grew by, fed.
+    fn read_subagent(&mut self, path: &Path, agent: &str, call: &str) -> std::io::Result<()> {
+        let mut file = File::open(path)?;
+        let len = file.metadata()?.len();
+        let offset = match self.subagents.get(path) {
+            Some(&at) if at <= len => at,
+            _ => len.saturating_sub(self.chunk),
+        };
+        if offset == len {
+            self.subagents.insert(path.to_owned(), len);
+            return Ok(());
+        }
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::new();
+        (&mut file).take(len - offset).read_to_end(&mut bytes)?;
+        // A last line still being written waits until it is whole.
+        let end = bytes
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |at| at + 1);
+        self.reader.feed_subagent(agent, call, &bytes[..end]);
+        self.subagents.insert(path.to_owned(), offset + end as u64);
         Ok(())
     }
 
@@ -626,6 +711,7 @@ impl Chat {
     /// `chunk` bytes.
     fn restart(&mut self, id: (u64, u64), len: u64) {
         self.reader = Reader::new(self.source.agent);
+        self.subagents.clear();
         self.file = Some(id);
         self.offset = len.saturating_sub(self.chunk);
         self.from = self.offset;
@@ -828,6 +914,45 @@ mod tests {
             [Event::Items { items, earlier, .. }] => assert!(items.len() == 41 && !earlier),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_subagents_own_file_is_read_under_its_call() {
+        let mut home = Home::new("subagents");
+        let call = serde_json::json!({ "type": "assistant", "uuid": "a1", "message": {
+            "id": "m1", "role": "assistant", "content": [{ "type": "tool_use", "id": "toolu_1",
+            "name": "Agent", "input": { "description": "Read the docs", "prompt": "Read" } }] } });
+        home.append("s1", &format!("{call}\n"));
+        let dir = home.dir.join(".claude/projects/-work/s1/subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("agent-ag1.meta.json"),
+            r#"{"toolUseId":"toolu_1"}"#,
+        )
+        .unwrap();
+        // One whose call isn't in the chat: left out.
+        std::fs::write(
+            dir.join("agent-ag2.meta.json"),
+            r#"{"toolUseId":"toolu_9"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("agent-ag2.jsonl"), line("user", "elsewhere")).unwrap();
+        std::fs::write(dir.join("agent-ag1.jsonl"), line("user", "Read")).unwrap();
+        home.follow("s1");
+        let steps = |home: &Home| match &home.chat().reader.items()[..] {
+            [Item::Subagent { items, .. }] => items.len(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(steps(&home), 1);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join("agent-ag1.jsonl"))
+            .unwrap();
+        file.write_all(line("assistant", "Reading").as_bytes())
+            .unwrap();
+        assert!(matches!(&home.poll()[..], [Event::Items { .. }]));
+        assert_eq!(steps(&home), 2);
+        assert!(home.poll().is_empty(), "nothing new");
     }
 
     #[test]
