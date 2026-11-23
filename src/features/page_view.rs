@@ -66,12 +66,19 @@ pub(super) fn stage_page(
     let (mut round_top, round_under, history) = round_sections(feature, stage, state, actions, now);
     // Work sent back to Build heads the page; else on AI review the agent
     // fixes go to follows the reviewer.
-    let mut fixes = rework_card(feature, stage, state, actions, now);
+    // Under it, whether the next fixes go to it or to a fresh one.
+    let mut fixes = rework_card(feature, stage, state, actions, now).map(|card| {
+        let switch = PageSection::MilestoneMode {
+            fresh: feature.fresh_fixes,
+            fixes: true,
+        };
+        [card, switch]
+    });
     // A stage not reached yet may start by itself: its agent is picked ahead.
     if mark == StageMark::Later {
         sections.append(&mut round_top);
         // The fixes it asked for go on in Build: the agent making them.
-        sections.extend(fixes.take());
+        sections.extend(fixes.take().into_iter().flatten());
         sections.extend(agent_card(feature, stage, state, actions, now));
         // What it will run is there to see ahead too.
         if !check_entries(feature, stage, &state.plan).is_empty() {
@@ -112,7 +119,7 @@ pub(super) fn stage_page(
     let fixes_under = stage == Stage::AiReview && rework_on(feature, stage, state.ctx).is_none();
     if mark != StageMark::Later {
         if !fixes_under {
-            sections.extend(fixes.take());
+            sections.extend(fixes.take().into_iter().flatten());
         }
         if let Some(m) = feature.marks.get(&stage).filter(|m| !m.note.is_empty()) {
             sections.push(lines("Note", vec![line(m.note.clone(), CheckTone::Note)]));
@@ -133,7 +140,7 @@ pub(super) fn stage_page(
             // plan, once written, goes over the suggestions it came from.
             Stage::PlanReview | Stage::AiReview => {
                 sections.extend(card());
-                sections.extend(fixes.take());
+                sections.extend(fixes.take().into_iter().flatten());
                 sections.extend(review_page_sections(feature, stage, mark, state, actions));
             }
             Stage::Discover | Stage::Plan => {
@@ -155,6 +162,7 @@ pub(super) fn stage_page(
                 if milestone_switch(feature, stage) {
                     sections.push(PageSection::MilestoneMode {
                         fresh: feature.fresh_milestones,
+                        fixes: false,
                     });
                 }
                 // The build log by name once read, else the counts of its
@@ -1097,6 +1105,8 @@ pub(super) fn tab_view(
             stage_page(feature, stage, state, &actions, now)
         }
     };
+    let fix_mode =
+        (page.sections.iter()).any(|s| matches!(s, PageSection::MilestoneMode { fixes: true, .. }));
     // The search hides the criteria not saying what it looks for, and opens
     // those that do, the places tinted.
     let search = (panel.search.as_ref()).filter(|_| !panel.keys && shows_criteria(feature, stage));
@@ -1353,6 +1363,7 @@ pub(super) fn tab_view(
                     place: state.place.is_some(),
                     fix_picks: &state.fix_picks,
                     fix_model: state.fix_model.is_some(),
+                    fix_mode,
                 },
                 &state.plan,
                 &ships,

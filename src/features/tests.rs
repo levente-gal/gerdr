@@ -72,6 +72,7 @@ pub(crate) fn feature(slug: &str, repos: Vec<Repo>, done: usize) -> Feature {
         epoch: 0,
         stage_models: Default::default(),
         fresh_milestones: false,
+        fresh_fixes: false,
         setup: None,
         checks: Default::default(),
         skip_checks: Default::default(),

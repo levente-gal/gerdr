@@ -1896,6 +1896,18 @@ impl Gerdr {
         }
     }
 
+    /// Whether the fixes of feature `slug` go to a fresh Build agent each
+    /// round, or to the one open. It applies from the next fixes sent.
+    pub(crate) fn set_fresh_fixes(&mut self, project: &str, slug: &str, fresh: bool) {
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        if feature.fresh_fixes != fresh {
+            feature.fresh_fixes = fresh;
+            self.save_feature(project, slug);
+        }
+    }
+
     /// The name of the agent `stage`'s next start runs, if one can.
     pub(crate) fn next_stage_agent(&self, feature: &Feature, stage: Stage) -> Option<String> {
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);

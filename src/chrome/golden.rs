@@ -5306,9 +5306,13 @@ fn feature_tab_milestone_mode() -> super::FeatureTabView {
     let after = (view.page.sections.iter())
         .position(|s| matches!(s, PageSection::Agent { .. }))
         .map_or(0, |i| i + 1);
-    view.page
-        .sections
-        .insert(after, PageSection::MilestoneMode { fresh: true });
+    view.page.sections.insert(
+        after,
+        PageSection::MilestoneMode {
+            fresh: true,
+            fixes: false,
+        },
+    );
     view.hover = Some(super::FeatureTabHit::MilestoneMode(0));
     view
 }
@@ -5527,6 +5531,10 @@ fn feature_tab_fixing() -> super::FeatureTabView {
                 picks: Vec::new(),
                 model: None,
                 waits: false,
+            },
+            PageSection::MilestoneMode {
+                fresh: false,
+                fixes: true,
             },
             super::PageSection::Lines {
                 label: "Findings".into(),
@@ -6737,7 +6745,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xd48536b498728d7f, // tab_held_860
         0xb9b5abec51026e22, // tab_resume_1180
         0x6ae0307d76ca322f, // tab_resume_860
-        0x5a416c6277a1dbfa, // tab_fixing_1180
+        0x916cdc16cbe41883, // tab_fixing_1180
         0x5542abcb26d90f39, // tab_fixed_code_1180
         0xd7a7b80f9f27d416, // tab_fixed_code_860
         0x1a4f4e37acdf66c7, // tab_approved_1180
@@ -6816,7 +6824,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xe1b738927bc04dff, // tab_held_860
         0xfa642ff569c47dd4, // tab_resume_1180
         0x784b345544209786, // tab_resume_860
-        0x72bd7713b0979b65, // tab_fixing_1180
+        0x4adcab24daac577c, // tab_fixing_1180
         0x58df8ab0042881ba, // tab_fixed_code_1180
         0x7df521261acb24d1, // tab_fixed_code_860
         0x37d9d647c0c811ca, // tab_approved_1180
@@ -6895,7 +6903,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xe2d26d5fe9476731, // tab_held_860
         0xd94265203761ab25, // tab_resume_1180
         0xf1c073a808b19edd, // tab_resume_860
-        0xaf8b56f163e2a0e2, // tab_fixing_1180
+        0x1a42095698bd2c51, // tab_fixing_1180
         0xaa5d613d73eede53, // tab_fixed_code_1180
         0xcda9020abe97fb75, // tab_fixed_code_860
         0x8659aa3ec30585a0, // tab_approved_1180
@@ -6974,7 +6982,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x87265f9a7ce4f430, // tab_held_860
         0xa0a1c07e8891b0c3, // tab_resume_1180
         0x386be938de478e3c, // tab_resume_860
-        0x3d1e0f57a115bc5c, // tab_fixing_1180
+        0x8711f4960b13b0a8, // tab_fixing_1180
         0xd57c6ac4e0579ed7, // tab_fixed_code_1180
         0x98a0fb9c3ec54a9f, // tab_fixed_code_860
         0xa5059d6ea5646db8, // tab_approved_1180

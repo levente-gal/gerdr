@@ -1000,7 +1000,10 @@ fn a_running_build_shows_its_agent_then_its_milestones() {
                 model: None,
                 waits: false,
             },
-            PageSection::MilestoneMode { fresh: false }
+            PageSection::MilestoneMode {
+                fresh: false,
+                fixes: false
+            }
         ]
     );
     // Show agent, the primary, is on the page's bar and its card; the rare

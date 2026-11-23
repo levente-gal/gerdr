@@ -949,8 +949,9 @@ pub enum PageSection {
         here: bool,
     },
     /// Build's choice: one agent through all milestones, or a fresh one
-    /// per milestone (`fresh`).
-    MilestoneMode { fresh: bool },
+    /// per milestone (`fresh`). With `fixes`, a fix page's: the next fixes
+    /// go to the Build agent open, or to a fresh one.
+    MilestoneMode { fresh: bool, fixes: bool },
     /// Ship's choice and tick boxes for a repository, or what follows.
     ShipGroup(ShipGroup),
     /// What happened while the feature was made, on Ship's page.
@@ -2269,6 +2270,16 @@ const PICK_NAME_IN: i32 = 4;
 const AGENT_MODEL_MAX: i32 = 220;
 /// Build's milestone choice: its segments' words.
 const MODE_SEGMENTS: [&str; 2] = ["One agent", "Agent per milestone"];
+/// The fix pages' agent choice: the Build agent open, or a fresh one.
+const FIX_MODE_SEGMENTS: [&str; 2] = ["Same agent", "Fresh agent"];
+
+/// The agent choice's segments: a fix page's (`fixes`), else Build's.
+fn mode_segments(fixes: bool) -> [&'static str; 2] {
+    match fixes {
+        true => FIX_MODE_SEGMENTS,
+        false => MODE_SEGMENTS,
+    }
+}
 /// The ways a repository can go on the Ship page, in `Route::ALL`'s order.
 pub const SHIP_ROUTES: [&str; 3] = ["Pull request", "Merge only", "Nothing"];
 /// How far a Ship page tick box sits in from its row's left edge.
@@ -2370,8 +2381,8 @@ pub(super) enum Piece {
     },
     /// The agent card of `StagePage::sections[i]`.
     Agent(usize),
-    /// Build's milestone choice, its label at the row's left.
-    MilestoneMode { fresh: bool },
+    /// Build's milestone choice or a fix page's, its label at the row's left.
+    MilestoneMode { fresh: bool, fixes: bool },
     /// The choice of the Ship group of `StagePage::sections[i]`.
     ShipRoute(usize),
     /// Tick box `.1` of the Ship group of `StagePage::sections[.0]`.
@@ -4348,12 +4359,13 @@ fn agent_pick_rects(names: &[&str], x: i32, y: i32, room: i32) -> (Rect, Vec<Rec
     (track, chips)
 }
 
-/// Build's milestone choice in `row`: after its label, each segment as wide
-/// as its words, the two squeezed alike on a narrow column.
-fn milestone_mode_rects(row: Rect) -> (Rect, [Rect; 2]) {
+/// The agent choice in `row` (a fix page's with `fixes`): after its label,
+/// each segment as wide as its words, the two squeezed alike on a narrow
+/// column.
+fn milestone_mode_rects(row: Rect, fixes: bool) -> (Rect, [Rect; 2]) {
     let x = row.loc.x + PICK_LABEL;
     let room = (row.size.w - PICK_LABEL - 2 * PICK_TRACK_PAD).max(2);
-    let [one, each] = MODE_SEGMENTS.map(button_width);
+    let [one, each] = mode_segments(fixes).map(button_width);
     let scaled = |w: i32| match one + each > room {
         true => w * room / (one + each),
         false => w,
@@ -4627,9 +4639,13 @@ fn page_stack(
                     choices.model.push((stage, rect));
                 }
             }
-            PageSection::MilestoneMode { fresh } => {
-                let row = s.put(PICK_TRACK, Piece::MilestoneMode { fresh: *fresh });
-                *milestone_mode = Some(milestone_mode_rects(row));
+            PageSection::MilestoneMode { fresh, fixes } => {
+                let piece = Piece::MilestoneMode {
+                    fresh: *fresh,
+                    fixes: *fixes,
+                };
+                let row = s.put(PICK_TRACK, piece);
+                *milestone_mode = Some(milestone_mode_rects(row, *fixes));
             }
             PageSection::ShipGroup(group) if group.card.is_some() => {
                 s.ship_card(k, group, page, buttons, ship, finding_cards);
@@ -8071,7 +8087,7 @@ impl Painter {
                 };
                 line(c, text, text_rect, Font::Small.size(), color);
             }
-            Piece::MilestoneMode { fresh } => {
+            Piece::MilestoneMode { fresh, fixes } => {
                 let Some((track, segments)) = l.milestone_mode.as_ref() else {
                     return;
                 };
@@ -8080,8 +8096,9 @@ impl Painter {
                     (rect.loc.x, track.loc.y).into(),
                     (PICK_LABEL, track.size.h).into(),
                 );
-                line(c, "Agents", label, SMALL_FONT_SIZE, p.muted);
-                let [one, each] = MODE_SEGMENTS;
+                let name = if *fixes { "Fixes" } else { "Agents" };
+                line(c, name, label, SMALL_FONT_SIZE, p.muted);
+                let [one, each] = mode_segments(*fixes);
                 let hover = match view.hover {
                     Some(FeatureTabHit::MilestoneMode(i)) => Some(i),
                     _ => None,
@@ -10775,7 +10792,10 @@ mod tests {
     #[test]
     fn the_milestone_choice_is_hit_by_segment_and_scrolls_with_the_page() {
         let mut view = tab_with_picks(false);
-        view.page.sections = vec![PageSection::MilestoneMode { fresh: false }];
+        view.page.sections = vec![PageSection::MilestoneMode {
+            fresh: false,
+            fixes: false,
+        }];
         let l = tab_at(&view, 1180);
         let (track, [one, each]) = l.milestone_mode.expect("placed");
         assert!(track.size.w >= one.size.w + each.size.w);
@@ -10798,9 +10818,11 @@ mod tests {
     #[test]
     fn the_milestone_choice_fits_a_narrow_column() {
         let row = Rectangle::new((0, 0).into(), (200, PICK_TRACK).into());
-        let (track, [_, each]) = milestone_mode_rects(row);
-        assert!(track.loc.x + track.size.w <= 200);
-        assert!(each.loc.x + each.size.w <= 200);
+        for fixes in [false, true] {
+            let (track, [_, each]) = milestone_mode_rects(row, fixes);
+            assert!(track.loc.x + track.size.w <= 200);
+            assert!(each.loc.x + each.size.w <= 200);
+        }
     }
 
     fn tab_with_picks(off: bool) -> FeatureTabView {

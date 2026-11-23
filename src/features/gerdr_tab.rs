@@ -74,7 +74,13 @@ impl Gerdr {
         }
         let outcome = match hit {
             FeatureTabHit::Tab | FeatureTabHit::Column(_) | FeatureTabHit::AgentPickOff(..) => None,
-            FeatureTabHit::MilestoneMode(i) => Some(PanelOutcome::FreshMilestones(i == 1)),
+            // Build's page has the milestones' choice, a fix page the fixes'.
+            FeatureTabHit::MilestoneMode(i) => Some(match self.features.panel.as_ref() {
+                Some(panel) if panel.page_stage(&feature) == Stage::Build => {
+                    PanelOutcome::FreshMilestones(i == 1)
+                }
+                _ => PanelOutcome::FreshFixes(i == 1),
+            }),
             FeatureTabHit::Shot(i, n) => Some(PanelOutcome::ShowShot(i, n)),
             FeatureTabHit::ShotDelete(i, n) => Some(PanelOutcome::DeleteShot(i, n)),
             FeatureTabHit::Fold(i) => {
@@ -807,9 +813,17 @@ impl Gerdr {
                 let (_, segments) = layout.milestone_mode.as_ref()?;
                 let mut spot = *segments.get(i)?;
                 spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
-                let text = match i {
-                    0 => "One agent keeps its chat through all milestones",
-                    _ => "A fresh agent builds each milestone, reading the build log and plan",
+                let feature = self.features.panel_feature()?;
+                let build = self.features.panel.as_ref()?.page_stage(feature) == Stage::Build;
+                let text = match (build, i) {
+                    (true, 0) => "One agent keeps its chat through all milestones",
+                    (true, _) => {
+                        "A fresh agent builds each milestone, reading the build log and plan"
+                    }
+                    (false, 0) => {
+                        "The next fixes go to the Build agent open, its chat kept; a fresh one if its tab is closed or another agent is picked"
+                    }
+                    (false, _) => "Each fix round starts a fresh Build agent",
                 };
                 Some(Tooltip::new(text, spot))
             }

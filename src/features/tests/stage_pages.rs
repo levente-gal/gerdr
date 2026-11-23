@@ -1426,7 +1426,10 @@ fn only_an_open_build_offers_the_milestone_choice() {
     let mode = |f: &Feature| {
         let page = stage_page(f, Stage::Build, &state, &[], 2_000);
         page.sections.into_iter().find_map(|s| match s {
-            PageSection::MilestoneMode { fresh } => Some(fresh),
+            PageSection::MilestoneMode {
+                fresh,
+                fixes: false,
+            } => Some(fresh),
             _ => None,
         })
     };
@@ -1460,6 +1463,74 @@ fn a_blocked_build_says_why_on_its_page_and_rail() {
     assert_eq!(
         (node.mark, node.line.as_str()),
         (NodeMark::Failed, "blocked")
+    );
+}
+
+#[test]
+fn fix_pages_choose_the_open_build_agent_or_a_fresh_one() {
+    let chip = AgentChip {
+        icon: AgentIcon::from_agent("Claude Code"),
+        name: "Claude Code".into(),
+        lit: true,
+        off: false,
+    };
+    let state = PanelState {
+        fix_picks: vec![chip],
+        ..PanelState::default()
+    };
+    // AI review, Build's agent still open: the fixes go to it.
+    let mut f = feature("b", vec![repo("api", true)], 5);
+    f.runs.insert(Stage::Build, agent_run(Some("p1"), None));
+    let seen = |f: &Feature| {
+        let actions = page_actions(f, Stage::AiReview, RowCtx::default());
+        let page = stage_page(f, Stage::AiReview, &state, &actions, 2_000);
+        let status = page.sections.iter().find_map(|s| match s {
+            PageSection::Agent {
+                stage: Stage::Build,
+                status,
+                ..
+            } => Some(status.clone()),
+            _ => None,
+        });
+        let mode = page.sections.iter().find_map(|s| match s {
+            PageSection::MilestoneMode { fresh, fixes: true } => Some(*fresh),
+            _ => None,
+        });
+        (status, mode)
+    };
+    assert_eq!(
+        seen(&f),
+        (
+            Some("Build agent \u{b7} next fixes: this agent".into()),
+            Some(false)
+        )
+    );
+    let mods = ModifiersState {
+        ctrl: true,
+        shift: true,
+        ..ModifiersState::default()
+    };
+    let mut panel = FeaturePanel {
+        slug: "b".into(),
+        ..FeaturePanel::default()
+    };
+    let ctx = RowCtx::default();
+    assert_eq!(
+        panel.key(&mods, Keysym::B, &f, &[], ctx, &[], &[], &[]),
+        Some(PanelOutcome::FreshFixes(true))
+    );
+    // Fresh agents picked: the next fixes start one.
+    f.fresh_fixes = true;
+    assert_eq!(
+        seen(&f),
+        (
+            Some("Build agent \u{b7} next fixes: a fresh Claude Code".into()),
+            Some(true)
+        )
+    );
+    assert_eq!(
+        panel.key(&mods, Keysym::B, &f, &[], ctx, &[], &[], &[]),
+        Some(PanelOutcome::FreshFixes(false))
     );
 }
 

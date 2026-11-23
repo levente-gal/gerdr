@@ -1462,12 +1462,16 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                 ),
                 row!(
                     "Ctrl+Shift+B",
-                    "Build: one agent, or a fresh agent per milestone",
+                    "Build: one agent, or a fresh agent per milestone; fixes: the Build agent open, or a fresh one",
                     |t| {
                         let f = t.feature;
-                        (milestone_switch(f, t.stage)).then_some({
-                            TabKey::Out(PanelOutcome::FreshMilestones(!f.fresh_milestones))
-                        })
+                        match milestone_switch(f, t.stage) {
+                            true => Some(TabKey::Out(PanelOutcome::FreshMilestones(
+                                !f.fresh_milestones,
+                            ))),
+                            false => (fixes_switch(f, t.stage, t.ctx))
+                                .then_some(TabKey::Out(PanelOutcome::FreshFixes(!f.fresh_fixes))),
+                        }
                     }
                 ),
                 row!(
@@ -1858,6 +1862,8 @@ pub(super) struct AgentChoices<'a> {
     /// (`fix_page`).
     pub(super) fix_picks: &'a [AgentChip],
     pub(super) fix_model: bool,
+    /// The choice of a fresh agent for the fixes, or the one open.
+    pub(super) fix_mode: bool,
 }
 
 /// Whether `stage`'s page of `feature` offers to pick the agent its fixes
@@ -2316,6 +2322,13 @@ fn page_hints(f: &Footer, choices: AgentChoices) -> Vec<(String, String)> {
                 milestones,
                 outs(|o| matches!(o, O::FreshMilestones(_))),
             ));
+            let fixes = match feature.fresh_fixes {
+                true => "fixes to same agent",
+                false => "fixes to fresh agent",
+            };
+            h.extend(f.says("Ctrl+Shift+B", fixes, |k| {
+                choices.fix_mode && matches!(k, TabKey::Out(O::FreshFixes(_)))
+            }));
         }
     }
     // What the header and the strip's buttons do (Open tab, Copy path, New

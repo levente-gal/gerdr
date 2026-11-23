@@ -643,6 +643,7 @@ impl Gerdr {
             PanelOutcome::FreshMilestones(fresh) => {
                 self.set_fresh_milestones(&project, &slug, fresh);
             }
+            PanelOutcome::FreshFixes(fresh) => self.set_fresh_fixes(&project, &slug, fresh),
             PanelOutcome::Untick(stage) => self.reopen_stage(&project, &slug, stage),
             PanelOutcome::GoToCurrent => self.feature_cursor_to_current_of(&project, &slug),
             PanelOutcome::StartOver(stage) => self.ask_start_over(&project, &slug, stage),

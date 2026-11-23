@@ -272,7 +272,8 @@ impl Gerdr {
         values.insert("fixes.what".into(), round.what.clone());
         values.insert("fixes.path".into(), input.clone());
         values.insert("fix_plan.path".into(), plan.clone());
-        let sent = if own_agent(&feature) {
+        // A kept agent at work gets no line typed into it: a fresh one plans.
+        let sent = if own_agent(&feature) && !self.build_agent_busy(&feature) {
             prompts::render_builtin("fix-plan", &values)
                 .map_err(|e| e.to_string())
                 .and_then(|line| self.tell_build_agent(&feature, SendKind::FixPlan, line.trim()))
@@ -313,6 +314,9 @@ impl Gerdr {
             }
         };
         let now = feature::now();
+        if let Some(f) = self.feature_mut(project, slug) {
+            claim_build(f);
+        }
         if let Some(round) = self
             .feature_mut(project, slug)
             .and_then(|f| f.fix_round.as_mut())
@@ -1060,6 +1064,7 @@ impl Gerdr {
         };
         f.reopen_fix_round();
         f.fixes_going(now, heads.as_ref());
+        claim_build(f);
         if let Some(round) = f.fix_round.as_mut() {
             round.phase = FixPhase::Fixing;
             round.stalled = None;
@@ -1484,15 +1489,27 @@ enum Go {
 /// one there, for the log.
 const NEW_ROUND: &str = "each fix round gets a fresh Build agent";
 
-/// Whether `feature`'s Build agent is the one its open or last round started:
-/// each round gets a fresh one, which plans it and makes its fixes, so no
-/// chat grows (and needs compacting) over the rounds.
+/// Whether fixes go to `feature`'s Build agent as it is: one open while the
+/// user keeps the agent (`fresh_fixes` off), else only the one its open or
+/// last round started. A fresh one per round grows no chat over the rounds.
 fn own_agent(feature: &Feature) -> bool {
+    let build = feature.runs.get(&Stage::Build);
+    if !feature.fresh_fixes && build.is_some_and(|r| r.live()) {
+        return true;
+    }
     let round = (feature.fix_round.as_ref()).or(feature.last_fix_round.as_ref());
-    let run = feature.runs.get(&Stage::Build).map(|r| r.n);
     round
         .and_then(|r| r.trail.build_run)
-        .is_some_and(|n| Some(n) == run)
+        .is_some_and(|n| Some(n) == build.map(|r| r.n))
+}
+
+/// Make `feature`'s Build agent its open round's own, a kept one too: the
+/// round's card and steps follow it from then on.
+fn claim_build(feature: &mut Feature) {
+    let n = feature.runs.get(&Stage::Build).map(|r| r.n);
+    if let Some(round) = feature.fix_round.as_mut() {
+        round.trail.build_run = n.or(round.trail.build_run);
+    }
 }
 
 fn fix_key(project: &str, slug: &str) -> (String, String) {
@@ -1561,6 +1578,30 @@ mod tests {
         f.last_fix_round = f.fix_round.take();
         assert!(own_agent(&f));
         f.last_fix_round = None;
+        assert!(!own_agent(&f));
+    }
+
+    #[test]
+    fn a_kept_agent_takes_the_fixes_while_open() {
+        use crate::features::tests::{feature, in_round, repo};
+        let mut f = in_round(
+            feature("a", vec![repo("api", true)], 3),
+            Stage::Verify,
+            FixPhase::Planning,
+        );
+        let open = feature::agents::StageRun {
+            n: 4,
+            pane: Some("p1".into()),
+            ..Default::default()
+        };
+        f.runs.insert(Stage::Build, open);
+        assert!(own_agent(&f));
+        // Fresh agents picked: the open one built it, so a fresh one.
+        f.fresh_fixes = true;
+        assert!(!own_agent(&f));
+        // Its tab gone: a fresh one too.
+        f.fresh_fixes = false;
+        f.runs.get_mut(&Stage::Build).unwrap().pane = None;
         assert!(!own_agent(&f));
     }
 }

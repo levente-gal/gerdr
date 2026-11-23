@@ -60,6 +60,7 @@ fn phone_may(outcome: &PanelOutcome) -> bool {
             | O::UpdateAllBases
             | O::StopResolving(_)
             | O::FreshMilestones(_)
+            | O::FreshFixes(_)
             | O::StartOver(_)
             | O::NotYet(_)
             | O::DecideFinding(..)
@@ -95,6 +96,7 @@ fn phone_quick(outcome: &PanelOutcome) -> bool {
             | O::PickAgent(..)
             | O::PickModel(_)
             | O::FreshMilestones(_)
+            | O::FreshFixes(_)
             | O::StartOver(_)
     )
 }
@@ -340,12 +342,14 @@ fn section_json(section: &chrome::PageSection) -> Option<Value> {
             json!({ "kind": "lines", "label": label, "lines": checks(lines) })
         }
         S::Doc { name, .. } => json!({ "kind": "doc", "name": name }),
-        S::MilestoneMode { fresh } => {
-            let text = match fresh {
-                true => "a fresh agent for each milestone",
-                false => "one agent through all milestones",
+        S::MilestoneMode { fresh, fixes } => {
+            let (label, text) = match (fixes, fresh) {
+                (false, true) => ("Agents", "a fresh agent for each milestone"),
+                (false, false) => ("Agents", "one agent through all milestones"),
+                (true, true) => ("Fixes", "a fresh Build agent each round"),
+                (true, false) => ("Fixes", "the Build agent open, its chat kept"),
             };
-            json!({ "kind": "lines", "label": "Agents", "lines": [{ "text": text, "tone": "note" }] })
+            json!({ "kind": "lines", "label": label, "lines": [{ "text": text, "tone": "note" }] })
         }
         S::ShipGroup(g) => json!({
             "kind": "ship",
@@ -741,9 +745,17 @@ impl Gerdr {
         let mut extra = Vec::new();
         for (i, section) in view.page.sections.iter().enumerate() {
             // Build's choice is two segments to press on the desktop.
-            if let chrome::PageSection::MilestoneMode { fresh } = section {
-                for (label, to) in [("One agent", false), ("Fresh each milestone", true)] {
-                    let mut pick = PhoneButton::new(label, PanelOutcome::FreshMilestones(to), *fresh == to);
+            if let chrome::PageSection::MilestoneMode { fresh, fixes } = section {
+                let picks = match fixes {
+                    true => [("Same agent", false), ("Fresh agent", true)],
+                    false => [("One agent", false), ("Fresh each milestone", true)],
+                };
+                for (label, to) in picks {
+                    let outcome = match fixes {
+                        true => PanelOutcome::FreshFixes(to),
+                        false => PanelOutcome::FreshMilestones(to),
+                    };
+                    let mut pick = PhoneButton::new(label, outcome, *fresh == to);
                     pick.off = *fresh == to;
                     extra.push((Some(i), pick));
                 }

@@ -894,6 +894,10 @@ pub struct Feature {
     /// from what that gives.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stage_agents: BTreeMap<Stage, String>,
+    /// Whether each fix round starts a fresh Build agent; off, fixes go to
+    /// the Build agent already open, as the fix pages' toggle picks.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fresh_fixes: bool,
     /// The model picked on a stage's page, by the agent it is for (its
     /// picker name): none starts the agent on its own default. Each agent
     /// keeps its own, as a model of one means nothing to another.
@@ -2135,6 +2139,7 @@ pub(crate) mod tests {
             own_agents: Vec::new(),
             research: Vec::new(),
             stage_agents: Default::default(),
+            fresh_fixes: false,
             stage_machines: Default::default(),
             setups_elsewhere: Vec::new(),
             came_from: None,
@@ -2239,6 +2244,7 @@ pub(crate) mod tests {
             own_agents: Vec::new(),
             research: Vec::new(),
             stage_agents: BTreeMap::new(),
+            fresh_fixes: false,
             stage_machines: BTreeMap::new(),
             setups_elsewhere: Vec::new(),
             came_from: None,

@@ -379,8 +379,9 @@ pub(super) fn rework_card(
         }
         return Some(card);
     }
-    // Each fix round starts a fresh agent of the pick.
+    // Kept, the open agent takes them; else a fresh one of the pick.
     let status = match lit {
+        _ if !feature.fresh_fixes && run.live() => "next fixes: this agent".to_owned(),
         Some(lit) => format!("next fixes: a fresh {}", lit.name),
         None => "next fixes: a fresh agent".to_owned(),
     };
@@ -2115,6 +2116,14 @@ pub(super) fn doc_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection>
 
 /// Whether `stage`'s page of `feature` offers the choice of one agent or a
 /// fresh one per milestone: Build's, until it is done.
+/// Whether `stage`'s page has the choice of the agent its fixes go to, as
+/// it has the card of that agent (`rework_card`).
+pub(super) fn fixes_switch(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {
+    stage > Stage::Build
+        && (keys::fix_page(feature, stage)
+            || super::page_actions::shows_build_card(feature, stage, ctx))
+}
+
 pub(super) fn milestone_switch(feature: &Feature, stage: Stage) -> bool {
     stage == Stage::Build && feature.status == Status::Open && !feature.is_done(stage)
 }

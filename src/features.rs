@@ -1496,6 +1496,8 @@ pub enum PanelOutcome {
     CycleAgent(Stage),
     /// Build with a fresh agent per milestone, or one through them all.
     FreshMilestones(bool),
+    /// Send fixes to a fresh Build agent each round, or to the one open.
+    FreshFixes(bool),
     /// Make this repository one the feature changes.
     Touch(String),
     /// Take this repository (`Repo::key`) out of the feature.
