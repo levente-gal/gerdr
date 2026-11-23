@@ -271,6 +271,8 @@ pub struct Chrome {
     toasts: Vec<(u64, ToastOverlay)>,
     /// One per placeholder, and the spinner they share, a buffer per step.
     placeholders: Vec<Cached<PlaceholderKey>>,
+    /// One per pane shown as a chat.
+    chats: Vec<Cached<(ChatView, Theme, f64)>>,
     spinner: [Cached<(Theme, f64)>; SPINNER_STEPS as usize],
     /// Where the toasts stacked up in the last frame that had any: what a
     /// pointer over them hits (see `Gerdr::toast_rect`).
@@ -354,6 +356,7 @@ impl Chrome {
             criteria_strip: Overlay::default(),
             toasts: Vec::new(),
             placeholders: Vec::new(),
+            chats: Vec::new(),
             spinner: Default::default(),
             toast_area: None,
             blink_dot: Cached::default(),
@@ -867,6 +870,21 @@ impl Chrome {
             parts.push(Part::new(buffer, rect.loc, rect.size, 1.0));
         }
 
+        // The panes shown as chats, each in its pane's place, and the dots
+        // of what works in them blinking over them.
+        self.chats.resize_with(view.chats.len(), Cached::default);
+        for (cached, chat) in self.chats.iter_mut().zip(view.chats) {
+            let rect = chat.rect;
+            if rect.size.w <= 0 || rect.size.h <= 0 {
+                continue;
+            }
+            push_dots(&mut parts, dot, chat_blinkers(&chat), blink);
+            let buffer = cached.get((chat, theme, scale), |(chat, ..)| {
+                painter.agent_chat(chat, scale, theme.palette())
+            });
+            parts.push(Part::new(buffer, rect.loc, rect.size, 1.0));
+        }
+
         // The strip marking the focused pane, along the top of its bar.
         // Parts pushed first are on top: it goes before the bars.
         if let Some(pane) = view.focused_pane {
@@ -1296,6 +1314,11 @@ fn hit_rects(
     for placeholder in &view.placeholders {
         let layout = placeholder_layout(placeholder.rect, placeholder.timed_out);
         rects.extend(layout.retry.into_iter().chain(layout.close));
+    }
+    for chat in &view.chats {
+        let layout = chat_layout(chat);
+        rects.extend([layout.list, layout.composer, layout.send]);
+        rects.extend(layout.waiting);
     }
     // A scrolled list's rows, as far as the list shows them.
     let within = |list: Rect| move |rect: Rect| rect.intersection(list);

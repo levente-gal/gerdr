@@ -27,6 +27,8 @@ const TEXT_INSET: i32 = 8;
 /// The text's size, and a row's height.
 const MONO_SIZE: f32 = 13.0;
 const ROW: i32 = 18;
+/// How far apart `Painter::paint_styled_rows` paints its rows.
+pub(super) const STYLED_ROW: i32 = ROW;
 /// How far bold text is drawn again to the right, logical pixels, when
 /// the monospace font has no bold face (see `Painter::has_mono_bold`).
 const BOLD_SHIFT: f32 = 0.6;

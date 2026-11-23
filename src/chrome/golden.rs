@@ -9637,3 +9637,149 @@ fn dump_ship_squash() {
         dump(&dir, &name, buffer, px);
     }
 }
+
+/// A pane shown as a chat: still reading it, none found, the chat with
+/// its cards (a folded and an unfolded tool, an unfolded edit, a thinking
+/// line), the same while the agent waits on the user, a reply being
+/// written, an item picked and another hovered, and scrolled down.
+const CHATS: [&str; 7] = [
+    "chat_finding",
+    "chat_missing",
+    "chat",
+    "chat_waiting",
+    "chat_composer",
+    "chat_picked",
+    "chat_scrolled",
+];
+
+fn chat_view(i: usize) -> super::ChatView {
+    use super::agent_chat::tests::{screen, view};
+    use super::{ChatHit, WaitKey};
+    use crate::chat::{ChatFocus, Reading};
+    let v = view();
+    match i {
+        0 => super::ChatView {
+            reading: Reading::Finding,
+            items: std::sync::Arc::new(Vec::new()),
+            ..v
+        },
+        1 => super::ChatView {
+            status: AgentStatus::Idle,
+            reading: Reading::Missing(
+                "Couldn't find this agent's chat. Its screen still works.".into(),
+            ),
+            items: std::sync::Arc::new(Vec::new()),
+            hover: Some(ChatHit::ShowScreen),
+            ..v
+        },
+        2 => v,
+        3 => super::ChatView {
+            status: AgentStatus::Blocked,
+            waiting: Some(screen()),
+            hover: Some(ChatHit::Key(WaitKey::Enter)),
+            ..v
+        },
+        4 => {
+            let text = "Looks good. Also log each retry\nwith its wait, at debug";
+            super::ChatView {
+                status: AgentStatus::Idle,
+                focus: ChatFocus::Composer,
+                draft: Line {
+                    text: text.into(),
+                    caret: text.len(),
+                    anchor: text.len(),
+                    scroll: 0,
+                },
+                ..v
+            }
+        }
+        5 => super::ChatView {
+            picked: Some(1),
+            hover: Some(ChatHit::Fold(2)),
+            ..v
+        },
+        // A shorter pane, for the list to scroll.
+        _ => super::ChatView {
+            rect: super::Rect::new(v.rect.loc, (v.rect.size.w, 460).into()),
+            top: 200.0,
+            ..v
+        },
+    }
+}
+
+fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    let p = theme.palette();
+    (0..CHATS.len())
+        .map(|i| hash(painter.agent_chat(&chat_view(i), scale, p)))
+        .collect()
+}
+
+/// The recorded hashes of `CHATS`, per case in `CASES`.
+const GOLDEN_CHATS: [[u64; 7]; 4] = [
+    // Dark at 1
+    [
+        0xbc5219330701b03a, // chat_finding
+        0xef498bd6d3ac652a, // chat_missing
+        0xa7321e3972bd5bf5, // chat
+        0xe0a3efaf1a9b20d8, // chat_waiting
+        0x9bf695df6d27d477, // chat_composer
+        0x668b0aa37e8f0b34, // chat_picked
+        0x4e96ff7116559c3c, // chat_scrolled
+    ],
+    // Dark at 2
+    [
+        0x7f6f158834c36630, // chat_finding
+        0xd7254dd3c840b13f, // chat_missing
+        0x9ae48cfe47b3dce6, // chat
+        0x6e2d3e185c9c68f9, // chat_waiting
+        0xd65790dae85eb404, // chat_composer
+        0x4c35c85791f5bf60, // chat_picked
+        0x5ce7556601ad9005, // chat_scrolled
+    ],
+    // Light at 1
+    [
+        0x67c5fdcdffae7bd6, // chat_finding
+        0x802871037a11dbfa, // chat_missing
+        0x18692118dbeec955, // chat
+        0x33737d3a42d10ed9, // chat_waiting
+        0xebd2766a613b5a1c, // chat_composer
+        0x75015283443a7585, // chat_picked
+        0xa4bca5be70cea6f7, // chat_scrolled
+    ],
+    // Light at 2
+    [
+        0x6d5ccd6212d1c3d3, // chat_finding
+        0xf0804c5f2535596f, // chat_missing
+        0x996729c02bb90cee, // chat
+        0xccd42c67152a8bce, // chat_waiting
+        0x34e3dfb2bf3ef0d3, // chat_composer
+        0xb61084c3982dd23b, // chat_picked
+        0x036868bc1f553f98, // chat_scrolled
+    ],
+];
+
+#[test]
+fn the_chats_paint_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_CHATS.iter().map(|row| row.as_slice()).collect();
+    check(&CHATS, &golden, paint_chats);
+}
+
+/// With `GERDR_DUMP_DIR` set, write the chats there.
+#[test]
+fn dump_chats() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    for (theme, scale) in CASES {
+        let tag = format!("{}_{}", theme.name(), scale);
+        for (i, name) in CHATS.iter().enumerate() {
+            let view = chat_view(i);
+            let w = (view.rect.size.w as f64 * scale).round() as usize;
+            let buffer = painter.agent_chat(&view, scale, theme.palette());
+            dump(&dir, &format!("{name}_{tag}"), buffer, w);
+        }
+    }
+}
