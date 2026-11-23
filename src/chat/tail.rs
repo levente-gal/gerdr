@@ -939,7 +939,7 @@ mod tests {
         std::fs::write(dir.join("agent-ag2.jsonl"), line("user", "elsewhere")).unwrap();
         std::fs::write(dir.join("agent-ag1.jsonl"), line("user", "Read")).unwrap();
         home.follow("s1");
-        let steps = |home: &Home| match &home.chat().reader.items()[..] {
+        let steps = |home: &Home| match home.chat().reader.items() {
             [Item::Subagent { items, .. }] => items.len(),
             other => panic!("{other:?}"),
         };
