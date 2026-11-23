@@ -20,6 +20,9 @@ use crate::{ai_work::locate::Homes, herdr::AgentInfo};
 pub const CHAT_TAIL: u64 = 2 * 1024 * 1024;
 /// How often the followed chats are looked at.
 const POLL: Duration = Duration::from_millis(500);
+/// How often a chat not found yet is looked for again: that lists the
+/// agent's folders of chats.
+const FIND_AGAIN: Duration = Duration::from_secs(5);
 /// The bytes kept from before the read offset: when they change, the file
 /// was written anew and is read again from the start.
 const PREV: usize = 4096;
@@ -112,6 +115,8 @@ struct Chats {
 
 struct Followed {
     agent: AgentInfo,
+    /// When its chat was last looked for.
+    looked: Instant,
     /// Its chat, or why it has none (told the user once).
     chat: Result<Chat, String>,
 }
@@ -141,6 +146,7 @@ impl Chats {
         let mut followed = Followed {
             chat: Err(String::new()),
             agent,
+            looked: Instant::now(),
         };
         followed.found(found, out);
         self.panes.insert(pane_id, followed);
@@ -155,7 +161,9 @@ impl Chats {
         for followed in self.panes.values_mut() {
             match &mut followed.chat {
                 Ok(chat) => chat.poll(&followed.agent.pane_id, out),
+                Err(_) if followed.looked.elapsed() < FIND_AGAIN => {}
                 Err(why) => {
+                    followed.looked = Instant::now();
                     let found = source::find(&followed.agent, &self.homes);
                     if found.as_ref().err() != Some(&*why) {
                         followed.found(found, out);
@@ -472,8 +480,17 @@ mod tests {
         let mut home = Home::new("later");
         let events = home.follow("s1");
         assert!(matches!(&events[..], [Event::Missing { why, .. }] if why == source::NOT_YET));
+        let ago = |home: &mut Home| {
+            for followed in home.chats.panes.values_mut() {
+                followed.looked -= FIND_AGAIN;
+            }
+        };
+        ago(&mut home);
         assert!(home.poll().is_empty(), "told once");
         home.append("s1", &line("user", "one"));
+        // Looked for again only once `FIND_AGAIN` is over.
+        assert!(home.poll().is_empty());
+        ago(&mut home);
         assert_eq!(items_of(&home.poll()), ["s1"]);
     }
 

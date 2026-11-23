@@ -199,6 +199,42 @@ const COMPOSER_KEYS: &[Binding<(), ComposerKey>] = &[
     },
 ];
 
+/// The footer's key hints of a chat whose keys are at `focus` (checklist
+/// K3: from the tables the keys are read with). Esc in the list does
+/// nothing, so it has none; Esc in the reply box says what becomes of the
+/// draft.
+pub(crate) fn footer(focus: ChatFocus, draft_empty: bool) -> Vec<(String, String)> {
+    match focus {
+        ChatFocus::List => key_table::joined(key_table::hints(LIST_KEYS, &(), |k| {
+            match k {
+                ListKey::Next | ListKey::Previous => "move",
+                ListKey::Fold => "fold",
+                ListKey::Copy => "copy",
+                ListKey::Compose => "reply",
+                ListKey::Top | ListKey::Bottom | ListKey::Page(_) => "scroll",
+            }
+            .to_owned()
+        })),
+        ChatFocus::Composer => {
+            let hints = key_table::hints(COMPOSER_KEYS, &(), |k| {
+                match k {
+                    ComposerKey::Send => "send",
+                    ComposerKey::Newline => "new line",
+                    ComposerKey::Back if draft_empty => "back",
+                    ComposerKey::Back => "keep draft",
+                    ComposerKey::Discard => "discard",
+                }
+                .to_owned()
+            });
+            let discard = |chord: &str| chord == text_field::DISCARD_KEY;
+            (hints.into_iter())
+                .filter(|(chord, _)| !(draft_empty && discard(chord)))
+                .map(|(chord, said)| (chord.to_owned(), said))
+                .collect()
+        }
+    }
+}
+
 /// What a key of the chat asks of gerdr, once the chat took it.
 #[derive(Clone, Debug, PartialEq)]
 enum ChatDo {
@@ -240,8 +276,6 @@ fn chat_key(
     let n = chat.items.len();
     let last = n.checked_sub(1);
     match key_table::press(LIST_KEYS, &(), mods, sym) {
-        // shortcut: the picked item isn't scrolled into view (`ChatLayout`
-        // says no item's place); do it once the painter says where items are.
         Some(ListKey::Next) => chat.picked = chat.picked.map_or(last, |i| Some((i + 1).min(n - 1))),
         Some(ListKey::Previous) => {
             chat.picked = chat.picked.map_or(last, |i| Some(i.saturating_sub(1)))
@@ -771,8 +805,9 @@ impl Gerdr {
         let Some((pane_id, chat)) = self.focused_chat_mut() else {
             return;
         };
+        let picked = chat.picked;
         match chat_key(chat, mods, sym, typed) {
-            None => {}
+            None => self.chat_show_picked(&pane_id, picked),
             Some(ChatDo::Send) => self.chat_send(&pane_id),
             Some(ChatDo::Copy(text)) => {
                 let lines = text.lines().count().max(1);
@@ -932,6 +967,7 @@ impl Gerdr {
                     focused: focused == Some(id),
                     draft: chat.draft.line(),
                     waiting: self.chats.waiting.get(pane_id).cloned(),
+                    hints: footer(chat.focus, chat.draft.line().text.is_empty()),
                     hover: None,
                 };
                 view.hover = pointer
@@ -954,11 +990,6 @@ impl Gerdr {
         (self.chat_places().into_iter()).find(|(_, _, view)| view.rect.to_f64().contains(pos))
     }
 
-    /// Whether a chat is painted at `pos`.
-    pub(crate) fn chat_at(&self, pos: Point<f64, Logical>) -> bool {
-        self.chat_place_at(pos).is_some()
-    }
-
     /// `button` went down at `pos` over a chat: its pane takes the focus, and
     /// a left press (only: checklist O2) does what is under it. Whether a
     /// chat was there. A press in the reply box gives it the keys; the caret
@@ -974,6 +1005,12 @@ impl Gerdr {
         };
         self.focus_pane(|_| Some(id));
         if button != crate::input::BTN_LEFT {
+            return true;
+        }
+        // A key hint does what its key does (checklist K3).
+        if let Some(i) = chrome::chat_hint_at(&view, pos) {
+            let keys = view.hints[i].0.clone();
+            self.press_hint(crate::input::Overlay::Chat, &keys, pos);
             return true;
         }
         let Some(hit) = chrome::chat_layout(&view).hit(&view, pos) else {
@@ -995,12 +1032,11 @@ impl Gerdr {
                     chat.unfolded.insert(id);
                 }
             }
-            // shortcut: "Show all" unfolds the item, as the contract has no
-            // mark for an output shown whole; add one when outputs are cut.
             ChatHit::ShowAll(i) => {
                 chat.picked = Some(i);
                 if let Some(item) = chat.items.get(i) {
                     chat.unfolded.insert(item.id().to_owned());
+                    chat.unfolded.insert(chrome::whole_key(item.id()));
                 }
             }
             ChatHit::Path(i) => self.chat_open_path(&pane_id, i),
@@ -1036,6 +1072,32 @@ impl Gerdr {
         let along = (pos.y - f64::from(list.loc.y)) / f64::from(list.size.h.max(1));
         let top = along.clamp(0.0, 1.0) * b.max;
         self.chat_scroll_to(&pane_id, (top < b.max).then_some(top));
+    }
+
+    /// The list of pane `pane_id`'s chat scrolled for its picked item to
+    /// show, when the keys moved it from `was`.
+    fn chat_show_picked(&mut self, pane_id: &str, was: Option<usize>) {
+        let Some((_, _, view)) = (self.chat_places().into_iter()).find(|(_, p, _)| p == pane_id)
+        else {
+            return;
+        };
+        let Some(i) = view.picked.filter(|_| view.picked != was) else {
+            return;
+        };
+        let Some((y, h)) = chrome::chat_item_span(&view, i) else {
+            return;
+        };
+        let (y, h, shown) = (
+            f64::from(y),
+            f64::from(h),
+            f64::from(chrome::chat_layout(&view).list.size.h),
+        );
+        let to = match () {
+            _ if y < view.top => y,
+            _ if y + h > view.top + shown => (y + h - shown).min(y),
+            _ => return,
+        };
+        self.chat_scroll_to(pane_id, Some(to));
     }
 
     /// The wheel or fingers moved over a chat at `pos`: its list moves, and

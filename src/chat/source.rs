@@ -25,7 +25,7 @@ pub fn find(agent: &AgentInfo, homes: &Homes) -> Result<Source, String> {
         return Err(NOT_FOUND.into());
     };
     let kind = AgentKind::of(name);
-    // shortcut: only Claude's chats are read; the others come in Inc 3.
+    // shortcut: only Claude's chats are read; the others come in Inc 2.
     if kind != AgentKind::Claude {
         let shown = agent.display_agent.as_deref().unwrap_or(name);
         return Err(format!("Chats of {shown} show in a later gerdr"));

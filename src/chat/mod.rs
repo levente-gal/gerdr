@@ -4,8 +4,6 @@
 //! pane's place (`chrome::agent_chat`), and what the user types goes to the
 //! pane as if typed there (`view`).
 
-// Wave 2 takes this out once every part is used.
-#![allow(dead_code)]
 
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
@@ -15,6 +13,9 @@ pub mod parse;
 pub mod source;
 pub mod tail;
 mod view;
+
+#[cfg(test)]
+pub(crate) use view::footer;
 
 /// One thing said or done in a chat, in order.
 #[derive(Clone, Debug, PartialEq)]
@@ -141,7 +142,8 @@ pub struct PaneChat {
     pub source: Option<Source>,
     pub reading: Reading,
     pub items: Arc<Vec<Item>>,
-    /// The ids of items unfolded.
+    /// The ids of items unfolded, and of those whose output shows whole
+    /// (`chrome::whole_key`).
     pub unfolded: HashSet<String>,
     /// The item picked with the keys, by index.
     pub picked: Option<usize>,

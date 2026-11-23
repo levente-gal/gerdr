@@ -3,9 +3,6 @@
 //! change, the agent's markdown), the waiting panel with the agent's
 //! screen rows and keys while it waits on the user, and the reply box.
 
-// Wave 2 takes this out once every part is used.
-#![allow(dead_code)]
-
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -60,6 +57,8 @@ pub struct ChatView {
     pub focused: bool,
     pub draft: Line,
     pub waiting: Option<Arc<Vec<(String, crate::scrollback::Styled)>>>,
+    /// The footer's key hints, from the chat's key tables (`chat::footer`).
+    pub hints: Vec<(String, String)>,
     pub hover: Option<ChatHit>,
 }
 
@@ -82,6 +81,7 @@ impl PartialEq for ChatView {
             && self.focused == other.focused
             && self.draft == other.draft
             && rows(&self.waiting, &other.waiting)
+            && self.hints == other.hints
             && self.hover == other.hover
     }
 }
@@ -201,8 +201,9 @@ pub fn chat_field_spot(view: &ChatView, scale: f64) -> Option<FieldSpot> {
     })
 }
 
-/// The list's scrollbar, while not all of it shows: to hold its thumb.
-pub fn chat_thumb(view: &ChatView) -> Option<Thumb> {
+/// The list's scrollbar, while not all of it shows.
+#[cfg(test)]
+fn chat_thumb(view: &ChatView) -> Option<Thumb> {
     if message(view).is_some() {
         return None;
     }
@@ -211,28 +212,16 @@ pub fn chat_thumb(view: &ChatView) -> Option<Thumb> {
     thumb_of(&parts, content, top_of(view, content, parts.list.size.h))
 }
 
-/// The footer's key hints (K3): the list's keys, or the reply box's.
-/// Esc in the list does nothing, and isn't hinted.
-pub fn chat_hints(view: &ChatView) -> Vec<(&'static str, &'static str)> {
-    match view.focus {
-        ChatFocus::List => vec![
-            ("j / k", "move"),
-            ("Space", "fold"),
-            ("y", "copy"),
-            ("i", "reply"),
-        ],
-        ChatFocus::Composer if view.draft.text.is_empty() => vec![
-            ("Enter", "send"),
-            ("Shift+Enter", "new line"),
-            ("Esc", "back"),
-        ],
-        ChatFocus::Composer => vec![
-            ("Enter", "send"),
-            ("Shift+Enter", "new line"),
-            ("Esc", "keep draft"),
-            (crate::text_field::DISCARD_KEY, "discard"),
-        ],
-    }
+/// Where item `i` of `view` is down its list's content: its top and height,
+/// to scroll it into view.
+pub fn chat_item_span(view: &ChatView, i: usize) -> Option<(i32, i32)> {
+    let (items, _) = stacked(view, parts(view).column.1);
+    items.get(i).map(|(y, laid)| (*y, laid.h))
+}
+
+/// The footer's key hints (K3), as the chat's key tables say them.
+pub fn chat_hints(view: &ChatView) -> Vec<(&str, &str)> {
+    super::hint_strs(&view.hints)
 }
 
 /// The hint of `chat_hints` under `pos`, to press as its key.
@@ -740,18 +729,24 @@ impl Laid {
 
     /// `text` as a code block from `x`, `w` wide, below the rest: its
     /// first `CHAT_CUT` lines, and "Show all" when it has more.
-    fn code(&mut self, text: &str, x: i32, w: i32) {
-        let lines: Vec<String> = (text.lines().take(CHAT_CUT))
+    fn code(&mut self, text: &str, x: i32, w: i32, cut: usize) {
+        let lines: Vec<String> = (text.lines().take(cut))
             .map(|line| line.replace('\t', "    "))
             .collect();
         let (pieces, _) = doc_layout::stack_of(&[DocBlock::Code(lines)], w);
         let top = self.below();
         self.doc(pieces, (x, top));
         let n = text.lines().count();
-        if n > CHAT_CUT {
+        if n > cut {
             self.more(x, w, n);
         }
     }
+}
+
+/// What `unfolded` holds for item `id` once its output shows whole ("Show
+/// all"), beside its id for it being unfolded.
+pub fn whole_key(id: &str) -> String {
+    format!("{id}\u{0}whole")
 }
 
 /// `item` laid out for a column `w` wide, as `unfolded` has its cards.
@@ -762,6 +757,10 @@ fn lay(item: &Item, w: i32, unfolded: &HashSet<String>) -> Laid {
     let who = WHO.min(w / 4);
     let (x, cw) = (who, (w - who).max(1));
     let open = unfolded.contains(item.id());
+    let cut = match unfolded.contains(&whole_key(item.id())) {
+        true => usize::MAX,
+        false => CHAT_CUT,
+    };
     // A card's insides: in from its fold mark.
     let (ix, iw) = (x + CHEVRON_WIDTH, (cw - CHEVRON_WIDTH).max(1));
     match item {
@@ -830,10 +829,10 @@ fn lay(item: &Item, w: i32, unfolded: &HashSet<String>) -> Laid {
             });
             if open {
                 if !input.trim().is_empty() {
-                    l.code(input, ix, iw);
+                    l.code(input, ix, iw, cut);
                 }
                 if let Some(out) = output.as_ref().filter(|out| !out.text.trim().is_empty()) {
-                    l.code(&out.text, ix, iw);
+                    l.code(&out.text, ix, iw, cut);
                 }
             }
         }
@@ -863,12 +862,12 @@ fn lay(item: &Item, w: i32, unfolded: &HashSet<String>) -> Laid {
             });
             if open {
                 let mut y = l.below();
-                for line in diff.iter().take(CHAT_CUT) {
+                for line in diff.iter().take(cut) {
                     let text = line.text.replace('\t', "    ");
                     l.put(rect(ix, y, iw, SMALL_LINE), Bit::Diff(line.side, text));
                     y += SMALL_LINE;
                 }
-                if diff.len() > CHAT_CUT {
+                if diff.len() > cut {
                     l.more(ix, iw, diff.len());
                 }
             }
@@ -947,6 +946,7 @@ thread_local! {
 fn opened(item: &Item, unfolded: &HashSet<String>, out: &mut Vec<bool>) {
     let open = unfolded.contains(item.id());
     out.push(open);
+    out.push(unfolded.contains(&whole_key(item.id())));
     if let (true, Item::Subagent { items, .. }) = (open, item) {
         for inner in items.iter() {
             opened(inner, unfolded, out);
@@ -1343,6 +1343,7 @@ pub(super) mod tests {
             focused: true,
             draft: Line::default(),
             waiting: None,
+            hints: crate::chat::footer(ChatFocus::List, true),
             hover: None,
         }
     }
@@ -1672,15 +1673,18 @@ pub(super) mod tests {
         let keys = |v: &ChatView| {
             chat_hints(v)
                 .into_iter()
-                .map(|(k, _)| k)
+                .map(|(k, _)| k.to_owned())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(keys(&v), ["j / k", "Space", "y", "i"]);
+        assert_eq!(keys(&v), ["J / K", "Space", "Y", "I"]);
         v.focus = ChatFocus::Composer;
+        v.hints = crate::chat::footer(ChatFocus::Composer, true);
         assert_eq!(chat_hints(&v)[2], ("Esc", "back"));
+        assert!(!keys(&v).iter().any(|k| k == crate::text_field::DISCARD_KEY));
         v.draft.text = "half a reply".into();
+        v.hints = crate::chat::footer(ChatFocus::Composer, false);
         assert_eq!(chat_hints(&v)[2], ("Esc", "keep draft"));
-        assert!(keys(&v).contains(&crate::text_field::DISCARD_KEY));
+        assert!(keys(&v).iter().any(|k| k == crate::text_field::DISCARD_KEY));
         let spots = hint_spots(&chat_hints(&v), parts(&v).hints);
         let (i, spot) = spots[0];
         assert_eq!(chat_hint_at(&v, middle(spot)), Some(i));

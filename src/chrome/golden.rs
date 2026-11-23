@@ -9687,6 +9687,7 @@ fn chat_view(i: usize) -> super::ChatView {
             super::ChatView {
                 status: AgentStatus::Idle,
                 focus: ChatFocus::Composer,
+                hints: crate::chat::footer(ChatFocus::Composer, false),
                 draft: Line {
                     text: text.into(),
                     caret: text.len(),
@@ -9721,43 +9722,43 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 const GOLDEN_CHATS: [[u64; 7]; 4] = [
     // Dark at 1
     [
-        0xbc5219330701b03a, // chat_finding
-        0xef498bd6d3ac652a, // chat_missing
-        0xa7321e3972bd5bf5, // chat
-        0xe0a3efaf1a9b20d8, // chat_waiting
+        0xb478d97f49c9ca8c, // chat_finding
+        0xc630d4e656a9b89c, // chat_missing
+        0xc21ba5cc134c9b9b, // chat
+        0xacbe450f6c94c3be, // chat_waiting
         0x9bf695df6d27d477, // chat_composer
-        0x668b0aa37e8f0b34, // chat_picked
-        0x4e96ff7116559c3c, // chat_scrolled
+        0xfb67845858ee7dba, // chat_picked
+        0x7f98fd76f431bde2, // chat_scrolled
     ],
     // Dark at 2
     [
-        0x7f6f158834c36630, // chat_finding
-        0xd7254dd3c840b13f, // chat_missing
-        0x9ae48cfe47b3dce6, // chat
-        0x6e2d3e185c9c68f9, // chat_waiting
+        0xa69ca85801328098, // chat_finding
+        0x53e8de3ff397becf, // chat_missing
+        0x5b2f9490318ae396, // chat
+        0xb5b4c33a453102d1, // chat_waiting
         0xd65790dae85eb404, // chat_composer
-        0x4c35c85791f5bf60, // chat_picked
-        0x5ce7556601ad9005, // chat_scrolled
+        0x91f2e2340abd9ce8, // chat_picked
+        0x3c9b087d25e16da5, // chat_scrolled
     ],
     // Light at 1
     [
-        0x67c5fdcdffae7bd6, // chat_finding
-        0x802871037a11dbfa, // chat_missing
-        0x18692118dbeec955, // chat
-        0x33737d3a42d10ed9, // chat_waiting
+        0x2e76b751f34cef2b, // chat_finding
+        0xa8243f4a60137d87, // chat_missing
+        0xa710d02b2a92d1f4, // chat
+        0x652484a4851147a0, // chat_waiting
         0xebd2766a613b5a1c, // chat_composer
-        0x75015283443a7585, // chat_picked
-        0xa4bca5be70cea6f7, // chat_scrolled
+        0xffc141154809d844, // chat_picked
+        0x848c8cf957770bea, // chat_scrolled
     ],
     // Light at 2
     [
-        0x6d5ccd6212d1c3d3, // chat_finding
-        0xf0804c5f2535596f, // chat_missing
-        0x996729c02bb90cee, // chat
-        0xccd42c67152a8bce, // chat_waiting
+        0xfa9307f1c52a7903, // chat_finding
+        0x0bda39ab06daf6f7, // chat_missing
+        0x6113a6f7fa6fd036, // chat
+        0xb65492f548692c16, // chat_waiting
         0x34e3dfb2bf3ef0d3, // chat_composer
-        0xb61084c3982dd23b, // chat_picked
-        0x036868bc1f553f98, // chat_scrolled
+        0x87e0476e3130777b, // chat_picked
+        0xa4a0eeac49f4caac, // chat_scrolled
     ],
 ];
 
