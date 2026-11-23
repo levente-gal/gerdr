@@ -8357,6 +8357,60 @@ fn doc_tab_closed(locked: bool) -> super::ReposView {
     view
 }
 
+/// A Rust file's diff in its code's colours: a comment opened on the
+/// removed side only, a changed line with its words marked, the cursor's
+/// row lit with a selection, the caret, a place found and a comment's dot.
+fn code_diff() -> super::ReposView {
+    use super::{DetailRow, RowMark};
+    let mut view = doc_tab(1, 1.0, Vec::new(), false);
+    let text = [
+        "diff --git a/src/git.rs b/src/git.rs",
+        "--- a/src/git.rs",
+        "+++ b/src/git.rs",
+        "@@ -10,7 +10,6 @@ impl Repo {",
+        "     /// The branch checked out, if any.",
+        "     pub fn branch(&self) -> Option<String> {",
+        "-        let head = std::fs::read_to_string(\"HEAD\").ok()?;",
+        "-        /* old: read HEAD",
+        "-           by hand */",
+        "+        let head = std::fs::read_to_string(\".git/HEAD\").ok()?;",
+        "+        // Detached: no branch.",
+        "         Some(head.trim().to_owned())",
+        "     }",
+    ];
+    let file = crate::diff::parse(&(text.join("\n") + "\n")).remove(0);
+    let hunk = &file.hunks[0];
+    let mut rows = vec![DetailRow::Hunk {
+        context: hunk.context.clone(),
+        number: 10,
+    }];
+    rows.extend(hunk.lines.iter().cloned().map(DetailRow::Line));
+    let n = rows.len();
+    view.detail.title = "src/git.rs \u{b7} +2 \u{2212}3".into();
+    view.detail.plain = false;
+    view.detail.total = n;
+    view.detail.caret = Some((4, 16));
+    view.detail.chosen = vec![(4, 8..14)];
+    view.detail.found = (0..n)
+        .map(|r| match r {
+            8 => vec![(18..22, true)],
+            _ => Vec::new(),
+        })
+        .collect();
+    view.detail.marks = (0..n)
+        .map(|r| RowMark {
+            selected: r == 4,
+            top: r == 4,
+            bottom: r == 4,
+            noted: r == 7,
+        })
+        .collect();
+    view.title = "Code review \u{b7} src/git.rs".into();
+    view.modes = None;
+    view.detail.rows = rows;
+    view
+}
+
 /// Each doc tab fixture and the width of content it is seen at.
 /// A code review with a comment of the user's and an AI review's findings
 /// in each of their looks, the cursor on the first finding.
@@ -8594,7 +8648,7 @@ fn findings_popup(at: u8) -> super::ReposView {
     view
 }
 
-fn doc_tabs() -> [(&'static str, super::ReposView, i32); 16] {
+fn doc_tabs() -> [(&'static str, super::ReposView, i32); 17] {
     [
         ("doc_preview_1180", doc_tab(0, 0.0, Vec::new(), false), 1180),
         ("doc_review_1180", doc_tab(1, 1.0, Vec::new(), false), 1180),
@@ -8616,6 +8670,7 @@ fn doc_tabs() -> [(&'static str, super::ReposView, i32); 16] {
         ("popup_no_comments_850", findings_popup(4), 850),
         ("popup_listed_1180", listed_review(false), 1180),
         ("inline_listed_1180", listed_review(true), 1180),
+        ("code_diff_1180", code_diff(), 1180),
     ]
 }
 
@@ -8688,7 +8743,7 @@ fn listed_review(flat: bool) -> super::ReposView {
     }
 }
 
-const DOC_TAB: [&str; 16] = [
+const DOC_TAB: [&str; 17] = [
     "doc_preview_1180",
     "doc_review_1180",
     "doc_review_no_browser",
@@ -8705,6 +8760,7 @@ const DOC_TAB: [&str; 16] = [
     "popup_no_comments_850",
     "popup_listed_1180",
     "inline_listed_1180",
+    "code_diff_1180",
 ];
 
 /// A doc tab's buffer, laid over the whole of a `w` wide content area.
@@ -8726,7 +8782,7 @@ fn paint_doc_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `DOC_TAB`, per case in `CASES`.
-const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
+const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
     // Dark at 1
     [
         0x5ff3dfe410119e29, // doc_preview_1180
@@ -8745,6 +8801,7 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x55aa3cc2b4d4188d, // popup_no_comments_850
         0x2fccc61a48e329b7, // popup_listed_1180
         0x9e04eb8e689c6852, // inline_listed_1180
+        0x1253e502749591ba, // code_diff_1180
     ],
     // Dark at 2
     [
@@ -8764,6 +8821,7 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x6233facee16c3b81, // popup_no_comments_850
         0x66c200e5056aaad6, // popup_listed_1180
         0x6460ad20bc195a17, // inline_listed_1180
+        0x523bfbbe39bb3fd1, // code_diff_1180
     ],
     // Light at 1
     [
@@ -8783,6 +8841,7 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0x1f59076d91210dfa, // popup_no_comments_850
         0x2a7590d4752dd875, // popup_listed_1180
         0x761cf800b7f05197, // inline_listed_1180
+        0x17f6ebb63b524f4b, // code_diff_1180
     ],
     // Light at 2
     [
@@ -8802,6 +8861,7 @@ const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
         0xd96bc9802a690703, // popup_no_comments_850
         0xa29f88e839292332, // popup_listed_1180
         0xbe887bcf759aff4f, // inline_listed_1180
+        0x6021d009f0aaf4d5, // code_diff_1180
     ],
 ];
 

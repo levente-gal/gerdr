@@ -5,7 +5,7 @@
 
 use std::ops::Range;
 
-use crate::syntax::{self, Spans};
+use crate::{highlight, syntax::Spans};
 
 /// How many lines of one file's diff the diff view shows until asked for
 /// them all.
@@ -101,7 +101,11 @@ pub fn parse(text: &str) -> Vec<FileDiff> {
         };
         file.line(raw);
     }
-    files.into_iter().map(Section::finish).collect()
+    // One budget for all the files: a big diff costs what a big file does.
+    let mut budget = highlight::GRAMMAR_LINES;
+    (files.into_iter())
+        .map(|file| file.finish(&mut budget))
+        .collect()
 }
 
 /// A file as it is read.
@@ -230,7 +234,7 @@ impl Section {
         }
     }
 
-    fn finish(mut self) -> FileDiff {
+    fn finish(mut self, budget: &mut usize) -> FileDiff {
         self.diff.path = self
             .renamed
             .or(self.plus)
@@ -255,39 +259,60 @@ impl Section {
             let note = format!("Words changed aren't marked on lines of {WORD_LINE} chars or more");
             self.diff.notes.push(note);
         }
-        colour_file(&mut self.diff);
+        colour_within(&mut self.diff, budget);
         self.diff
     }
 }
 
 /// Each of `file`'s hunks coloured as the language of its `path`; left
-/// as it is when that isn't known.
+/// as it is when that isn't known, or is Markdown: prose, shown as the
+/// doc pages show it.
 pub fn colour_file(file: &mut FileDiff) {
-    let Some(lang) = syntax::lang(&file.path) else {
+    colour_within(file, &mut highlight::GRAMMAR_LINES.clone());
+}
+
+/// `colour_file` with what is left of `budget` (`highlight::lines`).
+fn colour_within(file: &mut FileDiff, budget: &mut usize) {
+    if file.path.ends_with(".md") || file.path.ends_with(".markdown") {
         return;
-    };
+    }
     for hunk in &mut file.hunks {
-        colour(lang, &mut hunk.lines);
+        if !colour(&file.path, &mut hunk.lines, budget) {
+            return;
+        }
     }
 }
 
-/// A hunk's lines coloured as `lang`, the file before (context and
-/// removed lines) and after (context and added lines) each read on its
-/// own, so a comment opened on one side stays on that side. A hunk
-/// starts mid-file, so it starts as code.
-fn colour(lang: &syntax::Lang, lines: &mut [Line]) {
-    let (mut before, mut after) = (syntax::State::default(), syntax::State::default());
+/// A hunk's lines coloured as the language of `path`, the file before
+/// (context and removed lines) and after (context and added lines) each
+/// read as a text of its own, so a comment opened on one side stays on
+/// that side; a context line takes the colours of after. A hunk starts
+/// mid-file, so it starts as code. False when the language isn't known.
+fn colour(path: &str, lines: &mut [Line], budget: &mut usize) -> bool {
+    let mut side = |gone: LineKind| {
+        let text = lines
+            .iter()
+            .filter(|l| l.kind != gone)
+            .map(|l| l.text.as_str());
+        highlight::lines(path, text, budget)
+    };
+    let Some(before) = side(LineKind::Added) else {
+        return false;
+    };
+    let after = side(LineKind::Removed).unwrap_or_default();
+    let (mut before, mut after) = (before.into_iter(), after.into_iter());
     for line in lines {
         line.syntax = match line.kind {
-            LineKind::Removed => syntax::highlight(lang, &line.text, &mut before),
-            LineKind::Added => syntax::highlight(lang, &line.text, &mut after),
+            LineKind::Removed => before.next(),
+            LineKind::Added => after.next(),
             LineKind::Context => {
-                let spans = syntax::highlight(lang, &line.text, &mut after);
-                before = after;
-                spans
+                before.next();
+                after.next()
             }
-        };
+        }
+        .unwrap_or_default();
     }
+    true
 }
 
 /// `text` with its tabs as four spaces, as the panel draws them.

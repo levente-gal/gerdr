@@ -132,11 +132,13 @@ const ROW_CHIP_GAP: i32 = 4;
 const ROW_CHIP_INSET: i32 = 2;
 /// How strongly an added or removed line is tinted, and its changed
 /// words.
-const DIFF_TINT: f32 = 0.10;
+pub(super) const DIFF_TINT: f32 = 0.10;
 /// How strongly a repository's header is tinted, in the tree and the
 /// diff: it heads what is under it.
 const HEADER_TINT: f32 = 0.07;
-const DIFF_WORD_TINT: f32 = 0.28;
+pub(super) const DIFF_WORD_TINT: f32 = 0.28;
+/// How far the cursor's row is lit toward `selected`.
+pub(super) const PICKED_LIT: f32 = 0.5;
 /// The Diff and Log tabs: each this wide, this far apart.
 const REPOS_TAB_WIDTH: i32 = 64;
 const REPOS_TAB_GAP: i32 = 4;
@@ -4236,7 +4238,7 @@ impl Painter {
         // not a file's header, pinned or not, which shows its own.
         let (row, mark) = (&look.row, look.mark);
         let picked = mark.selected && !matches!(row, DetailRow::File(_));
-        let lit = picked.then_some(0.5);
+        let lit = picked.then_some(PICKED_LIT);
         if let Some(amount) = lit
             && matches!(
                 row,
@@ -4558,12 +4560,20 @@ impl Painter {
                         self.mono_text(c, text, REPOS_MONO_SIZE, x, bend, row_band, scale, color);
                     }
                 };
-                // In the places the search found, in the text's own colour
-                // to read on their tint.
+                // In the places the search found, the selection, the caret
+                // and the words changed: the text's own colour, to read on
+                // their tint where code's colours wouldn't.
                 let ends = bytes.len() - 1;
+                let mut inked = look.found.clone();
+                inked.extend(look.chosen.clone().map(|r| (r, false)));
+                inked.extend(look.caret.map(|ch| (ch..ch + 1, false)));
+                if tone.is_some() {
+                    inked.extend(line.words.iter().map(|w| (w.clone(), false)));
+                }
+                inked.sort_by_key(|(r, _)| r.start);
                 let mut run = |from: usize, to: usize, color: Rgb| {
-                    for (part, found) in found_split(from..to.min(ends), &look.found) {
-                        run(part.start, part.end, if found { p.text } else { color });
+                    for (part, plain) in found_split(from..to.min(ends), &inked) {
+                        run(part.start, part.end, if plain { p.text } else { color });
                     }
                 };
                 let mut at = 0;

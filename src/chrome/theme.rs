@@ -137,7 +137,9 @@ pub(crate) struct Palette {
     pub(super) shadow: f32,
     /// How dark the scrim behind a modal dialog is, 0 to 1.
     pub(super) scrim: f32,
-    /// Code's colours in a diff: Zed's `syntax` of this look.
+    /// Code's colours in a diff: Zed's `syntax` of this look, each moved
+    /// toward `text` as far as it takes to read 4.5:1 on every row a diff
+    /// draws it on (added, removed, the cursor's).
     pub(super) syntax: SyntaxColors,
     /// What Zed's terminal uses with this look: its background and
     /// foreground, and the 16 ANSI colours (the 8 normal, then the 8
@@ -180,12 +182,12 @@ pub(super) const ONE_DARK: Palette = Palette {
     shadow: 0.45,
     scrim: 0.40,
     syntax: SyntaxColors {
-        keyword: hex(0xb477cf),
+        keyword: hex(0xc8aada),
         string: hex(0xa1c181),
-        comment: hex(0x989eaa),
-        constant: hex(0xbf956a),
-        type_: hex(0x6eb4bf),
-        function: hex(0x73ade9),
+        comment: hex(0xb0b5bf),
+        constant: hex(0xcab198),
+        type_: hex(0x86bec7),
+        function: hex(0x8bb9e8),
     },
     terminal_background: hex(0x282c34),
     terminal_foreground: hex(0xabb2bf),
@@ -233,12 +235,12 @@ pub(super) const ONE_LIGHT: Palette = Palette {
     shadow: 0.18,
     scrim: 0.22,
     syntax: SyntaxColors {
-        keyword: hex(0xa449ab),
-        string: hex(0x649f57),
-        comment: hex(0x636569),
-        constant: hex(0xad6e25),
-        type_: hex(0x3882b7),
-        function: hex(0x5b79e3),
+        keyword: hex(0x87418d),
+        string: hex(0x456441),
+        comment: hex(0x5a5c60),
+        constant: hex(0x7d5426),
+        type_: hex(0x316185),
+        function: hex(0x46599c),
     },
     terminal_background: hex(0xfafafa),
     terminal_foreground: hex(0x2a2c33),
@@ -431,6 +433,60 @@ mod tests {
                 );
             }
             assert!(contrast(p.on_accent, p.accent) >= 3.0, "{name}: on_accent");
+        }
+    }
+
+    #[test]
+    fn code_colours_read_on_every_row_of_a_diff() {
+        use super::super::repos::{DIFF_TINT, DIFF_WORD_TINT, PICKED_LIT};
+        use super::super::search::{CARET_TINT, CHOSEN_TINT};
+        use super::{Kind, mix};
+        for (name, p) in [
+            ("One Dark", &ONE_DARK),
+            ("One Light", &ONE_LIGHT),
+            ("One Light page", &ONE_LIGHT_PAGE),
+        ] {
+            let p: &Palette = p;
+            let e = p.elevated;
+            let lit = |c: Rgb| mix(c, p.selected, PICKED_LIT);
+            let (added, removed) = (mix(e, p.success, DIFF_TINT), mix(e, p.error, DIFF_TINT));
+            let rows = [
+                ("context", e),
+                ("context lit", lit(e)),
+                ("added", added),
+                ("added lit", lit(added)),
+                ("removed", removed),
+                ("removed lit", lit(removed)),
+            ];
+            let kinds = [
+                Kind::Keyword,
+                Kind::String,
+                Kind::Comment,
+                Kind::Constant,
+                Kind::Type,
+                Kind::Function,
+            ];
+            for (row, ground) in rows {
+                for kind in kinds {
+                    let ratio = contrast(p.code(kind), ground);
+                    assert!(ratio >= 4.5, "{name}: {kind:?} on {row} is {ratio:.2}:1");
+                }
+            }
+            // Over these tints the code is drawn in `text`.
+            for (what, ground) in [
+                ("added word", mix(e, p.success, DIFF_WORD_TINT)),
+                ("removed word", mix(e, p.error, DIFF_WORD_TINT)),
+                ("selection", mix(e, p.accent, CHOSEN_TINT)),
+            ] {
+                let ratio = contrast(p.text, ground);
+                assert!(ratio >= 4.5, "{name}: text on {what} is {ratio:.2}:1");
+            }
+            // The caret's block is a mark (3:1), the char on it in `text`.
+            // shortcut: on One Dark that char reads 3.0-3.2:1, not 4.5:1;
+            // lower CARET_TINT there if it is found hard to read.
+            let caret = mix(e, p.accent, CARET_TINT);
+            let ratio = contrast(p.text, caret);
+            assert!(ratio >= 3.0, "{name}: text on the caret is {ratio:.2}:1");
         }
     }
 

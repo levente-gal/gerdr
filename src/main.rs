@@ -73,6 +73,7 @@ mod find;
 mod finding_dialog;
 mod frecency;
 mod fuzzy;
+mod highlight;
 mod git;
 mod git_identity;
 mod git_ops;

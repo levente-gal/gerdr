@@ -24,9 +24,9 @@ const FOUND_TINT: f32 = 0.35;
 /// Text on the place gone to still reads at 4.5:1 in the light look.
 const FOUND_CURRENT_TINT: f32 = 0.6;
 /// How much of the accent the caret's block is, on the ground.
-const CARET_TINT: f32 = 0.6;
+pub(super) const CARET_TINT: f32 = 0.6;
 /// How much of the accent is in the ground under what is selected.
-const CHOSEN_TINT: f32 = 0.4;
+pub(super) const CHOSEN_TINT: f32 = 0.4;
 const SEARCH_TICK: i32 = 2;
 
 /// The search: what is typed, what it says while empty, and how many
