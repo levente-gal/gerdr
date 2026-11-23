@@ -2,18 +2,31 @@
 //! reads their transcripts as they grow and sends their items back.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
     io::{Read as _, Seek as _, SeekFrom},
     os::unix::fs::MetadataExt as _,
+    path::{Path, PathBuf},
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
+use serde_json::Value;
 use smithay::reexports::calloop::channel;
 
-use super::{Event, Item, Source, parse::Reader, source};
-use crate::{ai_work::locate::Homes, herdr::AgentInfo};
+use super::{
+    Event, Item, Source,
+    parse::{self, Reader},
+    source::{self, Run},
+};
+use crate::{
+    ai_work::{
+        AgentKind,
+        locate::{self, Form, Homes},
+        usage,
+    },
+    herdr::{AgentInfo, Herdr},
+};
 
 /// The most of a transcript read the first time: its end.
 // shortcut: earlier turns past this aren't read; paging back comes in Inc 3.
@@ -26,6 +39,13 @@ const FIND_AGAIN: Duration = Duration::from_secs(5);
 /// The bytes kept from before the read offset: when they change, the file
 /// was written anew and is read again from the start.
 const PREV: usize = 4096;
+/// How long herdr's list of its integrations is trusted: one installed
+/// meanwhile shows after this.
+const INTEGRATIONS_AGAIN: Duration = Duration::from_secs(180);
+/// Where the problems of chats go, by herdr's integration (`cursor`).
+const PROBLEMS: &str = "chat";
+/// The state herdr gives an integration it hasn't installed.
+const NOT_INSTALLED: &str = "not_installed";
 
 enum Cmd {
     Follow(Box<AgentInfo>),
@@ -38,18 +58,20 @@ pub struct Tail {
 }
 
 impl Tail {
-    /// Start the thread, sending what it reads to `out`.
-    pub fn spawn(out: channel::Sender<Event>) -> Self {
+    /// Start the thread, sending what it reads to `out`. It asks the herdr
+    /// on `socket` what runs in a pane whose chat herdr doesn't name.
+    pub fn spawn(out: channel::Sender<Event>, socket: Option<PathBuf>) -> Self {
         let (cmds, asked) = mpsc::channel();
         std::thread::spawn(move || {
             let homes = Homes::here().unwrap_or_else(|| {
                 tracing::warn!("agent chats: no home folder, so no chat is found");
                 Homes {
                     claude: Vec::new(),
-                    ..Homes::under(std::path::Path::new("/"))
+                    ..Homes::under(Path::new("/"))
                 }
             });
-            run(&asked, &mut Chats::new(homes), &out);
+            let mut chats = Chats::new(homes, socket.map(Herdr::on_socket));
+            run(&asked, &mut chats, &out);
         });
         Self { cmds }
     }
@@ -110,6 +132,11 @@ fn run(asked: &mpsc::Receiver<Cmd>, chats: &mut Chats, out: &channel::Sender<Eve
 /// The panes followed, and their chats.
 struct Chats {
     homes: Homes,
+    /// The herdr asked what runs in a pane; none in tests.
+    herdr: Option<Herdr>,
+    /// herdr's integrations' states by target (`cursor`: `not_installed`),
+    /// and when it was asked.
+    integrations: Option<(Instant, HashMap<String, String>)>,
     panes: HashMap<String, Followed>,
 }
 
@@ -122,15 +149,17 @@ struct Followed {
 }
 
 impl Chats {
-    fn new(homes: Homes) -> Self {
+    fn new(homes: Homes, herdr: Option<Herdr>) -> Self {
         Self {
             homes,
+            herdr,
+            integrations: None,
             panes: HashMap::new(),
         }
     }
 
     fn follow(&mut self, agent: AgentInfo, out: &mut Vec<Event>) {
-        let found = source::find(&agent, &self.homes);
+        let found = self.find(&agent);
         if let Some(had) = self.panes.get_mut(&agent.pane_id) {
             let same = match (&had.chat, &found) {
                 (Ok(chat), Ok(source)) => chat.source == *source,
@@ -148,7 +177,7 @@ impl Chats {
             agent,
             looked: Instant::now(),
         };
-        followed.found(found, out);
+        followed.found(found, &self.homes, out);
         self.panes.insert(pane_id, followed);
     }
 
@@ -158,30 +187,169 @@ impl Chats {
 
     /// Read what each chat grew by; look again for the chats not found.
     fn poll(&mut self, out: &mut Vec<Event>) {
-        for followed in self.panes.values_mut() {
+        let mut again = Vec::new();
+        for (pane_id, followed) in &mut self.panes {
             match &mut followed.chat {
-                Ok(chat) => chat.poll(&followed.agent.pane_id, out),
+                Ok(chat) => chat.poll(&self.homes, pane_id, out),
                 Err(_) if followed.looked.elapsed() < FIND_AGAIN => {}
-                Err(why) => {
-                    followed.looked = Instant::now();
-                    let found = source::find(&followed.agent, &self.homes);
-                    if found.as_ref().err() != Some(&*why) {
-                        followed.found(found, out);
-                    }
-                }
+                Err(_) => again.push(pane_id.clone()),
+            }
+        }
+        for pane_id in again {
+            let agent = self.panes[&pane_id].agent.clone();
+            let found = self.find(&agent);
+            let Some(followed) = self.panes.get_mut(&pane_id) else {
+                continue;
+            };
+            followed.looked = Instant::now();
+            if found.as_ref().err() != followed.chat.as_ref().err() {
+                followed.found(found, &self.homes, out);
             }
         }
     }
+
+    /// The chat of the agent in `agent`'s pane: the one herdr names, else
+    /// one found by the agent's folder and start time. Says when herdr's
+    /// integration for the agent isn't installed, which is why it names
+    /// none.
+    fn find(&mut self, agent: &AgentInfo) -> Result<Source, String> {
+        let found = source::find(agent, &self.homes);
+        let Some(kind) = source::kind(agent).filter(|kind| *kind != AgentKind::Unknown) else {
+            return found;
+        };
+        let target = kind.name();
+        if source::named(agent) {
+            crate::problems::clear_at(PROBLEMS, target);
+            return found;
+        }
+        if found.as_ref().is_err_and(|why| why != source::NOT_FOUND) {
+            return found;
+        }
+        let missing = self.integration(target).as_deref() == Some(NOT_INSTALLED);
+        match missing {
+            true => {
+                crate::problems::report_at(PROBLEMS, target, source::not_installed(kind, target))
+            }
+            false => crate::problems::clear_at(PROBLEMS, target),
+        }
+        let run = match source::guessable(kind) {
+            true => self.run_of(agent),
+            false => None,
+        };
+        let claimed = self.claimed(&agent.pane_id);
+        let guessed = run.map(|run| source::by_time(kind, &run, &self.homes, &claimed));
+        match guessed {
+            Some(Ok(Some(source))) => Ok(source),
+            Some(Err(why)) => Err(why),
+            _ if missing => Err(source::missing_integration(target)),
+            _ => found,
+        }
+    }
+
+    /// The ids of the chats of the panes other than `pane_id`.
+    fn claimed(&self, pane_id: &str) -> HashSet<String> {
+        (self.panes.iter())
+            .filter(|(id, _)| *id != pane_id)
+            .filter_map(|(_, followed)| followed.chat.as_ref().ok())
+            .map(|chat| chat.source.id.clone())
+            .collect()
+    }
+
+    /// The state herdr gives its integration `target`, from its list
+    /// asked once an `INTEGRATIONS_AGAIN`. An integration no longer
+    /// missing takes its problem with it.
+    fn integration(&mut self, target: &str) -> Option<String> {
+        let stale =
+            (self.integrations.as_ref()).is_none_or(|(at, _)| at.elapsed() >= INTEGRATIONS_AGAIN);
+        if stale && let Some(herdr) = self.herdr.as_mut() {
+            let states = match herdr.call("integration.list", serde_json::json!({})) {
+                Ok(reply) => integration_states(&reply),
+                Err(err) => {
+                    tracing::warn!("agent chats: herdr's integrations: {err}");
+                    self.integrations
+                        .take()
+                        .map(|(_, states)| states)
+                        .unwrap_or_default()
+                }
+            };
+            for (target, _) in states.iter().filter(|(_, state)| *state != NOT_INSTALLED) {
+                crate::problems::clear_at(PROBLEMS, target);
+            }
+            self.integrations = Some((Instant::now(), states));
+        }
+        self.integrations.as_ref()?.1.get(target).cloned()
+    }
+
+    /// When the agent in `agent`'s pane began and where it runs: herdr's
+    /// foreground process there, as `/proc` says.
+    fn run_of(&mut self, agent: &AgentInfo) -> Option<Run> {
+        let info = (self.herdr.as_mut()?.process_info(&agent.pane_id))
+            .map_err(|err| tracing::warn!("agent chat of pane {}: {err}", agent.pane_id))
+            .ok()?;
+        let processes = &info.foreground_processes;
+        // The group's leader is what the shell started: the agent.
+        let lead = (processes.iter())
+            .find(|p| Some(p.pid) == info.foreground_process_group_id)
+            .or(processes.first())?;
+        if Some(lead.pid) == info.shell_pid {
+            return None;
+        }
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", lead.pid)).ok()?;
+        let boot = std::fs::read_to_string("/proc/stat").ok()?;
+        let cwd = (lead.cwd.clone())
+            .or_else(|| agent.foreground_cwd.clone())
+            .or_else(|| agent.cwd.clone())?;
+        Some(Run {
+            started: started_at(&stat, &boot, clock_ticks())?,
+            cwd,
+        })
+    }
+}
+
+/// The states of herdr's integrations by target, out of its
+/// `integration.list` reply; what it doesn't say is left out.
+fn integration_states(reply: &Value) -> HashMap<String, String> {
+    (reply["integrations"].as_array().into_iter().flatten())
+        .filter_map(|it| {
+            Some((
+                it["target"].as_str()?.to_owned(),
+                it["state"].as_str()?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// When a process began, in seconds since the epoch: out of its
+/// `/proc/<pid>/stat` (`stat`, its start in clock ticks since boot) and
+/// `/proc/stat` (`boot`, its `btime`).
+fn started_at(stat: &str, boot: &str, ticks: u64) -> Option<u64> {
+    // The name, in brackets, may hold spaces and brackets of its own.
+    let fields = &stat[stat.rfind(')')? + 1..];
+    // `starttime`, the 22nd field: the 20th after the name.
+    let since_boot: u64 = fields.split_whitespace().nth(19)?.parse().ok()?;
+    let btime: u64 = (boot.lines())
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(btime + since_boot / ticks.max(1))
+}
+
+/// The clock ticks a second `/proc` counts in.
+fn clock_ticks() -> u64 {
+    // SAFETY: sysconf reads a constant of the system.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks > 0 { ticks as u64 } else { 100 }
 }
 
 impl Followed {
     /// Take chat `found`: read it, or say why there is none.
-    fn found(&mut self, found: Result<Source, String>, out: &mut Vec<Event>) {
+    fn found(&mut self, found: Result<Source, String>, homes: &Homes, out: &mut Vec<Event>) {
         let pane_id = self.agent.pane_id.clone();
         match found {
             Ok(source) => {
                 let mut chat = Chat::new(source);
-                chat.poll(&pane_id, out);
+                chat.poll(homes, &pane_id, out);
                 self.chat = Ok(chat);
             }
             Err(why) => {
@@ -197,10 +365,15 @@ impl Followed {
     }
 }
 
-/// A transcript being read, line by line as it grows.
+/// A transcript being read, line by line as it grows; or a database chat
+/// (OpenCode's, Cursor's), read whole each time it changes.
 struct Chat {
     source: Source,
     reader: Reader,
+    /// A database chat's items, as last read.
+    snapshot: Vec<Item>,
+    /// What the database and its WAL were (`stamp`) when last read.
+    stamped: Option<[Option<Stamp>; 2]>,
     /// The file read (device and inode): another one is read from the start.
     file: Option<(u64, u64)>,
     /// How far it is read.
@@ -218,10 +391,50 @@ struct Chat {
     resets: u32,
 }
 
+/// A file as it is: its inode, change time and length.
+type Stamp = (u64, i64, i64, u64);
+
+fn stamp(path: &Path) -> std::io::Result<Stamp> {
+    let meta = std::fs::metadata(path)?;
+    Ok((meta.ino(), meta.mtime(), meta.mtime_nsec(), meta.len()))
+}
+
+/// Whether chats of agent `kind` are kept in a database.
+fn in_database(kind: AgentKind) -> bool {
+    matches!(kind, AgentKind::OpenCode | AgentKind::Cursor)
+}
+
+/// The rows of database chat `source`, as `parse::snapshot` takes them.
+fn rows(source: &Source, homes: &Homes) -> Result<Vec<Value>, String> {
+    if source.agent == AgentKind::Cursor {
+        let read = || {
+            let conn = crate::cursor_agents::open_read_only(&source.path)?;
+            conn.busy_timeout(Duration::from_secs(1))?;
+            usage::cursor_messages_in(&conn)
+        };
+        return read().map_err(|err| err.to_string());
+    }
+    let chat = source::chat(source.agent, Some(&source.id), None);
+    match locate::find(homes, &chat, &HashSet::new())? {
+        Some(locate::Found {
+            form: Form::Made(lines),
+            ..
+        }) => Ok((lines.split(|b| *b == b'\n'))
+            .filter_map(|line| serde_json::from_slice(line).ok())
+            .collect()),
+        _ => Err(format!(
+            "{} holds this chat no more",
+            homes.opencode.display()
+        )),
+    }
+}
+
 impl Chat {
     fn new(source: Source) -> Self {
         Self {
             reader: Reader::new(source.agent),
+            snapshot: Vec::new(),
+            stamped: None,
             source,
             file: None,
             offset: 0,
@@ -234,8 +447,12 @@ impl Chat {
     }
 
     /// Read what it grew by, and send its items if they changed.
-    fn poll(&mut self, pane_id: &str, out: &mut Vec<Event>) {
-        if let Err(err) = self.read() {
+    fn poll(&mut self, homes: &Homes, pane_id: &str, out: &mut Vec<Event>) {
+        let read = match in_database(self.source.agent) {
+            true => self.read_rows(homes),
+            false => self.read().map_err(|err| err.to_string()),
+        };
+        if let Err(err) = read {
             if !self.failed {
                 let path = self.source.path.display();
                 tracing::warn!("agent chat of pane {pane_id}: can't read {path}: {err}");
@@ -249,8 +466,12 @@ impl Chat {
             return;
         }
         self.failed = false;
-        if self.sent.as_deref().map(Vec::as_slice) != Some(self.reader.items()) {
-            let items = Arc::new(self.reader.items().to_vec());
+        let now = match in_database(self.source.agent) {
+            true => &self.snapshot[..],
+            false => self.reader.items(),
+        };
+        if self.sent.as_deref().map(Vec::as_slice) != Some(now) {
+            let items = Arc::new(now.to_vec());
             self.sent = Some(items.clone());
             out.push(Event::Items {
                 pane_id: pane_id.to_owned(),
@@ -258,6 +479,26 @@ impl Chat {
                 items,
             });
         }
+    }
+
+    /// Read a database chat's rows again if the database or its WAL changed
+    /// since the last read.
+    // shortcut: the whole session is read again on each change; read only
+    // the rows past the last one read once long chats make a read slow.
+    fn read_rows(&mut self, homes: &Homes) -> Result<(), String> {
+        let mut wal = self.source.path.clone().into_os_string();
+        wal.push("-wal");
+        let now = [
+            Some(stamp(&self.source.path).map_err(|err| err.to_string())?),
+            stamp(Path::new(&wal)).ok(),
+        ];
+        if self.stamped == Some(now) {
+            return Ok(());
+        }
+        self.snapshot = parse::snapshot(self.source.agent, &rows(&self.source, homes)?);
+        self.stamped = Some(now);
+        self.resets += 1;
+        Ok(())
     }
 
     /// Feed the reader the whole lines written since the last read. Another
@@ -327,7 +568,7 @@ impl Chat {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::Write as _, path::PathBuf};
+    use std::io::Write as _;
 
     use super::*;
     use crate::chat::source::tests::agent;
@@ -351,7 +592,7 @@ mod tests {
                 std::env::temp_dir().join(format!("gerdr-chat-tail-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(dir.join(".claude/projects/-work")).expect("dir");
-            let chats = Chats::new(Homes::under(&dir));
+            let chats = Chats::new(Homes::under(&dir), None);
             Self { dir, chats }
         }
 
@@ -513,7 +754,7 @@ mod tests {
         let (out, events) = channel::channel();
         let (cmds, asked) = mpsc::channel();
         let homes = Homes::under(&home.dir);
-        let thread = std::thread::spawn(move || run(&asked, &mut Chats::new(homes), &out));
+        let thread = std::thread::spawn(move || run(&asked, &mut Chats::new(homes, None), &out));
         let tail = Tail { cmds };
         tail.follow(agent("claude", "id", "s1"));
         drop(tail);
@@ -531,5 +772,207 @@ mod tests {
             .unwrap();
         events_loop.dispatch(Duration::ZERO, &mut got).unwrap();
         assert_eq!(got, ["s1"]);
+    }
+
+    #[test]
+    fn a_process_start_is_read_from_proc() {
+        let stat = "4242 (a (b) c) S 1 4242 4242 0 -1 4194560 100 0 0 0 5 1 0 0 20 0 1 0 123456 \
+                    1000 100 18446744073709551615";
+        let boot = "cpu  1 2 3\nbtime 1790000000\nprocesses 9\n";
+        assert_eq!(started_at(stat, boot, 100), Some(1_790_000_000 + 1234));
+        assert_eq!(started_at("4242 (x) S 1", boot, 100), None);
+        assert_eq!(started_at(stat, "cpu 1\n", 100), None);
+        // This test's own process began a while ago, not in the future.
+        let own = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let boot = std::fs::read_to_string("/proc/stat").unwrap();
+        let started = started_at(&own, &boot, clock_ticks()).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(
+            started <= now + 1 && now - started < 24 * 3600,
+            "{started} {now}"
+        );
+    }
+
+    #[test]
+    fn herdr_integrations_read_leniently() {
+        let reply = serde_json::json!({"type": "integration_list", "integrations": [
+            {"target": "codex", "label": "codex", "available": false, "state": "not_installed"},
+            {"target": "opencode", "state": "current"},
+            {"target": "pi"},
+            "junk",
+        ]});
+        let states = integration_states(&reply);
+        assert_eq!(states.len(), 2);
+        assert_eq!(states["codex"], NOT_INSTALLED);
+        assert!(integration_states(&serde_json::json!({})).is_empty());
+    }
+
+    fn chat_problems(target: &str) -> Vec<String> {
+        (crate::problems::list().into_iter())
+            .filter(|p| p.source == PROBLEMS && p.text.contains(&format!(" {target} ")))
+            .map(|p| p.text)
+            .collect()
+    }
+
+    #[test]
+    fn a_missing_integration_is_a_problem_until_a_session_shows() {
+        let mut home = Home::new("integration");
+        let states = HashMap::from([("codex".to_owned(), NOT_INSTALLED.to_owned())]);
+        home.chats.integrations = Some((Instant::now(), states));
+        let mut none = agent("codex", "id", "019a-1");
+        none.agent_session = None;
+        let mut out = Vec::new();
+        home.chats.follow(none, &mut out);
+        let why = source::missing_integration("codex");
+        assert!(matches!(&out[..], [Event::Missing { why: w, .. }] if *w == why));
+        let text = source::not_installed(AgentKind::Codex, "codex");
+        assert_eq!(chat_problems("codex"), [text]);
+        out.clear();
+        home.chats.follow(agent("codex", "id", "019a-1"), &mut out);
+        assert!(matches!(&out[..], [Event::Missing { why, .. }] if why == source::NOT_YET));
+        assert!(chat_problems("codex").is_empty());
+    }
+
+    /// A Cursor `store.db` at `dir/.cursor/chats/f00/<id>/`, with `blobs`.
+    fn cursor_store(dir: &Path, id: &str, blobs: &[&str]) -> PathBuf {
+        let db = dir.join(format!(".cursor/chats/f00/{id}/store.db"));
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE IF NOT EXISTS blobs (id TEXT PRIMARY KEY, data BLOB);")
+            .unwrap();
+        add_blobs(&db, blobs);
+        db
+    }
+
+    fn add_blobs(db: &Path, blobs: &[&str]) {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        for blob in blobs {
+            let id: i64 = conn
+                .query_row("SELECT count(*) FROM blobs", [], |r| r.get(0))
+                .unwrap();
+            conn.execute(
+                "INSERT INTO blobs VALUES (?1, ?2)",
+                rusqlite::params![id.to_string(), blob.as_bytes()],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn a_database_chat_is_read_again_only_when_it_changed() {
+        let mut home = Home::new("snapshot");
+        let db = cursor_store(&home.dir, "c-1", &[r#"{"role":"user","content":"go"}"#]);
+        home.chats
+            .follow(agent("cursor", "id", "c-1"), &mut Vec::new());
+        assert_eq!(home.chat().source.path, db);
+        assert_eq!(home.chat().resets, 1);
+        home.poll();
+        home.poll();
+        assert_eq!(home.chat().resets, 1, "unchanged: not read again");
+        add_blobs(&db, &[r#"{"role":"assistant","content":"done"}"#, "\u{1}x"]);
+        home.poll();
+        assert_eq!(home.chat().resets, 2);
+        let rows = rows(&home.chat().source, &home.chats.homes).unwrap();
+        let roles: Vec<&str> = rows.iter().filter_map(|r| r["role"].as_str()).collect();
+        assert_eq!(roles, ["user", "assistant"]);
+        // Gone: told once, then read again once it is back.
+        std::fs::remove_file(&db).unwrap();
+        assert!(matches!(&home.poll()[..], [Event::Failed { .. }]));
+        assert!(home.poll().is_empty(), "told once");
+        cursor_store(&home.dir, "c-1", &[]);
+        assert!(matches!(&home.poll()[..], [Event::Items { .. }]));
+    }
+
+    #[test]
+    fn an_opencode_chat_is_read_as_its_rows() {
+        let home = Home::new("opencode");
+        let homes = &home.chats.homes;
+        std::fs::create_dir_all(homes.opencode.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&homes.opencode).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, time_created INTEGER);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+             INSERT INTO session VALUES ('ses_a', NULL, '/w', 100500);
+             INSERT INTO message VALUES ('m1', 'ses_a', 100700, '{\"role\":\"user\"}');
+             INSERT INTO message VALUES ('m2', 'ses_a', 100800, '{\"role\":\"assistant\"}');
+             INSERT INTO part VALUES ('p1', 'm1', 'ses_a', 100701, '{\"text\":\"hi\"}');",
+        )
+        .unwrap();
+        drop(conn);
+        let source = source::find(&agent("opencode", "id", "ses_a"), homes).unwrap();
+        let read = rows(&source, homes).unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0]["parts"][0]["data"]["text"], "hi");
+        assert_eq!(read[1]["data"]["role"], "assistant");
+        let gone = Source {
+            id: "ses_b".into(),
+            ..source
+        };
+        assert!(rows(&gone, homes).is_err());
+    }
+
+    /// A herdr on a socket of its own answering `integration.list` and
+    /// `pane.process_info` with process `pid` in `cwd`, `calls` times.
+    fn fake_herdr(name: &str, pid: u32, cwd: &Path, calls: usize) -> PathBuf {
+        use std::{io::BufRead as _, os::unix::net::UnixListener};
+        let socket = std::env::temp_dir().join(format!("gerdr-tail-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).unwrap();
+        let cwd = cwd.to_path_buf();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(calls) {
+                let mut stream = stream.unwrap();
+                let mut line = String::new();
+                std::io::BufReader::new(&stream)
+                    .read_line(&mut line)
+                    .unwrap();
+                let asked: Value = serde_json::from_str(&line).unwrap();
+                let result = match asked["method"].as_str() {
+                    Some("integration.list") => serde_json::json!({"integrations": [
+                        {"target": "cursor", "state": "not_installed"},
+                    ]}),
+                    _ => serde_json::json!({"process_info": {
+                        "shell_pid": 1, "foreground_process_group_id": pid,
+                        "foreground_processes": [{"pid": pid, "name": "cursor-agent", "cwd": cwd}],
+                    }}),
+                };
+                let reply = serde_json::json!({"id": asked["id"], "result": result});
+                writeln!(stream, "{reply}").unwrap();
+            }
+        });
+        socket
+    }
+
+    #[test]
+    fn a_pane_herdr_names_no_chat_of_gets_a_guess_by_folder_and_time() {
+        let mut home = Home::new("guess");
+        let transcript = home
+            .dir
+            .join(".cursor/projects/work-app/agent-transcripts/c-1");
+        std::fs::create_dir_all(&transcript).unwrap();
+        cursor_store(&home.dir, "c-1", &[]);
+        // A process begun just now stands for the agent.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let socket = fake_herdr("guess", child.id(), Path::new("/work/app"), 2);
+        home.chats.herdr = Some(Herdr::on_socket(socket.clone()));
+        let mut none = agent("cursor", "id", "c-1");
+        none.agent_session = None;
+        home.chats.follow(none, &mut Vec::new());
+        child.kill().ok();
+        child.wait().ok();
+        let source = &home.chat().source;
+        assert_eq!((source.id.as_str(), source.guessed), ("c-1", true));
+        assert_eq!(
+            chat_problems("cursor"),
+            [source::not_installed(AgentKind::Cursor, "cursor")]
+        );
+        let _ = std::fs::remove_file(&socket);
     }
 }

@@ -653,7 +653,8 @@ impl Gerdr {
                 self.show_error("Couldn't start reading the agents' chats".into());
                 return false;
             }
-            self.chats.tail = Some(Tail::spawn(tx));
+            let socket = (self.session.herdr.as_ref()).map(|h| h.socket().to_path_buf());
+            self.chats.tail = Some(Tail::spawn(tx, socket));
         }
         true
     }

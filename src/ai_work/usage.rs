@@ -259,24 +259,27 @@ fn cursor_conn(raw: &[u8]) -> rusqlite::Result<rusqlite::Connection> {
 /// (a role and a content each), in the order they were written. Blobs
 /// that are no message are left out.
 pub fn cursor_messages(raw: &[u8]) -> Result<Vec<Value>, String> {
-    let read = || -> rusqlite::Result<Vec<Value>> {
-        let conn = cursor_conn(raw)?;
-        let mut stmt = conn.prepare("SELECT data FROM blobs ORDER BY rowid")?;
-        let mut rows = stmt.query([])?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            let Ok(data) = row.get::<_, Vec<u8>>(0) else {
-                continue;
-            };
-            if let Ok(blob) = serde_json::from_slice::<Value>(&data)
-                && blob["role"].is_string()
-            {
-                out.push(blob);
-            }
+    (cursor_conn(raw).and_then(|conn| cursor_messages_in(&conn))).map_err(|err| err.to_string())
+}
+
+/// The messages of the Cursor chat database open on `conn`, as
+/// `cursor_messages` gives them. A live `store.db` opened as a file is read
+/// with its WAL, which a copy of its bytes leaves out.
+pub fn cursor_messages_in(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Value>> {
+    let mut stmt = conn.prepare("SELECT data FROM blobs ORDER BY rowid")?;
+    let mut rows = stmt.query([])?;
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        let Ok(data) = row.get::<_, Vec<u8>>(0) else {
+            continue;
+        };
+        if let Ok(blob) = serde_json::from_slice::<Value>(&data)
+            && blob["role"].is_string()
+        {
+            out.push(blob);
         }
-        Ok(out)
-    };
-    read().map_err(|err| err.to_string())
+    }
+    Ok(out)
 }
 
 fn cursor_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Vec<Message>> {
@@ -573,6 +576,45 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].model, "grok-4.7");
         assert_eq!(got.iter().map(|m| m.usage.tool_calls).sum::<u64>(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A live chat's messages still in its WAL are read from the file,
+    /// and missed in a copy of its bytes.
+    #[test]
+    fn a_live_cursor_store_is_read_through_its_wal() {
+        let dir = std::env::temp_dir().join(format!("gerdr-usage-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("store.db");
+        let writer = rusqlite::Connection::open(&db).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+                 CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);",
+            )
+            .unwrap();
+        writer
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        for (i, blob) in [r#"{"role":"user","content":"go"}"#, "\u{1}x"]
+            .iter()
+            .enumerate()
+        {
+            writer
+                .execute(
+                    "INSERT INTO blobs VALUES (?1, ?2)",
+                    rusqlite::params![i.to_string(), blob.as_bytes()],
+                )
+                .unwrap();
+        }
+        // The writer stays open, as Cursor's does: the rows are in the WAL.
+        let reader = crate::cursor_agents::open_read_only(&db).unwrap();
+        let got = cursor_messages_in(&reader).unwrap();
+        assert_eq!(got, [serde_json::json!({"role": "user", "content": "go"})]);
+        let copied = cursor_messages(&std::fs::read(&db).unwrap()).unwrap();
+        assert!(copied.is_empty(), "{copied:?}");
+        drop((reader, writer));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

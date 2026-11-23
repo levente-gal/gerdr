@@ -1,13 +1,17 @@
 //! Which chat a pane's agent holds, and where its transcript is.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use super::Source;
 use crate::{
     ai_work::{
-        AgentKind,
+        AgentKind, Chat,
         locate::{self, Homes},
     },
+    feature::Stage,
     herdr::AgentInfo,
 };
 
@@ -17,17 +21,50 @@ pub const NOT_FOUND: &str = "Couldn't find this agent's chat. Its screen still w
 /// with its first message.
 pub const NOT_YET: &str = "No transcript of this chat yet. It shows once the agent writes one";
 
+/// An agent's run in a pane, for finding its chat when herdr names none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Run {
+    /// When it began, in seconds since the epoch.
+    pub started: u64,
+    /// Where it runs.
+    pub cwd: PathBuf,
+}
+
+/// The kind of agent in a pane, as herdr names it.
+pub fn kind(agent: &AgentInfo) -> Option<AgentKind> {
+    let session = agent.agent_session.as_ref().map(|s| s.agent.as_str());
+    (agent.agent.as_deref()).or(session).map(AgentKind::of)
+}
+
+/// Whether herdr names the chat of the agent in the pane.
+pub fn named(agent: &AgentInfo) -> bool {
+    let session = agent.agent_session.as_ref();
+    kind(agent).is_some_and(|kind| session.is_some_and(|s| AgentKind::of(&s.agent) == kind))
+}
+
+/// Whether gerdr can find the chats of agent `kind` with no help from
+/// herdr: by folder and start time.
+pub fn guessable(kind: AgentKind) -> bool {
+    matches!(
+        kind,
+        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Cursor
+    )
+}
+
 /// The chat of the agent in a pane, as herdr knows it; else why there is
 /// none, said to the user.
 pub fn find(agent: &AgentInfo, homes: &Homes) -> Result<Source, String> {
     let session = agent.agent_session.as_ref();
-    let Some(name) = (agent.agent.as_deref()).or(session.map(|s| s.agent.as_str())) else {
+    let Some(kind) = kind(agent) else {
         return Err(NOT_FOUND.into());
     };
-    let kind = AgentKind::of(name);
-    // shortcut: only Claude's chats are read; the others come in Inc 2.
-    if kind != AgentKind::Claude {
-        let shown = agent.display_agent.as_deref().unwrap_or(name);
+    if !(kind == AgentKind::Claude || guessable(kind)) {
+        let name = (agent.agent.as_deref()).or(session.map(|s| s.agent.as_str()));
+        let shown = agent
+            .display_agent
+            .as_deref()
+            .or(name)
+            .unwrap_or("this agent");
         return Err(format!("Chats of {shown} show in a later gerdr"));
     }
     let Some(session) = session.filter(|s| AgentKind::of(&s.agent) == kind) else {
@@ -35,45 +72,139 @@ pub fn find(agent: &AgentInfo, homes: &Homes) -> Result<Source, String> {
     };
     match session.kind.as_str() {
         "path" => {
-            let path = claude_transcript(&session.value, &homes.claude).ok_or(NOT_FOUND)?;
-            let id = (path.file_stem().and_then(|s| s.to_str()))
-                .ok_or(NOT_FOUND)?
-                .to_owned();
+            let path = match kind {
+                AgentKind::Claude => claude_transcript(&session.value, &homes.claude),
+                AgentKind::Codex => codex_rollout(&session.value, &homes.codex),
+                _ => None,
+            };
+            let path = path.ok_or(NOT_FOUND)?;
+            let stem = (path.file_stem().and_then(|s| s.to_str())).ok_or(NOT_FOUND)?;
+            // A rollout is `rollout-<yyyy-mm-ddThh-mm-ss>-<id>`.
+            let id = match kind {
+                AgentKind::Codex => stem.get("rollout-".len() + 20..).unwrap_or(stem),
+                _ => stem,
+            };
             Ok(Source {
                 agent: kind,
-                id,
+                id: id.to_owned(),
                 path,
                 guessed: false,
             })
         }
         "id" if locate::plain_id(&session.value) => {
-            let found = locate::claude(homes, &session.value).ok_or(NOT_YET)?;
-            Ok(Source {
-                agent: kind,
-                id: found.id,
-                path: found.main,
-                guessed: false,
-            })
+            let found = locate(homes, kind, Some(&session.value), None, &HashSet::new())?;
+            found.ok_or_else(|| NOT_YET.into())
         }
         _ => Err(NOT_FOUND.into()),
     }
 }
 
+/// The chat of agent `kind`'s run `run`, by its folder and start time, not
+/// one of `claimed` (other panes'). It may be another chat of the agent
+/// there: the source says it was guessed.
+pub fn by_time(
+    kind: AgentKind,
+    run: &Run,
+    homes: &Homes,
+    claimed: &HashSet<String>,
+) -> Result<Option<Source>, String> {
+    match guessable(kind) {
+        true => locate(homes, kind, None, Some(run), claimed),
+        false => Ok(None),
+    }
+}
+
+/// The problem said when herdr's integration for agent `kind`, `target`
+/// to herdr, isn't installed.
+pub fn not_installed(kind: AgentKind, target: &str) -> String {
+    let install = format!("Install it with `herdr integration install {target}`.");
+    match guessable(kind) {
+        true => format!(
+            "herdr's {target} integration isn't installed, so gerdr finds {target} chats by \
+             folder and start time and can pick the wrong one. {install}"
+        ),
+        false => format!(
+            "herdr's {target} integration isn't installed, so gerdr can't find {target} \
+             chats. {install}"
+        ),
+    }
+}
+
+/// Said when no chat was found and herdr's integration for `target` isn't
+/// installed.
+pub fn missing_integration(target: &str) -> String {
+    format!(
+        "{NOT_FOUND}. herdr's {target} integration isn't installed: \
+         `herdr integration install {target}` lets gerdr find its chats"
+    )
+}
+
+/// A chat to look for with `locate`: `id`, else the one of `run`.
+pub(super) fn chat(agent: AgentKind, id: Option<&str>, run: Option<&Run>) -> Chat {
+    Chat {
+        agent,
+        id: id.map(str::to_owned),
+        // No stage's: `locate` doesn't look at it.
+        stage: Stage::Build,
+        n: 0,
+        started: run.map_or(0, |run| run.started),
+        folders: run.map(|run| vec![run.cwd.clone()]).unwrap_or_default(),
+        machine: None,
+    }
+}
+
+/// Chat `id` of agent `kind`, else the one of `run`, as `locate` finds it.
+fn locate(
+    homes: &Homes,
+    kind: AgentKind,
+    id: Option<&str>,
+    run: Option<&Run>,
+    claimed: &HashSet<String>,
+) -> Result<Option<Source>, String> {
+    let chat = chat(kind, id, run);
+    let found = match (kind, id) {
+        (AgentKind::Cursor, None) => locate::cursor_by_time(homes, &chat, claimed),
+        _ => locate::find(homes, &chat, claimed)
+            .map_err(|err| format!("Couldn't read this agent's chats: {err}"))?,
+    };
+    Ok(found.map(|found| Source {
+        agent: kind,
+        id: found.id,
+        path: found.main,
+        guessed: id.is_none(),
+    }))
+}
+
 /// `path` as it really is, if it is a Claude transcript: a regular
 /// `.jsonl` file under `projects/` of one of the config folders `homes`.
-/// The path comes from herdr's socket, which another process writes: no
-/// `..` or link leads out.
 fn claude_transcript(path: &str, homes: &[PathBuf]) -> Option<PathBuf> {
+    let projects: Vec<PathBuf> = homes.iter().map(|home| home.join("projects")).collect();
+    transcript(path, &projects, |_| true)
+}
+
+/// `path` as it really is, if it is a Codex rollout: a regular
+/// `rollout-*.jsonl` file under `sessions/` of Codex's home `codex`.
+fn codex_rollout(path: &str, codex: &Path) -> Option<PathBuf> {
+    transcript(path, &[codex.join("sessions")], |name| {
+        name.starts_with("rollout-")
+    })
+}
+
+/// `path` as it really is, if it is a regular `.jsonl` file under one of
+/// folders `under` whose name passes `name_ok`. The path comes from herdr's
+/// socket, which another process writes: no `..` or link leads out.
+fn transcript(path: &str, under: &[PathBuf], name_ok: impl Fn(&str) -> bool) -> Option<PathBuf> {
     let path = Path::new(path);
     if !path.is_absolute() {
         return None;
     }
     let real = path.canonicalize().ok()?;
-    let inside = (homes.iter())
-        .filter_map(|home| home.join("projects").canonicalize().ok())
-        .any(|projects| real.starts_with(projects));
+    let inside = (under.iter())
+        .filter_map(|dir| dir.canonicalize().ok())
+        .any(|dir| real.starts_with(dir));
+    let name = real.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let jsonl = real.extension().is_some_and(|ext| ext == "jsonl");
-    (inside && jsonl && real.is_file()).then_some(real)
+    (inside && jsonl && name_ok(name) && real.is_file()).then_some(real)
 }
 
 #[cfg(test)]
@@ -90,7 +221,7 @@ pub(crate) mod tests {
         });
         let mut info: AgentInfo = serde_json::from_value(info).expect("agent info");
         info.agent_session = Some(AgentSession {
-            source: "herdr:claude".into(),
+            source: format!("herdr:{name}"),
             agent: name.into(),
             kind: kind.into(),
             value: value.into(),
@@ -105,6 +236,11 @@ pub(crate) mod tests {
         std::fs::create_dir_all(dir.join(".claude/projects/-work")).expect("dir");
         let homes = Homes::under(&dir);
         (dir, homes)
+    }
+
+    fn put(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("dir");
+        std::fs::write(path, text).expect("write");
     }
 
     #[test]
@@ -124,15 +260,59 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn codex_opencode_and_cursor_ids_find_their_chats_once_written() {
+        let (dir, homes) = home("ids");
+        let found = |name: &str, id: &str| find(&agent(name, "id", id), &homes);
+        assert_eq!(found("codex", "019a-1"), Err(NOT_YET.into()));
+        assert_eq!(found("opencode", "ses_a"), Err(NOT_YET.into()));
+        assert_eq!(found("cursor", "c-1"), Err(NOT_YET.into()));
+        let rollout =
+            dir.join(".codex/sessions/2026/08/26/rollout-2026-08-26T13-58-45-019a-1.jsonl");
+        put(&rollout, "{}\n");
+        let store = dir.join(".cursor/chats/f00/c-1/store.db");
+        put(&store, "");
+        std::fs::create_dir_all(homes.opencode.parent().unwrap()).expect("dir");
+        let conn = rusqlite::Connection::open(&homes.opencode).expect("db");
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, time_created INTEGER);
+             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+             INSERT INTO session VALUES ('ses_a', NULL, '/w', 100500);",
+        )
+        .expect("tables");
+        drop(conn);
+        let of = |name: &str, id: &str| found(name, id).map(|s| (s.agent, s.id, s.path, s.guessed));
+        assert_eq!(
+            of("codex", "019a-1"),
+            Ok((AgentKind::Codex, "019a-1".into(), rollout, false))
+        );
+        assert_eq!(
+            of("opencode", "ses_a"),
+            Ok((
+                AgentKind::OpenCode,
+                "ses_a".into(),
+                homes.opencode.clone(),
+                false
+            ))
+        );
+        assert_eq!(
+            of("cursor", "c-1"),
+            Ok((AgentKind::Cursor, "c-1".into(), store, false))
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn ids_that_could_leave_the_folder_are_refused() {
         let (dir, homes) = home("badid");
         std::fs::write(dir.join(".claude/x.jsonl"), "{}\n").expect("write");
-        for id in ["../x", "a/b", "", "a b", "a.b"] {
-            assert_eq!(
-                find(&agent("claude", "id", id), &homes),
-                Err(NOT_FOUND.into()),
-                "{id}"
-            );
+        for name in ["claude", "codex", "cursor", "opencode"] {
+            for id in ["../x", "a/b", "", "a b", "a.b"] {
+                assert_eq!(
+                    find(&agent(name, "id", id), &homes),
+                    Err(NOT_FOUND.into()),
+                    "{name} {id}"
+                );
+            }
         }
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -176,13 +356,78 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_codex_path_is_used_only_if_a_rollout_in_its_sessions() {
+        let (dir, homes) = home("codex-path");
+        let day = dir.join(".codex/sessions/2026/08/26");
+        let rollout = day.join("rollout-2026-08-26T13-58-45-019a-1.jsonl");
+        put(&rollout, "{}\n");
+        let path = |path: &Path| find(&agent("codex", "path", path.to_str().unwrap()), &homes);
+        assert_eq!(
+            path(&rollout).map(|s| (s.id, s.path)),
+            Ok(("019a-1".into(), rollout.canonicalize().unwrap()))
+        );
+        let outside = dir.join("rollout-2026-08-26T13-58-45-x.jsonl");
+        put(&outside, "{}\n");
+        assert_eq!(path(&outside), Err(NOT_FOUND.into()));
+        assert_eq!(
+            path(&day.join("../../../../rollout-2026-08-26T13-58-45-x.jsonl")),
+            Err(NOT_FOUND.into())
+        );
+        let link = day.join("rollout-2026-08-26T13-58-45-link.jsonl");
+        std::os::unix::fs::symlink(&outside, &link).expect("link");
+        assert_eq!(path(&link), Err(NOT_FOUND.into()));
+        let other = day.join("history.jsonl");
+        put(&other, "{}\n");
+        assert_eq!(path(&other), Err(NOT_FOUND.into()));
+        let not_jsonl = day.join("rollout-2026-08-26T13-58-45-y.json");
+        put(&not_jsonl, "{}\n");
+        assert_eq!(path(&not_jsonl), Err(NOT_FOUND.into()));
+        // Cursor and OpenCode name no paths.
+        assert_eq!(
+            find(&agent("cursor", "path", rollout.to_str().unwrap()), &homes),
+            Err(NOT_FOUND.into())
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_run_finds_its_chat_by_folder_and_time_as_a_guess() {
+        let (dir, homes) = home("by-time");
+        let transcript = dir.join(".cursor/projects/work-app/agent-transcripts/c-1");
+        std::fs::create_dir_all(&transcript).expect("dir");
+        put(&dir.join(".cursor/chats/f00/c-1/store.db"), "");
+        let started = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let run = Run {
+            started,
+            cwd: "/work/app".into(),
+        };
+        let none = HashSet::new();
+        let source = by_time(AgentKind::Cursor, &run, &homes, &none).expect("read");
+        assert_eq!(
+            source.map(|s| (s.id, s.guessed)),
+            Some(("c-1".into(), true))
+        );
+        assert_eq!(by_time(AgentKind::Claude, &run, &homes, &none), Ok(None));
+        assert_eq!(by_time(AgentKind::Codex, &run, &homes, &none), Ok(None));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn other_agents_and_no_session_say_why() {
         let (dir, homes) = home("other");
-        let codex = find(&agent("codex", "id", "abc"), &homes);
-        assert_eq!(codex, Err("Chats of codex show in a later gerdr".into()));
+        let t3 = find(&agent("t3", "id", "abc"), &homes);
+        assert_eq!(t3, Err("Chats of t3 show in a later gerdr".into()));
         let mut none = agent("claude", "id", "abc");
         none.agent_session = None;
         assert_eq!(find(&none, &homes), Err(NOT_FOUND.into()));
+        assert!(!named(&none));
+        let mut other = agent("codex", "id", "abc");
+        other.agent_session.as_mut().unwrap().agent = "claude".into();
+        assert_eq!(find(&other, &homes), Err(NOT_FOUND.into()));
+        assert!(!named(&other));
         std::fs::remove_dir_all(&dir).ok();
     }
 }
