@@ -156,6 +156,10 @@ pub struct PaneChat {
     pub top: f64,
     /// The list follows new items while it is at the bottom.
     pub stick: bool,
+    /// Its transcript holds more before what was read.
+    pub earlier: bool,
+    /// The earlier messages were asked for and are being read.
+    pub reading_earlier: bool,
     pub focus: ChatFocus,
     /// The reply being written: kept unsaved, as a draft (K2).
     pub draft: TextField,
@@ -173,6 +177,9 @@ pub enum Event {
         pane_id: String,
         source: Source,
         items: Arc<Vec<Item>>,
+        /// The transcript holds more before them, read on asking
+        /// (`Tail::earlier`).
+        earlier: bool,
     },
     /// No chat found for the pane, and why.
     Missing { pane_id: String, why: String },

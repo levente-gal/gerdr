@@ -65,6 +65,9 @@ pub struct ChatView {
     pub waiting: Option<Arc<Vec<(String, crate::scrollback::Styled)>>>,
     /// The footer's key hints, from the chat's key tables (`chat::footer`).
     pub hints: Vec<(String, String)>,
+    /// Its transcript holds messages before those read: whether they are
+    /// being read (true) or can be asked for (false).
+    pub earlier: Option<bool>,
     pub hover: Option<ChatHit>,
 }
 
@@ -89,6 +92,7 @@ impl PartialEq for ChatView {
             && self.draft == other.draft
             && rows(&self.waiting, &other.waiting)
             && self.hints == other.hints
+            && self.earlier == other.earlier
             && self.hover == other.hover
     }
 }
@@ -115,6 +119,8 @@ pub enum ChatHit {
     Path(usize),
     /// "Show all" under a tool output cut short.
     ShowAll(usize),
+    /// "Earlier messages", above the first one read.
+    Earlier,
     /// A key button of the waiting panel.
     Key(WaitKey),
     /// The reply box.
@@ -168,6 +174,9 @@ impl ChatLayout {
         }
         let y = (pos.y - self.list.loc.y as f64).floor() as i32 + top;
         let x = (pos.x - parts.column.0 as f64).floor() as i32;
+        if view.earlier.is_some() && (PART_GAP..PART_GAP + CARD_ROW).contains(&y) {
+            return (0..parts.column.1).contains(&x).then_some(ChatHit::Earlier);
+        }
         let i = items.partition_point(|(t, laid)| t + laid.h <= y);
         let (t, laid) = items.get(i).filter(|(t, _)| *t <= y)?;
         let at = Point::from((x, y - t));
@@ -494,7 +503,7 @@ fn message_layout(view: &ChatView, list: Rect) -> Option<Message> {
 /// below them.
 fn stacked(view: &ChatView, w: i32) -> (Vec<(i32, Rc<Laid>)>, i32) {
     let rows = rows::rows(&view.items, &view.unfolded);
-    let mut y = PART_GAP;
+    let mut y = PART_GAP + earlier_h(view);
     let mut laid_rows = Vec::with_capacity(rows.len());
     let mut was = None;
     for row in rows {
@@ -513,6 +522,23 @@ fn stacked(view: &ChatView, w: i32) -> (Vec<(i32, Rc<Laid>)>, i32) {
         y + PART_GAP
     };
     (laid_rows, content)
+}
+
+/// How high the "Earlier messages" row above the items is, with its gap:
+/// none when the transcript was read from its start.
+fn earlier_h(view: &ChatView) -> i32 {
+    match view.earlier {
+        Some(_) => CARD_ROW + TURN_GAP,
+        None => 0,
+    }
+}
+
+/// What the "Earlier messages" row says, and its colour.
+fn earlier_words(reading: bool) -> (&'static str, Mark) {
+    match reading {
+        true => ("Reading earlier messages…", Mark::Muted),
+        false => ("Earlier messages", Mark::Link),
+    }
 }
 
 /// Row `row` of `view` laid out for a column `w` wide.
@@ -1195,6 +1221,22 @@ impl Painter {
             let top = top_of(view, content, list.size.h);
             let (lx, ly, lw, lh) = rect_px(list, scale);
             c.clipped(lx as i32, ly as i32, lw as i32, lh as i32, |c| {
+                if let Some(reading) = view.earlier {
+                    let row = rect(
+                        parts.column.0 - r.loc.x,
+                        list.loc.y + PART_GAP - top,
+                        parts.column.1,
+                        CARD_ROW,
+                    );
+                    let hover = if view.hover == Some(ChatHit::Earlier) {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    self.row_highlight(c, row, (false, hover), scale, p);
+                    let (words, mark) = earlier_words(reading);
+                    self.centered(c, words, FONT_SIZE, row, scale, mark.color(p));
+                }
                 for i in in_view(&items, top, list.size.h) {
                     let (y, laid) = &items[i];
                     let at = Point::from((parts.column.0 - r.loc.x, list.loc.y + y - top));
@@ -1472,6 +1514,7 @@ pub(super) mod tests {
             draft: Line::default(),
             waiting: None,
             hints: crate::chat::footer(ChatFocus::List, true),
+            earlier: None,
             hover: None,
         }
     }
@@ -1753,6 +1796,24 @@ pub(super) mod tests {
         let right = v.rect.loc.x + v.rect.size.w - (p.column.0 + p.column.1);
         assert!((left - right).abs() <= 1, "{left} {right}");
         assert!(p.bar_x > p.column.0 + p.column.1);
+    }
+
+    #[test]
+    fn earlier_messages_sit_above_the_first_one_read() {
+        let mut v = view();
+        let below = item_rect(&v, 0).loc.y;
+        v.earlier = Some(false);
+        let layout = chat_layout(&v);
+        let first = item_rect(&v, 0);
+        assert_eq!(first.loc.y - below, CARD_ROW + TURN_GAP);
+        let p = parts(&v);
+        let row = Point::from((
+            (p.column.0 + p.column.1 / 2) as f64,
+            (layout.list.loc.y + PART_GAP + CARD_ROW / 2) as f64,
+        ));
+        assert_eq!(layout.hit(&v, row), Some(ChatHit::Earlier));
+        assert_eq!(layout.hit(&v, middle(first)), Some(ChatHit::Item(0)));
+        assert_eq!(earlier_words(true).0, "Reading earlier messages…");
     }
 
     #[test]

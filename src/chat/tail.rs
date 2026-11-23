@@ -28,8 +28,8 @@ use crate::{
     herdr::{AgentInfo, Herdr},
 };
 
-/// The most of a transcript read the first time: its end.
-// shortcut: earlier turns past this aren't read; paging back comes in Inc 3.
+/// The most of a transcript read the first time, its end; and how much
+/// more each ask for earlier messages reads.
 pub const CHAT_TAIL: u64 = 2 * 1024 * 1024;
 /// How often the followed chats are looked at.
 const POLL: Duration = Duration::from_millis(500);
@@ -50,6 +50,7 @@ const NOT_INSTALLED: &str = "not_installed";
 enum Cmd {
     Follow(Box<AgentInfo>),
     Stop(String),
+    Earlier(String),
 }
 
 /// The thread: what it is asked to follow.
@@ -88,6 +89,12 @@ impl Tail {
         self.send(Cmd::Stop(pane_id.to_owned()));
     }
 
+    /// Read more of the chat of pane `pane_id`, before what was read, and
+    /// send all its items again.
+    pub fn earlier(&self, pane_id: &str) {
+        self.send(Cmd::Earlier(pane_id.to_owned()));
+    }
+
     fn send(&self, cmd: Cmd) {
         if self.cmds.send(cmd).is_err() {
             tracing::warn!("agent chats: the thread that reads them has ended");
@@ -115,6 +122,7 @@ fn run(asked: &mpsc::Receiver<Cmd>, chats: &mut Chats, out: &channel::Sender<Eve
                 chats.follow(*agent, &mut events);
             }
             Ok(Cmd::Stop(pane_id)) => chats.stop(&pane_id),
+            Ok(Cmd::Earlier(pane_id)) => chats.earlier(&pane_id, &mut events),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 chats.poll(&mut events);
                 next = Instant::now() + POLL;
@@ -183,6 +191,23 @@ impl Chats {
 
     fn stop(&mut self, pane_id: &str) {
         self.panes.remove(pane_id);
+    }
+
+    /// Read more of pane `pane_id`'s chat before what was read.
+    fn earlier(&mut self, pane_id: &str, out: &mut Vec<Event>) {
+        let Some(Ok(chat)) = self.panes.get_mut(pane_id).map(|f| &mut f.chat) else {
+            return;
+        };
+        if let Err(err) = chat.earlier() {
+            let path = chat.source.path.display();
+            tracing::warn!("agent chat of pane {pane_id}: can't read {path}: {err}");
+            out.push(Event::Failed {
+                pane_id: pane_id.to_owned(),
+                error: format!("Couldn't read this agent's earlier messages: {err}"),
+            });
+            return;
+        }
+        chat.poll(&self.homes, pane_id, out);
     }
 
     /// Read what each chat grew by; look again for the chats not found.
@@ -378,6 +403,10 @@ struct Chat {
     file: Option<(u64, u64)>,
     /// How far it is read.
     offset: u64,
+    /// Where its reading began: what is before is read on asking.
+    from: u64,
+    /// How much a read from the end, or further back, takes.
+    chunk: u64,
     /// Whether `offset` is at a line's start: not when the first read began
     /// mid-line.
     whole: bool,
@@ -438,6 +467,8 @@ impl Chat {
             source,
             file: None,
             offset: 0,
+            from: 0,
+            chunk: CHAT_TAIL,
             whole: true,
             prev: Vec::new(),
             sent: None,
@@ -477,6 +508,7 @@ impl Chat {
                 pane_id: pane_id.to_owned(),
                 source: self.source.clone(),
                 items,
+                earlier: self.from > 0,
             });
         }
     }
@@ -553,12 +585,47 @@ impl Chat {
         Ok(())
     }
 
+    /// Read a `chunk` more of the transcript, before where its reading
+    /// began: everything from there to where it is read, with a fresh
+    /// reader, so the calls just before the old start meet their results.
+    /// Items keep their ids, so what was unfolded stays so.
+    fn earlier(&mut self) -> std::io::Result<()> {
+        if self.from == 0 || in_database(self.source.agent) {
+            return Ok(());
+        }
+        let mut file = File::open(&self.source.path)?;
+        let meta = file.metadata()?;
+        // Another file now: the next poll reads it from its end.
+        if self.file != Some((meta.dev(), meta.ino())) || meta.len() < self.offset {
+            return Ok(());
+        }
+        let from = self.from.saturating_sub(self.chunk);
+        file.seek(SeekFrom::Start(from))?;
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(self.offset - from)
+            .read_to_end(&mut bytes)?;
+        // Begun mid-line: from the first whole one.
+        let start = match from {
+            0 => 0,
+            _ => (bytes.iter().position(|&b| b == b'\n')).map_or(bytes.len(), |at| at + 1),
+        };
+        let mut reader = Reader::new(self.source.agent);
+        reader.feed(&bytes[start..]);
+        self.reader = reader;
+        self.from = from;
+        self.whole = true;
+        self.sent = None;
+        Ok(())
+    }
+
     /// Read file `id`, `len` bytes long, again from the start: its last
-    /// `CHAT_TAIL` bytes.
+    /// `chunk` bytes.
     fn restart(&mut self, id: (u64, u64), len: u64) {
         self.reader = Reader::new(self.source.agent);
         self.file = Some(id);
-        self.offset = len.saturating_sub(CHAT_TAIL);
+        self.offset = len.saturating_sub(self.chunk);
+        self.from = self.offset;
         self.whole = self.offset == 0;
         self.prev.clear();
         self.sent = None;
@@ -712,6 +779,52 @@ mod tests {
         home.append("s1", &line("user", "more"));
         home.poll();
         assert_eq!(home.chat().resets, 1);
+    }
+
+    #[test]
+    fn earlier_messages_are_read_on_asking_back_to_the_start() {
+        let mut home = Home::new("earlier");
+        let said: Vec<String> = (0..40)
+            .map(|i| line("user", &format!("message {i:02}")))
+            .collect();
+        home.append("s1", &said.concat());
+        home.chats
+            .follow(agent("claude", "id", "s1"), &mut Vec::new());
+        // Read again with a small chunk: about the last ten lines.
+        let chunk = (said[0].len() * 10) as u64;
+        let pane = home.chats.panes.get_mut("p1").unwrap();
+        let chat = pane.chat.as_mut().unwrap();
+        chat.chunk = chunk;
+        chat.file = None;
+        let events = home.poll();
+        let shown = |events: &[Event]| match events {
+            [Event::Items { items, earlier, .. }] => (items.len(), *earlier),
+            other => panic!("{other:?}"),
+        };
+        let (first, earlier) = shown(&events);
+        assert!(earlier && (9..=10).contains(&first), "{first}");
+        let mut out = Vec::new();
+        home.chats.earlier("p1", &mut out);
+        let (second, earlier) = shown(&out);
+        assert!(earlier && second >= first + 9, "{second}");
+        // Until the start: all of it, no more to ask for.
+        for _ in 0..5 {
+            out.clear();
+            home.chats.earlier("p1", &mut out);
+        }
+        let all = home.chat().reader.items().to_vec();
+        assert_eq!(all.len(), 40);
+        assert_eq!(all[0].id(), "user-message 00.0");
+        assert_eq!(home.chat().from, 0);
+        out.clear();
+        home.chats.earlier("p1", &mut out);
+        assert!(out.is_empty(), "nothing more");
+        // It still follows the end.
+        home.append("s1", &line("assistant", "done"));
+        match &home.poll()[..] {
+            [Event::Items { items, earlier, .. }] => assert!(items.len() == 41 && !earlier),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

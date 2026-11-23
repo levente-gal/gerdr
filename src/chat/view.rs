@@ -435,6 +435,14 @@ fn follow_plan<'a>(
     (follow, stop)
 }
 
+/// Where a chat stands: its first item, that item's row's top in its list,
+/// and how far the list is scrolled.
+struct Place {
+    first: String,
+    y: i32,
+    top: f64,
+}
+
 /// Take `event` from the tail into its pane's chat, among `chats` (by herdr
 /// pane id). Whether a chat took it: one closed meanwhile doesn't.
 fn take_event<'a>(
@@ -450,10 +458,17 @@ fn take_event<'a>(
         return false;
     };
     match event {
-        Event::Items { source, items, .. } => {
+        Event::Items {
+            source,
+            items,
+            earlier,
+            ..
+        } => {
             let n = rows(&items, &chat.unfolded).len();
             chat.picked = chat.picked.filter(|i| *i < n);
             chat.items = items;
+            chat.earlier = earlier;
+            chat.reading_earlier = false;
             chat.source = Some(source);
             chat.reading = Reading::Read;
         }
@@ -669,8 +684,72 @@ impl Gerdr {
         if let Event::Failed { pane_id, error } = &event {
             tracing::warn!("the chat of pane {pane_id}: {error}");
         }
+        let items_of = match &event {
+            Event::Items { pane_id, .. } => Some(pane_id.clone()),
+            _ => None,
+        };
+        let place = items_of.as_deref().and_then(|p| self.chat_place_of(p));
         // A pane closed meanwhile: nothing waits for it.
         take_event(chats_mut(&mut self.workspaces), event);
+        if let (Some(pane_id), Some(place)) = (items_of, place) {
+            self.chat_keep_place(&pane_id, place);
+        }
+    }
+
+    /// Where pane `pane_id`'s chat stands, to stay there as earlier
+    /// messages come in above.
+    fn chat_place_of(&self, pane_id: &str) -> Option<Place> {
+        let (_, _, view) = (self.chat_places().into_iter()).find(|(_, p, _)| p == pane_id)?;
+        let first = view.items.first()?.id().to_owned();
+        let (y, _) = chrome::chat_item_span(&view, 0)?;
+        Some(Place {
+            first,
+            y,
+            top: view.top,
+        })
+    }
+
+    /// Earlier messages came in above pane `pane_id`'s chat, which stood
+    /// at `place`: the same messages stay in view, and the same one picked.
+    fn chat_keep_place(&mut self, pane_id: &str, place: Place) {
+        let Some((_, _, view)) = (self.chat_places().into_iter()).find(|(_, p, _)| p == pane_id)
+        else {
+            return;
+        };
+        let Some(i) = (view.items.iter()).position(|item| item.id() == place.first) else {
+            return;
+        };
+        let shown = rows(&view.items, &view.unfolded);
+        let Some(r) = shown.iter().position(|row| row.span().contains(&i)) else {
+            return;
+        };
+        let Some((y, _)) = chrome::chat_item_span(&view, r).filter(|(y, _)| *y != place.y) else {
+            return;
+        };
+        let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
+            return;
+        };
+        chat.picked = chat
+            .picked
+            .map(|p| (p + r).min(shown.len().saturating_sub(1)));
+        if !chat.stick {
+            self.chat_scroll_to(pane_id, Some(place.top + f64::from(y - place.y)));
+        }
+    }
+
+    /// Ask for the messages before those read of pane `pane_id`'s chat,
+    /// once until they come.
+    fn chat_earlier(&mut self, pane_id: &str) {
+        let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
+            return;
+        };
+        if !chat.earlier || chat.reading_earlier {
+            return;
+        }
+        if let Some(tail) = self.chats.tail.as_ref() {
+            chat.reading_earlier = true;
+            tail.earlier(pane_id);
+        }
     }
 
     /// Read the screens of the chats in `wanted` whose agent waits on the
@@ -982,6 +1061,10 @@ impl Gerdr {
                     draft: chat.draft.line(),
                     waiting: self.chats.waiting.get(pane_id).cloned(),
                     hints: footer(chat.focus, chat.draft.line().text.is_empty()),
+                    earlier: match (chat.earlier, chat.reading_earlier) {
+                        (false, _) => None,
+                        (true, reading) => Some(reading),
+                    },
                     hover: None,
                 };
                 view.hover = pointer
@@ -1058,6 +1141,7 @@ impl Gerdr {
                 }
             }
             ChatHit::Path(i) => self.chat_open_path(&pane_id, i),
+            ChatHit::Earlier => self.chat_earlier(&pane_id),
             ChatHit::Key(key) => self.chat_wait_key(&pane_id, key),
             ChatHit::Composer => {
                 chat.focus = ChatFocus::Composer;
@@ -1145,6 +1229,7 @@ impl Gerdr {
     /// Move each chat shown on to `now`: one following new items stands at
     /// its bottom; one scrolled back to its bottom follows them again.
     pub(crate) fn chat_scroll_tick(&mut self, now: Instant) {
+        let mut at_top = Vec::new();
         for (_, pane_id, view) in self.chat_places() {
             let b = chat_bounds(&chrome::chat_layout(&view));
             let scroll =
@@ -1160,6 +1245,13 @@ impl Gerdr {
                 chat.stick = true;
             }
             chat.top = scroll.pos().clamp(0.0, b.max);
+            // Scrolled up to the first message read: read the ones before.
+            if !chat.stick && chat.top < 1.0 && chat.earlier && !chat.reading_earlier {
+                at_top.push(pane_id);
+            }
+        }
+        for pane_id in at_top {
+            self.chat_earlier(&pane_id);
         }
     }
 }
@@ -1255,6 +1347,7 @@ mod tests {
             pane_id: "w1:p2".into(),
             source: source.clone(),
             items: Arc::new(vec![user("u1", "hi")]),
+            earlier: true,
         };
         assert!(take_event(
             [("w1:p1", &mut one), ("w1:p2", &mut two)],
@@ -1262,6 +1355,7 @@ mod tests {
         ));
         assert_eq!(two.reading, Reading::Read);
         assert_eq!(two.items.len(), 1);
+        assert!(two.earlier && !two.reading_earlier);
         assert_eq!(two.source, Some(source));
         assert_eq!(one.reading, Reading::Finding);
         let missing = Event::Missing {

@@ -291,6 +291,12 @@ impl Reader {
             let id = self.id(line, k);
             match block["type"].as_str() {
                 Some("text") => self.answer(message, id, at, block["text"].as_str().unwrap_or("")),
+                // With thinking shown as updates, Claude Code keeps its
+                // reasoning out and these are its notes to the user: the
+                // terminal shows them as said, so the chat does too.
+                Some("thinking") if line["thinkingDisplay"] == "updates" => {
+                    self.answer(message, id, at, block["thinking"].as_str().unwrap_or(""))
+                }
                 Some("thinking") => {
                     let text = block["thinking"].as_str().unwrap_or("").trim();
                     if !text.is_empty() {
@@ -662,6 +668,23 @@ mod tests {
         assert_eq!(items[0], thinking);
         assert!(matches!(items[1], Item::Assistant { .. }), "{items:?}");
         assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn thinking_shown_as_updates_is_said() {
+        let note = serde_json::json!({ "type": "thinking", "thinking": "Reading the tail first.", "signature": "x" });
+        let blank = serde_json::json!({ "type": "thinking", "thinking": "", "signature": "x" });
+        let mut lines = [said("a1", "msg_1", note), said("a2", "msg_2", blank)];
+        for line in &mut lines {
+            line["thinkingDisplay"] = "updates".into();
+        }
+        let reader = read(&lines);
+        let items = reader.items();
+        assert_eq!(items.len(), 1, "{items:?}");
+        let Item::Assistant { blocks, .. } = &items[0] else {
+            panic!("{items:?}")
+        };
+        assert_eq!(**blocks, md_blocks::blocks("Reading the tail first."));
     }
 
     #[test]
