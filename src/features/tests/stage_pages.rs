@@ -1486,7 +1486,7 @@ fn an_open_agents_card_says_how_full_its_context_is() {
         .into(),
         ..ship::probe_seen(&f)
     };
-    let status = |probe: &Probe| {
+    let status = |f: &Feature, probe: &Probe| {
         let state = PanelState {
             probe: Some(probe),
             fix_picks: vec![AgentChip {
@@ -1497,8 +1497,8 @@ fn an_open_agents_card_says_how_full_its_context_is() {
             }],
             ..PanelState::default()
         };
-        let actions = page_actions(&f, Stage::AiReview, RowCtx::default());
-        let page = stage_page(&f, Stage::AiReview, &state, &actions, 2_000);
+        let actions = page_actions(f, Stage::AiReview, RowCtx::default());
+        let page = stage_page(f, Stage::AiReview, &state, &actions, 2_000);
         page.sections.iter().find_map(|s| match s {
             PageSection::Agent {
                 stage: Stage::Build,
@@ -1509,13 +1509,21 @@ fn an_open_agents_card_says_how_full_its_context_is() {
         })
     };
     let said = |what: &str| Some(format!("Build agent \u{b7} next fixes: this agent{what}"));
-    assert_eq!(status(&probe(n, 84_002)), said(" \u{b7} context 84k / 1M"));
+    assert_eq!(status(&f, &probe(n, 84_002)), said(" \u{b7} context 84k / 1M"));
     assert_eq!(
-        status(&probe(n, 850_000)),
+        status(&f, &probe(n, 850_000)),
         said(" \u{b7} context 850k / 1M, nearly full")
     );
     // Read of another run: not this agent's.
-    assert_eq!(status(&probe(n + 1, 84_002)), said(""));
+    assert_eq!(status(&f, &probe(n + 1, 84_002)), said(""));
+    // Fresh agents picked: the fixes don't go to this chat.
+    let big = probe(n, 850_000);
+    let mut f = f.clone();
+    f.fresh_fixes = true;
+    assert_eq!(
+        status(&f, &big),
+        Some("Build agent \u{b7} next fixes: a fresh Claude Code".into())
+    );
 }
 
 #[test]

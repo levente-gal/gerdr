@@ -391,7 +391,11 @@ pub(super) fn rework_card(
         icon: AgentIcon::from_agent(&run.agent),
         name: run.agent.clone(),
         dot: Dot::Done,
-        status: with_context(named(&status), feature, Stage::Build, state),
+        // A fresh agent takes them: how full this one is says nothing of it.
+        status: match feature.fresh_fixes {
+            true => named(&status),
+            false => with_context(named(&status), feature, Stage::Build, state),
+        },
         tail: Vec::new(),
         buttons,
         picks: state.fix_picks.clone(),
