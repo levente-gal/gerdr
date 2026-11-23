@@ -263,13 +263,17 @@ function rail(f, p, s) {
   return `<div class="rail-wrap"><div class="rail">${joins}${arch}${nodes}</div></div>`;
 }
 
+const HISTORY_SHOWN = 50;
 // A feature's history, folded: its last event in sight, the rest behind it.
 function history(list, now) {
   if (!list.length) return `<h2>History</h2><p class="quiet small">Nothing yet.</p>`;
   const item = (e) => `<li><time>${ago(e.at, now)}</time>${esc(e.what)}</li>`;
+  // The latest: hundreds would be drawn again at every read.
+  const earlier = list.length - HISTORY_SHOWN;
   return `<details class="fold history-fold"><summary><h2>History <span class="count">${list.length}</span></h2>
       <div class="last small"><span class="quiet">${ago(list[0].at, now)}</span> · ${esc(list[0].what)}</div></summary>
-    <ul class="history">${list.map(item).join("")}</ul></details>`;
+    <ul class="history">${list.slice(0, HISTORY_SHOWN).map(item).join("")}</ul>
+    ${earlier > 0 ? `<p class="quiet small">${earlier} earlier not shown here</p>` : ""}</details>`;
 }
 
 const stripAnsi = (t) => String(t ?? "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
@@ -290,12 +294,16 @@ const meter = (done, total, cls = "") => total
 // confirms itself) presses without a confirm here. A pair's chosen one
 // (Pass, Fail) shows in its tone. None while another machine writes it.
 let writable = true;
+// One that is off with a reason (Mark passed) looks off but presses at
+// once, as on the desktop: gerdr says what is left.
 const btn = (b, cls = "") => {
   if (!writable) return "";
   const dots = b.asks && !b.label.endsWith("…") ? "…" : "";
   const asks = b.asks ? ` data-asks="${esc(b.asks)}" data-value="${esc(b.value || "")}"` : "";
-  const more = [b.primary && "primary", b.tone, b.quick && "quiet-press", cls].filter(Boolean).join(" ");
-  return `<button class="${esc(more)}" data-press="${esc(b.id)}"${asks}${b.off ? " disabled" : ""}>${esc(b.label)}${dots}</button>`;
+  const held = b.off && b.why;
+  const more = [b.primary && "primary", b.tone, (b.quick || held) && "quiet-press", held && "held", cls].filter(Boolean).join(" ");
+  const state = held ? ` title="${esc(b.why)}" aria-disabled="true"` : b.off ? " disabled" : "";
+  return `<button class="${esc(more)}" data-press="${esc(b.id)}"${asks}${state}>${esc(b.label)}${dots}</button>`;
 };
 const row = (bs, cls = "") => writable && bs?.length ? `<div class="buttons">${bs.map((b) => btn(b, cls)).join("")}</div>` : "";
 
@@ -350,10 +358,18 @@ function section(x, f, p, s) {
     }
     case "finding": {
       const lead = x.dot ? dotOf(x.dot) : x.tag ? `<span class="sev ${esc(x.tag)}">${esc(x.tag)}</span>` : "";
+      // An issue of one line, its title cut to the desktop's width: the
+      // phone's lines wrap, so the line is the title.
+      const [only] = x.steps?.length === 1 && !x.steps[0][0] ? x.steps : [];
+      const whole = only && x.title.endsWith("…") && only[1].startsWith(x.title.slice(0, -1).trimEnd());
+      const title = whole ? only[1] : x.title;
       // A criterion's steps in full: its Given, When and Then.
-      const steps = x.steps?.length && `<dl class="steps">${x.steps.map(([w, t]) =>
+      const steps = !whole && x.steps?.length && `<dl class="steps">${x.steps.map(([w, t]) =>
         `<div>${w ? `<dt>${esc(w)}</dt>` : ""}<dd>${esc(t)}</dd></div>`).join("")}</dl>`;
+      // A file's place by its name on the card, its path unfolded.
+      const path = x.place?.includes("/") ? x.place : "";
       const more = [
+        path && `<p class="quiet small">${esc(path)}</p>`,
         steps,
         x.body && `<p>${esc(x.body)}</p>`,
         x.fix && `<p>${esc(x.fix)}</p>`,
@@ -361,8 +377,8 @@ function section(x, f, p, s) {
         x.comment && `<p><b>Your comment:</b> ${esc(x.comment)}</p>`,
         x.preview?.length && `<pre class="tail">${esc(stripAnsi(x.preview.join("\n")))}</pre>`,
       ].filter(Boolean).join("");
-      const meta = [x.place, x.state, x.clock].filter(Boolean).map(esc).join(" · ");
-      const body = `<div class="top">${lead}<span class="name">${esc(x.title)}</span>${x.made ? `<span class="t-ready small">made</span>` : ""}</div>
+      const meta = [path ? path.split("/").pop() : x.place, x.state, x.clock].filter(Boolean).map(esc).join(" · ");
+      const body = `<div class="top">${lead}<span class="name">${esc(title)}</span>${x.made ? `<span class="t-ready small">made</span>` : ""}</div>
         ${meta ? `<div class="meta">${meta}</div>` : ""}`;
       // A comment's buttons edit what it says: it starts from that.
       const said = (x.commentButtons || []).map((b) => ({ ...b, value: b.value || x.comment }));
@@ -371,11 +387,17 @@ function section(x, f, p, s) {
         ? `<div class="card finding${x.faded ? " faded" : ""}"><details class="in"><summary>${body}</summary>${more}</details>${acts}</div>`
         : `<div class="card finding${x.faded ? " faded" : ""}">${body}${acts}</div>`;
     }
-    case "review":
-      return `<div class="card"><div class="top"><span class="name">${esc(x.label)}</span>
-          <span class="count">${x.decided} of ${x.total} decided</span></div>
-        ${meter(x.decided, x.total)}<div class="meta">${esc(x.words)}</div>
+    case "review": {
+      // As the desktop's: a pill per severity, what is left of it (all
+      // decided: ✓), and a bar of what was wanted, then what was refused.
+      const pills = (x.counts || []).map(([word, , open]) =>
+        `<span class="pill ${esc(word)}${open ? "" : " faded"}">${open ? `${open} ${esc(word)}` : `${esc(word)} ✓`}</span>`).join("");
+      const pct = (n) => x.total ? Math.round(100 * Math.min(n, x.total) / x.total) : 0;
+      const bar = x.total ? `<div class="meter"><span class="wanted" style="width:${pct(x.decided - x.refused)}%"></span><span class="refused" style="width:${pct(x.refused)}%"></span></div>` : "";
+      return `<div class="card"><div class="top"><span class="name">${esc(x.label)}</span></div>
+        ${pills ? `<div class="pills">${pills}</div>` : ""}${bar}<div class="meta">${esc(x.words)}</div>
         ${x.notes.map((l) => `<div class="small">${toned(l)}</div>`).join("")}</div>`;
+    }
     case "ship": {
       const c = x.card;
       const head = c
@@ -539,7 +561,7 @@ async function newForm() {
     <label>Title<input name="title" autocomplete="off" enterkeyhint="next" placeholder="Bulk edit"></label>
     ${parts}
     <label>What it is for <span class="quiet">(optional)</span>
-      <textarea name="idea" rows="1" placeholder="Discover's agent starts from this, not from its own question"></textarea></label>
+      <textarea name="idea" rows="1" placeholder="Discover's agent starts from this"></textarea></label>
     <div class="buttons"><button class="primary" ${d.error ? "disabled" : ""}>Start feature</button></div>
   </form>`;
   return { title: "New feature", back: "#/", html };

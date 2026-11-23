@@ -123,6 +123,9 @@ struct PhoneButton {
     outcome: PanelOutcome,
     primary: bool,
     off: bool,
+    /// Why it is off, as its desktop tooltip says: pressed all the same,
+    /// gerdr says what is left (Mark passed).
+    why: Option<String>,
     /// How a pair's chosen one shows: `passed`, `failed`.
     tone: Option<&'static str>,
     asks: Option<&'static str>,
@@ -137,6 +140,7 @@ impl PhoneButton {
             outcome,
             primary,
             off: false,
+            why: None,
             tone: None,
             value: String::new(),
         }
@@ -154,6 +158,7 @@ impl PhoneButton {
             "id": self.id(),
             "primary": self.primary,
             "off": self.off,
+            "why": self.why,
             "tone": self.tone,
             "quick": phone_quick(&self.outcome),
             "asks": self.asks,
@@ -388,6 +393,10 @@ fn section_json(section: &chrome::PageSection) -> Option<Value> {
             "words": r.words,
             "decided": r.decided,
             "refused": r.refused,
+            // A pill per tag: what is left of it to decide, of how many.
+            "counts": (r.counts.iter().zip(&r.open))
+                .filter_map(|((tag, n), open)| Some(json!([tag.word()?, n, open])))
+                .collect::<Vec<_>>(),
             "total": r.total,
             "notes": checks(&r.notes),
         }),
@@ -705,6 +714,7 @@ impl Gerdr {
                     b.style == ButtonStyle::Primary || view.page.primary == Some(i),
                 );
                 button.off = b.style == ButtonStyle::Off;
+                button.why = mark_tip(&view.page, i);
                 button.tone = match b.style {
                     ButtonStyle::Passed => Some("passed"),
                     ButtonStyle::Failed => Some("failed"),
@@ -909,7 +919,9 @@ impl Gerdr {
                 let Some(page) = self.phone_page(&project, &slug, stage) else {
                     return json!({ "error": "gerdr has no such feature" });
                 };
-                let Some(button) = page.all().find(|b| b.id() == id && !b.off).cloned() else {
+                // Off with a reason, it presses all the same: gerdr says why.
+                let pressable = |b: &&PhoneButton| !b.off || b.why.is_some();
+                let Some(button) = page.all().filter(pressable).find(|b| b.id() == id).cloned() else {
                     return json!({ "error": "That button isn't on its page any more" });
                 };
                 let shown = page.shown;

@@ -115,7 +115,7 @@ a.card:active { background: var(--raised); }
 .dots { display: flex; align-items: center; gap: 3px; flex: none; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
 .dot.big { width: 13px; height: 13px; }
-.dot.done, .dot.stale { background: var(--ok); }
+.dot.done { background: var(--ok); }
 .dot.stale { background: var(--wait); }
 .dot.current, .dot.fixing { background: var(--accent); }
 .dot.waiting { background: var(--wait); }
@@ -232,7 +232,7 @@ button {
 }
 button:active { filter: brightness(.92); }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 650; }
-button:disabled { opacity: .5; }
+button:disabled, button.held { opacity: .5; }
 .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .buttons + .card { margin-top: 10px; }
 textarea, input, select {
@@ -265,7 +265,8 @@ textarea.more-above.more-below { box-shadow: inset 0 12px 10px -10px rgba(0,0,0,
 }
 .new-link:active { filter: brightness(.92); }
 .sendback { margin-top: 12px; }
-.sendback summary { color: var(--accent); padding: 6px 0; }
+.sendback > summary { display: flex; align-items: center; gap: 6px; color: var(--accent); padding: 6px 0; list-style: none; cursor: pointer; }
+.sendback > summary::-webkit-details-marker { display: none; }
 .sendback textarea { margin: 6px 0 8px; }
 .sev { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .sev.high { color: var(--bad); }
@@ -289,7 +290,6 @@ body.with-bar main { padding-bottom: calc(var(--bar-h, 110px) + 20px); }
 
 /* A stage's page, as the desktop has it, in words. */
 .page-head h2 { font-size: 20px; margin: 18px 0 2px; }
-.page-head .count { color: var(--dim); }
 .pstatus { font-size: 15px; margin-top: 4px; overflow-wrap: anywhere; }
 h3 { font-size: 13px; font-weight: 650; margin: 14px 0 6px; color: var(--quiet); }
 h3 .count { font-weight: 500; }
@@ -309,9 +309,22 @@ h3 .count { font-weight: 500; }
 .lines { list-style: none; margin: 0; padding: 0; font-size: 14px; }
 .lines li { padding: 3px 0; overflow-wrap: anywhere; }
 .fileline { margin: 10px 0 4px; overflow-wrap: anywhere; }
-.meter { height: 5px; border-radius: 3px; background: var(--raised); margin: 8px 0 4px; overflow: hidden; }
-.meter > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.meter { display: flex; height: 5px; border-radius: 3px; background: var(--raised); margin: 8px 0 4px; overflow: hidden; }
+.meter > span { flex: none; height: 100%; background: var(--accent); border-radius: 3px; }
 .meter.full > span { background: var(--ok); }
+/* Findings: what was wanted in the done colour, what was refused muted
+   after it, neither in the accent (as the desktop's bar). */
+.meter > span.wanted { background: var(--ok); }
+.meter > span.refused { background: color-mix(in srgb, var(--quiet) 60%, var(--raised)); }
+.pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.pill {
+  font-size: 12.5px; font-weight: 600; padding: 2px 9px; border-radius: 999px; white-space: nowrap;
+  color: var(--quiet); background: var(--raised);
+}
+.pill.high { color: var(--bad); background: color-mix(in srgb, var(--bad) var(--tint), var(--card)); }
+.pill.medium { color: var(--wait); background: color-mix(in srgb, var(--wait) var(--tint), var(--card)); }
+.pill.yours { color: var(--accent); background: color-mix(in srgb, var(--accent) var(--tint), var(--card)); }
+.pill.faded { opacity: .55; }
 .ticks { list-style: none; margin: 8px 0 0; padding: 0; font-size: 14px; }
 .ticks li { display: flex; gap: 8px; align-items: flex-start; padding: 4px 0; overflow-wrap: anywhere; }
 .ticks li > span:last-child { min-width: 0; }
@@ -337,13 +350,13 @@ details.card > summary, details.fold > summary, .card > details.in > summary { l
 details.card > summary::-webkit-details-marker, details.fold > summary::-webkit-details-marker,
 .card > details.in > summary::-webkit-details-marker { display: none; }
 details.card > summary .top::after, details.fold > summary h2::after, details.fold > summary h3::after,
-.card > details.in > summary .top::after {
+.card > details.in > summary .top::after, .sendback > summary::after {
   content: ""; flex: none; align-self: center; width: 7px; height: 7px; margin: 0 4px 4px auto;
   border: solid var(--dim); border-width: 0 2px 2px 0; transform: rotate(45deg); transition: transform .15s;
 }
 details[open].card > summary .top::after, details[open].fold > summary h2::after,
 details[open].fold > summary h3::after,
-.card > details[open].in > summary .top::after { transform: translateY(4px) rotate(-135deg); }
+.card > details[open].in > summary .top::after, .sendback[open] > summary::after { transform: translateY(4px) rotate(-135deg); }
 details.fold > summary h3 { display: flex; align-items: center; gap: 6px; }
 details.card > p, .card > details.in > p { font-size: 14px; overflow-wrap: anywhere; }
 .history-fold .last { margin: -2px 0 4px; overflow-wrap: anywhere; }
