@@ -1,9 +1,20 @@
 //! A transcript read into chat items, as it grows.
 //!
-//! Claude Code's: a JSON line per user turn, per block of an assistant
-//! message (its lines share `message.id`), per tool result, plus lines of its
-//! own bookkeeping. Subagents' lines (`isSidechain`) go in a `Subagent`
-//! under the `Task`/`Agent` call that started them.
+//! Claude Code's (here): a JSON line per user turn, per block of an
+//! assistant message (its lines share `message.id`), per tool result, plus
+//! lines of its own bookkeeping. Subagents' lines (`isSidechain`) go in a
+//! `Subagent` under the `Task`/`Agent` call that started them.
+//!
+//! Codex's rollout is lines too, fed the same way (`codex`). OpenCode's and
+//! Cursor's chats are in databases: their rows are read whole each time they
+//! change, and `snapshot` makes the items of all of them (`opencode`,
+//! `cursor`). Item ids come from the transcript (a message's, a call's), so
+//! they stay the same when it is read again and folds keep.
+
+mod codex;
+mod cursor;
+mod opencode;
+pub(crate) mod patch;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -74,8 +85,8 @@ impl Reader {
     /// (each ending in `\n`). An item already read can change: a tool call
     /// gets its result.
     pub fn feed(&mut self, lines: &[u8]) {
-        // Codex, OpenCode and Cursor come in later increments.
-        if self.agent != AgentKind::Claude {
+        // OpenCode's and Cursor's are read with `snapshot`.
+        if !matches!(self.agent, AgentKind::Claude | AgentKind::Codex) {
             return;
         }
         self.rest.extend_from_slice(lines);
@@ -89,6 +100,7 @@ impl Reader {
                 continue;
             }
             match serde_json::from_slice::<Value>(raw) {
+                Ok(line) if self.agent == AgentKind::Codex => self.codex_line(&line),
                 Ok(line) => self.route(&line),
                 // Reading can start mid-file: the first line may be cut short.
                 Err(_) if self.lines == 1 => {}
@@ -110,6 +122,25 @@ impl Reader {
     /// The items read so far, in order.
     pub fn items(&self) -> &[Item] {
         &self.items
+    }
+
+    /// Item `item` set at `call`, the tool call's id, so its result
+    /// (`fill`) finds it.
+    fn push_call(&mut self, call: String, at: Option<u64>, item: Item) {
+        self.calls.insert(call, (self.items.len(), at));
+        self.push(item);
+    }
+
+    /// The result of tool call `call`, given to its item; false when the
+    /// call isn't known (made before reading began).
+    fn fill(&mut self, call: &str, out: ToolOut) -> bool {
+        let Some(&(index, _)) = self.calls.get(call) else {
+            return false;
+        };
+        if let Item::Tool { output, .. } | Item::Edit { output, .. } = &mut self.items[index] {
+            *output = Some(out);
+        }
+        true
     }
 
     /// `line` read here, or in its subagent's reader.
@@ -476,6 +507,23 @@ fn more(lines: usize) -> String {
         1 => "\u{2026} 1 more line".to_owned(),
         n => format!("\u{2026} {n} more lines"),
     }
+}
+
+/// The items of a chat kept in a database, from all its rows in order:
+/// OpenCode's message rows as `ai_work::locate` reads them (a `message`
+/// row with its `parts`, or a `session_message` row, its JSON columns as
+/// what they hold), Cursor's `store.db` messages as
+/// `ai_work::usage::cursor_messages` gives them. Other agents' have none.
+pub fn snapshot(agent: AgentKind, rows: &[Value]) -> Vec<Item> {
+    let mut reader = Reader::new(agent);
+    match agent {
+        AgentKind::OpenCode => rows.iter().for_each(|row| reader.opencode_row(row)),
+        AgentKind::Cursor => {
+            (rows.iter().enumerate()).for_each(|(n, row)| reader.cursor_row(n, row))
+        }
+        _ => {}
+    }
+    reader.items
 }
 
 #[cfg(test)]

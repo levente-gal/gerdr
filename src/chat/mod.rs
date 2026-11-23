@@ -4,7 +4,6 @@
 //! pane's place (`chrome::agent_chat`), and what the user types goes to the
 //! pane as if typed there (`view`).
 
-
 use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use crate::{ai_work::AgentKind, md_blocks::DocBlock, text_field::TextField};
@@ -105,8 +104,13 @@ pub struct Source {
     pub agent: AgentKind,
     /// The chat's id.
     pub id: String,
-    /// Its transcript.
+    /// Its transcript: a file of lines (Claude, Codex), or the database
+    /// that holds it (OpenCode's `opencode.db`, a Cursor chat's `store.db`).
     pub path: PathBuf,
+    /// Found by the agent's folder and start time, as herdr named no chat
+    /// for the pane: it may be another chat of that agent there, and the
+    /// chat's head says so.
+    pub guessed: bool,
 }
 
 /// How far finding and reading a pane's chat got.

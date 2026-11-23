@@ -43,6 +43,7 @@ pub fn find(agent: &AgentInfo, homes: &Homes) -> Result<Source, String> {
                 agent: kind,
                 id,
                 path,
+                guessed: false,
             })
         }
         "id" if locate::plain_id(&session.value) => {
@@ -51,6 +52,7 @@ pub fn find(agent: &AgentInfo, homes: &Homes) -> Result<Source, String> {
                 agent: kind,
                 id: found.id,
                 path: found.main,
+                guessed: false,
             })
         }
         _ => Err(NOT_FOUND.into()),

@@ -1231,6 +1231,7 @@ mod tests {
             agent: crate::ai_work::AgentKind::Claude,
             id: "abc".into(),
             path: "/x.jsonl".into(),
+            guessed: false,
         };
         let event = Event::Items {
             pane_id: "w1:p2".into(),
