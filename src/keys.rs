@@ -335,6 +335,12 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "[",
     ),
     (
+        "toggle-chat",
+        Action::ToggleChat,
+        "Show the agent as a chat, or its screen",
+        "e",
+    ),
+    (
         "reload-projects",
         Action::ReloadProjects,
         "Reload the project files",

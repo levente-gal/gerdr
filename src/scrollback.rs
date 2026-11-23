@@ -471,7 +471,7 @@ pub enum Ink {
 }
 
 /// The runs of a line drawn other than plainly, by character of it.
-type Styled = Vec<(Range<usize>, Style)>;
+pub(crate) type Styled = Vec<(Range<usize>, Style)>;
 
 /// What a key or a click asks of gerdr.
 #[derive(Clone, Debug, PartialEq, Eq)]

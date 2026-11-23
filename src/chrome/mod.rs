@@ -15,6 +15,7 @@
 //!
 //! The look follows Zed's default themes, One Dark and One Light.
 
+mod agent_chat;
 mod badge;
 mod canvas;
 mod checkout;
@@ -97,6 +98,7 @@ pub use menu::*;
 pub use painter::*;
 pub use pane_bar::*;
 pub use placeholder::*;
+pub use agent_chat::*;
 pub use project_commands::*;
 pub use project_menu::*;
 pub use quit::*;
@@ -157,6 +159,8 @@ pub struct ChromeView {
     pub pane_drop: Option<Rect>,
     /// The panes of the active tab whose window is still to come.
     pub placeholders: Vec<PlaceholderView>,
+    /// The panes of the active tab shown as chats (see `crate::chat`).
+    pub chats: Vec<ChatView>,
     /// Set while a context menu is open.
     pub context_menu: Option<MenuView>,
     /// Set while a tooltip shows.

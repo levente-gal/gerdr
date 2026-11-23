@@ -25,6 +25,7 @@ mod agent_icons;
 mod agent_pause;
 mod agent_tell;
 mod agents;
+mod chat;
 mod ai_work;
 mod anim;
 mod app_icons;
@@ -356,6 +357,8 @@ pub struct Pane {
     /// The launched X11 app this window was taken for, while it may show a
     /// window of its own in its place (see `remove_window`).
     pub x11_app: Option<u32>,
+    /// The pane shown as a chat, once that was asked for (see `chat`).
+    pub chat: Option<Box<chat::PaneChat>>,
 }
 
 /// A process we started for a tab whose window hasn't shown up yet.
@@ -1458,6 +1461,9 @@ pub enum Action {
     /// Open the scrollback viewer over the focused terminal, to select
     /// and copy more of its output than a screen.
     Scrollback,
+    /// The focused agent pane shown as a chat, or its screen again (see
+    /// `chat`).
+    ToggleChat,
     /// Open the stats panel on the features' AI work, or close it again.
     AiStats,
     /// Give the keys to the criteria strip over the sandbox's app shown,
@@ -4512,6 +4518,7 @@ impl Gerdr {
             Action::Features => self.open_features(),
             Action::Scrollback if self.is_open(Overlay::Scrollback) => self.close_scrollback(),
             Action::Scrollback => self.open_focused_scrollback(),
+            Action::ToggleChat => self.toggle_chat(),
             Action::AiStats => self.toggle_ai_stats(),
             Action::Criteria => self.toggle_criteria_keys(),
             // Nothing to keep running without a project.
@@ -5297,6 +5304,7 @@ impl Gerdr {
             stray: false,
             window_of: e.window_of.map(|(command, _)| command),
             x11_app: e.pid.filter(|_| from_bridge),
+            chat: None,
         };
         self.add_pane(w, t, pane, e.focus);
         if dropped {
@@ -5359,6 +5367,7 @@ impl Gerdr {
             stray,
             window_of,
             x11_app: None,
+            chat: None,
         };
         self.add_pane(w, t, pane, true);
     }
@@ -6832,6 +6841,7 @@ impl Gerdr {
             focused_pane,
             pane_drop: self.pane_drop_rect(),
             placeholders,
+            chats: Vec::new(),
             context_menu: self.overlays.context_menu.as_ref().map(ContextMenu::view),
             tooltip: self.hover.tooltip.view(),
             switcher: self.overlays.switcher_view(),
