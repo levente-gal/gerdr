@@ -83,6 +83,7 @@ fn agent_card_at(
         }
     };
     let status = back.map_or(status, |back| back.status().to_owned());
+    let status = with_context(status, feature, stage, state);
     // Where it runs goes with that, or says all there is to say of it.
     let status = match machine_line {
         Some((line, true)) => line.clone(),
@@ -390,7 +391,7 @@ pub(super) fn rework_card(
         icon: AgentIcon::from_agent(&run.agent),
         name: run.agent.clone(),
         dot: Dot::Done,
-        status: named(&status),
+        status: with_context(named(&status), feature, Stage::Build, state),
         tail: Vec::new(),
         buttons,
         picks: state.fix_picks.clone(),
@@ -2116,6 +2117,31 @@ pub(super) fn doc_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection>
 
 /// Whether `stage`'s page of `feature` offers the choice of one agent or a
 /// fresh one per milestone: Build's, until it is done.
+/// `status` and how full the context of `stage`'s open agent is, as the
+/// last probe read it of that run: "context 84k / 1M", with "nearly full"
+/// from 80%. A run it wasn't read of, or can't be, says nothing more.
+fn with_context(status: String, feature: &Feature, stage: Stage, state: &PanelState) -> String {
+    let run = feature.runs.get(&stage).filter(|r| r.live());
+    let read = (state.probe.and_then(|p| p.contexts.get(&stage)))
+        .filter(|(n, _)| run.is_some_and(|r| r.n == *n));
+    let Some((_, context)) = read else {
+        return status;
+    };
+    // "84k", "1M": a whole figure needs no ".0".
+    let short = |n| crate::stats_panel::tokens(n).replace(".0", "");
+    let mut said = match context.window {
+        Some(window) => format!("context {} / {}", short(context.used), short(window)),
+        None => format!("context {}", short(context.used)),
+    };
+    if context.nearly_full() {
+        said.push_str(", nearly full");
+    }
+    match status.is_empty() {
+        true => said,
+        false => format!("{status} \u{b7} {said}"),
+    }
+}
+
 /// Whether `stage`'s page has the choice of the agent its fixes go to, as
 /// it has the card of that agent (`rework_card`).
 pub(super) fn fixes_switch(feature: &Feature, stage: Stage, ctx: RowCtx) -> bool {

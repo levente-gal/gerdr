@@ -797,6 +797,7 @@ fn probe_with(notes: Vec<Comment>) -> Probe {
             ..feature::page::Docs::default()
         },
         models: BTreeMap::new(),
+        contexts: BTreeMap::new(),
         prs: None,
         bases: BTreeMap::new(),
         resolution: None,

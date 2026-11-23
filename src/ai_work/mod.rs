@@ -23,6 +23,7 @@
 
 pub mod backfill;
 pub mod blobs;
+pub mod context;
 pub mod index;
 pub mod locate;
 pub mod observe;

@@ -220,6 +220,7 @@ impl Gerdr {
                 None => Probe {
                     docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
                     models: feature::agents::read_models(&feature),
+                    contexts: crate::ai_work::context::read_contexts(&feature, &data),
                     prs: read_prs.then(|| ship::read_prs(&feature, "gh")),
                     base_ci: read_base_ci.then(|| ship::read_base_ci(&feature, secs)),
                     bases: match feature.ships() || fetch {
