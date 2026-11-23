@@ -127,7 +127,7 @@ pub fn find(
 }
 
 /// Whether `id` can go into a path and a script as it is.
-fn plain_id(id: &str) -> bool {
+pub fn plain_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 200
         && (id.chars()).all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
