@@ -6335,7 +6335,12 @@ fn feature_tab_manual_rounds() -> super::FeatureTabView {
                     "The button stays on and exports an empty file",
                     Some(("being fixed", CheckTone::Note)),
                 ),
-                asked("AC-4", "Totals in the footer", "", Some(("not tried since", CheckTone::Note))),
+                asked(
+                    "AC-4",
+                    "Totals in the footer",
+                    "",
+                    Some(("not tried since", CheckTone::Note)),
+                ),
             ],
             asked_caption: "Asked to fix",
             fixes: vec![
@@ -7090,7 +7095,8 @@ fn dump_feature_tab() {
     let only = std::env::var("GERDR_DUMP_ONLY").ok();
     for (theme, scale) in CASES {
         let views = feature_tabs().into_iter();
-        for (name, view) in views.filter(|(n, _)| only.as_deref().is_none_or(|o| n.starts_with(o))) {
+        for (name, view) in views.filter(|(n, _)| only.as_deref().is_none_or(|o| n.starts_with(o)))
+        {
             for w in TAB_WIDTHS {
                 dump(
                     &dir,
@@ -9697,11 +9703,17 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
-        5 => super::ChatView {
-            picked: Some(1),
-            hover: Some(ChatHit::Fold(2)),
-            ..v
-        },
+        // Picked, a fold hovered, and the commands' steps open.
+        5 => {
+            let mut unfolded = v.unfolded.clone();
+            unfolded.insert(crate::chat::rows::steps_key("t2"));
+            super::ChatView {
+                picked: Some(1),
+                hover: Some(ChatHit::Fold(2)),
+                unfolded,
+                ..v
+            }
+        }
         // A shorter pane, for the list to scroll.
         _ => super::ChatView {
             rect: super::Rect::new(v.rect.loc, (v.rect.size.w, 460).into()),
@@ -9722,43 +9734,43 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 const GOLDEN_CHATS: [[u64; 7]; 4] = [
     // Dark at 1
     [
-        0xb478d97f49c9ca8c, // chat_finding
-        0xc630d4e656a9b89c, // chat_missing
-        0xc21ba5cc134c9b9b, // chat
-        0xacbe450f6c94c3be, // chat_waiting
-        0x9bf695df6d27d477, // chat_composer
-        0xfb67845858ee7dba, // chat_picked
-        0x7f98fd76f431bde2, // chat_scrolled
+        0x419a9650a3a8351c, // chat_finding
+        0x2f8fc013b4de6bd1, // chat_missing
+        0x83ec5e80e4a05b88, // chat
+        0x117ee4af2e317200, // chat_waiting
+        0x5379eaf62a09409c, // chat_composer
+        0xd793810f00e60a6a, // chat_picked
+        0x0de22d87d3da0f9f, // chat_scrolled
     ],
     // Dark at 2
     [
-        0xa69ca85801328098, // chat_finding
-        0x53e8de3ff397becf, // chat_missing
-        0x5b2f9490318ae396, // chat
-        0xb5b4c33a453102d1, // chat_waiting
-        0xd65790dae85eb404, // chat_composer
-        0x91f2e2340abd9ce8, // chat_picked
-        0x3c9b087d25e16da5, // chat_scrolled
+        0x3e72e534ff24238d, // chat_finding
+        0xfa3ab45bc8c44b61, // chat_missing
+        0x62e53b72757faab4, // chat
+        0xf6a0805f9f4adff6, // chat_waiting
+        0xd4cfe6233f0c2daa, // chat_composer
+        0x6e5f95556f2f35c9, // chat_picked
+        0x5c64f4d1885ca88c, // chat_scrolled
     ],
     // Light at 1
     [
-        0x2e76b751f34cef2b, // chat_finding
-        0xa8243f4a60137d87, // chat_missing
-        0xa710d02b2a92d1f4, // chat
-        0x652484a4851147a0, // chat_waiting
-        0xebd2766a613b5a1c, // chat_composer
-        0xffc141154809d844, // chat_picked
-        0x848c8cf957770bea, // chat_scrolled
+        0x429537ed2f724b56, // chat_finding
+        0xa18f8840c92014da, // chat_missing
+        0x16c9f51e2d5f26b0, // chat
+        0xcd0b8440380180e7, // chat_waiting
+        0x7ed43d2b842fa287, // chat_composer
+        0x41072adff761bdcc, // chat_picked
+        0x8f59b6dda508c945, // chat_scrolled
     ],
     // Light at 2
     [
-        0xfa9307f1c52a7903, // chat_finding
-        0x0bda39ab06daf6f7, // chat_missing
-        0x6113a6f7fa6fd036, // chat
-        0xb65492f548692c16, // chat_waiting
-        0x34e3dfb2bf3ef0d3, // chat_composer
-        0x87e0476e3130777b, // chat_picked
-        0xa4a0eeac49f4caac, // chat_scrolled
+        0xee26782ff38f4e12, // chat_finding
+        0xc628a1b5b2191c04, // chat_missing
+        0x9902fd42c349001d, // chat
+        0x36bcb6c9c23d4e4e, // chat_waiting
+        0xebeaecd05273457b, // chat_composer
+        0x3cad7cda202fe616, // chat_picked
+        0x0b3486f960ec773a, // chat_scrolled
     ],
 ];
 

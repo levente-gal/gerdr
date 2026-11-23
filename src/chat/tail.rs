@@ -584,16 +584,27 @@ mod tests {
     struct Home {
         dir: PathBuf,
         chats: Chats,
+        /// Held while it lives: following a chat reports and clears the
+        /// agent's problem in gerdr's one list, which another test's
+        /// following would clear under it.
+        _alone: std::sync::MutexGuard<'static, ()>,
     }
+
+    static ALONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     impl Home {
         fn new(name: &str) -> Self {
+            let alone = ALONE.lock().unwrap_or_else(|e| e.into_inner());
             let dir =
                 std::env::temp_dir().join(format!("gerdr-chat-tail-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(dir.join(".claude/projects/-work")).expect("dir");
             let chats = Chats::new(Homes::under(&dir), None);
-            Self { dir, chats }
+            Self {
+                dir,
+                chats,
+                _alone: alone,
+            }
         }
 
         fn file(&self, id: &str) -> PathBuf {

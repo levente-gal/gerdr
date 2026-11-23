@@ -9,6 +9,7 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc};
 use crate::{ai_work::AgentKind, md_blocks::DocBlock, text_field::TextField};
 
 pub mod parse;
+pub mod rows;
 pub mod source;
 pub mod tail;
 mod view;

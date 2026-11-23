@@ -22,7 +22,7 @@ use smithay::{
     utils::{Logical, Point},
 };
 
-use super::{ChatFocus, Event, Item, PaneChat, Reading, tail::Tail};
+use super::{ChatFocus, Event, Item, PaneChat, Reading, rows::rows, tail::Tail};
 use crate::{
     ChatRows, Gerdr, Pane, Workspace,
     chrome::{self, ChatHit, ChatLayout, ChatView, FieldSpot, WaitKey},
@@ -273,7 +273,9 @@ fn chat_key(
         }
         return None;
     }
-    let n = chat.items.len();
+    // The keys move over the rows as they show: a fold of steps is one.
+    let shown = rows(&chat.items, &chat.unfolded);
+    let n = shown.len();
     let last = n.checked_sub(1);
     match key_table::press(LIST_KEYS, &(), mods, sym) {
         Some(ListKey::Next) => chat.picked = chat.picked.map_or(last, |i| Some((i + 1).min(n - 1))),
@@ -281,8 +283,8 @@ fn chat_key(
             chat.picked = chat.picked.map_or(last, |i| Some(i.saturating_sub(1)))
         }
         Some(ListKey::Fold) => {
-            if let Some(id) = chat.picked.and_then(|i| chat.items.get(i)).map(Item::id) {
-                let id = id.to_owned();
+            let row = chat.picked.and_then(|i| shown.get(i));
+            if let Some(id) = row.and_then(|row| row.fold_key(&chat.items)) {
                 if !chat.unfolded.remove(&id) {
                     chat.unfolded.insert(id);
                 }
@@ -298,8 +300,9 @@ fn chat_key(
         }
         Some(ListKey::Page(by)) => return Some(ChatDo::Page(by)),
         Some(ListKey::Copy) => {
-            let item = chat.picked.or(last).and_then(|i| chat.items.get(i))?;
-            return Some(ChatDo::Copy(item_text(item)));
+            let row = chat.picked.or(last).and_then(|i| shown.get(i))?;
+            let texts: Vec<String> = row.span().map(|i| item_text(&chat.items[i])).collect();
+            return Some(ChatDo::Copy(texts.join("\n\n")));
         }
         Some(ListKey::Compose) => chat.focus = ChatFocus::Composer,
         // Any character goes to the reply box, typed into it; a paste too.
@@ -448,7 +451,8 @@ fn take_event<'a>(
     };
     match event {
         Event::Items { source, items, .. } => {
-            chat.picked = chat.picked.filter(|i| *i < items.len());
+            let n = rows(&items, &chat.unfolded).len();
+            chat.picked = chat.picked.filter(|i| *i < n);
             chat.items = items;
             chat.source = Some(source);
             chat.reading = Reading::Read;
@@ -918,7 +922,10 @@ impl Gerdr {
         let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
             return;
         };
-        let Some(Item::Edit { path, .. }) = chat.items.get(i) else {
+        let row = rows(&chat.items, &chat.unfolded)
+            .get(i)
+            .and_then(|row| row.item());
+        let Some(Item::Edit { path, .. }) = row.and_then(|i| chat.items.get(i)) else {
             return;
         };
         let mut file = PathBuf::from(path);
@@ -947,21 +954,22 @@ impl Gerdr {
                 let pane_id = &pane.herdr.as_ref()?.pane_id;
                 let agent = self.chat_agent(pane_id)?;
                 let chat = pane.chat.as_ref()?;
-                let label = match &chat.source {
-                    Some(source) => {
-                        let short: String = source.id.chars().take(8).collect();
-                        // herdr named no chat: it may be the wrong one.
-                        let how = match source.guessed {
-                            true => " · found by folder and time",
-                            false => "",
-                        };
-                        format!("{} · {short}{how}", agent.label())
-                    }
-                    None => agent.label().to_owned(),
-                };
+                // The agent and its folder; herdr named no chat when it was
+                // found by folder and time: it may be the wrong one.
+                let mut label = agent.label().to_owned();
+                if let Some(name) = (agent.cwd.as_deref())
+                    .and_then(|cwd| cwd.file_name())
+                    .and_then(|name| name.to_str())
+                {
+                    label = format!("{label} · {name}");
+                }
+                if chat.source.as_ref().is_some_and(|source| source.guessed) {
+                    label.push_str(" · found by folder and time");
+                }
                 let mut view = ChatView {
                     rect: tab.window_rect(id, rect),
                     label,
+                    cwd: agent.cwd.clone(),
                     status: agent.agent_status,
                     paused: self.pane_paused(pane_id),
                     reading: chat.reading.clone(),
@@ -1032,7 +1040,8 @@ impl Gerdr {
             }
             ChatHit::Fold(i) => {
                 chat.picked = Some(i);
-                if let Some(id) = chat.items.get(i).map(|item| item.id().to_owned())
+                let row = rows(&chat.items, &chat.unfolded).get(i).copied();
+                if let Some(id) = row.and_then(|row| row.fold_key(&chat.items))
                     && !chat.unfolded.remove(&id)
                 {
                     chat.unfolded.insert(id);
@@ -1040,7 +1049,10 @@ impl Gerdr {
             }
             ChatHit::ShowAll(i) => {
                 chat.picked = Some(i);
-                if let Some(item) = chat.items.get(i) {
+                let row = rows(&chat.items, &chat.unfolded)
+                    .get(i)
+                    .and_then(|row| row.item());
+                if let Some(item) = row.and_then(|i| chat.items.get(i)) {
                     chat.unfolded.insert(item.id().to_owned());
                     chat.unfolded.insert(chrome::whole_key(item.id()));
                 }
