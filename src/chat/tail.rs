@@ -205,6 +205,9 @@ impl Chats {
                 pane_id: pane_id.to_owned(),
                 error: format!("Couldn't read this agent's earlier messages: {err}"),
             });
+            // The next poll sends its items again: the chat comes back
+            // with "Earlier messages" to press again.
+            chat.sent = None;
             return;
         }
         chat.poll(&self.homes, pane_id, out);
