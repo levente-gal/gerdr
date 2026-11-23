@@ -346,9 +346,10 @@ and Ctrl+C or `y` copies what it says.
   plan and makes its fixes ("Same agent", the default), or each round starts
   a fresh one of the pick ("Fresh agent", so no chat grows over the rounds);
   the fixes' agent card says "next fixes: this agent" or "next fixes: a fresh
-  …". An open Claude Code or Codex agent's card also says how full its
-  context is, as its transcript last told ("context 84k / 1M", "nearly full"
-  from 80%); Cursor's and T3 Code's say nothing of it, nor does the fixes'
+  …". An open Claude Code, Codex or Cursor agent's card also says how full
+  its context is, as its transcript (Cursor's chat database) last told
+  ("context 84k / 1M", "nearly full" from 80%); T3 Code's says nothing of
+  it, nor does the fixes'
   card while Fresh agent is picked, as the fixes don't go to that chat.
   Its plan opens by "Open plan",
   shown only when an agent wrote one. On Verify's, AI review's, Code
