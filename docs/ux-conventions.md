@@ -347,7 +347,8 @@ and Ctrl+C or `y` copies what it says.
   the fixes' agent card says "next fixes: this agent" or "next fixes: a fresh
   …". An open Claude Code or Codex agent's card also says how full its
   context is, as its transcript last told ("context 84k / 1M", "nearly full"
-  from 80%); Cursor's and T3 Code's say nothing of it.
+  from 80%); Cursor's and T3 Code's say nothing of it, nor does the fixes'
+  card while Fresh agent is picked, as the fixes don't go to that chat.
   Its plan opens by "Open plan",
   shown only when an agent wrote one. On Verify's, AI review's, Code
   review's and Manual test's pages a round open (in progress) is on top,
