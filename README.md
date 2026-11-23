@@ -18,7 +18,9 @@ they come back when it starts again.
 - **Agents.** Claude Code, Codex, Gemini, cursor-agent, opencode and other
   agent CLIs on your `PATH` start from a workspace's AI button. Each runs in
   its own tab. Running agents, Cursor chats and T3 Code threads show as
-  sidebar cards, with a dot that says when one needs you.
+  sidebar cards, with a dot that says when one needs you. Any agent's pane
+  shows as a chat in its place (prefix `E`, or its Chat button): read,
+  fold tool calls, reply and answer its menus, its screen a key away.
 - **Repositories panel** (prefix `G`). Status of every repository in the
   workspace, a diff of all of them in one view, staging, commits, stashes, a
   commit log and a branch picker. The diff has vim keys (search, yank,
