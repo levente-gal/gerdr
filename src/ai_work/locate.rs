@@ -333,6 +333,68 @@ fn codex_by_time(codex: &Path, chat: &Chat, claimed: &HashSet<String>) -> Option
     Some(found(AgentKind::Codex, &meta.id, main.clone(), Form::Lines))
 }
 
+/// The folder Cursor keeps folder `dir`'s things in under `projects/`: its
+/// path with each run of other than letters and digits one `-`, none at
+/// either end (`/home/me/.cache/x` is `home-me-cache-x`).
+pub fn cursor_slug(dir: &Path) -> String {
+    let path = dir.to_string_lossy();
+    let words: Vec<&str> = (path.split(|c: char| !c.is_ascii_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .collect();
+    words.join("-")
+}
+
+/// Whether `name`, a folder under Cursor's `projects/`, is the one of
+/// `slug`. Newer Cursors cut a long slug to 55 bytes and add `-` and 7 hex
+/// digits of a hash gerdr doesn't know, so a cut one may be another
+/// folder's of the same start: the pick by time sorts them out.
+fn cursor_slug_is(name: &str, slug: &str) -> bool {
+    const CUT: usize = 55;
+    let cut = || {
+        slug.len() > CUT
+            && name.len() == CUT + 8
+            && name.starts_with(&slug[..CUT])
+            && name.as_bytes()[CUT] == b'-'
+            && name[CUT + 1..].bytes().all(|b| b.is_ascii_hexdigit())
+    };
+    name == slug || cut()
+}
+
+/// Of Cursor transcripts `begun` (an id and when its folder was made), the
+/// ones `chat`'s run may have, nearest its start first: begun from a minute
+/// before it to ten after, not `claimed`.
+fn cursor_pick(chat: &Chat, claimed: &HashSet<String>, begun: Vec<(String, u64)>) -> Vec<String> {
+    let from = chat.started.saturating_sub(CODEX_BEFORE);
+    let to = chat.started + CODEX_AFTER;
+    let mut fit: Vec<(String, u64)> = (begun.into_iter())
+        .filter(|(id, at)| (from..=to).contains(at) && !claimed.contains(id) && plain_id(id))
+        .collect();
+    fit.sort_by_key(|(id, at)| (at.abs_diff(chat.started), id.clone()));
+    fit.into_iter().map(|(id, _)| id).collect()
+}
+
+/// The Cursor chat of `chat`'s run, by folder and time: Cursor keeps a
+/// transcript folder per chat, `projects/<slug>/agent-transcripts/<id>/`,
+/// made with its first message; the chat is the `store.db` of that id.
+pub fn cursor_by_time(homes: &Homes, chat: &Chat, claimed: &HashSet<String>) -> Option<Found> {
+    let slugs: Vec<String> = chat.folders.iter().map(|f| cursor_slug(f)).collect();
+    let begun = (subdirs(&homes.cursor.join("projects")).into_iter())
+        .filter(|dir| {
+            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            slugs.iter().any(|slug| cursor_slug_is(name, slug))
+        })
+        .flat_map(|dir| subdirs(&dir.join("agent-transcripts")))
+        .filter_map(|dir| {
+            let id = dir.file_name()?.to_str()?.to_owned();
+            let meta = dir.metadata().ok()?;
+            let made = meta.created().or_else(|_| meta.modified()).ok()?;
+            let at = made.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            Some((id, at))
+        })
+        .collect();
+    (cursor_pick(chat, claimed, begun).iter()).find_map(|id| cursor(homes, id))
+}
+
 /// `value` of a database row as JSON: texts of JSON columns (`*_json`,
 /// `data`, `metadata`) as what they hold.
 fn cell(name: &str, value: rusqlite::types::ValueRef) -> Value {
@@ -959,6 +1021,78 @@ mod tests {
         let claimed = HashSet::from(["near".to_owned()]);
         let f = find(&homes, &c, &claimed).unwrap().unwrap();
         assert_eq!((f.id.as_str(), &f.main), ("far", &far));
+    }
+
+    #[test]
+    fn cursor_folders_are_named_as_cursor_does() {
+        let slug = |dir: &str| cursor_slug(Path::new(dir));
+        assert_eq!(
+            slug("/home/lgal/Work/alphaocean/ao-app"),
+            "home-lgal-Work-alphaocean-ao-app"
+        );
+        assert_eq!(slug("/home/me/.cache/x"), "home-me-cache-x");
+        assert_eq!(slug("/tmp/c-1/-home-me/a_b.c/"), "tmp-c-1-home-me-a-b-c");
+        let long = slug("/home/lgal/Work/alphaocean/ao-app/features/alpha-dashboard-redesign");
+        assert!(cursor_slug_is(&long, &long));
+        assert!(cursor_slug_is(
+            "home-lgal-Work-alphaocean-ao-app-features-alpha-dashboa-b953f1b",
+            &long
+        ));
+        assert!(!cursor_slug_is(
+            "home-lgal-Work-alphaocean-ao-app-features-alpha-dashboa-xyz1234",
+            &long
+        ));
+        assert!(!cursor_slug_is("home-me-cache-x-y", "home-me-cache-x"));
+    }
+
+    #[test]
+    fn a_cursor_chat_is_found_by_folder_and_time() {
+        let home = scratch("locate-cursor-time");
+        let homes = Homes::under(&home);
+        let work = Path::new("/work/my.app");
+        let transcripts = home.join(".cursor/projects/work-my-app/agent-transcripts");
+        for id in ["c-1", "c-2"] {
+            std::fs::create_dir_all(transcripts.join(id)).unwrap();
+        }
+        put(&home.join(".cursor/chats/f00/c-2/store.db"), "");
+        // Begun just now: c-1 has no store.db yet, so c-2 is the chat.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let c = chat(AgentKind::Cursor, None, now, &[work]);
+        let f = cursor_by_time(&homes, &c, &HashSet::new()).unwrap();
+        assert_eq!((f.id.as_str(), f.form), ("c-2", Form::Store));
+        assert_eq!(
+            cursor_by_time(&homes, &c, &HashSet::from(["c-2".into()])),
+            None
+        );
+        let other = chat(AgentKind::Cursor, None, now, &[Path::new("/work/my")]);
+        assert_eq!(cursor_by_time(&homes, &other, &HashSet::new()), None);
+        let later = chat(AgentKind::Cursor, None, now + 3600, &[work]);
+        assert_eq!(cursor_by_time(&homes, &later, &HashSet::new()), None);
+    }
+
+    #[test]
+    fn the_cursor_chat_begun_nearest_its_run_is_picked() {
+        let c = chat(AgentKind::Cursor, None, 1000, &[]);
+        let begun = |list: &[(&str, u64)]| -> Vec<(String, u64)> {
+            list.iter().map(|(id, at)| (id.to_string(), *at)).collect()
+        };
+        let all = begun(&[
+            ("early", 939),
+            ("before", 990),
+            ("after", 1005),
+            ("far", 1600),
+            ("late", 1601),
+            ("../x", 1000),
+        ]);
+        assert_eq!(
+            cursor_pick(&c, &HashSet::new(), all.clone()),
+            ["after", "before", "far"]
+        );
+        let claimed = HashSet::from(["after".to_owned()]);
+        assert_eq!(cursor_pick(&c, &claimed, all), ["before", "far"]);
     }
 
     #[test]
