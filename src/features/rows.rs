@@ -1571,6 +1571,9 @@ pub(super) fn review_action(feature: &Feature) -> PanelOutcome {
     match review {
         Some(r) if r.count(FindingState::Open) > 0 => PanelOutcome::Findings,
         Some(r) if r.count(FindingState::Fix) > 0 => PanelOutcome::SendFixes,
+        // Nothing holds it up, yet it is still current: marking it done
+        // was refused (changes not committed, the feature busy). Try again.
+        Some(r) if r.open() == 0 => PanelOutcome::Tick,
         _ if run.waits_to_send() => PanelOutcome::SendPrompt(stage),
         _ if run.live() => PanelOutcome::ShowAgent(stage),
         _ if run.resumes() => PanelOutcome::ResumeAgent(stage),

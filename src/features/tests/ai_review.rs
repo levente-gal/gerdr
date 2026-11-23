@@ -244,10 +244,8 @@ fn ai_review_shows_its_agent_then_its_findings_never_mark_done() {
         review_line(&decided, None).as_deref(),
         Some("all findings fixed or dismissed")
     );
-    assert_eq!(
-        row_action(&decided, row, none),
-        Some(PanelOutcome::ShowAgent(Stage::AiReview))
-    );
+    // Marking it done was refused (changes not committed): Enter tries again.
+    assert_eq!(row_action(&decided, row, none), Some(PanelOutcome::Tick));
     assert_eq!(
         review_line(&reviewing(&[], true), None).as_deref(),
         Some("no findings")
