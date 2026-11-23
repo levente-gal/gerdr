@@ -284,10 +284,10 @@ fn chat_key(
         }
         Some(ListKey::Fold) => {
             let row = chat.picked.and_then(|i| shown.get(i));
-            if let Some(id) = row.and_then(|row| row.fold_key(&chat.items)) {
-                if !chat.unfolded.remove(&id) {
-                    chat.unfolded.insert(id);
-                }
+            if let Some(id) = row.and_then(|row| row.fold_key(&chat.items))
+                && !chat.unfolded.remove(&id)
+            {
+                chat.unfolded.insert(id);
             }
         }
         Some(ListKey::Top) => {
