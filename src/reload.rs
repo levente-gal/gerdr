@@ -159,7 +159,7 @@ pub fn patch(
 
 fn rename_panes(node: &mut SavedNode, moved: &HashMap<String, Moved>) {
     match node {
-        SavedNode::Leaf(SavedLeaf::Herdr { pane_id }) => {
+        SavedNode::Leaf(SavedLeaf::Herdr { pane_id, .. }) => {
             if let Some(to) = moved.get(pane_id.as_str()) {
                 *pane_id = to.pane_id.clone();
             }
@@ -435,7 +435,10 @@ mod tests {
     use crate::projects::{Kind, PaneRecord, RunState, TabRecord, VenvSetting, WorkspaceRecord};
 
     fn herdr(id: &str) -> SavedNode {
-        SavedNode::Leaf(SavedLeaf::Herdr { pane_id: id.into() })
+        SavedNode::Leaf(SavedLeaf::Herdr {
+            pane_id: id.into(),
+            chat: false,
+        })
     }
 
     fn split(first: SavedNode, second: SavedNode) -> SavedNode {

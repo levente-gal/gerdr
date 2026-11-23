@@ -831,10 +831,13 @@ fn pane_bar_web() -> PaneBarView {
     }
 }
 
-/// A stage agent's terminal, waiting for its prompt.
+/// A stage agent's terminal, waiting for its prompt, with its Chat button.
 fn pane_bar_waiting() -> PaneBarView {
     let pane = Rect::new((0, 0).into(), (900, 400).into());
-    let buttons = BarButtons::Waiting;
+    let buttons = BarButtons::Agent {
+        chat: false,
+        waiting: true,
+    };
     PaneBarView {
         rect: super::pane_bar_rects(pane).0,
         label: "claude --add-dir /d/my-feature".into(),
@@ -946,7 +949,7 @@ const GOLDEN_OVERLAYS: [[u64; 11]; 4] = [
         0x7a426c6be23d66a6, // spinner
         0x5f7da883de161583, // blink_dot
         0x690a6fdd6250e8e1, // pane_bar_web
-        0x171e350dec0490d6, // pane_bar_waiting
+        0xcb8d38d14a16d1b0, // pane_bar_waiting
         0x73b4486c08a73249, // pane_bar_unfocused
     ],
     // Dark at 2
@@ -960,7 +963,7 @@ const GOLDEN_OVERLAYS: [[u64; 11]; 4] = [
         0x2f28c94a7002e520, // spinner
         0x3938d7cb530659b5, // blink_dot
         0x7190f0f4ac60796a, // pane_bar_web
-        0xa7f42755ed185a6e, // pane_bar_waiting
+        0xf4ed5aa6430d4f22, // pane_bar_waiting
         0xdfe4756e24125d73, // pane_bar_unfocused
     ],
     // Light at 1
@@ -974,7 +977,7 @@ const GOLDEN_OVERLAYS: [[u64; 11]; 4] = [
         0x6cb91debc8d3c473, // spinner
         0x55c89cc3e0120adb, // blink_dot
         0x7d03900f5d9bcdb9, // pane_bar_web
-        0xb4aeb378315321bb, // pane_bar_waiting
+        0x3a66e80f1961de10, // pane_bar_waiting
         0xbc5537b47892ea00, // pane_bar_unfocused
     ],
     // Light at 2
@@ -988,7 +991,7 @@ const GOLDEN_OVERLAYS: [[u64; 11]; 4] = [
         0x5ad35f5c0797002e, // spinner
         0x349f0f6edf45454d, // blink_dot
         0x2dfbb2c576d08918, // pane_bar_web
-        0xf14d0d51edd743ab, // pane_bar_waiting
+        0x16554b9c0f38d9c4, // pane_bar_waiting
         0xfcf0e63bf0a60f23, // pane_bar_unfocused
     ],
 ];

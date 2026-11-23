@@ -450,6 +450,7 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     ("Open the AI work stats", &["ai-stats"]),
     ("Try the criteria over the sandbox's app", &["criteria"]),
     ("Select and copy the scrollback", &["scrollback"]),
+    ("Show the agent as a chat, or its screen", &["toggle-chat"]),
     ("Reload the project files", &["reload-projects"]),
     ("Quit…", &["quit"]),
 ];
@@ -1285,6 +1286,7 @@ mod tests {
                 "U: Open the AI work stats",
                 "Shift+C: Try the criteria over the sandbox's app",
                 "[: Select and copy the scrollback",
+                "E: Show the agent as a chat, or its screen",
                 "Alt+R: Reload the project files",
                 "Shift+Q: Quit…",
                 "Ctrl+B: Send Ctrl+B to the app",

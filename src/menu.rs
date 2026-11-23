@@ -151,6 +151,8 @@ pub enum MenuAction {
     PaneToTab(u32, Option<usize>),
     /// Open the scrollback viewer over terminal pane `id`.
     Scrollback(u32),
+    /// Show terminal pane `id`'s agent as a chat, or its screen again.
+    ToggleChat(u32),
     RestartPane(u32),
     StopPane(u32),
     SendPrompt(u32),
@@ -642,6 +644,7 @@ impl Gerdr {
             MenuAction::ZoomPane(id) => self.zoom_pane(id),
             MenuAction::PaneToTab(id, to) => self.move_pane_to_tab(id, to),
             MenuAction::Scrollback(id) => self.open_scrollback(id),
+            MenuAction::ToggleChat(id) => self.toggle_pane_chat(id),
             MenuAction::RestartPane(id) => {
                 self.focus_pane(|_| Some(id));
                 self.restart_focused_pane();

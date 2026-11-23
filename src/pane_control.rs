@@ -492,6 +492,8 @@ pub fn label_tooltip(label: &str, rect: Rect, restart: Option<bool>) -> Tooltip 
 pub fn button_tooltip(button: BarButton, rect: Rect, help: &Help) -> Tooltip {
     let (text, what) = match button {
         BarButton::SendPrompt => ("Send the prompt", Some(Action::SendPrompt)),
+        BarButton::Chat => ("Show as chat", Some(Action::ToggleChat)),
+        BarButton::Screen => ("Show screen", Some(Action::ToggleChat)),
         BarButton::Scrollback => ("Select and copy", Some(Action::Scrollback)),
         BarButton::Restart => ("Restart", Some(Action::RestartPane)),
         BarButton::Stop => ("Stop", Some(Action::StopPane)),
@@ -585,7 +587,7 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
             MenuItem::new("Copy URL", MenuAction::CopyPaneUrl(id)),
         ]),
         buttons => items.extend(
-            (buttons == BarButtons::Waiting)
+            (buttons.buttons().contains(&BarButton::SendPrompt))
                 .then(|| {
                     item(
                         "Send prompt",
@@ -595,6 +597,15 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
                     )
                 })
                 .into_iter()
+                .chain(match buttons {
+                    BarButtons::Agent { chat, .. } => Some(item(
+                        if chat { "Show screen" } else { "Show as chat" },
+                        MenuAction::ToggleChat(id),
+                        Action::ToggleChat,
+                        true,
+                    )),
+                    _ => None,
+                })
                 .chain([
                     item(
                         "Select and copy",
@@ -763,6 +774,13 @@ impl Gerdr {
             }
             if self.pane_paused(&herdr.pane_id) {
                 content.note = Some("paused");
+            }
+            // Every agent herdr found, whoever started it (checklist X5).
+            if self.chat_agent(&herdr.pane_id).is_some() {
+                content.buttons = BarButtons::Agent {
+                    chat: self.chat_shown(pane),
+                    waiting: content.buttons == BarButtons::Waiting,
+                };
             }
             return content;
         }
@@ -939,6 +957,7 @@ impl Gerdr {
         };
         let step = match button {
             BarButton::SendPrompt => return self.send_focused_prompt(),
+            BarButton::Chat | BarButton::Screen => return self.toggle_pane_chat(id),
             BarButton::Back => WebStep::Back,
             BarButton::Forward => WebStep::Forward,
             BarButton::Reload => WebStep::Reload,
@@ -1792,6 +1811,36 @@ mod tests {
             (tip.text.as_str(), tip.key.as_deref()),
             ("Stop", Some("Ctrl+B S"))
         );
+        let tip = button_tooltip(BarButton::Chat, rect, &help);
+        assert_eq!(
+            (tip.text.as_str(), tip.key.as_deref()),
+            ("Show as chat", Some("Ctrl+B E"))
+        );
+    }
+
+    #[test]
+    fn an_agent_pane_s_menu_flips_its_chat() {
+        let help = crate::keys::Keymap::default().help();
+        let shown = |chat| {
+            let content = BarContent {
+                buttons: BarButtons::Agent {
+                    chat,
+                    waiting: true,
+                },
+                ..bar_content(Some(&running(9, "claude")), None, None)
+            };
+            let menu = bar_menu((0.0, 0.0).into(), 4, &content, &help);
+            let at = (menu.items.iter())
+                .position(|i| i.action == MenuAction::ToggleChat(4))
+                .unwrap();
+            let item = &menu.items[at];
+            // After its prompt to send, before what the terminal does.
+            assert_eq!(menu.items[at - 1].action, MenuAction::SendPrompt(4));
+            assert_eq!(item.hint.as_deref(), Some("Ctrl+B E"));
+            item.label.clone()
+        };
+        assert_eq!(shown(false), "Show as chat");
+        assert_eq!(shown(true), "Show screen");
     }
 
     #[test]

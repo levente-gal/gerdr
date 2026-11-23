@@ -74,8 +74,12 @@ pub enum SavedNode {
 #[serde(rename_all = "lowercase", tag = "kind")]
 pub enum SavedLeaf {
     /// A herdr terminal, by its herdr pane id (stable across a server
-    /// restart).
-    Herdr { pane_id: String },
+    /// restart); `chat`: shown as its agent's chat (see `crate::chat`).
+    Herdr {
+        pane_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        chat: bool,
+    },
     /// The workspace's Zed editor.
     Zed,
     /// An app launched from the run prompt, by the command that started it.
@@ -158,7 +162,7 @@ impl SavedNode {
 
     fn collect_herdr_panes<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
-            SavedNode::Leaf(SavedLeaf::Herdr { pane_id }) => out.push(pane_id),
+            SavedNode::Leaf(SavedLeaf::Herdr { pane_id, .. }) => out.push(pane_id),
             SavedNode::Leaf(_) => {}
             SavedNode::Split { first, second, .. } => {
                 first.collect_herdr_panes(out);
@@ -677,6 +681,7 @@ mod tests {
         match id {
             1 => Some(SavedLeaf::Herdr {
                 pane_id: "w1:p1".into(),
+                chat: false,
             }),
             2 => Some(SavedLeaf::Zed),
             3 => Some(SavedLeaf::App {
@@ -777,7 +782,12 @@ mod tests {
     #[test]
     fn herdr_panes_in_order() {
         // (h2 | Zed) over (h1 over h3)
-        let herdr = |id: &str| SavedNode::Leaf(SavedLeaf::Herdr { pane_id: id.into() });
+        let herdr = |id: &str| {
+            SavedNode::Leaf(SavedLeaf::Herdr {
+                pane_id: id.into(),
+                chat: false,
+            })
+        };
         let split = |dir, first, second| SavedNode::Split {
             dir,
             ratio: 0.5,
