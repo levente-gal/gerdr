@@ -789,7 +789,11 @@ fn lay(item: &Item, w: i32, unfolded: &HashSet<String>) -> Laid {
             l.doc(pieces, (x, 0));
         }
         Item::Thinking { text, .. } => {
-            let first = text.lines().find(|line| !line.trim().is_empty());
+            // Codex and OpenCode open theirs with a bold title: no stars.
+            let first = (text
+                .lines()
+                .map(|line| line.trim().trim_matches('*').trim()))
+            .find(|line| !line.is_empty());
             l.head(Head {
                 x,
                 w: cw,

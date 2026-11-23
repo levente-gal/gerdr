@@ -117,7 +117,7 @@ pub fn by_time(
 /// The problem said when herdr's integration for agent `kind`, `target`
 /// to herdr, isn't installed.
 pub fn not_installed(kind: AgentKind, target: &str) -> String {
-    let install = format!("Install it with `herdr integration install {target}`.");
+    let install = format!("Install it with “herdr integration install {target}”.");
     match guessable(kind) {
         true => format!(
             "herdr's {target} integration isn't installed, so gerdr finds {target} chats by \
@@ -135,7 +135,7 @@ pub fn not_installed(kind: AgentKind, target: &str) -> String {
 pub fn missing_integration(target: &str) -> String {
     format!(
         "{NOT_FOUND}. herdr's {target} integration isn't installed: \
-         `herdr integration install {target}` lets gerdr find its chats"
+         “herdr integration install {target}” lets gerdr find its chats"
     )
 }
 

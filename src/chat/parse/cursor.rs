@@ -19,7 +19,9 @@ impl Reader {
                 let id = format!("cursor{n}");
                 if let Some(typed) = tag(text, "user_query") {
                     let text = typed.trim().to_owned();
-                    self.push(Item::User { id, at: None, text });
+                    if !text.is_empty() {
+                        self.push(Item::User { id, at: None, text });
+                    }
                 } else if text.contains("<conversation_summary>") {
                     let text = "Conversation compacted".to_owned();
                     self.push(Item::Note { id, text });
@@ -169,6 +171,8 @@ mod tests {
             user(json!(
                 "<conversation_summary>\nall of it\n</conversation_summary>"
             )),
+            // An Enter on an empty prompt.
+            user(json!("<user_query>\n\n</user_query>")),
         ]);
         let want = vec![
             Item::User {
