@@ -28,7 +28,7 @@ use crate::{
     feature_workspace::feature_on,
     herdr::{self, AgentInfo, AgentStatus, Herdr, WorkspaceInfo},
     inbox_sources, md_preview, phone_control, phone_devices,
-    projects::{self, Project},
+    projects::{self, Project, WorkspaceRecord},
     stats_panel::{chat_and_screen, claude_chat},
     web_push,
 };
@@ -644,10 +644,13 @@ fn session_agents(session: &str) -> Result<(Vec<AgentInfo>, Vec<WorkspaceInfo>),
 
 /// The agents of `agents` that aren't `features`' (a project's): in no
 /// feature's workspace, nor one of a feature's own panes. Each with the
-/// name of its workspace, if herdr has it.
+/// name of its workspace, if herdr has it. A workspace's folder is the
+/// project's record of it (`records`), else the one gerdr gave herdr: a
+/// restored herdr server keeps no metadata.
 fn workspace_agents<'a>(
     agents: &'a [AgentInfo],
     workspaces: &'a [WorkspaceInfo],
+    records: &[WorkspaceRecord],
     features: &[Feature],
 ) -> Vec<(&'a AgentInfo, Option<&'a str>)> {
     let feature_pane =
@@ -656,7 +659,11 @@ fn workspace_agents<'a>(
         .filter(|a| !feature_pane(&a.pane_id))
         .filter_map(|a| {
             let ws = workspaces.iter().find(|w| w.workspace_id == a.workspace_id);
-            let dir = ws.and_then(WorkspaceInfo::dir);
+            let record = |w: &WorkspaceInfo| {
+                let r = records.iter().find(|r| r.mirrors(&w.workspace_id));
+                r.map(|r| r.dir.clone())
+            };
+            let dir = ws.and_then(|w| record(w).or_else(|| w.dir()));
             match dir.is_some_and(|d| feature_on(features, &d).is_some()) {
                 true => None,
                 false => Some((a, ws.map(|w| w.label.as_str()))),
@@ -725,7 +732,8 @@ fn all_features() -> Value {
         let Ok((agents, workspaces)) = &session else {
             continue;
         };
-        let theirs: Vec<Value> = (workspace_agents(agents, workspaces, &all).into_iter())
+        let found = workspace_agents(agents, workspaces, &project.workspaces, &all);
+        let theirs: Vec<Value> = (found.into_iter())
             .map(|(a, ws)| {
                 json!({
                     "pane": a.pane_id,
@@ -1265,15 +1273,22 @@ mod tests {
         let workspaces = [
             workspace("w1", "f", "/work/.features/f"),
             workspace("w2", "api", "/work/api"),
+            // Restored: no metadata, only the project's record.
+            serde_json::from_value(json!({ "workspace_id": "w5", "label": "f" })).expect("ws"),
         ];
-        // Its feature's workspace, its own agent elsewhere, and the user's.
+        let records: Vec<WorkspaceRecord> = serde_json::from_value(json!([
+            { "herdr_id": "w5", "label": "f", "kind": "terminal", "dir": "/work/.features/f" },
+        ]))
+        .expect("records");
+        // Its feature's workspaces, its own agent elsewhere, and the user's.
         let agents = [
             agent("w1:p1", "w1"),
+            agent("w5:p1", "w5"),
             agent("w3:p1", "w3"),
             agent("w2:p1", "w2"),
             agent("w4:p1", "w4"),
         ];
-        let kept: Vec<String> = workspace_agents(&agents, &workspaces, &[f])
+        let kept: Vec<String> = workspace_agents(&agents, &workspaces, &records, &[f])
             .into_iter()
             .map(|(a, ws)| format!("{} {}", a.pane_id, workspace_agent_label(a, ws)))
             .collect();
