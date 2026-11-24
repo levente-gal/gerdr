@@ -1947,7 +1947,10 @@ esac
         std::fs::write(&chained, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
         std::fs::set_permissions(&chained, PermissionsExt::from_mode(0o755)).unwrap();
         let (why, so_far) = open_prs(&f, &check.actions, &gh).unwrap_err();
-        assert_eq!(why, "Couldn't push feature/f of api: lint failed");
+        assert_eq!(
+            why,
+            "Couldn't push feature/f of api: a pre-push hook refused it: lint failed"
+        );
         assert!(so_far.is_empty());
         let guard_file = f.repos[0].main.join(".git/gerdr/guard/feature/f");
         assert_eq!(std::fs::read_to_string(&guard_file).unwrap(), "");

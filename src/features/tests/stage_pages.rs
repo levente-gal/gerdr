@@ -2785,13 +2785,17 @@ fn a_base_merged_here_only_and_a_stopped_ship_say_so_with_their_fixes() {
         .map(|b| actions[*b].0.label.as_str())
         .collect();
     assert_eq!(held, ["Push main\u{2026}"]);
-    let first = check_lines(&f, Some(&p), false, 2_000).remove(0);
+    let lines = check_lines(&f, Some(&p), false, 2_000);
     assert_eq!(
-        first,
+        lines[0],
         line(
             "Merged here only, not on origin: main of api",
             CheckTone::Blocker
         )
+    );
+    assert!(
+        !lines.iter().any(|l| l.text.starts_with("Next:")),
+        "{lines:?}"
     );
     // Pushed by hand: shipped as far as origin knows.
     let mut pushed = p.clone();

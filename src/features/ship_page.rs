@@ -245,7 +245,9 @@ pub(super) fn check_lines(
     let notes = check.notes.iter().map(|n| line(n.clone(), CheckTone::Note));
     let passed = passed.filter(|_| resolving.is_none());
     // Shipped, what comes next: the end of its life, said plainly.
-    let next = (more && (planned.nothing || planned.all_done)).then(|| {
+    // A base only here isn't the end: pushing it is next, its card says.
+    let ended = (planned.nothing || planned.all_done) && local_bases(feature, check).is_empty();
+    let next = (more && ended).then(|| {
         let what = worktrees_words(feature);
         let text = match waits {
             Some(_) => format!("Next: once it merges, Remove {what} in the header"),
