@@ -6,7 +6,7 @@
 use super::{
     BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Canvas, DETAIL_FONT_SIZE, GIT_MARK_GAP, GIT_MARK_WIDTH,
     POPUP_RADIUS, Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, band, git_branch, icon_sdf,
-    rect_px, repos::draw_counted,
+    line, rect_px, repos::draw_counted,
 };
 use crate::git::GitStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -15,14 +15,14 @@ use smithay::utils::{Logical, Rectangle, Size};
 /// A tooltip: this high, its text this far in from its ends, the keycap
 /// this far after the text, this far from what it is about, and at least
 /// this far in from the output's edges.
-pub const TOOLTIP_HEIGHT: i32 = 28;
+pub const TOOLTIP_HEIGHT: i32 = line(SMALL_FONT_SIZE, 15);
 const TOOLTIP_PADDING: i32 = 10;
 const TOOLTIP_KEY_GAP: i32 = 8;
 const TOOLTIP_GAP: i32 = 6;
 const TOOLTIP_MARGIN: i32 = 4;
 /// A line of the list under the text, the room after the list, and the
 /// gap between a line's name and where it is.
-const TOOLTIP_ROW: i32 = 20;
+const TOOLTIP_ROW: i32 = line(SMALL_FONT_SIZE, 7);
 const TOOLTIP_ROWS_BOTTOM: i32 = 6;
 const TOOLTIP_COLUMN_GAP: i32 = 16;
 /// The widest a field's value gets before it is cut with an ellipsis.

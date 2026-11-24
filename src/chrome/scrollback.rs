@@ -12,21 +12,21 @@ use super::{
     MONO_FONT_SIZE,
     FIELD_GAP, FONT_SIZE, FOOTER_PAD, FOOTER_ROW, FieldSpot, HELP_PADDING, HELP_RADIUS,
     HINT_KEY_GAP, Painter, Palette, ROW_BUTTON, Rect, SHADOW, SMALL_FONT_SIZE, SearchBar,
-    SearchPart, band, hint_spots, hint_strs, layers::Part, measure, measure_mono, mix, phys,
+    SearchPart, band, hint_spots, hint_strs, layers::Part, line, measure, measure_mono, mix, phys,
     physical, rect_px, search_field_text, search_spots,
 };
 use crate::scrollback::{Fit, Ink, Style};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The title row's height, and the footer's under the list.
-const TITLE: i32 = 34;
-const FOOTER: i32 = 34;
+const TITLE: i32 = line(FONT_SIZE, 19);
+const FOOTER: i32 = line(SMALL_FONT_SIZE, 21);
 /// The room around the list inside the panel.
 const PAD: i32 = 6;
 /// The room between the list's edges and its text.
 const TEXT_INSET: i32 = 8;
 /// A row's height.
-const ROW: i32 = 18;
+const ROW: i32 = line(MONO_FONT_SIZE, 5);
 /// How far apart `Painter::paint_styled_rows` paints its rows.
 pub(super) const STYLED_ROW: i32 = ROW;
 /// How far bold text is drawn again to the right, logical pixels, when
@@ -45,8 +45,8 @@ const SEARCH_MAX: i32 = 520;
 /// The keys listed (F1): a row's height, the heading's over them, the
 /// room for a row's keycaps before what it does, and the least width of
 /// a column of them.
-const KEYS_ROW: i32 = 26;
-const KEYS_HEADING: i32 = 34;
+const KEYS_ROW: i32 = line(SMALL_FONT_SIZE, 13);
+const KEYS_HEADING: i32 = line(FONT_SIZE, 19);
 const KEYS_CAPS: i32 = 190;
 const KEYS_COLUMN: i32 = 480;
 

@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use super::{
-    Canvas, FONT_SIZE, Painter, Palette, Rect, SMALL_FONT_SIZE, icon_sdf, physical, spinner,
+    Canvas, FONT_SIZE, Painter, Palette, Rect, SMALL_FONT_SIZE, icon_sdf, line, physical, spinner,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -18,10 +18,10 @@ pub const SPINNER_PERIOD: Duration = Duration::from_millis(900);
 /// How many drawings one turn of the spinner is made of.
 pub const SPINNER_STEPS: u32 = 24;
 /// The label line, and the Close and Retry buttons side by side under it.
-const LABEL_HEIGHT: i32 = 24;
+const LABEL_HEIGHT: i32 = line(FONT_SIZE, 9);
 const RETRY_GAP: i32 = 14;
 const RETRY_WIDTH: i32 = 84;
-const RETRY_HEIGHT: i32 = 30;
+const RETRY_HEIGHT: i32 = line(FONT_SIZE, 15);
 const BUTTON_GAP: i32 = 8;
 
 /// What a placeholder shows: where the window goes, what is starting

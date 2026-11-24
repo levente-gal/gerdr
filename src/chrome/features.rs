@@ -14,7 +14,7 @@ use std::{
 };
 
 use super::{
-    TITLE_FONT_SIZE,
+    TITLE_FONT_SIZE, line,
     AGENT_ICON, BUTTON_PADDING, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, CHECKBOX_SIZE, Canvas,
     Check, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT, Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE,
     ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP,
@@ -73,7 +73,7 @@ pub const CREATE: usize = 1;
 /// and back from it.
 pub const LINK_BUTTON: [&str; 2] = ["Link project\u{2026}", "Done"];
 /// How high a button on a repository row or an agent card is.
-const ROW_BUTTON: i32 = 24;
+const ROW_BUTTON: i32 = line(FONT_SIZE, 9);
 /// How wide the previous and next feature buttons are.
 const SWITCH_W: i32 = 28;
 /// How many lines a list on a stage's page shows at most (the Ship
@@ -2056,9 +2056,9 @@ const TAB_PAD: i32 = 16;
 const TAB_MAX: i32 = 1760;
 /// How high the header's title and sub lines are.
 const TAB_TITLE: i32 = QUIT_TITLE + 4;
-const TAB_SUB: i32 = 20;
+const TAB_SUB: i32 = line(DETAIL_FONT_SIZE, 8);
 /// How high the header's buttons and the page's buttons are.
-const TAB_BUTTON: i32 = 30;
+const TAB_BUTTON: i32 = line(FONT_SIZE, 15);
 /// The header's buttons show only their icons on a tab narrower than
 /// this, each `TAB_BUTTON` square.
 pub const COMPACT_BUTTONS_BELOW: i32 = 1000;
@@ -2068,11 +2068,11 @@ const RAIL_GAP: i32 = 14;
 /// stage's label and short line under that.
 const NODE: i32 = 24;
 const NODE_GAP: i32 = 6;
-const NODE_LABEL: i32 = 18;
-const NODE_LINE: i32 = 16;
+const NODE_LABEL: i32 = line(SMALL_FONT_SIZE, 5);
+const NODE_LINE: i32 = line(DETAIL_FONT_SIZE, 4);
 /// How far a label's second line sits under its first, when it is too
 /// wide for its slot and takes the short line's place.
-const RAIL_LABEL_STEP: i32 = 16;
+const RAIL_LABEL_STEP: i32 = line(SMALL_FONT_SIZE, 3);
 /// The room between a done stage's agent logo and its model on the rail.
 const RAIL_AGENT_GAP: i32 = 4;
 /// The room left between a node and the line joining it to the next.
@@ -2095,7 +2095,7 @@ pub const ACTIVITY_BELOW: i32 = 1180;
 /// corners.
 const COLUMN_GAP: i32 = 12;
 /// The height of the switch on Code review's page, and the gaps round it.
-const REVIEW_SWITCH_H: i32 = 30;
+const REVIEW_SWITCH_H: i32 = line(FONT_SIZE, 15);
 const REVIEW_SWITCH_GAP: i32 = 8;
 /// The size of its bar of files viewed, and the least room left for its words.
 const REVIEW_BAR_W: i32 = 120;
@@ -2109,7 +2109,7 @@ const BAR_INSET: i32 = 6;
 /// above and below the rows and at their ends, the gap between its parts,
 /// the spinner and the gap after it, the bar of steps and the gap before
 /// its count, and the gap under the card.
-const RUN_ROW: i32 = 28;
+const RUN_ROW: i32 = line(SMALL_FONT_SIZE, 15);
 const RUN_PAD: i32 = 4;
 const RUN_INSET: i32 = 12;
 const RUN_GAP: i32 = 10;
@@ -2126,13 +2126,13 @@ pub(super) const SWEEP_PERIOD: std::time::Duration = std::time::Duration::from_m
 const SWEEP_SHARE: f64 = 0.3;
 /// The row of repository chips on a narrow tab, and a chip's height,
 /// inner room and the gap between two.
-const CHIP_ROW: i32 = 28;
+const CHIP_ROW: i32 = line(SMALL_FONT_SIZE, 15);
 const CHIP_PAD: i32 = 10;
 const CHIP_GAP: i32 = 6;
 /// A column's uppercase caption.
-const CAPTION: i32 = 22;
+const CAPTION: i32 = line(DETAIL_FONT_SIZE, 10);
 /// A repository's row on the unfolded card, and the gap between two.
-const REPO_ROW: i32 = 28;
+const REPO_ROW: i32 = line(FONT_SIZE, 13);
 const REPO_GAP: i32 = 4;
 /// The room above a group of rows' heading, past the first.
 const REPO_GROUP_GAP: i32 = 6;

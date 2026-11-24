@@ -35,7 +35,7 @@ use super::{
     POPUP_RADIUS, Painter, Palette, ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS,
     ROWS_TOP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE,
     TINY_FONT_SIZE, TabView, agent_icon, app, arrow, band, centred_dot, chevron_down, ci_mark,
-    cross, distinct, ellipsis, folder, git_branch, icon_sdf, measure, mix, new_tab, physical,
+    cross, distinct, ellipsis, folder, git_branch, icon_sdf, line, measure, mix, new_tab, physical,
     rect_px, restart_arrow, sparkle, stages_mark, status_dot, status_mark, terminal, tray,
 };
 use crate::WorkspaceKind;
@@ -57,17 +57,17 @@ use std::path::PathBuf;
 /// `anim::quantize` gives 1.0.
 const ALPHA_STEPS: f32 = 16.0;
 /// A workspace header's height, in comfortable and compact density.
-const HEADER_ROW: i32 = 30;
-const HEADER_ROW_COMPACT: i32 = 26;
+const HEADER_ROW: i32 = line(FONT_SIZE, 15);
+const HEADER_ROW_COMPACT: i32 = line(FONT_SIZE, 11);
 /// A header with a branch: the band of its name, then the line under it
 /// of its branch, in comfortable and compact density.
-const NAME_LINE: i32 = 24;
-const NAME_LINE_COMPACT: i32 = 22;
-const BRANCH_LINE: i32 = 16;
-const BRANCH_LINE_COMPACT: i32 = 13;
+const NAME_LINE: i32 = line(FONT_SIZE, 9);
+const NAME_LINE_COMPACT: i32 = line(FONT_SIZE, 7);
+const BRANCH_LINE: i32 = line(DETAIL_FONT_SIZE, 4);
+const BRANCH_LINE_COMPACT: i32 = line(DETAIL_FONT_SIZE, 1);
 /// An agent row's first line, in comfortable and compact density.
-const AGENT_ROW: i32 = 24;
-const AGENT_ROW_COMPACT: i32 = 22;
+const AGENT_ROW: i32 = line(SMALL_FONT_SIZE, 11);
+const AGENT_ROW_COMPACT: i32 = line(SMALL_FONT_SIZE, 9);
 /// The gap between the rows under a header.
 const CHILD_GAP: i32 = 2;
 /// The room after a workspace's block, in comfortable and compact density.
@@ -132,7 +132,7 @@ const REPOS_ARROW_SLOT: (i32, i32) = (5, 7);
 const REPOS_ARROW_INSET: i32 = 3;
 /// The field a header's name turns into while renaming: its height and
 /// how far it reaches left of the name.
-const RENAME_HEIGHT: i32 = 24;
+const RENAME_HEIGHT: i32 = line(FONT_SIZE, 9);
 const RENAME_INSET: i32 = 5;
 /// How much of the warning colour a blocked agent's row carries at the
 /// top of its pulse.
@@ -156,13 +156,13 @@ const EMPTY_HINT: [&str; 2] = [
 ];
 const EMPTY_HINT_TOP: i32 = 12;
 /// The "Needs you" list: its heading's height, and the room after it.
-const INBOX_TITLE: i32 = 20;
+const INBOX_TITLE: i32 = line(SMALL_FONT_SIZE, 7);
 const INBOX_GAP: i32 = 6;
 /// The features section under the workspaces: the room from the last
 /// block to its heading, with a rule across the sidebar halfway, and its
 /// heading's height (a header's, as it heads a list of its own).
 const SECTION_TOP: i32 = 16;
-const SECTION_TITLE: i32 = 26;
+const SECTION_TITLE: i32 = line(SMALL_FONT_SIZE, 13);
 const FEATURES_LABEL: &str = "Features";
 /// How big the "+" on the rule is, the room the rule leaves it each side,
 /// and how far past it each way a click still lands on it.
@@ -173,7 +173,7 @@ const FEATURES_PLUS_REACH: (i32, i32) = (4, 2);
 /// the biggest of them.
 const STAGE_LINE: i32 = super::STAGE_DOT_BIG;
 /// The line under a feature's stage dots saying how its stage stands.
-const FEATURE_INFO_LINE: i32 = 15;
+const FEATURE_INFO_LINE: i32 = line(DETAIL_FONT_SIZE, 3);
 /// How far a feature row's lines tuck up under its title.
 const FEATURE_TUCK: i32 = 3;
 /// How wide a feature's count of repositories is.

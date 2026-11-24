@@ -12,6 +12,7 @@ use super::{
     icon_sdf,
     inbox::scope_segments,
     layers::{Part, RowCache},
+    line,
     measure, mix, phys, physical,
     project_menu::menu_mark,
     rect_px,
@@ -24,7 +25,7 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The popup: at most this wide, its title row this high.
 const WORKTREES_WIDTH: i32 = 640;
-const WORKTREES_TITLE: i32 = 44;
+const WORKTREES_TITLE: i32 = line(LABEL_FONT_SIZE, 27);
 /// The fewest and most entries it shows; it scrolls for more.
 const WORKTREES_MIN_ROWS: i32 = 3;
 const WORKTREES_MAX_ROWS: i32 = 14;

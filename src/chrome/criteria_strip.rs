@@ -13,7 +13,7 @@ use super::{
     BUTTON_RADIUS, ButtonStyle, Canvas, FOCUS_RING, FONT_SIZE, FieldSpot, POPUP_RADIUS, Painter,
     Palette, QUIT_BUTTON, ROW_BUTTON, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, band, button_width,
     check, chevron_down, chevron_side, field_text, hint_at, hint_spots, hint_strs, icon_sdf,
-    measure, rect_px, wrap_field_height,
+    line, measure, rect_px, wrap_field_height,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -26,15 +26,15 @@ const MARGIN: i32 = 12;
 /// while stepping.
 const MAX_WIDTH: i32 = 960;
 /// The row of its buttons, and the room inside its edge.
-const ROW: i32 = 40;
+const ROW: i32 = line(FONT_SIZE, 25);
 const INSET: i32 = 8;
 /// The gap between buttons, and before the ones at the right end.
 const GAP: i32 = 6;
 /// The key hints' row under the row, while the strip has the keys.
-const HINTS_H: i32 = 24;
+const HINTS_H: i32 = line(SMALL_FONT_SIZE, 11);
 const GROUP_GAP: i32 = 12;
 /// A line of its steps or note.
-const LINE: i32 = 20;
+const LINE: i32 = line(SMALL_FONT_SIZE, 7);
 /// The room for the dot before the criterion's id.
 const DOT_ROOM: i32 = 14;
 /// The least room the title keeps beside the row's buttons: with less, it
@@ -42,7 +42,7 @@ const DOT_ROOM: i32 = 14;
 /// many buttons.
 const TITLE_MIN: i32 = 220;
 /// The folded chip: its height, and the room for its chevron.
-const CHIP: i32 = 30;
+const CHIP: i32 = line(SMALL_FONT_SIZE, 17);
 const CHIP_ICON: i32 = 18;
 /// How many lines each step wraps to at most.
 const STEP_LINES: usize = 2;

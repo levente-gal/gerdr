@@ -22,6 +22,7 @@ use super::{
     HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState,
     MENU_MARK_WIDTH, MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW,
     SMALL_FONT_SIZE, SearchBar, SearchPart, arrow, band, check, chevron_down, coverage, field_text,
+    line,
     folder, found_split, found_within, git_branch, icon_sdf, magnifier, measure, measure_bold,
     measure_mono, mix, phys, physical, plus, rect_px, rounded_rect, search_field_text,
     search_spots, segment, trash,
@@ -39,11 +40,11 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 const REPOS_MAX_WIDTH: i32 = 1600;
 const REPOS_MAX_HEIGHT: i32 = 1200;
 /// A button's height and the error line's height.
-const ROW_BUTTON: i32 = 28;
-const ERROR_HEIGHT: i32 = 22;
+const ROW_BUTTON: i32 = line(FONT_SIZE, 13);
+const ERROR_HEIGHT: i32 = line(SMALL_FONT_SIZE, 9);
 /// The header row with the title and the summary, and the gap between
 /// them.
-pub const REPOS_HEADER: i32 = 44;
+pub const REPOS_HEADER: i32 = line(LABEL_FONT_SIZE, 27);
 const HEADER_GAP: i32 = 12;
 /// The tree's share of the panel's width unless dragged, the least and
 /// most it can be dragged to, the narrowest it gets (unless that is more
@@ -67,8 +68,8 @@ const REPOS_PAD: i32 = 6;
 /// far a file's line is indented under its repository's.
 pub fn repos_row(density: Density) -> i32 {
     match density {
-        Density::Comfortable => 30,
-        Density::Compact => 26,
+        Density::Comfortable => line(FONT_SIZE, 15),
+        Density::Compact => line(FONT_SIZE, 11),
     }
 }
 const REPOS_LINE_INSET: i32 = 4;
@@ -95,16 +96,16 @@ const REPOS_CODE: i32 = 16;
 const REPOS_CODE_GAP: i32 = 2;
 /// A repository's chip: its height, the room either side of its text and
 /// its corners.
-const CHIP_HEIGHT: i32 = 20;
+const CHIP_HEIGHT: i32 = line(DETAIL_FONT_SIZE, 8);
 const CHIP_PAD: i32 = 6;
 const CHIP_RADIUS: f32 = 4.0;
 /// The detail pane: its title row, a line of a diff or log at each
 /// density, and the size of the monospace font they are in.
-const REPOS_DETAIL_TITLE: i32 = 40;
+const REPOS_DETAIL_TITLE: i32 = line(FONT_SIZE, 25);
 pub fn repos_detail_line(density: Density) -> i32 {
     match density {
-        Density::Comfortable => 22,
-        Density::Compact => 19,
+        Density::Comfortable => line(CODE_FONT_SIZE, 8),
+        Density::Compact => line(CODE_FONT_SIZE, 5),
     }
 }
 /// How strongly a finding's heading band takes its severity's colour.
@@ -143,16 +144,16 @@ pub(super) const PICKED_LIT: f32 = 0.5;
 const REPOS_TAB_WIDTH: i32 = 64;
 const REPOS_TAB_GAP: i32 = 4;
 /// The field's row, and the field in it.
-const REPOS_FIELD_ROW: i32 = 44;
-const REPOS_FIELD: i32 = 32;
+const REPOS_FIELD_ROW: i32 = line(FONT_SIZE, 29);
+const REPOS_FIELD: i32 = line(FONT_SIZE, 17);
 /// The result bar, and the gap between its buttons.
-const REPOS_RESULT: i32 = 36;
+const REPOS_RESULT: i32 = line(FONT_SIZE, 21);
 const REPOS_BUTTON_GAP: i32 = 6;
 /// The footer: the room above and below its rows of actions, a row, the
 /// most rows (the rest go behind the "more" button), the gap between
 /// actions and the room inside either end of one.
 const REPOS_FOOTER_PAD: i32 = 4;
-const REPOS_HINT_ROW: i32 = 32;
+const REPOS_HINT_ROW: i32 = line(SMALL_FONT_SIZE, 19);
 const REPOS_FOOTER_ROWS: usize = 2;
 const HINT_GAP: i32 = 4;
 const HINT_PAD: i32 = 6;
@@ -169,10 +170,10 @@ const GUESS_SLACK: f64 = 4.0;
 /// repository's name takes.
 const SHEET_WIDTH: i32 = 640;
 const SHEET_PAD: i32 = 18;
-const SHEET_TITLE: i32 = 28;
-const SHEET_LINE: i32 = 28;
+const SHEET_TITLE: i32 = line(LABEL_FONT_SIZE, 11);
+const SHEET_LINE: i32 = line(FONT_SIZE, 13);
 const SHEET_GAP: i32 = 10;
-const SHEET_BUTTON: i32 = 34;
+const SHEET_BUTTON: i32 = line(FONT_SIZE, 19);
 const SHEET_BUTTON_GAP: i32 = QUIT_BUTTON_GAP;
 const SHEET_BUTTON_PAD: i32 = 16;
 const SHEET_BUTTON_MIN: i32 = 84;

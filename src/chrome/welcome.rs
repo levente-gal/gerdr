@@ -4,9 +4,9 @@ use super::{
     BUTTON_RADIUS, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, GREETING_FONT_SIZE, GREETING_HEIGHT,
     HELP_MARGIN, HINTS_HEIGHT, LABEL_FONT_SIZE, ListBar, NOTE_GAP, NOTE_HEIGHT, PADDING, Painter,
     Palette, ROW_RADIUS, Rect, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, SUBTITLE_HEIGHT, Thumb,
-    WELCOME_BUTTON, WELCOME_BUTTON_WIDTH, WELCOME_GAP, WELCOME_LABEL, WELCOME_MIDDLE, WELCOME_ROW,
+    WELCOME_BUTTON, WELCOME_BUTTON_WIDTH, WELCOME_GAP, WELCOME_LABEL, WELCOME_MIDDLE,
     WELCOME_ROWS, WELCOME_WIDTH, band, coverage, field_text, focus_ring, gutter_track, hint_at,
-    hint_spots, hint_strs, icon_sdf, mix, phys, physical, plus, rect_px,
+    hint_spots, hint_strs, icon_sdf, line, mix, phys, physical, plus, rect_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -14,16 +14,16 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// A project card: its name over its path and age (a row and the second
 /// line), and the gap to the next.
-pub(super) const WELCOME_CARD: i32 = WELCOME_ROW + 12;
+pub(super) const WELCOME_CARD: i32 = CARD_DETAIL_TOP + CARD_DETAIL_HEIGHT + 6;
 pub(super) const WELCOME_CARD_GAP: i32 = 6;
 /// The gap between the button (or the note under it) and the key hints.
 pub(super) const HINTS_GAP: i32 = 24;
 /// Where a card's two lines sit: the name's band and the detail's, from
 /// the card's top.
 const CARD_NAME_TOP: i32 = 10;
-const CARD_NAME_HEIGHT: i32 = 22;
-const CARD_DETAIL_TOP: i32 = 32;
-const CARD_DETAIL_HEIGHT: i32 = 18;
+const CARD_NAME_HEIGHT: i32 = line(LABEL_FONT_SIZE, 5);
+const CARD_DETAIL_TOP: i32 = CARD_NAME_TOP + CARD_NAME_HEIGHT;
+const CARD_DETAIL_HEIGHT: i32 = line(SMALL_FONT_SIZE, 5);
 /// How far right of the cards their scrollbar stands, besides the gutter's
 /// own gap.
 const WELCOME_BAR_GAP: i32 = 4;

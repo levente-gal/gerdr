@@ -4,14 +4,14 @@
 use super::{
     CAP_GAP, CAP_PADDING, FONT_SIZE, HELP_COLUMN_GAP, HELP_KEY_GAP, HELP_MARGIN, HELP_PADDING,
     HELP_ROW_HEIGHT, HELP_TITLE_HEIGHT, KEY_FONT_SIZE, POPUP_RADIUS, Painter, Palette, Rect,
-    SHADOW, SMALL_FONT_SIZE, keycap_text,
+    SHADOW, SMALL_FONT_SIZE, keycap_text, line,
 };
 use crate::Action;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The pinned panel's title line, above the prefix line.
-const HELP_PINNED_TITLE: i32 = 30;
+const HELP_PINNED_TITLE: i32 = line(FONT_SIZE, 15);
 /// The gap between the prefix keycap and the words after it, and between
 /// the Esc keycap and its word.
 const HELP_WORD_GAP: i32 = 10;

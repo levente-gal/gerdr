@@ -4,7 +4,7 @@
 
 use super::{
     FONT_SIZE, MENU_ITEM_HEIGHT, MENU_PADDING, MENU_WIDTH, PADDING, POPUP_RADIUS, Painter, Palette,
-    Rect, SHADOW, SMALL_FONT_SIZE,
+    Rect, SHADOW, SMALL_FONT_SIZE, line,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -19,7 +19,7 @@ const MENU_GAP: i32 = 2;
 /// The gap between a row's label and its key hint.
 const MENU_HINT_GAP: i32 = 16;
 /// How tall a row of a message is: its lines close, as a paragraph's.
-const MENU_NOTE_HEIGHT: i32 = 20;
+const MENU_NOTE_HEIGHT: i32 = line(FONT_SIZE, 5);
 /// How tall a rule between groups of rows is (a note with no text).
 const MENU_RULE_HEIGHT: i32 = 9;
 

@@ -22,7 +22,7 @@ pub fn tab_strip_height(density: Density) -> i32 {
         Density::Compact => NEW_TAB_SIZE + 2,
     }
 }
-pub(super) const TAB_LINE: i32 = 15;
+pub(super) const TAB_LINE: i32 = line(DETAIL_FONT_SIZE, 3);
 /// Room for the branch icon left of the branch name.
 pub(super) const BRANCH_ICON_WIDTH: i32 = 10;
 pub(super) const BRANCH_ICON_GAP: i32 = 5;
@@ -63,7 +63,7 @@ pub(super) const ROW_PICTURE_SIZE: i32 = 16;
 pub(super) const GAP: i32 = 1;
 /// A line under an agent's row in the sidebar: a subagent's, a GitHub
 /// section's.
-pub(super) const CARD_LINE: i32 = 17;
+pub(super) const CARD_LINE: i32 = line(DETAIL_FONT_SIZE, 5);
 /// Room for the status mark left of the agent's name.
 pub(super) const STATUS_WIDTH: i32 = 10;
 /// How big an agent's badge (its icon) is on a row of the sidebar or the
@@ -71,7 +71,7 @@ pub(super) const STATUS_WIDTH: i32 = 10;
 pub(super) const AGENT_ICON: i32 = 12;
 pub(super) const STATUS_GAP: i32 = 7;
 /// The status pill at the right of a card's header.
-pub(super) const PILL_HEIGHT: i32 = 16;
+pub(super) const PILL_HEIGHT: i32 = line(TINY_FONT_SIZE, 4);
 pub(super) const PILL_PADDING: i32 = 6;
 /// Gap between a detail's label and its value.
 pub(super) const FIELD_GAP: i32 = 8;
@@ -113,8 +113,8 @@ pub(super) const HELP_PADDING: i32 = 14;
 pub(super) const HELP_RADIUS: f32 = POPUP_RADIUS;
 /// Room around popups (help panel, menu) for their drop shadow.
 pub(super) const SHADOW: i32 = 12;
-pub(super) const HELP_TITLE_HEIGHT: i32 = 40;
-pub(super) const HELP_ROW_HEIGHT: i32 = 30;
+pub(super) const HELP_TITLE_HEIGHT: i32 = line(FONT_SIZE, 25);
+pub(super) const HELP_ROW_HEIGHT: i32 = line(FONT_SIZE, 15);
 pub(super) const HELP_KEY_GAP: i32 = 16;
 pub(super) const HELP_COLUMN_GAP: i32 = 32;
 /// Keycaps: text padding, gap around the "/" between alternatives, corner radius.
@@ -124,7 +124,7 @@ pub(super) const CAP_RADIUS: f32 = 4.0;
 /// The menu under the terminal button's chevron.
 pub(super) const MENU_WIDTH: i32 = 180;
 pub(super) const MENU_PADDING: i32 = 4;
-pub(super) const MENU_ITEM_HEIGHT: i32 = 30;
+pub(super) const MENU_ITEM_HEIGHT: i32 = line(FONT_SIZE, 15);
 /// What row highlights were rounded from (`MENU_RADIUS - 2.0` is
 /// `ROW_HIGHLIGHT_RADIUS`); a popup's own corners are `POPUP_RADIUS`.
 pub(super) const MENU_RADIUS: f32 = 6.0;
@@ -132,35 +132,33 @@ pub(super) const MENU_RADIUS: f32 = 6.0;
 /// The switcher, at the top of the app area.
 pub(super) const SWITCHER_WIDTH: i32 = 640;
 pub(super) const SWITCHER_TOP: i32 = 24;
-pub(super) const SWITCHER_INPUT: i32 = 44;
+pub(super) const SWITCHER_INPUT: i32 = line(FONT_SIZE, 29);
 pub(super) const SWITCHER_PADDING: i32 = 6;
 /// A section heading's band in the switcher (its rows are taller, see
 /// chrome/switcher.rs).
-pub(super) const SWITCHER_SECTION: i32 = 34;
+pub(super) const SWITCHER_SECTION: i32 = line(SMALL_FONT_SIZE, 21);
 /// The most rows it shows; it scrolls for more.
 pub(super) const SWITCHER_ROWS: i32 = 12;
 /// The caret after the query.
 pub(super) const CARET_WIDTH: i32 = 2;
-pub(super) const CARET_HEIGHT: i32 = 18;
+pub(super) const CARET_HEIGHT: i32 = line(FONT_SIZE, 3);
 
 /// The welcome screen: a column at most this wide, centred on the output.
 pub(super) const WELCOME_WIDTH: i32 = 560;
 /// From the top: greeting, subtitle, a gap, the "Recent projects" label,
 /// the rows, a gap, the button and the note under it.
-pub(super) const GREETING_HEIGHT: i32 = 40;
-pub(super) const SUBTITLE_HEIGHT: i32 = 24;
+pub(super) const GREETING_HEIGHT: i32 = line(GREETING_FONT_SIZE, 12);
+pub(super) const SUBTITLE_HEIGHT: i32 = line(FONT_SIZE, 9);
 pub(super) const WELCOME_GAP: i32 = 24;
-pub(super) const WELCOME_LABEL: i32 = 24;
-/// A project row: its name, detail and age on one line.
-pub(super) const WELCOME_ROW: i32 = 44;
+pub(super) const WELCOME_LABEL: i32 = line(SMALL_FONT_SIZE, 11);
 /// The most rows it shows; it scrolls for more.
 pub(super) const WELCOME_ROWS: i32 = 8;
-pub(super) const WELCOME_BUTTON: i32 = 36;
+pub(super) const WELCOME_BUTTON: i32 = line(FONT_SIZE, 21);
 pub(super) const WELCOME_BUTTON_WIDTH: i32 = 200;
 pub(super) const NOTE_GAP: i32 = 6;
-pub(super) const NOTE_HEIGHT: i32 = 20;
+pub(super) const NOTE_HEIGHT: i32 = line(SMALL_FONT_SIZE, 7);
 /// The key hints, a margin above the output's bottom edge.
-pub(super) const HINTS_HEIGHT: i32 = 24;
+pub(super) const HINTS_HEIGHT: i32 = line(SMALL_FONT_SIZE, 11);
 /// Where the middle of the welcome screen sits, as a share of the output's height.
 pub(super) const WELCOME_MIDDLE: f64 = 0.42;
 /// Space between the hints' entries, and between each key and its action.
@@ -174,14 +172,14 @@ pub(super) const FOCUS_GAP: f32 = 2.0;
 /// row per thing to stop and "Don't ask again", and the buttons at the
 /// bottom right. Every modal dialog is laid out with these.
 pub(super) const QUIT_PADDING: i32 = 20;
-pub(super) const QUIT_TITLE: i32 = 24;
-pub(super) const QUIT_BODY: i32 = 22;
+pub(super) const QUIT_TITLE: i32 = line(LABEL_FONT_SIZE, 7);
+pub(super) const QUIT_BODY: i32 = line(FONT_SIZE, 7);
 pub(super) const QUIT_LINE_GAP: i32 = 10;
 /// The checkbox row: the box and its label, all of it clickable.
-pub(super) const CHECKBOX_ROW: i32 = 24;
+pub(super) const CHECKBOX_ROW: i32 = line(FONT_SIZE, 9);
 pub(super) const CHECKBOX_SIZE: i32 = 16;
 pub(super) const CHECKBOX_GAP: i32 = 8;
-pub(super) const QUIT_BUTTON: i32 = 32;
+pub(super) const QUIT_BUTTON: i32 = line(FONT_SIZE, 17);
 pub(super) const QUIT_BUTTON_GAP: i32 = 8;
 pub(super) const BUTTON_RADIUS: f32 = 6.0;
 
@@ -203,12 +201,12 @@ pub(super) const PROJECT_MENU_WIDTH: i32 = 440;
 pub(super) const PROJECT_MENU_TOP: i32 = BAR_HEIGHT + 2;
 /// The query field (the title in form mode), the space around the list,
 /// and the footer with the key hints.
-pub(super) const PROJECT_MENU_INPUT: i32 = 44;
+pub(super) const PROJECT_MENU_INPUT: i32 = line(FONT_SIZE, 29);
 pub(super) const PROJECT_MENU_PADDING: i32 = 6;
-pub(super) const PROJECT_MENU_FOOTER: i32 = 36;
+pub(super) const PROJECT_MENU_FOOTER: i32 = line(SMALL_FONT_SIZE, 23);
 /// A project, "New project" or folder row, and a section label.
-pub(super) const PROJECT_MENU_ROW: i32 = 40;
-pub(super) const PROJECT_MENU_SECTION: i32 = 22;
+pub(super) const PROJECT_MENU_ROW: i32 = line(FONT_SIZE, 25);
+pub(super) const PROJECT_MENU_SECTION: i32 = line(SMALL_FONT_SIZE, 9);
 /// The fewest and most entries the list shows; it scrolls for more.
 pub(super) const PROJECT_MENU_MIN_ROWS: i32 = 3;
 pub(super) const PROJECT_MENU_MAX_ROWS: i32 = 12;
@@ -218,25 +216,25 @@ pub(super) const MENU_MARK_WIDTH: i32 = 14;
 pub(super) const MENU_MARK_GAP: i32 = 8;
 /// The square buttons on a project row under the pointer: their side, the
 /// gap between them and the room after the last.
-pub(super) const ROW_BUTTON: i32 = 26;
+pub(super) const ROW_BUTTON: i32 = line(FONT_SIZE, 11);
 pub(super) const ROW_BUTTON_GAP: i32 = 2;
 pub(super) const ROW_BUTTON_INSET: i32 = 6;
 /// The field a project row's name turns into while renaming: its height,
 /// and how far it reaches left of the name.
-pub(super) const RENAME_FIELD: i32 = 28;
+pub(super) const RENAME_FIELD: i32 = line(FONT_SIZE, 13);
 pub(super) const RENAME_INSET: i32 = 6;
 
 /// The project menu's form: its inner padding, the column of labels, a row
 /// and the field in it, and the gap between parts side by side.
 pub(super) const FORM_PADDING: i32 = 14;
 pub(super) const FORM_LABEL_WIDTH: i32 = 64;
-pub(super) const FORM_ROW: i32 = 40;
-pub(super) const FORM_FIELD: i32 = 32;
+pub(super) const FORM_ROW: i32 = line(FONT_SIZE, 25);
+pub(super) const FORM_FIELD: i32 = line(FONT_SIZE, 17);
 pub(super) const FORM_GAP: i32 = 8;
 /// The Browse button right of the folder field.
 pub(super) const BROWSE_WIDTH: i32 = 84;
 /// A folder offered under the folder field.
-pub(super) const SUGGESTION_ROW: i32 = 28;
+pub(super) const SUGGESTION_ROW: i32 = line(FONT_SIZE, 13);
 /// The "Opens" choices: what kind of workspace the new project's folder
 /// opens as (`WorkspaceKind::Project` is the Zed + terminal workspace, not
 /// a project), its label and its width; their height, and the side of the
@@ -245,10 +243,10 @@ pub(super) const KIND_CHOICES: [(WorkspaceKind, &str, i32); 2] = [
     (WorkspaceKind::Project, "Zed + terminal", 150),
     (WorkspaceKind::Terminal, "Terminal only", 130),
 ];
-pub(super) const KIND_HEIGHT: i32 = 28;
+pub(super) const KIND_HEIGHT: i32 = line(FONT_SIZE, 13);
 pub(super) const RADIO_SIZE: i32 = 16;
 /// The line saying why the project can't be created.
-pub(super) const ERROR_HEIGHT: i32 = 22;
+pub(super) const ERROR_HEIGHT: i32 = line(SMALL_FONT_SIZE, 9);
 /// Cancel and Create & switch: labels and widths.
 pub(super) const FORM_BUTTONS: [(&str, i32); 2] = [("Cancel", 84), ("Create & switch", 136)];
 /// Cancel, Run now and Save in the project settings form: labels and widths.
@@ -258,7 +256,7 @@ pub(super) const SETTINGS_BUTTONS: [(&str, i32); 3] =
 /// How high a pane's bar is: the band along its pane's top, over its
 /// window, which starts under it. The bar's buttons are this wide, this
 /// far apart and in from its ends.
-pub const PANE_BAR_HEIGHT: i32 = 28;
+pub const PANE_BAR_HEIGHT: i32 = line(DETAIL_FONT_SIZE, 16);
 pub(super) const BAR_BUTTON: i32 = 24;
 pub(super) const BAR_BUTTON_GAP: i32 = 2;
 pub(super) const BAR_INSET: i32 = 4;

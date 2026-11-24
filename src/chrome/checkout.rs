@@ -5,7 +5,7 @@
 use super::{
     ButtonStyle, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE, POPUP_RADIUS, Painter, Palette,
     QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, SHADOW,
-    band, dialog_buttons, hint_strs, phys,
+    band, dialog_buttons, hint_strs, line, phys,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -14,7 +14,7 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 const BUTTONS: [&str; 3] = ["Cancel", "Leave behind", "Bring along"];
 /// A file's row, the gap between rows, and the room between the last and
 /// the buttons.
-const ROW: i32 = 24;
+const ROW: i32 = line(FONT_SIZE, 9);
 const ROW_GAP: i32 = 2;
 const ROWS_END: i32 = 16;
 /// How far a row's text sits in from the row's left edge.
