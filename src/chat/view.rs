@@ -742,11 +742,8 @@ impl Gerdr {
         let turns = &mut self.chats.turns;
         turns.retain(|id, _| agents.iter().any(|a| a.pane_id == *id));
         for agent in agents {
-            let working = agent.agent_status == AgentStatus::Working;
-            turns
-                .entry(agent.pane_id.clone())
-                .or_default()
-                .note(working, now);
+            let turn = turns.entry(agent.pane_id.clone()).or_default();
+            turn.note(agent.agent_status, now);
         }
         // What is kept of chats gone with their panes.
         let kept: HashSet<String> = chats_mut(&mut self.workspaces)

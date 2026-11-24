@@ -186,11 +186,14 @@ pub struct Turn {
 }
 
 impl Turn {
-    /// A round saw its agent working or not at `now` (Unix ms).
-    pub fn note(&mut self, working: bool, now: u64) {
-        match working {
-            true => _ = self.seen.get_or_insert(now),
-            false => (self.seen, self.idle_at) = (None, now),
+    /// A round saw its agent at `status` at `now` (Unix ms). Only idle or
+    /// done ends a turn: paused (unknown) or asking (blocked), it goes on.
+    pub fn note(&mut self, status: crate::herdr::AgentStatus, now: u64) {
+        use crate::herdr::AgentStatus as S;
+        match status {
+            S::Working => _ = self.seen.get_or_insert(now),
+            S::Idle | S::Done => (self.seen, self.idle_at) = (None, now),
+            S::Blocked | S::Unknown => {}
         }
     }
 
@@ -242,19 +245,23 @@ mod tests {
 
     #[test]
     fn a_turn_begins_at_the_users_words_or_when_seen_working() {
+        use crate::herdr::AgentStatus::{Blocked, Idle, Unknown, Working};
         let mut turn = Turn::default();
         assert_eq!(turn.since(&[user(5)]), None);
         // gerdr started mid-turn: the transcript knows when it began.
-        turn.note(true, 900);
+        turn.note(Working, 900);
         assert_eq!(turn.since(&[user(5)]), Some(5));
         assert_eq!(turn.since(&[]), Some(900));
-        // Later rounds keep the first sighting.
-        turn.note(true, 950);
+        // Later rounds keep the first sighting; paused or asking, it goes on.
+        turn.note(Working, 950);
+        turn.note(Unknown, 960);
+        turn.note(Blocked, 970);
+        turn.note(Working, 980);
         assert_eq!(turn.since(&[]), Some(900));
-        turn.note(false, 1000);
+        turn.note(Idle, 1000);
         assert_eq!(turn.since(&[user(5)]), None);
         // Words sent after it went idle start the next turn.
-        turn.note(true, 1300);
+        turn.note(Working, 1300);
         assert_eq!(turn.since(&[user(5), user(1200)]), Some(1200));
         // A turn no words started (old words only): from when it was seen.
         assert_eq!(turn.since(&[user(5)]), Some(1300));
