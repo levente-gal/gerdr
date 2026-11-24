@@ -8,7 +8,8 @@ use super::{
     ButtonStyle, Canvas, DIALOG_WIDTH, FIELD_LINE, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE,
     POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
     QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band, button_width,
-    dialog_buttons, field_line_spot, field_lines_height, field_text, gutter_track, line, phys, rect_px,
+    dialog_buttons, field_line_spot, field_lines_height, field_text, gutter_track, line, phys,
+    rect_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;

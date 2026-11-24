@@ -4,9 +4,9 @@ use super::{
     BUTTON_RADIUS, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, GREETING_FONT_SIZE, GREETING_HEIGHT,
     HELP_MARGIN, HINTS_HEIGHT, LABEL_FONT_SIZE, ListBar, NOTE_GAP, NOTE_HEIGHT, PADDING, Painter,
     Palette, ROW_RADIUS, Rect, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, SUBTITLE_HEIGHT, Thumb,
-    WELCOME_BUTTON, WELCOME_BUTTON_WIDTH, WELCOME_GAP, WELCOME_LABEL, WELCOME_MIDDLE,
-    WELCOME_ROWS, WELCOME_WIDTH, band, coverage, field_text, focus_ring, gutter_track, hint_at,
-    hint_spots, hint_strs, icon_sdf, line, mix, phys, physical, plus, rect_px,
+    WELCOME_BUTTON, WELCOME_BUTTON_WIDTH, WELCOME_GAP, WELCOME_LABEL, WELCOME_MIDDLE, WELCOME_ROWS,
+    WELCOME_WIDTH, band, coverage, field_text, focus_ring, gutter_track, hint_at, hint_spots,
+    hint_strs, icon_sdf, line, mix, phys, physical, plus, rect_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;

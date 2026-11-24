@@ -9,11 +9,10 @@
 use std::ops::Range;
 
 use super::{
-    MONO_FONT_SIZE,
     FIELD_GAP, FONT_SIZE, FOOTER_PAD, FOOTER_ROW, FieldSpot, HELP_PADDING, HELP_RADIUS,
-    HINT_KEY_GAP, Painter, Palette, ROW_BUTTON, Rect, SHADOW, SMALL_FONT_SIZE, SearchBar,
-    SearchPart, band, hint_spots, hint_strs, layers::Part, line, measure, measure_mono, mix, phys,
-    physical, rect_px, search_field_text, search_spots,
+    HINT_KEY_GAP, MONO_FONT_SIZE, Painter, Palette, ROW_BUTTON, Rect, SHADOW, SMALL_FONT_SIZE,
+    SearchBar, SearchPart, band, hint_spots, hint_strs, layers::Part, line, measure, measure_mono,
+    mix, phys, physical, rect_px, search_field_text, search_spots,
 };
 use crate::scrollback::{Fit, Ink, Style};
 use smithay::utils::{Logical, Point, Rectangle, Size};

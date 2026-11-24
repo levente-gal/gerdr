@@ -8,14 +8,13 @@
 //! its items into an `InboxView`.
 
 use super::{
-    MONO_FONT_SIZE,
     BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, DOT, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
     FieldSpot, HELP_MARGIN, HELP_PADDING, LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH,
-    MENU_RADIUS, PADDING, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING, Painter, Palette,
-    ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STROKE, agent_icon, band,
-    cross, dot_slot, folder, footer_height, line, footer_hint_spots, git_branch, hint_at, hint_strs,
-    icon_sdf, measure, mix, pencil, phys, plus, rect_px, robot, rounded_rect, row_dot, row_fill,
-    search::query_text, segment, status_dot, tray,
+    MENU_RADIUS, MONO_FONT_SIZE, PADDING, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING,
+    Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STROKE,
+    agent_icon, band, cross, dot_slot, folder, footer_height, footer_hint_spots, git_branch,
+    hint_at, hint_strs, icon_sdf, line, measure, mix, pencil, phys, plus, rect_px, robot,
+    rounded_rect, row_dot, row_fill, search::query_text, segment, status_dot, tray,
 };
 use crate::git::{GitStatus, InProgress};
 use crate::text_field::Line;
@@ -873,7 +872,10 @@ fn detail_title_line(detail: &InboxDetailView, rect: Rect, title: Rect) -> Rect 
         return title;
     }
     let top = detail_badge(rect, title).loc.y - 2;
-    Rectangle::new((title.loc.x, top).into(), (title.size.w, line(LABEL_FONT_SIZE, 5)).into())
+    Rectangle::new(
+        (title.loc.x, top).into(),
+        (title.size.w, line(LABEL_FONT_SIZE, 5)).into(),
+    )
 }
 
 /// Where the text of the detail's title starts, in its title row at

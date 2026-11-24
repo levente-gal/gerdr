@@ -12,8 +12,8 @@
 use super::{
     BUTTON_RADIUS, ButtonStyle, Canvas, FOCUS_RING, FONT_SIZE, FieldSpot, POPUP_RADIUS, Painter,
     Palette, QUIT_BUTTON, ROW_BUTTON, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, band, button_width,
-    check, chevron_down, chevron_side, field_text, hint_at, hint_spots, hint_strs, icon_sdf,
-    line, measure, rect_px, wrap_field_height,
+    check, chevron_down, chevron_side, field_text, hint_at, hint_spots, hint_strs, icon_sdf, line,
+    measure, rect_px, wrap_field_height,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;

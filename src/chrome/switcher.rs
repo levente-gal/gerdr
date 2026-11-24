@@ -13,8 +13,8 @@ use super::{
     PILL_HEIGHT, PILL_PADDING, POPUP_RADIUS, Painter, Palette, ROW_ICON_GAP, ROW_ICON_WIDTH, Rect,
     SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING, SWITCHER_ROWS, SWITCHER_SECTION,
     SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, agent_icon, app, dot_slot, folder, folder_plus,
-    footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, line, measure, mix, pencil, prompt,
-    query_text, rect_px, row_dot, row_fill, status_dot, tab, terminal,
+    footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, line, measure, mix, pencil,
+    prompt, query_text, rect_px, row_dot, row_fill, status_dot, tab, terminal,
 };
 use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
