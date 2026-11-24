@@ -415,9 +415,18 @@ fn cell(name: &str, value: rusqlite::types::ValueRef) -> Value {
 
 /// The rows `sql` gives for `arg`, each as a JSON object by column.
 fn rows_json(conn: &rusqlite::Connection, sql: &str, arg: &str) -> rusqlite::Result<Vec<Value>> {
+    rows_of(conn, sql, [arg])
+}
+
+/// The rows `sql` gives for `params`, each as a JSON object by column.
+pub(crate) fn rows_of(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+) -> rusqlite::Result<Vec<Value>> {
     let mut query = conn.prepare(sql)?;
     let names: Vec<String> = query.column_names().iter().map(|n| n.to_string()).collect();
-    let rows = query.query_map([arg], |row| {
+    let rows = query.query_map(params, |row| {
         let mut object = Map::new();
         for (i, name) in names.iter().enumerate() {
             object.insert(name.clone(), cell(name, row.get_ref(i)?));

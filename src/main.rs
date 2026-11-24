@@ -195,7 +195,7 @@ use std::{
 
 use chrome::{
     AgentView, BarButton, Chrome, ChromeView, Density, Help, HelpHit, HelpPress, PlaceholderView,
-    SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, Theme, ThemeMode, WorkspaceView,
+    SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, at_text, from_text, Theme, ThemeMode, WorkspaceView,
 };
 use frecency::Frecency;
 use hooks::Hook;
@@ -1799,8 +1799,9 @@ impl Gerdr {
         let size = self.output_size();
         match drag {
             Drag::Sidebar => {
-                let max = SIDEBAR_MAX_WIDTH.min(size.w - MIN_PANE);
-                self.sidebar_width = (pos.x.round() as i32).min(max).max(SIDEBAR_MIN_WIDTH);
+                let max = at_text(SIDEBAR_MAX_WIDTH).min(size.w - MIN_PANE);
+                let min = at_text(SIDEBAR_MIN_WIDTH);
+                self.sidebar_width = (pos.x.round() as i32).min(max).max(min);
             }
             Drag::ReposSplit => self.repos_drag_to(pos),
             Drag::DocSplit => self.doc_drag_to(pos),
@@ -6677,7 +6678,8 @@ impl Gerdr {
         // Opened again as big, with the sidebar as wide.
         let size = self.output_size();
         self.projects.window_size = Some((size.w, size.h));
-        self.projects.sidebar_width = Some(self.sidebar_width);
+        // Kept at the default text size, so it opens as many characters wide.
+        self.projects.sidebar_width = Some(from_text(self.sidebar_width));
         self.projects.dock_share = Some(self.web.previews.share);
         self.keep_nav(true);
         self.projects.save();
@@ -7542,10 +7544,10 @@ fn new_gerdr(
         active_workspace: 0,
         chrome: Chrome::new(),
         inotify: inotify_limit::Watch::default(),
-        sidebar_width: store
-            .sidebar_width
-            .unwrap_or(SIDEBAR_WIDTH)
-            .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH),
+        sidebar_width: at_text(store.sidebar_width.unwrap_or(SIDEBAR_WIDTH)).clamp(
+            at_text(SIDEBAR_MIN_WIDTH),
+            at_text(SIDEBAR_MAX_WIDTH),
+        ),
         machines: machines::Machines::default(),
         features: features::Features::default(),
         code_reviews: Default::default(),
