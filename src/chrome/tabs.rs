@@ -4,11 +4,11 @@
 //! so a click lands where the pill is.
 
 use super::{
-    Badge, Canvas, Density, Dot, FONT_SIZE, FieldSpot, GAP, LABEL_FONT_SIZE, NEW_TAB_SIZE, PADDING,
-    Painter, Palette, Rect, Rgb, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, STROKE, TAB_MAX_WIDTH,
-    Theme, ThemeMode, agent_icon, chevron_side, cross, dot_slot, eye, field_text, icon_sdf, line,
-    mix, moon, new_tab, no_restart, physical, rounded_rect, row_dot, segment, stages_mark,
-    status_dot, status_label, sun, tab_strip_height, tray, zoom_corners,
+    Badge, Canvas, Density, Dot, FieldSpot, GAP, NEW_TAB_SIZE, PADDING, Painter, Palette, Rect,
+    Rgb, STATUS_GAP, STATUS_WIDTH, STROKE, TAB_MAX_WIDTH, Theme, ThemeMode, agent_icon,
+    chevron_side, cross, dot_slot, eye, field_text, font_size, icon_sdf, label_font_size, line,
+    mix, moon, new_tab, no_restart, physical, rounded_rect, row_dot, segment, small_font_size,
+    stages_mark, status_dot, status_label, sun, tab_strip_height, tray, zoom_corners,
 };
 use crate::agent_icons::AgentIcon;
 use crate::app_icons::github_icon;
@@ -532,7 +532,9 @@ const EDGE: i32 = 4;
 /// The overflow chip ("⋯ N" with its warning dot) and the PREFIX badge.
 const OVERFLOW_WIDTH: i32 = 44;
 const PREFIX_WIDTH: i32 = 64;
-const PREFIX_HEIGHT: i32 = line(SMALL_FONT_SIZE, 7);
+fn prefix_height() -> i32 {
+    line(small_font_size(), 7)
+}
 /// The watch button: an eye and "Watch CI" (or "Watching"), and the gap
 /// between them.
 const WATCH_WIDTH: i32 = 96;
@@ -739,8 +741,8 @@ pub fn tab_layout_at(
     right -= CHIP_GAP + PREFIX_WIDTH;
     let prefix = prefix.then(|| {
         Rectangle::new(
-            (right, (height - PREFIX_HEIGHT) / 2).into(),
-            (PREFIX_WIDTH, PREFIX_HEIGHT).into(),
+            (right, (height - prefix_height()) / 2).into(),
+            (PREFIX_WIDTH, prefix_height()).into(),
         )
     });
     let overflow = overflow.then(|| {
@@ -842,7 +844,7 @@ pub fn tab_rename_field(view: &TabStripView, strip: Rect, scale: f64) -> Option<
     let mut area = layout.rename_field(*t)?;
     area.loc += strip.loc;
     Some(FieldSpot {
-        size: FONT_SIZE,
+        size: font_size(),
         area,
         text: field_text(area, scale),
         line: line.clone(),
@@ -907,7 +909,11 @@ impl Painter {
         let pad = (PADDING * s).round();
         let line = px(1).max(1);
         let compact = size.h < tab_strip_height(Density::Comfortable);
-        let font = if compact { FONT_SIZE } else { LABEL_FONT_SIZE };
+        let font = if compact {
+            font_size()
+        } else {
+            label_font_size()
+        };
         let alpha = view.alpha();
         let lit = |hit: TabHit| view.hover == Some(hit) && alpha > 0.0;
         c.fill(0, 0, c.w, c.h, p.tab_bar);
@@ -1109,7 +1115,7 @@ impl Painter {
                 (chip.size.w - arrow.size.w, chip.size.h).into(),
             );
             let hidden = layout.hidden().len().to_string();
-            self.centered(&mut c, &hidden, SMALL_FONT_SIZE, count, scale, p.text);
+            self.centered(&mut c, &hidden, small_font_size(), count, scale, p.text);
         }
         if layout.plus.size.w > 0 {
             // A soft rounded square with a large "+", centred in the strip.
@@ -1138,7 +1144,7 @@ impl Painter {
             self.centered(
                 &mut c,
                 &view.elsewhere.0.to_string(),
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 count,
                 scale,
                 p.text,
@@ -1168,7 +1174,14 @@ impl Painter {
         if let Some(badge) = layout.prefix {
             let (bx, by, bw, bh) = super::rect_px(badge, scale);
             c.rounded(bx, by, bw, bh, bh / 2.0, p.accent);
-            self.centered(&mut c, "PREFIX", SMALL_FONT_SIZE, badge, scale, p.on_accent);
+            self.centered(
+                &mut c,
+                "PREFIX",
+                small_font_size(),
+                badge,
+                scale,
+                p.on_accent,
+            );
         }
 
         // The switch shows the mode in use: a monitor while following the
@@ -1216,7 +1229,7 @@ impl Painter {
             ("Watch CI", if lit.is_some() { p.text } else { p.muted })
         };
         // The eye and the label, centred together.
-        let text_w = self.text_width(label, SMALL_FONT_SIZE, scale) / s;
+        let text_w = self.text_width(label, small_font_size(), scale) / s;
         let content_w = (WATCH_ICON + WATCH_GAP) as f32 + text_w;
         let start = rect.loc.x + ((rect.size.w as f32 - content_w) / 2.0).round() as i32;
         let icon = Rectangle::new((start, rect.loc.y).into(), (WATCH_ICON, rect.size.h).into());
@@ -1224,7 +1237,7 @@ impl Painter {
         self.text(
             c,
             label,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             px(start + WATCH_ICON + WATCH_GAP) as f32,
             px(rect.loc.x + rect.size.w) as f32,
             (px(rect.loc.y), px(rect.size.h)),

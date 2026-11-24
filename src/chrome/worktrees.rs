@@ -4,18 +4,18 @@
 //! or hovered row, buttons to review, check out, merge and delete it.
 
 use super::{
-    ButtonStyle, Canvas, DETAIL_FONT_SIZE, FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP,
-    GIT_MARK_WIDTH, HELP_MARGIN, LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH, PADDING,
-    POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING, PROJECT_MENU_ROW, PROJECT_MENU_SECTION,
-    Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW,
-    SMALL_FONT_SIZE, band, footer_height, footer_hint_spots, git_branch, hint_at, hint_strs,
-    icon_sdf,
+    ButtonStyle, Canvas, FIELD_GAP, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN,
+    MENU_MARK_GAP, MENU_MARK_WIDTH, PADDING, POPUP_RADIUS, PROJECT_MENU_PADDING, Painter, Palette,
+    ROW_BUTTON_INSET, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW, band, detail_font_size, font_size,
+    footer_height, footer_hint_spots, git_branch, hint_at, hint_strs, icon_sdf,
     inbox::scope_segments,
+    label_font_size,
     layers::{Part, RowCache},
     line, measure, mix, phys, physical,
     project_menu::menu_mark,
-    rect_px,
+    project_menu_input, project_menu_row, project_menu_section, rect_px, row_button,
     search::query_text,
+    small_font_size,
 };
 use crate::git::GitStatus;
 use crate::text_field::Line;
@@ -24,7 +24,9 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The popup: at most this wide, its title row this high.
 const WORKTREES_WIDTH: i32 = 640;
-const WORKTREES_TITLE: i32 = line(LABEL_FONT_SIZE, 27);
+fn worktrees_title() -> i32 {
+    line(label_font_size(), 27)
+}
 /// The fewest and most entries it shows; it scrolls for more.
 const WORKTREES_MIN_ROWS: i32 = 3;
 const WORKTREES_MAX_ROWS: i32 = 14;
@@ -33,8 +35,12 @@ const WORKTREES_MAX_ROWS: i32 = 14;
 const WORKTREE_BUTTON_GAP: i32 = 4;
 const WORKTREE_BUTTON_PAD: i32 = 10;
 /// How high a worktree's row is, and a repository's label.
-pub const WORKTREES_ROW: i32 = PROJECT_MENU_ROW;
-pub const WORKTREES_LABEL: i32 = PROJECT_MENU_SECTION;
+pub fn worktrees_row() -> i32 {
+    project_menu_row()
+}
+pub fn worktrees_label() -> i32 {
+    project_menu_section()
+}
 
 /// What the worktrees popup shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -139,7 +145,7 @@ impl WorktreeButton {
     /// (`Painter::button_width`): four fit beside a worktree's name.
     fn width(self) -> i32 {
         let label = self.label();
-        let text = measure(label, FONT_SIZE)
+        let text = measure(label, font_size())
             .unwrap_or(label.chars().count() as f32 * 8.0)
             .ceil() as i32;
         text + 2 * WORKTREE_BUTTON_PAD
@@ -204,11 +210,11 @@ pub fn worktrees_page(size: Size<i32, Logical>) -> usize {
     let room = size.h
         - worktrees_top(size)
         - HELP_MARGIN
-        - WORKTREES_TITLE
-        - PROJECT_MENU_INPUT
+        - worktrees_title()
+        - project_menu_input()
         - 2 * PROJECT_MENU_PADDING
         - footer_height(usize::MAX);
-    (room / PROJECT_MENU_ROW).clamp(WORKTREES_MIN_ROWS, WORKTREES_MAX_ROWS) as usize
+    (room / project_menu_row()).clamp(WORKTREES_MIN_ROWS, WORKTREES_MAX_ROWS) as usize
 }
 
 /// Where the parts of the worktrees popup showing `view` go, on an output
@@ -219,15 +225,15 @@ pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> Workt
     let w = WORKTREES_WIDTH.min(size.w - 2 * HELP_MARGIN).max(1);
     let x = ((size.w - w) / 2).max(0);
     let top = worktrees_top(size);
-    let title = Rectangle::new((x, top).into(), (w, WORKTREES_TITLE).into());
+    let title = Rectangle::new((x, top).into(), (w, worktrees_title()).into());
     let scope = if view.repo.is_some() {
         scope_segments(title)
     } else {
         Vec::new()
     };
     let query = Rectangle::new(
-        (x, top + WORKTREES_TITLE).into(),
-        (w, PROJECT_MENU_INPUT).into(),
+        (x, top + worktrees_title()).into(),
+        (w, project_menu_input()).into(),
     );
     let (row_x, row_w) = (
         x + PROJECT_MENU_PADDING,
@@ -260,7 +266,7 @@ pub fn worktrees_layout(view: &WorktreesView, size: Size<i32, Logical>) -> Workt
         .collect();
     // As high as it is kept, the entries past it shown in part; with room
     // for the line saying there are none.
-    let y = start + view.list_height.max(PROJECT_MENU_ROW);
+    let y = start + view.list_height.max(project_menu_row());
     let list = Rectangle::new((row_x, start).into(), (row_w, y - start).into());
     let footer_h = super::measured_footer_height(&hint_strs(&view.hints), w);
     let bottom = y + PROJECT_MENU_PADDING + footer_h;
@@ -288,8 +294,8 @@ pub fn worktrees_thumb(view: &WorktreesView, layout: &WorktreesLayout) -> Option
 /// How high `entry` is in the list.
 fn height(entry: &WorktreeEntry) -> i32 {
     match entry {
-        WorktreeEntry::Repo(_) => WORKTREES_LABEL,
-        WorktreeEntry::Worktree(_) => WORKTREES_ROW,
+        WorktreeEntry::Repo(_) => worktrees_label(),
+        WorktreeEntry::Worktree(_) => worktrees_row(),
     }
 }
 
@@ -351,14 +357,14 @@ fn entry_tops(view: &WorktreesView, start: i32) -> Vec<f64> {
 /// `buttons` at the right end of a row in `rect`, vertically centred.
 fn button_rects(buttons: &[WorktreeButton], rect: Rect) -> Vec<(WorktreeButton, Rect)> {
     let mut right = rect.loc.x + rect.size.w - ROW_BUTTON_INSET;
-    let top = rect.loc.y + (rect.size.h - ROW_BUTTON) / 2;
+    let top = rect.loc.y + (rect.size.h - row_button()) / 2;
     let mut rects: Vec<_> = buttons
         .iter()
         .rev()
         .map(|&button| {
             let w = button.width();
             right -= w;
-            let r = Rectangle::new((right, top).into(), (w, ROW_BUTTON).into());
+            let r = Rectangle::new((right, top).into(), (w, row_button()).into());
             right -= WORKTREE_BUTTON_GAP;
             (button, r)
         })
@@ -391,7 +397,7 @@ pub fn worktree_marks(
             None => rect.loc.x + rect.size.w - PADDING as i32,
         };
         let name_x = mark.loc.x + MENU_MARK_WIDTH + MENU_MARK_GAP;
-        let name_w = measure(&line.name, FONT_SIZE).unwrap_or(0.0).ceil() as i32;
+        let name_w = measure(&line.name, font_size()).unwrap_or(0.0).ceil() as i32;
         let x = (name_x + name_w).min(end);
         let w = 2 * GIT_MARK_GAP + GIT_MARK_WIDTH;
         if x + w <= end + GIT_MARK_GAP {
@@ -441,7 +447,7 @@ pub fn worktrees_hit(
 pub fn worktrees_field(view: &WorktreesView, size: Size<i32, Logical>, scale: f64) -> FieldSpot {
     let area = worktrees_layout(view, size).query;
     FieldSpot {
-        size: FONT_SIZE,
+        size: font_size(),
         area,
         text: query_text(area, scale),
         line: view.query.clone(),
@@ -492,7 +498,7 @@ impl Painter {
         self.text(
             &mut c,
             &heading,
-            LABEL_FONT_SIZE,
+            label_font_size(),
             x,
             right,
             band(title, scale),
@@ -517,9 +523,16 @@ impl Painter {
                     query.loc.y + query.size.h + PROJECT_MENU_PADDING,
                 )
                     .into(),
-                (query.size.w, PROJECT_MENU_ROW).into(),
+                (query.size.w, project_menu_row()).into(),
             );
-            self.centered(&mut c, &view.empty, FONT_SIZE, first, scale, p.placeholder);
+            self.centered(
+                &mut c,
+                &view.empty,
+                font_size(),
+                first,
+                scale,
+                p.placeholder,
+            );
         }
 
         let footer = shift(layout.footer);
@@ -584,7 +597,7 @@ impl Painter {
                 self.text(
                     c,
                     &name.to_uppercase(),
-                    DETAIL_FONT_SIZE,
+                    detail_font_size(),
                     px(mark.loc.x) as f32,
                     right,
                     row_band,
@@ -629,7 +642,14 @@ impl Painter {
 
         let label_x = px(mark.loc.x + MENU_MARK_WIDTH + MENU_MARK_GAP) as f32;
         let after = self.text(
-            c, &line.name, FONT_SIZE, label_x, end, row_band, scale, p.text,
+            c,
+            &line.name,
+            font_size(),
+            label_x,
+            end,
+            row_band,
+            scale,
+            p.text,
         );
         let dirty = GitStatus {
             dirty: line.dirty,
@@ -645,7 +665,7 @@ impl Painter {
         let after = self.text(
             c,
             tag,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             after + gap,
             end,
             row_band,
@@ -656,7 +676,7 @@ impl Painter {
             self.text(
                 c,
                 &line.path,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 after + gap,
                 end,
                 row_band,
@@ -845,7 +865,7 @@ mod tests {
                 line("main", vec![Diff]),
                 line("topic", vec![Diff, Checkout, Merge, Delete]),
             ],
-            list_height: WORKTREES_LABEL + 2 * WORKTREES_ROW,
+            list_height: worktrees_label() + 2 * worktrees_row(),
             selected: Some(2),
             hover: None,
             hints: vec![("↵".into(), "diff".into()), ("Del".into(), "delete".into())],
@@ -982,7 +1002,7 @@ mod tests {
                 label("s"),
                 line("other", Vec::new()),
             ],
-            list_height: 3 * WORKTREES_ROW,
+            list_height: 3 * worktrees_row(),
             selected: None,
             part: 0.5,
             ..view()
@@ -990,11 +1010,11 @@ mod tests {
         let l = worktrees_layout(&scrolled, size);
         // As high as it is kept, its label on top staying, the worktrees
         // moved up half the first, the last reaching out under it.
-        assert_eq!(l.list.size.h, 3 * WORKTREES_ROW);
+        assert_eq!(l.list.size.h, 3 * worktrees_row());
         assert_eq!(l.entries[0].0.loc.y, l.list.loc.y);
         assert_eq!(
             l.entries[1].0.loc.y,
-            l.list.loc.y + WORKTREES_LABEL - WORKTREES_ROW / 2
+            l.list.loc.y + worktrees_label() - worktrees_row() / 2
         );
         let bottom = l.list.loc.y + l.list.size.h;
         let (last, _) = l.entries.last().unwrap();
@@ -1039,7 +1059,7 @@ mod tests {
         let (top, next) = (l.entries[0].0, l.entries[2].0);
         assert!(top.loc.y < l.list.loc.y);
         assert_eq!(top.loc.y + top.size.h, next.loc.y);
-        assert_eq!(l.list.size.h, 3 * WORKTREES_ROW);
+        assert_eq!(l.list.size.h, 3 * worktrees_row());
     }
 
     #[test]
@@ -1055,7 +1075,7 @@ mod tests {
     fn the_buttons_labels_fit() {
         use WorktreeButton::*;
         for button in [Diff, Checkout, Merge, Delete] {
-            let w = measure(button.label(), FONT_SIZE).unwrap_or(0.0);
+            let w = measure(button.label(), font_size()).unwrap_or(0.0);
             assert!(w + 16.0 <= button.width() as f32, "{button:?}: {w}");
         }
     }
@@ -1089,7 +1109,7 @@ mod tests {
                 continue;
             }
             let v = WorktreesView {
-                list_height: page * WORKTREES_ROW,
+                list_height: page * worktrees_row(),
                 hints: hints.clone(),
                 ..view()
             };
@@ -1112,7 +1132,7 @@ mod tests {
                 label("s"),
                 line("other", Vec::new()),
             ],
-            list_height: 3 * WORKTREES_ROW,
+            list_height: 3 * worktrees_row(),
             selected: Some(1),
             ..view()
         }
@@ -1167,7 +1187,7 @@ mod tests {
             // The label stays on top; the worktrees move up by the part
             // of the first, to the fraction of a pixel.
             assert_eq!(moved[0].loc, parts[0].loc);
-            let up = part * WORKTREES_ROW as f64;
+            let up = part * worktrees_row() as f64;
             assert!((parts[1].loc.y - moved[1].loc.y - up).abs() < 1e-9);
         }
         // Further, only the next repository's label coming into view is.

@@ -16,16 +16,14 @@
 //! Actions the footer has no room for go behind a "more" button.
 
 use super::{
-    CODE_FONT_SIZE,
-    BUTTON_RADIUS, ButtonStyle, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DETAIL_FONT_SIZE,
-    DOCK_GAP, Density, FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN,
-    HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState,
-    MENU_MARK_WIDTH, MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW,
-    SMALL_FONT_SIZE, SearchBar, SearchPart, arrow, band, check, chevron_down, coverage, field_text,
-    line,
-    folder, found_split, found_within, git_branch, icon_sdf, magnifier, measure, measure_bold,
-    measure_mono, mix, phys, physical, plus, rect_px, rounded_rect, search_field_text,
-    search_spots, segment, trash,
+    BUTTON_RADIUS, ButtonStyle, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DOCK_GAP, Density,
+    FIELD_GAP, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN, HELP_PADDING, HELP_RADIUS,
+    HINT_KEY_GAP, LineState, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, Painter, Palette,
+    QUIT_BUTTON_GAP, Rect, Rgb, SHADOW, SearchBar, SearchPart, arrow, band, check, chevron_down,
+    code_font_size, coverage, detail_font_size, field_text, folder, font_size, found_split,
+    found_within, git_branch, icon_sdf, key_font_size, label_font_size, line, magnifier, measure,
+    measure_bold, measure_mono, mix, phys, physical, plus, rect_px, rounded_rect,
+    search_field_text, search_spots, segment, small_font_size, trash,
 };
 use std::ops::Range;
 
@@ -40,11 +38,17 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 const REPOS_MAX_WIDTH: i32 = 1600;
 const REPOS_MAX_HEIGHT: i32 = 1200;
 /// A button's height and the error line's height.
-const ROW_BUTTON: i32 = line(FONT_SIZE, 13);
-const ERROR_HEIGHT: i32 = line(SMALL_FONT_SIZE, 9);
+fn row_button_px() -> i32 {
+    line(font_size(), 13)
+}
+fn error_height() -> i32 {
+    line(small_font_size(), 9)
+}
 /// The header row with the title and the summary, and the gap between
 /// them.
-pub const REPOS_HEADER: i32 = line(LABEL_FONT_SIZE, 27);
+pub fn repos_header() -> i32 {
+    line(label_font_size(), 27)
+}
 const HEADER_GAP: i32 = 12;
 /// The tree's share of the panel's width unless dragged, the least and
 /// most it can be dragged to, the narrowest it gets (unless that is more
@@ -61,7 +65,9 @@ pub const REVIEW_TREE_SHARE: f64 = 0.25;
 pub const REVIEW_TREE_MIN_PANEL: i32 = 640;
 /// The tree's least width: about nine letters of a name in its filter
 /// beside the toolbar's buttons, so it grows with the text.
-const REPOS_TREE_MIN: i32 = (FONT_SIZE * 20.0) as i32;
+fn repos_tree_min() -> i32 {
+    (font_size() * 20.0) as i32
+}
 pub const SPLITTER_GRAB: i32 = 5;
 /// The room above and below the tree's lines and the detail's, and beside
 /// the tree's.
@@ -70,8 +76,8 @@ const REPOS_PAD: i32 = 6;
 /// far a file's line is indented under its repository's.
 pub fn repos_row(density: Density) -> i32 {
     match density {
-        Density::Comfortable => line(FONT_SIZE, 15),
-        Density::Compact => line(FONT_SIZE, 11),
+        Density::Comfortable => line(font_size(), 15),
+        Density::Compact => line(font_size(), 11),
     }
 }
 const REPOS_LINE_INSET: i32 = 4;
@@ -98,16 +104,20 @@ const REPOS_CODE: i32 = 16;
 const REPOS_CODE_GAP: i32 = 2;
 /// A repository's chip: its height, the room either side of its text and
 /// its corners.
-const CHIP_HEIGHT: i32 = line(DETAIL_FONT_SIZE, 8);
+fn chip_height() -> i32 {
+    line(detail_font_size(), 8)
+}
 const CHIP_PAD: i32 = 6;
 const CHIP_RADIUS: f32 = 4.0;
 /// The detail pane: its title row, a line of a diff or log at each
 /// density, and the size of the monospace font they are in.
-const REPOS_DETAIL_TITLE: i32 = line(FONT_SIZE, 25);
+fn repos_detail_title() -> i32 {
+    line(font_size(), 25)
+}
 pub fn repos_detail_line(density: Density) -> i32 {
     match density {
-        Density::Comfortable => line(CODE_FONT_SIZE, 8),
-        Density::Compact => line(CODE_FONT_SIZE, 5),
+        Density::Comfortable => line(code_font_size(), 8),
+        Density::Compact => line(code_font_size(), 5),
     }
 }
 /// How strongly a finding's heading band takes its severity's colour.
@@ -146,16 +156,24 @@ pub(super) const PICKED_LIT: f32 = 0.5;
 const REPOS_TAB_WIDTH: i32 = 64;
 const REPOS_TAB_GAP: i32 = 4;
 /// The field's row, and the field in it.
-const REPOS_FIELD_ROW: i32 = line(FONT_SIZE, 29);
-const REPOS_FIELD: i32 = line(FONT_SIZE, 17);
+fn repos_field_row() -> i32 {
+    line(font_size(), 29)
+}
+fn repos_field_px() -> i32 {
+    line(font_size(), 17)
+}
 /// The result bar, and the gap between its buttons.
-const REPOS_RESULT: i32 = line(FONT_SIZE, 21);
+fn repos_result() -> i32 {
+    line(font_size(), 21)
+}
 const REPOS_BUTTON_GAP: i32 = 6;
 /// The footer: the room above and below its rows of actions, a row, the
 /// most rows (the rest go behind the "more" button), the gap between
 /// actions and the room inside either end of one.
 const REPOS_FOOTER_PAD: i32 = 4;
-const REPOS_HINT_ROW: i32 = line(SMALL_FONT_SIZE, 19);
+fn repos_hint_row() -> i32 {
+    line(small_font_size(), 19)
+}
 const REPOS_FOOTER_ROWS: usize = 2;
 const HINT_GAP: i32 = 4;
 const HINT_PAD: i32 = 6;
@@ -172,10 +190,16 @@ const GUESS_SLACK: f64 = 4.0;
 /// repository's name takes.
 const SHEET_WIDTH: i32 = 640;
 const SHEET_PAD: i32 = 18;
-const SHEET_TITLE: i32 = line(LABEL_FONT_SIZE, 11);
-const SHEET_LINE: i32 = line(FONT_SIZE, 13);
+fn sheet_title_px() -> i32 {
+    line(label_font_size(), 11)
+}
+fn sheet_line() -> i32 {
+    line(font_size(), 13)
+}
 const SHEET_GAP: i32 = 10;
-const SHEET_BUTTON: i32 = line(FONT_SIZE, 19);
+fn sheet_button() -> i32 {
+    line(font_size(), 19)
+}
 const SHEET_BUTTON_GAP: i32 = QUIT_BUTTON_GAP;
 const SHEET_BUTTON_PAD: i32 = 16;
 const SHEET_BUTTON_MIN: i32 = 84;
@@ -1267,7 +1291,7 @@ fn line_spans(
     let mut end = right;
     let parts = repo_counts(repo);
     let counts = (!parts.is_empty()).then(|| {
-        let w: f32 = parts.iter().map(|(t, _)| width(t, SMALL_FONT_SIZE)).sum();
+        let w: f32 = parts.iter().map(|(t, _)| width(t, small_font_size())).sum();
         let w = w + count_gap(s) * (parts.len() - 1) as f32;
         let cx = (right - w).floor().max(x);
         end = cx - gap;
@@ -1275,16 +1299,16 @@ fn line_spans(
     });
     let chip = repo.chip.as_ref().map(|chip| {
         let pad = (CHIP_PAD as f32 * s).round();
-        let cw = (width(&chip.text, DETAIL_FONT_SIZE) + 2.0 * pad).round();
+        let cw = (width(&chip.text, detail_font_size()) + 2.0 * pad).round();
         let cx = (end - cw).max(x);
         end = cx - gap;
         (cx, cw)
     });
-    let mut pen = (x + bold(&repo.label, FONT_SIZE)).min(end).max(x);
+    let mut pen = (x + bold(&repo.label, font_size())).min(end).max(x);
     let branch = (pen + gap + branch_icon(gap, s) < end).then(|| {
         let bx = pen + gap;
         let text = repo.branch.as_deref().unwrap_or("detached");
-        pen = (bx + branch_icon(gap, s) + width(text, SMALL_FONT_SIZE)).min(end);
+        pen = (bx + branch_icon(gap, s) + width(text, small_font_size())).min(end);
         bx
     });
     let (w, mark_gap) = (
@@ -1307,7 +1331,7 @@ fn line_spans(
         }
         let mut mark_end = mx + w;
         if count > 0 {
-            mark_end = (mark_end + s + width(&count.to_string(), DETAIL_FONT_SIZE)).min(end);
+            mark_end = (mark_end + s + width(&count.to_string(), detail_font_size())).min(end);
         }
         marks.push(MarkSpan {
             mark,
@@ -1320,12 +1344,12 @@ fn line_spans(
     // The notes, as far as they fit: the stash count is a mark too.
     let no_upstream = (repo.no_upstream && pen + gap < end).then(|| {
         let nx = pen + gap;
-        pen = (nx + width("no upstream", SMALL_FONT_SIZE)).min(end);
+        pen = (nx + width("no upstream", small_font_size())).min(end);
         nx
     });
     if repo.stashes > 0 && pen + gap < end {
         let nx = pen + gap;
-        let note_end = (nx + width(&stash_note(repo), SMALL_FONT_SIZE)).min(end);
+        let note_end = (nx + width(&stash_note(repo), small_font_size())).min(end);
         marks.push(MarkSpan {
             mark: RepoMark::Stashes,
             x: nx,
@@ -1467,14 +1491,14 @@ fn text_extent(text: &str, size: f32, per_char: f64) -> i32 {
 /// without a key, its label on a button.
 fn hint_width(hint: &Hint) -> i32 {
     if hint.key.is_empty() {
-        let label = text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR);
+        let label = text_extent(&hint.label, small_font_size(), SMALL_CHAR);
         return 2 * HINT_PAD + 2 * CAP_PADDING + label;
     }
     2 * HINT_PAD
         + 2 * CAP_PADDING
-        + text_extent(&hint.key, KEY_FONT_SIZE, KEY_CHAR)
+        + text_extent(&hint.key, key_font_size(), KEY_CHAR)
         + HINT_KEY_GAP
-        + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR)
+        + text_extent(&hint.label, small_font_size(), SMALL_CHAR)
 }
 
 /// `hint` as a button outside the footer draws it: its label alone. Only
@@ -1488,7 +1512,7 @@ fn without_key(hint: &Hint) -> Hint {
 
 /// How wide a button on a diff row is: its label with room either side.
 fn row_chip_width(hint: &Hint) -> i32 {
-    2 * ROW_CHIP_PAD + text_extent(&hint.label, SMALL_FONT_SIZE, SMALL_CHAR)
+    2 * ROW_CHIP_PAD + text_extent(&hint.label, small_font_size(), SMALL_CHAR)
 }
 
 /// Where the buttons `widths` wide go on a diff row in `row`: in order,
@@ -1523,9 +1547,9 @@ fn line_chip_rects(
 ) -> Vec<Rect> {
     let mut rects = chip_rects(rect, widths);
     if let (Some(DetailRow::Line(line)), Some(first)) = (row, rects.first()) {
-        let advance = measure_mono("0", CODE_FONT_SIZE)
+        let advance = measure_mono("0", code_font_size())
             .filter(|a| *a > 0.0)
-            .unwrap_or(CODE_FONT_SIZE * 0.6);
+            .unwrap_or(code_font_size() * 0.6);
         let chars: usize = line.text.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum();
         let text_end = rect.loc.x
             + DIFF_INSET
@@ -1549,12 +1573,12 @@ fn more_label(n: usize) -> String {
 
 /// How wide the "more" button is with `n` actions behind it.
 fn more_width(n: usize) -> i32 {
-    2 * HINT_PAD + 2 * CAP_PADDING + text_extent(&more_label(n), SMALL_FONT_SIZE, SMALL_CHAR)
+    2 * HINT_PAD + 2 * CAP_PADDING + text_extent(&more_label(n), small_font_size(), SMALL_CHAR)
 }
 
 /// How wide a sheet's button is.
 fn sheet_button_width(button: ReposButton) -> i32 {
-    (text_extent(button.label(), FONT_SIZE, BUTTON_CHAR) + 2 * SHEET_BUTTON_PAD)
+    (text_extent(button.label(), font_size(), BUTTON_CHAR) + 2 * SHEET_BUTTON_PAD)
         .max(SHEET_BUTTON_MIN)
 }
 
@@ -1605,14 +1629,14 @@ fn hint_rows(hints: &[Hint], w: i32) -> (Vec<Vec<(usize, i32)>>, Vec<usize>) {
 
 /// How high the footer is with `rows` rows of actions.
 fn footer_h(rows: usize) -> i32 {
-    2 * REPOS_FOOTER_PAD + rows.max(1) as i32 * REPOS_HINT_ROW
+    2 * REPOS_FOOTER_PAD + rows.max(1) as i32 * repos_hint_row()
 }
 
 /// The tree's width in a panel `w` wide, with `share` of it.
 fn tree_width(w: i32, share: f64) -> i32 {
     let share = share.clamp(REPOS_TREE_SHARE_MIN, REPOS_TREE_SHARE_MAX);
     ((w as f64 * share).round() as i32)
-        .max(REPOS_TREE_MIN.min(w / 2))
+        .max(repos_tree_min().min(w / 2))
         .min(w)
 }
 
@@ -1625,17 +1649,17 @@ pub fn repos_share_at(x: f64, panel: Rect) -> f64 {
 
 /// How wide the branch picker's button is for `label`.
 fn picker_width(label: &str) -> i32 {
-    let text = text_extent(label, FONT_SIZE, BUTTON_CHAR);
+    let text = text_extent(label, font_size(), BUTTON_CHAR);
     (2 * PICKER_PAD + PICKER_ICON + 2 * PICKER_GAP + text + PICKER_CHEVRON).max(PICKER_MIN)
 }
 
 /// How many tree lines and detail lines `panel` shows at once: with the error line, the result bar and the footer's
 /// rows all there, so that the page doesn't change as they come and go.
 pub fn repos_page(panel: Rect, density: Density) -> (usize, usize) {
-    let bottom = REPOS_FIELD_ROW + ERROR_HEIGHT + REPOS_RESULT + footer_h(REPOS_FOOTER_ROWS);
-    let middle = panel.size.h - REPOS_HEADER - bottom;
-    let tree = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_row(density);
-    let detail = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_detail_line(density);
+    let bottom = repos_field_row() + error_height() + repos_result() + footer_h(REPOS_FOOTER_ROWS);
+    let middle = panel.size.h - repos_header() - bottom;
+    let tree = (middle - repos_detail_title() - 2 * REPOS_PAD) / repos_row(density);
+    let detail = (middle - repos_detail_title() - 2 * REPOS_PAD) / repos_detail_line(density);
     (tree.max(1) as usize, detail.max(1) as usize)
 }
 
@@ -1645,11 +1669,11 @@ pub fn repos_page(panel: Rect, density: Density) -> (usize, usize) {
 pub fn repos_sheet_rows(panel: Rect, diff_only: bool) -> usize {
     let bottom = match diff_only {
         true => footer_h(REPOS_FOOTER_ROWS),
-        false => REPOS_FIELD_ROW + ERROR_HEIGHT + REPOS_RESULT + footer_h(REPOS_FOOTER_ROWS),
+        false => repos_field_row() + error_height() + repos_result() + footer_h(REPOS_FOOTER_ROWS),
     };
-    let middle = panel.size.h - REPOS_HEADER - bottom;
-    let fixed = 2 * SHEET_PAD + SHEET_TITLE + 2 * SHEET_GAP + SHEET_BUTTON;
-    ((middle - 2 * REPOS_PAD - fixed) / SHEET_LINE).max(1) as usize
+    let middle = panel.size.h - repos_header() - bottom;
+    let fixed = 2 * SHEET_PAD + sheet_title_px() + 2 * SHEET_GAP + sheet_button();
+    ((middle - 2 * REPOS_PAD - fixed) / sheet_line()).max(1) as usize
 }
 
 /// How many characters of the monospace font a review comment's row of
@@ -1702,8 +1726,8 @@ fn around(outer: Rect, hole: Rect) -> Vec<Rect> {
 /// it (`ReposView::diff_only`), in `panel`: with the footer's rows all
 /// there, as `repos_page`.
 pub fn diff_only_page(panel: Rect, density: Density) -> usize {
-    let middle = panel.size.h - REPOS_HEADER - footer_h(REPOS_FOOTER_ROWS);
-    let detail = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_detail_line(density);
+    let middle = panel.size.h - repos_header() - footer_h(REPOS_FOOTER_ROWS);
+    let detail = (middle - repos_detail_title() - 2 * REPOS_PAD) / repos_detail_line(density);
     detail.max(1) as usize
 }
 
@@ -1726,8 +1750,8 @@ pub fn diff_tree_cols(panel: Rect, share: f64) -> usize {
 /// How many lines the file list beside a diff shows at once in `panel`:
 /// with the footer's rows all there, as `diff_only_page`.
 pub fn diff_tree_page(panel: Rect, density: Density) -> usize {
-    let middle = panel.size.h - REPOS_HEADER - footer_h(REPOS_FOOTER_ROWS);
-    let tree = (middle - REPOS_DETAIL_TITLE - 2 * REPOS_PAD) / repos_row(density);
+    let middle = panel.size.h - repos_header() - footer_h(REPOS_FOOTER_ROWS);
+    let tree = (middle - repos_detail_title() - 2 * REPOS_PAD) / repos_row(density);
     tree.max(1) as usize
 }
 
@@ -1742,9 +1766,9 @@ fn gutter_width(digits: usize, plain: bool) -> i32 {
     if digits == 0 {
         return 0;
     }
-    let advance = measure_mono("0", SMALL_FONT_SIZE)
+    let advance = measure_mono("0", small_font_size())
         .filter(|a| *a > 0.0)
-        .unwrap_or(SMALL_FONT_SIZE * 0.6);
+        .unwrap_or(small_font_size() * 0.6);
     let columns = if plain { 1.0 } else { 2.0 };
     (columns * digits as f32 * advance).ceil() as i32 + 2 * GUTTER_GAP
 }
@@ -1753,9 +1777,9 @@ fn gutter_width(digits: usize, plain: bool) -> i32 {
 /// digits (`plain`: of the one column), where a comment's row holds `cols`
 /// (`repos_detail_cols`).
 pub fn diff_line_room(cols: usize, digits: usize, plain: bool) -> usize {
-    let advance = measure_mono("0", CODE_FONT_SIZE)
+    let advance = measure_mono("0", code_font_size())
         .filter(|a| *a > 0.0)
-        .unwrap_or(CODE_FONT_SIZE * 0.6);
+        .unwrap_or(code_font_size() * 0.6);
     let px = cols as f32 * advance + COMMENT_INDENT as f32 - gutter_width(digits, plain) as f32;
     ((px / advance).floor() as usize).max(8)
 }
@@ -1764,9 +1788,9 @@ pub fn diff_line_room(cols: usize, digits: usize, plain: bool) -> usize {
 /// `detail` wide.
 fn detail_cols(detail: i32) -> usize {
     let text = detail - 2 * HELP_PADDING - SCROLLBAR - 2 * DIFF_INSET - COMMENT_INDENT;
-    let advance = measure_mono("0", CODE_FONT_SIZE)
+    let advance = measure_mono("0", code_font_size())
         .filter(|a| *a > 0.0)
-        .unwrap_or(CODE_FONT_SIZE * 0.6);
+        .unwrap_or(code_font_size() * 0.6);
     ((text.max(0) as f32 / advance).floor() as usize).max(16)
 }
 
@@ -1815,15 +1839,15 @@ fn line_rects(line: &TreeLine, rect: Rect) -> (Rect, Rect, Option<Rect>) {
 /// everything, then apart again one per way of listing the files.
 fn tree_tools(tree: Rect, nav: bool) -> Vec<(TreeTool, Rect)> {
     use TreeTool::*;
-    let y = tree.loc.y + (REPOS_DETAIL_TITLE - ROW_BUTTON) / 2;
+    let y = tree.loc.y + (repos_detail_title() - row_button_px()) / 2;
     let mut x = tree.loc.x + tree.size.w - HELP_PADDING;
     let mut tools = Vec::new();
     let all = [Folders, List, Collapse, Expand, NextUnviewed, PrevUnviewed];
     for tool in &all[..if nav { all.len() } else { 4 }] {
-        x -= ROW_BUTTON;
+        x -= row_button_px();
         tools.push((
             *tool,
-            Rectangle::new((x, y).into(), (ROW_BUTTON, ROW_BUTTON).into()),
+            Rectangle::new((x, y).into(), (row_button_px(), row_button_px()).into()),
         ));
         x -= match tool {
             List | Expand => REPOS_TOOL_GAP,
@@ -1843,25 +1867,34 @@ fn filter_spots(
     tools: &[(TreeTool, Rect)],
     open: bool,
 ) -> (Vec<(SearchPart, Rect)>, Option<Rect>) {
-    let y = tree.loc.y + (REPOS_DETAIL_TITLE - ROW_BUTTON) / 2;
+    let y = tree.loc.y + (repos_detail_title() - row_button_px()) / 2;
     let right = tools.first().map_or(tree.loc.x + tree.size.w - HELP_PADDING, |(_, r)| {
         r.loc.x - REPOS_TOOL_GAP
     });
-    let square = |x: i32| Rectangle::new((x, y).into(), (ROW_BUTTON, ROW_BUTTON).into());
+    let square = |x: i32| Rectangle::new((x, y).into(), (row_button_px(), row_button_px()).into());
     if !open {
-        return (vec![(SearchPart::Open, square(right - ROW_BUTTON))], None);
+        return (
+            vec![(SearchPart::Open, square(right - row_button_px()))],
+            None,
+        );
     }
-    let close = square(right - ROW_BUTTON);
+    let close = square(right - row_button_px());
     let left = tree.loc.x + HELP_PADDING;
     let mut end = close.loc.x - REPOS_TAB_GAP;
     let count = (end - FILTER_COUNT - FIELD_GAP - left >= FILTER_FIELD_MIN).then(|| {
         end -= FILTER_COUNT;
-        let count = Rectangle::new((end, y).into(), (FILTER_COUNT, ROW_BUTTON).into());
+        let count = Rectangle::new((end, y).into(), (FILTER_COUNT, row_button_px()).into());
         end -= FIELD_GAP;
         count
     });
-    let field = Rectangle::new((left, y).into(), ((end - left).max(0), ROW_BUTTON).into());
-    (vec![(SearchPart::Field, field), (SearchPart::Close, close)], count)
+    let field = Rectangle::new(
+        (left, y).into(),
+        ((end - left).max(0), row_button_px()).into(),
+    );
+    (
+        vec![(SearchPart::Field, field), (SearchPart::Close, close)],
+        count,
+    )
 }
 
 /// Where a buffer holding the panel `panel` and its shadow has its top
@@ -1882,12 +1915,12 @@ fn tree_bar(view: &ReposView, layout: &ReposLayout) -> (Rect, usize) {
     let track = Rectangle::new(
         (
             tree.loc.x + tree.size.w - REPOS_PAD - SCROLLBAR,
-            tree.loc.y + REPOS_DETAIL_TITLE + REPOS_PAD,
+            tree.loc.y + repos_detail_title() + REPOS_PAD,
         )
             .into(),
         (
             SCROLLBAR,
-            (tree.size.h - REPOS_DETAIL_TITLE - 2 * REPOS_PAD).max(0),
+            (tree.size.h - repos_detail_title() - 2 * REPOS_PAD).max(0),
         )
             .into(),
     );
@@ -1934,12 +1967,12 @@ fn detail_bar(view: &ReposView, layout: &ReposLayout) -> (Rect, usize) {
     let track = Rectangle::new(
         (
             pane.loc.x + pane.size.w - HELP_PADDING / 2 - SCROLLBAR,
-            pane.loc.y + REPOS_DETAIL_TITLE + REPOS_PAD,
+            pane.loc.y + repos_detail_title() + REPOS_PAD,
         )
             .into(),
         (
             SCROLLBAR,
-            (pane.size.h - REPOS_DETAIL_TITLE - 2 * REPOS_PAD).max(0),
+            (pane.size.h - repos_detail_title() - 2 * REPOS_PAD).max(0),
         )
             .into(),
     );
@@ -2171,7 +2204,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     let bottom_edge = top + panel.size.h;
     let inner_x = x + HELP_PADDING;
     let inner_w = (w - 2 * HELP_PADDING).max(0);
-    let header_h = if view.no_header { 0 } else { REPOS_HEADER };
+    let header_h = if view.no_header { 0 } else { repos_header() };
     let header = Rectangle::new((x, top).into(), (w, header_h).into());
     // The diff alone: none of the rest, all of the panel under the header.
     let only = view.diff_only;
@@ -2179,8 +2212,8 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     // The branch picker at the header's left, no more than a third of it.
     let pw = picker_width(&view.branch.label).min(inner_w / 3).max(1);
     let branch = Rectangle::new(
-        (inner_x, top + (REPOS_HEADER - ROW_BUTTON) / 2).into(),
-        (if only { 0 } else { pw }, ROW_BUTTON).into(),
+        (inner_x, top + (repos_header() - row_button_px()) / 2).into(),
+        (if only { 0 } else { pw }, row_button_px()).into(),
     );
 
     let row_h = repos_row(view.density);
@@ -2198,18 +2231,18 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     let footer = Rectangle::new((x, footer_y).into(), (w, footer_height).into());
     let mut y = footer_y;
     let result = view.result.as_ref().map(|_| {
-        y -= REPOS_RESULT;
-        Rectangle::new((x, y).into(), (w, REPOS_RESULT).into())
+        y -= repos_result();
+        Rectangle::new((x, y).into(), (w, repos_result()).into())
     });
     let error = view.error.as_ref().map(|_| {
-        y -= ERROR_HEIGHT;
-        Rectangle::new((inner_x, y).into(), (inner_w, ERROR_HEIGHT).into())
+        y -= error_height();
+        Rectangle::new((inner_x, y).into(), (inner_w, error_height()).into())
     });
-    let field_row = if only { 0 } else { REPOS_FIELD_ROW };
+    let field_row = if only { 0 } else { repos_field_row() };
     y -= field_row;
     let field = Rectangle::new(
-        (inner_x, y + (field_row - REPOS_FIELD).max(0) / 2).into(),
-        (inner_w, if only { 0 } else { REPOS_FIELD }).into(),
+        (inner_x, y + (field_row - repos_field_px()).max(0) / 2).into(),
+        (inner_w, if only { 0 } else { repos_field_px() }).into(),
     );
     let middle_y = top + header_h;
     let middle_h = (y - middle_y).max(0);
@@ -2223,7 +2256,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     let tree = Rectangle::new((x, middle_y).into(), (tree_w, middle_h).into());
     let (line_x, line_w) = (x + REPOS_PAD, (tree_w - 2 * REPOS_PAD - SCROLLBAR).max(0));
     let tree_end = middle_y + middle_h - REPOS_PAD;
-    let lines_y = middle_y + REPOS_DETAIL_TITLE + REPOS_PAD;
+    let lines_y = middle_y + repos_detail_title() + REPOS_PAD;
     // Scrolled part of the first line, the lines start up by as much and
     // the last is shown in part, cut at where the others end; pulled past
     // an end, they move with the pull.
@@ -2295,16 +2328,16 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         let track = Rectangle::new(
             (
                 x + w - HELP_PADDING - track_w,
-                top + (REPOS_HEADER - ROW_BUTTON) / 2,
+                top + (repos_header() - row_button_px()) / 2,
             )
                 .into(),
-            (track_w, ROW_BUTTON).into(),
+            (track_w, row_button_px()).into(),
         );
         let segments = (0..n)
             .map(|i| {
                 Rectangle::new(
                     (track.loc.x + b + i * REPOS_TAB_WIDTH, track.loc.y + b).into(),
-                    (REPOS_TAB_WIDTH, ROW_BUTTON - 2 * b).into(),
+                    (REPOS_TAB_WIDTH, row_button_px() - 2 * b).into(),
                 )
             })
             .collect();
@@ -2314,7 +2347,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         (x + tree_w - SPLITTER_GRAB, middle_y).into(),
         (if no_tree { 0 } else { 2 * SPLITTER_GRAB }, middle_h).into(),
     );
-    let tab_y = middle_y + (REPOS_DETAIL_TITLE - ROW_BUTTON) / 2;
+    let tab_y = middle_y + (repos_detail_title() - row_button_px()) / 2;
     let tabs: &[DetailTab] = match only {
         true => &[],
         false => &[DetailTab::Diff, DetailTab::Log, DetailTab::Stashes],
@@ -2327,19 +2360,19 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         .enumerate()
         .map(|(k, tab)| {
             let tx = tabs_x + k as i32 * (REPOS_TAB_WIDTH + REPOS_TAB_GAP);
-            let size = (REPOS_TAB_WIDTH, ROW_BUTTON);
+            let size = (REPOS_TAB_WIDTH, row_button_px());
             (tab, Rectangle::new((tx, tab_y).into(), size.into()))
         })
         .collect();
     let body: Rect = Rectangle::new(
         (
             detail.loc.x + HELP_PADDING,
-            middle_y + REPOS_DETAIL_TITLE + REPOS_PAD,
+            middle_y + repos_detail_title() + REPOS_PAD,
         )
             .into(),
         (
             (detail.size.w - 2 * HELP_PADDING - SCROLLBAR).max(0),
-            (middle_h - REPOS_DETAIL_TITLE - 2 * REPOS_PAD).max(0),
+            (middle_h - repos_detail_title() - 2 * REPOS_PAD).max(0),
         )
             .into(),
     );
@@ -2398,7 +2431,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         if right < detail.loc.x + detail.size.w / 3 {
             break;
         }
-        let rect = Rectangle::new((right, tab_y).into(), (bw, ROW_BUTTON).into());
+        let rect = Rectangle::new((right, tab_y).into(), (bw, row_button_px()).into());
         detail_title_buttons.push((hint.button, rect));
         right -= REPOS_BUTTON_GAP;
     }
@@ -2412,17 +2445,18 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         .map_or(tabs_x - REPOS_TAB_GAP * 2, |(_, r)| {
             r.loc.x - REPOS_BUTTON_GAP
         });
-    let square = |x: i32| Rectangle::new((x, tab_y).into(), (ROW_BUTTON, ROW_BUTTON).into());
+    let square =
+        |x: i32| Rectangle::new((x, tab_y).into(), (row_button_px(), row_button_px()).into());
     let left = detail.loc.x + HELP_PADDING;
     if view.detail.tab == DetailTab::Diff {
         match &view.detail.search {
-            None if right - ROW_BUTTON >= detail.loc.x + detail.size.w / 3 => {
-                detail_search.push((SearchPart::Open, square(right - ROW_BUTTON)));
+            None if right - row_button_px() >= detail.loc.x + detail.size.w / 3 => {
+                detail_search.push((SearchPart::Open, square(right - row_button_px())));
             }
             None => {}
             Some(_) => {
                 let count;
-                (detail_search, count) = search_spots(left, right, tab_y, ROW_BUTTON);
+                (detail_search, count) = search_spots(left, right, tab_y, row_button_px());
                 detail_search_count = Some(count);
             }
         }
@@ -2451,7 +2485,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     let mut result_buttons = Vec::new();
     if let (Some(bar), Some(rect)) = (&view.result, result) {
         let mut right = inner_x + inner_w;
-        let by = rect.loc.y + (REPOS_RESULT - ROW_BUTTON) / 2;
+        let by = rect.loc.y + (repos_result() - row_button_px()) / 2;
         for (i, hint) in bar.buttons.iter().enumerate().rev() {
             let bw = hint_width(&without_key(hint));
             right -= bw;
@@ -2460,7 +2494,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
             }
             result_buttons.push((
                 i,
-                Rectangle::new((right, by).into(), (bw, ROW_BUTTON).into()),
+                Rectangle::new((right, by).into(), (bw, row_button_px()).into()),
             ));
             right -= REPOS_BUTTON_GAP;
         }
@@ -2472,20 +2506,26 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     let mut hints = Vec::new();
     let mut more = None;
     for (r, row) in rows.iter().enumerate() {
-        let ry = footer_y + REPOS_FOOTER_PAD + r as i32 * REPOS_HINT_ROW;
-        let by = ry + (REPOS_HINT_ROW - ROW_BUTTON) / 2;
+        let ry = footer_y + REPOS_FOOTER_PAD + r as i32 * repos_hint_row();
+        let by = ry + (repos_hint_row() - row_button_px()) / 2;
         let mut used: i32 = row.iter().map(|(_, hw)| hw + HINT_GAP).sum::<i32>() - HINT_GAP;
         if r + 1 == rows.len() && !overflow.is_empty() {
             used += HINT_GAP + more_width(overflow.len());
         }
         let mut hx = inner_x + (inner_w - used).max(0) / 2;
         for &(i, hw) in row {
-            hints.push((i, Rectangle::new((hx, by).into(), (hw, ROW_BUTTON).into())));
+            hints.push((
+                i,
+                Rectangle::new((hx, by).into(), (hw, row_button_px()).into()),
+            ));
             hx += hw + HINT_GAP;
         }
         if r + 1 == rows.len() && !overflow.is_empty() {
             let mw = more_width(overflow.len()).min((inner_x + inner_w - hx).max(1));
-            more = Some(Rectangle::new((hx, by).into(), (mw, ROW_BUTTON).into()));
+            more = Some(Rectangle::new(
+                (hx, by).into(),
+                (mw, row_button_px()).into(),
+            ));
         }
     }
 
@@ -2493,29 +2533,29 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     let (mut sheet, mut sheet_title, mut sheet_lines, mut sheet_buttons) =
         (None, None, Vec::new(), Vec::new());
     if let Some(s) = &view.sheet {
-        let fixed = 2 * SHEET_PAD + SHEET_TITLE + 2 * SHEET_GAP + SHEET_BUTTON;
-        let room = (middle_h - 2 * REPOS_PAD - fixed).max(0) / SHEET_LINE;
+        let fixed = 2 * SHEET_PAD + sheet_title_px() + 2 * SHEET_GAP + sheet_button();
+        let room = (middle_h - 2 * REPOS_PAD - fixed).max(0) / sheet_line();
         let shown = s.lines.len().min(room as usize);
         let sw = SHEET_WIDTH.min(inner_w).max(1);
-        let sh = (fixed + shown as i32 * SHEET_LINE).min(middle_h).max(1);
+        let sh = (fixed + shown as i32 * sheet_line()).min(middle_h).max(1);
         let sx = x + (w - sw) / 2;
         let sy = middle_y + (middle_h - sh) / 2;
         let card = Rectangle::new((sx, sy).into(), (sw, sh).into());
         let (cx, cw) = (sx + SHEET_PAD, (sw - 2 * SHEET_PAD).max(0));
         sheet_title = Some(Rectangle::new(
             (cx, sy + SHEET_PAD).into(),
-            (cw, SHEET_TITLE).into(),
+            (cw, sheet_title_px()).into(),
         ));
-        let lines_y = sy + SHEET_PAD + SHEET_TITLE + SHEET_GAP;
+        let lines_y = sy + SHEET_PAD + sheet_title_px() + SHEET_GAP;
         sheet_lines = (0..shown)
             .map(|i| {
                 Rectangle::new(
-                    (cx, lines_y + i as i32 * SHEET_LINE).into(),
-                    (cw, SHEET_LINE).into(),
+                    (cx, lines_y + i as i32 * sheet_line()).into(),
+                    (cw, sheet_line()).into(),
                 )
             })
             .collect();
-        let by = sy + sh - SHEET_PAD - SHEET_BUTTON;
+        let by = sy + sh - SHEET_PAD - sheet_button();
         let mut right = cx + cw;
         for (i, &button) in s.buttons.iter().enumerate().rev() {
             let bw = sheet_button_width(button);
@@ -2525,7 +2565,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
             }
             sheet_buttons.push((
                 i,
-                Rectangle::new((right, by).into(), (bw, SHEET_BUTTON).into()),
+                Rectangle::new((right, by).into(), (bw, sheet_button()).into()),
             ));
             right -= SHEET_BUTTON_GAP;
         }
@@ -2549,7 +2589,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
             .chain(&menu.widest)
             .chain([&menu.empty, &menu.placeholder, &menu.query.text])
             .chain(create)
-            .map(|r| text_extent(r, FONT_SIZE, BUTTON_CHAR))
+            .map(|r| text_extent(r, font_size(), BUTTON_CHAR))
             .max()
             .unwrap_or(0);
         let mw = (widest + 2 * BRANCH_ROW_PAD + 2 * BRANCH_CHECK)
@@ -2884,7 +2924,7 @@ pub fn repos_diff_char(
         return None;
     };
     let x0 = layout.detail_rows.get(i)?.loc.x + DIFF_INSET;
-    let advance = measure_mono("0", CODE_FONT_SIZE).filter(|a| *a > 0.0)? as f64;
+    let advance = measure_mono("0", code_font_size()).filter(|a| *a > 0.0)? as f64;
     let start = match view.detail.rows.get(i)? {
         DetailRow::Line(_) => x0 + gutter_width(view.detail.gutter, view.detail.plain),
         DetailRow::Editor { .. } => return editor_char(view, &layout, i, pos.x),
@@ -2924,7 +2964,7 @@ pub fn repos_editor_char(
         _ => false,
     };
     let rect = layout.detail_rows.get(nearest.unwrap_or(0))?;
-    let advance = measure_mono("0", CODE_FONT_SIZE).filter(|a| *a > 0.0)? as f64;
+    let advance = measure_mono("0", code_font_size()).filter(|a| *a > 0.0)? as f64;
     let card = rect.loc.x + DIFF_INSET + if within { COMMENT_INDENT } else { 0 };
     let x = pos.x - (card + 1 + COMMENT_INDENT) as f64;
     Some((nearest, (x / advance).round().max(0.0) as usize))
@@ -2937,7 +2977,7 @@ fn editor_char(view: &ReposView, layout: &ReposLayout, i: usize, x: f64) -> Opti
     let DetailRow::Editor { within, .. } = view.detail.rows.get(i)? else {
         return None;
     };
-    let advance = measure_mono("0", CODE_FONT_SIZE).filter(|a| *a > 0.0)? as f64;
+    let advance = measure_mono("0", code_font_size()).filter(|a| *a > 0.0)? as f64;
     let card = layout.detail_rows.get(i)?.loc.x
         + DIFF_INSET
         + if within.is_some() { COMMENT_INDENT } else { 0 };
@@ -2971,7 +3011,7 @@ pub fn repos_field(view: &ReposView, panel: Rect, scale: f64) -> FieldSpot {
         },
     };
     FieldSpot {
-        size: FONT_SIZE,
+        size: font_size(),
         area,
         text,
         line: line.clone(),
@@ -3309,16 +3349,16 @@ impl Painter {
                 &heading,
                 (hx, hend),
                 (p.text, p),
-                |run| self.mixed_width(run, LABEL_FONT_SIZE, scale),
+                |run| self.mixed_width(run, label_font_size(), scale),
                 |run, x, color| {
-                    let size = LABEL_FONT_SIZE;
+                    let size = label_font_size();
                     self.mixed_text(&mut c, run, size, x, hend, header_band, scale, color)
                 },
             );
             self.mixed_text(
                 &mut c,
                 &view.summary,
-                FONT_SIZE,
+                font_size(),
                 after + (HEADER_GAP as f32 * s).round(),
                 hend,
                 header_band,
@@ -3372,7 +3412,7 @@ impl Painter {
             let first = Rectangle::new(
                 (
                     tree.loc.x + REPOS_PAD + REPOS_LINE_INSET,
-                    tree.loc.y + REPOS_DETAIL_TITLE + REPOS_PAD,
+                    tree.loc.y + repos_detail_title() + REPOS_PAD,
                 )
                     .into(),
                 (
@@ -3385,7 +3425,7 @@ impl Painter {
             self.mixed_text(
                 &mut c,
                 &view.empty,
-                FONT_SIZE,
+                font_size(),
                 x,
                 right,
                 band(first, scale),
@@ -3437,7 +3477,7 @@ impl Painter {
             let field = shift(layout.field);
             across(
                 &mut c,
-                px(field.loc.y - (REPOS_FIELD_ROW - REPOS_FIELD) / 2) - border,
+                px(field.loc.y - (repos_field_row() - repos_field_px()) / 2) - border,
             );
             self.repos_field_box(&mut c, view, field, scale, p);
         }
@@ -3447,7 +3487,7 @@ impl Painter {
             self.mixed_text(
                 &mut c,
                 error,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 x + PADDING * s,
                 right,
                 band(rect, scale),
@@ -3569,17 +3609,17 @@ impl Painter {
     ) -> f32 {
         let s = scale as f32;
         let pad = (CHIP_PAD as f32 * s / 2.0).round();
-        let w = self.mixed_width(text, SMALL_FONT_SIZE, scale) + 2.0 * pad;
+        let w = self.mixed_width(text, small_font_size(), scale) + 2.0 * pad;
         let x = (right - w).round();
         let (y, h) = line_band;
-        let th = (CHIP_HEIGHT as f32 * s * 0.8).round();
+        let th = (chip_height() as f32 * s * 0.8).round();
         let ty = (y as f32 + (h as f32 - th) / 2.0).round();
         c.rounded(x, ty, w, th, CHIP_RADIUS * s, mix(p.elevated, color, 0.18));
         let ink = mix(color, p.text, 0.25);
         self.mixed_text(
             c,
             text,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             x + pad,
             right,
             line_band,
@@ -3704,7 +3744,7 @@ impl Painter {
                 self.mixed_text(
                     c,
                     &label,
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     label_x,
                     right,
                     line_band,
@@ -3730,7 +3770,7 @@ impl Painter {
                 self.mixed_text(
                     c,
                     &dir.name,
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     px(icon_x + REPOS_FOLDER) as f32 + gap / 2.0,
                     right,
                     line_band,
@@ -3750,11 +3790,11 @@ impl Painter {
                     true => p.error,
                     false => code_color(file.code, p),
                 };
-                let lw = self.mono_width(&letter, CODE_FONT_SIZE, scale);
+                let lw = self.mono_width(&letter, code_font_size(), scale);
                 self.mono_text(
                     c,
                     &letter,
-                    CODE_FONT_SIZE,
+                    code_font_size(),
                     (code_x + (code_w - lw) / 2.0).round(),
                     f32::MAX,
                     line_band,
@@ -3791,7 +3831,7 @@ impl Painter {
                 self.name_first(
                     c,
                     &file.path,
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     (x, end - gap),
                     line_band,
                     scale,
@@ -3827,7 +3867,7 @@ impl Painter {
                 pen = self.mixed_text(
                     c,
                     &text,
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     pen,
                     f32::MAX,
                     line_band,
@@ -3841,7 +3881,7 @@ impl Painter {
             let color = tone_color(chip.tone, p);
             let (top, height) = line_band;
             let pad = (CHIP_PAD as f32 * s).round();
-            let ch = (CHIP_HEIGHT as f32 * s).round();
+            let ch = (chip_height() as f32 * s).round();
             let cy = (top as f32 + (height as f32 - ch) / 2.0).round();
             // Lit under the pointer: it has something to say.
             let strength = if on_chip { 0.3 } else { 0.18 };
@@ -3854,7 +3894,7 @@ impl Painter {
             self.mixed_text(
                 c,
                 &chip.text,
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 cx + pad,
                 right,
                 (cy as i32, ch as i32),
@@ -3869,7 +3909,7 @@ impl Painter {
         self.bold_text(
             c,
             &repo.label,
-            FONT_SIZE,
+            font_size(),
             x,
             end,
             line_band,
@@ -3897,7 +3937,7 @@ impl Painter {
             self.mixed_text(
                 c,
                 branch,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 bx + branch_icon(gap, s),
                 end,
                 line_band,
@@ -3924,7 +3964,16 @@ impl Painter {
                 RepoMark::Stashes => {
                     let note = stash_note(repo);
                     let color = lit(p.placeholder);
-                    self.mixed_text(c, &note, SMALL_FONT_SIZE, m.x, end, line_band, scale, color);
+                    self.mixed_text(
+                        c,
+                        &note,
+                        small_font_size(),
+                        m.x,
+                        end,
+                        line_band,
+                        scale,
+                        color,
+                    );
                     continue;
                 }
             };
@@ -3941,7 +3990,7 @@ impl Painter {
                 self.text(
                     c,
                     &count.to_string(),
-                    DETAIL_FONT_SIZE,
+                    detail_font_size(),
                     m.x + m.w + s,
                     end,
                     line_band,
@@ -3955,7 +4004,7 @@ impl Painter {
             self.mixed_text(
                 c,
                 "no upstream",
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 nx,
                 end,
                 line_band,
@@ -3977,7 +4026,7 @@ impl Painter {
             pen = self.mixed_text(
                 c,
                 &note,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 pen + gap,
                 end,
                 line_band,
@@ -4007,7 +4056,7 @@ impl Painter {
         }
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
-        let title = Rectangle::new(rect.loc, (rect.size.w, REPOS_DETAIL_TITLE).into());
+        let title = Rectangle::new(rect.loc, (rect.size.w, repos_detail_title()).into());
         let (x, mut right) = phys(title, scale);
         let x = x + px(HELP_PADDING) as f32;
         let first = title_buttons
@@ -4029,10 +4078,10 @@ impl Painter {
             title_text,
             (x, right),
             (p.text, p),
-            |run| self.mixed_width(run, FONT_SIZE, scale),
+            |run| self.mixed_width(run, font_size(), scale),
             |run, x, color| {
                 let b = band(title, scale);
-                self.mixed_text(c, run, FONT_SIZE, x, right, b, scale, color)
+                self.mixed_text(c, run, font_size(), x, right, b, scale, color)
             },
         );
         for &(tab, rect) in tabs {
@@ -4052,7 +4101,7 @@ impl Painter {
         let border = px(1).max(1);
         c.fill(
             px(rect.loc.x) + border,
-            px(rect.loc.y + REPOS_DETAIL_TITLE) - border,
+            px(rect.loc.y + repos_detail_title()) - border,
             px(rect.loc.x + rect.size.w) - px(rect.loc.x) - 2 * border,
             border,
             p.border_variant,
@@ -4260,7 +4309,7 @@ impl Painter {
                 self.mono_text(
                     c,
                     &line.text,
-                    CODE_FONT_SIZE,
+                    code_font_size(),
                     bx,
                     bend,
                     row_band,
@@ -4286,7 +4335,7 @@ impl Painter {
                 let mut pen = self.bold_text(
                     c,
                     &repo.label,
-                    FONT_SIZE,
+                    font_size(),
                     bx,
                     right,
                     row_band,
@@ -4305,7 +4354,7 @@ impl Painter {
                         self.mixed_text(
                             c,
                             branch,
-                            SMALL_FONT_SIZE,
+                            small_font_size(),
                             pen,
                             right,
                             row_band,
@@ -4363,12 +4412,12 @@ impl Painter {
                     mix(p.elevated, tone, 0.2),
                 );
                 let letter = file.code.to_string();
-                let lw = self.mono_width(&letter, SMALL_FONT_SIZE, scale);
+                let lw = self.mono_width(&letter, small_font_size(), scale);
                 let lx = (badge_x + (bw - lw) / 2.0).round();
                 self.mono_text(
                     c,
                     &letter,
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     lx,
                     f32::MAX,
                     row_band,
@@ -4390,7 +4439,7 @@ impl Painter {
                     pen = self.bold_text(
                         c,
                         repo,
-                        SMALL_FONT_SIZE,
+                        small_font_size(),
                         pen,
                         right,
                         row_band,
@@ -4400,7 +4449,7 @@ impl Painter {
                     pen = self.mixed_text(
                         c,
                         " ›",
-                        SMALL_FONT_SIZE,
+                        small_font_size(),
                         pen,
                         right,
                         row_band,
@@ -4418,7 +4467,7 @@ impl Painter {
                     c,
                     name,
                     &in_name,
-                    FONT_SIZE,
+                    font_size(),
                     (pen, right),
                     row_band,
                     scale,
@@ -4431,7 +4480,7 @@ impl Painter {
                         c,
                         &rest,
                         &in_rest,
-                        FONT_SIZE,
+                        font_size(),
                         (pen + gap, right),
                         row_band,
                         scale,
@@ -4451,7 +4500,7 @@ impl Painter {
                     context.clone()
                 };
                 let tx = bx + lead as f32 + (gap / 2.0).round();
-                let width = |t: &str| self.mono_width(t, SMALL_FONT_SIZE, scale);
+                let width = |t: &str| self.mono_width(t, small_font_size(), scale);
                 self.found_tints(
                     c,
                     &label,
@@ -4470,8 +4519,16 @@ impl Painter {
                 for (part, found) in found_split(0..chars, &look.found) {
                     let text = &label[byte(part.start)..byte(part.end)];
                     let color = if found { p.text } else { p.muted };
-                    end =
-                        self.mono_text(c, text, SMALL_FONT_SIZE, end, bend, row_band, scale, color);
+                    end = self.mono_text(
+                        c,
+                        text,
+                        small_font_size(),
+                        end,
+                        bend,
+                        row_band,
+                        scale,
+                        color,
+                    );
                 }
                 let from = (end + (gap / 2.0).round()) as i32;
                 if (from as f32) < bend {
@@ -4504,7 +4561,7 @@ impl Painter {
                             .char_indices()
                             .nth(n)
                             .map_or(line.text.len(), |(b, _)| b);
-                        tx + self.mono_width(&line.text[..end], CODE_FONT_SIZE, scale)
+                        tx + self.mono_width(&line.text[..end], code_font_size(), scale)
                     };
                     for w in &line.words {
                         let (x0, x1) = (upto(w.start), upto(w.end).min(bend));
@@ -4516,7 +4573,7 @@ impl Painter {
                     }
                     c.fill(tint_x, y, px(DIFF_BAR), h, tone);
                 }
-                let width = |t: &str| self.mono_width(t, CODE_FONT_SIZE, scale);
+                let width = |t: &str| self.mono_width(t, code_font_size(), scale);
                 let text = &line.text;
                 if let Some(chars) = &look.chosen {
                     self.chosen_tint(c, text, chars, (tx, bend), row_band, width, scale, p);
@@ -4557,10 +4614,10 @@ impl Painter {
                     if from >= to {
                         return;
                     }
-                    let x = tx + self.mono_width(&line.text[..from], CODE_FONT_SIZE, scale);
+                    let x = tx + self.mono_width(&line.text[..from], code_font_size(), scale);
                     if x < bend {
                         let text = &line.text[from..to];
-                        self.mono_text(c, text, CODE_FONT_SIZE, x, bend, row_band, scale, color);
+                        self.mono_text(c, text, code_font_size(), x, bend, row_band, scale, color);
                     }
                 };
                 // In the places the search found, the selection, the caret
@@ -4609,14 +4666,14 @@ impl Painter {
                             continue;
                         };
                         let text = n.to_string();
-                        let w = self.mono_width(&text, SMALL_FONT_SIZE, scale);
+                        let w = self.mono_width(&text, small_font_size(), scale);
                         let right = x0 + (k as f32 + 1.0) * col + k as f32 * px(GUTTER_GAP) as f32;
                         let color = p.placeholder;
                         let x = (right - w).round();
                         self.mono_text(
                             c,
                             &text,
-                            SMALL_FONT_SIZE,
+                            small_font_size(),
                             x,
                             right + 1.0,
                             row_band,
@@ -4626,7 +4683,7 @@ impl Painter {
                     }
                 }
                 // Cut at the row's end, or shown from a char on: marked.
-                let mark_w = (self.mono_width("›", CODE_FONT_SIZE, scale)).ceil();
+                let mark_w = (self.mono_width("›", code_font_size(), scale)).ceil();
                 let ground = match tone {
                     Some(tone) => lighten(mix(p.elevated, tone, DIFF_TINT)),
                     None if lit.is_some() => lighten(p.elevated),
@@ -4638,7 +4695,7 @@ impl Painter {
                     self.mono_text(
                         c,
                         "›",
-                        CODE_FONT_SIZE,
+                        code_font_size(),
                         x,
                         f32::MAX,
                         row_band,
@@ -4649,14 +4706,14 @@ impl Painter {
                 if look.skipped {
                     let x = tx - mark_w;
                     c.fill(x as i32, y, mark_w as i32, h, ground);
-                    self.mono_text(c, "‹", CODE_FONT_SIZE, x, tx, row_band, scale, p.muted);
+                    self.mono_text(c, "‹", code_font_size(), x, tx, row_band, scale, p.muted);
                 }
             }
             DetailRow::Note(text) => {
                 self.mixed_text(
                     c,
                     text,
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     bx + inset,
                     bend,
                     row_band,
@@ -4713,7 +4770,7 @@ impl Painter {
                 let tx = self.comment_card(c, (x0, x1), row_band, (*first, *last), fill, scale);
                 c.fill(x0 as i32, y, px(2).max(1), h, mix(p.elevated, accent, 0.7));
                 // What the search found in it, tinted on the card.
-                let width = |t: &str| self.mono_width(t, CODE_FONT_SIZE, scale);
+                let width = |t: &str| self.mono_width(t, code_font_size(), scale);
                 let found = &look.found;
                 self.found_tints(c, text, found, (tx, bend), row_band, width, fill, scale, p);
                 // A dismissed finding's words dim.
@@ -4721,7 +4778,7 @@ impl Painter {
                     Some(Tone::Muted) => p.muted,
                     _ => p.text,
                 };
-                self.mono_text(c, text, CODE_FONT_SIZE, tx, bend, row_band, scale, ink);
+                self.mono_text(c, text, code_font_size(), tx, bend, row_band, scale, ink);
             }
             DetailRow::Editor {
                 text,
@@ -4755,13 +4812,13 @@ impl Painter {
                     scale,
                 );
                 let at = |byte: usize| {
-                    tx + self.mono_width(&text[..byte.min(text.len())], CODE_FONT_SIZE, scale)
+                    tx + self.mono_width(&text[..byte.min(text.len())], code_font_size(), scale)
                 };
                 if !selection.is_empty() {
                     let (sx, ex) = (at(selection.start), at(selection.end).min(x1));
                     c.fill(sx as i32, iy, (ex - sx).max(1.0) as i32, ih, p.selected);
                 }
-                self.mono_text(c, text, CODE_FONT_SIZE, tx, x1, row_band, scale, p.text);
+                self.mono_text(c, text, code_font_size(), tx, x1, row_band, scale, p.text);
                 if let Some(caret) = caret.filter(|_| look.focused) {
                     let cx = at(caret).min(x1 - b) as i32;
                     let pad = px(3);
@@ -4823,7 +4880,7 @@ impl Painter {
             self.mixed_text(
                 c,
                 &hint.label,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 tx,
                 x + w,
                 chip_band,
@@ -4928,13 +4985,22 @@ impl Painter {
         );
         let word = who;
         let Some(finding) = finding else {
-            self.bold_text(c, word, SMALL_FONT_SIZE, pen, x1, row_band, scale, p.text);
-            pen += self.bold_width(word, SMALL_FONT_SIZE, scale) + COMMENT_HEAD_GAP as f32 * s;
-            self.mixed_text(c, place, SMALL_FONT_SIZE, pen, x1, row_band, scale, p.muted);
+            self.bold_text(c, word, small_font_size(), pen, x1, row_band, scale, p.text);
+            pen += self.bold_width(word, small_font_size(), scale) + COMMENT_HEAD_GAP as f32 * s;
+            self.mixed_text(
+                c,
+                place,
+                small_font_size(),
+                pen,
+                x1,
+                row_band,
+                scale,
+                p.muted,
+            );
             return;
         };
         let pad = (COMMENT_TAG_PAD as f32 * s).round();
-        let w = self.bold_width(word, SMALL_FONT_SIZE, scale) + 2.0 * pad;
+        let w = self.bold_width(word, small_font_size(), scale) + 2.0 * pad;
         let tag_h = (h as f32 - 2.0 * s.round()).max(1.0);
         let tag_y = (y as f32 + (h as f32 - tag_h) / 2.0).round();
         c.rounded(pen, tag_y, w, tag_h, CHIP_RADIUS * s, accent);
@@ -4943,7 +5009,7 @@ impl Painter {
         self.bold_text(
             c,
             word,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             pen + pad,
             x1,
             tag_band,
@@ -4955,19 +5021,19 @@ impl Painter {
         self.bold_text(
             c,
             &finding.severity,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             pen,
             x1,
             row_band,
             scale,
             words,
         );
-        pen += self.bold_width(&finding.severity, SMALL_FONT_SIZE, scale);
+        pen += self.bold_width(&finding.severity, small_font_size(), scale);
         let rest = match &finding.state {
             Some(state) => format!(" \u{b7} {state} \u{b7} {place}"),
             None => format!(" \u{b7} {place}"),
         };
-        self.mixed_text(c, &rest, SMALL_FONT_SIZE, pen, x1, row_band, scale, words);
+        self.mixed_text(c, &rest, small_font_size(), pen, x1, row_band, scale, words);
     }
 
     /// At the right of a header, ending at `right` (physical pixels):
@@ -4984,7 +5050,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> f32 {
-        let size = SMALL_FONT_SIZE;
+        let size = small_font_size();
         let gap = count_gap(scale as f32);
         let parts = count_parts(lead.map(str::to_owned), (added, removed));
         let widths: Vec<f32> = parts
@@ -5017,7 +5083,7 @@ impl Painter {
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
-        let title = Rectangle::new(tree.loc, (tree.size.w, REPOS_DETAIL_TITLE).into());
+        let title = Rectangle::new(tree.loc, (tree.size.w, repos_detail_title()).into());
         let (x, mut right) = phys(title, scale);
         // The filter's button, else the first tool, ends the title.
         let first = (filter.iter().map(|(_, r)| r))
@@ -5036,7 +5102,16 @@ impl Painter {
         };
         // Open, the filter's field takes the title's place.
         if view.tree_filter.is_none() {
-            self.mixed_text(c, text, FONT_SIZE, x, right, band(title, scale), scale, color);
+            self.mixed_text(
+                c,
+                text,
+                font_size(),
+                x,
+                right,
+                band(title, scale),
+                scale,
+                color,
+            );
         }
         let hover = match view.hover {
             Some(ReposHit::Filter(part)) => Some(part),
@@ -5050,7 +5125,7 @@ impl Painter {
         let border = px(1).max(1);
         c.fill(
             px(tree.loc.x) + border,
-            px(tree.loc.y + REPOS_DETAIL_TITLE) - border,
+            px(tree.loc.y + repos_detail_title()) - border,
             px(tree.loc.x + tree.size.w) - px(tree.loc.x) - border,
             border,
             p.border_variant,
@@ -5137,7 +5212,7 @@ impl Painter {
             DetailTab::Stashes => "Stashes",
         };
         let color = if on { p.text } else { p.muted };
-        self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
+        self.centered(c, label, small_font_size(), rect, scale, color);
     }
 
     /// The field in `rect`: outlined in the accent while it has the
@@ -5170,7 +5245,7 @@ impl Painter {
             field_text(rect, scale),
             band(rect, scale),
             view.field_focused,
-            FONT_SIZE,
+            font_size(),
             scale,
             p,
         );
@@ -5210,7 +5285,7 @@ impl Painter {
         self.mixed_text(
             c,
             &bar.text,
-            FONT_SIZE,
+            font_size(),
             x + px(HELP_PADDING) as f32 + PADDING * s,
             right,
             band(rect, scale),
@@ -5256,7 +5331,7 @@ impl Painter {
         let cap_y = (y + (h - cap_h) / 2.0).round();
         let cap_x = (x + HINT_PAD as f32 * s).round();
         let pad = CAP_PADDING as f32 * s;
-        let cap_w = (self.mixed_width(&hint.key, KEY_FONT_SIZE, scale) + 2.0 * pad).round();
+        let cap_w = (self.mixed_width(&hint.key, key_font_size(), scale) + 2.0 * pad).round();
         let (edge, key_color, label_color) = if disabled {
             (mix(p.elevated, p.border, 0.6), p.placeholder, p.placeholder)
         } else {
@@ -5290,7 +5365,7 @@ impl Painter {
             self.mixed_text(
                 c,
                 &hint.label,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 bx + pad,
                 right,
                 hint_band,
@@ -5315,7 +5390,7 @@ impl Painter {
         self.mixed_text(
             c,
             &hint.key,
-            KEY_FONT_SIZE,
+            key_font_size(),
             cap_x + pad,
             right,
             (cap_y as i32, cap_h as i32),
@@ -5325,7 +5400,7 @@ impl Painter {
         self.mixed_text(
             c,
             &hint.label,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             cap_x + cap_w + (HINT_KEY_GAP as f32 * s).round(),
             right - (HINT_PAD as f32 * s).round() / 2.0,
             hint_band,
@@ -5375,7 +5450,7 @@ impl Painter {
         self.mixed_text(
             c,
             &picker.label,
-            FONT_SIZE,
+            font_size(),
             tx,
             tend,
             band(rect, scale),
@@ -5421,7 +5496,7 @@ impl Painter {
             search_field_text(search, scale),
             band(search, scale),
             true,
-            FONT_SIZE,
+            font_size(),
             scale,
             p,
         );
@@ -5453,7 +5528,7 @@ impl Painter {
             self.mixed_text(
                 c,
                 &row.label,
-                FONT_SIZE,
+                font_size(),
                 x + pad,
                 end,
                 row_band,
@@ -5483,7 +5558,7 @@ impl Painter {
             self.text(
                 c,
                 &menu.empty,
-                FONT_SIZE,
+                font_size(),
                 x + pad,
                 end - pad,
                 row_band,
@@ -5506,7 +5581,7 @@ impl Painter {
                 self.text(
                     c,
                     label,
-                    FONT_SIZE,
+                    font_size(),
                     x + pad,
                     end - pad,
                     row_band,
@@ -5543,7 +5618,7 @@ impl Painter {
             icon_sdf(c, delete, scale, color, |x, y| trash(x, y, s));
         }
         let end = (delete.loc.x as f64 * scale) as f32;
-        self.mixed_text(c, label, FONT_SIZE, x + pad, end, row_band, scale, p.text);
+        self.mixed_text(c, label, font_size(), x + pad, end, row_band, scale, p.text);
     }
 
     /// A line of the branch menu `size` big, in a buffer of its own.
@@ -5593,7 +5668,7 @@ impl Painter {
             self.mixed_text(
                 c,
                 &sheet.title,
-                LABEL_FONT_SIZE,
+                label_font_size(),
                 tx,
                 tend,
                 band(title, scale),
@@ -5615,7 +5690,7 @@ impl Painter {
                 self.text(
                     c,
                     &rest,
-                    FONT_SIZE,
+                    font_size(),
                     lx,
                     lend,
                     line_band,
@@ -5625,11 +5700,11 @@ impl Painter {
                 break;
             }
             let name_end = lx + (rect.size.w as f32 * SHEET_NAME_SHARE * s).round();
-            self.mixed_text(c, name, FONT_SIZE, lx, name_end, line_band, scale, p.text);
+            self.mixed_text(c, name, font_size(), lx, name_end, line_band, scale, p.text);
             self.mixed_text(
                 c,
                 verdict,
-                FONT_SIZE,
+                font_size(),
                 name_end + (FIELD_GAP as f32 * s).round(),
                 lend,
                 line_band,
@@ -6534,22 +6609,25 @@ mod tests {
 
     #[test]
     fn the_filter_takes_the_toolbars_title_and_drops_its_count_when_narrow() {
-        for (w, counted) in [(REPOS_TREE_MIN, false), (600, true)] {
+        for (w, counted) in [(repos_tree_min(), false), (600, true)] {
             let tree = Rectangle::new((0, 0).into(), (w, 400).into());
             let tools = tree_tools(tree, false);
             let (closed, none) = filter_spots(tree, &tools, false);
             assert_eq!(closed.iter().map(|(p, _)| *p).collect::<Vec<_>>(), [SearchPart::Open]);
-            assert!(none.is_none() && closed[0].1.loc.x + ROW_BUTTON < tools[0].1.loc.x);
+            assert!(none.is_none() && closed[0].1.loc.x + row_button_px() < tools[0].1.loc.x);
             let (open, count) = filter_spots(tree, &tools, true);
             let field = open[0].1;
             assert_eq!(open[0].0, SearchPart::Field);
             // At the tree's least, room for a name of about nine letters.
             let (from, to) = field_text(field, 1.0);
-            let name = text_extent("repo-name", FONT_SIZE, BUTTON_CHAR) as f32;
+            let name = text_extent("repo-name", font_size(), BUTTON_CHAR) as f32;
             assert!(to - from >= name, "{w}: {field:?} for {name}");
             assert_eq!(count.is_some(), counted, "{w}");
             let close = open[1].1;
-            assert!(field.loc.x + field.size.w < close.loc.x && close.loc.x + ROW_BUTTON < tools[0].1.loc.x);
+            assert!(
+                field.loc.x + field.size.w < close.loc.x
+                    && close.loc.x + row_button_px() < tools[0].1.loc.x
+            );
         }
     }
 
@@ -7558,7 +7636,7 @@ mod tests {
             .position(|r| matches!(r, DetailRow::Line(_)))
             .expect("a line");
         let rect = layout.detail_rows[i];
-        let advance = measure_mono("0", CODE_FONT_SIZE).unwrap() as f64;
+        let advance = measure_mono("0", code_font_size()).unwrap() as f64;
         // Its text starts after the line numbers.
         let x0 = (rect.loc.x + DIFF_INSET + gutter_width(view.detail.gutter, false)) as f64;
         let y = rect.loc.y as f64 + rect.size.h as f64 / 2.0;
@@ -7619,7 +7697,7 @@ mod tests {
         let size: Size<i32, Logical> = (1280, 800).into();
         let panel = repos_panel_rect(size);
         let layout = repos_layout(&view, panel);
-        let advance = measure_mono("0", CODE_FONT_SIZE).unwrap() as f64;
+        let advance = measure_mono("0", code_font_size()).unwrap() as f64;
         let (top, bottom) = (layout.detail_rows[2], layout.detail_rows[3]);
         let x0 = (top.loc.x + DIFF_INSET + 1 + COMMENT_INDENT) as f64;
         let mid = |r: Rect| r.loc.y as f64 + r.size.h as f64 / 2.0;

@@ -10,10 +10,10 @@
 //! wrong, and the note being written with the screenshot button.
 
 use super::{
-    BUTTON_RADIUS, ButtonStyle, Canvas, FOCUS_RING, FONT_SIZE, FieldSpot, POPUP_RADIUS, Painter,
-    Palette, QUIT_BUTTON, ROW_BUTTON, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, band, button_width,
-    check, chevron_down, chevron_side, field_text, hint_at, hint_spots, hint_strs, icon_sdf, line,
-    measure, rect_px, wrap_field_height,
+    BUTTON_RADIUS, ButtonStyle, Canvas, FOCUS_RING, FieldSpot, POPUP_RADIUS, Painter, Palette,
+    Rect, Rgb, SHADOW, band, button_width, check, chevron_down, chevron_side, field_text,
+    font_size, hint_at, hint_spots, hint_strs, icon_sdf, line, measure, quit_button, rect_px,
+    row_button, small_font_size, wrap_field_height,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -26,15 +26,21 @@ const MARGIN: i32 = 12;
 /// while stepping.
 const MAX_WIDTH: i32 = 960;
 /// The row of its buttons, and the room inside its edge.
-const ROW: i32 = line(FONT_SIZE, 25);
+fn row_px() -> i32 {
+    line(font_size(), 25)
+}
 const INSET: i32 = 8;
 /// The gap between buttons, and before the ones at the right end.
 const GAP: i32 = 6;
 /// The key hints' row under the row, while the strip has the keys.
-const HINTS_H: i32 = line(SMALL_FONT_SIZE, 11);
+fn hints_h_px() -> i32 {
+    line(small_font_size(), 11)
+}
 const GROUP_GAP: i32 = 12;
 /// A line of its steps or note.
-const LINE: i32 = line(SMALL_FONT_SIZE, 7);
+fn line_px() -> i32 {
+    line(small_font_size(), 7)
+}
 /// The room for the dot before the criterion's id.
 const DOT_ROOM: i32 = 14;
 /// The least room the title keeps beside the row's buttons: with less, it
@@ -42,7 +48,9 @@ const DOT_ROOM: i32 = 14;
 /// many buttons.
 const TITLE_MIN: i32 = 220;
 /// The folded chip: its height, and the room for its chevron.
-const CHIP: i32 = line(SMALL_FONT_SIZE, 17);
+fn chip_px() -> i32 {
+    line(small_font_size(), 17)
+}
 const CHIP_ICON: i32 = 18;
 /// How many lines each step wraps to at most.
 const STEP_LINES: usize = 2;
@@ -208,8 +216,8 @@ fn wrapped(text: &str, room: f32, size: f32, most: usize) -> Vec<String> {
 /// its right.
 fn row_room(w: i32) -> i32 {
     w - 2 * INSET
-        - (3 * (ROW_BUTTON + 2) + GROUP_GAP)
-        - (GROUP_GAP + button_width("Page") + GAP + ROW_BUTTON)
+        - (3 * (row_button() + 2) + GROUP_GAP)
+        - (GROUP_GAP + button_width("Page") + GAP + row_button())
 }
 
 /// The criterion's buttons of a strip `w` wide by the rows they go on, the
@@ -246,16 +254,16 @@ fn least_width(view: &CriteriaStripView) -> i32 {
 
 /// The chip the strip folds to, at the bottom right of `pane`.
 fn chip_rect(view: &CriteriaStripView) -> Rect {
-    let w = DOT_ROOM + width(&view.place, SMALL_FONT_SIZE).ceil() as i32 + CHIP_ICON + 2 * INSET;
+    let w = DOT_ROOM + width(&view.place, small_font_size()).ceil() as i32 + CHIP_ICON + 2 * INSET;
     let pane = view.pane;
     let w = w.min(pane.size.w - 2 * MARGIN).max(0);
     Rectangle::new(
         (
             pane.loc.x + pane.size.w - MARGIN - w,
-            pane.loc.y + pane.size.h - MARGIN - CHIP,
+            pane.loc.y + pane.size.h - MARGIN - chip_px(),
         )
             .into(),
-        (w, CHIP).into(),
+        (w, chip_px()).into(),
     )
 }
 
@@ -281,16 +289,16 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     let inner = w - 2 * INSET;
     let rows = button_rows(view, w);
     // The rows of buttons over the bottom one.
-    let above = rows.len().saturating_sub(1) as i32 * ROW;
+    let above = rows.len().saturating_sub(1) as i32 * row_px();
     // The title's own line over the rows, when the bottom one leaves it too
     // little beside the criterion's id, or the buttons wrap.
-    let place = width(&view.place, SMALL_FONT_SIZE).ceil() as i32 + DOT_ROOM;
+    let place = width(&view.place, small_font_size()).ceil() as i32 + DOT_ROOM;
     let bottom_used: i32 = (rows.first().into_iter().flatten())
         .map(|&i| button_width(&view.buttons[i].0) + GAP)
         .sum();
     let in_row = row_room(w) - bottom_used - GROUP_GAP + GAP;
     let title_h = match above > 0 || in_row - place < TITLE_MIN {
-        true => ROW,
+        true => row_px(),
         false => 0,
     };
     let room = inner as f32;
@@ -298,14 +306,14 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     let mut texts: Vec<(String, bool)> = Vec::new();
     if view.open || view.field.is_some() {
         for step in &view.steps {
-            for line in wrapped(step, room, SMALL_FONT_SIZE, STEP_LINES) {
+            for line in wrapped(step, room, small_font_size(), STEP_LINES) {
                 texts.push((line, false));
             }
         }
     }
     if view.open && view.field.is_none() && !view.note.is_empty() {
         let note = format!("What went wrong: {}", view.note);
-        for line in wrapped(&note, room, SMALL_FONT_SIZE, STEP_LINES) {
+        for line in wrapped(&note, room, small_font_size(), STEP_LINES) {
             texts.push((line, true));
         }
     }
@@ -314,23 +322,23 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     let fw = inner - button_width("Done") - GAP - button_width("Screenshot") - GROUP_GAP;
     let label = match view.shots.is_empty() {
         true => 0,
-        false => (width(&view.shots, SMALL_FONT_SIZE).ceil() as i32 + GAP).min(fw / 3),
+        false => (width(&view.shots, small_font_size()).ceil() as i32 + GAP).min(fw / 3),
     };
     let field_lines =
         (view.field.as_ref()).map(|line| wrap_field_height(line, (fw - label).max(0)));
     let field_h = field_lines.map_or(0, |h| h + GAP);
-    let lines_h = texts.len() as i32 * LINE;
+    let lines_h = texts.len() as i32 * line_px();
     let top_room = match lines_h + field_h {
         0 => 0,
         h => h + INSET,
     };
     let hints_h = match view.hints.is_empty() {
         true => 0,
-        false => HINTS_H,
+        false => hints_h_px(),
     };
-    let h = ROW + above + title_h + top_room + hints_h;
+    let h = row_px() + above + title_h + top_room + hints_h;
     // Never taller than the pane: the steps go before the row does.
-    let h = h.min(pane.size.h - 2 * MARGIN).max(ROW + hints_h);
+    let h = h.min(pane.size.h - 2 * MARGIN).max(row_px() + hints_h);
     let panel = Rectangle::new(
         (
             pane.loc.x + (pane.size.w - w) / 2,
@@ -340,20 +348,20 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
         (w, h).into(),
     );
     let (x0, mut y) = (panel.loc.x + INSET, panel.loc.y + INSET);
-    let bottom_row = panel.loc.y + h - hints_h - ROW;
+    let bottom_row = panel.loc.y + h - hints_h - row_px();
     // Where what is over the rows ends: at the title's line, when it has one.
     let over_row = bottom_row - above - title_h;
     let mut lines = Vec::new();
     for (text, dim) in texts {
-        if y + LINE > over_row - field_h {
+        if y + line_px() > over_row - field_h {
             break;
         }
         lines.push((
             text,
-            Rectangle::new((x0, y).into(), (inner, LINE).into()),
+            Rectangle::new((x0, y).into(), (inner, line_px()).into()),
             dim,
         ));
-        y += LINE;
+        y += line_px();
     }
     let mut hits = Vec::new();
     let mut field = None;
@@ -361,13 +369,13 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     if let Some(fh) = field_lines {
         let fy = over_row - fh - GAP / 2;
         // The buttons and the count by its last line, over the row.
-        let last = fy + fh - QUIT_BUTTON;
+        let last = fy + fh - quit_button();
         let done_w = button_width("Done");
         let shot_w = button_width("Screenshot");
         let bx = |w: i32, right: i32| {
             Rectangle::new(
-                (right - w, last + (QUIT_BUTTON - ROW_BUTTON) / 2).into(),
-                (w, ROW_BUTTON).into(),
+                (right - w, last + (quit_button() - row_button()) / 2).into(),
+                (w, row_button()).into(),
             )
         };
         let end = panel.loc.x + w - INSET;
@@ -378,7 +386,7 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
         if label > 0 {
             shots = Some(Rectangle::new(
                 (f.loc.x + f.size.w + GAP, last).into(),
-                (label - GAP, QUIT_BUTTON).into(),
+                (label - GAP, quit_button()).into(),
             ));
         }
         hits.push((StripHit::Done, done));
@@ -389,34 +397,34 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
     // The row: ‹ › at the left, the fold button and Page at the right, the
     // criterion's buttons before them (those that don't fit on rows above),
     // the title in what is left.
-    let cy = bottom_row + (ROW - ROW_BUTTON) / 2;
-    let square = |x: i32| Rectangle::new((x, cy).into(), (ROW_BUTTON, ROW_BUTTON).into());
+    let cy = bottom_row + (row_px() - row_button()) / 2;
+    let square = |x: i32| Rectangle::new((x, cy).into(), (row_button(), row_button()).into());
     let prev = square(x0);
-    let next = square(x0 + ROW_BUTTON + 2);
-    let passed = square(x0 + 2 * (ROW_BUTTON + 2));
+    let next = square(x0 + row_button() + 2);
+    let passed = square(x0 + 2 * (row_button() + 2));
     if view.steps_through {
         hits.push((StripHit::Prev, prev));
         hits.push((StripHit::Next, next));
         hits.push((StripHit::Passed, passed));
     }
     let mut right = panel.loc.x + w - INSET;
-    let fold = square(right - ROW_BUTTON);
+    let fold = square(right - row_button());
     hits.push((StripHit::Fold, fold));
     right = fold.loc.x - GAP;
     let page_w = button_width("Page");
-    let page = Rectangle::new((right - page_w, cy).into(), (page_w, ROW_BUTTON).into());
+    let page = Rectangle::new((right - page_w, cy).into(), (page_w, row_button()).into());
     hits.push((StripHit::Page, page));
     right = page.loc.x - GROUP_GAP;
     let mut buttons = Vec::new();
     for (k, row) in rows.iter().enumerate() {
-        let y = cy - k as i32 * ROW;
+        let y = cy - k as i32 * row_px();
         let mut end = match k {
             0 => right,
             _ => panel.loc.x + w - INSET,
         };
         for &i in row {
             let bw = button_width(&view.buttons[i].0);
-            let rect = Rectangle::new((end - bw, y).into(), (bw, ROW_BUTTON).into());
+            let rect = Rectangle::new((end - bw, y).into(), (bw, row_button()).into());
             buttons.push((StripHit::Button(i), rect));
             end = rect.loc.x - GAP;
         }
@@ -429,19 +437,22 @@ pub fn criteria_strip_layout(view: &CriteriaStripView) -> StripLayout {
         _ => 0,
     });
     hits.extend(buttons);
-    let tx = passed.loc.x + ROW_BUTTON + GROUP_GAP;
+    let tx = passed.loc.x + row_button() + GROUP_GAP;
     let title = match title_h {
         0 => Rectangle::new(
             (tx, bottom_row).into(),
-            ((right - GROUP_GAP + GAP - tx).max(0), ROW).into(),
+            ((right - GROUP_GAP + GAP - tx).max(0), row_px()).into(),
         ),
-        _ => Rectangle::new((x0, over_row).into(), (inner, ROW).into()),
+        _ => Rectangle::new((x0, over_row).into(), (inner, row_px()).into()),
     };
     hits.push((StripHit::Title, title));
     // The key hints under the row; those offering keys to choose from
     // (`Up / Down`) can't be clicked.
     let strs = hint_strs(&view.hints);
-    let hints_rect = Rectangle::new((x0, bottom_row + ROW).into(), (inner, HINTS_H).into());
+    let hints_rect = Rectangle::new(
+        (x0, bottom_row + row_px()).into(),
+        (inner, hints_h_px()).into(),
+    );
     let hints = match hints_h {
         0 => Vec::new(),
         _ => hint_spots(&strs, hints_rect),
@@ -470,7 +481,7 @@ pub fn criteria_strip_field(view: &CriteriaStripView, scale: f64) -> Option<Fiel
     Some(FieldSpot {
         area,
         text: field_text(area, scale),
-        size: FONT_SIZE,
+        size: font_size(),
         line,
     })
 }
@@ -494,7 +505,7 @@ impl Painter {
         let layout = criteria_strip_layout(view);
         let size = layout.panel.size;
         let radius = match strip_folded(view) {
-            true => CHIP as f32 / 2.0,
+            true => chip_px() as f32 / 2.0,
             false => POPUP_RADIUS,
         };
         let mut c = self.popup(size, radius, scale, p);
@@ -547,7 +558,7 @@ impl Painter {
             self.text(
                 &mut c,
                 &view.place,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 text_x,
                 icon.loc.x as f32 * s,
                 band(inner, scale),
@@ -565,7 +576,7 @@ impl Painter {
             self.text(
                 &mut c,
                 text,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 x,
                 x + w,
                 band(rect, scale),
@@ -590,7 +601,7 @@ impl Painter {
             self.text(
                 &mut c,
                 &view.shots,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 x,
                 x + w,
                 band(rect, scale),
@@ -680,7 +691,7 @@ impl Painter {
                     x = self.text(
                         &mut c,
                         &view.place,
-                        SMALL_FONT_SIZE,
+                        small_font_size(),
                         x,
                         max,
                         row,
@@ -688,13 +699,13 @@ impl Painter {
                         p.muted,
                     );
                     x += 8.0 * s;
-                    x = self.text(&mut c, &view.title, FONT_SIZE, x, max, row, scale, p.text);
+                    x = self.text(&mut c, &view.title, font_size(), x, max, row, scale, p.text);
                     if !view.state.is_empty() {
                         x += 8.0 * s;
                         self.text(
                             &mut c,
                             &view.state,
-                            SMALL_FONT_SIZE,
+                            small_font_size(),
                             x,
                             max,
                             row,
@@ -800,7 +811,7 @@ mod tests {
         assert!(strip_folded(&v));
         // A criterion's two buttons leave it beside them.
         let row = criteria_strip_layout(&view(1000));
-        assert_eq!(row.panel.size.h, ROW);
+        assert_eq!(row.panel.size.h, row_px());
     }
 
     #[test]
@@ -813,13 +824,13 @@ mod tests {
             layout.panel.loc.y + layout.panel.size.h,
             pane.loc.y + pane.size.h - MARGIN
         );
-        assert_eq!(layout.panel.size.h, ROW);
+        assert_eq!(layout.panel.size.h, row_px());
         let row = |hit| layout.rect_of(hit).unwrap();
         let pass = row(StripHit::Button(0));
         let fail = row(StripHit::Button(1));
         assert!(row(StripHit::Prev).loc.x < row(StripHit::Next).loc.x);
         assert!(row(StripHit::Next).loc.x < row(StripHit::Passed).loc.x);
-        assert!(row(StripHit::Passed).loc.x + ROW_BUTTON < row(StripHit::Title).loc.x);
+        assert!(row(StripHit::Passed).loc.x + row_button() < row(StripHit::Title).loc.x);
         assert!(row(StripHit::Title).loc.x + row(StripHit::Title).size.w <= pass.loc.x);
         assert!(pass.loc.x < fail.loc.x && fail.loc.x < row(StripHit::Page).loc.x);
         assert!(row(StripHit::Page).loc.x < row(StripHit::Fold).loc.x);
@@ -844,7 +855,7 @@ mod tests {
         let field = layout.field.unwrap();
         let row = layout.rect_of(StripHit::Title).unwrap();
         assert!(field.loc.y + field.size.h <= row.loc.y);
-        assert!(layout.lines.last().unwrap().1.loc.y + LINE <= field.loc.y);
+        assert!(layout.lines.last().unwrap().1.loc.y + line_px() <= field.loc.y);
         let shot = layout.rect_of(StripHit::Shot).unwrap();
         let done = layout.rect_of(StripHit::Done).unwrap();
         assert!(field.loc.x + field.size.w < layout.shots.unwrap().loc.x);
@@ -879,7 +890,7 @@ mod tests {
         let row = three.rect_of(StripHit::Title).unwrap();
         assert!(f3.loc.y + f3.size.h <= row.loc.y);
         let done = three.rect_of(StripHit::Done).unwrap();
-        assert!(done.loc.y > f3.loc.y + f3.size.h - QUIT_BUTTON);
+        assert!(done.loc.y > f3.loc.y + f3.size.h - quit_button());
         assert!(done.loc.y + done.size.h <= f3.loc.y + f3.size.h);
     }
 
@@ -895,7 +906,7 @@ mod tests {
             ("Esc".into(), "back".into()),
         ];
         let layout = criteria_strip_layout(&v);
-        assert_eq!(layout.panel.size.h, plain.panel.size.h + HINTS_H);
+        assert_eq!(layout.panel.size.h, plain.panel.size.h + hints_h_px());
         assert_eq!(layout.hints.len(), 3);
         let row = layout.rect_of(StripHit::Title).unwrap();
         for (_, r) in &layout.hints {
@@ -932,7 +943,7 @@ mod tests {
     #[test]
     fn a_low_pane_keeps_the_row_and_drops_steps() {
         let mut v = view(1200);
-        v.pane.size.h = ROW + 2 * MARGIN + LINE;
+        v.pane.size.h = row_px() + 2 * MARGIN + line_px();
         v.open = true;
         let layout = criteria_strip_layout(&v);
         assert!(layout.lines.len() <= 1);
@@ -943,9 +954,9 @@ mod tests {
     #[test]
     fn long_steps_wrap_and_are_cut() {
         let long = "word ".repeat(200);
-        let lines = wrapped(&long, 200.0, SMALL_FONT_SIZE, 2);
+        let lines = wrapped(&long, 200.0, small_font_size(), 2);
         assert_eq!(lines.len(), 2);
         assert!(lines[1].ends_with('\u{2026}'));
-        assert_eq!(wrapped("short", 200.0, SMALL_FONT_SIZE, 2), ["short"]);
+        assert_eq!(wrapped("short", 200.0, small_font_size(), 2), ["short"]);
     }
 }

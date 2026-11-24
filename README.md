@@ -126,6 +126,7 @@ browser = "firefox http://localhost:3000"
 theme = "system"      # or "light" or "dark"
 density = "compact"   # or "comfortable", the default
 zoom = 1.25           # everything drawn bigger, panes too; Prefix Alt+= / Alt+- / Alt+0
+text_size = 19        # gerdr's own text, 12 to 24 (17); Prefix Alt+Shift+= / - / 0
 
 [agents]
 claude = "claude --dangerously-skip-permissions"

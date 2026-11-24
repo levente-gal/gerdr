@@ -4,9 +4,9 @@
 //! agent, a line per thing known of it: a label, then its value.
 
 use super::{
-    BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Canvas, DETAIL_FONT_SIZE, GIT_MARK_GAP, GIT_MARK_WIDTH,
-    POPUP_RADIUS, Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, band, git_branch, icon_sdf,
-    line, rect_px, repos::draw_counted,
+    BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Canvas, GIT_MARK_GAP, GIT_MARK_WIDTH, POPUP_RADIUS,
+    Painter, Palette, Rect, SHADOW, band, detail_font_size, git_branch, icon_sdf, line, rect_px,
+    repos::draw_counted, small_font_size,
 };
 use crate::git::GitStatus;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -15,14 +15,18 @@ use smithay::utils::{Logical, Rectangle, Size};
 /// A tooltip: this high, its text this far in from its ends, the keycap
 /// this far after the text, this far from what it is about, and at least
 /// this far in from the output's edges.
-pub const TOOLTIP_HEIGHT: i32 = line(SMALL_FONT_SIZE, 15);
+pub fn tooltip_height() -> i32 {
+    line(small_font_size(), 15)
+}
 const TOOLTIP_PADDING: i32 = 10;
 const TOOLTIP_KEY_GAP: i32 = 8;
 const TOOLTIP_GAP: i32 = 6;
 const TOOLTIP_MARGIN: i32 = 4;
 /// A line of the list under the text, the room after the list, and the
 /// gap between a line's name and where it is.
-const TOOLTIP_ROW: i32 = line(SMALL_FONT_SIZE, 7);
+fn tooltip_row() -> i32 {
+    line(small_font_size(), 7)
+}
 const TOOLTIP_ROWS_BOTTOM: i32 = 6;
 const TOOLTIP_COLUMN_GAP: i32 = 16;
 /// The widest a field's value gets before it is cut with an ellipsis.
@@ -55,8 +59,8 @@ impl TooltipView {
     /// How high it is: its text's line, and its lists under it.
     pub fn height(&self) -> i32 {
         match (self.rows.len() + self.fields.len()) as i32 {
-            0 => TOOLTIP_HEIGHT,
-            n => TOOLTIP_HEIGHT + n * TOOLTIP_ROW + TOOLTIP_ROWS_BOTTOM,
+            0 => tooltip_height(),
+            n => tooltip_height() + n * tooltip_row() + TOOLTIP_ROWS_BOTTOM,
         }
     }
 }
@@ -81,7 +85,7 @@ pub fn tooltip_layout(anchor: Rect, size: Size<i32, Logical>, output: Size<i32, 
 impl Painter {
     /// How wide the tooltip showing `view` is, at most `max`.
     pub(super) fn tooltip_width(&self, view: &TooltipView, max: i32, scale: f64) -> i32 {
-        let mut w = self.text_width(&view.text, SMALL_FONT_SIZE, scale);
+        let mut w = self.text_width(&view.text, small_font_size(), scale);
         if let Some(key) = &view.key {
             w += TOOLTIP_KEY_GAP as f32 * scale as f32 + self.keycaps_width(key, scale);
         }
@@ -99,7 +103,7 @@ impl Painter {
             w = w.max(labels + TOOLTIP_COLUMN_GAP as f32 * scale as f32 + values);
         }
         let w = (w / scale as f32).ceil() as i32 + 2 * TOOLTIP_PADDING;
-        w.min(max).max(TOOLTIP_HEIGHT)
+        w.min(max).max(tooltip_height())
     }
 
     /// How wide the list's columns are, in physical pixels: the widest
@@ -109,18 +113,18 @@ impl Painter {
         let icon = ((BRANCH_ICON_WIDTH + BRANCH_ICON_GAP) as f32 * s).round();
         let dot = ((GIT_MARK_WIDTH + GIT_MARK_GAP) as f32 * s).round();
         let names = rows.iter().map(|row| {
-            let mut w = icon + self.text_width(&row.name, SMALL_FONT_SIZE, scale);
+            let mut w = icon + self.text_width(&row.name, small_font_size(), scale);
             if row.dirty {
                 w += dot;
             }
             if let Some(tag) = &row.tag {
-                w += self.text_width(&format!("  {tag}"), DETAIL_FONT_SIZE, scale);
+                w += self.text_width(&format!("  {tag}"), detail_font_size(), scale);
             }
             w
         });
         let paths = rows
             .iter()
-            .map(|row| self.text_width(&row.path, DETAIL_FONT_SIZE, scale));
+            .map(|row| self.text_width(&row.path, detail_font_size(), scale));
         (names.fold(0.0, f32::max), paths.fold(0.0, f32::max))
     }
 
@@ -130,10 +134,10 @@ impl Painter {
         let width = |text: &str, size| self.text_width(text, size, scale);
         let labels = fields
             .iter()
-            .map(|(label, _)| width(label, DETAIL_FONT_SIZE));
+            .map(|(label, _)| width(label, detail_font_size()));
         let values = fields
             .iter()
-            .map(|(_, value)| width(value, SMALL_FONT_SIZE));
+            .map(|(_, value)| width(value, small_font_size()));
         let max = TOOLTIP_VALUE_MAX as f32 * scale as f32;
         (
             labels.fold(0.0, f32::max),
@@ -156,7 +160,7 @@ impl Painter {
         let panel = Rectangle::new((SHADOW, SHADOW).into(), size);
         let (x, _, pw, _) = rect_px(panel, scale);
         let pad = TOOLTIP_PADDING as f32 * s;
-        let text_line = Rectangle::new(panel.loc, (w, TOOLTIP_HEIGHT).into());
+        let text_line = Rectangle::new(panel.loc, (w, tooltip_height()).into());
         let tooltip_band = band(text_line, scale);
         let mut right = x + pw - pad;
         if let Some(key) = &view.key {
@@ -168,7 +172,7 @@ impl Painter {
         self.text(
             &mut c,
             &view.text,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             x + pad,
             right,
             tooltip_band,
@@ -176,7 +180,7 @@ impl Painter {
             p.text,
         );
         self.tooltip_rows(&mut c, &view.rows, panel, scale, p);
-        let below = TOOLTIP_HEIGHT + view.rows.len() as i32 * TOOLTIP_ROW;
+        let below = tooltip_height() + view.rows.len() as i32 * tooltip_row();
         self.tooltip_fields(&mut c, &view.fields, panel, below, scale, p);
         c.into_buffer(false)
     }
@@ -199,10 +203,10 @@ impl Painter {
         let right = px(panel.loc.x + panel.size.w - TOOLTIP_PADDING) as f32;
         let path_x = px(left) as f32 + names + TOOLTIP_COLUMN_GAP as f32 * s;
         for (k, row) in rows.iter().enumerate() {
-            let y = panel.loc.y + TOOLTIP_HEIGHT + k as i32 * TOOLTIP_ROW;
-            let line = Rectangle::new((left, y).into(), (panel.size.w, TOOLTIP_ROW).into());
+            let y = panel.loc.y + tooltip_height() + k as i32 * tooltip_row();
+            let line = Rectangle::new((left, y).into(), (panel.size.w, tooltip_row()).into());
             let line_band = band(line, scale);
-            let icon = Rectangle::new((left, y).into(), (BRANCH_ICON_WIDTH, TOOLTIP_ROW).into());
+            let icon = Rectangle::new((left, y).into(), (BRANCH_ICON_WIDTH, tooltip_row()).into());
             icon_sdf(c, icon, scale, p.placeholder, |x, y| {
                 git_branch(x, y, 0.75 * s)
             });
@@ -210,7 +214,7 @@ impl Painter {
             let mut x = self.text(
                 c,
                 &row.name,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 name_x,
                 path_x,
                 line_band,
@@ -226,7 +230,7 @@ impl Painter {
                 self.text(
                     c,
                     &format!("  {tag}"),
-                    DETAIL_FONT_SIZE,
+                    detail_font_size(),
                     x,
                     path_x,
                     line_band,
@@ -237,7 +241,7 @@ impl Painter {
             self.text(
                 c,
                 &row.path,
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 path_x,
                 right,
                 line_band,
@@ -268,13 +272,16 @@ impl Painter {
         let right = px(panel.loc.x + panel.size.w - TOOLTIP_PADDING);
         let value_x = left + labels + TOOLTIP_COLUMN_GAP as f32 * s;
         for (k, (label, value)) in fields.iter().enumerate() {
-            let y = panel.loc.y + top + k as i32 * TOOLTIP_ROW;
-            let line = Rectangle::new((panel.loc.x, y).into(), (panel.size.w, TOOLTIP_ROW).into());
+            let y = panel.loc.y + top + k as i32 * tooltip_row();
+            let line = Rectangle::new(
+                (panel.loc.x, y).into(),
+                (panel.size.w, tooltip_row()).into(),
+            );
             let line_band = band(line, scale);
             self.text(
                 c,
                 label,
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 left,
                 value_x,
                 line_band,
@@ -285,9 +292,9 @@ impl Painter {
                 value,
                 (value_x, right),
                 (p.text, p),
-                |run| self.text_width(run, SMALL_FONT_SIZE, scale),
+                |run| self.text_width(run, small_font_size(), scale),
                 |run, x, color| {
-                    let size = SMALL_FONT_SIZE;
+                    let size = small_font_size();
                     self.text(c, run, size, x, right, line_band, scale, color)
                 },
             );
@@ -298,13 +305,13 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{
-        TOOLTIP_GAP, TOOLTIP_HEIGHT, TOOLTIP_MARGIN, TOOLTIP_ROW, TOOLTIP_ROWS_BOTTOM, TooltipRow,
-        TooltipView, tooltip_layout,
+        TOOLTIP_GAP, TOOLTIP_MARGIN, TOOLTIP_ROWS_BOTTOM, TooltipRow, TooltipView, tooltip_height,
+        tooltip_layout, tooltip_row,
     };
     use smithay::utils::{Logical, Size};
 
     fn size(w: i32) -> Size<i32, Logical> {
-        (w, TOOLTIP_HEIGHT).into()
+        (w, tooltip_height()).into()
     }
     use crate::chrome::Rect;
 
@@ -315,11 +322,11 @@ mod tests {
         let tip = tooltip_layout(anchor, size(120), output);
         assert_eq!(tip.loc.y, 10 + 28 + TOOLTIP_GAP);
         assert_eq!(tip.loc.x + tip.size.w / 2, 100 + 14);
-        assert_eq!(tip.size, (120, TOOLTIP_HEIGHT).into());
+        assert_eq!(tip.size, (120, tooltip_height()).into());
         // Near the bottom it goes above; near the edges it moves in.
         let low = Rect::new((790, 580).into(), (10, 20).into());
         let tip = tooltip_layout(low, size(120), output);
-        assert_eq!(tip.loc.y + TOOLTIP_HEIGHT + TOOLTIP_GAP, 580);
+        assert_eq!(tip.loc.y + tooltip_height() + TOOLTIP_GAP, 580);
         assert_eq!(tip.loc.x + tip.size.w, 800 - TOOLTIP_MARGIN);
         let left = Rect::new((0, 0).into(), (10, 20).into());
         assert_eq!(
@@ -344,9 +351,9 @@ mod tests {
             rows: Vec::new(),
             fields: Vec::new(),
         };
-        assert_eq!(view.height(), TOOLTIP_HEIGHT);
+        assert_eq!(view.height(), tooltip_height());
         view.rows = vec![row; 3];
-        let h = TOOLTIP_HEIGHT + 3 * TOOLTIP_ROW + TOOLTIP_ROWS_BOTTOM;
+        let h = tooltip_height() + 3 * tooltip_row() + TOOLTIP_ROWS_BOTTOM;
         assert_eq!(view.height(), h);
         // No room below: it goes above, whole.
         let tip = tooltip_layout(anchor, (200, h).into(), (800, 600).into());

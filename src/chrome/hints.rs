@@ -3,14 +3,16 @@
 //! repositories panel's footer.
 
 use super::{
-    BUTTON_RADIUS, CAP_GAP, CAP_PADDING, Canvas, FOOTER_PAD, FOOTER_ROW, HELP_PADDING, HINT_GAP,
-    HINT_KEY_GAP, KEY_FONT_SIZE, Painter, Palette, Rect, SMALL_FONT_SIZE, band, footer_rows,
-    keycap_text, line, measure, rect_px,
+    BUTTON_RADIUS, CAP_GAP, CAP_PADDING, Canvas, FOOTER_PAD, HELP_PADDING, HINT_GAP, HINT_KEY_GAP,
+    Painter, Palette, Rect, band, footer_row, footer_rows, key_font_size, keycap_text, line,
+    measure, rect_px, small_font_size,
 };
 use smithay::utils::{Logical, Point, Rectangle};
 
 /// How high the ground under a hovered hint is at most.
-const HINT_HOVER_HEIGHT: i32 = line(SMALL_FONT_SIZE, 11);
+fn hint_hover_height() -> i32 {
+    line(small_font_size(), 11)
+}
 
 /// Hints as the painter and the hit tests take them, from a view's owned
 /// ones.
@@ -30,17 +32,17 @@ fn extent(text: &str, size: f32) -> f32 {
 /// How wide the keycaps of `keys` are: one per key offered (" / "
 /// between), a slash between them.
 fn keycaps_extent(keys: &str) -> f32 {
-    let sep = extent("/", KEY_FONT_SIZE) + 2.0 * CAP_GAP as f32;
+    let sep = extent("/", key_font_size()) + 2.0 * CAP_GAP as f32;
     let caps: Vec<f32> = keys
         .split(" / ")
-        .map(|k| extent(&keycap_text(k), KEY_FONT_SIZE) + 2.0 * CAP_PADDING as f32)
+        .map(|k| extent(&keycap_text(k), key_font_size()) + 2.0 * CAP_PADDING as f32)
         .collect();
     caps.iter().sum::<f32>() + sep * (caps.len() - 1) as f32
 }
 
 /// How wide a hint is: its keycaps, then what it does.
 fn hint_extent((keys, action): (&str, &str)) -> f32 {
-    keycaps_extent(keys) + HINT_KEY_GAP as f32 + extent(action, SMALL_FONT_SIZE)
+    keycaps_extent(keys) + HINT_KEY_GAP as f32 + extent(action, small_font_size())
 }
 
 /// Whether a hint stays when not all fit: the way out ("Esc") and the
@@ -124,10 +126,10 @@ pub fn footer_hint_spots(hints: &[(&str, &str)], footer: Rect) -> Vec<(usize, Re
             let row = Rectangle::new(
                 (
                     footer.loc.x + HELP_PADDING,
-                    footer.loc.y + FOOTER_PAD + r as i32 * FOOTER_ROW,
+                    footer.loc.y + FOOTER_PAD + r as i32 * footer_row(),
                 )
                     .into(),
-                (w, FOOTER_ROW).into(),
+                (w, footer_row()).into(),
             );
             let first = range.start;
             hint_spots(&hints[range], row)
@@ -173,7 +175,7 @@ impl Painter {
             let (x, y, w, h) = rect_px(spot, scale);
             let hovered = hover == Some(i);
             if hovered {
-                let ground = h.min((HINT_HOVER_HEIGHT as f32 * s).round());
+                let ground = h.min((hint_hover_height() as f32 * s).round());
                 let top = (y + (h - ground) / 2.0).round();
                 c.rounded(x, top, w, ground, BUTTON_RADIUS * s, p.selected);
             }
@@ -184,7 +186,7 @@ impl Painter {
             self.text(
                 c,
                 action,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 end + key_gap,
                 f32::MAX,
                 hint_band,
@@ -198,7 +200,7 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{footer_hint_spots, hint_at, hint_spots};
-    use crate::chrome::{FOOTER_ROW, Rect, footer_height};
+    use crate::chrome::{Rect, footer_height, footer_row};
     use smithay::utils::Rectangle;
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
@@ -259,7 +261,7 @@ mod tests {
             assert!(rows.len() <= 2, "{w}");
             for (_, spot) in &spots {
                 assert!(spot.loc.y + spot.size.h <= footer.loc.y + footer.size.h);
-                assert_eq!(spot.size.h, FOOTER_ROW);
+                assert_eq!(spot.size.h, footer_row());
             }
             if w >= 640 {
                 assert_eq!(order, (0..HINTS.len()).collect::<Vec<_>>(), "{w}");

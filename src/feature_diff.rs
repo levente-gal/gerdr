@@ -1510,7 +1510,7 @@ impl Gerdr {
             .unwrap_or_else(|| self.content_rect());
         // The review has no header row there (`ReposView::no_header`).
         let mut area = area;
-        area.size.h += crate::chrome::REPOS_HEADER;
+        area.size.h += crate::chrome::repos_header();
         self.env_in(area, true)
     }
 

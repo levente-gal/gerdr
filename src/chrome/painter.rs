@@ -3,10 +3,10 @@
 
 use super::glyphs::{self, Face};
 use super::{
-    BUTTON_RADIUS, CAP_GAP, CAP_PADDING, CAP_RADIUS, CARET_HEIGHT, CARET_WIDTH, CHECKBOX_SIZE,
-    Canvas, Check, DETAIL_FONT_SIZE, FOCUS_GAP, FOCUS_RING, FONT_SIZE, GIT_MARK_GAP,
-    GIT_MARK_WIDTH, KEY_FONT_SIZE, PADDING, Palette, ROW_HIGHLIGHT_RADIUS, Rect, Rgb, SHADOW,
-    SMALL_FONT_SIZE, TINY_FONT_SIZE, arrow, check, coverage, cross, line, mix, segment,
+    BUTTON_RADIUS, CAP_GAP, CAP_PADDING, CAP_RADIUS, CARET_WIDTH, CHECKBOX_SIZE, Canvas, Check,
+    FOCUS_GAP, FOCUS_RING, GIT_MARK_GAP, GIT_MARK_WIDTH, PADDING, Palette, ROW_HIGHLIGHT_RADIUS,
+    Rect, Rgb, SHADOW, arrow, caret_height, check, coverage, cross, detail_font_size, font_size,
+    key_font_size, line, mix, segment, small_font_size, tiny_font_size,
 };
 use crate::git::{Change, GitStatus};
 use crate::text_field::Line;
@@ -15,7 +15,9 @@ use std::cell::RefCell;
 
 /// A button's count badge: its height, and the least room on each side of
 /// the number.
-const BADGE_HEIGHT: i32 = line(TINY_FONT_SIZE, 3);
+fn badge_height() -> i32 {
+    line(tiny_font_size(), 3)
+}
 const BADGE_PAD: i32 = 4;
 
 /// How many bytes of popup backgrounds `Painter` keeps, besides the last
@@ -92,12 +94,14 @@ pub(super) fn field_text(rect: Rect, scale: f64) -> (f32, f32) {
 
 /// How much lower each line of a field of lines (`Painter::lines_field`)
 /// is than the one before.
-pub(super) const FIELD_LINE: i32 = line(FONT_SIZE, 5);
+pub(super) fn field_line() -> i32 {
+    line(font_size(), 5)
+}
 
 /// How high a field of `lines` lines is: a one-line field's height, and
-/// `FIELD_LINE` more for each line past its first.
+/// `field_line()` more for each line past its first.
 pub(super) fn field_lines_height(lines: usize) -> i32 {
-    super::QUIT_BUTTON + (lines.max(1) as i32 - 1) * FIELD_LINE
+    super::quit_button() + (lines.max(1) as i32 - 1) * field_line()
 }
 
 /// A line of a field of several: its text, with the caret and selection of
@@ -140,8 +144,8 @@ pub(super) fn sub_lines(whole: &Line) -> Vec<SubLine> {
 /// The band of line `i` of a field of lines in `field`.
 pub(super) fn field_line_rect(field: Rect, i: usize) -> Rect {
     Rectangle::new(
-        (field.loc.x, field.loc.y + i as i32 * FIELD_LINE).into(),
-        (field.size.w, super::QUIT_BUTTON).into(),
+        (field.loc.x, field.loc.y + i as i32 * field_line()).into(),
+        (field.size.w, super::quit_button()).into(),
     )
 }
 
@@ -156,12 +160,12 @@ pub fn field_line_spot(
     scale: f64,
 ) -> (FieldSpot, usize) {
     let lines = sub_lines(whole);
-    let at = ((pos.y - area.loc.y as f64) / FIELD_LINE as f64).floor();
+    let at = ((pos.y - area.loc.y as f64) / field_line() as f64).floor();
     let sub = &lines[(at.max(0.0) as usize).min(lines.len() - 1)];
     let spot = FieldSpot {
         area: shown,
         text: field_text(area, scale),
-        size: FONT_SIZE,
+        size: font_size(),
         line: sub.line.clone(),
     };
     (spot, sub.start)
@@ -170,7 +174,7 @@ pub fn field_line_spot(
 /// The text caret at `x`, vertically centred in the band `(top, height)`.
 pub(super) fn caret(c: &mut Canvas, x: f32, (top, height): (i32, i32), scale: f64, color: Rgb) {
     let px = |v: i32| (v as f64 * scale).round() as i32;
-    let h = px(CARET_HEIGHT).min(height);
+    let h = px(caret_height()).min(height);
     c.fill(
         x.round() as i32,
         top + (height - h) / 2,
@@ -254,7 +258,7 @@ impl From<bool> for ButtonStyle {
 /// How wide a button labelled `label` is (logical pixels), as
 /// `Painter::button_width` says; for layouts, which have no painter.
 pub(super) fn button_width(label: &str) -> i32 {
-    let text = measure(label, FONT_SIZE).unwrap_or(label.chars().count() as f32 * 8.0);
+    let text = measure(label, font_size()).unwrap_or(label.chars().count() as f32 * 8.0);
     (text.ceil() as i32 + 2 * BUTTON_PADDING).max(BUTTON_MIN_WIDTH)
 }
 
@@ -578,7 +582,7 @@ impl Painter {
             field_text(rect, scale),
             field_band,
             focused,
-            FONT_SIZE,
+            font_size(),
             scale,
             p,
         );
@@ -636,7 +640,7 @@ impl Painter {
             if focused && !sub.has_caret && !selection.is_empty() {
                 // The caret's line paints its own selection, with the
                 // caret; the rest of it goes over these.
-                let width = |t: &str| self.text_width(t, FONT_SIZE, scale);
+                let width = |t: &str| self.text_width(t, font_size(), scale);
                 let from = text.0 + width(&sub.line[..selection.start]);
                 let to = (text.0 + width(&sub.line[..selection.end])).min(text.1);
                 let inset = px(3) as f32;
@@ -656,7 +660,7 @@ impl Painter {
                 text,
                 line_band,
                 focused && sub.has_caret,
-                FONT_SIZE,
+                font_size(),
                 scale,
                 p,
             );
@@ -795,7 +799,7 @@ impl Painter {
                 }
             }
         };
-        self.centered(c, label, FONT_SIZE, rect, scale, color);
+        self.centered(c, label, font_size(), rect, scale, color);
     }
 
     /// How wide a dialog button labelled `label` is (logical pixels): its
@@ -839,7 +843,7 @@ impl Painter {
         self.segment_grounds(c, track, &rects, (on, hover, off), scale, p);
         for (i, &(label, rect)) in segments.iter().enumerate() {
             let color = segment_tint(i, on, off, p);
-            self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
+            self.centered(c, label, small_font_size(), rect, scale, color);
         }
     }
 
@@ -957,10 +961,11 @@ impl Painter {
     /// Width of `keys` drawn as keycaps, in physical pixels.
     pub(super) fn keycaps_width(&self, keys: &str, scale: f64) -> f32 {
         let pad = 2.0 * CAP_PADDING as f32 * scale as f32;
-        let sep = self.text_width("/", KEY_FONT_SIZE, scale) + 2.0 * CAP_GAP as f32 * scale as f32;
+        let sep =
+            self.text_width("/", key_font_size(), scale) + 2.0 * CAP_GAP as f32 * scale as f32;
         let caps: Vec<f32> = keys
             .split(" / ")
-            .map(|k| self.text_width(&keycap_text(k), KEY_FONT_SIZE, scale) + pad)
+            .map(|k| self.text_width(&keycap_text(k), key_font_size(), scale) + pad)
             .collect();
         caps.iter().sum::<f32>() + sep * (caps.len() - 1) as f32
     }
@@ -988,17 +993,17 @@ impl Painter {
                 self.text(
                     c,
                     "/",
-                    KEY_FONT_SIZE,
+                    key_font_size(),
                     pen,
                     f32::MAX,
                     band,
                     scale,
                     p.placeholder,
                 );
-                pen += self.text_width("/", KEY_FONT_SIZE, scale) + CAP_GAP as f32 * s;
+                pen += self.text_width("/", key_font_size(), scale) + CAP_GAP as f32 * s;
             }
-            let w =
-                (self.text_width(key, KEY_FONT_SIZE, scale) + 2.0 * CAP_PADDING as f32 * s).round();
+            let w = (self.text_width(key, key_font_size(), scale) + 2.0 * CAP_PADDING as f32 * s)
+                .round();
             let (cx, r) = (pen.round(), CAP_RADIUS * s);
             c.rounded(cx, cap_y, w, cap_h, r, p.border);
             c.rounded(
@@ -1012,7 +1017,7 @@ impl Painter {
             self.text(
                 c,
                 key,
-                KEY_FONT_SIZE,
+                key_font_size(),
                 cx + CAP_PADDING as f32 * s,
                 f32::MAX,
                 band,
@@ -1079,15 +1084,15 @@ impl Painter {
         } else {
             count.to_string()
         };
-        let text_w = (self.text_width(&label, TINY_FONT_SIZE, scale) / s).ceil() as i32;
-        let w = (text_w + 2 * BADGE_PAD).max(BADGE_HEIGHT);
+        let text_w = (self.text_width(&label, tiny_font_size(), scale) / s).ceil() as i32;
+        let w = (text_w + 2 * BADGE_PAD).max(badge_height());
         let badge = Rectangle::new(
             (
                 rect.loc.x + rect.size.w + out - w,
                 (rect.loc.y - out).max(0),
             )
                 .into(),
-            (w, BADGE_HEIGHT).into(),
+            (w, badge_height()).into(),
         );
         let pill = |c: &mut Canvas, rect: Rect, color: Rgb| {
             let (x, y, w, h) = rect_px(rect, scale);
@@ -1095,11 +1100,11 @@ impl Painter {
         };
         let ring = Rectangle::new(
             (badge.loc.x - 1, badge.loc.y - 1).into(),
-            (w + 2, BADGE_HEIGHT + 2).into(),
+            (w + 2, badge_height() + 2).into(),
         );
         pill(c, ring, ground);
         pill(c, badge, fill);
-        self.centered(c, &label, TINY_FONT_SIZE, badge, scale, ink);
+        self.centered(c, &label, tiny_font_size(), badge, scale, ink);
     }
 
     /// The marks after a branch: a red cross for a merge, rebase or the
@@ -1158,7 +1163,7 @@ impl Painter {
             x = self.text(
                 c,
                 &count.to_string(),
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 end + s,
                 max_x,
                 (top, height),
@@ -1281,7 +1286,7 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{Canvas, Painter};
-    use crate::chrome::{Check, FONT_SIZE, Theme};
+    use crate::chrome::{Check, Theme, font_size};
     use crate::git::{Change, GitStatus, InProgress};
     use crate::text_field::Line;
 
@@ -1434,10 +1439,10 @@ mod tests {
         if !painter.has_font() {
             return;
         }
-        let width = |text: &str| painter.text_width(text, super::FONT_SIZE, 1.0);
+        let width = |text: &str| painter.text_width(text, super::font_size(), 1.0);
         let line = Line::from("abc def");
         let (x, max_x) = (100.0, 1000.0);
-        let at = |px: f32| painter.caret_at(&line, (x, max_x), px, FONT_SIZE, 1.0);
+        let at = |px: f32| painter.caret_at(&line, (x, max_x), px, font_size(), 1.0);
         assert_eq!(at(0.0), 0);
         assert_eq!(at(x + width("ab") + 1.0), 2);
         assert_eq!(at(x + width("abc ") - 1.0), 4);
@@ -1445,9 +1450,9 @@ mod tests {
         // Scrolled to keep the caret in view, the text starts left of `x`.
         let long = Line::from("a long line typed past the end of a narrow field");
         let narrow = (x, x + width("a long line"));
-        let end = painter.caret_at(&long, narrow, narrow.1, FONT_SIZE, 1.0);
+        let end = painter.caret_at(&long, narrow, narrow.1, font_size(), 1.0);
         assert_eq!(end, long.len());
-        assert!(painter.caret_at(&long, narrow, x, FONT_SIZE, 1.0) > 0);
+        assert!(painter.caret_at(&long, narrow, x, font_size(), 1.0) > 0);
     }
 
     #[test]
@@ -1456,7 +1461,7 @@ mod tests {
         if !painter.has_font() {
             return;
         }
-        let width = |text: &str| painter.text_width(text, FONT_SIZE, 1.0);
+        let width = |text: &str| painter.text_width(text, font_size(), 1.0);
         let text = "one two three four five six seven";
         let room = width("three four");
         let at = |caret: usize, scroll: usize| {
@@ -1466,7 +1471,7 @@ mod tests {
                 anchor: caret,
                 scroll,
             };
-            painter.shown_from(&line, room, FONT_SIZE, 1.0)
+            painter.shown_from(&line, room, font_size(), 1.0)
         };
         let four = text.find("four").unwrap();
         let three = text.find("three").unwrap();
@@ -1484,6 +1489,6 @@ mod tests {
         assert_eq!(at(text.len(), text.len()), end);
         // Room for it all, from its start.
         let short = Line::from("one");
-        assert_eq!(painter.shown_from(&short, room, FONT_SIZE, 1.0), 0);
+        assert_eq!(painter.shown_from(&short, room, font_size(), 1.0), 0);
     }
 }

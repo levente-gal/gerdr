@@ -3,23 +3,29 @@
 //! lines, some a button, and a "×" that dismisses it.
 
 use super::{
-    FONT_SIZE, Painter, Palette, Rect, Rgb, SHADOW, band, cross, icon_sdf, line, measure, rect_px,
+    Painter, Palette, Rect, Rgb, SHADOW, band, cross, font_size, icon_sdf, line, measure, rect_px,
 };
 use crate::toast::Level;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// A toast: this wide at most, this high with one line of text (with two,
-/// `TOAST_TALL`), this far in from the app area's bottom right corner,
+/// `toast_tall()`), this far in from the app area's bottom right corner,
 /// this far apart in the stack. One line sits in a band as high as the
 /// notice pill the toasts replaced, with its inset; two lines share the
 /// toast's height but for `TOAST_LINES_INSET` above and below.
 pub const TOAST_WIDTH: i32 = 360;
-pub const TOAST_HEIGHT: i32 = line(FONT_SIZE, 29);
-pub const TOAST_TALL: i32 = 2 * line(FONT_SIZE, 17);
+pub fn toast_height_px() -> i32 {
+    line(font_size(), 29)
+}
+pub fn toast_tall() -> i32 {
+    2 * line(font_size(), 17)
+}
 pub const TOAST_MARGIN: i32 = 16;
 pub const TOAST_GAP: i32 = 8;
-const TOAST_TEXT_BAND: i32 = line(FONT_SIZE, 15);
+fn toast_text_band() -> i32 {
+    line(font_size(), 15)
+}
 const TOAST_LINES_INSET: i32 = 8;
 const TOAST_PADDING: i32 = 16;
 /// The level's colour bar at the left, inset from the panel's edge.
@@ -27,7 +33,9 @@ const TOAST_BAR: i32 = 4;
 const TOAST_BAR_INSET: i32 = 6;
 /// The button at the right: its height, the room at its ends and the gap
 /// before it.
-const TOAST_BUTTON: i32 = line(FONT_SIZE, 11);
+fn toast_button() -> i32 {
+    line(font_size(), 11)
+}
 const TOAST_BUTTON_PADDING: i32 = 12;
 const TOAST_BUTTON_MIN: i32 = 48;
 const TOAST_BUTTON_GAP: i32 = 12;
@@ -118,12 +126,12 @@ pub fn toast_layout(toasts: &[ToastView], area: Rect) -> Vec<ToastLayout> {
 /// How tall `toast` is when `w` wide: two lines' worth when its text
 /// doesn't fit on one.
 pub fn toast_height(toast: &ToastView, w: i32) -> i32 {
-    let width = measure(&toast.text, FONT_SIZE)
-        .unwrap_or(toast.text.chars().count() as f32 * FONT_SIZE * 0.6);
+    let width = measure(&toast.text, font_size())
+        .unwrap_or(toast.text.chars().count() as f32 * font_size() * 0.6);
     if width > text_room(toast, w) as f32 {
-        TOAST_TALL
+        toast_tall()
     } else {
-        TOAST_HEIGHT
+        toast_height_px()
     }
 }
 
@@ -169,10 +177,10 @@ fn button_rect(panel: Rect, close: Rect, w: i32) -> Rect {
     Rectangle::new(
         (
             close.loc.x - TOAST_CLOSE_GAP - w,
-            panel.loc.y + (panel.size.h - TOAST_BUTTON) / 2,
+            panel.loc.y + (panel.size.h - toast_button()) / 2,
         )
             .into(),
-        (w, TOAST_BUTTON).into(),
+        (w, toast_button()).into(),
     )
 }
 
@@ -191,7 +199,7 @@ impl Painter {
     /// sets it, with room at its ends. Logical pixels: the font's advances
     /// grow with the scale.
     pub(super) fn toast_button_width(&self, label: &str) -> i32 {
-        let text = self.text_width(label, FONT_SIZE, 1.0).ceil() as i32;
+        let text = self.text_width(label, font_size(), 1.0).ceil() as i32;
         (text + 2 * TOAST_BUTTON_PADDING).max(TOAST_BUTTON_MIN)
     }
 
@@ -202,7 +210,7 @@ impl Painter {
         let (mut space, mut fit) = (None, 0);
         for (at, ch) in text.char_indices() {
             let end = at + ch.len_utf8();
-            if self.text_width(&text[..end], FONT_SIZE, scale) > room {
+            if self.text_width(&text[..end], font_size(), scale) > room {
                 break;
             }
             fit = end;
@@ -279,8 +287,11 @@ impl Painter {
         let line = |top: i32, height: i32| {
             Rectangle::new((panel.loc.x, panel.loc.y + top).into(), (w, height).into())
         };
-        let lines = if h == TOAST_HEIGHT {
-            let one = line((TOAST_HEIGHT - TOAST_TEXT_BAND) / 2, TOAST_TEXT_BAND);
+        let lines = if h == toast_height_px() {
+            let one = line(
+                (toast_height_px() - toast_text_band()) / 2,
+                toast_text_band(),
+            );
             vec![(view.text.as_str(), one)]
         } else {
             let (first, rest) = self.toast_lines(&view.text, text_end - text_x, scale);
@@ -294,7 +305,7 @@ impl Painter {
             self.text(
                 &mut c,
                 text,
-                FONT_SIZE,
+                font_size(),
                 text_x,
                 text_end,
                 band(rect, scale),
@@ -309,8 +320,8 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{
-        TOAST_GAP, TOAST_HEIGHT, TOAST_MARGIN, TOAST_TALL, TOAST_WIDTH, ToastSpot, ToastView,
-        toast_area, toast_height, toast_layout,
+        TOAST_GAP, TOAST_MARGIN, TOAST_WIDTH, ToastSpot, ToastView, toast_area, toast_height,
+        toast_height_px, toast_layout, toast_tall,
     };
     use crate::{
         chrome::{Painter, Rect, Theme, inside},
@@ -348,9 +359,9 @@ mod tests {
         let newest = layouts[2].panel;
         assert_eq!(newest.loc.x + newest.size.w, 1200 - TOAST_MARGIN);
         assert_eq!(newest.loc.y + newest.size.h, 748 - TOAST_MARGIN);
-        assert_eq!(newest.size, (TOAST_WIDTH, TOAST_HEIGHT).into());
+        assert_eq!(newest.size, (TOAST_WIDTH, toast_height_px()).into());
         assert_eq!(
-            layouts[1].panel.loc.y + TOAST_HEIGHT + TOAST_GAP,
+            layouts[1].panel.loc.y + toast_height_px() + TOAST_GAP,
             newest.loc.y
         );
         let button = layouts[1]
@@ -373,13 +384,16 @@ mod tests {
     fn a_long_toast_takes_two_lines() {
         let mut long = toast(1, Some("Open settings"));
         long.text = "Couldn't read the settings: unknown field `densty` in [ui]".repeat(2);
-        assert_eq!(toast_height(&long, TOAST_WIDTH), TOAST_TALL);
-        assert_eq!(toast_height(&toast(2, None), TOAST_WIDTH), TOAST_HEIGHT);
+        assert_eq!(toast_height(&long, TOAST_WIDTH), toast_tall());
+        assert_eq!(
+            toast_height(&toast(2, None), TOAST_WIDTH),
+            toast_height_px()
+        );
         let area = Rect::new((0, 0).into(), (1000, 700).into());
         let layouts = toast_layout(&[long.clone(), toast(2, None)], area);
-        assert_eq!(layouts[0].panel.size.h, TOAST_TALL);
+        assert_eq!(layouts[0].panel.size.h, toast_tall());
         assert_eq!(
-            layouts[0].panel.loc.y + TOAST_TALL + TOAST_GAP,
+            layouts[0].panel.loc.y + toast_tall() + TOAST_GAP,
             layouts[1].panel.loc.y
         );
         let painter = Painter::new();

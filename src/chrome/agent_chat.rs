@@ -19,16 +19,16 @@ use smithay::{
 };
 
 use super::doc_layout::{self, DocPiece, width_in};
-use super::features::{Font, SMALL_LINE};
+use super::features::{Font, small_line};
 use super::glyphs::Face;
 use super::repos::{DIFF_BAR, DIFF_INSET, DIFF_TINT};
-use super::scrollback::{STYLED_ROW, StyledRow};
+use super::scrollback::{StyledRow, styled_row};
 use super::{
-    BUTTON_WIDTH, ButtonStyle, CHEVRON_WIDTH, Canvas, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
-    FieldSpot, HINTS_HEIGHT, ListBar, PANE_BAR_HEIGHT, Painter, Palette, QUIT_BUTTON, ROW_BUTTON,
-    ROW_INSET, ROW_RADIUS, Rect, Rgb, SMALL_FONT_SIZE, Thumb, band, button_width, centred_dot,
-    check, chevron_down, chevron_side, field_text, gutter_track, hint_at, hint_spots, icon_sdf,
-    mix, phys, physical, rect_px, soft_rows, status_dot, wrap_field_height,
+    BUTTON_WIDTH, ButtonStyle, CHEVRON_WIDTH, Canvas, DOT_SLOT, Dot, FIELD_GAP, FieldSpot, ListBar,
+    Painter, Palette, ROW_INSET, ROW_RADIUS, Rect, Rgb, Thumb, band, button_width, centred_dot,
+    check, chevron_down, chevron_side, field_text, font_size, gutter_track, hint_at, hint_spots,
+    hints_height, icon_sdf, mix, pane_bar_height, phys, physical, quit_button, rect_px, row_button,
+    small_font_size, soft_rows, status_dot, wrap_field_height,
 };
 use crate::{
     ChatRows,
@@ -211,7 +211,7 @@ impl ChatLayout {
         }
         let y = (pos.y - self.list.loc.y as f64).floor() as i32 + top;
         let x = (pos.x - parts.column.0 as f64).floor() as i32;
-        if view.earlier.is_some() && (PART_GAP..PART_GAP + CARD_ROW).contains(&y) {
+        if view.earlier.is_some() && (PART_GAP..PART_GAP + card_row()).contains(&y) {
             return (0..parts.column.1).contains(&x).then_some(ChatHit::Earlier);
         }
         let i = items.partition_point(|(t, laid)| t + laid.h <= y);
@@ -255,7 +255,7 @@ pub fn chat_field_spot(view: &ChatView, scale: f64) -> Option<FieldSpot> {
     (area.size.w > 0 && area.size.h > 0).then(|| FieldSpot {
         area,
         text: field_text(area, scale),
-        size: FONT_SIZE,
+        size: font_size(),
         line: view.draft.clone(),
     })
 }
@@ -320,7 +320,9 @@ pub fn chat_blinkers(view: &ChatView) -> Vec<Rect> {
 const PAD: i32 = 12;
 const PART_GAP: i32 = 8;
 /// The head line.
-const HEAD: i32 = PANE_BAR_HEIGHT;
+fn head_px() -> i32 {
+    pane_bar_height()
+}
 /// The widest the items' column gets: longer lines read badly.
 const CHAT_MAX_W: i32 = 800;
 /// Between two rows of one speaker, and where the speaker changes.
@@ -333,7 +335,9 @@ const EDIT_PEEK: usize = 8;
 /// How many lines of the prompt a subagent was given show while folded.
 const PROMPT_PEEK: usize = 3;
 /// A card's head row: its fold mark, name, gist and state.
-const CARD_ROW: i32 = ROW_BUTTON;
+fn card_row() -> i32 {
+    row_button()
+}
 const CARD_GAP: i32 = 8;
 /// Room around the user's words on their ground.
 const BUBBLE_PAD: i32 = 8;
@@ -426,7 +430,7 @@ struct Parts {
 
 /// How wide a key button labelled `label` is.
 fn key_width(label: &str) -> i32 {
-    (width_in(label, Face::Ui, FONT_SIZE).ceil() as i32 + 2 * KEY_PAD).max(BUTTON_WIDTH)
+    (width_in(label, Face::Ui, font_size()).ceil() as i32 + 2 * KEY_PAD).max(BUTTON_WIDTH)
 }
 
 /// The screen rows the waiting panel shows of `rows`: up to the last
@@ -447,10 +451,10 @@ fn parts(view: &ChatView) -> Parts {
     let w = full.min(CHAT_MAX_W);
     let x = r.loc.x + PAD + (full - w) / 2;
     let bottom = r.loc.y + r.size.h;
-    let head = Rectangle::new(r.loc, (r.size.w, HEAD.min(r.size.h)).into());
+    let head = Rectangle::new(r.loc, (r.size.w, head_px().min(r.size.h)).into());
     let hints = Rectangle::new(
-        (r.loc.x, bottom - HINTS_HEIGHT).into(),
-        (r.size.w, HINTS_HEIGHT).into(),
+        (r.loc.x, bottom - hints_height()).into(),
+        (r.size.w, hints_height()).into(),
     );
     let send_w = button_width("Send");
     let field_w = (w - send_w - FIELD_GAP).max(0);
@@ -462,24 +466,24 @@ fn parts(view: &ChatView) -> Parts {
     let send = Rectangle::new(
         (
             x + field_w + FIELD_GAP,
-            composer.loc.y + field_h - QUIT_BUTTON,
+            composer.loc.y + field_h - quit_button(),
         )
             .into(),
-        (send_w, QUIT_BUTTON).into(),
+        (send_w, quit_button()).into(),
     );
     let list_top = head.loc.y + head.size.h;
     let mut end = composer.loc.y - PART_GAP;
     let (mut waiting, mut menu, mut rows, mut keys) = (None, None, Rect::default(), Vec::new());
     let (mut card, mut answers) = (None, Vec::new());
-    let frame = 3 * PART_GAP + ROW_BUTTON;
+    let frame = 3 * PART_GAP + row_button();
     let inner = (w - 2 * PART_GAP).max(0);
     if let Some(ask) = &view.ask {
         // As many lines of what it would run as leave the list three card
         // rows.
         let mut laid = lay_ask(view, ask, inner, 0);
         if view.unfolded.contains(&ask_key(&ask.ask)) {
-            let room = (end - list_top - 3 * CARD_ROW - frame - laid.h - PART_GAP).max(0);
-            let lines = (room / SMALL_LINE) as usize;
+            let room = (end - list_top - 3 * card_row() - frame - laid.h - PART_GAP).max(0);
+            let lines = (room / small_line()) as usize;
             laid = lay_ask(view, ask, inner, lines.min(ASK_LINES));
         }
         let h = frame + laid.h;
@@ -491,14 +495,14 @@ fn parts(view: &ChatView) -> Parts {
             if bx + bw > at.x + inner {
                 break;
             }
-            answers.push((hit, rect(bx, by, bw, ROW_BUTTON)));
+            answers.push((hit, rect(bx, by, bw, row_button())));
             bx += bw + PART_GAP / 2;
         }
         card = Some((at, laid));
         waiting = Some(panel);
         end = panel.loc.y - PART_GAP;
     } else if let Some(screen) = &view.waiting {
-        let room = (end - list_top - 3 * CARD_ROW - frame - PART_GAP).max(0);
+        let room = (end - list_top - 3 * card_row() - frame - PART_GAP).max(0);
         let laid = menu_laid(screen, inner, room);
         let (body, shown_keys) = match &laid {
             Some((laid, tabs)) => {
@@ -512,8 +516,8 @@ fn parts(view: &ChatView) -> Parts {
                 (laid.h, keys)
             }
             None => {
-                let n = (screen_rows(screen).len() as i32).min(room / STYLED_ROW);
-                (n * STYLED_ROW, WAIT_KEYS.to_vec())
+                let n = (screen_rows(screen).len() as i32).min(room / styled_row());
+                (n * styled_row(), WAIT_KEYS.to_vec())
             }
         };
         let h = frame + body;
@@ -534,7 +538,7 @@ fn parts(view: &ChatView) -> Parts {
             }
             keys.push((
                 key,
-                Rectangle::new((kx, ky).into(), (kw, ROW_BUTTON).into()),
+                Rectangle::new((kx, ky).into(), (kw, row_button()).into()),
             ));
             kx += kw + PART_GAP / 2;
         }
@@ -569,10 +573,10 @@ fn parts(view: &ChatView) -> Parts {
 fn menu_laid(screen: &Arc<ChatRows>, w: i32, room: i32) -> Option<(Rc<Laid>, bool)> {
     type Kept = (Arc<ChatRows>, i32, i32, Option<(Rc<Laid>, bool)>);
     thread_local! {
-        static MENU: RefCell<Option<Kept>> = const { RefCell::new(None) };
+        static MENU: RefCell<(u32, Option<Kept>)> = const { RefCell::new((0, None)) };
     }
-    let kept = MENU.with_borrow(|memo| {
-        (memo.as_ref())
+    let kept = MENU.with_borrow_mut(|memo| {
+        (super::sized(memo).as_ref())
             .filter(|(rows, mw, mr, _)| Arc::ptr_eq(rows, screen) && *mw == w && *mr == room)
             .map(|(.., laid)| laid.clone())
     });
@@ -586,7 +590,9 @@ fn menu_laid(screen: &Arc<ChatRows>, w: i32, room: i32) -> Option<(Rc<Laid>, boo
             .or_else(|| Some(lay_menu(&m, w, false)).filter(fits))?;
         Some((Rc::new(laid), !m.tabs.is_empty()))
     });
-    MENU.set(Some((screen.clone(), w, room, laid.clone())));
+    MENU.with_borrow_mut(|memo| {
+        *super::sized(memo) = Some((screen.clone(), w, room, laid.clone()))
+    });
     laid
 }
 
@@ -612,10 +618,10 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
                 break;
             }
             if tab.current {
-                l.put(rect(x, 0, tw, CARD_ROW), Bit::Picked);
+                l.put(rect(x, 0, tw, card_row()), Bit::Picked);
             }
             if tab.done {
-                let y = (CARD_ROW - TAB_CHECK) / 2;
+                let y = (card_row() - TAB_CHECK) / 2;
                 l.put(rect(x + BUBBLE_PAD, y, TAB_CHECK, TAB_CHECK), Bit::Check);
             }
             let mark = if tab.current { Mark::Text } else { Mark::Muted };
@@ -626,7 +632,7 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
                 mark,
                 centred: false,
             };
-            l.put(rect(x + BUBBLE_PAD + mark_w, 0, text_w, CARD_ROW), bit);
+            l.put(rect(x + BUBBLE_PAD + mark_w, 0, text_w, card_row()), bit);
             x += tw + PART_GAP / 2;
         }
         y = l.h + PART_GAP;
@@ -664,13 +670,13 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
             centred: false,
         };
         let mut bits = vec![
-            (rect(ROW_INSET, y, CHOICE_NUM, CARD_ROW), num),
+            (rect(ROW_INSET, y, CHOICE_NUM, card_row()), num),
             (
-                rect(ROW_INSET + CHOICE_NUM, y, tw - ROW_INSET, CARD_ROW),
+                rect(ROW_INSET + CHOICE_NUM, y, tw - ROW_INSET, card_row()),
                 label,
             ),
         ];
-        y += CARD_ROW;
+        y += card_row();
         if more && !choice.detail.is_empty() {
             let note = DocBlock::Note(choice.detail.clone());
             let (pieces, h) = doc_layout::stack_of(&[note], tw - 2 * ROW_INSET);
@@ -760,23 +766,23 @@ fn message_layout(view: &ChatView, list: Rect) -> Option<Message> {
     let rows = soft_rows(text, room as f32);
     let n = rows.len().min(MESSAGE_LINES);
     let button = if screen {
-        PART_GAP * 2 + QUIT_BUTTON
+        PART_GAP * 2 + quit_button()
     } else {
         0
     };
-    let mut y = list.loc.y + (list.size.h - n as i32 * SMALL_LINE - button) / 2;
+    let mut y = list.loc.y + (list.size.h - n as i32 * small_line() - button) / 2;
     let mut lines = Vec::new();
     for (i, row) in rows.iter().take(n).enumerate() {
         // The last line shown takes the rest, cut short as it is painted.
         let end = if i + 1 == n { text.len() } else { row.end };
-        let rect = Rectangle::new((list.loc.x + PAD, y).into(), (room, SMALL_LINE).into());
+        let rect = Rectangle::new((list.loc.x + PAD, y).into(), (room, small_line()).into());
         lines.push((text[row.start..end].trim().to_owned(), rect));
-        y += SMALL_LINE;
+        y += small_line();
     }
     let screen = screen.then(|| {
         let w = button_width("Show screen");
         let x = list.loc.x + (list.size.w - w) / 2;
-        Rectangle::new((x, y + PART_GAP * 2).into(), (w, QUIT_BUTTON).into())
+        Rectangle::new((x, y + PART_GAP * 2).into(), (w, quit_button()).into())
     });
     Some(Message { lines, screen })
 }
@@ -814,7 +820,7 @@ fn stacked(view: &ChatView, w: i32) -> (Vec<(i32, Rc<Laid>)>, i32) {
 /// none when the transcript was read from its start.
 fn earlier_h(view: &ChatView) -> i32 {
     match view.earlier {
-        Some(_) => CARD_ROW + TURN_GAP,
+        Some(_) => card_row() + TURN_GAP,
         None => 0,
     }
 }
@@ -890,17 +896,17 @@ fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
             let bit = Bit::Label {
                 text: line.replace('\t', "    "),
                 face: Face::Mono,
-                size: SMALL_FONT_SIZE,
+                size: small_font_size(),
                 mark: Mark::Text,
                 centred: false,
             };
-            l.put(rect(ix, y, iw, SMALL_LINE), bit);
-            y += SMALL_LINE;
+            l.put(rect(ix, y, iw, small_line()), bit);
+            y += small_line();
         }
         if all.len() > shown {
             let text = format!("{} more lines", all.len() - shown);
             l.put(
-                rect(ix, l.below(), iw, SMALL_LINE),
+                rect(ix, l.below(), iw, small_line()),
                 label(&text, Face::Ui, Mark::Muted),
             );
         }
@@ -910,7 +916,7 @@ fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
         agent_name(&view.label)
     );
     l.put(
-        rect(0, l.below(), w, SMALL_LINE),
+        rect(0, l.below(), w, small_line()),
         label(&words, Face::Ui, Mark::Muted),
     );
     l
@@ -1052,7 +1058,7 @@ fn label(text: &str, face: Face, mark: Mark) -> Bit {
     Bit::Label {
         text: text.to_owned(),
         face,
-        size: FONT_SIZE,
+        size: font_size(),
         mark,
         centred: false,
     }
@@ -1120,10 +1126,10 @@ impl Laid {
     /// press on it folding or unfolding the card.
     fn head(&mut self, head: Head) {
         let Head { x, w, open, .. } = head;
-        self.put(rect(x, 0, CHEVRON_WIDTH, CARD_ROW), Bit::Fold(open));
+        self.put(rect(x, 0, CHEVRON_WIDTH, card_row()), Bit::Fold(open));
         let face = if head.bold { Face::Bold } else { Face::Ui };
         let mark = if head.bold { Mark::Text } else { Mark::Muted };
-        let wide = |text: &str, face| width_in(text, face, FONT_SIZE).ceil() as i32;
+        let wide = |text: &str, face| width_in(text, face, font_size()).ceil() as i32;
         let widths: Vec<i32> = head.tail.iter().map(|(t, _)| wide(t, Face::Ui)).collect();
         let dot = if head.running { DOT_SLOT } else { 0 };
         let tail_w = widths.iter().map(|w| w + CARD_GAP).sum::<i32>() + dot;
@@ -1132,7 +1138,7 @@ impl Laid {
         let name_x = x + CHEVRON_WIDTH;
         let name_w = wide(head.name, face).min(tail_x - name_x);
         self.put(
-            rect(name_x, 0, name_w, CARD_ROW),
+            rect(name_x, 0, name_w, card_row()),
             label(head.name, face, mark),
         );
         let gist_x = name_x + name_w + CARD_GAP;
@@ -1141,8 +1147,8 @@ impl Laid {
             let gist = head.gist.lines().next().unwrap_or_default();
             let mark = if head.path { Mark::Text } else { Mark::Muted };
             let (gface, gsize) = match head.mono {
-                true => (Face::Mono, SMALL_FONT_SIZE),
-                false => (Face::Ui, FONT_SIZE),
+                true => (Face::Mono, small_font_size()),
+                false => (Face::Ui, font_size()),
             };
             let bit = Bit::Label {
                 text: gist.to_owned(),
@@ -1151,37 +1157,39 @@ impl Laid {
                 mark,
                 centred: false,
             };
-            self.put(rect(gist_x, 0, gist_w, CARD_ROW), bit);
+            self.put(rect(gist_x, 0, gist_w, card_row()), bit);
             if head.path {
                 let shown = (width_in(gist, gface, gsize).ceil() as i32).min(gist_w);
                 self.spots
-                    .push((rect(gist_x, 0, shown, CARD_ROW), Spot::Path));
+                    .push((rect(gist_x, 0, shown, card_row()), Spot::Path));
             }
         }
         let mut tx = tail_x;
         if head.running {
-            self.put(rect(tx, 0, DOT_SLOT, CARD_ROW), Bit::Running);
+            self.put(rect(tx, 0, DOT_SLOT, card_row()), Bit::Running);
             tx += DOT_SLOT;
         }
         for ((text, mark), w) in head.tail.into_iter().zip(widths) {
             let room = w.min(end - tx);
             self.put(
-                rect(tx + CARD_GAP, 0, room, CARD_ROW),
+                rect(tx + CARD_GAP, 0, room, card_row()),
                 label(&text, Face::Ui, mark),
             );
             tx += w + CARD_GAP;
         }
-        self.spots.push((rect(x, 0, w, CARD_ROW), Spot::Fold));
+        self.spots.push((rect(x, 0, w, card_row()), Spot::Fold));
     }
 
     /// "Show all (N lines)" under what was cut to `CHAT_CUT` of `n` lines.
     fn more(&mut self, x: i32, w: i32, n: usize) {
-        let row = rect(x, self.below(), w, SMALL_LINE);
+        let row = rect(x, self.below(), w, small_line());
         let text = format!("Show all ({n} lines)");
-        let shown = width_in(&text, Face::Ui, FONT_SIZE).ceil() as i32;
+        let shown = width_in(&text, Face::Ui, font_size()).ceil() as i32;
         self.put(row, label(&text, Face::Ui, Mark::Link));
-        self.spots
-            .push((rect(x, row.loc.y, shown.min(w), SMALL_LINE), Spot::ShowAll));
+        self.spots.push((
+            rect(x, row.loc.y, shown.min(w), small_line()),
+            Spot::ShowAll,
+        ));
     }
 
     /// `text` as a code block from `x`, `w` wide, below the rest: its
@@ -1265,8 +1273,8 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
             }
             if more > 0 {
                 let text = format!("{more} more lines");
-                let wide = width_in(&text, Face::Ui, FONT_SIZE).ceil() as i32;
-                let row = rect(x + cw - wide, l.below(), wide, SMALL_LINE);
+                let wide = width_in(&text, Face::Ui, font_size()).ceil() as i32;
+                let row = rect(x + cw - wide, l.below(), wide, small_line());
                 l.put(row, label(&text, Face::Ui, Mark::Link));
                 l.spots.push((row, Spot::Fold));
             }
@@ -1360,18 +1368,18 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
             let mut y = l.below();
             for line in diff.iter().take(shown) {
                 let text = line.text.replace('\t', "    ");
-                l.put(rect(ix, y, iw, SMALL_LINE), Bit::Diff(line.side, text));
-                y += SMALL_LINE;
+                l.put(rect(ix, y, iw, small_line()), Bit::Diff(line.side, text));
+                y += small_line();
             }
             if open && diff.len() > cut {
                 l.more(ix, iw, diff.len());
             } else if !open && diff.len() > EDIT_PEEK {
                 let text = format!("{} more lines", diff.len() - EDIT_PEEK);
-                let row = rect(ix, l.below(), iw, SMALL_LINE);
-                let wide = width_in(&text, Face::Ui, FONT_SIZE).ceil() as i32;
+                let row = rect(ix, l.below(), iw, small_line());
+                let wide = width_in(&text, Face::Ui, font_size()).ceil() as i32;
                 l.put(row, label(&text, Face::Ui, Mark::Link));
                 l.spots
-                    .push((rect(ix, row.loc.y, wide.min(iw), SMALL_LINE), Spot::Fold));
+                    .push((rect(ix, row.loc.y, wide.min(iw), small_line()), Spot::Fold));
             }
         }
         Item::Subagent {
@@ -1405,11 +1413,11 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
             let bit = Bit::Label {
                 text: line.to_owned(),
                 face: Face::Ui,
-                size: SMALL_FONT_SIZE,
+                size: small_font_size(),
                 mark: Mark::Muted,
                 centred: true,
             };
-            l.put(rect(0, 0, w, SMALL_LINE), bit);
+            l.put(rect(0, 0, w, small_line()), bit);
         }
     }
     l
@@ -1431,7 +1439,7 @@ struct Memo {
 const MEMOS: usize = 4096;
 
 thread_local! {
-    static MEMO: RefCell<HashMap<String, Memo>> = RefCell::new(HashMap::new());
+    static MEMO: RefCell<(u32, HashMap<String, Memo>)> = RefCell::new((0, HashMap::new()));
 }
 
 #[cfg(test)]
@@ -1461,8 +1469,8 @@ fn laid(
 ) -> Rc<Laid> {
     let mut open = Vec::new();
     opened(item, unfolded, &mut open);
-    let kept = MEMO.with_borrow(|memo| {
-        let m = memo.get(item.id())?;
+    let kept = MEMO.with_borrow_mut(|memo| {
+        let m = super::sized(memo).get(item.id())?;
         let same = m.w == w && m.nest == nest && m.open == open && m.cwd.as_deref() == cwd;
         (same && m.item == *item).then(|| m.laid.clone())
     });
@@ -1471,6 +1479,7 @@ fn laid(
     }
     let laid = Rc::new(lay(item, w, nest, unfolded, cwd));
     MEMO.with_borrow_mut(|memo| {
+        let memo = super::sized(memo);
         if memo.len() >= MEMOS {
             memo.clear();
         }
@@ -1493,14 +1502,14 @@ type StepsMemo = (Summary, bool, i32, Rc<Laid>);
 
 thread_local! {
     /// Each steps row's last layout, by its first item's id.
-    static STEPS: RefCell<HashMap<String, StepsMemo>> = RefCell::new(HashMap::new());
+    static STEPS: RefCell<(u32, HashMap<String, StepsMemo>)> = RefCell::new((0, HashMap::new()));
 }
 
 /// The steps row from item `id` on saying `s`, its fold mark `open`, for
 /// a column `w` wide: laid out once while they stay.
 fn laid_steps(id: &str, s: Summary, open: bool, w: i32, nest: i32) -> Rc<Laid> {
-    let kept = STEPS.with_borrow(|memo| {
-        let (was, o, ww, laid) = memo.get(id)?;
+    let kept = STEPS.with_borrow_mut(|memo| {
+        let (was, o, ww, laid) = super::sized(memo).get(id)?;
         (*was == s && *o == open && *ww == w).then(|| laid.clone())
     });
     if let Some(laid) = kept {
@@ -1508,6 +1517,7 @@ fn laid_steps(id: &str, s: Summary, open: bool, w: i32, nest: i32) -> Rc<Laid> {
     }
     let laid = lay_steps(&s, open, w, nest);
     STEPS.with_borrow_mut(|memo| {
+        let memo = super::sized(memo);
         if memo.len() >= MEMOS {
             memo.clear();
         }
@@ -1566,12 +1576,12 @@ impl Painter {
         status_dot(&mut c, centred_dot(head_slot(head)), dot, scale, p);
         let (hx, hend) = phys(head, scale);
         let pad = px(PAD) as f32;
-        let word_x = hend - pad - self.text_width(word, SMALL_FONT_SIZE, scale);
+        let word_x = hend - pad - self.text_width(word, small_font_size(), scale);
         let b = band(head, scale);
         self.text(
             &mut c,
             word,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             word_x,
             hend,
             b,
@@ -1583,7 +1593,7 @@ impl Painter {
         self.bold_text(
             &mut c,
             &view.label,
-            FONT_SIZE,
+            font_size(),
             label_x,
             label_end,
             b,
@@ -1596,7 +1606,7 @@ impl Painter {
         let list = here(parts.list);
         if let Some(message) = message_layout(view, parts.list) {
             for (text, rect) in &message.lines {
-                self.centered(&mut c, text, FONT_SIZE, here(*rect), scale, p.muted);
+                self.centered(&mut c, text, font_size(), here(*rect), scale, p.muted);
             }
             if let Some(button) = message.screen {
                 let lit = view.hover == Some(ChatHit::ShowScreen);
@@ -1621,7 +1631,7 @@ impl Painter {
                         parts.column.0 - r.loc.x,
                         list.loc.y + PART_GAP - top,
                         parts.column.1,
-                        CARD_ROW,
+                        card_row(),
                     );
                     let hover = if view.hover == Some(ChatHit::Earlier) {
                         1.0
@@ -1630,7 +1640,7 @@ impl Painter {
                     };
                     self.row_highlight(c, row, (false, hover), scale, p);
                     let (words, mark) = earlier_words(reading);
-                    self.centered(c, words, FONT_SIZE, row, scale, mark.color(p));
+                    self.centered(c, words, font_size(), row, scale, mark.color(p));
                 }
                 for i in in_view(&items, top, list.size.h) {
                     let (y, laid) = &items[i];
@@ -1701,7 +1711,7 @@ impl Painter {
                     .waiting
                     .as_deref()
                     .map_or(&[][..], |rows| screen_rows(rows));
-                let n = (parts.rows.size.h / STYLED_ROW) as usize;
+                let n = (parts.rows.size.h / styled_row()) as usize;
                 let rows: Vec<StyledRow> = (screen[screen.len().saturating_sub(n)..].iter())
                     .map(|(text, styles)| (text.as_str(), styles.as_slice()))
                     .collect();
@@ -2031,7 +2041,7 @@ pub(super) mod tests {
         // The rows up to the last with words on them.
         let shown = screen_rows(v.waiting.as_deref().unwrap());
         assert_eq!(shown.last().unwrap().0.trim(), "Type yes or no");
-        assert_eq!(p.rows.size.h, shown.len() as i32 * STYLED_ROW);
+        assert_eq!(p.rows.size.h, shown.len() as i32 * styled_row());
         assert_eq!(p.keys.len(), WAIT_KEYS.len());
         for (_, key) in &p.keys {
             assert!(inside(panel, *key));
@@ -2053,8 +2063,8 @@ pub(super) mod tests {
         // A short pane keeps its list three card rows: the rows give way.
         v.rect.size.h = 260;
         let p = parts(&v);
-        assert!(p.list.size.h >= 3 * CARD_ROW, "{:?}", p.list);
-        assert!(p.rows.size.h < shown.len() as i32 * STYLED_ROW);
+        assert!(p.list.size.h >= 3 * card_row(), "{:?}", p.list);
+        assert!(p.rows.size.h < shown.len() as i32 * styled_row());
         // Too narrow for all keys: those that fit.
         v.rect.size.w = 260;
         let p = parts(&v);
@@ -2153,12 +2163,13 @@ pub(super) mod tests {
             Some(ChatHit::Item(0))
         );
         let steps = item_rect(&v, 2);
-        let row =
-            |r: Rect, x: i32| Point::from(((r.loc.x + x) as f64, (r.loc.y + CARD_ROW / 2) as f64));
+        let row = |r: Rect, x: i32| {
+            Point::from(((r.loc.x + x) as f64, (r.loc.y + card_row() / 2) as f64))
+        };
         assert_eq!(layout.hit(&v, row(steps, 4)), Some(ChatHit::Fold(2)));
         // An edit's path, right of its name, opens the file.
         let edit = item_rect(&v, 3);
-        let name = width_in("Edit", Face::Bold, FONT_SIZE).ceil() as i32;
+        let name = width_in("Edit", Face::Bold, font_size()).ceil() as i32;
         let on_path = CHEVRON_WIDTH + name + CARD_GAP + 4;
         assert_eq!(layout.hit(&v, row(edit, on_path)), Some(ChatHit::Path(3)));
         // Its unfolded change is the item, not its fold.
@@ -2250,7 +2261,7 @@ pub(super) mod tests {
         );
         assert!(state.0.loc.x + state.0.size.w <= 400);
         // Folded: one row.
-        assert_eq!(laid.h, CARD_ROW);
+        assert_eq!(laid.h, card_row());
     }
 
     #[test]
@@ -2350,11 +2361,11 @@ pub(super) mod tests {
         v.earlier = Some(false);
         let layout = chat_layout(&v);
         let first = item_rect(&v, 0);
-        assert_eq!(first.loc.y - below, CARD_ROW + TURN_GAP);
+        assert_eq!(first.loc.y - below, card_row() + TURN_GAP);
         let p = parts(&v);
         let row = Point::from((
             (p.column.0 + p.column.1 / 2) as f64,
-            (layout.list.loc.y + PART_GAP + CARD_ROW / 2) as f64,
+            (layout.list.loc.y + PART_GAP + card_row() / 2) as f64,
         ));
         assert_eq!(layout.hit(&v, row), Some(ChatHit::Earlier));
         assert_eq!(layout.hit(&v, middle(first)), Some(ChatHit::Item(0)));
@@ -2391,7 +2402,7 @@ pub(super) mod tests {
         let at = |x: i32| {
             Point::from((
                 (steps.loc.x + x) as f64,
-                (steps.loc.y + CARD_ROW / 2) as f64,
+                (steps.loc.y + card_row() / 2) as f64,
             ))
         };
         assert_eq!(layout.hit(&v, at(NEST + 4)), Some(ChatHit::Fold(2)));
@@ -2623,7 +2634,7 @@ pub(super) mod tests {
         );
         assert!(p.answers.iter().all(|(_, b)| inside(panel, *b)));
         let (at, laid) = p.card.as_ref().unwrap();
-        let head = Point::from(((at.x + 4) as f64, (at.y + CARD_ROW / 2) as f64));
+        let head = Point::from(((at.x + 4) as f64, (at.y + card_row() / 2) as f64));
         assert_eq!(layout.hit(&v, head), Some(ChatHit::AskFold));
         // Folded: the tool and its gist, not what it would run.
         let said = labels(laid);
@@ -2646,7 +2657,7 @@ pub(super) mod tests {
         // A shorter pane keeps its list three card rows: the lines give way.
         v.rect.size.h = 460;
         let q = parts(&v);
-        assert!(q.list.size.h >= 3 * CARD_ROW, "{:?}", q.list);
+        assert!(q.list.size.h >= 3 * card_row(), "{:?}", q.list);
         let said = labels(&q.card.as_ref().unwrap().1);
         assert!(!said.contains(&"line 11".to_owned()));
     }

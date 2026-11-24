@@ -2,10 +2,10 @@
 //! restarting it runs again (see `crate::restart`).
 
 use super::{
-    ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Check, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE,
-    POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
-    QUIT_PADDING, QUIT_TITLE, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW, band, dialog_buttons, mix, phys,
-    rect_px,
+    ButtonStyle, CHECKBOX_GAP, Check, DIALOG_WIDTH, POPUP_RADIUS, Painter, Palette,
+    QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW, band,
+    checkbox_row, dialog_buttons, font_size, label_font_size, mix, phys, quit_body, quit_button,
+    quit_title, rect_px,
 };
 use crate::restart::more_rows;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -78,11 +78,12 @@ pub struct RestartLayout {
 /// Where the restart dialog's parts go, with `rows` commands and `action` as
 /// the button going on, centred on an output of `size`: as many rows as fit.
 pub fn restart_layout(size: Size<i32, Logical>, rows: usize, action: &str) -> RestartLayout {
-    let fixed = 2 * QUIT_PADDING + QUIT_TITLE + 2 * QUIT_LINE_GAP + QUIT_BODY + ROWS_END - ROW_GAP
-        + QUIT_BUTTON;
-    let fit = ((size.h - 2 * MARGIN - fixed) / (CHECKBOX_ROW + ROW_GAP)).max(1) as usize;
+    let fixed = 2 * QUIT_PADDING + quit_title() + 2 * QUIT_LINE_GAP + quit_body() + ROWS_END
+        - ROW_GAP
+        + quit_button();
+    let fit = ((size.h - 2 * MARGIN - fixed) / (checkbox_row() + ROW_GAP)).max(1) as usize;
     let shown = rows.min(fit);
-    let height = fixed + shown as i32 * (CHECKBOX_ROW + ROW_GAP);
+    let height = fixed + shown as i32 * (checkbox_row() + ROW_GAP);
     let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
@@ -94,14 +95,14 @@ pub fn restart_layout(size: Size<i32, Logical>, rows: usize, action: &str) -> Re
     );
     let (x, y) = (panel.loc.x + QUIT_PADDING, panel.loc.y + QUIT_PADDING);
     let inner = width - 2 * QUIT_PADDING;
-    let title = Rectangle::new((x, y).into(), (inner, QUIT_TITLE).into());
-    let body_y = y + QUIT_TITLE + QUIT_LINE_GAP;
-    let body = Rectangle::new((x, body_y).into(), (inner, QUIT_BODY).into());
-    let rows_y = body_y + QUIT_BODY + QUIT_LINE_GAP;
+    let title = Rectangle::new((x, y).into(), (inner, quit_title()).into());
+    let body_y = y + quit_title() + QUIT_LINE_GAP;
+    let body = Rectangle::new((x, body_y).into(), (inner, quit_body()).into());
+    let rows_y = body_y + quit_body() + QUIT_LINE_GAP;
     let rows = (0..shown as i32)
         .map(|i| {
-            let y = rows_y + i * (CHECKBOX_ROW + ROW_GAP);
-            Rectangle::new((x, y).into(), (inner, CHECKBOX_ROW).into())
+            let y = rows_y + i * (checkbox_row() + ROW_GAP);
+            Rectangle::new((x, y).into(), (inner, checkbox_row()).into())
         })
         .collect();
     let buttons = dialog_buttons(panel, &["Cancel", action]);
@@ -144,7 +145,7 @@ impl Painter {
         self.text(
             &mut c,
             &view.title,
-            LABEL_FONT_SIZE,
+            label_font_size(),
             title_x,
             title_end,
             band(title, scale),
@@ -156,7 +157,7 @@ impl Painter {
         self.text(
             &mut c,
             view.body,
-            FONT_SIZE,
+            font_size(),
             body_x,
             body_end,
             band(body, scale),
@@ -190,7 +191,7 @@ impl Painter {
             let after = self.text(
                 &mut c,
                 &row.label,
-                FONT_SIZE,
+                font_size(),
                 box_end + (CHECKBOX_GAP as f32 * s).round(),
                 end,
                 row_band,
@@ -205,7 +206,7 @@ impl Painter {
             self.text(
                 &mut c,
                 &place,
-                FONT_SIZE,
+                font_size(),
                 after + (PLACE_GAP as f32 * s).round(),
                 end,
                 row_band,
@@ -230,7 +231,7 @@ impl Painter {
                 self.text(
                     &mut c,
                     &more,
-                    FONT_SIZE,
+                    font_size(),
                     x,
                     end,
                     band(spot, scale),

@@ -3,10 +3,9 @@
 //! only those that failed.
 
 use super::{
-    BUTTON_RADIUS, ButtonStyle, Canvas, DIALOG_WIDTH, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE,
-    POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
-    QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, band, dialog_buttons, field_text, focus_ring,
-    phys,
+    BUTTON_RADIUS, ButtonStyle, Canvas, DIALOG_WIDTH, FieldSpot, POPUP_RADIUS, Painter, Palette,
+    QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, Rect, Rgb, SHADOW, band, dialog_buttons,
+    field_text, focus_ring, font_size, label_font_size, phys, quit_body, quit_button, quit_title,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -99,16 +98,20 @@ pub struct IdentityLayout {
 /// Where the git identity dialog's parts go, with an error line if
 /// `error`, centred on an output of `size`.
 pub fn identity_layout(size: Size<i32, Logical>, error: bool) -> IdentityLayout {
-    let error_h = if error { QUIT_BODY + QUIT_LINE_GAP } else { 0 };
+    let error_h = if error {
+        quit_body() + QUIT_LINE_GAP
+    } else {
+        0
+    };
     let height = 2 * QUIT_PADDING
-        + QUIT_TITLE
+        + quit_title()
         + QUIT_LINE_GAP
-        + QUIT_BODY
+        + quit_body()
         + QUIT_LINE_GAP
-        + 3 * (QUIT_BUTTON + QUIT_LINE_GAP)
+        + 3 * (quit_button() + QUIT_LINE_GAP)
         + error_h
         + ROWS_END
-        + QUIT_BUTTON;
+        + quit_button();
     let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
@@ -125,10 +128,14 @@ pub fn identity_layout(size: Size<i32, Logical>, error: bool) -> IdentityLayout 
         y += h + QUIT_LINE_GAP;
         rect
     };
-    let title = next(QUIT_TITLE);
-    let body = next(QUIT_BODY);
-    let rows = [next(QUIT_BUTTON), next(QUIT_BUTTON), next(QUIT_BUTTON)];
-    let error = error.then(|| next(QUIT_BODY));
+    let title = next(quit_title());
+    let body = next(quit_body());
+    let rows = [
+        next(quit_button()),
+        next(quit_button()),
+        next(quit_button()),
+    ];
+    let error = error.then(|| next(quit_body()));
     let split = |row: Rect| {
         let label = Rectangle::new(row.loc, (LABEL_W, row.size.h).into());
         let field = Rectangle::new(
@@ -205,7 +212,7 @@ pub fn identity_field(
     Some(FieldSpot {
         area,
         text: field_text(area, scale),
-        size: FONT_SIZE,
+        size: font_size(),
         line: line.clone(),
     })
 }
@@ -239,12 +246,12 @@ impl Painter {
             &mut c,
             "Git needs your name and email",
             layout.title,
-            LABEL_FONT_SIZE,
+            label_font_size(),
             p.text,
         );
-        line(&mut c, &view.body, layout.body, FONT_SIZE, p.muted);
+        line(&mut c, &view.body, layout.body, font_size(), p.muted);
         for (label, rect) in ["Name", "Email", "Save for"].into_iter().zip(layout.labels) {
-            line(&mut c, label, rect, FONT_SIZE, p.muted);
+            line(&mut c, label, rect, font_size(), p.muted);
         }
         let focus = view.focus;
         self.field(
@@ -287,7 +294,7 @@ impl Painter {
         }
         self.segmented(&mut c, shift(layout.track), &segments, on, hover, scale, p);
         if let (Some(rect), Some(error)) = (layout.error, &view.error) {
-            line(&mut c, error, rect, FONT_SIZE, p.error);
+            line(&mut c, error, rect, font_size(), p.error);
         }
 
         // Left of the buttons, the keys besides them; then Cancel and

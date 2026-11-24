@@ -339,8 +339,8 @@ fn entries(items: &[Item]) -> Vec<Entry> {
 /// How high `entry` is in the list.
 fn height(entry: Entry) -> i32 {
     match entry {
-        Entry::Repo(_) => chrome::WORKTREES_LABEL,
-        Entry::Item(_) => chrome::WORKTREES_ROW,
+        Entry::Repo(_) => chrome::worktrees_label(),
+        Entry::Item(_) => chrome::worktrees_row(),
     }
 }
 
@@ -353,7 +353,7 @@ fn list_height(items: &[Item], page: usize) -> i32 {
 
 /// The room for a view of `page` rows.
 fn room(page: usize) -> i32 {
-    page.max(1) as i32 * chrome::WORKTREES_ROW
+    page.max(1) as i32 * chrome::worktrees_row()
 }
 
 /// The entries in a view of `page` rows from worktree `first`: its
@@ -365,10 +365,10 @@ fn shown(items: &[Item], first: usize, page: usize) -> Vec<Entry> {
     };
     let room = room(page);
     let mut shown = vec![Entry::Repo(top.repo)];
-    let mut h = chrome::WORKTREES_LABEL;
+    let mut h = chrome::worktrees_label();
     for (k, item) in items.iter().enumerate().skip(first) {
         let label = k > first && items[k - 1].repo != item.repo;
-        let need = chrome::WORKTREES_ROW + if label { chrome::WORKTREES_LABEL } else { 0 };
+        let need = chrome::worktrees_row() + if label { chrome::worktrees_label() } else { 0 };
         if h + need > room && shown.len() > 1 {
             break;
         }
@@ -400,10 +400,10 @@ fn under(items: &[Item], shown: &[Entry], page: usize) -> Vec<Entry> {
         }
         if item.repo != items[k - 1].repo {
             under.push(Entry::Repo(item.repo));
-            h += chrome::WORKTREES_LABEL;
+            h += chrome::worktrees_label();
         }
         under.push(Entry::Item(k));
-        h += chrome::WORKTREES_ROW;
+        h += chrome::worktrees_row();
     }
     under
 }
@@ -414,9 +414,9 @@ fn under(items: &[Item], shown: &[Entry], page: usize) -> Vec<Entry> {
 fn step(items: &[Item], first: usize) -> i32 {
     match (items.get(first), items.get(first + 1)) {
         (Some(this), Some(next)) if next.repo != this.repo => {
-            chrome::WORKTREES_ROW + chrome::WORKTREES_LABEL
+            chrome::worktrees_row() + chrome::worktrees_label()
         }
-        _ => chrome::WORKTREES_ROW,
+        _ => chrome::worktrees_row(),
     }
 }
 
@@ -1996,7 +1996,7 @@ mod tests {
         let mut popup = Popup::default();
         let view = |popup: &Popup| popup.view(&items, &names, &HashMap::new(), 3);
         let height = view(&popup).list_height;
-        assert_eq!(height, 3 * chrome::WORKTREES_ROW);
+        assert_eq!(height, 3 * chrome::worktrees_row());
         // Scrolled to the second worktree, its repository's label stays on top.
         popup.scroll.jump(1.0);
         let scrolled = view(&popup);
@@ -2029,7 +2029,10 @@ mod tests {
         items.push(other);
         let names = vec!["r".to_owned(), "s".to_owned()];
         let view = |popup: &Popup| popup.view(&items, &names, &HashMap::new(), 3);
-        let (row, label) = (chrome::WORKTREES_ROW as f64, chrome::WORKTREES_LABEL as f64);
+        let (row, label) = (
+            chrome::worktrees_row() as f64,
+            chrome::worktrees_label() as f64,
+        );
         // Past "b", the next repository's label comes up with "other".
         assert_eq!(scrolled_px(&items, 5.0), 5.0 * row + label);
         assert_eq!(scrolled_px(&items, 4.5), 4.0 * row + (row + label) / 2.0);
@@ -2074,7 +2077,7 @@ mod tests {
         let key = |popup: &mut Popup, sym: Keysym| {
             popup.key(&ModifiersState::default(), sym, &items, 3);
         };
-        let (t, row) = (Instant::now(), chrome::WORKTREES_ROW as f64);
+        let (t, row) = (Instant::now(), chrome::worktrees_row() as f64);
         let finger = |popup: &mut Popup, rows: f64, time: u32| {
             let motion = Motion::Finger {
                 px: rows * row,
@@ -2091,7 +2094,7 @@ mod tests {
         finger(&mut popup, 1.5, 0);
         assert_eq!(view(&popup).part, 0.5);
         assert_eq!(shown(&popup), ["# r", "wip", "done", "a", "b"]);
-        assert_eq!(view(&popup).list_height, 3 * chrome::WORKTREES_ROW);
+        assert_eq!(view(&popup).list_height, 3 * chrome::worktrees_row());
         // The next repository's label and worktree come with it.
         popup.scroll.jump(4.0);
         assert_eq!(shown(&popup), ["# r", "b", "# s", "other"]);
@@ -2147,7 +2150,7 @@ mod tests {
         popup.scroll.jump(3.0);
         assert_eq!(
             popup.bounds(&items, 3).unit,
-            (chrome::WORKTREES_ROW + chrome::WORKTREES_LABEL) as f64
+            (chrome::worktrees_row() + chrome::worktrees_label()) as f64
         );
         let t = Instant::now();
         popup.scroll_by(Motion::Notches(1.0), t, &items, 3);

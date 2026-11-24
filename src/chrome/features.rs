@@ -14,15 +14,14 @@ use std::{
 };
 
 use super::{
-    TITLE_FONT_SIZE, line,
-    AGENT_ICON, BUTTON_PADDING, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, CHECKBOX_SIZE, Canvas,
-    Check, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT, Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE,
-    ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP,
-    QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, agent_icon,
-    band, button_width, check, chevron_down, chevron_side, coverage, cross, dialog_buttons,
-    field_text, focus_ring, footer_hint_spots, gutter_track, hint_strs, icon_sdf, measure,
-    measure_bold, measured_footer_height, mix, phys, physical, rect_px, segment, segment_tint,
-    status_dot, wrap_field_height,
+    AGENT_ICON, BUTTON_PADDING, ButtonStyle, CHECKBOX_GAP, CHECKBOX_SIZE, Canvas, Check,
+    DIALOG_WIDTH, DOT, Dot, FieldSpot, ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BUTTON_GAP,
+    QUIT_LINE_GAP, QUIT_PADDING, Rect, Rgb, SHADOW, Thumb, agent_icon, band, button_width, check,
+    checkbox_row, chevron_down, chevron_side, coverage, cross, detail_font_size, dialog_buttons,
+    field_text, focus_ring, font_size, footer_hint_spots, gutter_track, hint_strs, icon_sdf,
+    label_font_size, line, measure, measure_bold, measured_footer_height, mix, phys, physical,
+    quit_body, quit_button, quit_title, rect_px, segment, segment_tint, small_font_size,
+    status_dot, title_font_size, wrap_field_height,
 };
 use super::{
     Standing, code_mark,
@@ -73,7 +72,9 @@ pub const CREATE: usize = 1;
 /// and back from it.
 pub const LINK_BUTTON: [&str; 2] = ["Link project\u{2026}", "Done"];
 /// How high a button on a repository row or an agent card is.
-const ROW_BUTTON: i32 = line(FONT_SIZE, 9);
+fn row_button() -> i32 {
+    line(font_size(), 9)
+}
 /// How wide the previous and next feature buttons are.
 const SWITCH_W: i32 = 28;
 /// How many lines a list on a stage's page shows at most (the Ship
@@ -216,28 +217,28 @@ pub fn new_feature_layout(
     reviewers: &[AgentChip],
 ) -> NewFeatureLayout {
     // Its line has room kept, so the dialog doesn't grow when one shows.
-    let error_h = QUIT_BODY + QUIT_LINE_GAP;
+    let error_h = quit_body() + QUIT_LINE_GAP;
     let reviewer_h = match reviewers.is_empty() {
         true => 0,
-        false => PICK_TRACK + ROWS_END,
+        false => pick_track() + ROWS_END,
     };
     let fixed = 2 * QUIT_PADDING
-        + QUIT_TITLE
+        + quit_title()
         + QUIT_LINE_GAP
-        + QUIT_BUTTON
+        + quit_button()
         + QUIT_LINE_GAP
         + error_h
-        + QUIT_BODY
+        + quit_body()
         + QUIT_LINE_GAP
-        + QUIT_BUTTON
+        + quit_button()
         + QUIT_LINE_GAP
         + ROWS_END
         - ROW_GAP
-        + QUIT_BUTTON
+        + quit_button()
         + reviewer_h;
-    let fit = ((size.h - 2 * MARGIN - fixed) / (CHECKBOX_ROW + ROW_GAP)).max(1) as usize;
+    let fit = ((size.h - 2 * MARGIN - fixed) / (checkbox_row() + ROW_GAP)).max(1) as usize;
     let shown = repos.min(fit);
-    let height = fixed + shown as i32 * (CHECKBOX_ROW + ROW_GAP);
+    let height = fixed + shown as i32 * (checkbox_row() + ROW_GAP);
     let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
@@ -254,21 +255,21 @@ pub fn new_feature_layout(
         y += h + QUIT_LINE_GAP;
         rect
     };
-    let title = next(QUIT_TITLE);
-    let field = next(QUIT_BUTTON);
-    let error_line = next(QUIT_BODY);
+    let title = next(quit_title());
+    let field = next(quit_button());
+    let error_line = next(quit_body());
     let error = error.then_some(error_line);
-    let root = next(QUIT_BODY);
-    let projects = next(QUIT_BUTTON);
+    let root = next(quit_body());
+    let projects = next(quit_button());
     let link_w = button_width(LINK_BUTTON[0]).max(button_width(LINK_BUTTON[1]));
     let link = Rectangle::new(
         (projects.loc.x + projects.size.w - link_w, projects.loc.y).into(),
-        (link_w, QUIT_BUTTON).into(),
+        (link_w, quit_button()).into(),
     );
     let rows: Vec<Rect> = (0..shown as i32)
         .map(|i| {
-            let y = y + i * (CHECKBOX_ROW + ROW_GAP);
-            Rectangle::new((x, y).into(), (inner, CHECKBOX_ROW).into())
+            let y = y + i * (checkbox_row() + ROW_GAP);
+            Rectangle::new((x, y).into(), (inner, checkbox_row()).into())
         })
         .collect();
     let bases = (rows.iter())
@@ -279,9 +280,9 @@ pub fn new_feature_layout(
         .collect();
     let buttons = dialog_buttons(panel, &NEW_FEATURE_BUTTONS);
     let reviewer = (!reviewers.is_empty()).then(|| {
-        let y = y + shown as i32 * (CHECKBOX_ROW + ROW_GAP) - ROW_GAP + ROWS_END;
-        let row = Rectangle::new((x, y).into(), (inner, PICK_TRACK).into());
-        let label = ROW_INSET + width_of(REVIEWER_LABEL, FONT_SIZE).ceil() as i32 + PLACE_GAP;
+        let y = y + shown as i32 * (checkbox_row() + ROW_GAP) - ROW_GAP + ROWS_END;
+        let row = Rectangle::new((x, y).into(), (inner, pick_track()).into());
+        let label = ROW_INSET + width_of(REVIEWER_LABEL, font_size()).ceil() as i32 + PLACE_GAP;
         let names: Vec<&str> = reviewers.iter().map(|c| c.name.as_str()).collect();
         let (track, chips) = agent_pick_rects(&names, x + label, y, inner - label);
         (row, track, chips)
@@ -344,7 +345,7 @@ pub fn new_feature_field(view: &NewFeatureView, size: Size<i32, Logical>, scale:
     FieldSpot {
         area,
         text: field_text(area, scale),
-        size: FONT_SIZE,
+        size: font_size(),
         line: view.title.clone(),
     }
 }
@@ -855,7 +856,7 @@ fn criteria_search_parts(row: Rect, open: bool) -> SearchSpots {
 /// Where `strip` goes in the row at `(x, y)`, `width` wide: the bar, then its
 /// words.
 fn test_strip_spots(x: i32, y: i32, width: i32) -> TestStripSpots {
-    let h = REVIEW_SWITCH_H;
+    let h = review_switch_h();
     let has_bar = width >= REVIEW_BAR_W + COLUMN_GAP + REVIEW_LEFT_MIN;
     let bar = has_bar.then(|| {
         Rectangle::new(
@@ -1587,7 +1588,7 @@ pub fn feature_tab_field(view: &FeatureTabView, frame: Rect, scale: f64) -> Opti
         return Some(FieldSpot {
             area,
             text: super::search_field_text(area, scale),
-            size: FONT_SIZE,
+            size: font_size(),
             line: bar.query.clone(),
         });
     }
@@ -1613,7 +1614,7 @@ pub fn feature_tab_field(view: &FeatureTabView, frame: Rect, scale: f64) -> Opti
     Some(FieldSpot {
         area,
         text: field_text(area, scale),
-        size: FONT_SIZE,
+        size: font_size(),
         line: line.clone(),
     })
 }
@@ -2055,12 +2056,18 @@ const TAB_PAD: i32 = 16;
 /// margin either side.
 const TAB_MAX: i32 = 1760;
 /// How high the header's title and sub lines are.
-const TAB_TITLE: i32 = QUIT_TITLE + 4;
-const TAB_SUB: i32 = line(DETAIL_FONT_SIZE, 8);
+fn tab_title() -> i32 {
+    quit_title() + 4
+}
+fn tab_sub() -> i32 {
+    line(detail_font_size(), 8)
+}
 /// How high the header's buttons and the page's buttons are.
-const TAB_BUTTON: i32 = line(FONT_SIZE, 15);
+fn tab_button() -> i32 {
+    line(font_size(), 15)
+}
 /// The header's buttons show only their icons on a tab narrower than
-/// this, each `TAB_BUTTON` square.
+/// this, each `tab_button()` square.
 pub const COMPACT_BUTTONS_BELOW: i32 = 1000;
 /// The gap between the header and the rail, and under the rail.
 const RAIL_GAP: i32 = 14;
@@ -2068,11 +2075,17 @@ const RAIL_GAP: i32 = 14;
 /// stage's label and short line under that.
 const NODE: i32 = 24;
 const NODE_GAP: i32 = 6;
-const NODE_LABEL: i32 = line(SMALL_FONT_SIZE, 5);
-const NODE_LINE: i32 = line(DETAIL_FONT_SIZE, 4);
+fn node_label() -> i32 {
+    line(small_font_size(), 5)
+}
+fn node_line() -> i32 {
+    line(detail_font_size(), 4)
+}
 /// How far a label's second line sits under its first, when it is too
 /// wide for its slot and takes the short line's place.
-const RAIL_LABEL_STEP: i32 = line(SMALL_FONT_SIZE, 3);
+fn rail_label_step() -> i32 {
+    line(small_font_size(), 3)
+}
 /// The room between a done stage's agent logo and its model on the rail.
 const RAIL_AGENT_GAP: i32 = 4;
 /// The room left between a node and the line joining it to the next.
@@ -2095,7 +2108,9 @@ pub const ACTIVITY_BELOW: i32 = 1180;
 /// corners.
 const COLUMN_GAP: i32 = 12;
 /// The height of the switch on Code review's page, and the gaps round it.
-const REVIEW_SWITCH_H: i32 = line(FONT_SIZE, 15);
+fn review_switch_h() -> i32 {
+    line(font_size(), 15)
+}
 const REVIEW_SWITCH_GAP: i32 = 8;
 /// The size of its bar of files viewed, and the least room left for its words.
 const REVIEW_BAR_W: i32 = 120;
@@ -2109,7 +2124,9 @@ const BAR_INSET: i32 = 6;
 /// above and below the rows and at their ends, the gap between its parts,
 /// the spinner and the gap after it, the bar of steps and the gap before
 /// its count, and the gap under the card.
-const RUN_ROW: i32 = line(SMALL_FONT_SIZE, 15);
+fn run_row() -> i32 {
+    line(small_font_size(), 15)
+}
 const RUN_PAD: i32 = 4;
 const RUN_INSET: i32 = 12;
 const RUN_GAP: i32 = 10;
@@ -2126,13 +2143,19 @@ pub(super) const SWEEP_PERIOD: std::time::Duration = std::time::Duration::from_m
 const SWEEP_SHARE: f64 = 0.3;
 /// The row of repository chips on a narrow tab, and a chip's height,
 /// inner room and the gap between two.
-const CHIP_ROW: i32 = line(SMALL_FONT_SIZE, 15);
+fn chip_row() -> i32 {
+    line(small_font_size(), 15)
+}
 const CHIP_PAD: i32 = 10;
 const CHIP_GAP: i32 = 6;
 /// A column's uppercase caption.
-const CAPTION: i32 = line(DETAIL_FONT_SIZE, 10);
+fn caption_px() -> i32 {
+    line(detail_font_size(), 10)
+}
 /// A repository's row on the unfolded card, and the gap between two.
-const REPO_ROW: i32 = line(FONT_SIZE, 13);
+fn repo_row() -> i32 {
+    line(font_size(), 13)
+}
 const REPO_GAP: i32 = 4;
 /// The room above a group of rows' heading, past the first.
 const REPO_GROUP_GAP: i32 = 6;
@@ -2155,13 +2178,23 @@ const DOT_ROOM: i32 = 18;
 const LINE_LEAD: i32 = 7;
 const TAIL_LEAD: i32 = 5;
 /// A line of small text, of body text, and of an agent's pane.
-pub(super) const SMALL_LINE: i32 = Font::Small.size() as i32 + LINE_LEAD;
-pub(crate) const BODY_LINE: i32 = Font::Body.size() as i32 + LINE_LEAD;
+pub(super) fn small_line() -> i32 {
+    Font::Small.size() as i32 + LINE_LEAD
+}
+pub(crate) fn body_line() -> i32 {
+    Font::Body.size() as i32 + LINE_LEAD
+}
 /// How high a stage page's title is.
-const TITLE_LINE: i32 = BODY_LINE + 6;
+fn title_line() -> i32 {
+    body_line() + 6
+}
 /// How high the page's bar is: its title's line.
-const PAGE_BAR: i32 = TITLE_LINE;
-const TAIL_LINE: i32 = Font::Small.size() as i32 + TAIL_LEAD;
+fn page_bar_px() -> i32 {
+    title_line()
+}
+fn tail_line_px() -> i32 {
+    Font::Small.size() as i32 + TAIL_LEAD
+}
 /// The gap between the parts of a page.
 const PAGE_GAP: i32 = 16;
 /// The gap between a review's heading and the card under it.
@@ -2257,11 +2290,13 @@ fn toolbar_width(groups: &[(String, Vec<usize>)], page: &StagePage) -> i32 {
 /// A toolbar button's width: its label and a little room, not a full
 /// button's least width, so a row of them stays short.
 fn toolbar_button_width(label: &str) -> i32 {
-    width_of(label, FONT_SIZE).ceil() as i32 + 2 * TOOLBAR_PADDING
+    width_of(label, font_size()).ceil() as i32 + 2 * TOOLBAR_PADDING
 }
 /// An agent or file card's head: as high as a title line, its name being
 /// body text in bold.
-const AGENT_HEAD: i32 = TITLE_LINE;
+fn agent_head() -> i32 {
+    title_line()
+}
 /// Where an agent card's name starts, past its logo and dot.
 const AGENT_TEXT_AT: i32 = 36;
 /// The room an agent card keeps for its status beside its buttons.
@@ -2271,7 +2306,9 @@ const AGENT_ROWS_GAP: i32 = 4;
 /// An agent card's chips: the outline's height, as its button's, the room
 /// between it and its chips, a chip's width, a logo's size, and the label
 /// in front of them on a card with no head.
-const PICK_TRACK: i32 = ROW_BUTTON;
+fn pick_track() -> i32 {
+    row_button()
+}
 const PICK_TRACK_PAD: i32 = 2;
 const PICK_CHIP: i32 = 28;
 const PICK_ICON: i32 = 14;
@@ -2307,7 +2344,9 @@ const SHIP_STEP_INSET: i32 = 4;
 const RECAP_TILE_GAP: i32 = 28;
 const AGENT_RADIUS: f32 = 6.0;
 /// A milestone's row, and the progress bar's height.
-const MILESTONE_ROW: i32 = BODY_LINE;
+fn milestone_row() -> i32 {
+    body_line()
+}
 const PROGRESS: i32 = 6;
 /// The most lines a wrapped text takes; the last ends in "…".
 const MAX_WRAP: usize = 4;
@@ -2323,14 +2362,14 @@ pub(super) enum Font {
 
 impl Font {
     /// Its size: the one the page's text is measured and painted at, and
-    /// its lines (`BODY_LINE`, `SMALL_LINE`, `TAIL_LINE`) grow from. A step
+    /// its lines (`body_line()`, `small_line()`, `tail_line_px()`) grow from. A step
     /// over the chrome's own, as the page is read, not glanced at.
-    pub(super) const fn size(self) -> f32 {
+    pub(super) fn size(self) -> f32 {
         match self {
-            Self::Heading => TITLE_FONT_SIZE,
-            Self::Body => LABEL_FONT_SIZE,
-            Self::Small => FONT_SIZE,
-            Self::Detail => DETAIL_FONT_SIZE,
+            Self::Heading => title_font_size(),
+            Self::Body => label_font_size(),
+            Self::Small => font_size(),
+            Self::Detail => detail_font_size(),
         }
     }
 }
@@ -2705,7 +2744,7 @@ impl Stack {
     }
 
     fn caption(&mut self, text: &str) {
-        self.put(CAPTION, Piece::Caption(text.to_uppercase()));
+        self.put(caption_px(), Piece::Caption(text.to_uppercase()));
     }
 
     /// `text` wrapped to the column, a line `h` high each.
@@ -2737,11 +2776,11 @@ impl Stack {
         let (x, w) = (self.x, self.w);
         for line in lines {
             let Some((key, what)) = line.text.split_once('\t') else {
-                self.text(&line.text, Font::Body, Ink::Tone(line.tone), BODY_LINE);
+                self.text(&line.text, Font::Body, Ink::Tone(line.tone), body_line());
                 continue;
             };
             self.pieces.push((
-                Rectangle::new((x, self.y).into(), (key_w, BODY_LINE).into()),
+                Rectangle::new((x, self.y).into(), (key_w, body_line()).into()),
                 Piece::Text {
                     text: key.to_owned(),
                     font: Font::Body,
@@ -2754,8 +2793,8 @@ impl Stack {
             self.join_next(false);
             let start = self.y;
             // All of it: the sheet scrolls, a cut key loses what it does.
-            self.all_text(what, Font::Body, Ink::Tone(line.tone), false, BODY_LINE);
-            self.y = self.y.max(start + BODY_LINE);
+            self.all_text(what, Font::Body, Ink::Tone(line.tone), false, body_line());
+            self.y = self.y.max(start + body_line());
             (self.x, self.w) = (x, w);
         }
     }
@@ -2789,11 +2828,11 @@ impl Stack {
         buttons: &mut [Option<Rect>],
     ) {
         let caption = self.put(
-            CAPTION,
+            caption_px(),
             Piece::GroupCaption(k, summary.label.to_uppercase()),
         );
         let mut bx = caption.loc.x + caption.size.w;
-        let by = caption.loc.y + (CAPTION - ROW_BUTTON) / 2;
+        let by = caption.loc.y + (caption_px() - row_button()) / 2;
         for &b in summary
             .buttons
             .iter()
@@ -2802,10 +2841,10 @@ impl Stack {
         {
             let w = button_width(&page.buttons[b].label);
             bx -= w;
-            buttons[b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+            buttons[b] = Some(Rectangle::new((bx, by).into(), (w, row_button()).into()));
             bx -= QUIT_BUTTON_GAP;
         }
-        self.y = self.y.max(by + ROW_BUTTON) + FINDING_GAP;
+        self.y = self.y.max(by + row_button()) + FINDING_GAP;
         // The pills in rows, as wide as their words.
         let (left, right) = (self.x, self.x + self.w);
         let mut x = left;
@@ -2821,10 +2860,10 @@ impl Stack {
             };
             let w = pill_width(*tag, &text);
             if x > left && x + w > right {
-                (x, self.y) = (left, self.y + TAIL_LINE + FINDING_GAP);
+                (x, self.y) = (left, self.y + tail_line_px() + FINDING_GAP);
             }
             self.pieces.push((
-                Rectangle::new((x, self.y).into(), (w, TAIL_LINE).into()),
+                Rectangle::new((x, self.y).into(), (w, tail_line_px()).into()),
                 Piece::TagPill {
                     tag: *tag,
                     faded: open == 0,
@@ -2835,7 +2874,7 @@ impl Stack {
             x += w + PILL_GAP;
         }
         if !summary.counts.is_empty() {
-            self.y += TAIL_LINE + FINDING_GAP;
+            self.y += tail_line_px() + FINDING_GAP;
         }
         if summary.total > 0 {
             self.put(
@@ -2849,10 +2888,10 @@ impl Stack {
             self.y += FINDING_GAP;
         }
         if !summary.words.is_empty() {
-            self.text(&summary.words, Font::Small, Ink::Muted, SMALL_LINE);
+            self.text(&summary.words, Font::Small, Ink::Muted, small_line());
         }
         for line in &summary.notes {
-            self.text(&line.text, Font::Body, Ink::Tone(line.tone), BODY_LINE);
+            self.text(&line.text, Font::Body, Ink::Tone(line.tone), body_line());
         }
     }
 
@@ -2869,9 +2908,9 @@ impl Stack {
             _ => (None, fix),
         };
         if let Some(label) = label {
-            self.text(label, Font::Small, Ink::Muted, TAIL_LINE);
+            self.text(label, Font::Small, Ink::Muted, tail_line_px());
         }
-        self.all_text(text, Font::Body, ink, false, BODY_LINE);
+        self.all_text(text, Font::Body, ink, false, body_line());
         self.y += COMMENT_PAD / 2;
         (self.x, self.w) = (x, w);
         let ground = Rectangle::new((x, top).into(), (w, self.y - top).into());
@@ -2901,8 +2940,8 @@ impl Stack {
                 .first()
                 .is_some_and(|b| *b < page.buttons.len());
             let h = match card.collapsed && first {
-                true => ROW_BUTTON,
-                false => BODY_LINE,
+                true => row_button(),
+                false => body_line(),
             };
             self.pieces.push((
                 Rectangle::new((self.x, self.y).into(), (SHEET_FOLD, h).into()),
@@ -2925,7 +2964,7 @@ impl Stack {
         if let Some(dot) = card.tag.dot().or(card.made.then_some(Dot::Done)) {
             self.pieces.push((
                 Rectangle::new(
-                    (self.x, self.y + (BODY_LINE - DOT) / 2).into(),
+                    (self.x, self.y + (body_line() - DOT) / 2).into(),
                     (DOT, DOT).into(),
                 ),
                 Piece::CheckDot(dot),
@@ -2940,16 +2979,16 @@ impl Stack {
             .collect();
         let mut head_bottom = self.y;
         if !head.is_empty() {
-            let by = self.y + (BODY_LINE - ROW_BUTTON) / 2;
+            let by = self.y + (body_line() - row_button()) / 2;
             let mut bx = self.x + self.w;
             for b in head.iter().rev() {
                 let w = button_width(&page.buttons[*b].label);
                 bx -= w;
-                buttons[*b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+                buttons[*b] = Some(Rectangle::new((bx, by).into(), (w, row_button()).into()));
                 bx -= QUIT_BUTTON_GAP;
             }
             self.w = (bx - PILL_GAP - self.x).max(1);
-            head_bottom = by + ROW_BUTTON;
+            head_bottom = by + row_button();
         }
         // A finding's severity as a pill, its title right of it.
         let (title_x, title_w) = (self.x, self.w);
@@ -2957,8 +2996,8 @@ impl Stack {
             let pw = pill_width(card.tag, word);
             self.pieces.push((
                 Rectangle::new(
-                    (self.x, self.y + (BODY_LINE - TAIL_LINE) / 2).into(),
-                    (pw, TAIL_LINE).into(),
+                    (self.x, self.y + (body_line() - tail_line_px()) / 2).into(),
+                    (pw, tail_line_px()).into(),
                 ),
                 Piece::TagPill {
                     tag: card.tag,
@@ -2970,7 +3009,7 @@ impl Stack {
             self.x += pw + PILL_GAP;
             self.w = (self.w - pw - PILL_GAP).max(1);
         }
-        self.all_text(&card.title, Font::Body, body, true, BODY_LINE);
+        self.all_text(&card.title, Font::Body, body, true, body_line());
         self.y = self.y.max(head_bottom);
         (self.x, self.w) = (title_x, title_w);
         if !head.is_empty() {
@@ -2996,7 +3035,7 @@ impl Stack {
                 as i32
                 + 1;
             self.pieces.push((
-                Rectangle::new((self.x, self.y).into(), (w, TAIL_LINE).into()),
+                Rectangle::new((self.x, self.y).into(), (w, tail_line_px()).into()),
                 Piece::Clock(k),
             ));
             self.x += w;
@@ -3009,7 +3048,7 @@ impl Stack {
             self.w = (self.w - w).max(1);
             rest = format!("\u{b7} {rest}");
         }
-        self.all_text(&rest, Font::Small, Ink::Muted, false, TAIL_LINE);
+        self.all_text(&rest, Font::Small, Ink::Muted, false, tail_line_px());
         (self.x, self.w) = (left, width);
         // Why, in a box of its own, as plain as the comment's: the box under it
         // has the comment, so the folded line's mark of it goes.
@@ -3030,13 +3069,13 @@ impl Stack {
             };
             line(self, DOC_CODE_PAD / 2, "");
             for text in &card.preview {
-                line(self, TAIL_LINE, text);
+                line(self, tail_line_px(), text);
             }
             line(self, DOC_CODE_PAD / 2, "");
         }
         if !card.body.is_empty() {
             self.y += FINDING_GAP;
-            self.all_text(&card.body, Font::Body, body, false, BODY_LINE);
+            self.all_text(&card.body, Font::Body, body, false, body_line());
         }
         if !card.fix.is_empty() {
             self.y += FINDING_GAP;
@@ -3044,7 +3083,7 @@ impl Stack {
         }
         if !card.note.is_empty() {
             self.y += FINDING_GAP;
-            self.all_text(&card.note, Font::Body, body, false, BODY_LINE);
+            self.all_text(&card.note, Font::Body, body, false, body_line());
         }
         if !card.comment.is_empty() {
             self.y += FINDING_GAP;
@@ -3067,9 +3106,9 @@ impl Stack {
                 .collect();
             let placed = rows_from_right(&widths, self.x, self.x + self.w);
             for (b, (bx, row)) in held.iter().zip(&placed) {
-                let by = self.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
+                let by = self.y + row * (row_button() + QUIT_BUTTON_GAP);
                 let w = button_width(&page.buttons[*b].label);
-                buttons[*b] = Some(Rectangle::new((*bx, by).into(), (w, ROW_BUTTON).into()));
+                buttons[*b] = Some(Rectangle::new((*bx, by).into(), (w, row_button()).into()));
             }
             self.y += rows_height(&placed);
         }
@@ -3099,28 +3138,28 @@ impl Stack {
         self.w = (w - 2 * AGENT_PAD).max(1);
         self.y += AGENT_PAD;
         let (left, width) = (self.x, self.w);
-        let caption = self.put(CAPTION, Piece::Caption("RECAP".into()));
+        let caption = self.put(caption_px(), Piece::Caption("RECAP".into()));
         let held: Vec<usize> = (card.buttons.iter().copied())
             .filter(|b| *b < page.buttons.len())
             .collect();
         let widths: Vec<i32> = (held.iter())
             .map(|b| toolbar_button_width(&page.buttons[*b].label))
             .collect();
-        let by = caption.loc.y + (CAPTION - ROW_BUTTON) / 2;
+        let by = caption.loc.y + (caption_px() - row_button()) / 2;
         for (b, (bx, _)) in held
             .iter()
             .zip(rows_from_right(&widths, left, left + width))
         {
             let w = toolbar_button_width(&page.buttons[*b].label);
-            buttons[*b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+            buttons[*b] = Some(Rectangle::new((bx, by).into(), (w, row_button()).into()));
         }
-        self.y = self.y.max(by + ROW_BUTTON) + 4;
+        self.y = self.y.max(by + row_button()) + 4;
         for para in &card.summary {
-            self.all_text(para, Font::Body, Ink::Text, false, BODY_LINE);
+            self.all_text(para, Font::Body, Ink::Text, false, body_line());
             self.y += 4;
         }
         if let Some(note) = &card.summary_note {
-            self.text(note, Font::Small, Ink::Muted, SMALL_LINE);
+            self.text(note, Font::Small, Ink::Muted, small_line());
         }
         if !card.figures.is_empty() {
             self.y += FINDING_GAP;
@@ -3137,11 +3176,11 @@ impl Stack {
                 let tw = tile(figure);
                 if tx > left && tx + tw > left + width {
                     tx = left;
-                    row_top += TITLE_LINE + SMALL_LINE + 6;
+                    row_top += title_line() + small_line() + 6;
                 }
                 let tw_in = (tw - RECAP_TILE_GAP).min(left + width - tx).max(1);
                 self.pieces.push((
-                    Rectangle::new((tx, row_top).into(), (tw_in, TITLE_LINE).into()),
+                    Rectangle::new((tx, row_top).into(), (tw_in, title_line()).into()),
                     Piece::Text {
                         text: figure.0.clone(),
                         font: Font::Heading,
@@ -3151,8 +3190,8 @@ impl Stack {
                 ));
                 self.pieces.push((
                     Rectangle::new(
-                        (tx, row_top + TITLE_LINE).into(),
-                        (tw_in, SMALL_LINE).into(),
+                        (tx, row_top + title_line()).into(),
+                        (tw_in, small_line()).into(),
                     ),
                     Piece::Text {
                         text: figure.1.clone(),
@@ -3163,7 +3202,7 @@ impl Stack {
                 ));
                 tx += tw;
             }
-            self.y = row_top + TITLE_LINE + SMALL_LINE;
+            self.y = row_top + title_line() + small_line();
         }
         if !card.stages.is_empty() {
             self.y += FINDING_GAP;
@@ -3175,7 +3214,7 @@ impl Stack {
                 .min(width / 3);
             for (name, said) in &card.stages {
                 self.pieces.push((
-                    Rectangle::new((left, self.y).into(), (name_w, BODY_LINE).into()),
+                    Rectangle::new((left, self.y).into(), (name_w, body_line()).into()),
                     Piece::Text {
                         text: name.clone(),
                         font: Font::Body,
@@ -3187,15 +3226,15 @@ impl Stack {
                 (self.x, self.w) = (said_x, (left + width - said_x).max(1));
                 self.join_next(false);
                 let start = self.y;
-                self.text(said, Font::Body, Ink::Muted, BODY_LINE);
-                self.y = self.y.max(start + BODY_LINE);
+                self.text(said, Font::Body, Ink::Muted, body_line());
+                self.y = self.y.max(start + body_line());
                 (self.x, self.w) = (left, width);
             }
         }
         if !card.lines.is_empty() {
             self.y += FINDING_GAP;
             for line in &card.lines {
-                self.text(&line.text, Font::Body, Ink::Tone(line.tone), BODY_LINE);
+                self.text(&line.text, Font::Body, Ink::Tone(line.tone), body_line());
             }
         }
         self.y += AGENT_PAD;
@@ -3215,8 +3254,8 @@ impl Stack {
         finding_cards: &mut Vec<Rect>,
     ) {
         for (j, step) in group.steps.iter().enumerate() {
-            let detail = step.detail.as_ref().map_or(0, |_| SMALL_LINE);
-            let row = self.put(CHECKBOX_ROW + detail, Piece::ShipStep(k, j));
+            let detail = step.detail.as_ref().map_or(0, |_| small_line());
+            let row = self.put(checkbox_row() + detail, Piece::ShipStep(k, j));
             if !step.done {
                 ship.rows.push((step.row, row));
                 finding_cards.push(row);
@@ -3225,8 +3264,8 @@ impl Stack {
             if let Some(b) = step.button.filter(|b| *b < page.buttons.len()) {
                 let w = toolbar_button_width(&page.buttons[b].label);
                 let x = row.loc.x + row.size.w - w - SHIP_STEP_INSET;
-                let y = row.loc.y + (CHECKBOX_ROW - ROW_BUTTON) / 2;
-                buttons[b] = Some(Rectangle::new((x, y).into(), (w, ROW_BUTTON).into()));
+                let y = row.loc.y + (checkbox_row() - row_button()) / 2;
+                buttons[b] = Some(Rectangle::new((x, y).into(), (w, row_button()).into()));
             }
         }
     }
@@ -3267,7 +3306,7 @@ impl Stack {
         };
         self.pieces.push((
             Rectangle::new(
-                (left, self.y + (BODY_LINE - DOT) / 2).into(),
+                (left, self.y + (body_line() - DOT) / 2).into(),
                 (DOT, DOT).into(),
             ),
             Piece::CheckDot(card.dot),
@@ -3275,7 +3314,7 @@ impl Stack {
         let name_x = left + CHECK_DOT_ROOM;
         let name_w = name_w.min((head_end - name_x).max(1));
         self.pieces.push((
-            Rectangle::new((name_x, self.y).into(), (name_w, BODY_LINE).into()),
+            Rectangle::new((name_x, self.y).into(), (name_w, body_line()).into()),
             Piece::Text {
                 text: group.head.clone(),
                 font: Font::Body,
@@ -3289,7 +3328,7 @@ impl Stack {
             self.pieces.push((
                 Rectangle::new(
                     (state_x, self.y).into(),
-                    (head_end - state_x, BODY_LINE).into(),
+                    (head_end - state_x, body_line()).into(),
                 ),
                 Piece::Text {
                     text: card.state.text.clone(),
@@ -3300,29 +3339,34 @@ impl Stack {
             ));
         }
         if beside {
-            let by = self.y + (BODY_LINE - ROW_BUTTON) / 2;
+            let by = self.y + (body_line() - row_button()) / 2;
             for (b, (bx, _)) in held
                 .iter()
                 .zip(rows_from_right(&widths, left, left + width))
             {
                 let w = button_width(&page.buttons[*b].label);
-                buttons[*b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+                buttons[*b] = Some(Rectangle::new((bx, by).into(), (w, row_button()).into()));
             }
         }
-        self.y += BODY_LINE;
+        self.y += body_line();
         if !card.meta.is_empty() {
             (self.x, self.w) = (name_x, (left + width - name_x).max(1));
-            self.text(&card.meta, Font::Small, Ink::Muted, TAIL_LINE);
+            self.text(&card.meta, Font::Small, Ink::Muted, tail_line_px());
             (self.x, self.w) = (left, width);
         }
         for under in card.base.iter().chain(&card.ci) {
             (self.x, self.w) = (name_x, (left + width - name_x).max(1));
-            self.text(&under.text, Font::Small, Ink::Tone(under.tone), TAIL_LINE);
+            self.text(
+                &under.text,
+                Font::Small,
+                Ink::Tone(under.tone),
+                tail_line_px(),
+            );
             (self.x, self.w) = (left, width);
         }
         if let Some(route) = &group.route {
             self.y += FINDING_GAP;
-            let row = self.put(PICK_TRACK, Piece::ShipRoute(k));
+            let row = self.put(pick_track(), Piece::ShipRoute(k));
             let (track, segments) = ship_route_rects(row);
             ship.routes.push((route.row, track, segments));
             ship.rows.push((route.row, row));
@@ -3330,7 +3374,7 @@ impl Stack {
         }
         if let Some(note) = &group.note {
             self.y += 4;
-            self.text(note, Font::Small, Ink::Muted, SMALL_LINE);
+            self.text(note, Font::Small, Ink::Muted, small_line());
         }
         if !group.steps.is_empty() {
             self.y += FINDING_GAP;
@@ -3340,9 +3384,9 @@ impl Stack {
             self.y += FINDING_GAP;
             let placed = rows_from_right(&widths, left, left + width);
             for (b, (bx, row)) in held.iter().zip(&placed) {
-                let by = self.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
+                let by = self.y + row * (row_button() + QUIT_BUTTON_GAP);
                 let w = button_width(&page.buttons[*b].label);
-                buttons[*b] = Some(Rectangle::new((*bx, by).into(), (w, ROW_BUTTON).into()));
+                buttons[*b] = Some(Rectangle::new((*bx, by).into(), (w, row_button()).into()));
             }
             self.y += rows_height(&placed);
         }
@@ -3369,7 +3413,7 @@ impl Stack {
         // Its dot, then its name in bold, then how it stands in its tone.
         self.pieces.push((
             Rectangle::new(
-                (self.x, self.y + (BODY_LINE - DOT) / 2).into(),
+                (self.x, self.y + (body_line() - DOT) / 2).into(),
                 (DOT, DOT).into(),
             ),
             Piece::CheckDot(card.dot),
@@ -3379,7 +3423,7 @@ impl Stack {
         let name_w = (width_of(&card.label, Font::Body.size()).ceil() as i32 + 1) * 9 / 8;
         let name_w = name_w.min((left + width - name_x).max(1));
         self.pieces.push((
-            Rectangle::new((name_x, self.y).into(), (name_w, BODY_LINE).into()),
+            Rectangle::new((name_x, self.y).into(), (name_w, body_line()).into()),
             Piece::Text {
                 text: card.label.clone(),
                 font: Font::Body,
@@ -3393,7 +3437,7 @@ impl Stack {
             self.pieces.push((
                 Rectangle::new(
                     (state_x, self.y).into(),
-                    (left + width - state_x, BODY_LINE).into(),
+                    (left + width - state_x, body_line()).into(),
                 ),
                 Piece::Text {
                     text: card.state.text.clone(),
@@ -3403,10 +3447,10 @@ impl Stack {
                 },
             ));
         }
-        self.y += BODY_LINE;
+        self.y += body_line();
         if !card.meta.is_empty() {
             (self.x, self.w) = (name_x, (left + width - name_x).max(1));
-            self.text(&card.meta, Font::Small, Ink::Muted, TAIL_LINE);
+            self.text(&card.meta, Font::Small, Ink::Muted, tail_line_px());
             (self.x, self.w) = (left, width);
         }
         if card.open {
@@ -3419,14 +3463,14 @@ impl Stack {
                         (true, false) => asked.title.clone(),
                         (false, false) => format!("{} \u{b7} {}", asked.id, asked.title),
                     };
-                    self.all_text(&head, Font::Body, Ink::Text, false, BODY_LINE);
+                    self.all_text(&head, Font::Body, Ink::Text, false, body_line());
                     (self.x, self.w) = (left + ROUND_INDENT, (width - ROUND_INDENT).max(1));
                     if !asked.note.is_empty() {
                         let note = format!("\u{201c}{}\u{201d}", asked.note);
-                        self.all_text(&note, Font::Small, Ink::Muted, false, TAIL_LINE);
+                        self.all_text(&note, Font::Small, Ink::Muted, false, tail_line_px());
                     }
                     if let Some(now) = &asked.now {
-                        self.text(&now.text, Font::Small, Ink::Tone(now.tone), TAIL_LINE);
+                        self.text(&now.text, Font::Small, Ink::Tone(now.tone), tail_line_px());
                     }
                     (self.x, self.w) = (left, width);
                     self.y += ROUND_ITEM_GAP;
@@ -3447,7 +3491,7 @@ impl Stack {
                     .filter(|_| card.running.is_empty() && card.dot == Dot::Working);
                 for (i, (done, text)) in card.fixes.iter().enumerate() {
                     self.put(
-                        MILESTONE_ROW,
+                        milestone_row(),
                         Piece::Milestone {
                             done: *done,
                             next: next == Some(i),
@@ -3461,7 +3505,7 @@ impl Stack {
                 self.y += FINDING_GAP;
                 self.caption("Changed");
                 for line in &card.changed {
-                    self.text(line, Font::Small, Ink::Text, TAIL_LINE);
+                    self.text(line, Font::Small, Ink::Text, tail_line_px());
                 }
             }
         }
@@ -3475,9 +3519,9 @@ impl Stack {
                 .collect();
             let placed = rows_from_right(&widths, self.x, self.x + self.w);
             for (b, (bx, row)) in held.iter().zip(&placed) {
-                let by = self.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
+                let by = self.y + row * (row_button() + QUIT_BUTTON_GAP);
                 let w = button_width(&page.buttons[*b].label);
-                buttons[*b] = Some(Rectangle::new((*bx, by).into(), (w, ROW_BUTTON).into()));
+                buttons[*b] = Some(Rectangle::new((*bx, by).into(), (w, row_button()).into()));
             }
             self.y += rows_height(&placed);
         }
@@ -3502,16 +3546,16 @@ impl Stack {
             for &b in held.iter().rev().filter(|b| **b < page.buttons.len()) {
                 let w = toolbar_button_width(&page.buttons[b].label);
                 x -= w;
-                let rect = Rectangle::new((x, row.loc.y).into(), (w, ROW_BUTTON).into());
+                let rect = Rectangle::new((x, row.loc.y).into(), (w, row_button()).into());
                 buttons[b] = Some(rect);
                 self.pieces.push((rect, Piece::Button(b)));
                 x -= SHEET_BUTTON_GAP;
             }
             let w = width_of(word, Font::Small.size()).ceil() as i32 + 1;
             x -= w;
-            let y = row.loc.y + (ROW_BUTTON - TAIL_LINE) / 2;
+            let y = row.loc.y + (row_button() - tail_line_px()) / 2;
             self.pieces.push((
-                Rectangle::new((x, y).into(), (w, TAIL_LINE).into()),
+                Rectangle::new((x, y).into(), (w, tail_line_px()).into()),
                 Piece::Text {
                     text: word.clone(),
                     font: Font::Small,
@@ -3576,22 +3620,22 @@ impl Stack {
         let right = x + w - SHEET_PAD;
         let placed = rows_from_right(&widths, text_x + SHEET_TITLE_MIN, right);
         for (b, ((bx, row), bw)) in held.iter().zip(placed.iter().zip(&widths)) {
-            let by = self.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
-            buttons[*b] = Some(Rectangle::new((*bx, by).into(), (*bw, ROW_BUTTON).into()));
+            let by = self.y + row * (row_button() + QUIT_BUTTON_GAP);
+            buttons[*b] = Some(Rectangle::new((*bx, by).into(), (*bw, row_button()).into()));
         }
         let buttons_left = placed.iter().map(|(bx, _)| *bx).min().unwrap_or(right);
-        let buttons_h = rows_height(&placed).max(ROW_BUTTON);
+        let buttons_h = rows_height(&placed).max(row_button());
         let head = self.y;
         // Its chevron, then its dot, lined up with the first line's text.
-        let line_y = head + (ROW_BUTTON - BODY_LINE) / 2;
+        let line_y = head + (row_button() - body_line()) / 2;
         self.pieces.push((
-            Rectangle::new((x, head).into(), (SHEET_FOLD, ROW_BUTTON).into()),
+            Rectangle::new((x, head).into(), (SHEET_FOLD, row_button()).into()),
             Piece::Fold(k),
         ));
         if let Some(dot) = card.tag.dot().or(card.made.then_some(Dot::Done)) {
             self.pieces.push((
                 Rectangle::new(
-                    (x + SHEET_FOLD, line_y + (BODY_LINE - DOT) / 2).into(),
+                    (x + SHEET_FOLD, line_y + (body_line() - DOT) / 2).into(),
                     (DOT, DOT).into(),
                 ),
                 Piece::CheckDot(dot),
@@ -3611,15 +3655,15 @@ impl Stack {
                 (width_of(&title, Font::Body.size()).ceil() as i32 * 9 / 8 + 1).min(title_room);
             let piece = |text, font, ink, bold| found_piece(text, font, ink, bold, sheet);
             self.pieces.push((
-                Rectangle::new((text_x, line_y).into(), (title_w, BODY_LINE).into()),
+                Rectangle::new((text_x, line_y).into(), (title_w, body_line()).into()),
                 piece(title, Font::Body, ink, true),
             ));
             let tail_x = text_x + title_w + QUIT_BUTTON_GAP;
             let tail_room = (buttons_left - QUIT_BUTTON_GAP - tail_x).max(1);
             self.pieces.push((
                 Rectangle::new(
-                    (tail_x, head + (ROW_BUTTON - TAIL_LINE) / 2).into(),
-                    (tail_room, TAIL_LINE).into(),
+                    (tail_x, head + (row_button() - tail_line_px()) / 2).into(),
+                    (tail_room, tail_line_px()).into(),
                 ),
                 piece(
                     cut_to_width(&tail, Font::Small.size(), tail_room),
@@ -3633,8 +3677,8 @@ impl Stack {
             // The title whole, beside the buttons, and its id under it.
             (self.x, self.w) = (text_x, room);
             self.y = line_y;
-            self.found_text(&card.title, Font::Body, ink, true, BODY_LINE, sheet);
-            self.found_text(&tail, Font::Small, Ink::Muted, false, TAIL_LINE, sheet);
+            self.found_text(&card.title, Font::Body, ink, true, body_line(), sheet);
+            self.found_text(&tail, Font::Small, Ink::Muted, false, tail_line_px(), sheet);
             self.y = self.y.max(head + buttons_h);
             // Its steps, under all that, across the row.
             let word_w = (sheet.steps.iter())
@@ -3652,7 +3696,7 @@ impl Stack {
                 let at = self.y;
                 if !word.is_empty() {
                     self.pieces.push((
-                        Rectangle::new((text_x, at).into(), (word_w + 1, BODY_LINE).into()),
+                        Rectangle::new((text_x, at).into(), (word_w + 1, body_line()).into()),
                         Piece::Text {
                             text: (*word).to_owned(),
                             font: Font::Body,
@@ -3662,16 +3706,23 @@ impl Stack {
                     ));
                 }
                 (self.x, self.w) = (text_x + word_room, (right - text_x - word_room).max(1));
-                self.found_text(text, Font::Body, ink, false, BODY_LINE, sheet);
+                self.found_text(text, Font::Body, ink, false, body_line(), sheet);
             }
             (self.x, self.w) = (text_x, (right - text_x).max(1));
             if !card.body.is_empty() {
                 self.y += FINDING_GAP;
-                self.all_text(&card.body, Font::Small, Ink::Muted, false, TAIL_LINE);
+                self.all_text(&card.body, Font::Small, Ink::Muted, false, tail_line_px());
             }
             if !card.note.is_empty() {
                 self.y += FINDING_GAP;
-                self.found_text(&card.note, Font::Body, Ink::Error, false, BODY_LINE, sheet);
+                self.found_text(
+                    &card.note,
+                    Font::Body,
+                    Ink::Error,
+                    false,
+                    body_line(),
+                    sheet,
+                );
             }
             if !sheet.shots.is_empty() {
                 self.y += FINDING_GAP;
@@ -3711,8 +3762,8 @@ impl Stack {
                 let tw = (width_of(text, Font::Small.size()).ceil() as i32 + 1).min(w);
                 self.pieces.push((
                     Rectangle::new(
-                        (at + (w - tw) / 2, self.y + (h - TAIL_LINE) / 2).into(),
-                        (tw, TAIL_LINE).into(),
+                        (at + (w - tw) / 2, self.y + (h - tail_line_px()) / 2).into(),
+                        (tw, tail_line_px()).into(),
                     ),
                     Piece::Text {
                         text: text.to_owned(),
@@ -3741,7 +3792,7 @@ impl Stack {
         // Bold runs wider than it measures.
         let w = (width_of(text, Font::Small.size()).ceil() as i32 + 1) * 9 / 8;
         self.pieces.push((
-            Rectangle::new((x, y).into(), (w, TAIL_LINE).into()),
+            Rectangle::new((x, y).into(), (w, tail_line_px()).into()),
             Piece::Text {
                 text: text.to_owned(),
                 font: Font::Small,
@@ -3770,9 +3821,9 @@ impl Stack {
             .copied()
             .filter(|b| *b < page.buttons.len());
         let line = if first.is_some() {
-            ROW_BUTTON
+            row_button()
         } else {
-            BODY_LINE
+            body_line()
         };
         let (mut left, mut right) = (self.x, self.x + self.w);
         if let Some(b) = first {
@@ -3780,15 +3831,15 @@ impl Stack {
             right -= w;
             buttons[b] = Some(Rectangle::new(
                 (right, self.y).into(),
-                (w, ROW_BUTTON).into(),
+                (w, row_button()).into(),
             ));
             right -= QUIT_BUTTON_GAP;
         }
-        let text_y = self.y + (line - TAIL_LINE) / 2;
+        let text_y = self.y + (line - tail_line_px()) / 2;
         if let Some(word) = card.tag.word() {
             let w = pill_width(card.tag, word);
             self.pieces.push((
-                Rectangle::new((left, text_y).into(), (w, TAIL_LINE).into()),
+                Rectangle::new((left, text_y).into(), (w, tail_line_px()).into()),
                 Piece::TagPill {
                     tag: card.tag,
                     faded: card.faded,
@@ -3821,12 +3872,12 @@ impl Stack {
                 bold: false,
             };
             self.pieces.push((
-                Rectangle::new((left, text_y).into(), (why_w, TAIL_LINE).into()),
+                Rectangle::new((left, text_y).into(), (why_w, tail_line_px()).into()),
                 text(why, Ink::Text),
             ));
             let rest = (room - why_w).max(1);
             self.pieces.push((
-                Rectangle::new((left + why_w, text_y).into(), (rest, TAIL_LINE).into()),
+                Rectangle::new((left + why_w, text_y).into(), (rest, tail_line_px()).into()),
                 text(cut_to_width(&title, size, rest), Ink::Muted),
             ));
             self.y += line;
@@ -3845,7 +3896,7 @@ impl Stack {
         let title_w = width_of(&text, size).ceil() as i32 + 1;
         text.push_str(&cut_to_width(&state, size, (room - title_w).max(1)));
         self.pieces.push((
-            Rectangle::new((left, text_y).into(), (room, TAIL_LINE).into()),
+            Rectangle::new((left, text_y).into(), (room, tail_line_px()).into()),
             Piece::Text {
                 text,
                 font: Font::Small,
@@ -3890,11 +3941,11 @@ impl Stack {
         // Bold runs wider than it measures.
         let word_w = width_of(word, Font::Small.size()).ceil() as i32 * 9 / 8;
         let placed = rows_from_right(&widths, self.x + word_w + QUIT_BUTTON_GAP, self.x + self.w);
-        let line = rows_height(&placed).max(TAIL_LINE);
+        let line = rows_height(&placed).max(tail_line_px());
         self.pieces.push((
             Rectangle::new(
                 (self.x, self.y).into(),
-                (word_w, ROW_BUTTON.min(line)).into(),
+                (word_w, row_button().min(line)).into(),
             ),
             Piece::Text {
                 text: word.to_owned(),
@@ -3904,13 +3955,13 @@ impl Stack {
             },
         ));
         for ((b, bw), (bx, row)) in held.iter().zip(&placed) {
-            let by = self.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
-            let rect = Rectangle::new((*bx, by).into(), (*bw, ROW_BUTTON).into());
+            let by = self.y + row * (row_button() + QUIT_BUTTON_GAP);
+            let rect = Rectangle::new((*bx, by).into(), (*bw, row_button()).into());
             buttons[*b] = Some(rect);
             self.pieces.push((rect, Piece::Button(*b)));
         }
         self.y += line + FINDING_GAP / 2;
-        self.all_text(text, Font::Body, Ink::Text, false, BODY_LINE);
+        self.all_text(text, Font::Body, Ink::Text, false, body_line());
         self.y += COMMENT_PAD;
         (self.x, self.w) = (x, w);
         let frame = Rectangle::new((x, top).into(), (w, self.y - top).into());
@@ -3927,7 +3978,7 @@ impl Stack {
                 self.w - DOT_ROOM - ago,
                 ACTIVITY_LINES,
             );
-            let h = lines.len() as i32 * TAIL_LINE + 6;
+            let h = lines.len() as i32 * tail_line_px() + 6;
             self.put(h, Piece::Activity { row, lines });
         }
     }
@@ -3957,7 +4008,7 @@ fn repo_stack(
             &format!("couldn't read: {why}"),
             Font::Small,
             Ink::Error,
-            SMALL_LINE,
+            small_line(),
         );
     }
     for (i, repo) in view.repos.iter().enumerate() {
@@ -3967,14 +4018,14 @@ fn repo_stack(
             }
             s.caption(group);
         }
-        let row = s.put(REPO_ROW, Piece::Repo(i));
+        let row = s.put(repo_row(), Piece::Repo(i));
         s.y += REPO_GAP;
-        let y = row.loc.y + (REPO_ROW - ROW_BUTTON) / 2;
+        let y = row.loc.y + (repo_row() - row_button()) / 2;
         // The × keeps its slot on every row, so the buttons line up.
-        let slot = row.loc.x + row.size.w - ROW_BUTTON - 4;
+        let slot = row.loc.x + row.size.w - row_button() - 4;
         removes.push(
             (repo.remove && !repo.busy)
-                .then(|| Rectangle::new((slot, y).into(), (ROW_BUTTON, ROW_BUTTON).into())),
+                .then(|| Rectangle::new((slot, y).into(), (row_button(), row_button()).into())),
         );
         // From the right. One with no room left has none: the keys reach it.
         let mut rects = vec![Rect::default(); repo.buttons.len()];
@@ -3985,7 +4036,7 @@ fn repo_stack(
             if repo.busy || end - w < left {
                 break;
             }
-            rects[b] = Rectangle::new((end - w, y).into(), (w, ROW_BUTTON).into());
+            rects[b] = Rectangle::new((end - w, y).into(), (w, row_button()).into());
             end -= w + QUIT_BUTTON_GAP;
         }
         buttons.push(rects);
@@ -3997,10 +4048,10 @@ fn repo_stack(
         }
         s.caption(&note.caption);
         let ink = if note.error { Ink::Error } else { Ink::Muted };
-        s.text(&note.text, Font::Small, ink, SMALL_LINE);
+        s.text(&note.text, Font::Small, ink, small_line());
     }
     if view.repos.is_empty() && view.repo_notes.is_empty() && view.repos_error.is_none() {
-        s.text("No repositories", Font::Small, Ink::Muted, SMALL_LINE);
+        s.text("No repositories", Font::Small, Ink::Muted, small_line());
     }
 }
 
@@ -4024,7 +4075,7 @@ fn stat_width(stat: Option<Stat>) -> i32 {
         return 0;
     };
     let parts = stat_parts(stat);
-    let widths = (parts.iter().flatten()).map(|t| width_of(t, DETAIL_FONT_SIZE).ceil() as i32);
+    let widths = (parts.iter().flatten()).map(|t| width_of(t, detail_font_size()).ceil() as i32);
     let widths: Vec<i32> = widths.collect();
     widths.iter().sum::<i32>() + STAT_SPACE * (widths.len() as i32 - 1).max(0)
 }
@@ -4063,9 +4114,9 @@ fn rows_from_right(widths: &[i32], left: i32, right: i32) -> Vec<(i32, i32)> {
 
 /// How high the rows of `rows_from_right` are, none for nothing placed.
 fn rows_height(placed: &[(i32, i32)]) -> i32 {
-    placed
-        .last()
-        .map_or(0, |(_, row)| (row + 1) * ROW_BUTTON + row * QUIT_BUTTON_GAP)
+    placed.last().map_or(0, |(_, row)| {
+        (row + 1) * row_button() + row * QUIT_BUTTON_GAP
+    })
 }
 
 /// The page's column: the selected stage's title, about, status, buttons
@@ -4079,13 +4130,13 @@ fn pick_word(status: &str) -> &str {
 /// How wide the label `word` before chips is: `PICK_LABEL`, or as wide as
 /// the word needs, as "Summary" does.
 fn pick_label_width(word: &str) -> i32 {
-    PICK_LABEL.max(width_of(word, SMALL_FONT_SIZE).ceil() as i32 + PICK_LABEL_GAP)
+    PICK_LABEL.max(width_of(word, small_font_size()).ceil() as i32 + PICK_LABEL_GAP)
 }
 
 /// How wide an agent's chip is: its logo, then its name, so two agents of
 /// one logo are told apart without a tooltip.
 fn pick_chip_width(name: &str) -> i32 {
-    PICK_CHIP + width_of(name, SMALL_FONT_SIZE).ceil() as i32 + PICK_NAME_PAD
+    PICK_CHIP + width_of(name, small_font_size()).ceil() as i32 + PICK_NAME_PAD
 }
 
 /// How wide the chips of agents `names` are together, with the room.
@@ -4115,13 +4166,16 @@ fn agent_pick_rects(names: &[&str], x: i32, y: i32, room: i32) -> (Rect, Vec<Rec
         .map(|w| {
             let chip = Rectangle::new(
                 (at, y + PICK_TRACK_PAD).into(),
-                (*w, PICK_TRACK - 2 * PICK_TRACK_PAD).into(),
+                (*w, pick_track() - 2 * PICK_TRACK_PAD).into(),
             );
             at += w;
             chip
         })
         .collect();
-    let track = Rectangle::new((x, y).into(), (at - x + PICK_TRACK_PAD, PICK_TRACK).into());
+    let track = Rectangle::new(
+        (x, y).into(),
+        (at - x + PICK_TRACK_PAD, pick_track()).into(),
+    );
     (track, chips)
 }
 
@@ -4138,12 +4192,12 @@ fn milestone_mode_rects(row: Rect, fixes: bool) -> (Rect, [Rect; 2]) {
     };
     let (one, each) = (scaled(one), scaled(each));
     let y = row.loc.y + PICK_TRACK_PAD;
-    let h = PICK_TRACK - 2 * PICK_TRACK_PAD;
+    let h = pick_track() - 2 * PICK_TRACK_PAD;
     let left = Rectangle::new((x + PICK_TRACK_PAD, y).into(), (one, h).into());
     let right = Rectangle::new((x + PICK_TRACK_PAD + one, y).into(), (each, h).into());
     let track = Rectangle::new(
         (x, row.loc.y).into(),
-        (one + each + 2 * PICK_TRACK_PAD, PICK_TRACK).into(),
+        (one + each + 2 * PICK_TRACK_PAD, pick_track()).into(),
     );
     (track, [left, right])
 }
@@ -4158,7 +4212,7 @@ fn ship_route_rects(row: Rect) -> (Rect, [Rect; 3]) {
         false => w,
     });
     let y = row.loc.y + PICK_TRACK_PAD;
-    let h = PICK_TRACK - 2 * PICK_TRACK_PAD;
+    let h = pick_track() - 2 * PICK_TRACK_PAD;
     let mut x = row.loc.x + PICK_TRACK_PAD;
     let segments = scaled.map(|w| {
         let segment = Rectangle::new((x, y).into(), (w, h).into());
@@ -4167,7 +4221,11 @@ fn ship_route_rects(row: Rect) -> (Rect, [Rect; 3]) {
     });
     let track = Rectangle::new(
         row.loc,
-        (scaled.iter().sum::<i32>() + 2 * PICK_TRACK_PAD, PICK_TRACK).into(),
+        (
+            scaled.iter().sum::<i32>() + 2 * PICK_TRACK_PAD,
+            pick_track(),
+        )
+            .into(),
     );
     (track, segments)
 }
@@ -4253,10 +4311,15 @@ fn page_stack(
     let page = &view.page;
     // The title is on the page's bar, with what acts on the stage as a
     // whole; what of that the bar has no room for, in rows of its own here.
-    s.text(&page.about, Font::Small, Ink::Muted, SMALL_LINE);
+    s.text(&page.about, Font::Small, Ink::Muted, small_line());
     if let Some(status) = &page.status {
         s.y += 4;
-        s.text(&status.text, Font::Body, Ink::Tone(status.tone), BODY_LINE);
+        s.text(
+            &status.text,
+            Font::Body,
+            Ink::Tone(status.tone),
+            body_line(),
+        );
     }
     if !free_on_bar {
         let free = free_buttons(page);
@@ -4267,8 +4330,8 @@ fn page_stack(
         let placed = rows_from_right(&widths, s.x, s.x + s.w);
         for (i, (x, row)) in free.iter().zip(&placed) {
             let w = button_width(&page.buttons[*i].label);
-            let y = s.y + row * (ROW_BUTTON + QUIT_BUTTON_GAP);
-            let rect = Rectangle::new((*x, y).into(), (w, ROW_BUTTON).into());
+            let y = s.y + row * (row_button() + QUIT_BUTTON_GAP);
+            let rect = Rectangle::new((*x, y).into(), (w, row_button()).into());
             buttons[*i] = Some(rect);
             s.pieces.push((rect, Piece::Button(*i)));
         }
@@ -4303,17 +4366,17 @@ fn page_stack(
                 ..Default::default()
             });
             let open = strip.search.is_some();
-            s.put(REVIEW_SWITCH_H, Piece::Search { bar, open });
+            s.put(review_switch_h(), Piece::Search { bar, open });
             if let Some(shown) = &strip.shown {
                 s.y += FINDING_GAP;
-                s.text(shown, Font::Body, Ink::Tone(CheckTone::Note), BODY_LINE);
+                s.text(shown, Font::Body, Ink::Tone(CheckTone::Note), body_line());
             }
             s.y += FINDING_GAP;
         }
         match section {
             PageSection::Doc { blocks, .. } => s.doc(blocks),
             PageSection::Toolbar { groups } => {
-                let row = s.put(ROW_BUTTON, Piece::Caption(String::new()));
+                let row = s.put(row_button(), Piece::Caption(String::new()));
                 s.toolbar(groups, page, buttons, row);
             }
             PageSection::Agent {
@@ -4333,7 +4396,7 @@ fn page_stack(
                     .collect();
                 let tail_h = match tail.len() {
                     0 => 0,
-                    n => n as i32 * TAIL_LINE + 4,
+                    n => n as i32 * tail_line_px() + 4,
                 };
                 let inner = (s.w - 2 * AGENT_PAD).max(1);
                 let inner_x = s.x + AGENT_PAD;
@@ -4343,12 +4406,12 @@ fn page_stack(
                     // No run yet: its chips after their label, its buttons
                     // at the card's end.
                     let widths: Vec<i32> = widths.collect();
-                    let card = s.put(AGENT_PAD * 2 + AGENT_HEAD, Piece::Agent(k));
-                    let row = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
+                    let card = s.put(AGENT_PAD * 2 + agent_head(), Piece::Agent(k));
+                    let row = card.loc.y + AGENT_PAD + (agent_head() - row_button()) / 2;
                     let placed = rows_from_right(&widths, inner_x, inner_right);
                     for (b, ((x, _), w)) in held.iter().zip(placed.iter().zip(&widths)) {
                         buttons[*b] =
-                            Some(Rectangle::new((*x, row).into(), (*w, ROW_BUTTON).into()));
+                            Some(Rectangle::new((*x, row).into(), (*w, row_button()).into()));
                     }
                     if !picks.is_empty() {
                         let from = inner_x + pick_label_width(pick_word(status));
@@ -4363,7 +4426,7 @@ fn page_stack(
                         if let Some(w) = model_w {
                             let x = track.loc.x + track.size.w + QUIT_BUTTON_GAP;
                             let w = w.min((end - x).max(1));
-                            let rect = Rectangle::new((x, row).into(), (w, ROW_BUTTON).into());
+                            let rect = Rectangle::new((x, row).into(), (w, row_button()).into());
                             choices.model.push((stage, rect));
                         }
                         choices.picks.push((stage, track, chips));
@@ -4385,15 +4448,21 @@ fn page_stack(
                     true => 0,
                     false => rows_height(&placed) + AGENT_ROWS_GAP,
                 };
-                let card = s.put(AGENT_PAD * 2 + AGENT_HEAD + below + tail_h, Piece::Agent(k));
-                let head_y = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
-                let rows_y = card.loc.y + AGENT_PAD + AGENT_HEAD + AGENT_ROWS_GAP;
+                let card = s.put(
+                    AGENT_PAD * 2 + agent_head() + below + tail_h,
+                    Piece::Agent(k),
+                );
+                let head_y = card.loc.y + AGENT_PAD + (agent_head() - row_button()) / 2;
+                let rows_y = card.loc.y + AGENT_PAD + agent_head() + AGENT_ROWS_GAP;
                 let spot = |(x, row): &(i32, i32)| match fits {
                     true => (*x, head_y),
-                    false => (*x, rows_y + row * (ROW_BUTTON + QUIT_BUTTON_GAP)),
+                    false => (*x, rows_y + row * (row_button() + QUIT_BUTTON_GAP)),
                 };
                 for ((b, place), w) in held.iter().zip(&placed).zip(&widths) {
-                    buttons[*b] = Some(Rectangle::new(spot(place).into(), (*w, ROW_BUTTON).into()));
+                    buttons[*b] = Some(Rectangle::new(
+                        spot(place).into(),
+                        (*w, row_button()).into(),
+                    ));
                 }
                 if let (Some(w), Some(place)) = (chips, placed.get(held.len())) {
                     let (x, y) = spot(place);
@@ -4401,7 +4470,7 @@ fn page_stack(
                     choices.picks.push((stage, track, chips));
                 }
                 if let (Some(w), Some(place)) = (model_w, placed.last()) {
-                    let rect = Rectangle::new(spot(place).into(), (w, ROW_BUTTON).into());
+                    let rect = Rectangle::new(spot(place).into(), (w, row_button()).into());
                     choices.model.push((stage, rect));
                 }
             }
@@ -4410,7 +4479,7 @@ fn page_stack(
                     fresh: *fresh,
                     fixes: *fixes,
                 };
-                let row = s.put(PICK_TRACK, piece);
+                let row = s.put(pick_track(), piece);
                 *milestone_mode = Some(milestone_mode_rects(row, *fixes));
             }
             PageSection::ShipGroup(group) if group.card.is_some() => {
@@ -4423,11 +4492,11 @@ fn page_stack(
                 if group.caption {
                     s.caption(&group.head);
                 } else {
-                    s.text(&group.head, Font::Body, Ink::Text, BODY_LINE);
+                    s.text(&group.head, Font::Body, Ink::Text, body_line());
                     s.y += 4;
                 }
                 if let Some(route) = &group.route {
-                    let row = s.put(PICK_TRACK, Piece::ShipRoute(k));
+                    let row = s.put(pick_track(), Piece::ShipRoute(k));
                     let (track, segments) = ship_route_rects(row);
                     ship.routes.push((route.row, track, segments));
                     ship.rows.push((route.row, row));
@@ -4435,19 +4504,19 @@ fn page_stack(
                     s.y += 4;
                 }
                 if let Some(note) = &group.note {
-                    s.text(note, Font::Small, Ink::Muted, SMALL_LINE);
+                    s.text(note, Font::Small, Ink::Muted, small_line());
                 }
                 s.ship_steps(k, group, (page, buttons), ship, finding_cards);
             }
             PageSection::File { buttons: held, .. } => {
-                let card = s.put(AGENT_PAD * 2 + AGENT_HEAD, Piece::File(k));
+                let card = s.put(AGENT_PAD * 2 + agent_head(), Piece::File(k));
                 // Its buttons from the card's right, in their order.
                 let mut bx = card.loc.x + card.size.w - AGENT_PAD;
-                let by = card.loc.y + AGENT_PAD + (AGENT_HEAD - ROW_BUTTON) / 2;
+                let by = card.loc.y + AGENT_PAD + (agent_head() - row_button()) / 2;
                 for &b in held.iter().rev().filter(|b| **b < page.buttons.len()) {
                     let w = button_width(&page.buttons[b].label);
                     bx -= w;
-                    buttons[b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+                    buttons[b] = Some(Rectangle::new((bx, by).into(), (w, row_button()).into()));
                     bx -= QUIT_BUTTON_GAP;
                 }
             }
@@ -4465,18 +4534,22 @@ fn page_stack(
             }
             PageSection::Lines { label, lines } => {
                 if !label.is_empty() {
-                    let caption = s.put(CAPTION, Piece::Caption(label.to_uppercase()));
+                    let caption = s.put(caption_px(), Piece::Caption(label.to_uppercase()));
                     if let Some(PageSection::Toolbar { groups }) = page.sections.get(k + 1) {
                         let room = caption.size.w
-                            - width_of(&label.to_uppercase(), DETAIL_FONT_SIZE).ceil() as i32
+                            - width_of(&label.to_uppercase(), detail_font_size()).ceil() as i32
                             - PAGE_GAP;
                         if toolbar_width(groups, page) <= room {
                             let row = Rectangle::new(
-                                (caption.loc.x, caption.loc.y + (CAPTION - ROW_BUTTON) / 2).into(),
-                                (caption.size.w, ROW_BUTTON).into(),
+                                (
+                                    caption.loc.x,
+                                    caption.loc.y + (caption_px() - row_button()) / 2,
+                                )
+                                    .into(),
+                                (caption.size.w, row_button()).into(),
                             );
                             s.toolbar(groups, page, buttons, row);
-                            s.y = s.y.max(row.loc.y + ROW_BUTTON) + 2;
+                            s.y = s.y.max(row.loc.y + row_button()) + 2;
                             beside = Some(k + 1);
                         }
                     }
@@ -4485,7 +4558,7 @@ fn page_stack(
             }
             PageSection::Review(summary) => s.review_summary(k, summary, page, buttons),
             PageSection::Heading(label) => {
-                s.put(CAPTION, Piece::Caption(label.to_uppercase()));
+                s.put(caption_px(), Piece::Caption(label.to_uppercase()));
             }
             PageSection::Milestones {
                 label,
@@ -4497,14 +4570,14 @@ fn page_stack(
                 buttons: held,
             } => {
                 let said = format!("{label} \u{b7} {done} of {total}").to_uppercase();
-                let caption = s.put(CAPTION, Piece::GroupCaption(k, said));
+                let caption = s.put(caption_px(), Piece::GroupCaption(k, said));
                 // Its buttons from the caption's right, in their order.
                 let mut bx = caption.loc.x + caption.size.w;
-                let by = caption.loc.y + (CAPTION - ROW_BUTTON) / 2;
+                let by = caption.loc.y + (caption_px() - row_button()) / 2;
                 for &b in held.iter().rev().filter(|b| **b < page.buttons.len()) {
                     let w = button_width(&page.buttons[b].label);
                     bx -= w;
-                    buttons[b] = Some(Rectangle::new((bx, by).into(), (w, ROW_BUTTON).into()));
+                    buttons[b] = Some(Rectangle::new((bx, by).into(), (w, row_button()).into()));
                     bx -= QUIT_BUTTON_GAP;
                 }
                 s.y += 2;
@@ -4517,7 +4590,7 @@ fn page_stack(
                 );
                 s.y += 8;
                 if let Some(state) = state {
-                    s.text(&state.text, Font::Body, Ink::Tone(state.tone), BODY_LINE);
+                    s.text(&state.text, Font::Body, Ink::Tone(state.tone), body_line());
                 }
                 // What runs says where the work is; else what comes next.
                 let next = items
@@ -4526,7 +4599,7 @@ fn page_stack(
                     .filter(|_| running.is_empty());
                 for (i, (done, text)) in items.iter().enumerate() {
                     s.put(
-                        MILESTONE_ROW,
+                        milestone_row(),
                         Piece::Milestone {
                             done: *done,
                             next: next == Some(i),
@@ -4592,10 +4665,10 @@ fn review_switch_spots(
     width: i32,
     bar: Option<Rect>,
 ) -> ReviewSwitchSpots {
-    let measure = |label: &str| width_of(label, SMALL_FONT_SIZE).ceil() as i32 + 2 * CHIP_PAD;
+    let measure = |label: &str| width_of(label, small_font_size()).ceil() as i32 + 2 * CHIP_PAD;
     let [code, fixes] = switch.labels();
     let widths = [measure(&code), measure(&fixes)];
-    let h = REVIEW_SWITCH_H;
+    let h = review_switch_h();
     // The buttons first: the least of the switch and its words is all they
     // leave. The rightmost, the one to press next, stays longest.
     // On the page's bar (`bar`, what its title leaves of it), all of it is
@@ -4618,11 +4691,11 @@ fn review_switch_spots(
     let fits = !sizes.is_empty() && row_width(&sizes) <= room - least;
     let end = x + width;
     let mut buttons = vec![None; switch.buttons.len()];
-    let by = row.loc.y + (row.size.h - ROW_BUTTON) / 2;
+    let by = row.loc.y + (row.size.h - row_button()) / 2;
     if fits {
         let placed = rows_from_right(&sizes, row.loc.x, row.loc.x + row.size.w);
         for (i, (bx, _)) in placed.into_iter().enumerate() {
-            let rect = Rectangle::new((bx, by).into(), (sizes[i], ROW_BUTTON).into());
+            let rect = Rectangle::new((bx, by).into(), (sizes[i], row_button()).into());
             buttons[dropped + i] = Some(rect);
         }
     }
@@ -4634,14 +4707,14 @@ fn review_switch_spots(
         let mut to = first.loc.x - COLUMN_GAP;
         let model_w = switch.model.as_deref().map(agent_model_width);
         if let Some(w) = model_w.filter(|w| to - w - COLUMN_GAP >= from) {
-            let rect = Rectangle::new((to - w, by).into(), (w, ROW_BUTTON).into());
+            let rect = Rectangle::new((to - w, by).into(), (w, row_button()).into());
             model = Some(rect);
             to = rect.loc.x - COLUMN_GAP;
         }
         let names: Vec<&str> = switch.picks.iter().map(|c| c.name.as_str()).collect();
         let want = agent_picks_width(&names).min(to - from);
         if want >= PICK_CHIP * names.len() as i32 + 2 * PICK_TRACK_PAD {
-            let ty = row.loc.y + (row.size.h - PICK_TRACK) / 2;
+            let ty = row.loc.y + (row.size.h - pick_track()) / 2;
             picks = Some(agent_pick_rects(&names, to - want, ty, want));
         } else {
             model = None;
@@ -4701,8 +4774,8 @@ fn review_switch_spots(
 pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     // A pointer move hit-tests the tab several times over the same view,
     // and the frame lays it out again: the last few layouts are kept.
-    let found = TAB_LAYOUTS.with_borrow(|memo| {
-        (memo.iter())
+    let found = TAB_LAYOUTS.with_borrow_mut(|memo| {
+        (super::sized(memo).iter())
             .find(|(v, f, _)| *f == frame && v == view)
             .map(|(.., l)| l.clone())
     });
@@ -4711,6 +4784,7 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
     }
     let l = lay_out_tab(view, frame);
     TAB_LAYOUTS.with_borrow_mut(|memo| {
+        let memo = super::sized(memo);
         memo.insert(0, (view.clone(), frame, l.clone()));
         memo.truncate(TAB_LAYOUTS_MAX);
     });
@@ -4721,9 +4795,11 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
 /// out at their own origins.
 const TAB_LAYOUTS_MAX: usize = 4;
 
+/// Tab layouts laid out, each with its view and rect.
+type TabLayouts = Vec<(FeatureTabView, Rect, FeatureTabLayout)>;
+
 thread_local! {
-    static TAB_LAYOUTS: RefCell<Vec<(FeatureTabView, Rect, FeatureTabLayout)>> =
-        const { RefCell::new(Vec::new()) };
+    static TAB_LAYOUTS: RefCell<(u32, TabLayouts)> = const { RefCell::new((0, Vec::new())) };
 }
 
 /// `feature_tab_layout`, laying out.
@@ -4731,7 +4807,7 @@ thread_local! {
 /// or the selected card when it sits where they would cover it (at the
 /// bottom right) and there is room above it for a few of them.
 pub fn feature_toast_floor(view: &FeatureTabView, frame: Rect) -> Rect {
-    use super::{TOAST_GAP, TOAST_MARGIN, TOAST_TALL, TOAST_WIDTH};
+    use super::{TOAST_GAP, TOAST_MARGIN, TOAST_WIDTH, toast_tall};
     let l = feature_tab_layout(view, frame);
     let cards = (view.page.sections.iter()).filter_map(|s| match s {
         PageSection::Finding(card) => Some(card.selected),
@@ -4743,7 +4819,7 @@ pub fn feature_toast_floor(view: &FeatureTabView, frame: Rect) -> Rect {
     };
     let mut card = *card;
     card.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
-    let stack = 2 * (TOAST_TALL + TOAST_GAP) + TOAST_MARGIN;
+    let stack = 2 * (toast_tall() + TOAST_GAP) + TOAST_MARGIN;
     let toasts_left = frame.loc.x + frame.size.w - TOAST_MARGIN - TOAST_WIDTH;
     let under = card.loc.x + card.size.w > toasts_left
         && card.loc.y + card.size.h > l.hints.loc.y - stack
@@ -4769,42 +4845,42 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let x = frame.loc.x + ((width - inner) / 2).max(TAB_PAD);
     let right = x + inner;
     let top = frame.loc.y + TAB_PAD;
-    let header_h = TAB_TITLE + TAB_SUB;
+    let header_h = tab_title() + tab_sub();
 
     // The header's buttons from the right: the `⋯` menu, then the switch
     // left of it. The page's primary is on the page's bar.
     let compact = width < COMPACT_BUTTONS_BELOW;
-    let by = top + (header_h - TAB_BUTTON) / 2;
+    let by = top + (header_h - tab_button()) / 2;
     let mut bx = right;
     let mut buttons = Vec::new();
     if has_menu(view) {
-        bx -= TAB_BUTTON;
+        bx -= tab_button();
         buttons.push(Rectangle::new(
             (bx, by).into(),
-            (TAB_BUTTON, TAB_BUTTON).into(),
+            (tab_button(), tab_button()).into(),
         ));
         bx -= QUIT_BUTTON_GAP;
     }
     let switch = view.which.filter(|(_, n)| *n > 1).map(|(i, n)| {
-        let count_w = width_of(&format!("{} of {n}", i + 1), FONT_SIZE).ceil() as i32 + 12;
+        let count_w = width_of(&format!("{} of {n}", i + 1), font_size()).ceil() as i32 + 12;
         let next = Rectangle::new(
             (bx - 8 - SWITCH_W, by).into(),
-            (SWITCH_W, TAB_BUTTON).into(),
+            (SWITCH_W, tab_button()).into(),
         );
         let count = Rectangle::new(
             (next.loc.x - count_w, by).into(),
-            (count_w, TAB_BUTTON).into(),
+            (count_w, tab_button()).into(),
         );
         let prev = Rectangle::new(
             (count.loc.x - SWITCH_W, by).into(),
-            (SWITCH_W, TAB_BUTTON).into(),
+            (SWITCH_W, tab_button()).into(),
         );
         bx = prev.loc.x - 8;
         (count, prev, next)
     });
     let text_w = (bx - PLACE_GAP - x).max(1);
-    let title = Rectangle::new((x, top).into(), (text_w, TAB_TITLE).into());
-    let sub = Rectangle::new((x, top + TAB_TITLE).into(), (text_w, TAB_SUB).into());
+    let title = Rectangle::new((x, top).into(), (text_w, tab_title()).into());
+    let sub = Rectangle::new((x, top + tab_title()).into(), (text_w, tab_sub()).into());
 
     // The rail under the header: a slot per stage, its node at the slot's
     // top middle. It stays put whatever runs: the card of work running goes
@@ -4824,10 +4900,10 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     // the page doesn't drop once the first stage is done.
     let rail_h = NODE
         + NODE_GAP
-        + NODE_LABEL
-        + NODE_LINE
-        + if wraps { RAIL_LABEL_STEP } else { 0 }
-        + NODE_LINE;
+        + node_label()
+        + node_line()
+        + if wraps { rail_label_step() } else { 0 }
+        + node_line();
     let nodes = (0..view.rail.len() as i32)
         .map(|i| {
             let (left, next) = slot(i);
@@ -4840,10 +4916,13 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let rule_end = rail_top + rail_h + RAIL_GAP + 1;
     let (running_card, running, running_more) = running_spots(view, x, rule_end + RUN_BELOW, inner);
     let rule_end = rule_end + running_card.map_or(0, |c| c.size.h + 2 * RUN_BELOW);
-    let strip = Rectangle::new((x, rule_end + COLUMN_GAP).into(), (inner, CHIP_ROW).into());
-    let row_top = strip.loc.y + CHIP_ROW;
+    let strip = Rectangle::new(
+        (x, rule_end + COLUMN_GAP).into(),
+        (inner, chip_row()).into(),
+    );
+    let row_top = strip.loc.y + chip_row();
     let rows_end = match view.review_switch.is_some() || view.test_strip.is_some() {
-        true => row_top + 2 * REVIEW_SWITCH_GAP + REVIEW_SWITCH_H,
+        true => row_top + 2 * REVIEW_SWITCH_GAP + review_switch_h(),
         false => row_top,
     };
     // The review's bar keeps close to its switch: it has the switch's
@@ -4861,15 +4940,15 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let mut repo_buttons = Vec::new();
     let mut repo_removes = Vec::new();
     let mut more_repos = Vec::new();
-    let chip_y = strip.loc.y + (CHIP_ROW - ROW_BUTTON) / 2;
-    let label_w = width_of(REPOS_LABEL, SMALL_FONT_SIZE).ceil() as i32;
-    let repos_label = Rectangle::new((x, strip.loc.y).into(), (label_w, CHIP_ROW).into());
-    let toggle_w = repos_toggle_label(view).map_or(ROW_BUTTON, |label| {
-        CHIP_PAD + width_of(&label, SMALL_FONT_SIZE).ceil() as i32 + TOGGLE_ICON
+    let chip_y = strip.loc.y + (chip_row() - row_button()) / 2;
+    let label_w = width_of(REPOS_LABEL, small_font_size()).ceil() as i32;
+    let repos_label = Rectangle::new((x, strip.loc.y).into(), (label_w, chip_row()).into());
+    let toggle_w = repos_toggle_label(view).map_or(row_button(), |label| {
+        CHIP_PAD + width_of(&label, small_font_size()).ceil() as i32 + TOGGLE_ICON
     });
     let repos_toggle = Rectangle::new(
         (right - toggle_w, chip_y).into(),
-        (toggle_w, ROW_BUTTON).into(),
+        (toggle_w, row_button()).into(),
     );
     if !view.expanded && view.repos_error.is_none() {
         // The chips that fit, from the selected one if it would be past
@@ -4881,10 +4960,10 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
                 0 => 0,
                 w => w + STAT_GAP,
             };
-            width_of(&r.name, SMALL_FONT_SIZE).ceil() as i32 + stat + DOT_ROOM + 2 * CHIP_PAD
+            width_of(&r.name, small_font_size()).ceil() as i32 + stat + DOT_ROOM + 2 * CHIP_PAD
         };
         let n = view.repos.len();
-        let more_w = |label: &str| width_of(label, SMALL_FONT_SIZE).ceil() as i32 + 2 * CHIP_PAD;
+        let more_w = |label: &str| width_of(label, small_font_size()).ceil() as i32 + 2 * CHIP_PAD;
         // How many chips fit from `from` after a chip `lead` wide, with
         // room kept for the "+N" chip when some are left over.
         let fits = |from: usize, lead: i32| {
@@ -4916,7 +4995,7 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
         let shown = first..first + fits(first, lead);
         if first > 0 {
             let w = more_w(&more_label(first, false));
-            let chip = Rectangle::new((start, chip_y).into(), (w, ROW_BUTTON).into());
+            let chip = Rectangle::new((start, chip_y).into(), (w, row_button()).into());
             more_repos.push((chip, first - 1, more_label(first, false)));
         }
         let mut cx = start + lead;
@@ -4926,14 +5005,14 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
                 continue;
             }
             let w = chip_w(repo);
-            let chip = Rectangle::new((cx, chip_y).into(), (w, ROW_BUTTON).into());
+            let chip = Rectangle::new((cx, chip_y).into(), (w, row_button()).into());
             cx += w + CHIP_GAP;
             repos.push(chip);
         }
         if shown.end < n {
             let label = more_label(n - shown.end, true);
             let w = more_w(&label);
-            let chip = Rectangle::new((cx, chip_y).into(), (w, ROW_BUTTON).into());
+            let chip = Rectangle::new((cx, chip_y).into(), (w, row_button()).into());
             more_repos.push((chip, shown.end, label));
         }
         repo_buttons = vec![Vec::new(); repos.len()];
@@ -4959,7 +5038,7 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
             &mut Vec::new(),
         );
         let body = (bottom - body_top).max(0);
-        let least = REPOS_CARD_ROWS * (REPO_ROW + REPO_GAP) + CAPTION + 2 * CARD_PAD;
+        let least = REPOS_CARD_ROWS * (repo_row() + REPO_GAP) + caption_px() + 2 * CARD_PAD;
         let cap = (body * REPOS_CARD_SHARE / 100).max(least).min(body);
         let h = (dry.y + 2 * CARD_PAD).min(cap);
         let card = Rectangle::new((x, body_top).into(), (inner, h).into());
@@ -4970,14 +5049,14 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     // to press next last. Close over its page: it is the page's. On Code
     // review's page under the rail it has the switch's buttons.
     let title_w = bar_title_width(&view.page).min(inner);
-    let page_bar = Rectangle::new((x, body_top).into(), (inner, PAGE_BAR).into());
-    body_top += PAGE_BAR + REVIEW_SWITCH_GAP;
+    let page_bar = Rectangle::new((x, body_top).into(), (inner, page_bar_px()).into());
+    body_top += page_bar_px() + REVIEW_SWITCH_GAP;
     let review_switch = view.review_switch.as_ref().map(|switch| {
         let buttons = view.review_page.then(|| {
             let from = (x + title_w + PAGE_GAP).min(right);
             Rectangle::new(
                 (from, page_bar.loc.y).into(),
-                (right - from, PAGE_BAR).into(),
+                (right - from, page_bar_px()).into(),
             )
         });
         review_switch_spots(switch, x, row_top + REVIEW_SWITCH_GAP, inner, buttons)
@@ -4995,13 +5074,13 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
     let widths: Vec<i32> = (bar_row.iter())
         .map(|i| button_width(&view.page.buttons[*i].label))
         .collect();
-    let bar_y = page_bar.loc.y + (PAGE_BAR - ROW_BUTTON) / 2;
+    let bar_y = page_bar.loc.y + (page_bar_px() - row_button()) / 2;
     let bar_buttons = (bar_row.iter().zip(&widths))
         .zip(rows_from_right(&widths, x, right))
         .map(|((i, w), (bx, _))| {
             (
                 *i,
-                Rectangle::new((bx, bar_y).into(), (*w, ROW_BUTTON).into()),
+                Rectangle::new((bx, bar_y).into(), (*w, row_button()).into()),
             )
         })
         .collect::<Vec<(usize, Rect)>>();
@@ -5011,7 +5090,10 @@ fn lay_out_tab(view: &FeatureTabView, frame: Rect) -> FeatureTabLayout {
         spots.buttons.iter().flatten().next().map(|r| r.loc.x)
     });
     let title_room = first.map_or(inner, |bx| bx - PAGE_GAP - x).max(1);
-    let bar_title = Rectangle::new(page_bar.loc, (title_w.min(title_room), PAGE_BAR).into());
+    let bar_title = Rectangle::new(
+        page_bar.loc,
+        (title_w.min(title_room), page_bar_px()).into(),
+    );
     let col_h = (bottom - body_top).max(0);
     let card = |cx: i32, w: i32| Rectangle::new((cx, body_top).into(), (w, col_h).into());
     let mut columns = [None; 3];
@@ -5153,15 +5235,15 @@ fn running_spots(
     if lines == 0 {
         return (None, Vec::new(), None);
     }
-    let h = lines as i32 * RUN_ROW + 2 * RUN_PAD;
+    let h = lines as i32 * run_row() + 2 * RUN_PAD;
     let card = Rectangle::new((x, top).into(), (inner, h).into());
     let line = |i: usize| {
         Rectangle::new(
-            (x, top + RUN_PAD + i as i32 * RUN_ROW).into(),
-            (inner, RUN_ROW).into(),
+            (x, top + RUN_PAD + i as i32 * run_row()).into(),
+            (inner, run_row()).into(),
         )
     };
-    let mid = |row: Rect, h: i32| row.loc.y + (RUN_ROW - h) / 2;
+    let mid = |row: Rect, h: i32| row.loc.y + (run_row() - h) / 2;
     let rows = (view.running.iter().enumerate())
         .map(|(i, r)| {
             let row = line(i);
@@ -5176,18 +5258,20 @@ fn running_spots(
             for (b, label) in r.buttons.iter().enumerate().rev() {
                 let w = button_width(label);
                 end -= w;
-                buttons[b] =
-                    Rectangle::new((end, mid(row, ROW_BUTTON)).into(), (w, ROW_BUTTON).into());
+                buttons[b] = Rectangle::new(
+                    (end, mid(row, row_button())).into(),
+                    (w, row_button()).into(),
+                );
                 end -= RUN_GAP;
             }
-            let took_w = width_of("88:88", SMALL_FONT_SIZE).ceil() as i32;
+            let took_w = width_of("88:88", small_font_size()).ceil() as i32;
             end -= took_w;
-            let took = Rectangle::new((end, row.loc.y).into(), (took_w, RUN_ROW).into());
+            let took = Rectangle::new((end, row.loc.y).into(), (took_w, run_row()).into());
             end -= RUN_GAP;
             let bar = r.steps.map(|(i, n)| {
-                let count_w = width_of(&format!("{i} of {n}"), SMALL_FONT_SIZE).ceil() as i32;
+                let count_w = width_of(&format!("{i} of {n}"), small_font_size()).ceil() as i32;
                 end -= count_w;
-                let count = Rectangle::new((end, row.loc.y).into(), (count_w, RUN_ROW).into());
+                let count = Rectangle::new((end, row.loc.y).into(), (count_w, run_row()).into());
                 end -= RUN_BAR_GAP + RUN_BAR_W;
                 let bar = Rectangle::new(
                     (end, mid(row, RUN_BAR_H)).into(),
@@ -5198,15 +5282,15 @@ fn running_spots(
             });
             let word_x = left + RUN_SPIN + RUN_SPIN_GAP;
             // Bold, as it is drawn.
-            let word_w = measure_bold(r.word, SMALL_FONT_SIZE)
-                .unwrap_or_else(|| width_of(r.word, SMALL_FONT_SIZE) * 9.0 / 8.0)
+            let word_w = measure_bold(r.word, small_font_size())
+                .unwrap_or_else(|| width_of(r.word, small_font_size()) * 9.0 / 8.0)
                 .ceil() as i32
                 + 1;
-            let word = Rectangle::new((word_x, row.loc.y).into(), (word_w, RUN_ROW).into());
+            let word = Rectangle::new((word_x, row.loc.y).into(), (word_w, run_row()).into());
             let what_x = word_x + word_w + RUN_GAP;
             let what = Rectangle::new(
                 (what_x, row.loc.y).into(),
-                ((end - what_x).max(0), RUN_ROW).into(),
+                ((end - what_x).max(0), run_row()).into(),
             );
             RunningSpots {
                 row,
@@ -5224,7 +5308,7 @@ fn running_spots(
         let x = x + RUN_INSET + RUN_SPIN + RUN_SPIN_GAP;
         Rectangle::new(
             (x, row.loc.y).into(),
-            (inner - 2 * RUN_INSET, RUN_ROW).into(),
+            (inner - 2 * RUN_INSET, run_row()).into(),
         )
     });
     (Some(card), rows, more)
@@ -5387,7 +5471,7 @@ fn more_label(n: usize, after: bool) -> String {
 pub(super) fn rail_label(text: &str, w: i32) -> Vec<String> {
     let fits = |t: &str| {
         let width =
-            measure_bold(t, SMALL_FONT_SIZE).unwrap_or_else(|| width_of(t, SMALL_FONT_SIZE));
+            measure_bold(t, small_font_size()).unwrap_or_else(|| width_of(t, small_font_size()));
         width <= w as f32
     };
     if fits(text) {
@@ -5471,7 +5555,7 @@ fn framed(
     );
     Rectangle::new(
         (rect.loc.x + AGENT_PAD, rect.loc.y + AGENT_PAD).into(),
-        (rect.size.w - 2 * AGENT_PAD, AGENT_HEAD).into(),
+        (rect.size.w - 2 * AGENT_PAD, agent_head()).into(),
     )
 }
 
@@ -5480,7 +5564,7 @@ fn agent_card_dot(card: Rect) -> Rect {
     Rectangle::new(
         (
             card.loc.x + AGENT_PAD + 22,
-            card.loc.y + AGENT_PAD + (AGENT_HEAD - DOT) / 2,
+            card.loc.y + AGENT_PAD + (agent_head() - DOT) / 2,
         )
             .into(),
         (DOT, DOT).into(),
@@ -6343,7 +6427,7 @@ impl FeatureTabLayers {
                 (
                     row.took.as_str(),
                     spots.took,
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     p.muted,
                     None,
                 )
@@ -6563,7 +6647,13 @@ impl Painter {
             let (x, end) = phys(rect, scale);
             self.text(c, text, size, x, end, band(rect, scale), scale, color)
         };
-        line(&mut c, &view.heading, layout.title, LABEL_FONT_SIZE, p.text);
+        line(
+            &mut c,
+            &view.heading,
+            layout.title,
+            label_font_size(),
+            p.text,
+        );
         self.field(
             &mut c,
             &view.title,
@@ -6574,10 +6664,10 @@ impl Painter {
             p,
         );
         if let (Some(rect), Some(error)) = (layout.error, &view.error) {
-            line(&mut c, error, rect, FONT_SIZE, p.error);
+            line(&mut c, error, rect, font_size(), p.error);
         }
         let root_color = if view.root_failed { p.error } else { p.muted };
-        line(&mut c, &view.root, layout.root, FONT_SIZE, root_color);
+        line(&mut c, &view.root, layout.root, font_size(), root_color);
         let mut projects = layout.projects;
         projects.size.w = layout.link.loc.x - projects.loc.x - QUIT_BUTTON_GAP;
         // The picker over the form leaves the form's buttons off.
@@ -6595,7 +6685,7 @@ impl Painter {
             scale,
             p,
         );
-        line(&mut c, &view.projects, projects, FONT_SIZE, p.muted);
+        line(&mut c, &view.projects, projects, font_size(), p.muted);
 
         let shown = view.repos.iter().enumerate().skip(view.top);
         let slots = layout.rows.iter().zip(&layout.bases);
@@ -6626,7 +6716,7 @@ impl Painter {
                 let base = shift(*base);
                 let on = view.hover == Some(NewFeatureHit::Base(i));
                 // A long branch name ellipsizes inside it.
-                let centred = self.text_width(label, FONT_SIZE, scale)
+                let centred = self.text_width(label, font_size(), scale)
                     <= ((BASE_BUTTON_W - 2 * BASE_BUTTON_INSET) as f64 * scale) as f32;
                 let word = if centred { label.as_str() } else { "" };
                 self.button(
@@ -6645,7 +6735,7 @@ impl Painter {
                     );
                     let (x, to) = phys(inside, scale);
                     let at = band(inside, scale);
-                    self.text(&mut c, label, FONT_SIZE, x, to, at, scale, p.text);
+                    self.text(&mut c, label, font_size(), x, to, at, scale, p.text);
                 }
                 end = phys(base, scale).0 - (PLACE_GAP as f32 * s).round();
             }
@@ -6653,7 +6743,7 @@ impl Painter {
             let after = self.text(
                 &mut c,
                 &repo.name,
-                FONT_SIZE,
+                font_size(),
                 box_end + (CHECKBOX_GAP as f32 * s).round(),
                 end,
                 row_band,
@@ -6663,7 +6753,7 @@ impl Painter {
             self.text(
                 &mut c,
                 &repo.place,
-                FONT_SIZE,
+                font_size(),
                 after + (PLACE_GAP as f32 * s).round(),
                 end,
                 row_band,
@@ -6681,7 +6771,16 @@ impl Painter {
             );
             let (x, end) = phys(label, scale);
             let at = band(label, scale);
-            self.text(&mut c, REVIEWER_LABEL, FONT_SIZE, x, end, at, scale, p.text);
+            self.text(
+                &mut c,
+                REVIEWER_LABEL,
+                font_size(),
+                x,
+                end,
+                at,
+                scale,
+                p.text,
+            );
             let rects: Vec<Rect> = chips.iter().map(|r| shift(*r)).collect();
             let hover = match view.hover {
                 Some(NewFeatureHit::Reviewer(i)) if !view.choosing => Some(i),
@@ -6706,7 +6805,7 @@ impl Painter {
                 self.text(
                     &mut c,
                     &more,
-                    FONT_SIZE,
+                    font_size(),
                     x,
                     end,
                     band(spot, scale),
@@ -6777,7 +6876,7 @@ impl Painter {
                 );
                 let (x, end) = phys(label, scale);
                 let at = band(label, scale);
-                self.text(c, &chip.name, SMALL_FONT_SIZE, x, end, at, scale, tint);
+                self.text(c, &chip.name, small_font_size(), x, end, at, scale, tint);
             }
         }
     }
@@ -6941,7 +7040,7 @@ impl Painter {
             self.text(
                 c,
                 text,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 tx,
                 tend,
                 band(rect, scale),
@@ -6958,7 +7057,7 @@ impl Painter {
             self.bold_text(
                 c,
                 row.word,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 wx,
                 wend,
                 word_band,
@@ -7078,7 +7177,7 @@ impl Painter {
         self.bold_text(
             c,
             &view.title,
-            TITLE_FONT_SIZE,
+            title_font_size(),
             tx,
             tend,
             band(l.title, scale),
@@ -7089,7 +7188,7 @@ impl Painter {
         self.text(
             c,
             &view.sub,
-            DETAIL_FONT_SIZE,
+            detail_font_size(),
             sx,
             send,
             band(l.sub, scale),
@@ -7100,7 +7199,7 @@ impl Painter {
             self.centered(
                 c,
                 &format!("{} of {n}", i + 1),
-                FONT_SIZE,
+                font_size(),
                 count,
                 scale,
                 p.muted,
@@ -7204,7 +7303,7 @@ impl Painter {
             self.rail_node(c, spot, i + 1, node.mark, ground, scale, p);
             let label = Rectangle::new(
                 (slot.loc.x + 2, spot.loc.y + NODE + NODE_GAP).into(),
-                (slot.size.w - 4, NODE_LABEL).into(),
+                (slot.size.w - 4, node_label()).into(),
             );
             let label_color = match node.mark {
                 NodeMark::Later | NodeMark::Ran if !node.selected => p.muted,
@@ -7215,17 +7314,17 @@ impl Painter {
             let lines = rail_label(&node.label, label.size.w);
             for (j, text) in lines.iter().enumerate() {
                 let rect = Rectangle::new(
-                    (label.loc.x, label.loc.y + j as i32 * RAIL_LABEL_STEP).into(),
+                    (label.loc.x, label.loc.y + j as i32 * rail_label_step()).into(),
                     label.size,
                 );
                 let bold = node.selected;
-                self.centred_cut(c, text, SMALL_FONT_SIZE, rect, bold, scale, label_color);
+                self.centred_cut(c, text, small_font_size(), rect, bold, scale, label_color);
             }
             if !node.line.is_empty() {
-                let below = (lines.len() as i32 - 1) * RAIL_LABEL_STEP;
+                let below = (lines.len() as i32 - 1) * rail_label_step();
                 let line = Rectangle::new(
-                    (label.loc.x, label.loc.y + NODE_LABEL + below).into(),
-                    (label.size.w, NODE_LINE).into(),
+                    (label.loc.x, label.loc.y + node_label() + below).into(),
+                    (label.size.w, node_line()).into(),
                 );
                 let color = match node.mark {
                     NodeMark::Current
@@ -7236,13 +7335,13 @@ impl Painter {
                     | NodeMark::Failed => node.mark.dot_color(p),
                     _ => p.muted,
                 };
-                self.centred_cut(c, &node.line, DETAIL_FONT_SIZE, line, false, scale, color);
+                self.centred_cut(c, &node.line, detail_font_size(), line, false, scale, color);
             }
             if let Some((icon, what)) = &node.agent {
-                let below = (lines.len() as i32 - 1) * RAIL_LABEL_STEP + NODE_LINE;
+                let below = (lines.len() as i32 - 1) * rail_label_step() + node_line();
                 let row = Rectangle::new(
-                    (label.loc.x, label.loc.y + NODE_LABEL + below).into(),
-                    (label.size.w, NODE_LINE).into(),
+                    (label.loc.x, label.loc.y + node_label() + below).into(),
+                    (label.size.w, node_line()).into(),
                 );
                 self.rail_agent(c, *icon, what, row, scale, p);
             }
@@ -7325,7 +7424,7 @@ impl Painter {
     ) {
         let (x, end) = phys(row, scale);
         let logo = ((AGENT_ICON + RAIL_AGENT_GAP) as f64 * scale) as f32;
-        let width = logo + self.text_width(what, DETAIL_FONT_SIZE, scale);
+        let width = logo + self.text_width(what, detail_font_size(), scale);
         let from = (x + ((end - x) - width) / 2.0).max(x);
         let spot = Rectangle::new(
             ((f64::from(from) / scale).round() as i32, row.loc.y).into(),
@@ -7336,7 +7435,7 @@ impl Painter {
         self.text(
             c,
             what,
-            DETAIL_FONT_SIZE,
+            detail_font_size(),
             text,
             end,
             band(row, scale),
@@ -7416,12 +7515,12 @@ impl Painter {
     /// `text` in bold, small, centred on `rect`.
     fn bold_centred(&self, c: &mut Canvas, text: &str, rect: Rect, scale: f64, color: Rgb) {
         let (x, end) = phys(rect, scale);
-        let w = self.bold_width(text, SMALL_FONT_SIZE, scale);
+        let w = self.bold_width(text, small_font_size(), scale);
         let from = (x + ((end - x) - w) / 2.0).round();
         self.bold_text(
             c,
             text,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             from,
             end,
             band(rect, scale),
@@ -7452,7 +7551,7 @@ impl Painter {
         self.bold_text(
             c,
             &strip.text,
-            FONT_SIZE,
+            font_size(),
             x,
             end,
             band(spots.text, scale),
@@ -7507,7 +7606,7 @@ impl Painter {
         self.bold_text(
             c,
             &said,
-            FONT_SIZE,
+            font_size(),
             x,
             end,
             band(spots.left, scale),
@@ -7532,7 +7631,7 @@ impl Painter {
             self.text(
                 c,
                 text,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 x,
                 end,
                 band(r, scale),
@@ -7559,7 +7658,7 @@ impl Painter {
                 (from, l.strip.loc.y).into(),
                 (
                     (l.repos_toggle.loc.x - QUIT_BUTTON_GAP - from).max(1),
-                    CHIP_ROW,
+                    chip_row(),
                 )
                     .into(),
             );
@@ -7604,7 +7703,7 @@ impl Painter {
             let lit = view.hover == Some(FeatureTabHit::MoreRepos(*i));
             chip_ground(c, *chip, p.border_variant, lit_fill(lit));
             let color = if lit { p.text } else { p.muted };
-            self.centered(c, label, SMALL_FONT_SIZE, *chip, scale, color);
+            self.centered(c, label, small_font_size(), *chip, scale, color);
         }
         // The toggle: what is left to see, and which way it goes.
         let rect = l.repos_toggle;
@@ -7689,10 +7788,10 @@ impl Painter {
         };
         match piece {
             Piece::Caption(text) => {
-                line(c, text, rect, DETAIL_FONT_SIZE, p.muted);
+                line(c, text, rect, detail_font_size(), p.muted);
             }
             Piece::GroupCaption(k, text) => {
-                line(c, text, rect, DETAIL_FONT_SIZE, p.muted);
+                line(c, text, rect, detail_font_size(), p.muted);
                 let buttons = match view.page.sections.get(*k) {
                     Some(
                         PageSection::Milestones { buttons, .. }
@@ -7844,7 +7943,7 @@ impl Painter {
                     (PICK_LABEL, track.size.h).into(),
                 );
                 let name = if *fixes { "Fixes" } else { "Agents" };
-                line(c, name, label, SMALL_FONT_SIZE, p.muted);
+                line(c, name, label, small_font_size(), p.muted);
                 let [one, each] = mode_segments(*fixes);
                 let hover = match view.hover {
                     Some(FeatureTabHit::MilestoneMode(i)) => Some(i),
@@ -7898,14 +7997,14 @@ impl Painter {
                 self.row_highlight(c, rect, (selected, lit), scale, p);
                 let tick = Rectangle::new(
                     (rect.loc.x + SHIP_STEP_INSET, rect.loc.y).into(),
-                    (CHECKBOX_SIZE, CHECKBOX_ROW).into(),
+                    (CHECKBOX_SIZE, checkbox_row()).into(),
                 );
                 if step.done {
                     // Where the tick box would be, the size of a check's dot.
                     let dot = Rectangle::new(
                         (
                             tick.loc.x + (CHECKBOX_SIZE - DOT) / 2,
-                            tick.loc.y + (CHECKBOX_ROW - DOT) / 2,
+                            tick.loc.y + (checkbox_row() - DOT) / 2,
                         )
                             .into(),
                         (DOT, DOT).into(),
@@ -7922,13 +8021,13 @@ impl Painter {
                     .map_or(rect.loc.x + rect.size.w, |b| b.loc.x - PAGE_GAP / 2);
                 let text_w = (end - text_x - SHIP_STEP_INSET).max(1);
                 let label =
-                    Rectangle::new((text_x, rect.loc.y).into(), (text_w, CHECKBOX_ROW).into());
+                    Rectangle::new((text_x, rect.loc.y).into(), (text_w, checkbox_row()).into());
                 let ink = if step.off { p.muted } else { p.text };
                 line(c, &step.label, label, Font::Body.size(), ink);
                 if let Some(detail) = &step.detail {
                     let under = Rectangle::new(
-                        (text_x, rect.loc.y + CHECKBOX_ROW).into(),
-                        (text_w, SMALL_LINE).into(),
+                        (text_x, rect.loc.y + checkbox_row()).into(),
+                        (text_w, small_line()).into(),
                     );
                     line(
                         c,
@@ -7977,7 +8076,7 @@ impl Painter {
                             (head.loc.x, track.loc.y).into(),
                             (pick_label_width(word), track.size.h).into(),
                         );
-                        line(c, word, label, SMALL_FONT_SIZE, p.muted);
+                        line(c, word, label, small_font_size(), p.muted);
                     }
                     let rects: Vec<Rect> = chips.iter().map(|r| at(*r)).collect();
                     let hover = match view.hover {
@@ -8007,20 +8106,20 @@ impl Painter {
                 if name.is_empty() {
                     return;
                 }
-                let icon_spot = Rectangle::new(head.loc, (16, AGENT_HEAD).into());
+                let icon_spot = Rectangle::new(head.loc, (16, agent_head()).into());
                 agent_icon(c, icon_spot, 16, *icon, p.text, scale);
                 // A dot at work blinks: it is composed over the tab.
                 status_dot(c, agent_card_dot(rect), *dot, scale, p);
                 let track = spots.map(|(_, track, _)| at(*track));
                 // What shares the head's row ends its text.
                 let end_x = (held.iter().chain(&track))
-                    .filter(|r| r.loc.y < head.loc.y + AGENT_HEAD)
+                    .filter(|r| r.loc.y < head.loc.y + agent_head())
                     .map(|r| r.loc.x - QUIT_BUTTON_GAP)
                     .min()
                     .unwrap_or(head.loc.x + head.size.w);
                 let text = Rectangle::new(
                     (head.loc.x + AGENT_TEXT_AT, head.loc.y).into(),
-                    ((end_x - head.loc.x - AGENT_TEXT_AT).max(1), AGENT_HEAD).into(),
+                    ((end_x - head.loc.x - AGENT_TEXT_AT).max(1), agent_head()).into(),
                 );
                 let (tx, tend) = phys(text, scale);
                 let hb = band(text, scale);
@@ -8052,17 +8151,18 @@ impl Painter {
                 // What it asks is in its last lines: they read, on its tint.
                 let tail_ink = if *waits { p.text } else { p.muted };
                 // From the card's foot: rows of buttons may come before it.
-                let tail_top = rect.loc.y + rect.size.h - AGENT_PAD - tail.len() as i32 * TAIL_LINE;
+                let tail_top =
+                    rect.loc.y + rect.size.h - AGENT_PAD - tail.len() as i32 * tail_line_px();
                 for (j, tail_line) in tail.iter().enumerate() {
                     let r = Rectangle::new(
-                        (head.loc.x, tail_top + j as i32 * TAIL_LINE).into(),
-                        (head.size.w, TAIL_LINE).into(),
+                        (head.loc.x, tail_top + j as i32 * tail_line_px()).into(),
+                        (head.size.w, tail_line_px()).into(),
                     );
                     let (lx, lend) = phys(r, scale);
                     self.mono_text(
                         c,
                         tail_line,
-                        DETAIL_FONT_SIZE,
+                        detail_font_size(),
                         lx,
                         lend,
                         band(r, scale),
@@ -8108,8 +8208,8 @@ impl Painter {
                 };
                 // The name whole if the line then still fits, else its share.
                 let room = (text_end - left).max(1);
-                let name_w = width_of(&repo.name, FONT_SIZE).ceil() as i32 + 1;
-                let line_w = width_of(&detail, DETAIL_FONT_SIZE).ceil() as i32 + 1;
+                let name_w = width_of(&repo.name, font_size()).ceil() as i32 + 1;
+                let line_w = width_of(&detail, detail_font_size()).ceil() as i32 + 1;
                 let name_w = match name_w + PLACE_GAP + line_w <= room {
                     true => name_w,
                     false => name_w.min(room * 45 / 100),
@@ -8119,11 +8219,11 @@ impl Painter {
                     RepoKind::Active => p.text,
                     _ => p.muted,
                 };
-                line(c, &repo.name, name, FONT_SIZE, color);
+                line(c, &repo.name, name, font_size(), color);
                 let from = left + name_w + PLACE_GAP;
                 if text_end - from >= REPO_LINE_MIN {
                     let place = Rectangle::new((from, y).into(), ((text_end - from), 20).into());
-                    line(c, &detail, place, DETAIL_FONT_SIZE, p.muted);
+                    line(c, &detail, place, detail_font_size(), p.muted);
                 }
                 for (b, (spot, label)) in buttons.iter().zip(&repo.buttons).enumerate() {
                     if spot.size.w <= 0 {
@@ -8155,7 +8255,7 @@ impl Painter {
                     .find_map(|i| l.page_buttons.get(*i).copied().flatten());
                 let end_x = first.map_or(head.loc.x + head.size.w, |r| r.loc.x - QUIT_BUTTON_GAP);
                 let text =
-                    Rectangle::new(head.loc, ((end_x - head.loc.x).max(1), AGENT_HEAD).into());
+                    Rectangle::new(head.loc, ((end_x - head.loc.x).max(1), agent_head()).into());
                 let (tx, tend) = phys(text, scale);
                 let hb = band(text, scale);
                 let after = self.bold_text(c, name, Font::Body.size(), tx, tend, hb, scale, p.text);
@@ -8389,17 +8489,17 @@ impl Painter {
                     return;
                 };
                 let dot = Rectangle::new(
-                    (rect.loc.x + 1, rect.loc.y + (TAIL_LINE - 8) / 2).into(),
+                    (rect.loc.x + 1, rect.loc.y + (tail_line_px() - 8) / 2).into(),
                     (8, 8).into(),
                 );
                 activity_dot(c, dot, a.tone, scale, p);
-                let ago = Rectangle::new(rect.loc, (rect.size.w, TAIL_LINE).into());
+                let ago = Rectangle::new(rect.loc, (rect.size.w, tail_line_px()).into());
                 let (ax, aend) = phys(ago, scale);
-                let w = self.text_width(&a.ago, DETAIL_FONT_SIZE, scale);
+                let w = self.text_width(&a.ago, detail_font_size(), scale);
                 self.text(
                     c,
                     &a.ago,
-                    DETAIL_FONT_SIZE,
+                    detail_font_size(),
                     (aend - w - 1.0).max(ax).floor(),
                     aend,
                     band(ago, scale),
@@ -8409,8 +8509,12 @@ impl Painter {
                 let room = (w / s).ceil() as i32 + 8;
                 for (j, text) in lines.iter().enumerate() {
                     let r = Rectangle::new(
-                        (rect.loc.x + DOT_ROOM, rect.loc.y + j as i32 * TAIL_LINE).into(),
-                        ((rect.size.w - DOT_ROOM - room).max(1), TAIL_LINE).into(),
+                        (
+                            rect.loc.x + DOT_ROOM,
+                            rect.loc.y + j as i32 * tail_line_px(),
+                        )
+                            .into(),
+                        ((rect.size.w - DOT_ROOM - room).max(1), tail_line_px()).into(),
                     );
                     line(c, text, r, Font::Small.size(), p.text);
                 }
@@ -8463,7 +8567,7 @@ impl Painter {
         let s = scale as f32;
         let gap = (STAT_SPACE as f32 * s).round();
         let widths: Vec<f32> = (parts.iter())
-            .map(|(text, _)| self.text_width(text, DETAIL_FONT_SIZE, scale).ceil())
+            .map(|(text, _)| self.text_width(text, detail_font_size(), scale).ceil())
             .collect();
         let total = widths.iter().sum::<f32>() + gap * (parts.len() - 1) as f32;
         let (x, end) = phys(rect, scale);
@@ -8476,7 +8580,7 @@ impl Painter {
             self.text(
                 c,
                 text,
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 from,
                 from + w + 1.0,
                 band(rect, scale),
@@ -8530,7 +8634,7 @@ impl Painter {
         self.text(
             c,
             label,
-            FONT_SIZE,
+            font_size(),
             x,
             end,
             band(text, scale),
@@ -8820,7 +8924,7 @@ mod tests {
     use super::*;
     use crate::chrome::sidebar::feature_dots_rect as feature_row_dots;
     use crate::chrome::{
-        FIELD_LINE, ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, contrast, inside, wrap_field_spot,
+        ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, contrast, field_line, inside, wrap_field_spot,
     };
 
     #[test]
@@ -9801,7 +9905,7 @@ mod tests {
         assert!(plain.running_card.is_none() && plain.running.is_empty());
         assert_eq!(
             card.size.h,
-            3 * RUN_ROW + 2 * RUN_PAD,
+            3 * run_row() + 2 * RUN_PAD,
             "two rows and the count"
         );
         assert!(
@@ -10469,7 +10573,7 @@ mod tests {
 
     #[test]
     fn the_milestone_choice_fits_a_narrow_column() {
-        let row = Rectangle::new((0, 0).into(), (200, PICK_TRACK).into());
+        let row = Rectangle::new((0, 0).into(), (200, pick_track()).into());
         for fixes in [false, true] {
             let (track, [_, each]) = milestone_mode_rects(row, fixes);
             assert!(track.loc.x + track.size.w <= 200);
@@ -10671,7 +10775,7 @@ mod tests {
         }
         // No stage says what ran it yet: the page doesn't drop once one does.
         assert_eq!(with, height(&view));
-        assert!(with >= NODE + NODE_GAP + NODE_LABEL + 2 * NODE_LINE);
+        assert!(with >= NODE + NODE_GAP + node_label() + 2 * node_line());
     }
 
     /// `view` with its agent card's model button saying `label`.
@@ -10741,7 +10845,7 @@ mod tests {
     fn the_word_before_the_chips_gets_the_room_it_needs() {
         assert_eq!(pick_word(""), "Agent");
         assert_eq!(pick_label_width("Agent"), PICK_LABEL);
-        let summary = width_of("Summary", SMALL_FONT_SIZE);
+        let summary = width_of("Summary", small_font_size());
         assert!(pick_label_width("Summary") as f32 >= summary + PICK_LABEL_GAP as f32);
     }
 
@@ -10758,7 +10862,7 @@ mod tests {
         );
         assert_eq!(
             rows_height(&rows_from_right(&[40, 40, 60], 0, 100)),
-            2 * ROW_BUTTON + QUIT_BUTTON_GAP
+            2 * row_button() + QUIT_BUTTON_GAP
         );
         assert_eq!(rows_height(&[]), 0);
     }
@@ -10827,11 +10931,11 @@ mod tests {
         };
         note(&mut view, "one line");
         let (one, card, _) = field_of(&view);
-        assert_eq!(one.size.h, QUIT_BUTTON);
+        assert_eq!(one.size.h, quit_button());
         note(&mut view, "first\nsecond\nthird");
         let (three, grown, next) = field_of(&view);
-        assert_eq!(three.size.h - one.size.h, 2 * FIELD_LINE);
-        assert_eq!(grown.size.h - card.size.h, 2 * FIELD_LINE);
+        assert_eq!(three.size.h - one.size.h, 2 * field_line());
+        assert_eq!(grown.size.h - card.size.h, 2 * field_line());
         assert!(three.loc.y + three.size.h <= grown.loc.y + grown.size.h);
         assert!(
             grown.loc.y + grown.size.h <= next.loc.y,
@@ -10849,14 +10953,14 @@ mod tests {
             (spot.line.text, base)
         };
         assert_eq!(line_at(5), ("first".to_owned(), 0));
-        assert_eq!(line_at(FIELD_LINE + 5), ("second".to_owned(), 6));
+        assert_eq!(line_at(field_line() + 5), ("second".to_owned(), 6));
         assert_eq!(line_at(three.size.h + 40), ("third".to_owned(), 13));
         // A long note wraps to the card, five rows at most.
         note(&mut view, &"word ".repeat(400));
         let (long, _, _) = field_of(&view);
         assert_eq!(
             long.size.h,
-            one.size.h + (crate::chrome::WRAP_MAX_ROWS as i32 - 1) * FIELD_LINE
+            one.size.h + (crate::chrome::WRAP_MAX_ROWS as i32 - 1) * field_line()
         );
     }
 
@@ -10952,7 +11056,7 @@ mod tests {
             .find_map(|(rect, piece)| matches!(piece, Piece::GroupCaption(0, _)).then_some(*rect))
             .expect("its caption");
         assert_eq!(button.loc.x + button.size.w, caption.loc.x + caption.size.w);
-        assert!((button.loc.y - caption.loc.y).abs() <= ROW_BUTTON - CAPTION);
+        assert!((button.loc.y - caption.loc.y).abs() <= row_button() - caption_px());
     }
 
     #[test]
@@ -10995,7 +11099,7 @@ mod tests {
         view.page.sections.push(PageSection::Finding(card(true)));
         let closed = feature_tab_layout(&view, area);
         let frame = closed.finding_cards[0];
-        assert_eq!(frame.size.h, 2 * AGENT_PAD + ROW_BUTTON);
+        assert_eq!(frame.size.h, 2 * AGENT_PAD + row_button());
         assert!(closed.page_buttons[0].is_some());
         assert!(closed.page_buttons[1].is_none() && closed.page_buttons[2].is_none());
         // The decision bold, then why, then the title: a title past the line
@@ -11208,7 +11312,7 @@ mod tests {
         let (wide_card, narrow_card) = (card(&wide), card(&narrow));
         assert!(narrow_card.size.h > wide_card.size.h);
         let (_, track, _) = narrow.agent_picks[0].clone();
-        assert!(track.loc.y >= narrow_card.loc.y + AGENT_PAD + AGENT_HEAD);
+        assert!(track.loc.y >= narrow_card.loc.y + AGENT_PAD + agent_head());
         assert!(
             track.loc.x >= narrow_card.loc.x,
             "{track:?} {narrow_card:?}"

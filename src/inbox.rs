@@ -1279,9 +1279,9 @@ impl Default for Panel {
             bounds: Cell::new(Bounds {
                 max: 0.0,
                 notch: 1.0,
-                unit: chrome::INBOX_ROW as f64,
-                next: chrome::INBOX_ROW as f64,
-                prev: chrome::INBOX_ROW as f64,
+                unit: chrome::inbox_row_px() as f64,
+                next: chrome::inbox_row_px() as f64,
+                prev: chrome::inbox_row_px() as f64,
                 view: 0.0,
             }),
             all: true,
@@ -1338,7 +1338,7 @@ impl Listed {
 /// fill the list, its first row scrolled all but past, were they all
 /// labels (lower than items).
 fn reach(page: usize) -> usize {
-    ((page.max(1) + 2) * chrome::INBOX_ROW as usize).div_ceil(chrome::INBOX_LABEL as usize)
+    ((page.max(1) + 2) * chrome::inbox_row_px() as usize).div_ceil(chrome::inbox_label() as usize)
 }
 
 /// The workspace after `at` (`back`: before) among `n`, then none, round.
@@ -1568,8 +1568,8 @@ impl Panel {
     fn list_bounds(&self, listed: &Listed, page: usize) -> Bounds {
         let page = page.max(1);
         let height = |i: usize| match listed.rows.get(i) {
-            Some(Entry::Label(..)) => chrome::INBOX_LABEL as f64,
-            _ => chrome::INBOX_ROW as f64,
+            Some(Entry::Label(..)) => chrome::inbox_label() as f64,
+            _ => chrome::inbox_row_px() as f64,
         };
         let first = self.scroll.first();
         Bounds {
@@ -1579,7 +1579,7 @@ impl Panel {
             next: height(first + 1),
             prev: first.checked_sub(1).map_or(height(first), height),
             // A page of items is about as high as the list.
-            view: (page as i32 * chrome::INBOX_ROW) as f64,
+            view: (page as i32 * chrome::inbox_row_px()) as f64,
         }
     }
 
@@ -3156,9 +3156,9 @@ mod tests {
         };
         // One to one by the rows' own heights: the label, then half an
         // item.
-        finger(&mut panel, chrome::INBOX_LABEL as f64, 0, &list);
+        finger(&mut panel, chrome::inbox_label() as f64, 0, &list);
         assert_eq!(panel.view(&list).first, 1);
-        finger(&mut panel, chrome::INBOX_ROW as f64 / 2.0, 8, &list);
+        finger(&mut panel, chrome::inbox_row_px() as f64 / 2.0, 8, &list);
         panel.scroll(Motion::Lift { time: 300 }, Instant::now(), &list);
         rest(&mut panel);
         let view = panel.view(&list);

@@ -293,6 +293,24 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "Draw everything at the monitor's size",
         "Alt+0",
     ),
+    (
+        "text-bigger",
+        Action::TextSize(ZoomStep::In),
+        "Make gerdr's text bigger",
+        "Alt+Shift+=",
+    ),
+    (
+        "text-smaller",
+        Action::TextSize(ZoomStep::Out),
+        "Make gerdr's text smaller",
+        "Alt+Shift+-",
+    ),
+    (
+        "text-reset",
+        Action::TextSize(ZoomStep::Reset),
+        "Set gerdr's text back to its size",
+        "Alt+Shift+0",
+    ),
     ("shortcuts", Action::Shortcuts, "Keep this help open", "?"),
     ("switcher", Action::Switcher, "Find and switch…", "f"),
     ("run", Action::Run, "Run an app in a split…", "r"),
@@ -451,6 +469,10 @@ const HELP_LINES: &[(&str, &[&str])] = &[
     (
         "Make everything bigger / smaller / as the monitor's",
         &["zoom-in", "zoom-out", "zoom-reset"],
+    ),
+    (
+        "Make gerdr's text bigger / smaller / as it was",
+        &["text-bigger", "text-smaller", "text-reset"],
     ),
     ("Keep this help open", &["shortcuts"]),
     ("Find and switch…", &["switcher"]),
@@ -1292,6 +1314,7 @@ mod tests {
                 "Tab / Shift+Tab: Go to the next / previous pane",
                 "T: Toggle light / dark theme (not system)",
                 "Alt+= / - / 0: Make everything bigger / smaller / as the monitor's",
+                "Alt++ / _ / ): Make gerdr's text bigger / smaller / as it was",
                 "?: Keep this help open",
                 "F: Find and switch…",
                 "R: Run an app in a split…",
@@ -1332,6 +1355,29 @@ mod tests {
         assert_eq!(
             keymap.action(&mods(false, false), Keysym::minus),
             Some(Action::Split(Dir::Down))
+        );
+        use crate::ZoomStep;
+        // Alt is the zoom, Alt+Shift the text size; `sym` is unshifted.
+        let alt = |shift| ModifiersState {
+            alt: true,
+            shift,
+            ..Default::default()
+        };
+        assert_eq!(
+            keymap.action(&alt(false), Keysym::equal),
+            Some(Action::Zoom(ZoomStep::In))
+        );
+        assert_eq!(
+            keymap.action(&alt(true), Keysym::equal),
+            Some(Action::TextSize(ZoomStep::In))
+        );
+        assert_eq!(
+            keymap.action(&alt(true), Keysym::minus),
+            Some(Action::TextSize(ZoomStep::Out))
+        );
+        assert_eq!(
+            keymap.action(&alt(true), Keysym::_0),
+            Some(Action::TextSize(ZoomStep::Reset))
         );
         assert_eq!(
             keymap.action(&mods(false, true), Keysym::ISO_Left_Tab),

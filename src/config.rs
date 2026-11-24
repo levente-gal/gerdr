@@ -128,7 +128,7 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use crate::{
     Gerdr, ZoomStep,
     anim::Motion,
-    chrome::{Density, ThemeMode},
+    chrome::{DEFAULT_TEXT, Density, TEXT_MAX, TEXT_MIN, ThemeMode},
     home_dir,
     keys::{Keymap, KeysConfig},
     launch::App,
@@ -238,11 +238,27 @@ pub fn with_bool(text: &str, table: &str, key: &str, value: bool) -> Result<Stri
 
 /// `write_bool` for the `[ui] zoom`, given in percent: written as `1.25`.
 pub fn write_zoom(percent: u16) -> Result<(), String> {
+    write_with(|text| with_zoom(text, percent))
+}
+
+/// `write_bool` for the `[ui] text_size`, in px.
+pub fn write_text_size(px: u16) -> Result<(), String> {
+    write_with(|text| with_text_size(text, px))
+}
+
+/// The config file changed by `edit`, made first when there is none.
+fn write_with(edit: impl FnOnce(&str) -> Result<String, String>) -> Result<(), String> {
     let path = config_file();
     ensure_file(&path).map_err(|err| err.to_string())?;
     let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
-    let text = with_zoom(&text, percent)?;
+    let text = edit(&text)?;
     crate::projects::write_atomic(&path, text.as_bytes()).map_err(|err| err.to_string())
+}
+
+/// `text` with `[ui] text_size` set to `px`, as `with_bool` does.
+fn with_text_size(text: &str, px: u16) -> Result<String, String> {
+    let px = toml_edit::value(i64::from(px));
+    with_value(text, "ui", "text_size", Some(px))
 }
 
 /// `text` with `[ui] zoom` set to `percent`, as `with_bool` does.
@@ -726,6 +742,7 @@ struct UiConfig {
     footer: Option<bool>,
     agent_hooks: Option<bool>,
     zoom: Option<toml::Value>,
+    text_size: Option<toml::Value>,
 }
 
 /// The `[git]` table, as written.
@@ -837,6 +854,9 @@ pub struct Ui {
     /// How big the whole screen is drawn, chrome and panes, in percent of
     /// the monitor's own scale: `zoom = 1.25` is 125.
     pub zoom: u16,
+    /// The chrome's text size in px, its rows grown with it; the panes
+    /// keep theirs.
+    pub text_size: u16,
 }
 
 impl Default for Ui {
@@ -849,6 +869,7 @@ impl Default for Ui {
             footer: true,
             agent_hooks: true,
             zoom: 100,
+            text_size: DEFAULT_TEXT as u16,
         }
     }
 }
@@ -1006,6 +1027,13 @@ pub fn from_text(
         Some(toml::Value::Integer(zoom)) => ui.zoom = zoom_percent(zoom as f64),
         Some(other) => problems.push(format!("zoom `{other}` isn't a number like 1.25")),
     }
+    let text_px = |px: f64| px.round().clamp(TEXT_MIN.into(), TEXT_MAX.into()) as u16;
+    match config.ui.text_size {
+        None => {}
+        Some(toml::Value::Integer(px)) => ui.text_size = text_px(px as f64),
+        Some(toml::Value::Float(px)) if px.is_finite() => ui.text_size = text_px(px),
+        Some(other) => problems.push(format!("text_size `{other}` isn't a number like 17")),
+    }
     let mut git = Git::default();
     if let Some(groups) = config.git.same_branches {
         git.same_branches = same_branches(groups, &mut problems);
@@ -1122,6 +1150,7 @@ const TEMPLATE: &str = "\
 # agent_hooks = false   # don't add gerdr's hooks to Claude, Cursor and OpenCode; added by default
 # motion = \"reduced\"    # or \"off\": no blinking dots or pulses; \"full\", the default
 # zoom = 1.25           # draw everything bigger, panes too; Prefix Alt+= / Alt+- / Alt+0
+# text_size = 19        # gerdr's own text, 12 to 24, 17 by default; Prefix Alt+Shift+= / - / 0
 #
 # [git]
 # # Branch names that are one branch across repositories, in the
@@ -1366,6 +1395,8 @@ impl Gerdr {
         self.launcher.apps = settings.apps;
         self.settings.density = settings.ui.density;
         self.set_zoom(settings.ui.zoom);
+        // Cached drawings see the new size; `arrange` below lays out again.
+        crate::chrome::set_text_size(f32::from(settings.ui.text_size));
         self.settings.needs_you = settings.ui.needs_you;
         // Turned on again: added again, now.
         if settings.ui.agent_hooks && !self.settings.agent_hooks {
@@ -1461,6 +1492,26 @@ impl Gerdr {
         let text = format!("Drawn at {}% \u{b7} [ui] zoom in Settings", self.settings.zoom);
         self.show_success(text);
     }
+
+    /// Set gerdr's own text a px bigger or smaller, or back to the default,
+    /// kept as `[ui] text_size` in the config file. The panes keep theirs.
+    pub fn step_text_size(&mut self, step: ZoomStep) {
+        let now = crate::chrome::text_size() as u16;
+        let px = match step {
+            ZoomStep::In => now + 1,
+            ZoomStep::Out => now.saturating_sub(1),
+            ZoomStep::Reset => DEFAULT_TEXT as u16,
+        }
+        .clamp(TEXT_MIN as u16, TEXT_MAX as u16);
+        if let Err(err) = write_text_size(px) {
+            let text = format!("Couldn't change the text size in Settings: {err}");
+            let open = ("Open settings".to_owned(), MenuAction::OpenSettings);
+            return self.toast_with(text, Level::Error, Some(open));
+        }
+        let _ = self.apply_settings();
+        let px = crate::chrome::text_size();
+        self.show_success(format!("Text at {px} px \u{b7} [ui] text_size in Settings"));
+    }
 }
 
 /// gerdr's config file: `$XDG_CONFIG_HOME/gerdr/config.toml`, by default
@@ -1477,7 +1528,7 @@ pub fn config_file() -> PathBuf {
 mod tests {
     use super::{
         Density, Git, InboxSettings, TEMPLATE, ThemeMode, Ui, ZOOM_MAX, ZOOM_MIN, from_text,
-        with_zoom,
+        with_text_size, with_zoom,
     };
 
     #[test]
@@ -1611,6 +1662,26 @@ other = 1
         assert_eq!(out, text.replace("1.25", "1.1"));
         assert_eq!(zoom(&out).0, 110);
         assert_eq!(with_zoom("", 130).unwrap(), "[ui]\nzoom = 1.3\n");
+    }
+
+    #[test]
+    fn text_size_reads_as_px_within_what_can_be_shown() {
+        let size = |text: &str| {
+            let (_, _, ui, _, _, problems, _, _) = from_text(text);
+            (ui.text_size, problems)
+        };
+        assert_eq!(size(""), (17, vec![]));
+        assert_eq!(size("[ui]\ntext_size = 19\n"), (19, vec![]));
+        assert_eq!(size("[ui]\ntext_size = 18.6\n"), (19, vec![]));
+        assert_eq!(size("[ui]\ntext_size = 99\n"), (24, vec![]));
+        assert_eq!(size("[ui]\ntext_size = 3\n"), (12, vec![]));
+        let (px, problems) = size("[ui]\ntext_size = \"big\"\n");
+        assert_eq!(px, 17);
+        assert!(problems[0].contains("text_size"), "{problems:?}");
+        let text = "# Mine.\n[ui]\nzoom = 1.25  # big\n";
+        let out = with_text_size(text, 20).unwrap();
+        assert!(out.starts_with(text), "{out}");
+        assert_eq!(size(&out).0, 20);
     }
 
     #[test]
@@ -1764,6 +1835,7 @@ other = 1
                 footer: true,
                 agent_hooks: true,
                 zoom: 100,
+                text_size: 17,
             }
         );
         assert!(problems.is_empty());

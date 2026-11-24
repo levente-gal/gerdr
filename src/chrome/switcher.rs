@@ -9,12 +9,12 @@
 
 use super::layers::{Part, RowCache};
 use super::{
-    AGENT_ICON, BUTTON_RADIUS, Badge, Canvas, FONT_SIZE, FieldSpot, HELP_MARGIN, PADDING,
-    PILL_HEIGHT, PILL_PADDING, POPUP_RADIUS, Painter, Palette, ROW_ICON_GAP, ROW_ICON_WIDTH, Rect,
-    SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING, SWITCHER_ROWS, SWITCHER_SECTION,
-    SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, agent_icon, app, dot_slot, folder, folder_plus,
-    footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, line, measure, mix, pencil,
-    prompt, query_text, rect_px, row_dot, row_fill, status_dot, tab, terminal,
+    AGENT_ICON, BUTTON_RADIUS, Badge, Canvas, FieldSpot, HELP_MARGIN, PADDING, PILL_PADDING,
+    POPUP_RADIUS, Painter, Palette, ROW_ICON_GAP, ROW_ICON_WIDTH, Rect, SHADOW, SWITCHER_PADDING,
+    SWITCHER_ROWS, SWITCHER_TOP, SWITCHER_WIDTH, agent_icon, app, dot_slot, folder, folder_plus,
+    font_size, footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, line, measure, mix,
+    pencil, pill_height, prompt, query_text, rect_px, row_dot, row_fill, small_font_size,
+    status_dot, switcher_input, switcher_section, tab, terminal, tiny_font_size,
 };
 use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
@@ -25,19 +25,29 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// A row: two lines of text.
-const ROW_HEIGHT: i32 = line(FONT_SIZE, 7) + line(SMALL_FONT_SIZE, 5);
+fn row_height() -> i32 {
+    line(font_size(), 7) + line(small_font_size(), 5)
+}
 /// A section's heading: the gap above it and its text.
-const SECTION_HEIGHT: i32 = SWITCHER_SECTION;
+fn section_height() -> i32 {
+    switcher_section()
+}
 /// The heading's text sits in the lower part of its band.
-const SECTION_TEXT: i32 = line(TINY_FONT_SIZE, 10);
+fn section_text() -> i32 {
+    line(tiny_font_size(), 10)
+}
 /// The gap between the two lines' bands and the row's edges.
 const LINE_INSET: i32 = 4;
 /// The first line's band; the second takes the rest.
-const LABEL_LINE: i32 = line(FONT_SIZE, 3);
+fn label_line() -> i32 {
+    line(font_size(), 3)
+}
 /// The pill at the right of a row and the gap before it.
 const PILL_GAP: i32 = 10;
 /// A category chip's height, and the gap between chips.
-const CHIP_HEIGHT: i32 = line(SMALL_FONT_SIZE, 11);
+fn chip_height() -> i32 {
+    line(small_font_size(), 11)
+}
 const CHIP_GAP: i32 = 4;
 /// The room either side of a chip's label; and per character of it, a
 /// guess at its width when there is no font to measure it with.
@@ -47,7 +57,9 @@ const CHIP_CHAR: f32 = 7.0;
 /// neighbouring highlights don't touch.
 const ROW_HIGHLIGHT_INSET: i32 = 2;
 /// The row of chips: a chip and the gap under it.
-const CHIPS_ROW: i32 = CHIP_HEIGHT + SWITCHER_PADDING;
+fn chips_row() -> i32 {
+    chip_height() + SWITCHER_PADDING
+}
 
 /// The icon of a switcher row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -220,14 +232,14 @@ fn panel_origin(area: Rect) -> Point<i32, Logical> {
 pub fn switcher_room(area: Rect) -> i32 {
     let fits = area.size.h
         - SWITCHER_TOP
-        - SWITCHER_INPUT
+        - switcher_input()
         - 2 * SWITCHER_PADDING
         - HELP_MARGIN
-        - CHIPS_ROW
+        - chips_row()
         - footer_height(SWITCHER_HINTS);
     fits.clamp(
-        SECTION_HEIGHT + ROW_HEIGHT,
-        SWITCHER_ROWS * ROW_HEIGHT + 2 * SECTION_HEIGHT,
+        section_height() + row_height(),
+        SWITCHER_ROWS * row_height() + 2 * section_height(),
     )
 }
 
@@ -239,10 +251,10 @@ pub fn switcher_room(area: Rect) -> i32 {
 pub fn switcher_places(starts: impl IntoIterator<Item = bool>) -> RowTops {
     let starts: Vec<bool> = starts.into_iter().collect();
     RowTops::new((0..starts.len()).map(|i| {
-        ROW_HEIGHT
+        row_height()
             + match starts.get(i + 1) {
                 Some(false) => 0,
-                Some(true) | None => SECTION_HEIGHT,
+                Some(true) | None => section_height(),
             }
     }))
 }
@@ -251,7 +263,7 @@ pub fn switcher_places(starts: impl IntoIterator<Item = bool>) -> RowTops {
 /// band and the row.
 pub fn switcher_row_span(places: &RowTops, i: usize) -> (f64, f64) {
     let top = places.top(i);
-    (top, top + (SECTION_HEIGHT + ROW_HEIGHT) as f64)
+    (top, top + (section_height() + row_height()) as f64)
 }
 
 /// The scrollbar of the switcher's list laid out as `layout`, in the
@@ -319,8 +331,8 @@ fn chip_rects(labels: &[&str], x: i32, y: i32, right: i32) -> Vec<Rect> {
     let natural: Vec<i32> = labels
         .iter()
         .map(|label| {
-            let text =
-                measure(label, SMALL_FONT_SIZE).unwrap_or(label.chars().count() as f32 * CHIP_CHAR);
+            let text = measure(label, small_font_size())
+                .unwrap_or(label.chars().count() as f32 * CHIP_CHAR);
             text.ceil() as i32 + 2 * CHIP_INSET
         })
         .collect();
@@ -332,7 +344,7 @@ fn chip_rects(labels: &[&str], x: i32, y: i32, right: i32) -> Vec<Rect> {
         .into_iter()
         .map(|w| {
             let w = if total > room { w * room / total } else { w };
-            let rect = Rectangle::new((left, y).into(), (w, CHIP_HEIGHT).into());
+            let rect = Rectangle::new((left, y).into(), (w, chip_height()).into());
             left += w + CHIP_GAP;
             rect
         })
@@ -353,7 +365,7 @@ struct Placed {
 
 fn place(sections: &[Option<&'static str>], part: f64) -> Placed {
     let band = |i: usize| match sections.get(i) {
-        Some(Some(_)) => SECTION_HEIGHT,
+        Some(Some(_)) => section_height(),
         _ => 0,
     };
     let mut y = band(0) as f64 - part;
@@ -362,14 +374,14 @@ fn place(sections: &[Option<&'static str>], part: f64) -> Placed {
     for (i, section) in sections.iter().enumerate() {
         if let (true, Some(label)) = (i > 0, section) {
             headings.push((y, *label));
-            y += SECTION_HEIGHT as f64;
+            y += section_height() as f64;
         }
         rows.push(y);
-        y += ROW_HEIGHT as f64;
+        y += row_height() as f64;
     }
     let height = band(0)
         + (1..sections.len()).map(band).sum::<i32>()
-        + ROW_HEIGHT * sections.len().max(1) as i32;
+        + row_height() * sections.len().max(1) as i32;
     // Pulled down past the start, the kept heading comes down with the rows.
     let top = (-part).max(0.0);
     let kept = sections.first().copied().flatten().map(|label| {
@@ -378,7 +390,7 @@ fn place(sections: &[Option<&'static str>], part: f64) -> Placed {
             if y <= top {
                 kept = (top, label);
             } else {
-                kept.0 = kept.0.min(y - SECTION_HEIGHT as f64);
+                kept.0 = kept.0.min(y - section_height() as f64);
                 break;
             }
         }
@@ -406,26 +418,30 @@ fn parts(
     loc: Point<i32, Logical>,
     w: i32,
 ) -> SwitcherLayout {
-    let mut y = loc.y + SWITCHER_INPUT + SWITCHER_PADDING;
+    let mut y = loc.y + switcher_input() + SWITCHER_PADDING;
     let x = loc.x + SWITCHER_PADDING;
     let row_w = w - 2 * SWITCHER_PADDING;
     let chips = chip_rects(categories, x, y, x + row_w);
     if !chips.is_empty() {
-        y += CHIPS_ROW;
+        y += chips_row();
     }
     let start = y;
     let placed = place(sections, part);
     let at = |dy: f64| start + dy.round() as i32;
     let rect = |dy: f64, h: i32| Rectangle::new((x, at(dy)).into(), (row_w, h).into());
-    let rows = placed.rows.iter().map(|&dy| rect(dy, ROW_HEIGHT)).collect();
+    let rows = placed
+        .rows
+        .iter()
+        .map(|&dy| rect(dy, row_height()))
+        .collect();
     let headings = placed
         .headings
         .iter()
-        .map(|&(dy, label)| (rect(dy, SECTION_HEIGHT), label))
+        .map(|&(dy, label)| (rect(dy, section_height()), label))
         .collect();
     let kept = placed
         .kept
-        .map(|(dy, label)| (rect(dy, SECTION_HEIGHT), label));
+        .map(|(dy, label)| (rect(dy, section_height()), label));
     y += placed.height.min(room.unwrap_or(i32::MAX));
     let list = Rectangle::new((x, start).into(), (row_w, y - start).into());
     let footer_h = footer_height(hints);
@@ -433,7 +449,7 @@ fn parts(
     let h = y + SWITCHER_PADDING + footer_h - loc.y;
     SwitcherLayout {
         panel: Rectangle::new(loc, (w, h).into()),
-        input: Rectangle::new(loc, (w, SWITCHER_INPUT).into()),
+        input: Rectangle::new(loc, (w, switcher_input()).into()),
         chips,
         rows,
         sections: headings,
@@ -448,7 +464,7 @@ fn parts(
 pub fn switcher_field(view: &SwitcherView, area: Rect, scale: f64) -> FieldSpot {
     let input = switcher_geometry(view, area).input;
     FieldSpot {
-        size: FONT_SIZE,
+        size: font_size(),
         area: input,
         text: query_text(input, scale),
         line: view.query.clone(),
@@ -522,11 +538,11 @@ impl Painter {
         }
 
         if empty {
-            let slot = Rectangle::new(layout.list.loc, (layout.list.size.w, ROW_HEIGHT).into());
+            let slot = Rectangle::new(layout.list.loc, (layout.list.size.w, row_height()).into());
             self.centered(
                 &mut c,
                 "Nothing matches",
-                FONT_SIZE,
+                font_size(),
                 slot,
                 scale,
                 p.placeholder,
@@ -544,13 +560,13 @@ impl Painter {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let s = scale as f32;
         let band = (
-            px(rect.loc.y + rect.size.h - SECTION_TEXT),
-            px(SECTION_TEXT),
+            px(rect.loc.y + rect.size.h - section_text()),
+            px(section_text()),
         );
         self.text(
             c,
             &label.to_uppercase(),
-            TINY_FONT_SIZE,
+            tiny_font_size(),
             px(rect.loc.x) as f32 + PADDING * s,
             px(rect.loc.x + rect.size.w) as f32 - PADDING * s,
             band,
@@ -636,13 +652,13 @@ impl Painter {
         // The kind pill at the right, an agent's left of its dot; the text
         // stops before it.
         let pill_w =
-            self.text_width(row.kind, TINY_FONT_SIZE, scale) + 2.0 * PILL_PADDING as f32 * s;
+            self.text_width(row.kind, tiny_font_size(), scale) + 2.0 * PILL_PADDING as f32 * s;
         let pill_end = match row.icon {
             ItemIcon::Agent(..) => px(dot_slot(switcher_dot_line(slot)).loc.x) as f32,
             _ => (x + w) as f32 - PADDING * s,
         };
         let pill_x = (pill_end - pill_w).round();
-        let pill_h = px(PILL_HEIGHT) as f32;
+        let pill_h = px(pill_height()) as f32;
         let pill_y = (y as f32 + (h as f32 - pill_h) / 2.0).round();
         c.rounded(
             pill_x,
@@ -655,7 +671,7 @@ impl Painter {
         self.text(
             c,
             row.kind,
-            TINY_FONT_SIZE,
+            tiny_font_size(),
             pill_x + PILL_PADDING as f32 * s,
             f32::MAX,
             (pill_y as i32, pill_h as i32),
@@ -665,25 +681,25 @@ impl Painter {
 
         let right = pill_x - px(PILL_GAP) as f32;
         let text_x = px(icon.loc.x + ROW_ICON_WIDTH + ROW_ICON_GAP) as f32;
-        let label_band = (y + px(LINE_INSET), px(LABEL_LINE));
+        let label_band = (y + px(LINE_INSET), px(label_line()));
         self.marked(
             c,
             &row.label,
             &row.label_hits,
-            FONT_SIZE,
+            font_size(),
             text_x,
             right,
             label_band,
             scale,
             (p.text, p.accent),
         );
-        let detail_top = y + px(LINE_INSET + LABEL_LINE);
+        let detail_top = y + px(LINE_INSET + label_line());
         let detail_band = (detail_top, y + h - px(LINE_INSET) - detail_top);
         self.marked(
             c,
             &row.detail,
             &row.detail_hits,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             text_x,
             right,
             detail_band,
@@ -721,7 +737,7 @@ impl Painter {
         c.rounded(x, y, w, h, r, if on { p.accent } else { p.border });
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, fill);
         let color = if on { p.text } else { p.muted };
-        self.centered(c, label, SMALL_FONT_SIZE, rect, scale, color);
+        self.centered(c, label, small_font_size(), rect, scale, color);
     }
 }
 
@@ -827,10 +843,10 @@ impl SwitcherLayers {
                     parts.push(part.at((bar.track.loc.x as f64, bar.top).into()));
                 }
                 let mut heading = |parts: &mut Vec<Part>, (dy, label): (f64, &'static str)| {
-                    if out(dy, SECTION_HEIGHT) {
+                    if out(dy, section_height()) {
                         return;
                     }
-                    let size = Size::from((w, SECTION_HEIGHT));
+                    let size = Size::from((w, section_height()));
                     let buffer = self
                         .headings
                         .get((label, w, theme, scale), size, scale, |_| {
@@ -855,11 +871,11 @@ impl SwitcherLayers {
                 let dots = switcher_blinkers(view, layout);
                 parts.extend(super::layers::dot_parts(blink, dots, &at, layout.list));
                 for (i, (row, &dy)) in view.rows.iter().zip(&placed.rows).enumerate() {
-                    if out(dy, ROW_HEIGHT) {
+                    if out(dy, row_height()) {
                         continue;
                     }
                     let (selected, hovered) = (view.selected == Some(i), view.hover == Some(i));
-                    let size = Size::from((w, ROW_HEIGHT));
+                    let size = Size::from((w, row_height()));
                     let row = SwitcherRow {
                         section: None,
                         ..row.clone()
@@ -890,9 +906,9 @@ impl SwitcherLayers {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHIP_GAP, CHIP_HEIGHT, CHIPS_ROW, ItemIcon, ROW_HEIGHT, ROW_ICON_GAP, ROW_ICON_WIDTH,
-        SECTION_HEIGHT, SWITCHER_INPUT, SWITCHER_PADDING, SwitcherLayers, SwitcherRow,
-        SwitcherView, chip_rects, footer_height, query_text, switcher_geometry, switcher_icon,
+        CHIP_GAP, ItemIcon, ROW_ICON_GAP, ROW_ICON_WIDTH, SWITCHER_PADDING, SwitcherLayers,
+        SwitcherRow, SwitcherView, chip_height, chip_rects, chips_row, footer_height, query_text,
+        row_height, section_height, switcher_geometry, switcher_icon, switcher_input,
         switcher_layout, switcher_places, switcher_room, switcher_row_at,
     };
     use crate::chrome::{Painter, Rect, Theme};
@@ -929,24 +945,28 @@ mod tests {
             bar: None,
         };
         let layout = switcher_geometry(&view, area);
-        let top = layout.panel.loc.y + SWITCHER_INPUT + SWITCHER_PADDING;
+        let top = layout.panel.loc.y + switcher_input() + SWITCHER_PADDING;
         let (kept, label) = layout.kept.unwrap();
         assert_eq!((kept.loc.y, label), (top, "Workspaces"));
-        assert_eq!(layout.rows[0].loc.y, top + SECTION_HEIGHT);
-        assert_eq!(layout.rows[1].loc.y, top + SECTION_HEIGHT + ROW_HEIGHT);
+        assert_eq!(layout.rows[0].loc.y, top + section_height());
+        assert_eq!(layout.rows[1].loc.y, top + section_height() + row_height());
         assert_eq!(layout.sections.len(), 1);
         assert_eq!(
             layout.sections[0].0.loc.y,
-            top + SECTION_HEIGHT + 2 * ROW_HEIGHT
+            top + section_height() + 2 * row_height()
         );
         assert_eq!(
             layout.rows[2].loc.y,
-            top + 2 * SECTION_HEIGHT + 2 * ROW_HEIGHT
+            top + 2 * section_height() + 2 * row_height()
         );
         let footer = footer_height(0);
         assert_eq!(
             layout.panel.size.h,
-            SWITCHER_INPUT + 2 * SWITCHER_PADDING + 2 * SECTION_HEIGHT + 3 * ROW_HEIGHT + footer
+            switcher_input()
+                + 2 * SWITCHER_PADDING
+                + 2 * section_height()
+                + 3 * row_height()
+                + footer
         );
         // The footer closes the panel.
         assert_eq!(
@@ -957,14 +977,14 @@ mod tests {
         let (panel, input, rows) = switcher_layout(3, area);
         assert_eq!(
             panel.size.h,
-            SWITCHER_INPUT + 2 * SWITCHER_PADDING + 3 * ROW_HEIGHT + footer
+            switcher_input() + 2 * SWITCHER_PADDING + 3 * row_height() + footer
         );
         assert_eq!((panel.loc, input.loc), (layout.panel.loc, layout.input.loc));
         assert_eq!(rows[0].loc.y, top);
         // An empty list keeps room for the "Nothing matches" row.
         assert_eq!(
             switcher_layout(0, area).0.size.h,
-            SWITCHER_INPUT + 2 * SWITCHER_PADDING + ROW_HEIGHT + footer
+            switcher_input() + 2 * SWITCHER_PADDING + row_height() + footer
         );
     }
 
@@ -995,7 +1015,7 @@ mod tests {
             bar: None,
         };
         let layout = switcher_geometry(&view, area);
-        let top = layout.panel.loc.y + SWITCHER_INPUT + SWITCHER_PADDING;
+        let top = layout.panel.loc.y + switcher_input() + SWITCHER_PADDING;
         assert_eq!(layout.chips.len(), 3);
         assert!(layout.chips.iter().all(|chip| chip.loc.y == top));
         // Wider for a longer label, in order, apart.
@@ -1003,8 +1023,8 @@ mod tests {
         for pair in layout.chips.windows(2) {
             assert_eq!(pair[0].loc.x + pair[0].size.w + CHIP_GAP, pair[1].loc.x);
         }
-        assert_eq!(layout.kept.unwrap().0.loc.y, top + CHIPS_ROW);
-        assert_eq!(layout.rows[0].loc.y, top + CHIPS_ROW + SECTION_HEIGHT);
+        assert_eq!(layout.kept.unwrap().0.loc.y, top + chips_row());
+        assert_eq!(layout.rows[0].loc.y, top + chips_row() + section_height());
     }
 
     /// Rows of tabs under `sections`, a row each, `part` scrolled.
@@ -1030,7 +1050,7 @@ mod tests {
         // A room for three rows and a heading more than shows.
         let area = Rectangle::new((200, 36).into(), (1000, 800).into());
         let room = switcher_room(area);
-        let n = (room / ROW_HEIGHT) as usize + 2;
+        let n = (room / row_height()) as usize + 2;
         let mut sections = vec![None; n];
         sections[0] = Some("Workspaces");
         sections[2] = Some("Tabs");
@@ -1052,14 +1072,14 @@ mod tests {
         // are hit.
         let x = b.list.loc.x as f64 + 40.0;
         let at = |y: i32| switcher_row_at(&b, (x, y as f64 + 0.5).into());
-        let under = b.list.loc.y + SECTION_HEIGHT;
+        let under = b.list.loc.y + section_height();
         assert_eq!(at(b.list.loc.y), None);
         assert_eq!(at(under - 1), None);
         assert_eq!(at(under), Some(0));
         assert_eq!(at(bottom - 1), b.rows.iter().position(|r| r == last));
         assert_eq!(at(bottom), None);
         // Scrolled near the next heading, it pushes the kept one up.
-        let near = (ROW_HEIGHT + SECTION_HEIGHT + ROW_HEIGHT - 10) as f64;
+        let near = (row_height() + section_height() + row_height() - 10) as f64;
         let c = switcher_geometry(&scrolled(&sections, near), area);
         let (kept, label) = c.kept.unwrap();
         assert_eq!(label, "Workspaces");
@@ -1073,7 +1093,7 @@ mod tests {
     #[test]
     fn places_hold_a_row_and_the_band_over_the_next() {
         let places = switcher_places([true, false, true, false]);
-        let (row, band) = (ROW_HEIGHT as f64, SECTION_HEIGHT as f64);
+        let (row, band) = (row_height() as f64, section_height() as f64);
         assert_eq!(places.height(0), row);
         assert_eq!(places.height(1), row + band);
         assert_eq!(places.end(), 4.0 * row + 2.0 * band);
@@ -1172,7 +1192,7 @@ mod tests {
         let chips = chip_rects(&labels, 10, 0, 310);
         let last = chips.last().unwrap();
         assert!(last.loc.x + last.size.w <= 310);
-        assert!(chips.iter().all(|chip| chip.size.h == CHIP_HEIGHT));
+        assert!(chips.iter().all(|chip| chip.size.h == chip_height()));
         assert!(chip_rects(&[], 0, 0, 100).is_empty());
     }
 
@@ -1180,8 +1200,8 @@ mod tests {
     fn the_room_fits_the_area_within_bounds() {
         let room = |h: i32| switcher_room(Rectangle::new((0, 0).into(), (1000, h).into()));
         assert!(room(600) < room(800));
-        assert_eq!(room(100), SECTION_HEIGHT + ROW_HEIGHT);
-        assert_eq!(room(2000), 12 * ROW_HEIGHT + 2 * SECTION_HEIGHT);
+        assert_eq!(room(100), section_height() + row_height());
+        assert_eq!(room(2000), 12 * row_height() + 2 * section_height());
     }
 
     #[test]

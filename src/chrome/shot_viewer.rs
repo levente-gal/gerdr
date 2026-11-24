@@ -5,8 +5,8 @@
 use std::path::PathBuf;
 
 use super::{
-    ButtonStyle, FONT_SIZE, POPUP_RADIUS, Painter, Palette, QUIT_BUTTON, QUIT_BUTTON_GAP,
-    QUIT_PADDING, Rect, SHADOW, band, button_width, phys, rect_px,
+    ButtonStyle, POPUP_RADIUS, Painter, Palette, QUIT_BUTTON_GAP, QUIT_PADDING, Rect, SHADOW, band,
+    button_width, font_size, phys, quit_button, rect_px,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -88,14 +88,14 @@ pub fn shot_viewer_layout(view: &ShotViewerView, size: Size<i32, Logical>) -> Sh
         .map(|hit| {
             let w = button_width(hit.label());
             end -= w;
-            let rect = Rectangle::new((end, y).into(), (w, QUIT_BUTTON).into());
+            let rect = Rectangle::new((end, y).into(), (w, quit_button()).into());
             end -= QUIT_BUTTON_GAP;
             (*hit, rect)
         })
         .collect();
     buttons.reverse();
-    let title = Rectangle::new((x, y).into(), ((end - x).max(1), QUIT_BUTTON).into());
-    let top = y + QUIT_BUTTON + QUIT_PADDING;
+    let title = Rectangle::new((x, y).into(), ((end - x).max(1), quit_button()).into());
+    let top = y + quit_button() + QUIT_PADDING;
     let room = Rectangle::new(
         (x, top).into(),
         (
@@ -168,17 +168,17 @@ impl Painter {
         };
         let title = shift(layout.title);
         let place = format!("{} of {}", view.at + 1, view.of);
-        let place_w = (self.text_width(&place, FONT_SIZE, scale) / scale as f32).ceil() as i32;
+        let place_w = (self.text_width(&place, font_size(), scale) / scale as f32).ceil() as i32;
         // The title gets up to half the line, the place and keys the rest.
         let title_w =
-            (self.text_width(&view.title, FONT_SIZE, scale) / scale as f32).ceil() as i32 + 1;
+            (self.text_width(&view.title, font_size(), scale) / scale as f32).ceil() as i32 + 1;
         let title_end = title.loc.x + title_w.min(title.size.w / 2);
         let (x, _) = phys(title, scale);
         let end = (title_end as f64 * scale).round() as f32;
         self.text(
             &mut c,
             &view.title,
-            FONT_SIZE,
+            font_size(),
             x,
             end,
             band(title, scale),
@@ -193,7 +193,7 @@ impl Painter {
         self.text(
             &mut c,
             &place,
-            FONT_SIZE,
+            font_size(),
             px,
             pend,
             band(place_rect, scale),
@@ -237,20 +237,21 @@ impl Painter {
             }
             None => {
                 let text = "This screenshot's file is gone";
-                let w = (self.text_width(text, FONT_SIZE, scale) / scale as f32).ceil() as i32 + 1;
+                let w =
+                    (self.text_width(text, font_size(), scale) / scale as f32).ceil() as i32 + 1;
                 let line = Rectangle::new(
                     (
                         image.loc.x + (image.size.w - w) / 2,
-                        image.loc.y + image.size.h / 2 - QUIT_BUTTON / 2,
+                        image.loc.y + image.size.h / 2 - quit_button() / 2,
                     )
                         .into(),
-                    (w, QUIT_BUTTON).into(),
+                    (w, quit_button()).into(),
                 );
                 let (lx, lend) = phys(line, scale);
                 self.text(
                     &mut c,
                     text,
-                    FONT_SIZE,
+                    font_size(),
                     lx,
                     lend,
                     band(line, scale),

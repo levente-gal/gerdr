@@ -29,14 +29,14 @@
 use super::consts::{GIT_MARK_GAP, GIT_MARK_WIDTH};
 use super::layers::{Part, RowCache};
 use super::{
-    AGENT_ICON, BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Badge, CARD_LINE, CHEVRON_WIDTH,
-    Canvas, DETAIL_FONT_SIZE, Density, Dot, FONT_SIZE, FieldSpot, GAP, HEADER_BUTTON,
-    HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP, PADDING, PILL_HEIGHT, PILL_PADDING,
-    POPUP_RADIUS, Painter, Palette, ROW_ICON_WIDTH, ROW_INSET, ROW_PICTURE_SIZE, ROW_RADIUS,
-    ROWS_TOP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, TAB_LINE,
-    TINY_FONT_SIZE, TabView, agent_icon, app, arrow, band, centred_dot, chevron_down, ci_mark,
-    cross, distinct, ellipsis, folder, git_branch, icon_sdf, line, measure, mix, new_tab, physical,
-    rect_px, restart_arrow, sparkle, stages_mark, status_dot, status_mark, terminal, tray,
+    AGENT_ICON, BAR_HEIGHT, BRANCH_ICON_GAP, BRANCH_ICON_WIDTH, Badge, CHEVRON_WIDTH, Canvas,
+    Density, Dot, FieldSpot, GAP, HEADER_BUTTON, HEADER_MARGIN, HEADER_NAME_END, HEADER_NAME_GAP,
+    PADDING, PILL_PADDING, POPUP_RADIUS, Painter, Palette, ROW_ICON_WIDTH, ROW_INSET,
+    ROW_PICTURE_SIZE, ROW_RADIUS, ROWS_TOP, Rect, Rgb, SHADOW, STATUS_GAP, STATUS_WIDTH, TabView,
+    agent_icon, app, arrow, band, card_line_px, centred_dot, chevron_down, ci_mark, cross,
+    detail_font_size, distinct, ellipsis, folder, font_size, git_branch, icon_sdf, line, measure,
+    mix, new_tab, physical, pill_height, rect_px, restart_arrow, small_font_size, sparkle,
+    stages_mark, status_dot, status_mark, tab_line, terminal, tiny_font_size, tray,
 };
 use crate::WorkspaceKind;
 use crate::agent_icons::AgentIcon;
@@ -57,17 +57,33 @@ use std::path::PathBuf;
 /// `anim::quantize` gives 1.0.
 const ALPHA_STEPS: f32 = 16.0;
 /// A workspace header's height, in comfortable and compact density.
-const HEADER_ROW: i32 = line(FONT_SIZE, 15);
-const HEADER_ROW_COMPACT: i32 = line(FONT_SIZE, 11);
+fn header_row() -> i32 {
+    line(font_size(), 15)
+}
+fn header_row_compact() -> i32 {
+    line(font_size(), 11)
+}
 /// A header with a branch: the band of its name, then the line under it
 /// of its branch, in comfortable and compact density.
-const NAME_LINE: i32 = line(FONT_SIZE, 9);
-const NAME_LINE_COMPACT: i32 = line(FONT_SIZE, 7);
-const BRANCH_LINE: i32 = line(DETAIL_FONT_SIZE, 4);
-const BRANCH_LINE_COMPACT: i32 = line(DETAIL_FONT_SIZE, 1);
+fn name_line() -> i32 {
+    line(font_size(), 9)
+}
+fn name_line_compact() -> i32 {
+    line(font_size(), 7)
+}
+fn branch_line() -> i32 {
+    line(detail_font_size(), 4)
+}
+fn branch_line_compact() -> i32 {
+    line(detail_font_size(), 1)
+}
 /// An agent row's first line, in comfortable and compact density.
-const AGENT_ROW: i32 = line(SMALL_FONT_SIZE, 11);
-const AGENT_ROW_COMPACT: i32 = line(SMALL_FONT_SIZE, 9);
+fn agent_row_px() -> i32 {
+    line(small_font_size(), 11)
+}
+fn agent_row_compact() -> i32 {
+    line(small_font_size(), 9)
+}
 /// The gap between the rows under a header.
 const CHILD_GAP: i32 = 2;
 /// The room after a workspace's block, in comfortable and compact density.
@@ -132,7 +148,9 @@ const REPOS_ARROW_SLOT: (i32, i32) = (5, 7);
 const REPOS_ARROW_INSET: i32 = 3;
 /// The field a header's name turns into while renaming: its height and
 /// how far it reaches left of the name.
-const RENAME_HEIGHT: i32 = line(FONT_SIZE, 9);
+fn rename_height() -> i32 {
+    line(font_size(), 9)
+}
 const RENAME_INSET: i32 = 5;
 /// How much of the warning colour a blocked agent's row carries at the
 /// top of its pulse.
@@ -156,13 +174,17 @@ const EMPTY_HINT: [&str; 2] = [
 ];
 const EMPTY_HINT_TOP: i32 = 12;
 /// The "Needs you" list: its heading's height, and the room after it.
-const INBOX_TITLE: i32 = line(SMALL_FONT_SIZE, 7);
+fn inbox_title_px() -> i32 {
+    line(small_font_size(), 7)
+}
 const INBOX_GAP: i32 = 6;
 /// The features section under the workspaces: the room from the last
 /// block to its heading, with a rule across the sidebar halfway, and its
 /// heading's height (a header's, as it heads a list of its own).
 const SECTION_TOP: i32 = 16;
-const SECTION_TITLE: i32 = line(SMALL_FONT_SIZE, 13);
+fn section_title() -> i32 {
+    line(small_font_size(), 13)
+}
 const FEATURES_LABEL: &str = "Features";
 /// How big the "+" on the rule is, the room the rule leaves it each side,
 /// and how far past it each way a click still lands on it.
@@ -173,7 +195,9 @@ const FEATURES_PLUS_REACH: (i32, i32) = (4, 2);
 /// the biggest of them.
 const STAGE_LINE: i32 = super::STAGE_DOT_BIG;
 /// The line under a feature's stage dots saying how its stage stands.
-const FEATURE_INFO_LINE: i32 = line(DETAIL_FONT_SIZE, 3);
+fn feature_info_line() -> i32 {
+    line(detail_font_size(), 3)
+}
 /// How far a feature row's lines tuck up under its title.
 const FEATURE_TUCK: i32 = 3;
 /// How wide a feature's count of repositories is.
@@ -209,15 +233,15 @@ const GUESS_CHAR: f32 = 0.55;
 
 fn header_height(density: Density) -> i32 {
     match density {
-        Density::Comfortable => HEADER_ROW,
-        Density::Compact => HEADER_ROW_COMPACT,
+        Density::Comfortable => header_row(),
+        Density::Compact => header_row_compact(),
     }
 }
 
 fn agent_row(density: Density) -> i32 {
     match density {
-        Density::Comfortable => AGENT_ROW,
-        Density::Compact => AGENT_ROW_COMPACT,
+        Density::Comfortable => agent_row_px(),
+        Density::Compact => agent_row_compact(),
     }
 }
 
@@ -674,9 +698,9 @@ impl AgentView {
     /// pill's padding before the text to the row's padding.
     pub fn subagent_line(&self, row: Rect, density: Density, j: usize) -> Rect {
         let x = row.loc.x + CHILD_TEXT_X - CHILD_X - PILL_PADDING;
-        let y = row.loc.y + agent_row(density) + j as i32 * CARD_LINE;
+        let y = row.loc.y + agent_row(density) + j as i32 * card_line_px();
         let w = (row.loc.x + row.size.w - CHILD_PAD / 2 - x).max(0);
-        Rectangle::new((x, y).into(), (w, CARD_LINE).into())
+        Rectangle::new((x, y).into(), (w, card_line_px()).into())
     }
 
     /// Everything known of it, for its tooltip under `label`: a line each,
@@ -701,7 +725,7 @@ impl AgentView {
     /// Its row's height at `density`, in logical pixels: a line, and one
     /// per subagent line.
     pub fn height(&self, density: Density) -> i32 {
-        agent_row(density) + self.subagent_lines() as i32 * CARD_LINE
+        agent_row(density) + self.subagent_lines() as i32 * card_line_px()
     }
 }
 
@@ -873,7 +897,7 @@ fn git_marks_rect(git: &GitStatus, x: i32, line: Rect) -> Option<Rect> {
     let arrows: i32 = [git.ahead, git.behind]
         .into_iter()
         .filter(|&n| n > 0)
-        .map(|n| mark + 1 + text_extent(&n.to_string(), DETAIL_FONT_SIZE))
+        .map(|n| mark + 1 + text_extent(&n.to_string(), detail_font_size()))
         .sum();
     let w = shapes * mark + arrows;
     let start = x + GIT_MARK_GAP;
@@ -895,7 +919,7 @@ fn text_extent(text: &str, size: f32) -> i32 {
 /// How wide the GitHub section's chip labelled `label` is: its mark and
 /// its label, with room around them.
 fn ci_chip_width(label: &str) -> i32 {
-    2 * CI_CHIP_PAD + STATUS_WIDTH + CI_MARK_GAP + text_extent(label, DETAIL_FONT_SIZE)
+    2 * CI_CHIP_PAD + STATUS_WIDTH + CI_MARK_GAP + text_extent(label, detail_font_size())
 }
 
 /// The colour of the mark of a CI run standing at `state`: a done agent's
@@ -981,7 +1005,7 @@ impl WorkspaceView {
         let lines = self.attention_lines(density) as i32;
         let bottom = if lines > 0 { ATTENTION_BOTTOM } else { 0 };
         let (name, branch) = self.header_lines(density);
-        name + branch + self.info_line() + lines * TAB_LINE + bottom
+        name + branch + self.info_line() + lines * tab_line() + bottom
     }
 
     /// The heights of its header's name band and of the line under it
@@ -991,15 +1015,15 @@ impl WorkspaceView {
         let under = self.branch.is_some() || self.feature.is_some();
         match (under, density) {
             (false, _) => (header_height(density), 0),
-            (true, Density::Comfortable) => (NAME_LINE, BRANCH_LINE),
-            (true, Density::Compact) => (NAME_LINE_COMPACT, BRANCH_LINE_COMPACT),
+            (true, Density::Comfortable) => (name_line(), branch_line()),
+            (true, Density::Compact) => (name_line_compact(), branch_line_compact()),
         }
     }
 
     /// The height of the line under its feature's stage marks.
     fn info_line(&self) -> i32 {
         if self.feature.is_some() {
-            FEATURE_INFO_LINE
+            feature_info_line()
         } else {
             0
         }
@@ -1385,7 +1409,7 @@ impl RowLayout {
     /// the branch.
     pub fn rename_field(&self) -> Rect {
         let x = self.name.loc.x - RENAME_INSET;
-        let y = self.title.loc.y + (self.title.size.h - RENAME_HEIGHT) / 2;
+        let y = self.title.loc.y + (self.title.size.h - rename_height()) / 2;
         let end = [self.worktrees, self.ci, self.errors, self.chip]
             .into_iter()
             .flatten()
@@ -1394,7 +1418,7 @@ impl RowLayout {
             .min()
             .unwrap_or(self.buttons_x())
             - 2;
-        Rectangle::new((x, y).into(), ((end - x).max(0), RENAME_HEIGHT).into())
+        Rectangle::new((x, y).into(), ((end - x).max(0), rename_height()).into())
     }
 }
 
@@ -1670,7 +1694,10 @@ impl SidebarLayout {
         } else if let Some(dots) = row.stages.filter(|r| inside(*r)) {
             SidebarHit::Stage(i, super::stage_dot_at(dots, row.stage_big, pos.x))
         } else if let Some(lines) = row.attention.filter(|r| inside(*r)) {
-            SidebarHit::Attention(i, ((pos.y - lines.loc.y as f64) / TAB_LINE as f64) as usize)
+            SidebarHit::Attention(
+                i,
+                ((pos.y - lines.loc.y as f64) / tab_line() as f64) as usize,
+            )
         } else if row.chip.is_some_and(inside) {
             SidebarHit::Chip(i)
         } else if row.errors.is_some_and(inside) {
@@ -1899,14 +1926,14 @@ fn status_extent(ws: &WorkspaceView, cards: &[AgentView]) -> Option<i32> {
     ws.status.filter(|_| ws.folded)?;
     Some(match cards.len() {
         0 => STATUS_SLOT,
-        n => STATUS_SLOT + COUNT_GAP + text_extent(&n.to_string(), TINY_FONT_SIZE),
+        n => STATUS_SLOT + COUNT_GAP + text_extent(&n.to_string(), tiny_font_size()),
     })
 }
 
 /// The width of a header pill counting `count`.
 fn pill_extent(count: usize) -> i32 {
-    let w = text_extent(&count.to_string(), TINY_FONT_SIZE) + 2 * PILL_PADDING;
-    w.max(PILL_HEIGHT)
+    let w = text_extent(&count.to_string(), tiny_font_size()) + 2 * PILL_PADDING;
+    w.max(pill_height())
 }
 
 /// Where the header's parts sit in a sidebar `width` wide: the project's
@@ -1942,9 +1969,9 @@ fn inbox_rects(n: usize, y: i32, width: i32, density: Density) -> (Option<Rect>,
     if n == 0 {
         return (None, Vec::new(), y);
     }
-    let title = Rectangle::new((0, y).into(), (width - GAP, INBOX_TITLE).into());
+    let title = Rectangle::new((0, y).into(), (width - GAP, inbox_title_px()).into());
     let child_w = (width - GAP - ROW_INSET - CHILD_X).max(0);
-    let mut y = y + INBOX_TITLE;
+    let mut y = y + inbox_title_px();
     let rows = (0..n)
         .map(|_| {
             let rect = Rectangle::new((CHILD_X, y).into(), (child_w, agent_row(density)).into());
@@ -1973,10 +2000,10 @@ fn features_rects(
     // A row per feature, as an agent row with lines under its first for
     // the stage dots and how the stage stands.
     let child_w = (width - GAP - ROW_INSET - CHILD_X).max(0);
-    let mut y = title.map_or(y, |t| t.loc.y + SECTION_TITLE);
+    let mut y = title.map_or(y, |t| t.loc.y + section_title());
     let rows = (0..n)
         .map(|_| {
-            let h = agent_row(density) + STAGE_LINE + FEATURE_INFO_LINE - FEATURE_TUCK;
+            let h = agent_row(density) + STAGE_LINE + feature_info_line() - FEATURE_TUCK;
             let rect = Rectangle::new((CHILD_X, y).into(), (child_w, h).into());
             y += h + CHILD_GAP;
             rect
@@ -1996,7 +2023,7 @@ pub(super) fn feature_dots_rect(row: Rect) -> Rect {
     Rectangle::new(
         (
             row.loc.x - CHILD_X + NAME_X,
-            row.loc.y + row.size.h - FEATURE_INFO_LINE - STAGE_LINE,
+            row.loc.y + row.size.h - feature_info_line() - STAGE_LINE,
         )
             .into(),
         (
@@ -2012,12 +2039,12 @@ fn feature_info_rect(row: Rect) -> Rect {
     Rectangle::new(
         (
             row.loc.x - CHILD_X + NAME_X,
-            row.loc.y + row.size.h - FEATURE_INFO_LINE,
+            row.loc.y + row.size.h - feature_info_line(),
         )
             .into(),
         (
             row.size.w - (NAME_X - CHILD_X) - CHILD_PAD,
-            FEATURE_INFO_LINE,
+            feature_info_line(),
         )
             .into(),
     )
@@ -2028,7 +2055,7 @@ fn feature_info_rect(row: Rect) -> Rect {
 fn features_title_rect(y: i32, width: i32) -> Rect {
     Rectangle::new(
         (0, y + SECTION_TOP).into(),
-        (width - GAP, SECTION_TITLE).into(),
+        (width - GAP, section_title()).into(),
     )
 }
 
@@ -2063,8 +2090,8 @@ fn features_waiting_rect(title: Rect, count: usize, waiting: usize) -> Option<Re
     }
     let right = title.loc.x + title.size.w - ROW_INSET - CHILD_PAD;
     let w = pill_extent(waiting);
-    let x = right - text_extent(&count.to_string(), DETAIL_FONT_SIZE) - TITLE_GAP - w;
-    let label_end = NAME_X + text_extent(FEATURES_LABEL, SMALL_FONT_SIZE) + TITLE_GAP;
+    let x = right - text_extent(&count.to_string(), detail_font_size()) - TITLE_GAP - w;
+    let label_end = NAME_X + text_extent(FEATURES_LABEL, small_font_size()) + TITLE_GAP;
     (x >= label_end).then(|| Rectangle::new((x, title.loc.y).into(), (w, title.size.h).into()))
 }
 
@@ -2238,7 +2265,7 @@ pub fn sidebar_layout_at(
         let marks = ws.git.as_ref().and_then(|status| {
             let (x, line) = match (branch, git) {
                 (Some(line), _) => {
-                    let name = text_extent(ws.branch.as_deref()?, DETAIL_FONT_SIZE);
+                    let name = text_extent(ws.branch.as_deref()?, detail_font_size());
                     (
                         line.loc.x + BRANCH_ICON_WIDTH + BRANCH_ICON_GAP + name,
                         line,
@@ -2253,7 +2280,7 @@ pub fn sidebar_layout_at(
         let attention = (attention_lines > 0).then(|| {
             Rectangle::new(
                 (ROW_INSET, y + title_h + branch_h + info_h).into(),
-                (width - GAP - 2 * ROW_INSET, attention_lines * TAB_LINE).into(),
+                (width - GAP - 2 * ROW_INSET, attention_lines * tab_line()).into(),
             )
         });
         rows.push(RowLayout {
@@ -2317,8 +2344,8 @@ pub fn sidebar_layout_at(
         );
         card_rects.push(ws_cards);
         let ws_more = (!folded && !ws.more_agents.is_empty()).then(|| {
-            let line = child(y, CARD_LINE);
-            y += CARD_LINE + CHILD_GAP;
+            let line = child(y, card_line_px());
+            y += card_line_px() + CHILD_GAP;
             line
         });
         more.push(ws_more);
@@ -2377,12 +2404,12 @@ fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32) -> CiLayout {
     let label_w = view
         .chips
         .iter()
-        .map(|chip| text_extent(group_label(chip.group), DETAIL_FONT_SIZE))
+        .map(|chip| text_extent(group_label(chip.group), detail_font_size()))
         .max()
         .unwrap_or(0);
     let left = label_x + label_w + CI_LABEL_GAP - CI_CHIP_PAD;
     let right = end + CI_CHIP_PAD;
-    let line_y = |line: i32| top + line * CARD_LINE;
+    let line_y = |line: i32| top + line * card_line_px();
     let (mut chip_x, mut line, mut group) = (left, -1, None);
     let mut labels = Vec::new();
     let chips = view
@@ -2392,14 +2419,16 @@ fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32) -> CiLayout {
             let full = ci_chip_width(&chip.label);
             if group != Some(chip.group) {
                 (chip_x, line, group) = (left, line + 1, Some(chip.group));
-                let label =
-                    Rectangle::new((label_x, line_y(line)).into(), (label_w, CARD_LINE).into());
+                let label = Rectangle::new(
+                    (label_x, line_y(line)).into(),
+                    (label_w, card_line_px()).into(),
+                );
                 labels.push((chip.group, label));
             } else if chip_x > left && chip_x + full.min(right - left) > right {
                 (chip_x, line) = (left, line + 1);
             }
             let w = full.min((right - left).max(0));
-            let rect = Rectangle::new((chip_x, line_y(line)).into(), (w, CARD_LINE).into());
+            let rect = Rectangle::new((chip_x, line_y(line)).into(), (w, card_line_px()).into());
             chip_x += w + CI_CHIP_GAP;
             rect
         })
@@ -2407,16 +2436,20 @@ fn ci_layout(view: &CiView, (x, y): (i32, i32), width: i32) -> CiLayout {
     // The count after the last chip, or a line down when it does not fit.
     let mut lines = line + 1;
     let others = (view.other_prs > 0).then(|| {
-        let w = text_extent(&prs_label(view.other_prs), TINY_FONT_SIZE) + 2 * PILL_PADDING;
+        let w = text_extent(&prs_label(view.other_prs), tiny_font_size()) + 2 * PILL_PADDING;
         if line < 0 || chip_x > end - w {
             lines += 1;
         }
         Rectangle::new(
-            (end - w, line_y(lines - 1) + (CARD_LINE - PILL_HEIGHT) / 2).into(),
-            (w, PILL_HEIGHT).into(),
+            (
+                end - w,
+                line_y(lines - 1) + (card_line_px() - pill_height()) / 2,
+            )
+                .into(),
+            (w, pill_height()).into(),
         )
     });
-    let height = 2 * CI_PAD + lines * CARD_LINE;
+    let height = 2 * CI_PAD + lines * card_line_px();
     CiLayout {
         card: Rectangle::new((x, y).into(), (width, height).into()),
         chips,
@@ -2547,7 +2580,7 @@ impl Painter {
                 self.text(
                     c,
                     "Workspaces",
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     px(ROW_INSET) as f32 + PADDING * s,
                     px(header.loc.x + header.size.w) as f32,
                     (0, px(BAR_HEIGHT)),
@@ -2558,13 +2591,13 @@ impl Painter {
         }
         let lit = (alpha(head.plus), head.plus_open);
         self.header_button(c, plus, lit, scale, p, |x, y| new_tab(x, y, 0.9 * s));
-        if head.empty && c.h > px(BAR_HEIGHT + EMPTY_HINT_TOP + 2 * CARD_LINE) {
+        if head.empty && c.h > px(BAR_HEIGHT + EMPTY_HINT_TOP + 2 * card_line_px()) {
             let x = px(ROW_INSET) as f32 + PADDING * s;
             let end = px(width - GAP - ROW_INSET) as f32;
             for (k, (line, color)) in EMPTY_HINT.iter().zip([p.muted, p.placeholder]).enumerate() {
-                let y = BAR_HEIGHT + EMPTY_HINT_TOP + k as i32 * CARD_LINE;
-                let band = (px(y), px(y + CARD_LINE) - px(y));
-                self.text(c, line, DETAIL_FONT_SIZE, x, end, band, scale, color);
+                let y = BAR_HEIGHT + EMPTY_HINT_TOP + k as i32 * card_line_px();
+                let band = (px(y), px(y + card_line_px()) - px(y));
+                self.text(c, line, detail_font_size(), x, end, band, scale, color);
             }
         }
         let lit = (alpha(head.repos), head.repos_open);
@@ -2680,12 +2713,12 @@ impl Painter {
         let end = match count {
             Some(n) => {
                 let n = n.to_string();
-                let w = self.text_width(&n, DETAIL_FONT_SIZE, scale);
+                let w = self.text_width(&n, detail_font_size(), scale);
                 let x = (right - w).round();
                 self.text(
                     c,
                     &n,
-                    DETAIL_FONT_SIZE,
+                    detail_font_size(),
                     x,
                     right + 1.0,
                     title_band,
@@ -2699,7 +2732,7 @@ impl Painter {
         self.text(
             c,
             label,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             px(NAME_X) as f32,
             end,
             title_band,
@@ -2800,7 +2833,7 @@ impl Painter {
             self.text(
                 c,
                 &row.title,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 text_x as f32,
                 px(rect.loc.x + rect.size.w - CHILD_PAD) as f32,
                 band(first, scale),
@@ -2851,21 +2884,30 @@ impl Painter {
         let x = (rect.loc.x as f64 * scale).round() as f32;
         let color = card.tone.text_color(p);
         let band = band(rect, scale);
-        self.text(c, &card.line, DETAIL_FONT_SIZE, x, end, band, scale, color);
+        self.text(
+            c,
+            &card.line,
+            detail_font_size(),
+            x,
+            end,
+            band,
+            scale,
+            color,
+        );
     }
 
     /// The count of a feature's `repos` at the right end of `rect`, in
     /// words: a mark beside a number counts worktrees on the same line.
     fn repo_count(&self, c: &mut Canvas, repos: usize, rect: Rect, scale: f64, p: &Palette) {
         let text = format!("{repos} repos");
-        let w = self.text_width(&text, DETAIL_FONT_SIZE, scale);
+        let w = self.text_width(&text, detail_font_size(), scale);
         let end = ((rect.loc.x + rect.size.w) as f64 * scale).round() as f32;
         let band = band(rect, scale);
         let x = (end - w).round();
         self.text(
             c,
             &text,
-            DETAIL_FONT_SIZE,
+            detail_font_size(),
             x,
             end + 1.0,
             band,
@@ -2932,7 +2974,7 @@ impl Painter {
             self.text(
                 c,
                 &format!("+{n} more"),
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 px(line.loc.x + CHILD_TEXT_X - CHILD_X) as f32,
                 px(line.loc.x + line.size.w) as f32,
                 band(*line, scale),
@@ -3035,7 +3077,7 @@ impl Painter {
                 self.text(
                     c,
                     &ws.name,
-                    FONT_SIZE,
+                    font_size(),
                     px(row.name.loc.x) as f32,
                     px(end) as f32,
                     title_band,
@@ -3051,7 +3093,7 @@ impl Painter {
                     let after = self.text(
                         c,
                         branch,
-                        DETAIL_FONT_SIZE,
+                        detail_font_size(),
                         x,
                         end,
                         line_band,
@@ -3070,7 +3112,7 @@ impl Painter {
         // pill as it opens the popup.
         if let Some(count) = row.worktrees {
             let n = ws.worktrees().len().to_string();
-            let n_w = (self.text_width(&n, DETAIL_FONT_SIZE, scale) / s).ceil() as i32;
+            let n_w = (self.text_width(&n, detail_font_size(), scale) / s).ceil() as i32;
             let end = count.loc.x + count.size.w - COUNT_PILL_PAD;
             let icon = within(
                 count,
@@ -3092,7 +3134,7 @@ impl Painter {
             self.text(
                 c,
                 &n,
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 px(end - n_w) as f32,
                 px(end) as f32,
                 band(count, scale),
@@ -3182,14 +3224,14 @@ impl Painter {
         let text_x = px(NAME_X + BRANCH_ICON_WIDTH + BRANCH_ICON_GAP) as f32;
         let needing = ws.needing_attention();
         for k in 0..ws.attention_lines(view.state.density) {
-            let line_y = lines.loc.y + TAB_LINE * k as i32;
-            let band = (px(line_y), px(line_y + TAB_LINE) - px(line_y));
+            let line_y = lines.loc.y + tab_line() * k as i32;
+            let band = (px(line_y), px(line_y + tab_line()) - px(line_y));
             let Some(wt) = needing.get(k).filter(|_| k < WORKTREE_LINES) else {
                 let more = format!("+{} more", needing.len() - WORKTREE_LINES);
                 self.text(
                     c,
                     &more,
-                    DETAIL_FONT_SIZE,
+                    detail_font_size(),
                     text_x,
                     right,
                     band,
@@ -3200,7 +3242,7 @@ impl Painter {
             };
             let icon = Rectangle::new(
                 (NAME_X, line_y).into(),
-                (BRANCH_ICON_WIDTH, TAB_LINE).into(),
+                (BRANCH_ICON_WIDTH, tab_line()).into(),
             );
             icon_sdf(c, icon, scale, p.placeholder, |x, y| {
                 git_branch(x, y, 0.75 * s)
@@ -3208,7 +3250,7 @@ impl Painter {
             let x = self.text(
                 c,
                 &wt.name(),
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 text_x,
                 right,
                 band,
@@ -3224,7 +3266,7 @@ impl Painter {
                 self.text(
                     c,
                     &format!("  {tag}"),
-                    DETAIL_FONT_SIZE,
+                    detail_font_size(),
                     x,
                     right,
                     band,
@@ -3310,7 +3352,7 @@ impl Painter {
         p: &Palette,
     ) {
         let s = scale as f32;
-        let h = PILL_HEIGHT + 4;
+        let h = pill_height() + 4;
         let pill = Rectangle::new(
             (x - COUNT_PILL_PAD, title.loc.y + (title.size.h - h) / 2).into(),
             (end - x + 2 * COUNT_PILL_PAD, h).into(),
@@ -3348,7 +3390,7 @@ impl Painter {
         self.text(
             c,
             name,
-            FONT_SIZE,
+            font_size(),
             text_x,
             max_x,
             (0, px(BAR_HEIGHT)),
@@ -3403,18 +3445,18 @@ impl Painter {
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
         let band = band(slot, scale);
-        let h = px(PILL_HEIGHT) as f32;
+        let h = px(pill_height()) as f32;
         let (x0, _, w, _) = rect_px(slot, scale);
         let y = (band.0 as f32 + (band.1 as f32 - h) / 2.0).round();
         c.rounded(x0, y, w, h, h / 2.0, color);
         let text = count.to_string();
-        let text_w = self.text_width(&text, TINY_FONT_SIZE, scale);
+        let text_w = self.text_width(&text, tiny_font_size(), scale);
         let x = (x0 + (w - text_w) / 2.0).round();
         let pill_band = (y as i32, h as i32);
         self.text(
             c,
             &text,
-            TINY_FONT_SIZE,
+            tiny_font_size(),
             x,
             f32::MAX,
             pill_band,
@@ -3455,7 +3497,7 @@ impl Painter {
             self.text(
                 c,
                 &hidden.to_string(),
-                TINY_FONT_SIZE,
+                tiny_font_size(),
                 x,
                 end,
                 band,
@@ -3488,7 +3530,7 @@ impl Painter {
             (x + pad, x + w - pad),
             band(rect, scale),
             true,
-            FONT_SIZE,
+            font_size(),
             scale,
             p,
         );
@@ -3592,12 +3634,12 @@ impl Painter {
             px(close.loc.x) as f32
         } else if let Some(place) = place {
             let most = (rect.size.w as f32 * INBOX_PLACE * s).round();
-            let w = self.text_width(place, DETAIL_FONT_SIZE, scale).min(most);
+            let w = self.text_width(place, detail_font_size(), scale).min(most);
             let x = (right - w).round();
             self.text(
                 c,
                 place,
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 x,
                 right + 1.0,
                 line_band,
@@ -3609,8 +3651,8 @@ impl Painter {
             // Its turn's word, as the feature tab says it.
             let label = super::Standing::Yours.word();
             let pill_w =
-                self.text_width(label, TINY_FONT_SIZE, scale) + 2.0 * PILL_PADDING as f32 * s;
-            let pill_h = px(PILL_HEIGHT) as f32;
+                self.text_width(label, tiny_font_size(), scale) + 2.0 * PILL_PADDING as f32 * s;
+            let pill_h = px(pill_height()) as f32;
             let pill_x = (right - pill_w).round();
             let pill_y = (line_band.0 as f32 + (line_band.1 as f32 - pill_h) / 2.0).round();
             let pill_fill = blocked_pill(p);
@@ -3627,7 +3669,7 @@ impl Painter {
             self.text(
                 c,
                 label,
-                TINY_FONT_SIZE,
+                tiny_font_size(),
                 x,
                 f32::MAX,
                 pill_band,
@@ -3646,7 +3688,7 @@ impl Painter {
         let after = self.text(
             c,
             card.heading(),
-            SMALL_FONT_SIZE,
+            small_font_size(),
             text_x,
             end,
             line_band,
@@ -3655,12 +3697,12 @@ impl Painter {
         );
         // What it is on, where a few characters of it fit.
         let x = after + px(TITLE_GAP) as f32;
-        let some = self.text_width("abc…", SMALL_FONT_SIZE, scale);
+        let some = self.text_width("abc…", small_font_size(), scale);
         if let Some(title) = card.title().filter(|_| x + some <= end) {
             self.text(
                 c,
                 title,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 x,
                 end,
                 line_band,
@@ -3691,16 +3733,16 @@ impl Painter {
             };
             let color = mix(rest, p.text, lit);
             let (ex, thin) = (text_x as i32 + px(2), px(1).max(1));
-            let (top, mid) = (px(line.loc.y + 3), px(line.loc.y + CARD_LINE / 2));
+            let (top, mid) = (px(line.loc.y + 3), px(line.loc.y + card_line_px() / 2));
             c.fill(ex, top, thin, mid - top + thin, color);
             c.fill(ex, mid, px(SUBAGENT_INDENT - 5), thin, color);
             self.text(
                 c,
                 &sub.task,
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 task_x,
                 right,
-                (px(line.loc.y), px(CARD_LINE)),
+                (px(line.loc.y), px(card_line_px())),
                 scale,
                 color,
             );
@@ -3710,10 +3752,10 @@ impl Painter {
             self.text(
                 c,
                 &format!("+{} more", rest + 1),
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 task_x,
                 right,
-                (px(line.loc.y), px(CARD_LINE)),
+                (px(line.loc.y), px(card_line_px())),
                 scale,
                 p.muted,
             );
@@ -3750,7 +3792,7 @@ impl Painter {
         }
         let mark = Rectangle::new(
             (rect.loc.x + CHILD_PAD, rect.loc.y + CI_PAD).into(),
-            (STATUS_WIDTH, CARD_LINE).into(),
+            (STATUS_WIDTH, card_line_px()).into(),
         );
         if let Some(icon) = github_icon() {
             c.picture_sized(&icon, mark, scale, p.muted, CI_ICON_SIZE);
@@ -3769,7 +3811,7 @@ impl Painter {
             self.text(
                 c,
                 &prs_label(view.other_prs),
-                TINY_FONT_SIZE,
+                tiny_font_size(),
                 ox + PILL_PADDING as f32 * s,
                 ox + ow,
                 (oy as i32, oh as i32),
@@ -3783,7 +3825,7 @@ impl Painter {
             self.text(
                 c,
                 group_label(*group),
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 px(rect.loc.x) as f32,
                 px(rect.loc.x + rect.size.w) as f32 + 1.0,
                 band(*rect, scale),
@@ -3819,7 +3861,7 @@ impl Painter {
             self.text(
                 c,
                 &chip.label,
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 px(mark.loc.x + STATUS_WIDTH + CI_MARK_GAP) as f32,
                 end,
                 band(*rect, scale),
@@ -3852,7 +3894,7 @@ pub fn sidebar_rename_field(area: Rect, line: &Line, scale: f64) -> FieldSpot {
     let (x, _, w, _) = rect_px(area, scale);
     let pad = (RENAME_INSET as f32 * scale as f32).round();
     FieldSpot {
-        size: FONT_SIZE,
+        size: font_size(),
         area,
         text: (x + pad, x + w - pad),
         line: line.clone(),
@@ -4438,14 +4480,14 @@ mod tests {
     }
 
     use super::{
-        AGENT_ROW, AGENT_ROW_COMPACT, AGENT_SLOT, ATTENTION_BOTTOM, AgentIcon, AgentLine,
-        AgentView, BLOCK_GAP, BRANCH_LINE, BRANCH_LINE_COMPACT, CARD_LINE, CHILD_GAP, CHILD_TEXT_X,
-        CHILD_X, CI_CHIP_GAP, CI_LABEL_GAP, CI_PAD, CLOSE_SLOT, CiChip, CiLayout, CiView,
-        DETAIL_FONT_SIZE, Density, FOLDER, GAP, HEADER_BUTTON, HEADER_ROW, HEADER_ROW_COMPACT,
-        INBOX_GAP, INBOX_TITLE, NAME_GAP, NAME_LINE, NAME_LINE_COMPACT, NAME_X, PILL_GAP,
-        ROW_INSET, ROWS_TOP, SCROLL_END, SidebarHit, SidebarLayout, TAB_LINE, WorkspaceView,
-        card_order, ci_chip_width, inbox_order, sentence_case, sidebar_layout, sidebar_layout_at,
-        text_extent, workspace_slot,
+        AGENT_SLOT, ATTENTION_BOTTOM, AgentIcon, AgentLine, AgentView, BLOCK_GAP, CHILD_GAP,
+        CHILD_TEXT_X, CHILD_X, CI_CHIP_GAP, CI_LABEL_GAP, CI_PAD, CLOSE_SLOT, CiChip, CiLayout,
+        CiView, Density, FOLDER, GAP, HEADER_BUTTON, INBOX_GAP, NAME_GAP, NAME_X, PILL_GAP,
+        ROW_INSET, ROWS_TOP, SCROLL_END, SidebarHit, SidebarLayout, WorkspaceView,
+        agent_row_compact, agent_row_px, branch_line, branch_line_compact, card_line_px,
+        card_order, ci_chip_width, detail_font_size, header_row, header_row_compact, inbox_order,
+        inbox_title_px, name_line, name_line_compact, sentence_case, sidebar_layout,
+        sidebar_layout_at, tab_line, text_extent, workspace_slot,
     };
     use crate::WorkspaceKind;
     use crate::chrome::{BAR_HEIGHT, Rect, TabView};
@@ -4455,8 +4497,12 @@ mod tests {
     use smithay::utils::Rectangle;
 
     /// A header with a branch: its name's band and its branch's line.
-    const BRANCHED: i32 = NAME_LINE + BRANCH_LINE;
-    const BRANCHED_COMPACT: i32 = NAME_LINE_COMPACT + BRANCH_LINE_COMPACT;
+    fn branched() -> i32 {
+        name_line() + branch_line()
+    }
+    fn branched_compact() -> i32 {
+        name_line_compact() + branch_line_compact()
+    }
 
     #[test]
     fn workspace_puts_its_tabs_together() {
@@ -4681,33 +4727,33 @@ mod tests {
             ..GitStatus::default()
         });
         // Merged and clean: only counted.
-        assert_eq!(ws.height(Density::Comfortable), BRANCHED);
+        assert_eq!(ws.height(Density::Comfortable), branched());
         // Those needing a look get a line each, up to a count of the rest.
         let worktrees = &mut ws.git.as_mut().unwrap().worktrees;
         worktrees[0].dirty = true;
         worktrees[1].merged = false;
-        let lines = |n: i32| BRANCHED + n * TAB_LINE + ATTENTION_BOTTOM;
+        let lines = |n: i32| branched() + n * tab_line() + ATTENTION_BOTTOM;
         assert_eq!(ws.height(Density::Comfortable), lines(2));
         for w in &mut ws.git.as_mut().unwrap().worktrees {
             w.merged = false;
         }
         assert_eq!(ws.height(Density::Comfortable), lines(4));
         // Compact keeps the lines too.
-        let compact = BRANCHED_COMPACT + 4 * TAB_LINE + ATTENTION_BOTTOM;
+        let compact = branched_compact() + 4 * tab_line() + ATTENTION_BOTTOM;
         assert_eq!(ws.height(Density::Compact), compact);
         let layout = sidebar_layout_at(&[ws.clone()], &[], 240, Density::Comfortable);
         let row = layout.rows[0];
         // On the branch's line, at its right end.
         let count = row.worktrees.expect("a count");
         let branch = row.branch.expect("a branch");
-        assert_eq!(count.loc.y, ROWS_TOP + NAME_LINE);
+        assert_eq!(count.loc.y, ROWS_TOP + name_line());
         assert_eq!(count.loc.y, branch.loc.y);
         assert!(branch.loc.x + branch.size.w < count.loc.x);
         assert_eq!(count.loc.x + count.size.w, row.close.loc.x + CLOSE_SLOT);
         assert_eq!(layout.hit(mid(count)), Some(SidebarHit::Worktrees(0)));
         assert_eq!(SidebarHit::Worktrees(0).pill(), SidebarHit::Row(0));
         let lines = row.attention.expect("worktree lines");
-        assert_eq!(lines.loc.y, ROWS_TOP + BRANCHED);
+        assert_eq!(lines.loc.y, ROWS_TOP + branched());
         assert_eq!(layout.hit(mid(lines)), Some(SidebarHit::Attention(0, 2)));
         // A feature's card has neither: they are other features' branches.
         let mut card = ws.clone();
@@ -4721,7 +4767,7 @@ mod tests {
         assert!(compact.rows[0].attention.is_some());
         // Folded: the lines go, the count stays.
         ws.folded = true;
-        assert_eq!(ws.height(Density::Comfortable), BRANCHED);
+        assert_eq!(ws.height(Density::Comfortable), branched());
         let folded = sidebar_layout(&[ws], &[], 240);
         assert!(folded.rows[0].worktrees.is_some());
         assert_eq!(folded.rows[0].attention, None);
@@ -4752,7 +4798,10 @@ mod tests {
             })
             .collect();
         assert_eq!(card.subagent_lines(), SUBAGENT_LINES + 1);
-        assert_eq!(card.height(Density::Comfortable), AGENT_ROW + 6 * CARD_LINE);
+        assert_eq!(
+            card.height(Density::Comfortable),
+            agent_row_px() + 6 * card_line_px()
+        );
         let ws = workspace("gerdr", Some(AgentStatus::Working), Some("main"));
         let agents = vec![vec![card.clone()]];
         let layout = sidebar_layout_at(&[ws], &agents, 240, Density::Comfortable);
@@ -4762,7 +4811,7 @@ mod tests {
         let row = layout.cards[0][0].1;
         let at = |r: super::Rect| Point::from((r.loc.x as f64 + 4.0, r.loc.y as f64 + 4.0));
         let first = card.subagent_line(row, Density::Comfortable, 0);
-        assert_eq!(first.loc.y, row.loc.y + AGENT_ROW);
+        assert_eq!(first.loc.y, row.loc.y + agent_row_px());
         assert_eq!(layout.hit(at(first)), Some(SidebarHit::Subagent(0, 0, 0)));
         // The unknown one's line and the count are the row's.
         for j in [2, SUBAGENT_LINES] {
@@ -4803,24 +4852,27 @@ mod tests {
         let fields = card.tooltip_fields();
         assert!(fields.contains(&("Subagent".into(), "Audit the plan".into())));
         assert!(fields.contains(&("Subagent".into(), "Working".into())));
-        assert_eq!(card.height(Density::Comfortable), AGENT_ROW + 2 * CARD_LINE);
+        assert_eq!(
+            card.height(Density::Comfortable),
+            agent_row_px() + 2 * card_line_px()
+        );
         chat.subagents.clear();
         let card = AgentView::cursor(&chat);
         assert_eq!(card.subagent_lines(), 0);
-        assert_eq!(card.height(Density::Comfortable), AGENT_ROW);
+        assert_eq!(card.height(Density::Comfortable), agent_row_px());
     }
 
     #[test]
     fn headers_are_a_line_and_one_for_the_branch() {
         let with = workspace("gerdr", Some(AgentStatus::Working), Some("main"));
         let plain = workspace("~", None, None);
-        assert_eq!(plain.height(Density::Comfortable), HEADER_ROW);
-        assert_eq!(plain.height(Density::Compact), HEADER_ROW_COMPACT);
-        assert_eq!(with.height(Density::Comfortable), BRANCHED);
-        assert_eq!(with.height(Density::Compact), BRANCHED_COMPACT);
+        assert_eq!(plain.height(Density::Comfortable), header_row());
+        assert_eq!(plain.height(Density::Compact), header_row_compact());
+        assert_eq!(with.height(Density::Comfortable), branched());
+        assert_eq!(with.height(Density::Compact), branched_compact());
         let with = agent("p1", AgentStatus::Idle, Some("gerdr/src"));
-        assert_eq!(with.height(Density::Comfortable), AGENT_ROW);
-        assert_eq!(with.height(Density::Compact), AGENT_ROW_COMPACT);
+        assert_eq!(with.height(Density::Comfortable), agent_row_px());
+        assert_eq!(with.height(Density::Compact), agent_row_compact());
         assert_eq!(
             with.tooltip_fields(),
             [
@@ -4837,9 +4889,9 @@ mod tests {
         let row = layout.rows[0];
         let branch = row.branch.expect("a line for the branch");
         assert_eq!((row.name.loc.x, branch.loc.x), (NAME_X, NAME_X));
-        assert_eq!(row.title.size.h, NAME_LINE);
-        assert_eq!(branch.loc.y, row.name.loc.y + NAME_LINE);
-        assert_eq!(branch.size.h, BRANCH_LINE);
+        assert_eq!(row.title.size.h, name_line());
+        assert_eq!(branch.loc.y, row.name.loc.y + name_line());
+        assert_eq!(branch.size.h, branch_line());
         // A long name keeps the width, under the "×" too: that shows
         // only under the pointer.
         let long = "a-workspace-with-a-very-long-name-indeed";
@@ -4861,7 +4913,7 @@ mod tests {
         // Without a branch, one line.
         let layout = sidebar_layout(&[workspace("~", None, None)], &[], 200);
         assert_eq!(layout.rows[0].branch, None);
-        assert_eq!(layout.rows[0].rect.size.h, HEADER_ROW);
+        assert_eq!(layout.rows[0].rect.size.h, header_row());
         // On the header, the branch is the row's.
         let layout = sidebar_layout(&[workspace("gerdr", None, Some("main"))], &[], 240);
         let branch = layout.rows[0].branch.unwrap();
@@ -4884,7 +4936,7 @@ mod tests {
         let layout = sidebar_layout(std::slice::from_ref(&ws), &[], 240);
         let row = layout.rows[0];
         let (branch, marks) = (row.branch.unwrap(), row.marks.expect("marks"));
-        let name = text_extent("main", DETAIL_FONT_SIZE);
+        let name = text_extent("main", detail_font_size());
         let after = branch.loc.x + super::BRANCH_ICON_WIDTH + super::BRANCH_ICON_GAP + name;
         assert_eq!(marks.loc.x, after + super::GIT_MARK_GAP);
         assert_eq!((marks.loc.y, marks.size.h), (branch.loc.y, branch.size.h));
@@ -5162,12 +5214,12 @@ mod tests {
         let layout = sidebar_layout(&[ws], &agents, 240);
         assert!(layout.cards[0].is_empty());
         assert_eq!((layout.more[0], layout.ci[0].clone()), (None, None));
-        assert_eq!(layout.blocks[0].size.h, BRANCHED + BLOCK_GAP);
+        assert_eq!(layout.blocks[0].size.h, branched() + BLOCK_GAP);
         // Its status shows, with how many agents it hides, and its CI as
         // the mark.
         let row = layout.rows[0];
         let chip = row.chip.expect("the status of a folded workspace");
-        let count = text_extent("2", crate::chrome::TINY_FONT_SIZE);
+        let count = text_extent("2", crate::chrome::tiny_font_size());
         assert_eq!(chip.size.w, super::STATUS_SLOT + super::COUNT_GAP + count);
         assert!(row.ci.is_some());
         let fold = row.fold.expect("a chevron");
@@ -5215,7 +5267,7 @@ mod tests {
         let row = layout.rows[0];
         assert_eq!(mark.loc.y, row.branch.unwrap().loc.y);
         assert_eq!(mark.loc.x + mark.size.w, row.close.loc.x + CLOSE_SLOT);
-        assert_eq!(layout.blocks[0].size.h, BRANCHED + BLOCK_GAP);
+        assert_eq!(layout.blocks[0].size.h, branched() + BLOCK_GAP);
         // The mark says a run failed.
         let mut ci = passing(&["main", "dev"]);
         ci.chips[0].state = CiState::Failed;
@@ -5249,8 +5301,8 @@ mod tests {
         let rows: Vec<_> = layout.inbox.iter().map(|(i, k, _)| (*i, *k)).collect();
         assert_eq!(rows, [(1, 1), (0, 1)]);
         let (_, _, first) = layout.inbox[0];
-        assert_eq!(first.loc, (CHILD_X, ROWS_TOP + INBOX_TITLE).into());
-        assert_eq!(first.size.h, AGENT_ROW);
+        assert_eq!(first.loc, (CHILD_X, ROWS_TOP + inbox_title_px()).into());
+        assert_eq!(first.size.h, agent_row_px());
         assert_eq!(layout.hit(mid(first)), Some(SidebarHit::Inbox(1, 1)));
         assert_eq!(SidebarHit::Inbox(1, 1).pill(), SidebarHit::Inbox(1, 1));
         let (_, _, last) = layout.inbox[1];
@@ -5557,7 +5609,7 @@ mod tests {
             assert_eq!((section.loc.x, section.size.w), (row.loc.x, row.size.w));
             // A line of chips; the block takes it and the gap after it,
             // and the next header moves down by as much.
-            assert_eq!(section.size.h, 2 * CI_PAD + CARD_LINE);
+            assert_eq!(section.size.h, 2 * CI_PAD + card_line_px());
             let end = section.loc.y + section.size.h + 2 * CHILD_GAP + super::block_gap(density);
             assert_eq!(layout.blocks[0].size.h, end - ROWS_TOP);
             assert_eq!(layout.rows[1].rect.loc.y, end);
@@ -5595,28 +5647,31 @@ mod tests {
         assert_eq!(chips[0].loc.y, first_line);
         // One label, "CI", on the first line, where a row's text starts;
         // the chips in a column after it.
-        let label_w = text_extent("CI", DETAIL_FONT_SIZE);
+        let label_w = text_extent("CI", detail_font_size());
         let label_x = card.loc.x + CHILD_TEXT_X - CHILD_X;
-        let label = Rectangle::new((label_x, first_line).into(), (label_w, CARD_LINE).into());
+        let label = Rectangle::new(
+            (label_x, first_line).into(),
+            (label_w, card_line_px()).into(),
+        );
         assert_eq!(ci.labels, [(Group::Branch, label)]);
         assert_eq!(chips[0].loc.x, label_x + label_w + CI_LABEL_GAP - 4);
         let mut lines = 1;
         for (pair, label) in chips.windows(2).zip(&labels[1..]) {
             let (a, b) = (pair[0], pair[1]);
-            assert_eq!(b.size, (ci_chip_width(label), CARD_LINE).into());
+            assert_eq!(b.size, (ci_chip_width(label), card_line_px()).into());
             if b.loc.y == a.loc.y {
                 // Straight after the last on its line.
                 assert_eq!(b.loc.x, a.loc.x + a.size.w + CI_CHIP_GAP);
             } else {
                 // A line down, in the column, as the next did not fit.
                 lines += 1;
-                assert_eq!(b.loc.y, a.loc.y + CARD_LINE);
+                assert_eq!(b.loc.y, a.loc.y + card_line_px());
                 assert_eq!(b.loc.x, chips[0].loc.x);
                 assert!(a.loc.x + a.size.w + CI_CHIP_GAP + b.size.w > card.loc.x + card.size.w);
             }
         }
         assert!(lines > 1, "eight chips take more than a line at 200 px");
-        assert_eq!(card.size.h, 2 * CI_PAD + lines * CARD_LINE);
+        assert_eq!(card.size.h, 2 * CI_PAD + lines * card_line_px());
         for chip in chips {
             assert!(crate::chrome::inside(card, *chip));
         }
@@ -5628,7 +5683,7 @@ mod tests {
         let ci = layout.ci[0].as_ref().unwrap();
         let card_end = ci.card.loc.x + ci.card.size.w - super::CHILD_PAD + 4;
         assert_eq!(ci.chips[0].loc.x + ci.chips[0].size.w, card_end);
-        assert_eq!(ci.card.size.h, 2 * CI_PAD + CARD_LINE);
+        assert_eq!(ci.card.size.h, 2 * CI_PAD + card_line_px());
     }
 
     #[test]
@@ -5638,8 +5693,8 @@ mod tests {
             ws.ci = Some(ci_view(labels, others));
             sidebar_layout(&[ws], &[], width).ci[0].clone().unwrap()
         };
-        let line_of = |ci: &CiLayout, r: Rect| (r.loc.y - ci.card.loc.y - CI_PAD) / CARD_LINE;
-        let lines = |ci: &CiLayout| (ci.card.size.h - 2 * CI_PAD) / CARD_LINE;
+        let line_of = |ci: &CiLayout, r: Rect| (r.loc.y - ci.card.loc.y - CI_PAD) / card_line_px();
+        let lines = |ci: &CiLayout| (ci.card.size.h - 2 * CI_PAD) / card_line_px();
         // Two short branches leave the count room on their line.
         let ci = section(&["main", "dev"], 5, 240);
         let count = ci.others.unwrap();
@@ -5812,13 +5867,13 @@ mod tests {
             [
                 first_line,
                 first_line,
-                first_line + CARD_LINE,
-                first_line + 2 * CARD_LINE
+                first_line + card_line_px(),
+                first_line + 2 * card_line_px()
             ]
         );
         // A label per line, in its chips' band, as wide as the widest.
         let widest = ["CI", "Mine", "Review"]
-            .map(|l| text_extent(l, DETAIL_FONT_SIZE))
+            .map(|l| text_extent(l, detail_font_size()))
             .into_iter()
             .max()
             .unwrap();
@@ -5826,14 +5881,14 @@ mod tests {
         assert_eq!(groups, [Group::Branch, Group::Mine, Group::Review]);
         for ((_, label), chip) in ci.labels.iter().zip([0, 2, 3]) {
             assert_eq!(label.loc.x, ci.card.loc.x + CHILD_TEXT_X - CHILD_X);
-            assert_eq!(label.size, (widest, CARD_LINE).into());
+            assert_eq!(label.size, (widest, card_line_px()).into());
             assert_eq!(label.loc.y, ci.chips[chip].loc.y);
             assert!(label.loc.x + label.size.w < ci.chips[chip].loc.x);
         }
         // The first chip of each line in the same column.
         assert_eq!(ci.chips[2].loc.x, ci.chips[0].loc.x);
         assert_eq!(ci.chips[3].loc.x, ci.chips[0].loc.x);
-        assert_eq!(ci.card.size.h, 2 * CI_PAD + 3 * CARD_LINE);
+        assert_eq!(ci.card.size.h, 2 * CI_PAD + 3 * card_line_px());
     }
 
     #[test]
@@ -5853,13 +5908,13 @@ mod tests {
             .iter()
             .find(|c| c.loc.y > mine[0].loc.y)
             .expect("six chips take more than a line at 200 px");
-        assert_eq!(wrapped.loc.y, mine[0].loc.y + CARD_LINE);
+        assert_eq!(wrapped.loc.y, mine[0].loc.y + card_line_px());
         assert_eq!(wrapped.loc.x, mine[0].loc.x);
         assert_eq!(wrapped.loc.x, ci.chips[0].loc.x);
         // No label on the wrapped line: one per group.
         assert_eq!(ci.labels.len(), 2);
-        let lines = 1 + (mine[mine.len() - 1].loc.y - mine[0].loc.y) / CARD_LINE + 1;
-        assert_eq!(ci.card.size.h, 2 * CI_PAD + lines * CARD_LINE);
+        let lines = 1 + (mine[mine.len() - 1].loc.y - mine[0].loc.y) / card_line_px() + 1;
+        assert_eq!(ci.card.size.h, 2 * CI_PAD + lines * card_line_px());
     }
 
     #[test]
@@ -5867,18 +5922,18 @@ mod tests {
         let (_, ci) = ci_card_of(&[(Group::Branch, "main"), (Group::Review, "#70")], 240);
         let groups: Vec<_> = ci.labels.iter().map(|(g, _)| *g).collect();
         assert_eq!(groups, [Group::Branch, Group::Review]);
-        assert_eq!(ci.chips[1].loc.y, ci.chips[0].loc.y + CARD_LINE);
-        assert_eq!(ci.card.size.h, 2 * CI_PAD + 2 * CARD_LINE);
+        assert_eq!(ci.chips[1].loc.y, ci.chips[0].loc.y + card_line_px());
+        assert_eq!(ci.card.size.h, 2 * CI_PAD + 2 * card_line_px());
         // The column fits the labels present only.
         let (_, mine) = ci_card_of(&[(Group::Mine, "#42")], 240);
         let column = |w: i32| ci.card.loc.x + CHILD_TEXT_X - CHILD_X + w + CI_LABEL_GAP - 4;
         assert_eq!(
             mine.chips[0].loc.x,
-            column(text_extent("Mine", DETAIL_FONT_SIZE))
+            column(text_extent("Mine", detail_font_size()))
         );
         assert_eq!(
             ci.chips[0].loc.x,
-            column(text_extent("Review", DETAIL_FONT_SIZE))
+            column(text_extent("Review", detail_font_size()))
         );
     }
 

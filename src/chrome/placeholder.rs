@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use super::{
-    Canvas, FONT_SIZE, Painter, Palette, Rect, SMALL_FONT_SIZE, icon_sdf, line, physical, spinner,
+    Canvas, Painter, Palette, Rect, font_size, icon_sdf, line, physical, small_font_size, spinner,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -18,10 +18,14 @@ pub const SPINNER_PERIOD: Duration = Duration::from_millis(900);
 /// How many drawings one turn of the spinner is made of.
 pub const SPINNER_STEPS: u32 = 24;
 /// The label line, and the Close and Retry buttons side by side under it.
-const LABEL_HEIGHT: i32 = line(FONT_SIZE, 9);
+fn label_height() -> i32 {
+    line(font_size(), 9)
+}
 const RETRY_GAP: i32 = 14;
 const RETRY_WIDTH: i32 = 84;
-const RETRY_HEIGHT: i32 = line(FONT_SIZE, 15);
+fn retry_height() -> i32 {
+    line(font_size(), 15)
+}
 const BUTTON_GAP: i32 = 8;
 
 /// What a placeholder shows: where the window goes, what is starting
@@ -90,14 +94,15 @@ impl PlaceholderLayout {
 pub fn placeholder_layout(rect: Rect, timed_out: bool) -> PlaceholderLayout {
     let cx = rect.loc.x + rect.size.w / 2;
     let cy = rect.loc.y + rect.size.h / 2;
-    let label = |y: i32| Rectangle::new((rect.loc.x, y).into(), (rect.size.w, LABEL_HEIGHT).into());
+    let label =
+        |y: i32| Rectangle::new((rect.loc.x, y).into(), (rect.size.w, label_height()).into());
     if timed_out {
-        let h = LABEL_HEIGHT + RETRY_GAP + RETRY_HEIGHT;
+        let h = label_height() + RETRY_GAP + retry_height();
         let top = cy - h / 2;
         let button = |x: i32| {
             Some(Rectangle::new(
-                (x, top + LABEL_HEIGHT + RETRY_GAP).into(),
-                (RETRY_WIDTH, RETRY_HEIGHT).into(),
+                (x, top + label_height() + RETRY_GAP).into(),
+                (RETRY_WIDTH, retry_height()).into(),
             ))
         };
         PlaceholderLayout {
@@ -108,7 +113,7 @@ pub fn placeholder_layout(rect: Rect, timed_out: bool) -> PlaceholderLayout {
             retry: button(cx + BUTTON_GAP / 2),
         }
     } else {
-        let h = SPINNER_SIZE + SPINNER_GAP + LABEL_HEIGHT;
+        let h = SPINNER_SIZE + SPINNER_GAP + label_height();
         let top = cy - h / 2;
         PlaceholderLayout {
             spinner: Some(Rectangle::new(
@@ -140,7 +145,14 @@ impl Painter {
         let local = Rectangle::new((0, 0).into(), size);
         let layout = placeholder_layout(local, view.timed_out);
         let color = if view.timed_out { p.text } else { p.muted };
-        self.centered(&mut c, &view.text(), FONT_SIZE, layout.label, scale, color);
+        self.centered(
+            &mut c,
+            &view.text(),
+            font_size(),
+            layout.label,
+            scale,
+            color,
+        );
         if let Some(close) = layout.close {
             let lit = hovered == Some(PlaceholderButton::Close);
             self.button(&mut c, "Close", close, (lit, false), false, scale, p);
@@ -150,12 +162,12 @@ impl Painter {
             self.button(&mut c, "Retry", retry, (lit, false), true, scale, p);
             let hint = Rectangle::new(
                 (0, retry.loc.y + retry.size.h + 6).into(),
-                (size.w, LABEL_HEIGHT).into(),
+                (size.w, label_height()).into(),
             );
             self.centered(
                 &mut c,
                 "Its output is in the launch log",
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 hint,
                 scale,
                 p.muted,

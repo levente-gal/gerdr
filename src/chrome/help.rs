@@ -2,16 +2,18 @@
 //! with the Shortcuts action: then it carries a title and a way out.
 
 use super::{
-    CAP_GAP, CAP_PADDING, FONT_SIZE, HELP_COLUMN_GAP, HELP_KEY_GAP, HELP_MARGIN, HELP_PADDING,
-    HELP_ROW_HEIGHT, HELP_TITLE_HEIGHT, KEY_FONT_SIZE, POPUP_RADIUS, Painter, Palette, Rect,
-    SHADOW, SMALL_FONT_SIZE, keycap_text, line,
+    CAP_GAP, CAP_PADDING, HELP_COLUMN_GAP, HELP_KEY_GAP, HELP_MARGIN, HELP_PADDING, POPUP_RADIUS,
+    Painter, Palette, Rect, SHADOW, font_size, help_row_height, help_title_height, key_font_size,
+    keycap_text, line, small_font_size,
 };
 use crate::Action;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The pinned panel's title line, above the prefix line.
-const HELP_PINNED_TITLE: i32 = line(FONT_SIZE, 15);
+fn help_pinned_title() -> i32 {
+    line(font_size(), 15)
+}
 /// The gap between the prefix keycap and the words after it, and between
 /// the Esc keycap and its word.
 const HELP_WORD_GAP: i32 = 10;
@@ -185,9 +187,9 @@ impl HelpLayout {
     /// above it when pinned.
     fn head(&self) -> i32 {
         if self.pinned {
-            HELP_PINNED_TITLE + HELP_TITLE_HEIGHT
+            help_pinned_title() + help_title_height()
         } else {
-            HELP_TITLE_HEIGHT
+            help_title_height()
         }
     }
 }
@@ -229,7 +231,7 @@ impl Painter {
             &mut help
                 .rows
                 .iter()
-                .map(|(_, action)| self.text_width(action, FONT_SIZE, scale)),
+                .map(|(_, action)| self.text_width(action, font_size(), scale)),
         );
         let column_width = key_width + HELP_KEY_GAP + action_width;
         let fits_width = |columns: usize| {
@@ -239,12 +241,13 @@ impl Painter {
                 <= max_width
         };
         let head = if pinned {
-            HELP_PINNED_TITLE + HELP_TITLE_HEIGHT
+            help_pinned_title() + help_title_height()
         } else {
-            HELP_TITLE_HEIGHT
+            help_title_height()
         };
         // How many rows a column has room for.
-        let room = ((max.h.saturating_sub(head + HELP_PADDING)) / HELP_ROW_HEIGHT).max(1) as usize;
+        let room =
+            ((max.h.saturating_sub(head + HELP_PADDING)) / help_row_height()).max(1) as usize;
         let n = help.rows.len();
         let mut columns = if fits_width(2) { 2 } else { 1 };
         while n.div_ceil(columns) > room && columns < HELP_MAX_COLUMNS && fits_width(columns + 1) {
@@ -265,7 +268,7 @@ impl Painter {
             shown: if shown < n { shown - 1 } else { n },
             greyed: (0..n).map(|row| help.greyed(row)).collect(),
         };
-        layout.size.h = layout.head() + layout.rows * HELP_ROW_HEIGHT + HELP_PADDING;
+        layout.size.h = layout.head() + layout.rows * help_row_height() + HELP_PADDING;
         layout
     }
 
@@ -284,12 +287,12 @@ impl Painter {
         let mut spots = Vec::new();
         if layout.pinned {
             let max_x = origin.x + layout.size.w - HELP_PADDING;
-            let close_w = width("close", SMALL_FONT_SIZE);
+            let close_w = width("close", small_font_size());
             let esc_w = self.keycaps_width("Esc", scale) / s;
             let esc_x = (max_x as f32 - close_w - HELP_ESC_GAP as f32 - esc_w).floor() as i32;
             let rect = Rectangle::new(
                 (esc_x - HELP_KEY_PAD, origin.y + HELP_PADDING / 2).into(),
-                (max_x - esc_x + 2 * HELP_KEY_PAD, HELP_PINNED_TITLE).into(),
+                (max_x - esc_x + 2 * HELP_KEY_PAD, help_pinned_title()).into(),
             );
             spots.push((HelpHit::Close, rect));
         }
@@ -300,20 +303,20 @@ impl Painter {
             }
             let (column, row) = (i as i32 / layout.rows, i as i32 % layout.rows);
             let x = origin.x + HELP_PADDING + column * (layout.column_width + HELP_COLUMN_GAP);
-            let y = origin.y + head + row * HELP_ROW_HEIGHT;
+            let y = origin.y + head + row * help_row_height();
             if help.one_press(i) {
                 let rect = Rectangle::new(
                     (x - HELP_SPOT_PAD, y).into(),
-                    (layout.column_width + 2 * HELP_SPOT_PAD, HELP_ROW_HEIGHT).into(),
+                    (layout.column_width + 2 * HELP_SPOT_PAD, help_row_height()).into(),
                 );
                 spots.push((HelpHit::Row(i), rect));
                 continue;
             }
             let presses = help.presses.get(i);
-            let sep = width("/", KEY_FONT_SIZE) + 2.0 * CAP_GAP as f32;
+            let sep = width("/", key_font_size()) + 2.0 * CAP_GAP as f32;
             let mut pen = x as f32;
             for (k, key) in keys.split(" / ").enumerate() {
-                let cap = width(&keycap_text(key), KEY_FONT_SIZE) + 2.0 * CAP_PADDING as f32;
+                let cap = width(&keycap_text(key), key_font_size()) + 2.0 * CAP_PADDING as f32;
                 if presses
                     .and_then(|keys| keys.get(k))
                     .is_some_and(|p| p.is_some_and(|p| p != HelpPress::NotHere))
@@ -321,7 +324,7 @@ impl Painter {
                     let left = pen.floor() as i32 - HELP_KEY_PAD;
                     let right = (pen + cap).ceil() as i32 + HELP_KEY_PAD;
                     let rect =
-                        Rectangle::new((left, y).into(), (right - left, HELP_ROW_HEIGHT).into());
+                        Rectangle::new((left, y).into(), (right - left, help_row_height()).into());
                     spots.push((HelpHit::Key(i, k), rect));
                 }
                 pen += cap + sep;
@@ -361,23 +364,23 @@ impl Painter {
         let mut line_top = HELP_PADDING / 2;
         if layout.pinned {
             // "Shortcuts" with the way out at its right.
-            let title_band = (oy + px(line_top), px(HELP_PINNED_TITLE));
+            let title_band = (oy + px(line_top), px(help_pinned_title()));
             self.text(
                 &mut c,
                 "Shortcuts",
-                FONT_SIZE,
+                font_size(),
                 pad as f32,
                 max_x as f32,
                 title_band,
                 scale,
                 p.text,
             );
-            let close_w = self.text_width("close", SMALL_FONT_SIZE, scale);
+            let close_w = self.text_width("close", small_font_size(), scale);
             let close_x = max_x as f32 - close_w;
             self.text(
                 &mut c,
                 "close",
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 close_x,
                 max_x as f32,
                 title_band,
@@ -386,14 +389,17 @@ impl Painter {
             );
             let esc_x = close_x - px(HELP_ESC_GAP) as f32 - self.keycaps_width("Esc", scale);
             self.keycaps(&mut c, "Esc", esc_x, title_band, scale, p);
-            line_top += HELP_PINNED_TITLE;
+            line_top += help_pinned_title();
         }
-        let title_band = (oy + px(line_top), px(HELP_TITLE_HEIGHT - HELP_PADDING / 2));
+        let title_band = (
+            oy + px(line_top),
+            px(help_title_height() - HELP_PADDING / 2),
+        );
         let after = self.keycaps(&mut c, &help.prefix, pad as f32, title_band, scale, p);
         self.text(
             &mut c,
             "then press a key",
-            SMALL_FONT_SIZE,
+            small_font_size(),
             after + px(HELP_WORD_GAP) as f32,
             max_x as f32,
             title_band,
@@ -412,8 +418,8 @@ impl Painter {
         let place = |i: usize| {
             let (column, row) = (i as i32 / layout.rows, i as i32 % layout.rows);
             let x = SHADOW + HELP_PADDING + column * (layout.column_width + HELP_COLUMN_GAP);
-            let y = SHADOW + head + row * HELP_ROW_HEIGHT;
-            (x, (px(y), px(HELP_ROW_HEIGHT)))
+            let y = SHADOW + head + row * help_row_height();
+            (x, (px(y), px(help_row_height())))
         };
         for (i, (keys, action)) in help.rows.iter().enumerate().take(layout.shown) {
             let (x, band) = place(i);
@@ -432,7 +438,14 @@ impl Painter {
             let colour = if greyed { p.placeholder } else { p.text };
             let action_x = px(x + layout.key_width + HELP_KEY_GAP) as f32;
             self.text(
-                &mut c, action, FONT_SIZE, action_x, column_end, band, scale, colour,
+                &mut c,
+                action,
+                font_size(),
+                action_x,
+                column_end,
+                band,
+                scale,
+                colour,
             );
         }
         let more = help.rows.len() - layout.shown;
@@ -444,7 +457,7 @@ impl Painter {
             self.text(
                 &mut c,
                 &text,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 px(x) as f32,
                 column_end,
                 band,
@@ -458,7 +471,7 @@ impl Painter {
 
 #[cfg(test)]
 mod tests {
-    use super::{HELP_PINNED_TITLE, Help, HelpHit, HelpPress, Painter};
+    use super::{Help, HelpHit, HelpPress, Painter, help_pinned_title};
     use crate::Action;
 
     #[test]
@@ -475,7 +488,7 @@ mod tests {
         let armed = painter.help_layout(&help, 800, false, 1.0);
         let pinned = painter.help_layout(&help, 800, true, 1.0);
         assert_eq!(pinned.size.w, armed.size.w);
-        assert_eq!(pinned.size.h, armed.size.h + HELP_PINNED_TITLE);
+        assert_eq!(pinned.size.h, armed.size.h + help_pinned_title());
         assert!(pinned.pinned && !armed.pinned);
     }
 
@@ -493,7 +506,7 @@ mod tests {
         let tall = painter.help_layout(&help, 4000, false, 1.0);
         assert_eq!((tall.rows, tall.shown), (15, 30));
         // Too short for two columns of 15: three of 10.
-        let h = tall.size.h - 5 * super::HELP_ROW_HEIGHT;
+        let h = tall.size.h - 5 * super::help_row_height();
         let split = painter.help_layout_within(&help, (4000, h).into(), false, 1.0);
         assert_eq!((split.rows, split.shown), (10, 30));
         assert!(split.size.h <= h && split.size.w > tall.size.w);

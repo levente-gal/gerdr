@@ -4,9 +4,9 @@
 
 use super::wrap_field::{byte_at, first_shown, row_of, row_step, soft_rows, wrap_thumb};
 use super::{
-    BUTTON_RADIUS, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DIALOG_WIDTH, FONT_SIZE,
-    LABEL_FONT_SIZE, PADDING, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON_GAP,
-    QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, band, caret, dialog_buttons, line, phys,
+    BUTTON_RADIUS, ButtonStyle, CHECKBOX_GAP, Canvas, Check, DIALOG_WIDTH, PADDING, POPUP_RADIUS,
+    Painter, Palette, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, Rect, Rgb, SHADOW, band, caret,
+    checkbox_row, dialog_buttons, font_size, label_font_size, line, phys, quit_body, quit_title,
     rect_px,
 };
 use crate::text_field::Line;
@@ -14,7 +14,9 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// How high a line of a field is.
-const ROW: i32 = line(FONT_SIZE, 7);
+fn row_px() -> i32 {
+    line(font_size(), 7)
+}
 /// The room above and below a field's lines.
 const FIELD_PAD: i32 = 6;
 /// The Cancel button's index, then the action's.
@@ -92,28 +94,28 @@ pub fn finding_dialog_layout(
     view: &FindingDialogView,
     size: Size<i32, Logical>,
 ) -> FindingDialogLayout {
-    let field_h = |rows: i32| rows * ROW + 2 * FIELD_PAD;
+    let field_h = |rows: i32| rows * row_px() + 2 * FIELD_PAD;
     let fields_h: i32 = (view.fields.iter())
-        .map(|f| QUIT_BODY + QUIT_LINE_GAP + field_h(f.rows) + QUIT_LINE_GAP)
+        .map(|f| quit_body() + QUIT_LINE_GAP + field_h(f.rows) + QUIT_LINE_GAP)
         .sum();
     let error_h = match view.error {
-        Some(_) => QUIT_BODY + QUIT_LINE_GAP,
+        Some(_) => quit_body() + QUIT_LINE_GAP,
         None => 0,
     };
-    let about_h = QUIT_BODY * super::confirm_body_lines(&view.about, size) as i32;
+    let about_h = quit_body() * super::confirm_body_lines(&view.about, size) as i32;
     let shot_h = match view.shot {
-        Some(_) => CHECKBOX_ROW + QUIT_LINE_GAP,
+        Some(_) => checkbox_row() + QUIT_LINE_GAP,
         None => 0,
     };
     let height = 2 * QUIT_PADDING
-        + QUIT_TITLE
+        + quit_title()
         + QUIT_LINE_GAP
         + about_h
         + QUIT_LINE_GAP
         + fields_h
         + shot_h
         + error_h
-        + super::QUIT_BUTTON;
+        + super::quit_button();
     let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
@@ -130,16 +132,16 @@ pub fn finding_dialog_layout(
         y += h + QUIT_LINE_GAP;
         rect
     };
-    let title = next(QUIT_TITLE);
+    let title = next(quit_title());
     let about = next(about_h);
     let mut labels = Vec::new();
     let mut fields = Vec::new();
     for f in &view.fields {
-        labels.push(next(QUIT_BODY));
+        labels.push(next(quit_body()));
         fields.push(next(field_h(f.rows)));
     }
-    let shot = view.shot.map(|_| next(CHECKBOX_ROW));
-    let error = view.error.as_ref().map(|_| next(QUIT_BODY));
+    let shot = view.shot.map(|_| next(checkbox_row()));
+    let error = view.error.as_ref().map(|_| next(quit_body()));
     let buttons = dialog_buttons(panel, &[view.cancel, view.action]);
     FindingDialogLayout {
         panel,
@@ -231,7 +233,7 @@ pub fn finding_field_edge(
         return 0.0;
     };
     let top = (rect.loc.y + FIELD_PAD) as f64;
-    let bottom = top + (field.rows.max(1) * ROW) as f64;
+    let bottom = top + (field.rows.max(1) * row_px()) as f64;
     match pos.y {
         y if y < top => y - top,
         y if y >= bottom => y - bottom + 1.0,
@@ -252,7 +254,7 @@ pub fn finding_field_at(
     let first = first_shown(&rows, &field.line, field.rows);
     // Off its shown rows, the nearest: a press held past them scrolls by
     // `finding_field_past`.
-    let down = ((pos.y as i32 - rect.loc.y - FIELD_PAD).max(0) / ROW) as usize;
+    let down = ((pos.y as i32 - rect.loc.y - FIELD_PAD).max(0) / row_px()) as usize;
     let down = down.min(field.rows.max(1) as usize - 1);
     let row = rows.get(first + down).or(rows.last())?;
     let x = pos.x as f32 - (rect.loc.x as f32 + PADDING);
@@ -301,11 +303,11 @@ impl Painter {
             .take(field.rows as usize);
         for (k, (i, row)) in shown.enumerate() {
             let at = Rectangle::new(
-                (rect.loc.x, rect.loc.y + FIELD_PAD + k as i32 * ROW).into(),
-                (rect.size.w, ROW).into(),
+                (rect.loc.x, rect.loc.y + FIELD_PAD + k as i32 * row_px()).into(),
+                (rect.size.w, row_px()).into(),
             );
             let row_band = band(at, scale);
-            let upto = |byte: usize| self.text_width(&line[row.start..byte], FONT_SIZE, scale);
+            let upto = |byte: usize| self.text_width(&line[row.start..byte], font_size(), scale);
             let (from, to) = (selection.start.max(row.start), selection.end.min(row.end));
             if focused && from < to {
                 let (a, z) = (text_x + upto(from), (text_x + upto(to)).min(end));
@@ -324,7 +326,7 @@ impl Painter {
                 self.text(
                     c,
                     hint,
-                    FONT_SIZE,
+                    font_size(),
                     text_x + nudge,
                     end,
                     row_band,
@@ -333,7 +335,7 @@ impl Painter {
                 );
             } else {
                 let text = &line[row.clone()];
-                self.text(c, text, FONT_SIZE, text_x, end, row_band, scale, p.text);
+                self.text(c, text, font_size(), text_x, end, row_band, scale, p.text);
             }
             if focused && i == caret_row {
                 caret(c, text_x + upto(line.caret), row_band, scale, p.accent);
@@ -368,15 +370,15 @@ impl Painter {
             let (x, end) = phys(rect, scale);
             self.text(c, text, size, x, end, band(rect, scale), scale, color)
         };
-        line(&mut c, &view.title, layout.title, LABEL_FONT_SIZE, p.text);
+        line(&mut c, &view.title, layout.title, label_font_size(), p.text);
         for (i, text) in super::confirm_body_rows(&view.about, size).iter().enumerate() {
             let about = layout.about;
-            let at = (about.loc.x, about.loc.y + i as i32 * QUIT_BODY);
-            let rect = Rectangle::new(at.into(), (about.size.w, QUIT_BODY).into());
-            line(&mut c, text, rect, FONT_SIZE, p.muted);
+            let at = (about.loc.x, about.loc.y + i as i32 * quit_body());
+            let rect = Rectangle::new(at.into(), (about.size.w, quit_body()).into());
+            line(&mut c, text, rect, font_size(), p.muted);
         }
         for (i, field) in view.fields.iter().enumerate() {
-            line(&mut c, field.label, layout.labels[i], FONT_SIZE, p.muted);
+            line(&mut c, field.label, layout.labels[i], font_size(), p.muted);
             let focused = view.focus == i;
             self.lines_field(
                 &mut c,
@@ -397,7 +399,7 @@ impl Painter {
             let x = box_end + (CHECKBOX_GAP as f32 * scale as f32).round();
             let at = band(rect, scale);
             let label = FINDING_DIALOG_SHOT;
-            let after = self.text(&mut c, label, FONT_SIZE, x, end, at, scale, p.text);
+            let after = self.text(&mut c, label, font_size(), x, end, at, scale, p.text);
             let from = (after as f64 / scale).round() as i32 + 2 * CHECKBOX_GAP;
             let room = Rectangle::new((from, rect.loc.y).into(), (0, rect.size.h).into());
             let keys = [(FINDING_DIALOG_SHOT_KEY, "toggle")];
@@ -405,7 +407,7 @@ impl Painter {
             self.dialog_keys(&mut c, &keys, None, room, end, scale, p);
         }
         if let (Some(rect), Some(error)) = (layout.error, &view.error) {
-            line(&mut c, error, rect, FONT_SIZE, p.error);
+            line(&mut c, error, rect, font_size(), p.error);
         }
         let first = shift(layout.buttons[0]);
         let left = shift(layout.title).loc.x;
@@ -476,7 +478,7 @@ mod tests {
         let with = finding_dialog_layout(&with, size);
         let shot = with.shot.unwrap();
         let taller = with.panel.size.h - without.panel.size.h;
-        assert_eq!(taller, CHECKBOX_ROW + QUIT_LINE_GAP);
+        assert_eq!(taller, checkbox_row() + QUIT_LINE_GAP);
         assert!(shot.loc.y >= with.fields[0].loc.y + with.fields[0].size.h);
         assert!(shot.loc.y + shot.size.h <= with.buttons[0].loc.y);
         let mid = shot.to_f64().loc + Point::from((4.0, shot.size.h as f64 / 2.0));
@@ -492,7 +494,7 @@ mod tests {
         three.about = "From feature/x:\nSquash into main\nPush main".into();
         let three = finding_dialog_layout(&three, size);
         assert_eq!(three.about.size.h, 3 * one.about.size.h);
-        assert_eq!(three.panel.size.h - one.panel.size.h, 2 * QUIT_BODY);
+        assert_eq!(three.panel.size.h - one.panel.size.h, 2 * quit_body());
         assert!(three.labels[0].loc.y >= three.about.loc.y + three.about.size.h);
     }
 
@@ -525,9 +527,9 @@ mod tests {
         let edge = |dy: f64| finding_field_edge(&with(0), 0, size, (x, y + dy).into());
         assert_eq!(edge(-10.0), -10.0);
         assert_eq!(edge(5.0), 0.0);
-        assert!(edge((2 * ROW) as f64 + 4.0) > 0.0);
+        assert!(edge((2 * row_px()) as f64 + 4.0) > 0.0);
         // A press below its rows lands on the last shown, not past it.
-        let below = (x, y + (5 * ROW) as f64).into();
+        let below = (x, y + (5 * row_px()) as f64).into();
         assert_eq!(finding_field_at(&with(0), 0, size, below), Some(3));
     }
 

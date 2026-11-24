@@ -3,17 +3,17 @@
 
 use super::layers::{Part, RowCache};
 use super::{
-    BROWSE_WIDTH, BUTTON_RADIUS, CAP_RADIUS, Canvas, DETAIL_FONT_SIZE, ERROR_HEIGHT, FIELD_GAP,
-    FONT_SIZE, FORM_BUTTONS, FORM_FIELD, FORM_GAP, FORM_LABEL_WIDTH, FORM_PADDING, FORM_ROW,
-    FieldSpot, HELP_MARGIN, KIND_CHOICES, KIND_HEIGHT, LABEL_FONT_SIZE, MENU_MARK_GAP,
-    MENU_MARK_WIDTH, PADDING, POPUP_RADIUS, PROJECT_MENU_FOOTER, PROJECT_MENU_INPUT,
-    PROJECT_MENU_MAX_ROWS, PROJECT_MENU_MIN_ROWS, PROJECT_MENU_PADDING, PROJECT_MENU_ROW,
-    PROJECT_MENU_SECTION, PROJECT_MENU_TOP, PROJECT_MENU_WIDTH, Painter, Palette, ProjectRow,
-    QUIT_BUTTON, QUIT_BUTTON_GAP, RADIO_SIZE, RENAME_FIELD, RENAME_INSET, ROW_BUTTON,
-    ROW_BUTTON_GAP, ROW_BUTTON_INSET, ROW_HIGHLIGHT_RADIUS, ROW_INSET, Rect, SETTINGS_BUTTONS,
-    SHADOW, SMALL_FONT_SIZE, SUGGESTION_ROW, band, commands_prompt, cross, field_text, file,
-    focus_ring, folder, footer_hint_spots, hash_mark, hint_at, hint_strs, icon_sdf, mix, pencil,
-    phys, plus, rect_px, search::query_text, stop,
+    BROWSE_WIDTH, BUTTON_RADIUS, CAP_RADIUS, Canvas, FIELD_GAP, FORM_BUTTONS, FORM_GAP,
+    FORM_LABEL_WIDTH, FORM_PADDING, FieldSpot, HELP_MARGIN, KIND_CHOICES, MENU_MARK_GAP,
+    MENU_MARK_WIDTH, PADDING, POPUP_RADIUS, PROJECT_MENU_MAX_ROWS, PROJECT_MENU_MIN_ROWS,
+    PROJECT_MENU_PADDING, PROJECT_MENU_TOP, PROJECT_MENU_WIDTH, Painter, Palette, ProjectRow,
+    QUIT_BUTTON_GAP, RADIO_SIZE, RENAME_INSET, ROW_BUTTON_GAP, ROW_BUTTON_INSET,
+    ROW_HIGHLIGHT_RADIUS, ROW_INSET, Rect, SETTINGS_BUTTONS, SHADOW, band, commands_prompt, cross,
+    detail_font_size, error_height, field_text, file, focus_ring, folder, font_size,
+    footer_hint_spots, form_field, form_row, hash_mark, hint_at, hint_strs, icon_sdf, kind_height,
+    label_font_size, mix, pencil, phys, plus, project_menu_footer, project_menu_input,
+    project_menu_row, project_menu_section, quit_button, rect_px, rename_field_px, row_button,
+    search::query_text, small_font_size, stop, suggestion_row,
 };
 use crate::WorkspaceKind;
 use crate::project_list::RowTops;
@@ -219,11 +219,13 @@ pub struct FormLayout {
     pub create: Rect,
 }
 
-/// The footer: `PROJECT_MENU_FOOTER` high with one row of key hints, which
+/// The footer: `project_menu_footer()` high with one row of key hints, which
 /// has this much room above and below; a row more for every further row,
 /// up to this many.
 pub(super) const FOOTER_PAD: i32 = 4;
-pub(super) const FOOTER_ROW: i32 = PROJECT_MENU_FOOTER - 2 * FOOTER_PAD;
+pub(super) fn footer_row() -> i32 {
+    project_menu_footer() - 2 * FOOTER_PAD
+}
 pub(super) const FOOTER_ROWS: i32 = 2;
 
 /// How many rows the footer's `hints` take: one up to four, two beyond.
@@ -233,7 +235,7 @@ pub fn footer_rows(hints: usize) -> i32 {
 
 /// How high the footer is with `hints`.
 pub fn footer_height(hints: usize) -> i32 {
-    PROJECT_MENU_FOOTER + (footer_rows(hints) - 1) * FOOTER_ROW
+    project_menu_footer() + (footer_rows(hints) - 1) * footer_row()
 }
 
 /// How high the footer is with `hints` across `w`, measured: a row for
@@ -246,7 +248,7 @@ pub(super) fn measured_footer_height(hints: &[(&str, &str)], w: i32) -> i32 {
         .collect::<std::collections::BTreeSet<_>>()
         .len()
         .max(1) as i32;
-    PROJECT_MENU_FOOTER + (rows - 1) * FOOTER_ROW
+    project_menu_footer() + (rows - 1) * footer_row()
 }
 
 /// Where the project menu's settings form parts go, in output coordinates.
@@ -269,8 +271,8 @@ pub struct SettingsLayout {
 pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> ProjectMenuLayout {
     let w = PROJECT_MENU_WIDTH.min(size.w - 2 * HELP_MARGIN).max(1);
     let (x, top) = (ROW_INSET, PROJECT_MENU_TOP);
-    let query = Rectangle::new((x, top).into(), (w, PROJECT_MENU_INPUT).into());
-    let mut y = top + PROJECT_MENU_INPUT + PROJECT_MENU_PADDING;
+    let query = Rectangle::new((x, top).into(), (w, project_menu_input()).into());
+    let mut y = top + project_menu_input() + PROJECT_MENU_PADDING;
     let start = y;
     let (mut entries, form, settings) = match (&view.form, &view.settings) {
         (Some(form), _) => (Vec::new(), Some(form_layout(form, x, w, &mut y)), None),
@@ -284,7 +286,7 @@ pub fn project_menu_layout(view: &ProjectMenuView, size: Size<i32, Logical>) -> 
     let footer_h = measured_footer_height(&hint_strs(&view.hints), w);
     let bottom = (y + PROJECT_MENU_PADDING + footer_h)
         .min(size.h - HELP_MARGIN)
-        .max(top + PROJECT_MENU_INPUT + footer_h);
+        .max(top + project_menu_input() + footer_h);
     let footer = Rectangle::new((x, bottom - footer_h).into(), (w, footer_h).into());
     let limit = footer.loc.y - PROJECT_MENU_PADDING;
     let listed = view.form.is_none() && view.settings.is_none();
@@ -345,7 +347,7 @@ pub(super) fn menu_entries(
         })
         .collect();
     let height: i32 = view.entries.iter().map(entry_height).sum();
-    *y = start + height.max(PROJECT_MENU_ROW);
+    *y = start + height.max(project_menu_row());
     entries
 }
 
@@ -357,9 +359,9 @@ fn entry_height(entry: &MenuEntry) -> i32 {
 /// How high an entry of the project menu is: a section's label, or a row.
 pub fn project_menu_entry_height(section: bool) -> i32 {
     if section {
-        PROJECT_MENU_SECTION
+        project_menu_section()
     } else {
-        PROJECT_MENU_ROW
+        project_menu_row()
     }
 }
 
@@ -460,16 +462,16 @@ pub(super) fn row_buttons(row: &ProjectRow) -> Vec<RowButton> {
 pub(super) fn row_button_rects(buttons: &[RowButton], rect: Rect) -> Vec<(RowButton, Rect)> {
     let n = buttons.len() as i32;
     let right = rect.loc.x + rect.size.w - ROW_BUTTON_INSET;
-    let left = right - n * ROW_BUTTON - (n - 1).max(0) * ROW_BUTTON_GAP;
-    let top = rect.loc.y + (rect.size.h - ROW_BUTTON) / 2;
+    let left = right - n * row_button() - (n - 1).max(0) * ROW_BUTTON_GAP;
+    let top = rect.loc.y + (rect.size.h - row_button()) / 2;
     buttons
         .iter()
         .enumerate()
         .map(|(i, button)| {
-            let x = left + i as i32 * (ROW_BUTTON + ROW_BUTTON_GAP);
+            let x = left + i as i32 * (row_button() + ROW_BUTTON_GAP);
             (
                 *button,
-                Rectangle::new((x, top).into(), (ROW_BUTTON, ROW_BUTTON).into()),
+                Rectangle::new((x, top).into(), (row_button(), row_button()).into()),
             )
         })
         .collect()
@@ -485,32 +487,39 @@ pub(super) fn form_layout(form: &FormView, x: i32, w: i32, y: &mut i32) -> FormL
     let right = x + w - FORM_PADDING;
     let field_x = x + FORM_PADDING + FORM_LABEL_WIDTH;
     let field_w = (right - field_x).max(0);
-    let in_row = |y: i32, h: i32| y + (FORM_ROW - h) / 2;
+    let in_row = |y: i32, h: i32| y + (form_row() - h) / 2;
     // The error line under the row just laid out, if it is `field`'s.
     let error_under = |y: &mut i32, field: FormField| {
-        let at = *y - (FORM_ROW - FORM_FIELD) / 2;
+        let at = *y - (form_row() - form_field()) / 2;
         match &form.error {
             Some((at_fault, _)) if *at_fault == field => {
-                *y += ERROR_HEIGHT;
-                Some(rect(field_x, at, field_w, ERROR_HEIGHT))
+                *y += error_height();
+                Some(rect(field_x, at, field_w, error_height()))
             }
             _ => None,
         }
     };
 
-    let name = rect(field_x, in_row(*y, FORM_FIELD), field_w, FORM_FIELD);
-    *y += FORM_ROW;
+    let name = rect(field_x, in_row(*y, form_field()), field_w, form_field());
+    *y += form_row();
     let mut error = error_under(y, FormField::Name);
     let browse_w = BROWSE_WIDTH.min(field_w);
     let folder_w = field_w - browse_w - FORM_GAP;
-    let folder = rect(field_x, in_row(*y, FORM_FIELD), folder_w, FORM_FIELD);
-    let browse = rect(right - browse_w, folder.loc.y, browse_w, FORM_FIELD);
-    *y += FORM_ROW;
+    let folder = rect(field_x, in_row(*y, form_field()), folder_w, form_field());
+    let browse = rect(right - browse_w, folder.loc.y, browse_w, form_field());
+    *y += form_row();
     let suggestions = (0..form.suggestions.len() as i32)
-        .map(|i| rect(field_x, *y + i * SUGGESTION_ROW, folder_w, SUGGESTION_ROW))
+        .map(|i| {
+            rect(
+                field_x,
+                *y + i * suggestion_row(),
+                folder_w,
+                suggestion_row(),
+            )
+        })
         .collect::<Vec<_>>();
     if !suggestions.is_empty() {
-        *y += suggestions.len() as i32 * SUGGESTION_ROW + FORM_GAP;
+        *y += suggestions.len() as i32 * suggestion_row() + FORM_GAP;
     }
     if let Some(under) = error_under(y, FormField::Folder) {
         error = Some(under);
@@ -519,20 +528,20 @@ pub(super) fn form_layout(form: &FormView, x: i32, w: i32, y: &mut i32) -> FormL
     let mut kind_x = field_x;
     let kinds = KIND_CHOICES.map(|(kind, _, kind_w)| {
         let kind_w = kind_w.min((right - kind_x).max(0));
-        let r = rect(kind_x, in_row(*y, KIND_HEIGHT), kind_w, KIND_HEIGHT);
+        let r = rect(kind_x, in_row(*y, kind_height()), kind_w, kind_height());
         kind_x += kind_w + FORM_GAP;
         (kind, r)
     });
-    *y += FORM_ROW + FORM_GAP;
+    *y += form_row() + FORM_GAP;
     let [(_, cancel_w), (_, create_w)] = FORM_BUTTONS;
-    let create = rect(right - create_w, *y, create_w, QUIT_BUTTON);
+    let create = rect(right - create_w, *y, create_w, quit_button());
     let cancel = rect(
         create.loc.x - QUIT_BUTTON_GAP - cancel_w,
         *y,
         cancel_w,
-        QUIT_BUTTON,
+        quit_button(),
     );
-    *y += QUIT_BUTTON + FORM_GAP;
+    *y += quit_button() + FORM_GAP;
     FormLayout {
         name,
         folder,
@@ -553,24 +562,29 @@ pub(super) fn settings_layout(x: i32, w: i32, y: &mut i32) -> SettingsLayout {
     let right = x + w - FORM_PADDING;
     let field_x = x + FORM_PADDING + FORM_LABEL_WIDTH;
     let field_w = (right - field_x).max(0);
-    let in_row = |y: i32| y + (FORM_ROW - FORM_FIELD) / 2;
+    let in_row = |y: i32| y + (form_row() - form_field()) / 2;
 
-    let before = rect(field_x, in_row(*y), field_w, FORM_FIELD);
-    *y += FORM_ROW;
-    let after = rect(field_x, in_row(*y), field_w, FORM_FIELD);
-    *y += FORM_ROW;
-    let note = rect(field_x, *y, field_w, ERROR_HEIGHT);
-    *y += ERROR_HEIGHT + FORM_GAP;
+    let before = rect(field_x, in_row(*y), field_w, form_field());
+    *y += form_row();
+    let after = rect(field_x, in_row(*y), field_w, form_field());
+    *y += form_row();
+    let note = rect(field_x, *y, field_w, error_height());
+    *y += error_height() + FORM_GAP;
     let [(_, cancel_w), (_, run_w), (_, save_w)] = SETTINGS_BUTTONS;
-    let save = rect(right - save_w, *y, save_w, QUIT_BUTTON);
-    let run = rect(save.loc.x - QUIT_BUTTON_GAP - run_w, *y, run_w, QUIT_BUTTON);
+    let save = rect(right - save_w, *y, save_w, quit_button());
+    let run = rect(
+        save.loc.x - QUIT_BUTTON_GAP - run_w,
+        *y,
+        run_w,
+        quit_button(),
+    );
     let cancel = rect(
         run.loc.x - QUIT_BUTTON_GAP - cancel_w,
         *y,
         cancel_w,
-        QUIT_BUTTON,
+        quit_button(),
     );
-    *y += QUIT_BUTTON + FORM_GAP;
+    *y += quit_button() + FORM_GAP;
     SettingsLayout {
         before,
         after,
@@ -584,16 +598,16 @@ pub(super) fn settings_layout(x: i32, w: i32, y: &mut i32) -> SettingsLayout {
 /// How many rows the project menu's list holds at most on an output of
 /// `size`: as many full rows as fit above its bottom margin, within bounds.
 pub fn project_menu_page(size: Size<i32, Logical>) -> usize {
-    (project_menu_fits(size) / PROJECT_MENU_ROW).clamp(PROJECT_MENU_MIN_ROWS, PROJECT_MENU_MAX_ROWS)
-        as usize
+    (project_menu_fits(size) / project_menu_row())
+        .clamp(PROJECT_MENU_MIN_ROWS, PROJECT_MENU_MAX_ROWS) as usize
 }
 
 /// How high the project menu's list may be on an output of `size`: as
 /// high as `project_menu_page` rows, or as fits, a row at the least.
 pub fn project_menu_room(size: Size<i32, Logical>) -> i32 {
-    (project_menu_page(size) as i32 * PROJECT_MENU_ROW)
+    (project_menu_page(size) as i32 * project_menu_row())
         .min(project_menu_fits(size))
-        .max(PROJECT_MENU_ROW)
+        .max(project_menu_row())
 }
 
 /// The room above the project menu's bottom margin for its list, with the
@@ -602,7 +616,7 @@ fn project_menu_fits(size: Size<i32, Logical>) -> i32 {
     size.h
         - HELP_MARGIN
         - PROJECT_MENU_TOP
-        - PROJECT_MENU_INPUT
+        - project_menu_input()
         - 2 * PROJECT_MENU_PADDING
         - footer_height(usize::MAX)
 }
@@ -685,8 +699,8 @@ pub(super) fn rename_field(rect: Rect, buttons: &[(RowButton, Rect)]) -> Rect {
             b.loc.x - FIELD_GAP
         });
     Rectangle::new(
-        (x, rect.loc.y + (rect.size.h - RENAME_FIELD) / 2).into(),
-        ((end - x).max(0), RENAME_FIELD).into(),
+        (x, rect.loc.y + (rect.size.h - rename_field_px()) / 2).into(),
+        ((end - x).max(0), rename_field_px()).into(),
     )
 }
 
@@ -698,7 +712,7 @@ pub fn project_menu_field(
 ) -> Option<FieldSpot> {
     let layout = project_menu_layout(view, size);
     let boxed = |area: Rect, line: &Line| FieldSpot {
-        size: FONT_SIZE,
+        size: font_size(),
         area,
         text: field_text(area, scale),
         line: line.clone(),
@@ -730,7 +744,7 @@ pub fn project_menu_field(
         });
     renamed.or_else(|| {
         Some(FieldSpot {
-            size: FONT_SIZE,
+            size: font_size(),
             area: layout.query,
             text: query_text(layout.query, scale),
             line: view.query.clone(),
@@ -864,7 +878,7 @@ impl Painter {
                     self.text(
                         &mut c,
                         &format!("{} · start and stop", settings_view.name),
-                        LABEL_FONT_SIZE,
+                        label_font_size(),
                         x + (FORM_PADDING as f32 * s).round(),
                         right,
                         band(query, scale),
@@ -879,7 +893,7 @@ impl Painter {
                 self.text(
                     &mut c,
                     "New project",
-                    LABEL_FONT_SIZE,
+                    label_font_size(),
                     x + (FORM_PADDING as f32 * s).round(),
                     right,
                     band(query, scale),
@@ -900,13 +914,13 @@ impl Painter {
                             query.loc.y + query.size.h + PROJECT_MENU_PADDING,
                         )
                             .into(),
-                        (query.size.w, PROJECT_MENU_ROW).into(),
+                        (query.size.w, project_menu_row()).into(),
                     );
                     let (x, right) = phys(first, scale);
                     self.text(
                         &mut c,
                         "Nothing matches",
-                        FONT_SIZE,
+                        font_size(),
                         x + px(PROJECT_MENU_PADDING) as f32 + PADDING * s,
                         right,
                         band(first, scale),
@@ -979,7 +993,7 @@ impl Painter {
             self.text(
                 c,
                 &label.to_uppercase(),
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 px(mark.loc.x) as f32,
                 right,
                 row_band,
@@ -1046,11 +1060,11 @@ impl Painter {
                     if let Some(digit) = digit {
                         end = keycap(c, &format!("Alt+{digit}")) - gap;
                     }
-                    let ago_x = (end - self.text_width(&row.ago, SMALL_FONT_SIZE, scale)).round();
+                    let ago_x = (end - self.text_width(&row.ago, small_font_size(), scale)).round();
                     self.text(
                         c,
                         &row.ago,
-                        SMALL_FONT_SIZE,
+                        small_font_size(),
                         ago_x,
                         f32::MAX,
                         row_band,
@@ -1063,7 +1077,7 @@ impl Painter {
                     self.text(
                         c,
                         &format!("Press Del again to forget {}", row.name),
-                        FONT_SIZE,
+                        font_size(),
                         label_x,
                         end,
                         row_band,
@@ -1086,7 +1100,7 @@ impl Painter {
                         c,
                         &row.name,
                         &name_hits,
-                        FONT_SIZE,
+                        font_size(),
                         label_x,
                         end,
                         row_band,
@@ -1097,7 +1111,7 @@ impl Painter {
                         c,
                         &row.detail,
                         &detail_hits,
-                        SMALL_FONT_SIZE,
+                        small_font_size(),
                         after + (12.0 * s).round(),
                         end,
                         row_band,
@@ -1111,17 +1125,17 @@ impl Painter {
                     plus(x, y, 0.0, 0.0, 5.0 * s, s)
                 });
                 let end = keycap(c, "Ctrl+N") - gap;
-                self.text(c, label, FONT_SIZE, label_x, end, row_band, scale, p.text);
+                self.text(c, label, font_size(), label_x, end, row_band, scale, p.text);
             }
             MenuEntry::Folder(path) => {
                 let small = 0.8 * s;
                 icon_sdf(c, mark, scale, p.placeholder, |x, y| folder(x, y, small));
                 let suffix = "new project";
-                let suffix_w = self.text_width(suffix, SMALL_FONT_SIZE, scale);
+                let suffix_w = self.text_width(suffix, small_font_size(), scale);
                 let after = self.text(
                     c,
                     path,
-                    FONT_SIZE,
+                    font_size(),
                     label_x,
                     right - suffix_w - gap,
                     row_band,
@@ -1131,7 +1145,7 @@ impl Painter {
                 self.text(
                     c,
                     suffix,
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     after + gap,
                     right,
                     row_band,
@@ -1215,7 +1229,7 @@ impl Painter {
             let x = px(rect.loc.x - FORM_LABEL_WIDTH) as f32;
             let end = px(rect.loc.x - FORM_GAP) as f32;
             let label_band = band(rect, scale);
-            self.text(c, label, FONT_SIZE, x, end, label_band, scale, p.muted);
+            self.text(c, label, font_size(), x, end, label_band, scale, p.muted);
             if focused(field) {
                 focus_ring(c, rect, BUTTON_RADIUS, p.elevated, scale, p.accent);
             }
@@ -1227,7 +1241,7 @@ impl Painter {
         self.text(
             c,
             &format!("Run with sh -c in {}", form.dir),
-            SMALL_FONT_SIZE,
+            small_font_size(),
             x,
             right,
             band(note, scale),
@@ -1272,7 +1286,7 @@ impl Painter {
             self.text(
                 c,
                 text,
-                FONT_SIZE,
+                font_size(),
                 x,
                 end,
                 band(rect, scale),
@@ -1346,7 +1360,7 @@ impl Painter {
                 self.text(
                     c,
                     path,
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     text_x,
                     end,
                     band(rect, scale),
@@ -1398,7 +1412,7 @@ impl Painter {
             self.text(
                 c,
                 text,
-                FONT_SIZE,
+                font_size(),
                 bx + side + (FORM_GAP as f32 * s).round(),
                 x + w,
                 band(*rect, scale),
@@ -1413,7 +1427,7 @@ impl Painter {
             self.text(
                 c,
                 error,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 x,
                 right,
                 band(error_rect, scale),
@@ -1570,9 +1584,9 @@ impl ProjectMenuLayers {
 #[cfg(test)]
 mod tests {
     use super::{
-        FormField, FormView, MenuEntry, MenuHit, PROJECT_MENU_SECTION, ProjectMenuLayers,
-        ProjectMenuView, RowButton, SettingsField, SettingsView, project_menu_field,
-        project_menu_hit, project_menu_layout, project_menu_page, project_menu_room,
+        FormField, FormView, MenuEntry, MenuHit, ProjectMenuLayers, ProjectMenuView, RowButton,
+        SettingsField, SettingsView, project_menu_field, project_menu_hit, project_menu_layout,
+        project_menu_page, project_menu_room, project_menu_section,
     };
     use crate::WorkspaceKind;
     use crate::chrome::{
@@ -1759,7 +1773,7 @@ mod tests {
                         // The error hangs under the field at fault, the name here.
                         match &form.error {
                             Some(_) => {
-                                assert_eq!(f.error.size.h, super::ERROR_HEIGHT);
+                                assert_eq!(f.error.size.h, super::error_height());
                                 assert!(below(f.name, f.error) && below(f.error, f.folder));
                             }
                             None => assert_eq!(f.error.size.h, 0),
@@ -1795,8 +1809,8 @@ mod tests {
         let p = plain.form.as_ref().unwrap();
         assert_eq!(f.name, p.name);
         assert_eq!(f.folder, p.folder);
-        assert_eq!(f.create.loc.y, p.create.loc.y + super::ERROR_HEIGHT);
-        assert_eq!(l.panel.size.h, plain.panel.size.h + super::ERROR_HEIGHT);
+        assert_eq!(f.create.loc.y, p.create.loc.y + super::error_height());
+        assert_eq!(l.panel.size.h, plain.panel.size.h + super::error_height());
     }
 
     #[test]
@@ -1807,7 +1821,7 @@ mod tests {
         let tall = project_menu_layout(&list, size).footer;
         let short = project_menu_layout(&few, size).footer;
         assert_eq!(short.size.h, super::footer_height(1));
-        assert_eq!(tall.size.h, short.size.h + super::FOOTER_ROW);
+        assert_eq!(tall.size.h, short.size.h + super::footer_row());
         assert_eq!(super::footer_rows(4), 1);
         assert_eq!(super::footer_rows(5), 2);
 
@@ -1866,7 +1880,7 @@ mod tests {
         assert!(cut(&b.entries[0]));
         assert_eq!(
             b.entries[1].0.loc.y,
-            b.list.loc.y + PROJECT_MENU_SECTION - 30
+            b.list.loc.y + project_menu_section() - 30
         );
         let last = b.entries.iter().rposition(|e| !cut(e)).unwrap();
         let (rect, _) = b.entries[last];

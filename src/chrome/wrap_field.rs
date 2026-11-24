@@ -8,8 +8,8 @@
 use std::ops::Range;
 
 use super::{
-    CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, ListBar, PADDING, Painter, Palette, Rect, Thumb,
-    field_lines_height, field_text, measure, mix, rect_px,
+    CARET_WIDTH, Canvas, FieldSpot, ListBar, PADDING, Painter, Palette, Rect, Thumb,
+    field_lines_height, field_text, font_size, measure, mix, rect_px,
 };
 use crate::text_field::Line;
 use smithay::utils::{Logical, Point, Rectangle};
@@ -25,7 +25,7 @@ const BAR_INSET: i32 = 5;
 
 /// How wide `text` is, guessed when there is no font.
 pub(super) fn width(text: &str) -> f32 {
-    measure(text, FONT_SIZE).unwrap_or(text.chars().count() as f32 * FONT_SIZE * 0.55)
+    measure(text, font_size()).unwrap_or(text.chars().count() as f32 * font_size() * 0.55)
 }
 
 /// `text`'s lines as shown in a field `room` wide, as byte ranges: at its
@@ -149,12 +149,12 @@ pub fn wrap_field_spot(
     scale: f64,
 ) -> (FieldSpot, usize) {
     let (subs, _, _) = view_of(whole, area.size.w);
-    let at = ((pos.y - area.loc.y as f64) / super::FIELD_LINE as f64).floor();
+    let at = ((pos.y - area.loc.y as f64) / super::field_line() as f64).floor();
     let sub = &subs[(at.max(0.0) as usize).min(subs.len() - 1)];
     let spot = FieldSpot {
         area,
         text: field_text(area, scale),
-        size: FONT_SIZE,
+        size: font_size(),
         line: sub.line.clone(),
     };
     (spot, sub.start)
@@ -255,7 +255,7 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chrome::{FIELD_LINE, painter::field_line_rect};
+    use crate::chrome::{field_line, painter::field_line_rect};
 
     fn at(text: &str, caret: usize, scroll: usize) -> Line {
         Line {
@@ -343,7 +343,7 @@ mod tests {
         let rows = soft_rows(&para, room(w));
         assert!(rows.len() >= 3, "{rows:?}");
         // The second row's band: its spot starts where the row does.
-        let y = field_line_rect(area, 1).loc.y as f64 + FIELD_LINE as f64 / 2.0;
+        let y = field_line_rect(area, 1).loc.y as f64 + field_line() as f64 / 2.0;
         let (spot, base) = wrap_field_spot(area, &line, (20.0, y).into(), 1.0);
         assert_eq!(base, rows[1].start);
         assert_eq!(spot.line.text, &para[rows[1].clone()]);
@@ -351,7 +351,7 @@ mod tests {
         let whole = FieldSpot {
             area,
             text: field_text(area, 1.0),
-            size: FONT_SIZE,
+            size: font_size(),
             line: line.clone(),
         };
         let down = wrap_field_step(&whole, false).unwrap();

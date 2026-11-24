@@ -1000,10 +1000,12 @@ fn push_dots(
     }
 }
 
-/// A buffer plus the inputs it was drawn from.
+/// A buffer plus the inputs it was drawn from, and the text size it was
+/// drawn at (as `f32` bits).
 struct Cached<K> {
     key: Option<K>,
     buffer: Option<MemoryRenderBuffer>,
+    text: u32,
 }
 
 impl<K> Default for Cached<K> {
@@ -1011,17 +1013,20 @@ impl<K> Default for Cached<K> {
         Self {
             key: None,
             buffer: None,
+            text: 0,
         }
     }
 }
 
 impl<K: PartialEq> Cached<K> {
     fn get(&mut self, key: K, draw: impl FnOnce(&K) -> MemoryRenderBuffer) -> &MemoryRenderBuffer {
-        if self.key.as_ref() != Some(&key) {
+        let text = text_size().to_bits();
+        if self.key.as_ref() != Some(&key) || self.text != text {
             self.buffer = None;
         }
         let buffer = self.buffer.get_or_insert_with(|| draw(&key));
         self.key = Some(key);
+        self.text = text;
         buffer
     }
 }

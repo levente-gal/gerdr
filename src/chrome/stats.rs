@@ -11,10 +11,11 @@ use smithay::{
 };
 
 use super::{
-    BUTTON_RADIUS, ButtonStyle, Canvas, icon_sdf, trash, FONT_SIZE, FieldSpot, HELP_MARGIN, HELP_PADDING,
-    HINT_KEY_GAP, HINTS_HEIGHT, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING,
-    Painter, Palette, ROW_BUTTON, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band, button_width,
-    focus_ring, gutter_track, hint_at, hint_spots, hint_strs, line, measure, phys, query_text,
+    BUTTON_RADIUS, ButtonStyle, Canvas, FieldSpot, HELP_MARGIN, HELP_PADDING, HINT_KEY_GAP,
+    ListBar, POPUP_RADIUS, PROJECT_MENU_PADDING, Painter, Palette, Rect, Rgb, SHADOW, Thumb, band,
+    button_width, focus_ring, font_size, gutter_track, hint_at, hint_spots, hint_strs,
+    hints_height, icon_sdf, label_font_size, line, measure, phys, project_menu_input, query_text,
+    row_button, small_font_size, trash,
 };
 use crate::text_field::Line;
 
@@ -28,12 +29,22 @@ const STATS_MAX_WIDTH: i32 = 1400;
 const STATS_MAX_HEIGHT: i32 = 1100;
 /// The title row, the row of tabs and search under it, the columns'
 /// titles and the footer.
-const TITLE: i32 = line(LABEL_FONT_SIZE, 27);
-const BAR: i32 = PROJECT_MENU_INPUT;
-const HEAD: i32 = line(SMALL_FONT_SIZE, 13);
-const FOOTER: i32 = HINTS_HEIGHT + 12;
+fn title_px() -> i32 {
+    line(label_font_size(), 27)
+}
+fn bar_px() -> i32 {
+    project_menu_input()
+}
+fn head() -> i32 {
+    line(small_font_size(), 13)
+}
+fn footer_px() -> i32 {
+    hints_height() + 12
+}
 /// A row of the table.
-pub const STATS_ROW: i32 = line(SMALL_FONT_SIZE, 15);
+pub fn stats_row() -> i32 {
+    line(small_font_size(), 15)
+}
 /// The room around the list, and between its columns.
 const PAD: i32 = PROJECT_MENU_PADDING;
 const COL_GAP: i32 = 10;
@@ -48,8 +59,12 @@ const SCOPE_MAX: i32 = 220;
 const SEGMENT_PAD: i32 = 24;
 /// The keys listed (F1): a row's height, the heading's over them, the
 /// room for a row's keycaps before what it does.
-const KEYS_ROW: i32 = line(SMALL_FONT_SIZE, 13);
-const KEYS_HEADING: i32 = line(FONT_SIZE, 19);
+fn keys_row() -> i32 {
+    line(small_font_size(), 13)
+}
+fn keys_heading() -> i32 {
+    line(font_size(), 19)
+}
 const KEYS_CAPS: i32 = 220;
 
 /// The tabs' labels, in order.
@@ -190,64 +205,67 @@ pub fn stats_layout(view: &StatsView, size: Size<i32, Logical>) -> StatsLayout {
     let right = x + w - HELP_PADDING;
     let title = Rectangle::new(
         (x + HELP_PADDING, top).into(),
-        (w - 2 * HELP_PADDING, TITLE).into(),
+        (w - 2 * HELP_PADDING, title_px()).into(),
     );
-    let button_y = top + (TITLE - ROW_BUTTON) / 2;
+    let button_y = top + (title_px() - row_button()) / 2;
     let scope = view.scope.as_ref().map(|(name, _)| {
         let own = name.as_deref().map_or(SCOPE_MIN, |n| {
-            (width(n, SMALL_FONT_SIZE) + SEGMENT_PAD).clamp(SCOPE_MIN, SCOPE_MAX)
+            (width(n, small_font_size()) + SEGMENT_PAD).clamp(SCOPE_MIN, SCOPE_MAX)
         });
         let all_x = right - SCOPE_ALL;
         let own_x = all_x - own;
-        let seg = |x, w| Rectangle::new((x, button_y).into(), (w, ROW_BUTTON).into());
+        let seg = |x, w| Rectangle::new((x, button_y).into(), (w, row_button()).into());
         let track = seg(own_x, own + SCOPE_ALL);
         (track, [seg(own_x, own), seg(all_x, SCOPE_ALL)])
     });
     let back = view.back.then(|| {
         let bw = button_width("Back");
-        Rectangle::new((right - bw, button_y).into(), (bw, ROW_BUTTON).into())
+        Rectangle::new((right - bw, button_y).into(), (bw, row_button()).into())
     });
-    let bar_top = top + TITLE;
-    let tab_y = bar_top + (BAR - ROW_BUTTON) / 2;
+    let bar_top = top + title_px();
+    let tab_y = bar_top + (bar_px() - row_button()) / 2;
     let tab = |i: i32| {
         Rectangle::new(
             (x + HELP_PADDING + i * TAB_SEGMENT, tab_y).into(),
-            (TAB_SEGMENT, ROW_BUTTON).into(),
+            (TAB_SEGMENT, row_button()).into(),
         )
     };
     let tabs_track = Rectangle::new(
         (x + HELP_PADDING, tab_y).into(),
-        (3 * TAB_SEGMENT, ROW_BUTTON).into(),
+        (3 * TAB_SEGMENT, row_button()).into(),
     );
     let query_x = tabs_track.loc.x + tabs_track.size.w + COL_GAP;
     let query = Rectangle::new(
         (query_x, bar_top).into(),
-        ((x + w - query_x).max(1), BAR).into(),
+        ((x + w - query_x).max(1), bar_px()).into(),
     );
-    let mut list_top = bar_top + BAR;
+    let mut list_top = bar_top + bar_px();
     let header = view.header.then(|| {
         let rect = Rectangle::new(
             (x + PAD, list_top).into(),
-            ((w - 2 * PAD).max(1), HEAD).into(),
+            ((w - 2 * PAD).max(1), head()).into(),
         );
-        list_top += HEAD;
+        list_top += head();
         rect
     });
-    let footer = Rectangle::new((x, top + panel.size.h - FOOTER).into(), (w, FOOTER).into());
+    let footer = Rectangle::new(
+        (x, top + panel.size.h - footer_px()).into(),
+        (w, footer_px()).into(),
+    );
     let list = Rectangle::new(
         (x + PAD, list_top).into(),
         ((w - 2 * PAD).max(1), (footer.loc.y - list_top).max(1)).into(),
     );
     let row_w = (list.size.w - 2 * PAD - GUTTER).max(1);
-    let fits = ((list.size.h - 2 * PAD) / STATS_ROW).max(0) as usize;
+    let fits = ((list.size.h - 2 * PAD) / stats_row()).max(0) as usize;
     let rows = match view.keys.is_empty() && view.note.is_none() {
         true => (view.first..view.rows.len().min(view.first + fits))
             .enumerate()
             .map(|(k, i)| {
-                let y = list.loc.y + PAD + k as i32 * STATS_ROW;
+                let y = list.loc.y + PAD + k as i32 * stats_row();
                 (
                     i,
-                    Rectangle::new((list.loc.x + PAD, y).into(), (row_w, STATS_ROW).into()),
+                    Rectangle::new((list.loc.x + PAD, y).into(), (row_w, stats_row()).into()),
                 )
             })
             .collect(),
@@ -266,7 +284,7 @@ pub fn stats_layout(view: &StatsView, size: Size<i32, Logical>) -> StatsLayout {
         .collect();
     let hint_row = Rectangle::new(
         (x + HELP_PADDING, footer.loc.y).into(),
-        ((w - 2 * HELP_PADDING).max(0), FOOTER).into(),
+        ((w - 2 * HELP_PADDING).max(0), footer_px()).into(),
     );
     let hints = hint_spots(&hint_strs(&view.hints), hint_row);
     StatsLayout {
@@ -294,12 +312,12 @@ fn list_thumb(view: &StatsView, list: Rect, shown: usize) -> Option<Thumb> {
         (list.size.w, (list.size.h - 2 * PAD).max(1)).into(),
     );
     let bar = ListBar {
-        down: view.first as f64 * STATS_ROW as f64,
-        total: view.rows.len() as f64 * STATS_ROW as f64,
+        down: view.first as f64 * stats_row() as f64,
+        total: view.rows.len() as f64 * stats_row() as f64,
     };
     Thumb::of(
         gutter_track(right, inner),
-        (shown as i32 * STATS_ROW) as f64,
+        (shown as i32 * stats_row()) as f64,
         bar,
     )
 }
@@ -321,7 +339,7 @@ pub fn stats_page(size: Size<i32, Logical>) -> usize {
         ..StatsView::default()
     };
     let list = stats_layout(&view, size).list;
-    ((list.size.h - 2 * PAD) / STATS_ROW).max(1) as usize
+    ((list.size.h - 2 * PAD) / stats_row()).max(1) as usize
 }
 
 /// Where the cells of a row in `row` go, one per column of `columns`: the
@@ -390,7 +408,7 @@ pub fn stats_field(view: &StatsView, size: Size<i32, Logical>, scale: f64) -> Op
     }
     let area = stats_layout(view, size).query;
     Some(FieldSpot {
-        size: FONT_SIZE,
+        size: font_size(),
         area,
         text: query_text(area, scale),
         line: view.query.clone(),
@@ -463,7 +481,7 @@ impl Painter {
         self.bold_text(
             &mut c,
             &view.title,
-            LABEL_FONT_SIZE,
+            label_font_size(),
             left,
             title_end,
             band(title, scale),
@@ -548,7 +566,7 @@ impl Painter {
                 ((header.size.w - 2 * PAD - GUTTER).max(1), header.size.h).into(),
             );
             for (column, rect) in columns.iter().zip(cells(columns, row)) {
-                let font = (SMALL_FONT_SIZE, false);
+                let font = (small_font_size(), false);
                 self.stats_cell(
                     &mut c,
                     &column.title,
@@ -569,13 +587,22 @@ impl Painter {
             let color = if *error { p.error } else { p.muted };
             let rect = Rectangle::new(
                 (list.loc.x + HELP_PADDING, list.loc.y + PAD).into(),
-                ((list.size.w - 2 * HELP_PADDING).max(1), 3 * STATS_ROW).into(),
+                ((list.size.w - 2 * HELP_PADDING).max(1), 3 * stats_row()).into(),
             );
-            if self.text_width(note, FONT_SIZE, scale) <= phys(rect, scale).1 - phys(rect, scale).0
+            if self.text_width(note, font_size(), scale)
+                <= phys(rect, scale).1 - phys(rect, scale).0
             {
-                self.centered(&mut c, note, FONT_SIZE, rect, scale, color);
+                self.centered(&mut c, note, font_size(), rect, scale, color);
             } else {
-                self.stats_cell(&mut c, note, rect, false, (FONT_SIZE, false), scale, color);
+                self.stats_cell(
+                    &mut c,
+                    note,
+                    rect,
+                    false,
+                    (font_size(), false),
+                    scale,
+                    color,
+                );
             }
         } else {
             self.stats_rows(&mut c, view, &layout, by, scale, p);
@@ -628,9 +655,9 @@ impl Painter {
                 .enumerate()
             {
                 let (font, color) = match (row.heading, k) {
-                    (true, 0) => ((SMALL_FONT_SIZE, true), p.text),
-                    (true, _) => ((SMALL_FONT_SIZE, false), p.muted),
-                    (false, _) => ((SMALL_FONT_SIZE, false), p.text),
+                    (true, 0) => ((small_font_size(), true), p.text),
+                    (true, _) => ((small_font_size(), false), p.muted),
+                    (false, _) => ((small_font_size(), false), p.text),
                 };
                 self.stats_cell(c, cell, spot, column.right, font, scale, color);
             }
@@ -658,22 +685,22 @@ impl Painter {
         let inset = HELP_PADDING - PAD;
         let heading = Rectangle::new(
             (list.loc.x + inset, list.loc.y + PAD).into(),
-            ((list.size.w - 2 * inset).max(1), KEYS_HEADING).into(),
+            ((list.size.w - 2 * inset).max(1), keys_heading()).into(),
         );
         let (left, right) = phys(heading, scale);
         let text = "Keys in the AI work stats";
         self.text(
             c,
             text,
-            FONT_SIZE,
+            font_size(),
             left,
             right,
             band(heading, scale),
             scale,
             p.text,
         );
-        let top = heading.loc.y + KEYS_HEADING;
-        let per_column = ((list.loc.y + list.size.h - PAD - top) / KEYS_ROW).max(1) as usize;
+        let top = heading.loc.y + keys_heading();
+        let per_column = ((list.loc.y + list.size.h - PAD - top) / keys_row()).max(1) as usize;
         let columns = view.keys.len().div_ceil(per_column).max(1);
         let w = heading.size.w / columns as i32;
         let (caps, gap) = (
@@ -685,10 +712,10 @@ impl Painter {
             let rect = Rectangle::new(
                 (
                     heading.loc.x + column as i32 * w,
-                    top + row as i32 * KEYS_ROW,
+                    top + row as i32 * keys_row(),
                 )
                     .into(),
-                (w, KEYS_ROW).into(),
+                (w, keys_row()).into(),
             );
             let (left, right) = phys(rect, scale);
             let row_band = band(rect, scale);
@@ -697,7 +724,7 @@ impl Painter {
             self.text(
                 c,
                 what,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 x,
                 right - gap,
                 row_band,
