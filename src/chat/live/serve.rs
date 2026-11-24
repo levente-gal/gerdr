@@ -1,7 +1,7 @@
 //! gerdr's side of live word (see `super`): the socket, what each event
 //! changes, the asks and their answers, and adding the hooks.
 
-use std::{io::Read, os::unix::net::UnixStream, path::Path};
+use std::{collections::HashMap, io::Read, os::unix::net::UnixStream, path::Path};
 
 use smithay::reexports::calloop::{
     Interest, Mode, PostAction,
@@ -205,11 +205,7 @@ impl Gerdr {
     /// The asks of chats no longer in sight go back to their TUIs (called
     /// as `chats_sync` ends).
     pub(crate) fn live_release_hidden(&mut self) {
-        let hidden: Vec<String> = (self.chats.live.asks.iter())
-            .filter(|(_, held)| !self.chats.followed.contains_key(&held.pane))
-            .map(|(ask, _)| ask.clone())
-            .collect();
-        for ask in hidden {
+        for ask in hidden_asks(&self.chats.live.asks, &self.chats.followed) {
             self.live_answer(&ask, AskReply::Pass);
         }
     }
@@ -299,5 +295,38 @@ impl Gerdr {
             Some(err) => self.show_error(format!("Couldn't take gerdr's hooks out: {err}")),
             None => self.show_notice("gerdr's hooks are out; it won't add them again".into()),
         }
+    }
+}
+
+/// The asks of `asks` whose pane's chat isn't `followed` (shown, in sight):
+/// flipped to its screen, closed, or in a tab out of sight.
+fn hidden_asks(
+    asks: &HashMap<String, HeldAsk>,
+    followed: &HashMap<String, Option<AgentSession>>,
+) -> Vec<String> {
+    (asks.iter())
+        .filter(|(_, held)| !followed.contains_key(&held.pane))
+        .map(|(ask, _)| ask.clone())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asks_go_back_once_their_chat_is_out_of_sight() {
+        let held = |pane: &str| HeldAsk {
+            pane: pane.into(),
+            conn: 0,
+            stream: UnixStream::pair().unwrap().0,
+        };
+        let asks = HashMap::from([
+            ("a".to_owned(), held("w1:p1")),
+            ("b".to_owned(), held("w1:p2")),
+        ]);
+        let followed = HashMap::from([("w1:p1".to_owned(), None)]);
+        assert_eq!(hidden_asks(&asks, &followed), ["b"]);
+        assert_eq!(hidden_asks(&asks, &HashMap::new()).len(), 2);
     }
 }

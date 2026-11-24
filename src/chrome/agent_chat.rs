@@ -32,6 +32,7 @@ use super::{
 use crate::{
     chat::{
         ChatFocus, DiffSide, Item, Reading, ToolOut,
+        live::{AskReply, PendingAsk, Running},
         rows::{self, Row, Summary},
     },
     herdr::AgentStatus,
@@ -69,6 +70,12 @@ pub struct ChatView {
     /// being read (true) or can be asked for (false).
     pub earlier: Option<bool>,
     pub hover: Option<ChatHit>,
+    /// The tools its agent's hooks said run that the transcript doesn't
+    /// hold yet (`rows::unread`): rows at the list's end.
+    pub running: Vec<Running>,
+    /// What its agent asks to run, waiting on the chat's answer: a card in
+    /// the waiting panel's place.
+    pub ask: Option<PendingAsk>,
 }
 
 impl PartialEq for ChatView {
@@ -94,6 +101,8 @@ impl PartialEq for ChatView {
             && self.hints == other.hints
             && self.earlier == other.earlier
             && self.hover == other.hover
+            && self.running == other.running
+            && self.ask == other.ask
     }
 }
 
@@ -126,8 +135,13 @@ pub enum ChatHit {
     /// The reply box.
     Composer,
     Send,
-    /// "Show screen", where the chat couldn't be found or read.
+    /// "Show screen", where the chat couldn't be found or read, and on the
+    /// ask's card.
     ShowScreen,
+    /// Allow or Deny on the ask's card.
+    Answer(AskReply),
+    /// The ask's head row: shows or folds what it would run.
+    AskFold,
     /// The list's scrollbar.
     Scrollbar,
 }
@@ -158,6 +172,14 @@ impl ChatLayout {
         if let Some((key, _)) = parts.keys.iter().find(|(_, rect)| on(*rect)) {
             return Some(ChatHit::Key(*key));
         }
+        if let Some((hit, _)) = parts.answers.iter().find(|(_, rect)| on(*rect)) {
+            return Some(*hit);
+        }
+        if let Some((at, laid)) = &parts.card
+            && (laid.spots.iter()).any(|(r, _)| on(Rectangle::new(r.loc + *at, r.size)))
+        {
+            return Some(ChatHit::AskFold);
+        }
         if !on(self.list) {
             return None;
         }
@@ -178,6 +200,11 @@ impl ChatLayout {
             return (0..parts.column.1).contains(&x).then_some(ChatHit::Earlier);
         }
         let i = items.partition_point(|(t, laid)| t + laid.h <= y);
+        // The running rows at the end aren't the transcript's: nothing to
+        // pick or fold there.
+        if i >= items.len() - view.running.len() {
+            return None;
+        }
         let (t, laid) = items.get(i).filter(|(t, _)| *t <= y)?;
         let at = Point::from((x, y - t));
         let spot = laid.spots.iter().find(|(rect, _)| rect.contains(at));
@@ -313,6 +340,21 @@ const WAIT_KEYS: [(WaitKey, &str); 7] = [
     (WaitKey::Down, "↓"),
     (WaitKey::Enter, "Enter"),
 ];
+/// The most lines of what an ask would run its card shows unfolded.
+const ASK_LINES: usize = 12;
+/// The ask card's buttons, as they say them (the footer hints take their
+/// words: checklist K3).
+pub const ASK_BUTTONS: [(ChatHit, &str); 3] = [
+    (ChatHit::Answer(AskReply::Allow), "Allow"),
+    (ChatHit::Answer(AskReply::Deny), "Deny"),
+    (ChatHit::ShowScreen, "Show screen"),
+];
+
+/// What `unfolded` holds for ask `ask` while its card shows what it would
+/// run.
+pub fn ask_key(ask: &str) -> String {
+    format!("{ask}\u{0}ask")
+}
 
 /// All of a chat's parts, in output coordinates.
 struct Parts {
@@ -326,6 +368,10 @@ struct Parts {
     /// The screen rows in the waiting panel, and its key buttons.
     rows: Rect,
     keys: Vec<(WaitKey, Rect)>,
+    /// The ask's card in the waiting panel's place: where its body is laid
+    /// from, and its body; and its buttons.
+    card: Option<(Point<i32, Logical>, Laid)>,
+    answers: Vec<(ChatHit, Rect)>,
     composer: Rect,
     send: Rect,
     hints: Rect,
@@ -377,13 +423,38 @@ fn parts(view: &ChatView) -> Parts {
     let list_top = head.loc.y + head.size.h;
     let mut end = composer.loc.y - PART_GAP;
     let (mut waiting, mut rows, mut keys) = (None, Rect::default(), Vec::new());
-    if let Some(screen) = &view.waiting {
-        let frame = 3 * PART_GAP + ROW_BUTTON;
+    let (mut card, mut answers) = (None, Vec::new());
+    let frame = 3 * PART_GAP + ROW_BUTTON;
+    let inner = (w - 2 * PART_GAP).max(0);
+    if let Some(ask) = &view.ask {
+        // As many lines of what it would run as leave the list three card
+        // rows.
+        let mut laid = lay_ask(view, ask, inner, 0);
+        if view.unfolded.contains(&ask_key(&ask.ask)) {
+            let room = (end - list_top - 3 * CARD_ROW - frame - laid.h - PART_GAP).max(0);
+            let lines = (room / SMALL_LINE) as usize;
+            laid = lay_ask(view, ask, inner, lines.min(ASK_LINES));
+        }
+        let h = frame + laid.h;
+        let panel = Rectangle::new((x, end - h).into(), (w, h).into());
+        let at = Point::from((x + PART_GAP, panel.loc.y + PART_GAP));
+        let (mut bx, by) = (at.x, at.y + laid.h + PART_GAP);
+        for (hit, label) in ASK_BUTTONS {
+            let bw = button_width(label);
+            if bx + bw > at.x + inner {
+                break;
+            }
+            answers.push((hit, rect(bx, by, bw, ROW_BUTTON)));
+            bx += bw + PART_GAP / 2;
+        }
+        card = Some((at, laid));
+        waiting = Some(panel);
+        end = panel.loc.y - PART_GAP;
+    } else if let Some(screen) = &view.waiting {
         let room = (end - list_top - 3 * CARD_ROW - frame - PART_GAP).max(0) / STYLED_ROW;
         let n = (screen_rows(screen).len() as i32).min(room);
         let h = frame + n * STYLED_ROW;
         let panel = Rectangle::new((x, end - h).into(), (w, h).into());
-        let inner = (w - 2 * PART_GAP).max(0);
         rows = Rectangle::new(
             (x + PART_GAP, panel.loc.y + PART_GAP).into(),
             (inner, n * STYLED_ROW).into(),
@@ -415,6 +486,8 @@ fn parts(view: &ChatView) -> Parts {
         waiting,
         rows,
         keys,
+        card,
+        answers,
         composer,
         send,
         hints,
@@ -433,6 +506,10 @@ fn head_slot(head: Rect) -> Rect {
 fn standing(view: &ChatView) -> (Dot, &'static str) {
     if view.paused {
         return (Dot::Unknown, "paused");
+    }
+    // herdr sees no menu on its screen while its agent asks the chat.
+    if view.ask.is_some() {
+        return (Dot::of_status(AgentStatus::Blocked), "waits for you");
     }
     let word = match view.status {
         AgentStatus::Working => "working",
@@ -456,6 +533,7 @@ fn agent_name(label: &str) -> &str {
 /// under it; none while it shows items.
 fn message(view: &ChatView) -> Option<(&str, bool)> {
     match &view.reading {
+        _ if !view.running.is_empty() => None,
         Reading::Finding if view.items.is_empty() => Some(("Reading the chat…", false)),
         Reading::Read if view.items.is_empty() => Some(("Nothing said yet", false)),
         Reading::Missing(why) | Reading::Failed(why) => Some((why, true)),
@@ -506,15 +584,17 @@ fn message_layout(view: &ChatView, list: Rect) -> Option<Message> {
 fn stacked(view: &ChatView, w: i32) -> (Vec<(i32, Rc<Laid>)>, i32) {
     let rows = rows::rows(&view.items, &view.unfolded);
     let mut y = PART_GAP + earlier_h(view);
-    let mut laid_rows = Vec::with_capacity(rows.len());
+    let mut laid_rows = Vec::with_capacity(rows.len() + view.running.len());
     let mut was = None;
-    for row in rows {
-        let yours = matches!(row, Row::Item(i) if matches!(view.items[i], Item::User { .. }));
-        let row = &row;
+    let said = (rows.iter()).map(|row| {
+        let yours = matches!(row, Row::Item(i) if matches!(view.items[*i], Item::User { .. }));
+        (yours, laid_row(view, row, w))
+    });
+    let running = (view.running.iter()).map(|r| (false, running_row(view, r, w)));
+    for (yours, laid) in said.chain(running) {
         if let Some(was) = was {
             y += if was == yours { STEP_GAP } else { TURN_GAP };
         }
-        let laid = laid_row(view, row, w);
         laid_rows.push((y, laid.clone()));
         y += laid.h;
         was = Some(yours);
@@ -565,6 +645,72 @@ fn laid_row(view: &ChatView, row: &Row, w: i32) -> Rc<Laid> {
             laid_steps(first.id(), s, open, w, nest)
         }
     }
+}
+
+/// A tool its agent's hooks said runs, laid out as the transcript's
+/// running tools are.
+fn running_row(view: &ChatView, r: &Running, w: i32) -> Rc<Laid> {
+    let item = Item::Tool {
+        id: r.call.clone(),
+        name: r.name.clone(),
+        gist: r.gist.clone(),
+        input: String::new(),
+        output: None,
+    };
+    laid(&item, w, 0, &view.unfolded, view.cwd.as_deref())
+}
+
+/// The ask's card laid out from `(0, 0)` for `w` wide: the tool and its
+/// gist on a row that folds, under it unfolded the first `lines` of what it
+/// would run, then what the agent waits for.
+fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
+    let mut l = Laid::default();
+    let open = view.unfolded.contains(&ask_key(&ask.ask));
+    l.head(Head {
+        x: 0,
+        w,
+        open,
+        name: &ask.tool,
+        bold: true,
+        gist: &short(&ask.gist, view.cwd.as_deref()),
+        tail: Vec::new(),
+        running: false,
+        path: false,
+        mono: true,
+    });
+    if open {
+        let (ix, iw) = (CHEVRON_WIDTH, (w - CHEVRON_WIDTH).max(1));
+        let all: Vec<&str> = ask.input.lines().collect();
+        let shown = all.len().min(lines);
+        let mut y = l.below();
+        for line in &all[..shown] {
+            let bit = Bit::Label {
+                text: line.replace('\t', "    "),
+                face: Face::Mono,
+                size: SMALL_FONT_SIZE,
+                mark: Mark::Text,
+                centred: false,
+            };
+            l.put(rect(ix, y, iw, SMALL_LINE), bit);
+            y += SMALL_LINE;
+        }
+        if all.len() > shown {
+            let text = format!("{} more lines", all.len() - shown);
+            l.put(
+                rect(ix, l.below(), iw, SMALL_LINE),
+                label(&text, Face::Ui, Mark::Muted),
+            );
+        }
+    }
+    let words = format!(
+        "{} waits for your answer · Show screen to answer in its own prompt",
+        agent_name(&view.label)
+    );
+    l.put(
+        rect(0, l.below(), w, SMALL_LINE),
+        label(&words, Face::Ui, Mark::Muted),
+    );
+    l
 }
 
 /// The row `row` is down its subagent cards.
@@ -1302,6 +1448,30 @@ impl Painter {
             c.rounded(x, y, w, h, radius, p.border_variant);
             let (x, y, w, h) = (x + line, y + line, w - 2.0 * line, h - 2.0 * line);
             c.rounded(x, y, w, h, radius, p.terminal_background);
+            if let Some((at, laid)) = &parts.card {
+                let at = *at - r.loc;
+                if view.hover == Some(ChatHit::AskFold) {
+                    for (spot, _) in &laid.spots {
+                        let row = Rectangle::new(spot.loc + at, spot.size);
+                        self.row_highlight(&mut c, row, (false, 1.0), scale, p);
+                    }
+                }
+                for (rect, bit) in &laid.bits {
+                    let rect = Rectangle::new(rect.loc + at, rect.size);
+                    self.chat_bit(&mut c, rect, bit, scale, p);
+                }
+                for (hit, rect) in &parts.answers {
+                    let label = (ASK_BUTTONS.iter())
+                        .find(|(h, _)| h == hit)
+                        .map_or("", |(_, l)| l);
+                    let style = match hit {
+                        ChatHit::Answer(AskReply::Allow) => ButtonStyle::Primary,
+                        _ => ButtonStyle::Plain,
+                    };
+                    let lit = view.hover == Some(*hit);
+                    self.button(&mut c, label, here(*rect), (lit, false), style, scale, p);
+                }
+            }
             let screen = view
                 .waiting
                 .as_deref()
@@ -1555,6 +1725,8 @@ pub(super) mod tests {
             hints: crate::chat::footer(ChatFocus::List, true),
             earlier: None,
             hover: None,
+            running: Vec::new(),
+            ask: None,
         }
     }
 
@@ -2071,6 +2243,107 @@ pub(super) mod tests {
         v.paused = true;
         assert!(chat_blinkers(&v).is_empty());
         assert_eq!(standing(&v).1, "paused");
+    }
+
+    fn running(call: &str) -> Running {
+        Running {
+            call: call.into(),
+            name: "Bash".into(),
+            gist: "cargo test".into(),
+            since_ms: 0,
+        }
+    }
+
+    #[test]
+    fn a_running_tool_the_transcript_lacks_shows_at_the_end() {
+        let mut v = view();
+        let w = parts(&v).column.1;
+        let before = stacked(&v, w).0.len();
+        v.running = vec![running("c9")];
+        v.top = 1e9;
+        let (rows, _) = stacked(&v, w);
+        assert_eq!(rows.len(), before + 1);
+        let last = item_rect(&v, before);
+        assert!(rows[before].1.bits.iter().any(|(_, b)| *b == Bit::Running));
+        // Its dot blinks while the agent works; a press there picks nothing.
+        assert!(chat_blinkers(&v).iter().any(|dot| inside(last, *dot)));
+        assert_eq!(chat_layout(&v).hit(&v, middle(last)), None);
+        // An empty chat shows it, not "Nothing said yet".
+        v.items = Arc::new(Vec::new());
+        assert!(message(&v).is_none());
+        assert_eq!(stacked(&v, w).0.len(), 1);
+    }
+
+    fn ask() -> PendingAsk {
+        let input: Vec<String> = (0..30).map(|i| format!("line {i}")).collect();
+        PendingAsk {
+            ask: "q1".into(),
+            tool: "Bash".into(),
+            gist: "rm -rf target".into(),
+            input: input.join("\n"),
+            since: std::time::Instant::now(),
+        }
+    }
+
+    fn labels(laid: &Laid) -> Vec<String> {
+        (laid.bits.iter())
+            .filter_map(|(_, bit)| match bit {
+                Bit::Label { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_asks_card_takes_the_waiting_panels_place() {
+        let mut v = view();
+        v.waiting = Some(screen());
+        v.ask = Some(ask());
+        let p = parts(&v);
+        let panel = p.waiting.expect("the card's panel");
+        assert!(p.keys.is_empty() && p.rows.size.h == 0);
+        assert!(panel.loc.y > p.list.loc.y + p.list.size.h);
+        assert!(panel.loc.y + panel.size.h < p.composer.loc.y);
+        let layout = chat_layout(&v);
+        let hits: Vec<_> = (p.answers.iter())
+            .map(|(_, b)| layout.hit(&v, middle(*b)))
+            .collect();
+        assert_eq!(
+            hits,
+            [
+                Some(ChatHit::Answer(AskReply::Allow)),
+                Some(ChatHit::Answer(AskReply::Deny)),
+                Some(ChatHit::ShowScreen),
+            ]
+        );
+        assert!(p.answers.iter().all(|(_, b)| inside(panel, *b)));
+        let (at, laid) = p.card.as_ref().unwrap();
+        let head = Point::from(((at.x + 4) as f64, (at.y + CARD_ROW / 2) as f64));
+        assert_eq!(layout.hit(&v, head), Some(ChatHit::AskFold));
+        // Folded: the tool and its gist, not what it would run.
+        let said = labels(laid);
+        assert!(said.contains(&"Bash".to_owned()) && said.contains(&"rm -rf target".to_owned()));
+        assert!(!said.contains(&"line 0".to_owned()));
+        assert!(
+            said.iter()
+                .any(|t| t.starts_with("claude waits for your answer"))
+        );
+        // The head says the agent waits, and nothing blinks.
+        assert_eq!(standing(&v).1, "waits for you");
+        assert!(chat_blinkers(&v).is_empty());
+        // Unfolded: its first lines, and how many more.
+        v.unfolded.insert(ask_key("q1"));
+        let q = parts(&v);
+        let said = labels(&q.card.as_ref().unwrap().1);
+        assert!(said.contains(&"line 11".to_owned()) && !said.contains(&"line 12".to_owned()));
+        assert!(said.contains(&"18 more lines".to_owned()));
+        assert!(q.waiting.unwrap().size.h > panel.size.h);
+        // A shorter pane keeps its list three card rows: the lines give way.
+        v.rect.size.h = 460;
+        let q = parts(&v);
+        assert!(q.list.size.h >= 3 * CARD_ROW, "{:?}", q.list);
+        let said = labels(&q.card.as_ref().unwrap().1);
+        assert!(!said.contains(&"line 11".to_owned()));
     }
 
     /// The marks and words in their colours read on the chat's ground and

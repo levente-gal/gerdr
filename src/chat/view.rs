@@ -22,7 +22,12 @@ use smithay::{
     utils::{Logical, Point},
 };
 
-use super::{ChatFocus, Event, Item, PaneChat, Reading, rows::rows, tail::Tail};
+use super::{
+    ChatFocus, Event, Item, PaneChat, Reading,
+    live::AskReply,
+    rows::{rows, unread},
+    tail::Tail,
+};
 use crate::{
     ChatRows, Gerdr, Pane, Workspace,
     chrome::{self, ChatHit, ChatLayout, ChatView, FieldSpot, WaitKey},
@@ -83,6 +88,57 @@ enum ComposerKey {
     /// Back to the list, the reply kept as a draft.
     Back,
     Discard,
+}
+
+/// A key of the ask's card, while its agent waits on the chat's answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AskKey {
+    Answer(AskReply),
+    /// Show or fold what it would run.
+    Input,
+}
+
+/// The ask card's keys: they come before the list's and the reply box's
+/// (`docs/ux-conventions.md`: Ctrl+Enter / Ctrl+Shift+Enter approve and
+/// send back).
+const ASK_KEYS: &[Binding<(), AskKey>] = &[
+    Binding {
+        chord: "Ctrl+Enter",
+        does: |_| Some(AskKey::Answer(AskReply::Allow)),
+        footer: true,
+        f1: "allow what the agent asks to run",
+    },
+    Binding {
+        chord: "Ctrl+Shift+Enter",
+        does: |_| Some(AskKey::Answer(AskReply::Deny)),
+        footer: true,
+        f1: "deny what the agent asks to run",
+    },
+    Binding {
+        chord: "Alt+Shift+I",
+        does: |_| Some(AskKey::Input),
+        footer: true,
+        f1: "show or fold what the agent would run",
+    },
+];
+
+/// The footer's hints of the ask card's keys, its input shown (`open`) or
+/// not: Allow and Deny in their buttons' words (checklist K3).
+fn ask_footer(open: bool) -> Vec<(String, String)> {
+    let said = |hit: ChatHit| {
+        (chrome::ASK_BUTTONS.iter())
+            .find(|(h, _)| *h == hit)
+            .map_or("", |(_, label)| label)
+            .to_lowercase()
+    };
+    (key_table::hints(ASK_KEYS, &(), |k| match k {
+        AskKey::Answer(reply) => said(ChatHit::Answer(*reply)),
+        AskKey::Input if open => "fold input".to_owned(),
+        AskKey::Input => "show input".to_owned(),
+    })
+    .into_iter())
+    .map(|(chord, said)| (chord.to_owned(), said))
+    .collect()
 }
 
 /// The list's keys (`docs/ux-conventions.md`, the agent chat).
@@ -240,6 +296,8 @@ pub(crate) fn footer(focus: ChatFocus, draft_empty: bool) -> Vec<(String, String
 enum ChatDo {
     /// Send the reply to the agent.
     Send,
+    /// Answer the ask on the chat's card.
+    Answer(AskReply),
     /// Give the clipboard this text.
     Copy(String),
     /// Scroll to the top, to the bottom (following new items again), or a
@@ -262,6 +320,19 @@ fn chat_key(
     sym: Keysym,
     typed: Keysym,
 ) -> Option<ChatDo> {
+    if let Some(ask) = &chat.live.ask {
+        match key_table::press(ASK_KEYS, &(), mods, sym) {
+            Some(AskKey::Answer(reply)) => return Some(ChatDo::Answer(reply)),
+            Some(AskKey::Input) => {
+                let key = chrome::ask_key(&ask.ask);
+                if !chat.unfolded.remove(&key) {
+                    chat.unfolded.insert(key);
+                }
+                return None;
+            }
+            None => {}
+        }
+    }
     if chat.focus == ChatFocus::Composer {
         match key_table::press(COMPOSER_KEYS, &(), mods, sym) {
             Some(ComposerKey::Send) => return Some(ChatDo::Send),
@@ -897,6 +968,7 @@ impl Gerdr {
         match chat_key(chat, mods, sym, typed) {
             None => self.chat_show_picked(&pane_id, picked),
             Some(ChatDo::Send) => self.chat_send(&pane_id),
+            Some(ChatDo::Answer(reply)) => self.chat_answer(&pane_id, reply),
             Some(ChatDo::Copy(text)) => {
                 let lines = text.lines().count().max(1);
                 let s = if lines == 1 { "" } else { "s" };
@@ -968,6 +1040,21 @@ impl Gerdr {
         let herdr = (self.session.herdr.as_mut()).ok_or("herdr isn't connected")?;
         agent_in_front(&herdr.process_info(pane_id))?;
         herdr.send_agent_line(pane_id, line)
+    }
+
+    /// Answer what pane `pane_id`'s agent asks, from its chat's card. One
+    /// that waits no more (its hook gone, its time up) just loses its card.
+    fn chat_answer(&mut self, pane_id: &str, reply: AskReply) {
+        let Some(ask) = chat_mut(&mut self.workspaces, pane_id)
+            .and_then(|chat| chat.live.ask.as_ref())
+            .map(|ask| ask.ask.clone())
+        else {
+            return;
+        };
+        self.live_answer(&ask, reply);
+        if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
+            chat.live.ask = None;
+        }
     }
 
     /// Press `key` in pane `pane_id`, from its waiting panel's button: a
@@ -1063,12 +1150,19 @@ impl Gerdr {
                     focused: focused == Some(id),
                     draft: chat.draft.line(),
                     waiting: self.chats.waiting.get(pane_id).cloned(),
-                    hints: footer(chat.focus, chat.draft.line().text.is_empty()),
+                    hints: (chat.live.ask.as_ref())
+                        .map(|ask| ask_footer(chat.unfolded.contains(&chrome::ask_key(&ask.ask))))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .chain(footer(chat.focus, chat.draft.line().text.is_empty()))
+                        .collect(),
                     earlier: match (chat.earlier, chat.reading_earlier) {
                         (false, _) => None,
                         (true, reading) => Some(reading),
                     },
                     hover: None,
+                    running: unread(&chat.items, &chat.live.running),
+                    ask: chat.live.ask.clone(),
                 };
                 view.hover = pointer
                     .filter(|pos| view.rect.to_f64().contains(*pos))
@@ -1149,6 +1243,15 @@ impl Gerdr {
                 field(self);
             }
             ChatHit::Send => self.chat_send(&pane_id),
+            ChatHit::Answer(reply) => self.chat_answer(&pane_id, reply),
+            ChatHit::AskFold => {
+                if let Some(ask) = &chat.live.ask {
+                    let key = chrome::ask_key(&ask.ask);
+                    if !chat.unfolded.remove(&key) {
+                        chat.unfolded.insert(key);
+                    }
+                }
+            }
             ChatHit::ShowScreen => self.toggle_pane_chat(id),
             ChatHit::Scrollbar => {
                 self.chats.bar_drag = Some(pane_id);
@@ -1502,5 +1605,47 @@ mod tests {
         {
             assert!(crate::keys::hint_key(chord).is_some(), "{chord}");
         }
+    }
+
+    #[test]
+    fn an_asks_keys_answer_it_and_show_what_it_would_run() {
+        let mut chat = with_items(vec![user("u1", "one")]);
+        // No card: no answer.
+        assert_eq!(press(&mut chat, "Ctrl+Enter", '\r'), None);
+        chat.live.ask = Some(crate::chat::live::PendingAsk {
+            ask: "q1".into(),
+            tool: "Bash".into(),
+            gist: "ls".into(),
+            input: "{}".into(),
+            since: Instant::now(),
+        });
+        let allow = Some(ChatDo::Answer(AskReply::Allow));
+        assert_eq!(press(&mut chat, "Ctrl+Enter", '\r'), allow);
+        let deny = Some(ChatDo::Answer(AskReply::Deny));
+        assert_eq!(press(&mut chat, "Ctrl+Shift+Enter", '\r'), deny);
+        // From the reply box too, nothing typed into it.
+        chat.focus = ChatFocus::Composer;
+        assert_eq!(press(&mut chat, "Ctrl+Enter", '\r'), allow);
+        press(&mut chat, "Alt+Shift+I", 'I');
+        assert!(chat.unfolded.contains(&chrome::ask_key("q1")));
+        press(&mut chat, "Alt+Shift+I", 'I');
+        assert!(chat.unfolded.is_empty());
+        assert_eq!(chat.draft, "");
+        // The footer says them in the buttons' words.
+        let hints: Vec<(String, String)> = [
+            ("Ctrl+Enter", "allow"),
+            ("Ctrl+Shift+Enter", "deny"),
+            ("Alt+Shift+I", "show input"),
+        ]
+        .map(|(k, s)| (k.to_owned(), s.to_owned()))
+        .into();
+        assert_eq!(ask_footer(false), hints);
+        assert_eq!(ask_footer(true)[2].1, "fold input");
+        // Their chords parse and mean nothing else in the chat (K1).
+        key_table::check(ASK_KEYS, &[()]);
+        let others: Vec<&str> = (LIST_KEYS.iter().map(|b| b.chord))
+            .chain(COMPOSER_KEYS.iter().map(|b| b.chord))
+            .collect();
+        assert!(ASK_KEYS.iter().all(|b| !others.contains(&b.chord)));
     }
 }

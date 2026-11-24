@@ -4,7 +4,7 @@
 
 use std::{collections::HashSet, path::Path};
 
-use super::Item;
+use super::{Item, live::Running};
 
 /// One row of a chat's list.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -201,6 +201,29 @@ pub fn summary(items: &[Item]) -> Summary {
     s
 }
 
+/// The tools of `running` (as the agent's hooks said) that `items` don't
+/// hold yet, by call id, a subagent's own items too: once the transcript
+/// has one, its row there shows it.
+pub fn unread(items: &[Item], running: &[Running]) -> Vec<Running> {
+    if running.is_empty() {
+        return Vec::new();
+    }
+    fn ids<'a>(items: &'a [Item], out: &mut HashSet<&'a str>) {
+        for item in items {
+            out.insert(item.id());
+            if let Item::Subagent { items, .. } = item {
+                ids(items, out);
+            }
+        }
+    }
+    let mut read = HashSet::new();
+    ids(items, &mut read);
+    (running.iter())
+        .filter(|r| !read.contains(r.call.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// `gist` shorter for its line: a leading `cd <dir> && ` dropped, paths
 /// in `cwd` relative to it, those in `home` from `~`.
 pub fn short_gist(gist: &str, cwd: Option<&Path>, home: Option<&Path>) -> String {
@@ -225,6 +248,7 @@ pub fn short_gist(gist: &str, cwd: Option<&Path>, home: Option<&Path>) -> String
 mod tests {
     use super::*;
     use crate::chat::ToolOut;
+    use std::sync::Arc;
 
     fn said(id: &str) -> Item {
         Item::User {
@@ -392,5 +416,28 @@ mod tests {
         assert_eq!(short("grep x /home/u/.cache/log"), "grep x ~/.cache/log");
         assert_eq!(short("cd \"a b\" && ls"), "cd \"a b\" && ls");
         assert_eq!(short_gist("/x/y", None, None), "/x/y");
+    }
+
+    #[test]
+    fn a_running_tool_shows_till_the_transcript_holds_it() {
+        let run = |call: &str| Running {
+            call: call.into(),
+            name: "Bash".into(),
+            gist: "ls".into(),
+            since_ms: 1,
+        };
+        let sub = Item::Subagent {
+            id: "s1".into(),
+            title: "look".into(),
+            items: Arc::new(vec![tool("c2", "Read", None)]),
+            output: None,
+        };
+        let items = vec![said("u1"), tool("c1", "Bash", None), sub];
+        let running = [run("c1"), run("c2"), run("c3")];
+        let calls: Vec<String> = (unread(&items, &running).into_iter())
+            .map(|r| r.call)
+            .collect();
+        assert_eq!(calls, ["c3"]);
+        assert!(unread(&items, &[]).is_empty());
     }
 }
