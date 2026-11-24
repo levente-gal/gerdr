@@ -1,8 +1,9 @@
 //! Live word from the agents in herdr panes (see
 //! `/home/lgal/reports/gerdr-agent-live-plan.md`): each agent keeps running
-//! as its TUI in its pane, and its own hooks (Claude, Cursor's CLI) or a
-//! plugin in its TUI (OpenCode) tell gerdr what happens as it happens: the
-//! chat it holds, the tool running, a turn's end, a permission it asks for.
+//! as its TUI in its pane, and its own hooks (Claude, Cursor's CLI,
+//! Antigravity) or a plugin in its TUI (OpenCode, pi) tell gerdr what
+//! happens as it happens: the chat it holds, the tool running, a turn's
+//! end, a permission it asks for.
 //! The transcript stays what the chat shows (`tail`); this adds what it
 //! can't say yet, and answers asks from the chat.
 //!
@@ -25,6 +26,7 @@ use sha2::{Digest, Sha256};
 use super::Item;
 use crate::herdr::AgentSession;
 
+pub mod antigravity;
 pub mod claude;
 pub mod opencode;
 mod serve;
@@ -743,5 +745,19 @@ mod tests {
         assert_eq!(install(&path, |t| Ok(t.unwrap().into())).unwrap(), None);
         undo(&changed).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn undo_gives_antigravity_its_hooks_back_as_they_were() {
+        let dir = TempDir::new();
+        let path = dir.path().join("hooks.json");
+        let theirs = "{\"herdr\": {\"PreInvocation\": [{\"command\": \"h\"}]}}\n";
+        std::fs::write(&path, theirs).unwrap();
+        let merge = |text: Option<&str>| antigravity::merged(text, "/g agy-hook");
+        let changed = install(&path, merge).unwrap().unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("agy-hook"));
+        assert_eq!(install(&path, merge).unwrap(), None, "once");
+        undo(&changed).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs);
     }
 }

@@ -7324,6 +7324,11 @@ fn command_line() -> Option<Args> {
         chat::live::claude::run_hook();
         return None;
     }
+    // Run by the Antigravity CLI's hooks: in and out at once.
+    if std::env::args().nth(1).as_deref() == Some(chat::live::antigravity::HOOK_COMMAND) {
+        chat::live::antigravity::run_hook();
+        return None;
+    }
     // Run by the browser, for gerdr's extension in it: nothing may go to
     // stdout but its messages.
     let mut args = std::env::args_os().skip(1);
