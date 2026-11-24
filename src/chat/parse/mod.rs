@@ -63,6 +63,10 @@ struct Sub {
     at: usize,
     reader: Reader,
     changed: bool,
+    /// When its first and last lines read were written.
+    span: Option<(u64, u64)>,
+    /// Its card's time is that span, kept up as it grows.
+    spanned: bool,
 }
 
 impl Reader {
@@ -142,8 +146,16 @@ impl Reader {
     fn sync_subs(&mut self) {
         for sub in self.subs.iter_mut().filter(|s| s.changed) {
             sub.changed = false;
-            if let Item::Subagent { items, .. } = &mut self.items[sub.at] {
+            if let Item::Subagent { items, output, .. } = &mut self.items[sub.at] {
                 *items = Arc::new(sub.reader.items.clone());
+                // A result that doesn't say how long it took (one run in the
+                // background answers at once): its own lines' span.
+                if let (Some(out), Some((from, to))) = (output.as_mut(), sub.span)
+                    && (out.ms.is_none() || sub.spanned)
+                {
+                    out.ms = Some(to - from);
+                    sub.spanned = true;
+                }
             }
         }
     }
@@ -195,6 +207,12 @@ impl Reader {
         sub.reader.lines = self.lines;
         sub.reader.line(line);
         sub.changed = true;
+        if let Some(at) = line["timestamp"].as_str().and_then(iso_ms) {
+            sub.span = Some(
+                sub.span
+                    .map_or((at, at), |(from, to)| (from.min(at), to.max(at))),
+            );
+        }
     }
 
     /// A subagent for sidechain `line`, when the call that started it is
@@ -218,6 +236,8 @@ impl Reader {
             at,
             reader: Reader::new(self.agent),
             changed: false,
+            span: None,
+            spanned: false,
         });
         let id = format!("agent:{call}");
         self.items[at] = Item::Subagent {
@@ -303,7 +323,10 @@ impl Reader {
                     .ok()
                     .map(|d| d.as_millis() as u64)
             })
-            .or_else(|| at?.checked_sub(called?));
+            .or_else(|| at?.checked_sub(called?))
+            // Launched in the background: how long launching took says
+            // nothing of the agent's work.
+            .filter(|_| done["status"] != "async_launched");
         let out = ToolOut {
             text: cap(&texts(&part["content"])),
             failed: part["is_error"] == true,
@@ -881,15 +904,29 @@ mod tests {
         // An agent run in the background answers first, its work comes later.
         let task = serde_json::json!({ "description": "Late one", "prompt": "Go" });
         let mut done = result("r1", "task_1", "Started", false);
-        done["toolUseResult"] = serde_json::json!({ "agentId": "ag1", "isAsync": true });
-        let mut work = said("s1", "m9", text("Working."));
-        work["isSidechain"] = true.into();
-        work["agentId"] = "ag1".into();
-        let reader = read(&[call("a1", "task_1", "Task", task), done, work]);
-        let Item::Subagent { items, .. } = &reader.items()[0] else {
+        done["toolUseResult"] =
+            serde_json::json!({ "agentId": "ag1", "isAsync": true, "status": "async_launched" });
+        let side = |mut line: Value, at: &str| {
+            line["isSidechain"] = true.into();
+            line["agentId"] = "ag1".into();
+            line["timestamp"] = at.into();
+            line
+        };
+        let reader = read(&[
+            call("a1", "task_1", "Task", task),
+            done,
+            side(
+                said("s1", "m9", text("Working.")),
+                "2026-01-02T03:04:06.000Z",
+            ),
+            side(said("s2", "m10", text("Done.")), "2026-01-02T03:09:06.000Z"),
+        ]);
+        let Item::Subagent { items, output, .. } = &reader.items()[0] else {
             panic!()
         };
         assert!(matches!(&items[0], Item::Assistant { .. }));
+        // Its own five minutes, not how long launching it took.
+        assert_eq!(output.as_ref().and_then(|o| o.ms), Some(300_000));
     }
 
     #[test]
