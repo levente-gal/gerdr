@@ -5,12 +5,14 @@
 //! tool part holds its call and its result together, so it is one item,
 //! made whole each time the rows are read.
 
+use std::sync::Arc;
+
 use serde_json::Value;
 
 use super::{
     DiffLine, DiffSide, Item, MAX_LINES, Reader, ToolOut, cap, change, more, patch, texts,
 };
-use crate::stats_panel::tool_gist;
+use crate::{ai_work::AgentKind, stats_panel::tool_gist};
 
 impl Reader {
     /// Read message row `row` of an OpenCode session (see `super::snapshot`).
@@ -124,6 +126,17 @@ impl Reader {
         let state = &part["state"];
         let input = &state["input"];
         let output = opencode_out(part);
+        // A `task` call whose child session was read (`tail::db`): its work
+        // under one card, as Claude's subagents.
+        if let Some(rows) = part["subagent"].as_array() {
+            let title = Some(gist(input)).filter(|title| !title.is_empty());
+            return self.push(Item::Subagent {
+                id: format!("agent:{id}"),
+                title: title.unwrap_or_else(|| name.to_owned()),
+                items: Arc::new(super::snapshot(AgentKind::OpenCode, rows)),
+                output,
+            });
+        }
         let text = |key: &str| input[key].as_str().unwrap_or("");
         let path = (input["filePath"].as_str()).or(input["path"].as_str());
         let diffs: Vec<(String, Vec<DiffLine>)> = match (name, path) {
