@@ -7,6 +7,8 @@ const main = document.getElementById("main");
 const titleEl = document.getElementById("title");
 const back = document.getElementById("back");
 const seen = document.getElementById("seen");
+const work = document.getElementById("work");
+const sweep = document.getElementById("sweep");
 const offline = document.getElementById("offline");
 const note = document.getElementById("note");
 const bar = document.getElementById("bar");
@@ -630,9 +632,10 @@ async function pane(p, s, id) {
       <details><summary class="quiet small">What it would run</summary><pre class="input">${esc(a.input)}</pre></details>
       <div class="buttons"><button class="primary" data-answer="allow" data-ask="${esc(a.ask)}">Allow</button><button data-answer="deny" data-ask="${esc(a.ask)}">Deny</button></div></div>` : "";
   // While it works, as on gerdr's chat: a row under its output, with its turn's clock.
-  const working = d.working == null ? "" : `<div class="work-row small"><span class="sdot blink"></span>working
-    <span class="clock" data-since="${turnAt(id, d.working)}"></span></div>`;
-  return { title: d.label, back: href("f", p, s), html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true,
+  const since = d.working == null ? null : turnAt(id, d.working);
+  const working = since === null ? "" : `<div class="work-row small"><span class="sdot blink"></span>working
+    <span class="clock" data-since="${since}"></span></div>`;
+  return { title: d.label, back: href("f", p, s), html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
     bar: `${ask}<form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
@@ -651,7 +654,7 @@ function turnAt(id, secs) {
 // How long, as gerdr says it: `12s`, `2m 5s`, `1h 5m` (`clock::took`).
 const took = (s) => s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s`
   : `${Math.floor(s / 3600)}h ${Math.floor(s / 60) % 60}m`;
-const tickClocks = () => main.querySelectorAll(".clock[data-since]").forEach((e) => {
+const tickClocks = () => document.querySelectorAll(".clock[data-since]").forEach((e) => {
   e.textContent = took(Math.max(0, Math.floor((Date.now() - Number(e.dataset.since)) / 1000)));
 });
 setInterval(tickClocks, 1000);
@@ -719,6 +722,15 @@ async function render(fresh, force, keepBottom) {
     const v = await r.load();
     if (hash !== location.hash || read !== reads) return;
     titleEl.textContent = v.title;
+    // A working agent's page: its clock in the head, in place of when it
+    // was read, and the sweep along the head's edge, as on gerdr's chat.
+    const working = v.since != null;
+    work.hidden = !working;
+    seen.hidden = working;
+    sweep.hidden = !working;
+    if (working) work.querySelector(".clock").dataset.since = v.since;
+    else delete work.querySelector(".clock").dataset.since;
+    tickClocks();
     back.hidden = !v.back;
     if (v.back) back.href = v.back;
     if (barFor !== hash) {
