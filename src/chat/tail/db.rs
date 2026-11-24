@@ -155,13 +155,13 @@ impl Kept {
             self.opencode_table(conn, table, id)
                 .map_err(|err| format!("reading {table}: {err}"))?;
         }
-        self.subagents(conn);
+        self.subagents(conn, id);
         Ok(())
     }
 
     /// Read what changed in the child sessions the `task` calls started:
     /// those still running, and each once after its calls ended.
-    fn subagents(&mut self, conn: &rusqlite::Connection) {
+    fn subagents(&mut self, conn: &rusqlite::Connection, own: &str) {
         // A session a later call resumes has all its calls to end.
         let mut tasks: HashMap<String, bool> = HashMap::new();
         let parts = (self.parts.values().map(|part| &part["data"])).chain(
@@ -169,7 +169,8 @@ impl Kept {
                 .flat_map(|row| row["data"]["content"].as_array().into_iter().flatten()),
         );
         for part in parts {
-            if let Some(child) = started(part) {
+            // A session naming itself would read itself without end.
+            if let Some(child) = started(part).filter(|child| *child != own) {
                 let ended = matches!(
                     part["state"]["status"].as_str(),
                     Some("completed" | "error")
