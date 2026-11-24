@@ -169,7 +169,7 @@ fn pull_first(base: &str) -> String {
 /// Where `repo`'s base is checked out, where its squash goes: the worktree
 /// that has it, as a feature started from another feature's branch finds it
 /// in that feature's worktree; else its main worktree, to switch to it.
-pub(crate) fn base_tree(repo: &Repo) -> PathBuf {
+fn base_tree(repo: &Repo) -> PathBuf {
     gitinfo::checked_out_in(&repo.main, &repo.base).unwrap_or_else(|| repo.main.clone())
 }
 

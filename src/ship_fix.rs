@@ -23,12 +23,14 @@ pub(crate) fn by_hook(why: &str) -> bool {
     why.contains("hook") && !why.contains("pre-receive") && !why.contains("remote")
 }
 
-/// Where each repository of `feature` has its base checked out, one line
-/// each: "- api: dev in /w/api".
-fn bases(feature: &Feature) -> String {
+/// Where each repository of `feature` has its base checked out, as `check`
+/// last read it (`RepoCheck::tree`), else its main worktree, one line each:
+/// "- api: dev in /w/api". No git runs here: it is called on the UI thread.
+fn bases(feature: &Feature, check: Option<&ship::ShipCheck>) -> String {
     (feature.touched())
         .map(|r| {
-            let tree = ship::base_tree(r);
+            let read = (check.into_iter().flat_map(|c| &c.repos)).find(|c| c.key == r.key());
+            let tree = read.map_or(&r.main, |c| &c.tree);
             format!("- {}: {} in {}", r.key(), r.base, tree.display())
         })
         .collect::<Vec<String>>()
@@ -44,6 +46,14 @@ fn hook_text(title: &str, why: &str, log: &str) -> String {
 }
 
 impl Gerdr {
+    /// Say `text`, why shipping feature `slug` stopped, with a way to have
+    /// an agent plan its fix.
+    pub(crate) fn ship_failed(&mut self, project: &str, slug: &str, text: String) {
+        let action = crate::menu::MenuAction::FixShipProblem(project.to_owned(), slug.to_owned());
+        let fix = Some(("Plan fix".to_owned(), action));
+        self.toast_with(text, crate::toast::Level::Error, fix);
+    }
+
     /// Keep `why` as why shipping feature `slug` stopped, or clear it.
     pub(crate) fn set_ship_problem(&mut self, project: &str, slug: &str, why: Option<String>) {
         let Some(f) = self.feature_mut(project, slug) else {
@@ -82,6 +92,8 @@ impl Gerdr {
         if by_hook(&problem.why) {
             return self.ship_problem_to_build(project, slug, planning, &problem.why, &log);
         }
+        let check = self.last_probe(project, slug).and_then(|p| p.ship.as_ref());
+        let bases = bases(&feature, check);
         let (_, command) = match self.picked_cli(&feature, Stage::Build) {
             Ok(picked) => picked,
             Err(why) => return self.show_warning(why),
@@ -90,7 +102,7 @@ impl Gerdr {
         let vars = [
             ("ship.why", problem.why),
             ("ship.log", log),
-            ("ship.bases", bases(&feature)),
+            ("ship.bases", bases),
             ("ship.plan", plan.to_owned()),
         ];
         let task = crate::feature_agents::OwnTask {

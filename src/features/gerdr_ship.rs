@@ -509,7 +509,7 @@ impl Gerdr {
         self.save_feature(project, slug);
         self.keep_squash_draft(project, slug, "", message);
         tracing::warn!("shipping feature {project}/{slug}: {text}");
-        self.show_error(text);
+        self.ship_failed(project, slug, text);
         self.probe_feature(project, slug);
     }
 
@@ -671,7 +671,8 @@ impl Gerdr {
             });
             self.save_feature(project, slug);
             tracing::warn!("shipping feature {project}/{slug}: {why}");
-            self.show_error(format!("Couldn't ship \u{201c}{title}\u{201d}: {why}"));
+            let text = format!("Couldn't ship \u{201c}{title}\u{201d}: {why}");
+            self.ship_failed(project, slug, text);
             return self.probe_feature(project, slug);
         }
         // Only a base merged already: it went.

@@ -609,7 +609,7 @@ impl Gerdr {
         let kept = finishing.then(|| self.after_ship(project, slug)).flatten();
         if let Some(text) = failed {
             self.features.just_closed = None;
-            return self.show_error(format!("\u{201c}{title}\u{201d}: {text}"));
+            return self.ship_failed(project, slug, format!("\u{201c}{title}\u{201d}: {text}"));
         }
         let mut text = format!("Pushed {} for \u{201c}{title}\u{201d}", went.join(", "));
         if let Some(kept) = kept {
