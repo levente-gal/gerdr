@@ -484,6 +484,7 @@ impl Gerdr {
         for value in env.values_mut() {
             *value = crate::sandbox_lan::with_lan_ip(value, ip);
         }
+        let outside = self.sandbox_outside(&feature);
         // A port is only taken on the machine that holds it.
         let taken: Vec<u16> = (self.features.all.values().flatten())
             .filter(|f| !(f.project == project && f.slug == slug))
@@ -523,7 +524,7 @@ impl Gerdr {
             what: format!("Starting the sandbox of \u{201c}{title}\u{201d}"),
         };
         let there = machine.as_ref().and_then(|id| {
-            self.sandbox_there_job(&feature, id, &env, taken.clone())
+            self.sandbox_there_job(&feature, id, &env, taken.clone(), outside.clone())
         });
         if machine.is_some() && there.is_none() {
             // The link went this moment: what it would have said comes next.
@@ -603,6 +604,7 @@ impl Gerdr {
                 prepare: &prepare,
                 env: &env,
                 taken: &taken,
+                outside: &outside,
                 stop: &stop,
             };
             let mut run = sandbox_run::start(&job, &mut progress);
@@ -616,6 +618,16 @@ impl Gerdr {
                 opened: None,
             }
         });
+    }
+
+    /// The ports feature's sandbox leads out to its machine: its projects'
+    /// `workflow.sandbox_outside`.
+    fn sandbox_outside(&self, feature: &Feature) -> Vec<u16> {
+        let set = self.projects.workflows(feature, |w| w.sandbox_outside.clone());
+        let mut ports: Vec<u16> = (set.links.into_values().flatten()).chain(set.home).collect();
+        ports.sort_unstable();
+        ports.dedup();
+        ports
     }
 
     /// Where feature's sandbox starts: `None` for here, in the outer `None` when

@@ -273,6 +273,15 @@ and Ctrl+C or `y` copies what it says.
   Podman's compose can be Docker's or podman-compose; a sandbox's copy runs under
   the same one as main's. Its setup runs there first. It stays there until it is
   removed: its data is there.
+- A sandbox has its own localhost. The ports in the project's
+  `workflow.sandbox_outside` lead out of it to the same ports on its machine:
+  a service of another project, running in its own workspace, is then reached at
+  the same URL from inside, by the app's commands and its browser alike. Those
+  ports are no app port of the sandbox's, are never reported out of reach, and
+  are not given to its copies; a copy that has one stops the start with a
+  sentence naming both. The sandbox's card says where each leads. A service
+  listening on one address family only (127.0.0.1, not ::1) resets the other,
+  so `localhost` may fail inside where `127.0.0.1` works.
 - A sandbox says which gerdr started it. Each time a machine connects, gerdr looks
   there for sandboxes whose feature is gone. Each one stays as a row in the tasks
   panel, with Remove, which asks; a toast offers this gerdr's own once as well.

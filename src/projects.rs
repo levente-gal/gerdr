@@ -418,6 +418,12 @@ pub struct Workflow {
     /// sending real mail, say. The file is the only place for them.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub sandbox_env: std::collections::BTreeMap<String, String>,
+    /// TCP ports a sandbox reaches outside itself, on its machine, under the
+    /// same numbers: a service of another project running in its own
+    /// workspace, which the sandbox has no copy of. The file is the only place
+    /// for them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sandbox_outside: Vec<u16>,
     /// The page a sandbox's Open app opens, when what listens in it doesn't
     /// tell (see `sandbox_run::app_port`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -464,6 +470,7 @@ impl Workflow {
             && self.run.is_empty()
             && self.prepare.is_empty()
             && self.sandbox_env.is_empty()
+            && self.sandbox_outside.is_empty()
             && self.sandbox_url.is_none()
             && self.sandbox_pages.is_empty()
             && !self.allow_same_reviewer

@@ -764,9 +764,15 @@ pub(super) fn sandbox_sections(feature: &Feature, state: &PanelState) -> Vec<Pag
         "files, unix sockets and the internet are shared with main",
         CheckTone::Note,
     ));
+    for forward in run.forwards.iter().filter(|f| f.outside) {
+        let on = seen.map_or("this machine", |seen| seen.name.as_str());
+        let port = forward.main_port;
+        let text = format!("port {port} leads out of it, to {on}'s own {port}");
+        out.push(line(text, CheckTone::Note));
+    }
     let mut sections = vec![lines("Sandbox", capped(out, CheckTone::Note))];
     let mut out = Vec::new();
-    for forward in &run.forwards {
+    for forward in run.forwards.iter().filter(|f| !f.outside) {
         let text = match seen {
             Some(seen) => format!(
                 "{}: port {} inside it, 127.0.0.1:{} outside it on {}",

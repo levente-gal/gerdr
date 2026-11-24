@@ -841,6 +841,7 @@ fn the_sandbox_section_says_what_it_copied_and_what_it_shares() {
             main_port: 5433,
             host_port: 41001,
             udp: false,
+            outside: false,
         }],
         stopped: true,
         ..Default::default()

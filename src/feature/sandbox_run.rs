@@ -1057,6 +1057,8 @@ pub struct Job<'a> {
     pub env: &'a [(String, String)],
     /// Ports other sandboxes hold, though stopped.
     pub taken: &'a [u16],
+    /// TCP ports leading out to the machine itself: `workflow.sandbox_outside`.
+    pub outside: &'a [u16],
     pub stop: &'a AtomicBool,
 }
 
@@ -1129,7 +1131,9 @@ fn start_into(
     }
     run.outward = outward_of(job);
     run.out_of_reach = out_of_reach_of(job, &containers);
-    let mut taken: std::collections::BTreeSet<u16> = job.taken.iter().copied().collect();
+    // A copy publishing on an outside port would stand in for what is there.
+    let mut taken: std::collections::BTreeSet<u16> =
+        job.taken.iter().chain(job.outside).copied().collect();
     let mut starting: Vec<Vec<String>> = Vec::new();
     for stack in &stacks {
         progress(format!("Reading {}", stack.project));
@@ -1153,6 +1157,10 @@ fn start_into(
                 next_port: &mut next_port,
             },
         )?;
+        let clash = |f: &&Forward| !f.udp && job.outside.contains(&f.main_port);
+        if let Some(copy) = generated.forwards.iter().find(clash) {
+            return Err(outside_clash_text(copy.main_port, &copy.service));
+        }
         taken.extend(generated.forwards.iter().map(|f| f.host_port));
         let mut compose = generated.compose.clone();
         if engine == Engine::PodmanCompose {
@@ -1194,6 +1202,13 @@ fn start_into(
         tool(job.host, stack.engine, &args, job.stop)?;
         wait_ready(job.host, &stack, job.stop)?;
     }
+    run.forwards.extend(job.outside.iter().map(|&port| Forward {
+        service: String::new(),
+        main_port: port,
+        host_port: port,
+        udp: false,
+        outside: true,
+    }));
     progress("Making its network".to_owned());
     let holder = job.host.start_holder()?;
     run.holder = Some(holder.clone());
@@ -1248,6 +1263,14 @@ fn outward_of(job: &Job) -> Vec<String> {
 /// sandbox won't have, going by what the project set for sandboxes.
 fn out_of_reach_of(job: &Job, containers: &[sandbox::Container]) -> Vec<String> {
     let roots = job.roots();
+    // What the project leads out to is in reach.
+    let containers: Vec<sandbox::Container> = (containers.iter().cloned())
+        .map(|mut c| {
+            c.ports.retain(|port| !job.outside.contains(port));
+            c
+        })
+        .collect();
+    let containers = &containers;
     let mut found: Vec<String> = job
         .repos
         .iter()
@@ -1276,6 +1299,14 @@ pub fn out_of_reach_text(found: &[String]) -> String {
     format!(
         "can't reach what runs outside its project: {}. Give the project its own compose stack, or set workflow.sandbox_env in the project file",
         found.join(", ")
+    )
+}
+
+/// Why a sandbox doesn't start when its copy of `service` has a port the
+/// project leads out of it.
+fn outside_clash_text(port: u16, service: &str) -> String {
+    format!(
+        "its copy of {service} has port {port}, which workflow.sandbox_outside leads out of it: take {port} out of the project file"
     )
 }
 
@@ -2566,6 +2597,7 @@ mod tests {
             main_port: 5433,
             host_port: 41001,
             udp: false,
+            outside: false,
         }];
         assert_eq!(
             pasta_args(7, &forwards).join(" "),
@@ -2643,6 +2675,7 @@ mod tests {
                 main_port: 5432,
                 host_port: 15432,
                 udp: false,
+                outside: false,
             }],
             ..SandboxRun::default()
         };
@@ -2853,9 +2886,49 @@ To fix them run 'python manage.py makemigrations --merge'\n";
             prepare: &[],
             env: &[],
             taken: &[],
+            outside: &[],
             stop: &stop,
         };
         assert_eq!(job.roots(), [root.clone(), PathBuf::from("/w/Asset-Track")]);
+    }
+
+    #[test]
+    fn a_port_led_outside_is_in_reach() {
+        let dir = std::env::temp_dir().join(format!("gerdr-outside-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let env = "TRADE_URL=http://localhost:8080\nDB=postgres://me@127.0.0.1:5433/app\n";
+        fs::write(dir.join(".env"), env).unwrap();
+        let repos = [repo("/w/app", &dir.to_string_lossy())];
+        let other = sandbox::Container {
+            name: "other-1".to_owned(),
+            engine: Engine::Docker,
+            image: "node".to_owned(),
+            compose: None,
+            ports: vec![8080, 5433],
+            pod: None,
+        };
+        let stop = AtomicBool::new(false);
+        let job = Job {
+            host: &Host::Here,
+            project: "p",
+            slug: "f",
+            owner: "",
+            repos: &repos,
+            roots: &[PathBuf::from("/w/app")],
+            dir: &dir,
+            prepare: &[],
+            env: &[],
+            taken: &[],
+            outside: &[8080],
+            stop: &stop,
+        };
+        let found = out_of_reach_of(&job, std::slice::from_ref(&other));
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(found, ["DB (other-1, port 5433)"]);
+        assert_eq!(
+            outside_clash_text(8080, "web"),
+            "its copy of web has port 8080, which workflow.sandbox_outside leads out of it: take 8080 out of the project file"
+        );
     }
 
     #[test]
@@ -2886,6 +2959,7 @@ To fix them run 'python manage.py makemigrations --merge'\n";
             prepare: &[],
             env: &[],
             taken: &[],
+            outside: &[],
             stop: &stop,
         };
         let run = start(&job, &mut |what| eprintln!("{what}"));
@@ -3058,6 +3132,7 @@ To fix them run 'python manage.py makemigrations --merge'\n";
             prepare: &[],
             env: &[],
             taken: &[],
+            outside: &[],
             stop: &stop,
         };
         let run = start(&job, &mut |what| eprintln!("{what}"));
