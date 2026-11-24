@@ -1511,6 +1511,11 @@ pub(crate) fn chat_text(jsonl: &str) -> String {
         let mut said = Vec::new();
         if let Some(content) = body.get("content") {
             words(content, &mut said);
+            // Claude Code sends a tool's result back as the user's turn.
+            let parts = content.as_array().map(Vec::as_slice).unwrap_or_default();
+            if !parts.is_empty() && parts.iter().all(|part| part["type"] == "tool_result") {
+                role = "tool";
+            }
         } else if body["type"] == "function_call" {
             // Codex's tool calls are lines of their own.
             words(body, &mut said);
@@ -2754,6 +2759,13 @@ mod tests {
                 r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"ls\"]}"}}"#
             ),
             "assistant: [shell] bash -lc ls"
+        );
+        // A tool's result comes back in a user line: it says so.
+        assert_eq!(
+            said(
+                r#"{"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"4 passed"}]}}"#
+            ),
+            "tool: 4 passed"
         );
     }
 

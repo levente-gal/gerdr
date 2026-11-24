@@ -174,8 +174,6 @@ pub struct PaneChat {
     pub waiting: Option<Vec<(String, crate::scrollback::Styled)>>,
     /// What its agent said live: the tools running, an ask (`live`).
     pub live: live::PaneLive,
-    /// When its agent's turn began, for the chat's working row and head.
-    pub turn: Turn,
 }
 
 /// When an agent's turn began, as herdr's rounds saw its status.
