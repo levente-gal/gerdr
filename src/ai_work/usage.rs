@@ -53,7 +53,13 @@ pub fn read(agent: AgentKind, raw: &[u8]) -> Vec<Message> {
         AgentKind::Claude => claude(raw),
         AgentKind::Codex => codex(raw),
         AgentKind::Cursor => cursor(raw),
-        AgentKind::OpenCode | AgentKind::T3 | AgentKind::Unknown => Vec::new(),
+        // shortcut: pi's assistant messages hold usage too; read it when
+        // the stats should count pi.
+        AgentKind::OpenCode
+        | AgentKind::T3
+        | AgentKind::Pi
+        | AgentKind::Antigravity
+        | AgentKind::Unknown => Vec::new(),
     }
 }
 

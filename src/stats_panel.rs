@@ -1144,6 +1144,8 @@ pub(crate) fn agent_name(agent: &str) -> String {
         AgentKind::Codex => "Codex".into(),
         AgentKind::OpenCode => "OpenCode".into(),
         AgentKind::T3 => "T3 Code".into(),
+        AgentKind::Pi => "pi".into(),
+        AgentKind::Antigravity => "Antigravity".into(),
         AgentKind::Unknown if agent.is_empty() => NONE.into(),
         AgentKind::Unknown => agent.to_owned(),
     }
