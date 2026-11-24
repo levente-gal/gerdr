@@ -1,7 +1,7 @@
 //! The project commands dialog (see `crate::project_commands`): Verify's
-//! checks and the setup commands of a project, a field of lines per
-//! repository, on four tabs, and opened from a feature a fifth with the
-//! checks only it runs. The list of fields scrolls; the title, the tabs and
+//! checks, the setup commands and what a sandbox runs of a project, a field
+//! of lines per repository, on its tabs, and opened from a feature one more
+//! with the checks only it runs. The list of fields scrolls; the title, the tabs and
 //! the buttons stay.
 
 use super::{
@@ -15,21 +15,23 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The dialog's tabs for a project.
-pub const COMMANDS_PROJECT_TABS: [CommandsTab; 5] = [
+pub const COMMANDS_PROJECT_TABS: [CommandsTab; 6] = [
     CommandsTab::Checks,
     CommandsTab::Setup,
     CommandsTab::Run,
     CommandsTab::Prepare,
     CommandsTab::Pages,
+    CommandsTab::Network,
 ];
 /// The dialog's tabs for a feature.
-pub const COMMANDS_FEATURE_TABS: [CommandsTab; 6] = [
+pub const COMMANDS_FEATURE_TABS: [CommandsTab; 7] = [
     CommandsTab::Checks,
     CommandsTab::Setup,
     CommandsTab::Feature,
     CommandsTab::Run,
     CommandsTab::Prepare,
     CommandsTab::Pages,
+    CommandsTab::Network,
 ];
 /// The dialog's buttons while it can save.
 pub const COMMANDS_BUTTONS: [&str; 2] = ["Cancel", "Save"];
@@ -87,6 +89,8 @@ pub enum CommandsTab {
     Prepare,
     /// The pages of a sandbox's app, the first the one Open app opens.
     Pages,
+    /// The ports a sandbox reaches outside itself.
+    Network,
 }
 
 impl CommandsTab {
@@ -98,6 +102,7 @@ impl CommandsTab {
             Self::Run => "Run",
             Self::Prepare => "Prepare",
             Self::Pages => "Pages",
+            Self::Network => "Network",
         }
     }
 }
@@ -274,8 +279,8 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
     let room = (size.h - 2 * MARGIN - fixed).max(list_min());
     let list_h = list_tall().min(room);
     let height = fixed + list_h;
-    // Wider than other dialogs by a tab, so its six leave the title room.
-    let width = (DIALOG_WIDTH + TAB_W).min(size.w);
+    // Wider than other dialogs by two tabs, so its seven leave the title room.
+    let width = (DIALOG_WIDTH + 2 * TAB_W).min(size.w);
     let panel = Rectangle::new(
         (
             ((size.w - width) / 2).max(0),
@@ -600,6 +605,7 @@ impl Painter {
                     CommandsTab::Prepare => "Nothing runs first",
                     CommandsTab::Feature => "Nothing added",
                     CommandsTab::Pages => "Guessed from the Run commands",
+                    CommandsTab::Network => "No ports lead out",
                 };
                 self.field_of_lines(
                     c,

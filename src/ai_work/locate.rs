@@ -85,6 +85,10 @@ pub struct Homes {
     pub opencode: PathBuf,
     /// T3 Code's home, when it ran here.
     pub t3: Option<PathBuf>,
+    /// Where pi keeps its sessions: `~/.pi/agent/sessions`.
+    pub pi: PathBuf,
+    /// The Antigravity CLI's home: `~/.gemini/antigravity-cli`.
+    pub antigravity: PathBuf,
 }
 
 impl Homes {
@@ -108,6 +112,11 @@ impl Homes {
         if let Some(data) = env("XDG_DATA_HOME") {
             homes.opencode = data.join("opencode").join("opencode.db");
         }
+        if let Some(sessions) = env("PI_CODING_AGENT_SESSION_DIR") {
+            homes.pi = sessions;
+        } else if let Some(agent) = env("PI_CODING_AGENT_DIR") {
+            homes.pi = agent.join("sessions");
+        }
         homes.t3 = crate::t3_agents::home();
         Some(homes)
     }
@@ -121,6 +130,8 @@ impl Homes {
             codex: home.join(".codex"),
             opencode: home.join(".local/share/opencode/opencode.db"),
             t3: None,
+            pi: home.join(".pi/agent/sessions"),
+            antigravity: home.join(".gemini/antigravity-cli"),
         }
     }
 }
@@ -153,6 +164,12 @@ pub fn find_in(
         (AgentKind::Codex, None) => codex_by_time(&homes.codex, chat, claimed, span),
         (AgentKind::OpenCode, _) => opencode(&homes.opencode, chat, claimed, span)?,
         (AgentKind::T3, Some(id)) => t3(homes, chat, id)?,
+        (AgentKind::Pi, Some(id)) => pi_by_id(&homes.pi, id),
+        (AgentKind::Pi, None) => pi_by_time(&homes.pi, chat, claimed, span),
+        (AgentKind::Antigravity, Some(id)) => antigravity_by_id(&homes.antigravity, id),
+        (AgentKind::Antigravity, None) => {
+            antigravity_by_time(&homes.antigravity, chat, claimed, span)
+        }
         _ => None,
     })
 }
@@ -372,6 +389,114 @@ fn codex_by_time(
     )?;
     let (main, meta) = &metas[at];
     Some(found(AgentKind::Codex, &meta.id, main.clone(), Form::Lines))
+}
+
+/// pi's sessions under `sessions`, with when each began by its name
+/// (`<yyyy-mm-ddThh-mm-ss-mmmZ>_<id>.jsonl`), in a folder per working
+/// folder.
+fn pi_sessions(sessions: &Path) -> Vec<(PathBuf, u64)> {
+    (subdirs(sessions).iter())
+        .flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten())
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?;
+            let (time, _) = name.strip_suffix(".jsonl")?.split_once('_')?;
+            // `2026-11-24T19-27-30-349Z` as ISO: its clock's dashes as colons.
+            let (date, clock) = time.split_once('T')?;
+            let mut parts = clock.trim_end_matches('Z').split('-');
+            let (h, m, s) = (parts.next()?, parts.next()?, parts.next()?);
+            let at = super::usage::iso_ms(&format!("{date}T{h}:{m}:{s}Z"))? / 1000;
+            Some((path, at))
+        })
+        .collect()
+}
+
+/// pi chat `id`: `sessions/--<folder>--/<time>_<id>.jsonl`.
+fn pi_by_id(sessions: &Path, id: &str) -> Option<Found> {
+    let end = format!("_{id}.jsonl");
+    let (main, _) = (pi_sessions(sessions).into_iter())
+        .find(|(path, _)| path.to_str().is_some_and(|p| p.ends_with(&end)))?;
+    Some(found(AgentKind::Pi, id, main, Form::Lines))
+}
+
+/// The pi chat of `chat`'s run, by folder and time: its first line says
+/// where it runs (`{"type":"session","id","timestamp","cwd"}`).
+fn pi_by_time(
+    sessions: &Path,
+    chat: &Chat,
+    claimed: &HashSet<String>,
+    span: Span,
+) -> Option<Found> {
+    let metas: Vec<(PathBuf, CodexMeta)> = (pi_sessions(sessions).into_iter())
+        .filter(|(_, at)| (span.from..=span.to).contains(at))
+        .filter_map(|(path, _)| {
+            let head: Value = serde_json::from_str(first_line(&path)?.trim()).ok()?;
+            if head["type"] != "session" {
+                return None;
+            }
+            let meta = CodexMeta {
+                id: head["id"].as_str()?.to_owned(),
+                cwd: PathBuf::from(head["cwd"].as_str()?),
+                started: super::usage::iso_ms(head["timestamp"].as_str()?)? / 1000,
+            };
+            Some((path, meta))
+        })
+        .collect();
+    let at = codex_pick(
+        chat,
+        span,
+        claimed,
+        (metas.iter().enumerate()).map(|(i, (_, m))| (i, m)),
+    )?;
+    let (main, meta) = &metas[at];
+    plain_id(&meta.id).then(|| found(AgentKind::Pi, &meta.id, main.clone(), Form::Lines))
+}
+
+/// The Antigravity CLI's transcript of conversation `id`, the whole one:
+/// `brain/<id>/.system_generated/logs/transcript_full.jsonl`.
+pub fn antigravity_transcript(home: &Path, id: &str) -> PathBuf {
+    (home.join("brain").join(id)).join(".system_generated/logs/transcript_full.jsonl")
+}
+
+/// Antigravity CLI conversation `id`.
+fn antigravity_by_id(home: &Path, id: &str) -> Option<Found> {
+    let main = antigravity_transcript(home, id);
+    main.is_file()
+        .then(|| found(AgentKind::Antigravity, id, main, Form::Lines))
+}
+
+/// The Antigravity CLI conversation of `chat`'s run, by folder and time:
+/// its `history.jsonl` has a line per prompt typed, with the conversation
+/// and the folder (`{timestamp, workspace, conversationId}`); a
+/// conversation begins with its first.
+fn antigravity_by_time(
+    home: &Path,
+    chat: &Chat,
+    claimed: &HashSet<String>,
+    span: Span,
+) -> Option<Found> {
+    let history = std::fs::read_to_string(home.join("history.jsonl")).ok()?;
+    let mut metas: Vec<CodexMeta> = Vec::new();
+    for line in history.lines() {
+        let Ok(line) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let (Some(id), Some(cwd), Some(ms)) = (
+            line["conversationId"].as_str(),
+            line["workspace"].as_str(),
+            line["timestamp"].as_u64(),
+        ) else {
+            continue;
+        };
+        if !metas.iter().any(|m| m.id == id) {
+            let (id, cwd, started) = (id.to_owned(), PathBuf::from(cwd), ms / 1000);
+            metas.push(CodexMeta { id, cwd, started });
+        }
+    }
+    let meta = codex_pick(chat, span, claimed, metas.iter().map(|m| (m, m)))?;
+    plain_id(&meta.id)
+        .then(|| antigravity_by_id(home, &meta.id))
+        .flatten()
 }
 
 /// The folder Cursor keeps folder `dir`'s things in under `projects/`: its
@@ -951,6 +1076,82 @@ mod tests {
     fn put(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
+    }
+
+    #[test]
+    fn pi_and_antigravity_chats_are_found_by_id_and_by_folder_and_time() {
+        let home = std::env::temp_dir().join(format!("gerdr-locate-piagy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let homes = Homes::under(&home);
+        let started = 1_787_741_925; // 2026-08-26T10:58:45Z
+        let (app, other) = (Path::new("/w/app"), Path::new("/w/other"));
+        let session = |id: &str, cwd: &str| {
+            format!(
+                r#"{{"type":"session","version":3,"id":"{id}","timestamp":"2026-08-26T10:58:50.000Z","cwd":"{cwd}"}}"#
+            )
+        };
+        put(
+            &homes
+                .pi
+                .join("--w-app--/2026-08-26T10-58-50-000Z_p-1.jsonl"),
+            &session("p-1", "/w/app"),
+        );
+        put(
+            &homes
+                .pi
+                .join("--w-other--/2026-08-26T10-58-50-000Z_p-2.jsonl"),
+            &session("p-2", "/w/other"),
+        );
+        let none = HashSet::new();
+        let pi = |id: Option<&str>, folder: &Path, claimed: &HashSet<String>| {
+            find(
+                &homes,
+                &chat(AgentKind::Pi, id, started, &[folder]),
+                claimed,
+            )
+            .unwrap()
+            .map(|f| f.id)
+        };
+        assert_eq!(pi(None, app, &none).as_deref(), Some("p-1"));
+        assert_eq!(pi(None, other, &none).as_deref(), Some("p-2"));
+        assert_eq!(
+            pi(Some("p-2"), app, &none).as_deref(),
+            Some("p-2"),
+            "by id, any folder"
+        );
+        let held = HashSet::from(["p-1".to_owned()]);
+        assert_eq!(pi(None, app, &held), None, "another pane's");
+        // Antigravity: its history names each conversation's folder.
+        let ms = (started + 5) * 1000;
+        let history = format!(
+            "{{\"timestamp\":{ms},\"workspace\":\"/w/other\",\"conversationId\":\"a-2\"}}\n\
+             {{\"timestamp\":{ms},\"workspace\":\"/w/app\",\"conversationId\":\"a-1\"}}\n\
+             {{\"timestamp\":{},\"workspace\":\"/w/app\",\"conversationId\":\"a-1\"}}\n",
+            ms + 90_000
+        );
+        put(&homes.antigravity.join("history.jsonl"), &history);
+        for id in ["a-1", "a-2"] {
+            put(&antigravity_transcript(&homes.antigravity, id), "{}\n");
+        }
+        let agy = |id: Option<&str>, folder: &Path| {
+            find(
+                &homes,
+                &chat(AgentKind::Antigravity, id, started, &[folder]),
+                &none,
+            )
+            .unwrap()
+            .map(|f| (f.id, f.main))
+        };
+        assert_eq!(
+            agy(None, app),
+            Some((
+                "a-1".into(),
+                antigravity_transcript(&homes.antigravity, "a-1")
+            ))
+        );
+        assert_eq!(agy(None, other).map(|(id, _)| id).as_deref(), Some("a-2"));
+        assert_eq!(agy(Some("a-3"), app), None, "no such conversation");
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]

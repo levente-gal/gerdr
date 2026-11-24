@@ -274,7 +274,9 @@ and Ctrl+C or `y` copies what it says.
   the same one as main's. Its setup runs there first. It stays there until it is
   removed: its data is there.
 - A sandbox has its own localhost. The ports in the project's
-  `workflow.sandbox_outside` lead out of it to the same ports on its machine:
+  `workflow.sandbox_outside` (the Network tab of the project commands dialog,
+  a port a line, the home project's) lead out of it to the same ports on its
+  machine, from its next start:
   a service of another project, running in its own workspace, is then reached at
   the same URL from inside, by the app's commands and its browser alike. Those
   ports are no app port of the sandbox's, are never reported out of reach, and

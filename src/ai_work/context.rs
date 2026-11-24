@@ -84,7 +84,12 @@ pub fn context(agent: AgentKind, tail: &[u8]) -> Option<Context> {
             let window = info["model_context_window"].as_u64();
             (used > 0).then_some(Context { used, window })
         }),
-        AgentKind::Cursor | AgentKind::OpenCode | AgentKind::T3 | AgentKind::Unknown => None,
+        AgentKind::Cursor
+        | AgentKind::OpenCode
+        | AgentKind::T3
+        | AgentKind::Pi
+        | AgentKind::Antigravity
+        | AgentKind::Unknown => None,
     }
 }
 

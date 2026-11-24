@@ -148,14 +148,18 @@ pub struct Summary {
 /// The verb, and the noun one and many, a tool's work is counted under.
 fn counted(name: &str) -> (&'static str, &'static str, &'static str) {
     match name.to_ascii_lowercase().as_str() {
-        "read" | "read_file" | "view" | "notebookread" => ("read", "file", "files"),
+        "read" | "read_file" | "view" | "notebookread" | "view_file" | "view_file_outline" => {
+            ("read", "file", "files")
+        }
         "bash" | "shell" | "exec" | "exec_command" | "local_shell" | "local_shell_call"
-        | "run_terminal_cmd" | "bashoutput" => ("ran", "command", "commands"),
+        | "run_terminal_cmd" | "bashoutput" | "run_command" => ("ran", "command", "commands"),
         "grep" | "glob" | "search" | "grep_search" | "file_search" | "codebase_search" | "find"
-        | "rg" => ("searched", "pattern", "patterns"),
+        | "rg" | "find_by_name" => ("searched", "pattern", "patterns"),
         "list" | "ls" | "list_dir" => ("listed", "folder", "folders"),
-        "webfetch" | "fetch" | "web_fetch" => ("fetched", "page", "pages"),
-        "websearch" | "web_search" | "web_search_call" => ("ran", "web search", "web searches"),
+        "webfetch" | "fetch" | "web_fetch" | "read_url_content" => ("fetched", "page", "pages"),
+        "websearch" | "web_search" | "web_search_call" | "search_web" => {
+            ("ran", "web search", "web searches")
+        }
         "task" | "agent" => ("started", "subagent", "subagents"),
         _ => ("used", "tool", "tools"),
     }
@@ -392,11 +396,13 @@ mod tests {
             tool("d", "exec_command", None),
             tool("e", "Grep", Some((false, 0))),
             tool("f", "todowrite", Some((false, 0))),
+            // Antigravity's.
+            tool("g", "run_command", Some((false, 0))),
         ];
         let s = summary(&items);
         assert_eq!(
             s.text,
-            "Read 2 files, ran 2 commands, searched 1 pattern, used 1 tool"
+            "Read 2 files, ran 3 commands, searched 1 pattern, used 1 tool"
         );
         assert_eq!((s.ms, s.failed), (1600, 1));
         assert_eq!(s.running.as_deref(), Some("exec_command gist"));
