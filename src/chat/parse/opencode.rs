@@ -216,7 +216,7 @@ fn compacted(id: String) -> Item {
 
 /// The one line a tool's `input` says: its command, file, pattern; OpenCode's
 /// and Cursor's keys first (`filePath`, `glob_pattern`), else as Claude's.
-pub(super) fn gist(input: &Value) -> String {
+pub(crate) fn gist(input: &Value) -> String {
     let keys = [
         "command",
         "filePath",

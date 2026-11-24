@@ -1,20 +1,291 @@
 //! Claude Code's hooks, for live word (see `super`): `gerdr claude-hook`
 //! reads a hook's input and tells gerdr; `merged` adds it to
 //! `~/.claude/settings.json`.
-//!
-//! Wave 2 B fills this in; the signatures are the contract.
+
+use std::io::Read;
+
+use serde_json::{Value, json};
+
+use super::{AskReply, LiveEvent, What};
+use crate::stats_panel::tool_gist;
 
 /// The subcommand Claude's hooks run.
 pub const HOOK_COMMAND: &str = "claude-hook";
+/// The agent, as herdr names it.
+const AGENT: &str = "claude";
+/// The hook events gerdr listens to, each with how long its hook may take,
+/// in seconds: an ask waits for the chat's answer (`ASK_WAIT` and a little).
+const EVENTS: [(&str, u64); 6] = [
+    ("SessionStart", 5),
+    ("PreToolUse", 5),
+    ("PostToolUse", 5),
+    ("PostToolUseFailure", 5),
+    ("Stop", 5),
+    ("PermissionRequest", 90),
+];
+/// The most of a hook's input read.
+const MAX_INPUT: u64 = 4 << 20;
+/// The most of a tool's input an ask shows, in chars.
+const MAX_ASK_INPUT: usize = 4000;
 
 /// `gerdr claude-hook`: read the hook's input from stdin and tell gerdr;
 /// for `PermissionRequest`, print the chat's answer, if any. Always exits
 /// at once without gerdr, and never fails the hook.
-pub fn run_hook() {}
+pub fn run_hook() {
+    let mut input = Vec::new();
+    let _ = std::io::stdin().take(MAX_INPUT).read_to_end(&mut input);
+    let Some((socket, pane)) = super::from_env() else {
+        return;
+    };
+    let Ok(payload) = serde_json::from_slice::<Value>(&input) else {
+        return;
+    };
+    let now = super::now_ms();
+    let ask = format!("claude-{}-{now}", std::process::id());
+    let Some(what) = what_of(&payload, &ask) else {
+        return;
+    };
+    let event = LiveEvent {
+        pane,
+        agent: AGENT.into(),
+        at_ms: now,
+        what,
+    };
+    if let Some(out) = super::send(&socket, &event).and_then(decision) {
+        println!("{out}");
+    }
+}
+
+/// What hook input `payload` says, an ask named `ask`; `None` for what
+/// gerdr doesn't hear.
+fn what_of(payload: &Value, ask: &str) -> Option<What> {
+    let text = |key: &str| payload.get(key).and_then(Value::as_str).map(str::to_owned);
+    let input = &payload["tool_input"];
+    Some(match payload.get("hook_event_name")?.as_str()? {
+        "SessionStart" => What::Session {
+            kind: "path".into(),
+            value: text("transcript_path")?,
+        },
+        "PreToolUse" => What::ToolStart {
+            call: text("tool_use_id")?,
+            name: text("tool_name")?,
+            gist: tool_gist(input).unwrap_or_default(),
+        },
+        "PostToolUse" => What::ToolEnd {
+            call: text("tool_use_id")?,
+            failed: payload["tool_response"]["is_error"].as_bool() == Some(true),
+        },
+        "PostToolUseFailure" => What::ToolEnd {
+            call: text("tool_use_id")?,
+            failed: true,
+        },
+        "Stop" => What::TurnEnd,
+        "PermissionRequest" => {
+            let mut shown = serde_json::to_string_pretty(input).unwrap_or_default();
+            if let Some((cut, _)) = shown.char_indices().nth(MAX_ASK_INPUT) {
+                shown.truncate(cut);
+                shown.push('…');
+            }
+            What::Ask {
+                ask: ask.to_owned(),
+                tool: text("tool_name")?,
+                gist: tool_gist(input).unwrap_or_default(),
+                input: shown,
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// What the hook prints for the chat's answer `reply`: nothing for `Pass`,
+/// so Claude's TUI asks as it always does.
+fn decision(reply: AskReply) -> Option<String> {
+    let decision = match reply {
+        AskReply::Allow => json!({ "behavior": "allow" }),
+        AskReply::Deny => json!({ "behavior": "deny", "message": "Denied from gerdr's chat" }),
+        AskReply::Pass => return None,
+    };
+    let out = json!({
+        "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": decision }
+    });
+    Some(out.to_string())
+}
 
 /// `existing`, the text of `~/.claude/settings.json`, with `command` run
-/// for gerdr's events, in place of any older gerdr's, all else kept.
+/// for gerdr's events, in place of any older gerdr's, all else kept. Only
+/// `"hooks"` is written anew; text that isn't a settings object is an
+/// error.
 pub fn merged(existing: Option<&str>, command: &str) -> Result<String, String> {
-    let _ = command;
-    Ok(existing.unwrap_or("{}").to_owned())
+    let text = existing.filter(|t| !t.trim().is_empty());
+    let root: Value = match text {
+        Some(text) => serde_json::from_str(text).map_err(|err| err.to_string())?,
+        None => json!({}),
+    };
+    let old = (root.as_object().ok_or("not a JSON object")?)
+        .get("hooks")
+        .cloned();
+    let mut hooks = old.clone().unwrap_or_else(|| json!({}));
+    let events = hooks.as_object_mut().ok_or("\"hooks\" isn't an object")?;
+    for (event, timeout) in EVENTS {
+        let groups = (events.entry(event))
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| format!("\"{event}\" isn't a list"))?;
+        // A group left empty by taking gerdr's hook out goes too.
+        groups.retain_mut(|group| {
+            let Some(list) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
+                return true;
+            };
+            let had = list.len();
+            list.retain(|hook| {
+                !(hook.get("command").and_then(Value::as_str))
+                    .is_some_and(|c| crate::cursor_agents::is_gerdr_command(c, HOOK_COMMAND))
+            });
+            list.len() == had || !list.is_empty()
+        });
+        let hook = json!({ "type": "command", "command": command, "timeout": timeout });
+        let mut group = json!({ "hooks": [hook] });
+        if !matches!(event, "SessionStart" | "Stop") {
+            group["matcher"] = "*".into();
+        }
+        groups.push(group);
+    }
+    match text {
+        Some(text) if old.as_ref() == Some(&hooks) => Ok(text.to_owned()),
+        Some(text) => super::with_key(text, "hooks", &hooks),
+        None => serde_json::to_string_pretty(&json!({ "hooks": hooks }))
+            .map(|text| text + "\n")
+            .map_err(|err| err.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    fn fixture(name: &str) -> Value {
+        let text = match name {
+            "SessionStart" => include_str!("fixtures/claude/SessionStart.json"),
+            "PreToolUse" => include_str!("fixtures/claude/PreToolUse.json"),
+            "PostToolUse" => include_str!("fixtures/claude/PostToolUse.json"),
+            "PermissionRequest" => include_str!("fixtures/claude/PermissionRequest.json"),
+            "Stop" => include_str!("fixtures/claude/Stop.json"),
+            "UserPromptSubmit" => include_str!("fixtures/claude/UserPromptSubmit.json"),
+            _ => unreachable!(),
+        };
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn hooks_say_what_claude_does() {
+        let what = |name| what_of(&fixture(name), "q1");
+        let call = "toolu_01Vv5bFcWUmhcvCarPCiFz2z";
+        let transcript = fixture("SessionStart")["transcript_path"].clone();
+        assert_eq!(
+            what("SessionStart"),
+            Some(What::Session {
+                kind: "path".into(),
+                value: transcript.as_str().unwrap().into(),
+            })
+        );
+        assert_eq!(
+            what("PreToolUse"),
+            Some(What::ToolStart {
+                call: call.into(),
+                name: "Bash".into(),
+                gist: "echo done > out.txt".into(),
+            })
+        );
+        let end = |failed| {
+            Some(What::ToolEnd {
+                call: call.into(),
+                failed,
+            })
+        };
+        assert_eq!(what("PostToolUse"), end(false));
+        let mut failure = fixture("PostToolUse");
+        failure["hook_event_name"] = "PostToolUseFailure".into();
+        assert_eq!(what_of(&failure, "q1"), end(true));
+        assert_eq!(what("Stop"), Some(What::TurnEnd));
+        assert_eq!(what("UserPromptSubmit"), None);
+        let Some(What::Ask {
+            ask,
+            tool,
+            gist,
+            input,
+        }) = what("PermissionRequest")
+        else {
+            panic!("not an ask");
+        };
+        assert_eq!((ask.as_str(), tool.as_str()), ("q1", "Bash"));
+        assert_eq!(gist, "echo done > out.txt");
+        assert!(
+            input.starts_with("{\n  \"command\": \"echo done > out.txt\""),
+            "{input}"
+        );
+    }
+
+    #[test]
+    fn the_chats_answer_is_claudes_decision() {
+        let out: Value = serde_json::from_str(&decision(AskReply::Allow).unwrap()).unwrap();
+        let allow = json!({"hookSpecificOutput": {
+            "hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}
+        }});
+        assert_eq!(out, allow);
+        let out = decision(AskReply::Deny).unwrap();
+        assert!(out.contains(r#""behavior":"deny""#), "{out}");
+        assert_eq!(decision(AskReply::Pass), None);
+    }
+
+    #[test]
+    fn gerdrs_hooks_go_in_beside_the_others() {
+        let command = "/opt/gerdr claude-hook";
+        let theirs = r#"{
+  "env": {"B": "1", "A": "2"},
+  "model": "opus",
+  "hooks": {
+    "SessionStart": [
+      {"matcher": "^(startup|resume)$", "hooks": [{"type": "command", "command": "bash herdr.sh session", "timeout": 10}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "'/old/gerdr' claude-hook", "timeout": 5}]},
+      {"hooks": [{"type": "command", "command": "notify-send done"}, {"type": "command", "command": "/old/gerdr claude-hook"}]}
+    ]
+  },
+  "theme": "light"
+}
+"#;
+        let out = merged(Some(theirs), command).unwrap();
+        // The user's keys keep their order and form.
+        let head =
+            "{\n  \"env\": {\"B\": \"1\", \"A\": \"2\"},\n  \"model\": \"opus\",\n  \"hooks\": {";
+        assert!(out.starts_with(head), "{out}");
+        assert!(out.ends_with("},\n  \"theme\": \"light\"\n}\n"), "{out}");
+        let root: Value = serde_json::from_str(&out).unwrap();
+        let hooks = &root["hooks"];
+        let start = &hooks["SessionStart"];
+        assert_eq!(start[0]["hooks"][0]["command"], "bash herdr.sh session");
+        assert_eq!(start[1]["hooks"][0]["command"], command);
+        assert_eq!(start[1].get("matcher"), None);
+        // Old gerdr hooks are gone, their group too when it held no other.
+        let stop = json!([
+            {"hooks": [{"type": "command", "command": "notify-send done"}]},
+            {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
+        ]);
+        assert_eq!(hooks["Stop"], stop);
+        // An ask's hook outlives the wait for its answer.
+        let wait = hooks["PermissionRequest"][0]["hooks"][0]["timeout"].as_u64();
+        assert!(
+            Duration::from_secs(wait.unwrap()) > super::super::ASK_WAIT + Duration::from_secs(5)
+        );
+        assert_eq!(hooks["PreToolUse"][0]["matcher"], "*");
+        assert_eq!(merged(Some(&out), command).unwrap(), out);
+        let fresh = merged(None, command).unwrap();
+        assert_eq!(merged(Some(&fresh), command).unwrap(), fresh);
+        assert!(merged(Some("{oops"), command).is_err());
+        assert!(merged(Some("[]"), command).is_err());
+        assert!(merged(Some(r#"{"hooks": []}"#), command).is_err());
+    }
 }

@@ -16,6 +16,8 @@ mod cursor;
 mod opencode;
 pub(crate) mod patch;
 
+pub(crate) use opencode::gist;
+
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use serde_json::Value;
