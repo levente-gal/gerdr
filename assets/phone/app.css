@@ -220,14 +220,16 @@ a.row:active { background: var(--raised); }
 .doc table { border-collapse: collapse; display: block; overflow-x: auto; }
 .doc th, .doc td { border: 1px solid var(--line); padding: 4px 8px; }
 .doc img { max-width: 100%; }
+/* A pane's output, and its working row right under the last line. */
+.term-box { background: var(--term-bg); margin: 0 -16px; min-height: 60vh; }
 .term {
-  background: var(--term-bg); color: var(--term-text); margin: 0 -16px;
+  color: var(--term-text); margin: 0;
   padding: 10px 12px; font: 12px/1.35 ui-monospace, "SF Mono", Menlo, monospace;
-  white-space: pre-wrap; overflow-wrap: anywhere; min-height: 60vh;
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
 /* Under a working agent's output: a blinking dot and its turn's clock. */
-.working { display: flex; align-items: center; gap: 6px; color: var(--accent); padding: 8px 0 2px; }
-.working .clock { font-variant-numeric: tabular-nums; }
+.work-row { display: flex; align-items: center; gap: 6px; color: var(--accent); padding: 0 12px 10px; }
+.work-row .clock { font-variant-numeric: tabular-nums; }
 
 button {
   font: inherit; font-size: 15px; font-weight: 550; color: var(--text); background: var(--raised);
