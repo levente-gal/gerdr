@@ -1402,6 +1402,14 @@ pub struct PendingEnter {
     folders: Vec<PathBuf>,
 }
 
+/// A step of the `[ui] zoom`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZoomStep {
+    In,
+    Out,
+    Reset,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     NewTab,
@@ -1439,6 +1447,9 @@ pub enum Action {
     CyclePane(isize),
     /// Switch the chrome between light and dark.
     ToggleTheme,
+    /// Draw everything bigger or smaller, or as the monitor would (see
+    /// `Gerdr::step_zoom`).
+    Zoom(ZoomStep),
     /// Keep the key help open, or close it again.
     Shortcuts,
     /// Open the switcher, to search for what to switch to.
@@ -1717,6 +1728,16 @@ impl Gerdr {
 
     pub fn scale(&self) -> f64 {
         self.output.current_scale().fractional_scale()
+    }
+
+    /// Draw at the host window's scale times the `[ui] zoom`: the chrome
+    /// and the panes grow together, as on a monitor scaled up. The panes
+    /// hear of it when next arranged.
+    pub fn rescale(&mut self) {
+        let host_scale = self.backend.window().scale_factor();
+        let scale = host_scale * f64::from(self.settings.zoom) / 100.0;
+        self.output
+            .change_current_state(None, None, Some(Scale::Fractional(scale)), None);
     }
 
     /// Where the panes go: right of the sidebar, below the tab strip,
@@ -4484,6 +4505,7 @@ impl Gerdr {
             Action::NewTab => self.new_tab(),
             Action::NewAgent => self.open_agent_picker(self.active_workspace),
             Action::PauseAgents => self.toggle_agents_paused(),
+            Action::Zoom(step) => self.step_zoom(step),
             Action::CloseTab => self.close_tab(tab),
             Action::RenameTab if tabs > 0 => self.start_rename(RenameTarget::Tab(ws, tab)),
             Action::MoveTab(step) => self.move_tab(step),
@@ -7248,6 +7270,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = config::load();
     let (mut state, saved_machines, settings_problems) =
         new_gerdr(&event_loop, dh, backend, wayland, settings, &store, &args);
+    state.rescale();
     register_sources(&event_loop, socket, display, winit_loop, output)?;
     start(
         &mut state,
@@ -7579,6 +7602,7 @@ fn new_gerdr(
             theme_mode: start_theme(ui.theme),
             system_dark: true,
             density: ui.density,
+            zoom: ui.zoom,
             needs_you: ui.needs_you,
             notify: notifications.enabled,
             sounds,
@@ -7791,16 +7815,17 @@ fn register_sources(
     event_loop
         .handle()
         .insert_source(winit_loop, move |event, _, state| match event {
-            WinitEvent::Resized { size, scale_factor } => {
+            WinitEvent::Resized { size, .. } => {
                 state.output.change_current_state(
                     Some(Mode {
                         size,
                         refresh: 60_000,
                     }),
                     None,
-                    Some(Scale::Fractional(scale_factor)),
+                    None,
                     None,
                 );
+                state.rescale();
                 state.arrange();
             }
             WinitEvent::Input(event) => state.process_input_event(event),

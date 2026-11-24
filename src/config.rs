@@ -125,7 +125,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 
 use crate::{
-    Gerdr,
+    Gerdr, ZoomStep,
     anim::Motion,
     chrome::{Density, ThemeMode},
     home_dir,
@@ -233,6 +233,32 @@ pub fn sets(text: &str, table: &str, key: &str) -> bool {
 /// their order and spacing) as it was.
 pub fn with_bool(text: &str, table: &str, key: &str, value: bool) -> Result<String, String> {
     with_value(text, table, key, Some(toml_edit::value(value)))
+}
+
+/// `write_bool` for the `[ui] zoom`, given in percent: written as `1.25`.
+pub fn write_zoom(percent: u16) -> Result<(), String> {
+    let path = config_file();
+    ensure_file(&path).map_err(|err| err.to_string())?;
+    let text = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    let text = with_zoom(&text, percent)?;
+    crate::projects::write_atomic(&path, text.as_bytes()).map_err(|err| err.to_string())
+}
+
+/// `text` with `[ui] zoom` set to `percent`, as `with_bool` does.
+fn with_zoom(text: &str, percent: u16) -> Result<String, String> {
+    let zoom = toml_edit::value(f64::from(percent) / 100.0);
+    with_value(text, "ui", "zoom", Some(zoom))
+}
+
+/// The zoom the screen can take, in percent.
+pub const ZOOM_MIN: u16 = 50;
+pub const ZOOM_MAX: u16 = 300;
+/// How much a zoom key changes it, in percent.
+pub const ZOOM_STEP: u16 = 10;
+
+/// A zoom as written (`1.25`) in percent, kept within what can be shown.
+fn zoom_percent(zoom: f64) -> u16 {
+    (zoom * 100.0).round().clamp(ZOOM_MIN.into(), ZOOM_MAX.into()) as u16
 }
 
 /// `with_bool` for any value; no value takes the key out, what else the
@@ -697,6 +723,7 @@ struct UiConfig {
     needs_you: Option<bool>,
     motion: Option<String>,
     footer: Option<bool>,
+    zoom: Option<toml::Value>,
 }
 
 /// The `[git]` table, as written.
@@ -802,6 +829,9 @@ pub struct Ui {
     pub motion: Motion,
     /// Whether the footer with the background tasks shows.
     pub footer: bool,
+    /// How big the whole screen is drawn, chrome and panes, in percent of
+    /// the monitor's own scale: `zoom = 1.25` is 125.
+    pub zoom: u16,
 }
 
 impl Default for Ui {
@@ -812,6 +842,7 @@ impl Default for Ui {
             needs_you: true,
             motion: Motion::Full,
             footer: true,
+            zoom: 100,
         }
     }
 }
@@ -960,6 +991,12 @@ pub fn from_text(
     if let Some(footer) = config.ui.footer {
         ui.footer = footer;
     }
+    match config.ui.zoom {
+        None => {}
+        Some(toml::Value::Float(zoom)) if zoom.is_finite() => ui.zoom = zoom_percent(zoom),
+        Some(toml::Value::Integer(zoom)) => ui.zoom = zoom_percent(zoom as f64),
+        Some(other) => problems.push(format!("zoom `{other}` isn't a number like 1.25")),
+    }
     let mut git = Git::default();
     if let Some(groups) = config.git.same_branches {
         git.same_branches = same_branches(groups, &mut problems);
@@ -1074,6 +1111,7 @@ const TEMPLATE: &str = "\
 # needs_you = false     # hide the sidebar's \"Needs you\" list; shown by default
 # footer = false        # hide the footer with the background tasks; shown by default
 # motion = \"reduced\"    # or \"off\": no blinking dots or pulses; \"full\", the default
+# zoom = 1.25           # draw everything bigger, panes too; Prefix Alt+= / Alt+- / Alt+0
 #
 # [git]
 # # Branch names that are one branch across repositories, in the
@@ -1317,6 +1355,7 @@ impl Gerdr {
         self.key_state.keymap = settings.keymap;
         self.launcher.apps = settings.apps;
         self.settings.density = settings.ui.density;
+        self.set_zoom(settings.ui.zoom);
         self.settings.needs_you = settings.ui.needs_you;
         // The panes take the footer's room, or give it back (`arrange`).
         self.settings.show_footer = settings.ui.footer;
@@ -1379,6 +1418,34 @@ impl Gerdr {
         let open = ("Open settings".to_owned(), MenuAction::OpenSettings);
         self.toast_with(text, Level::Error, Some(open));
     }
+
+    /// Draw at `zoom` percent from now on; `arrange` tells the panes.
+    fn set_zoom(&mut self, zoom: u16) {
+        if zoom != self.settings.zoom {
+            self.settings.zoom = zoom;
+            self.rescale();
+        }
+    }
+
+    /// Draw everything a step bigger or smaller, or at the monitor's own
+    /// size, kept as `[ui] zoom` in the config file.
+    pub fn step_zoom(&mut self, step: ZoomStep) {
+        let zoom = match step {
+            ZoomStep::In => self.settings.zoom + ZOOM_STEP,
+            ZoomStep::Out => self.settings.zoom.saturating_sub(ZOOM_STEP),
+            ZoomStep::Reset => 100,
+        }
+        .clamp(ZOOM_MIN, ZOOM_MAX);
+        if let Err(err) = write_zoom(zoom) {
+            let text = format!("Couldn't change the zoom in Settings: {err}");
+            let open = ("Open settings".to_owned(), MenuAction::OpenSettings);
+            return self.toast_with(text, Level::Error, Some(open));
+        }
+        // Read again whole, as `toggle_terminal_reload` does.
+        let _ = self.apply_settings();
+        let text = format!("Drawn at {}% \u{b7} [ui] zoom in Settings", self.settings.zoom);
+        self.show_success(text);
+    }
 }
 
 /// gerdr's config file: `$XDG_CONFIG_HOME/gerdr/config.toml`, by default
@@ -1393,7 +1460,10 @@ pub fn config_file() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{Density, Git, InboxSettings, TEMPLATE, ThemeMode, Ui, from_text};
+    use super::{
+        Density, Git, InboxSettings, TEMPLATE, ThemeMode, Ui, ZOOM_MAX, ZOOM_MIN, from_text,
+        with_zoom,
+    };
 
     #[test]
     fn the_template_changes_nothing() {
@@ -1504,6 +1574,28 @@ other = 1
         // What can't be written says why.
         assert!(with_bool("t3 = 1\n", "t3", "updates", false).is_err());
         assert!(with_bool("[t3\n", "t3", "updates", false).is_err());
+    }
+
+    #[test]
+    fn zoom_reads_as_percent_within_what_can_be_shown() {
+        let zoom = |text: &str| {
+            let (_, _, ui, _, _, problems, _, _) = from_text(text);
+            (ui.zoom, problems)
+        };
+        assert_eq!(zoom(""), (100, vec![]));
+        assert_eq!(zoom("[ui]\nzoom = 1.25\n"), (125, vec![]));
+        assert_eq!(zoom("[ui]\nzoom = 2\n"), (200, vec![]));
+        assert_eq!(zoom("[ui]\nzoom = 9.0\n"), (ZOOM_MAX, vec![]));
+        assert_eq!(zoom("[ui]\nzoom = 0.1\n"), (ZOOM_MIN, vec![]));
+        let (percent, problems) = zoom("[ui]\nzoom = \"big\"\n");
+        assert_eq!(percent, 100);
+        assert!(problems[0].contains("zoom"), "{problems:?}");
+        // Written as it is read back, comments and the rest kept.
+        let text = "# Mine.\n[ui]\ndensity = \"compact\"  # tight\nzoom = 1.25\n";
+        let out = with_zoom(text, 110).unwrap();
+        assert_eq!(out, text.replace("1.25", "1.1"));
+        assert_eq!(zoom(&out).0, 110);
+        assert_eq!(with_zoom("", 130).unwrap(), "[ui]\nzoom = 1.3\n");
     }
 
     #[test]
@@ -1655,6 +1747,7 @@ other = 1
                 needs_you: true,
                 motion: crate::anim::Motion::Full,
                 footer: true,
+                zoom: 100,
             }
         );
         assert!(problems.is_empty());

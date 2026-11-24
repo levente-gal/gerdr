@@ -40,7 +40,7 @@ use smithay::{
 };
 
 use crate::{
-    Gerdr, WorkspaceKind,
+    Gerdr, WorkspaceKind, ZoomStep,
     agent_icons::AgentIcon,
     agents::AgentKey,
     app_icons::AppIcon,
@@ -120,6 +120,8 @@ pub enum Target {
     T3Updates,
     /// New terminals reloading their config file, turned on or off.
     TerminalReload,
+    /// Everything drawn a step bigger or smaller, or at the monitor's size.
+    Zoom(ZoomStep),
     /// The dialog raising the inotify limit (see `inotify_limit`).
     RaiseInotifyLimit,
     /// The tasks running in the background (see `tasks`).
@@ -193,6 +195,7 @@ impl Target {
             | Target::UpdateT3
             | Target::T3Updates
             | Target::TerminalReload
+            | Target::Zoom(_)
             | Target::RaiseInotifyLimit
             | Target::Tasks
             | Target::Phones
@@ -231,6 +234,7 @@ impl Target {
             | Target::UpdateT3
             | Target::T3Updates
             | Target::TerminalReload
+            | Target::Zoom(_)
             | Target::RaiseInotifyLimit
             | Target::Tasks
             | Target::Phones
@@ -1057,6 +1061,7 @@ fn frecency_key(
         | Target::UpdateT3
         | Target::T3Updates
         | Target::TerminalReload
+        | Target::Zoom(_)
         | Target::RaiseInotifyLimit
         | Target::Tasks
         | Target::Phones
@@ -1854,6 +1859,7 @@ impl Gerdr {
             Target::UpdateT3 => self.update_t3(None),
             Target::T3Updates => self.toggle_t3_updates(),
             Target::TerminalReload => self.toggle_terminal_reload(),
+            Target::Zoom(step) => self.step_zoom(step),
             Target::RaiseInotifyLimit => self.ask_raise_inotify(),
             Target::Tasks => self.open_tasks(0),
             Target::Phones => self.open_phones(),
@@ -2085,6 +2091,28 @@ impl Gerdr {
                 Target::TerminalReload,
             )
         });
+        // Settings' `[ui] zoom`, written there.
+        let zoom = self.settings.zoom;
+        items.push(Item::new(
+            ItemIcon::Command,
+            "Make everything bigger",
+            format!("now {zoom}% \u{b7} panes too \u{b7} [ui] zoom"),
+            Target::Zoom(ZoomStep::In),
+        ));
+        items.push(Item::new(
+            ItemIcon::Command,
+            "Make everything smaller",
+            format!("now {zoom}% \u{b7} panes too \u{b7} [ui] zoom"),
+            Target::Zoom(ZoomStep::Out),
+        ));
+        if zoom != 100 {
+            items.push(Item::new(
+                ItemIcon::Command,
+                "Draw everything at the monitor's size",
+                format!("now {zoom}%, back to 100%"),
+                Target::Zoom(ZoomStep::Reset),
+            ));
+        }
         if self.inotify.is_low() {
             items.push(Item::new(
                 ItemIcon::Command,
