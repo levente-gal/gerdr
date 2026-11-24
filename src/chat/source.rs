@@ -28,6 +28,8 @@ pub struct Run {
     pub started: u64,
     /// Where it runs.
     pub cwd: PathBuf,
+    /// Its process.
+    pub pid: u32,
 }
 
 /// The kind of agent in a pane, as herdr names it.
@@ -513,6 +515,7 @@ pub(crate) mod tests {
         let run = Run {
             started,
             cwd: "/work/app".into(),
+            pid: 0,
         };
         let none = HashSet::new();
         let source = by_time(AgentKind::Cursor, &run, &homes, &none).expect("read");
