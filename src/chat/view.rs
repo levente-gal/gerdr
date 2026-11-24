@@ -301,7 +301,7 @@ fn chat_key(
         Some(ListKey::Page(by)) => return Some(ChatDo::Page(by)),
         Some(ListKey::Copy) => {
             let row = chat.picked.or(last).and_then(|i| shown.get(i))?;
-            let texts: Vec<String> = row.span().map(|i| item_text(&chat.items[i])).collect();
+            let texts: Vec<String> = row.items(&chat.items).iter().map(item_text).collect();
             return Some(ChatDo::Copy(texts.join("\n\n")));
         }
         Some(ListKey::Compose) => chat.focus = ChatFocus::Composer,
@@ -720,7 +720,7 @@ impl Gerdr {
             return;
         };
         let shown = rows(&view.items, &view.unfolded);
-        let Some(r) = shown.iter().position(|row| row.span().contains(&i)) else {
+        let Some(r) = shown.iter().position(|row| row.holds(i)) else {
             return;
         };
         let Some((y, _)) = chrome::chat_item_span(&view, r).filter(|(y, _)| *y != place.y) else {
@@ -1001,10 +1001,9 @@ impl Gerdr {
         let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
             return;
         };
-        let row = rows(&chat.items, &chat.unfolded)
-            .get(i)
-            .and_then(|row| row.item());
-        let Some(Item::Edit { path, .. }) = row.and_then(|i| chat.items.get(i)) else {
+        let shown = rows(&chat.items, &chat.unfolded);
+        let Some(Item::Edit { path, .. }) = shown.get(i).and_then(|row| row.item(&chat.items))
+        else {
             return;
         };
         let mut file = PathBuf::from(path);
@@ -1123,7 +1122,7 @@ impl Gerdr {
             }
             ChatHit::Fold(i) => {
                 chat.picked = Some(i);
-                let row = rows(&chat.items, &chat.unfolded).get(i).copied();
+                let row = rows(&chat.items, &chat.unfolded).get(i).cloned();
                 if let Some(id) = row.and_then(|row| row.fold_key(&chat.items))
                     && !chat.unfolded.remove(&id)
                 {
@@ -1132,12 +1131,10 @@ impl Gerdr {
             }
             ChatHit::ShowAll(i) => {
                 chat.picked = Some(i);
-                let row = rows(&chat.items, &chat.unfolded)
-                    .get(i)
-                    .and_then(|row| row.item());
-                if let Some(item) = row.and_then(|i| chat.items.get(i)) {
-                    chat.unfolded.insert(item.id().to_owned());
-                    chat.unfolded.insert(chrome::whole_key(item.id()));
+                let shown = rows(&chat.items, &chat.unfolded);
+                if let Some(id) = shown.get(i).and_then(|row| row.fold_key(&chat.items)) {
+                    chat.unfolded.insert(chrome::whole_key(&id));
+                    chat.unfolded.insert(id);
                 }
             }
             ChatHit::Path(i) => self.chat_open_path(&pane_id, i),

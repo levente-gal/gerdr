@@ -7,7 +7,7 @@ use std::{collections::HashSet, path::Path};
 use super::Item;
 
 /// One row of a chat's list.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Row {
     /// An item on its own: words, an edit, a subagent, a note.
     Item(usize),
@@ -16,30 +16,68 @@ pub enum Row {
     Steps { from: usize, to: usize, open: bool },
     /// An item of an open `Steps`, in under its line.
     Step(usize),
+    /// A row of the open subagent card at item `sub`, in under it: `row`
+    /// is of the subagent's own items.
+    In { sub: usize, row: Box<Row> },
 }
 
 impl Row {
-    /// What `unfolded` holds for it while it is open, or its card is.
-    pub fn fold_key(self, items: &[Item]) -> Option<String> {
+    /// The items its indexes are into, of `items` or a subagent's down
+    /// them, and the row there.
+    fn level<'a>(&'a self, items: &'a [Item]) -> (&'a [Item], &'a Row) {
         match self {
-            Row::Item(i) | Row::Step(i) => items.get(i).map(|item| item.id().to_owned()),
-            Row::Steps { from, .. } => items.get(from).map(|item| steps_key(item.id())),
+            Row::In { sub, row } => match items.get(*sub) {
+                Some(Item::Subagent { items, .. }) => row.level(items),
+                _ => (&[], row),
+            },
+            _ => (items, self),
+        }
+    }
+
+    /// How many subagent cards it is in under.
+    pub fn depth(&self) -> usize {
+        match self {
+            Row::In { row, .. } => 1 + row.depth(),
+            _ => 0,
+        }
+    }
+
+    /// What `unfolded` holds for it while it is open, or its card is.
+    pub fn fold_key(&self, items: &[Item]) -> Option<String> {
+        let (items, row) = self.level(items);
+        match row {
+            Row::Item(i) | Row::Step(i) => items.get(*i).map(|item| item.id().to_owned()),
+            Row::Steps { from, .. } => items.get(*from).map(|item| steps_key(item.id())),
+            Row::In { .. } => None,
         }
     }
 
     /// The one item it shows, if it is one.
-    pub fn item(self) -> Option<usize> {
-        match self {
-            Row::Item(i) | Row::Step(i) => Some(i),
-            Row::Steps { .. } => None,
+    pub fn item<'a>(&'a self, items: &'a [Item]) -> Option<&'a Item> {
+        let (items, row) = self.level(items);
+        match row {
+            Row::Item(i) | Row::Step(i) => items.get(*i),
+            _ => None,
         }
     }
 
-    /// The items it holds.
-    pub fn span(self) -> std::ops::Range<usize> {
+    /// The items it shows: one, or a steps line's.
+    pub fn items<'a>(&'a self, items: &'a [Item]) -> &'a [Item] {
+        let (items, row) = self.level(items);
+        let range = match row {
+            Row::Item(i) | Row::Step(i) => *i..*i + 1,
+            Row::Steps { from, to, .. } => *from..*to,
+            Row::In { .. } => 0..0,
+        };
+        items.get(range).unwrap_or_default()
+    }
+
+    /// Whether it shows the chat's own item `i` (not a subagent's).
+    pub fn holds(&self, i: usize) -> bool {
         match self {
-            Row::Item(i) | Row::Step(i) => i..i + 1,
-            Row::Steps { from, to, .. } => from..to,
+            Row::Item(at) | Row::Step(at) => *at == i,
+            Row::Steps { from, to, .. } => (*from..*to).contains(&i),
+            Row::In { .. } => false,
         }
     }
 }
@@ -74,7 +112,25 @@ pub fn rows(items: &[Item], unfolded: &HashSet<String>) -> Vec<Row> {
             rows.extend((from..i).map(Row::Step));
         }
     }
-    rows
+    // An open subagent card: its own rows follow it.
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let sub = match row {
+            Row::Item(i) => match &items[i] {
+                Item::Subagent { id, items: own, .. } if unfolded.contains(id) => Some((i, own)),
+                _ => None,
+            },
+            _ => None,
+        };
+        out.push(row);
+        if let Some((sub, own)) = sub {
+            out.extend((self::rows(own, unfolded).into_iter()).map(|row| Row::In {
+                sub,
+                row: Box::new(row),
+            }));
+        }
+    }
+    out
 }
 
 /// What a steps line says of its items.
@@ -251,6 +307,56 @@ mod tests {
             ]
         );
         assert_eq!(open[2].fold_key(&items).as_deref(), Some("t1"));
+        assert_eq!(open[1].items(&items).len(), 3);
+    }
+
+    #[test]
+    fn an_open_subagents_own_rows_follow_its_card() {
+        let own = vec![
+            said("s1"),
+            tool("st1", "Bash", Some((false, 5))),
+            edit("se"),
+        ];
+        let items = [
+            said("u"),
+            Item::Subagent {
+                id: "agent:t".into(),
+                title: "Look".into(),
+                items: std::sync::Arc::new(own),
+                output: None,
+            },
+        ];
+        assert_eq!(rows(&items, &HashSet::new()).len(), 2);
+        let mut unfolded = HashSet::from(["agent:t".to_owned()]);
+        let open = rows(&items, &unfolded);
+        let inner = |row| Row::In {
+            sub: 1,
+            row: Box::new(row),
+        };
+        let steps = Row::Steps {
+            from: 1,
+            to: 2,
+            open: false,
+        };
+        assert_eq!(
+            open,
+            [
+                Row::Item(0),
+                Row::Item(1),
+                inner(Row::Item(0)),
+                inner(steps),
+                inner(Row::Item(2))
+            ]
+        );
+        // Its rows fold, copy and open as the chat's do.
+        assert_eq!(open[3].fold_key(&items), Some(steps_key("st1")));
+        assert_eq!(open[4].item(&items).map(Item::id), Some("se"));
+        assert_eq!(open[3].items(&items).len(), 1);
+        assert_eq!(open[3].depth(), 1);
+        assert!(open[1].holds(1) && !open[2].holds(0));
+        unfolded.insert(steps_key("st1"));
+        let deeper = rows(&items, &unfolded);
+        assert_eq!(deeper[4], inner(Row::Step(1)));
     }
 
     #[test]

@@ -508,6 +508,7 @@ fn stacked(view: &ChatView, w: i32) -> (Vec<(i32, Rc<Laid>)>, i32) {
     let mut was = None;
     for row in rows {
         let yours = matches!(row, Row::Item(i) if matches!(view.items[i], Item::User { .. }));
+        let row = &row;
         if let Some(was) = was {
             y += if was == yours { STEP_GAP } else { TURN_GAP };
         }
@@ -541,17 +542,34 @@ fn earlier_words(reading: bool) -> (&'static str, Mark) {
     }
 }
 
-/// Row `row` of `view` laid out for a column `w` wide.
-fn laid_row(view: &ChatView, row: Row, w: i32) -> Rc<Laid> {
+/// Row `row` of `view` laid out for a column `w` wide: a subagent's own
+/// rows in from its card.
+fn laid_row(view: &ChatView, row: &Row, w: i32) -> Rc<Laid> {
     let (cwd, unfolded) = (view.cwd.as_deref(), &view.unfolded);
-    match row {
-        Row::Item(i) => laid(&view.items[i], w, 0, unfolded, cwd),
-        Row::Step(i) => laid(&view.items[i], w, NEST, unfolded, cwd),
-        Row::Steps { from, to, open } => {
-            let mut s = rows::summary(&view.items[from..to]);
-            s.running = (s.running.take()).map(|gist| short(&gist, cwd));
-            laid_steps(view.items[from].id(), s, open, w)
+    let nest = NEST * row.depth() as i32;
+    let items = row.items(&view.items);
+    let Some(first) = items.first() else {
+        return Rc::default();
+    };
+    match row.item(&view.items) {
+        Some(item) => {
+            let step = matches!(innermost(row), Row::Step(_));
+            laid(item, w, nest + if step { NEST } else { 0 }, unfolded, cwd)
         }
+        None => {
+            let open = matches!(innermost(row), Row::Steps { open: true, .. });
+            let mut s = rows::summary(items);
+            s.running = (s.running.take()).map(|gist| short(&gist, cwd));
+            laid_steps(first.id(), s, open, w, nest)
+        }
+    }
+}
+
+/// The row `row` is down its subagent cards.
+fn innermost(row: &Row) -> &Row {
+    match row {
+        Row::In { row, .. } => innermost(row),
+        row => row,
     }
 }
 
@@ -993,27 +1011,7 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
                 path: false,
                 mono: false,
             });
-            if open {
-                // Its own rows, in from the card, its steps folded as the
-                // chat's are: what they paint, not what presses on them do.
-                let (nx, nw) = (x + NEST, (cw - NEST).max(1));
-                let mut y = l.below();
-                for row in rows::rows(items, unfolded) {
-                    let laid = match row {
-                        Row::Item(i) | Row::Step(i) => laid(&items[i], nw, 0, unfolded, cwd),
-                        Row::Steps { from, to, open } => {
-                            let mut s = rows::summary(&items[from..to]);
-                            s.running = (s.running.take()).map(|gist| short(&gist, cwd));
-                            laid_steps(items[from].id(), s, open, nw)
-                        }
-                    };
-                    for (r, bit) in &laid.bits {
-                        let at = Rectangle::new(r.loc + Point::from((nx, y)), r.size);
-                        l.put(at, bit.clone());
-                    }
-                    y += laid.h + STEP_GAP;
-                }
-            }
+            // Open, its own rows follow it in the list (`rows::rows`).
         }
         Item::Note { text, .. } => {
             let line = text.lines().next().unwrap_or_default();
@@ -1055,17 +1053,13 @@ thread_local! {
     static LAYS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// Whether `item` is unfolded, and so on down a subagent's items while it
-/// is: what its layout depends on of `unfolded`.
+/// Whether `item` is unfolded, and its output shown whole: what its layout
+/// depends on of `unfolded` (an open subagent's own rows are rows of the
+/// list).
 fn opened(item: &Item, unfolded: &HashSet<String>, out: &mut Vec<bool>) {
     let open = unfolded.contains(item.id());
     out.push(open);
     out.push(unfolded.contains(&whole_key(item.id())));
-    if let (true, Item::Subagent { items, .. }) = (open, item) {
-        for inner in items.iter() {
-            opened(inner, unfolded, out);
-        }
-    }
 }
 
 /// `item` laid out for a column `w` wide, as `unfolded` has it: once per
@@ -1117,7 +1111,7 @@ thread_local! {
 
 /// The steps row from item `id` on saying `s`, its fold mark `open`, for
 /// a column `w` wide: laid out once while they stay.
-fn laid_steps(id: &str, s: Summary, open: bool, w: i32) -> Rc<Laid> {
+fn laid_steps(id: &str, s: Summary, open: bool, w: i32, nest: i32) -> Rc<Laid> {
     let kept = STEPS.with_borrow(|memo| {
         let (was, o, ww, laid) = memo.get(id)?;
         (*was == s && *o == open && *ww == w).then(|| laid.clone())
@@ -1125,7 +1119,7 @@ fn laid_steps(id: &str, s: Summary, open: bool, w: i32) -> Rc<Laid> {
     if let Some(laid) = kept {
         return laid;
     }
-    let laid = lay_steps(&s, open, w);
+    let laid = lay_steps(&s, open, w, nest);
     STEPS.with_borrow_mut(|memo| {
         if memo.len() >= MEMOS {
             memo.clear();
@@ -1135,7 +1129,7 @@ fn laid_steps(id: &str, s: Summary, open: bool, w: i32) -> Rc<Laid> {
     laid
 }
 
-fn lay_steps(s: &Summary, open: bool, w: i32) -> Rc<Laid> {
+fn lay_steps(s: &Summary, open: bool, w: i32, nest: i32) -> Rc<Laid> {
     #[cfg(test)]
     LAYS.with(|n| n.set(n.get() + 1));
     let mut l = Laid::default();
@@ -1145,8 +1139,8 @@ fn lay_steps(s: &Summary, open: bool, w: i32) -> Rc<Laid> {
     }
     tail.extend(took(s.ms).map(|took| (took, Mark::Muted)));
     l.head(Head {
-        x: 0,
-        w,
+        x: nest,
+        w: (w - nest).max(1),
         open,
         name: &s.text,
         bold: false,
@@ -1828,6 +1822,48 @@ pub(super) mod tests {
         assert_eq!(layout.hit(&v, row), Some(ChatHit::Earlier));
         assert_eq!(layout.hit(&v, middle(first)), Some(ChatHit::Item(0)));
         assert_eq!(earlier_words(true).0, "Reading earlier messages…");
+    }
+
+    #[test]
+    fn a_step_in_an_open_subagent_folds_where_it_shows() {
+        let mut v = view();
+        let own = vec![
+            Item::Assistant {
+                id: "s1".into(),
+                at: None,
+                blocks: Arc::new(crate::md_blocks::blocks("Looking.")),
+            },
+            Item::Tool {
+                id: "st1".into(),
+                name: "Grep".into(),
+                gist: "fn parse".into(),
+                input: String::new(),
+                output: None,
+            },
+        ];
+        v.items = Arc::new(vec![Item::Subagent {
+            id: "agent:t".into(),
+            title: "Find it".into(),
+            items: Arc::new(own),
+            output: None,
+        }]);
+        v.unfolded = ["agent:t".to_owned()].into();
+        let layout = chat_layout(&v);
+        // The card, its words, its steps: three rows, the steps in from it.
+        let steps = item_rect(&v, 2);
+        let at = |x: i32| {
+            Point::from((
+                (steps.loc.x + x) as f64,
+                (steps.loc.y + CARD_ROW / 2) as f64,
+            ))
+        };
+        assert_eq!(layout.hit(&v, at(NEST + 4)), Some(ChatHit::Fold(2)));
+        let (shown, _) = stacked(&v, parts(&v).column.1);
+        assert_eq!(shown.len(), 3);
+        let fold = (shown[2].1.bits.iter())
+            .find_map(|(r, b)| matches!(b, Bit::Fold(_)).then_some(r.loc.x))
+            .unwrap();
+        assert_eq!(fold, NEST);
     }
 
     #[test]
