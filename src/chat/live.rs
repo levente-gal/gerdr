@@ -158,6 +158,20 @@ pub struct HeldAsk {
     pub pane: String,
     pub conn: u64,
     pub stream: UnixStream,
+    /// The running call it asks for, as its tool and line match: once that
+    /// call ends, the TUI's own prompt answered it (`settled_by`).
+    pub call: Option<String>,
+}
+
+/// Whether `what`, heard from the pane of ask `held`, says the ask was
+/// answered in the agent's own prompt: Claude shows its prompt beside the
+/// hook's wait, and doesn't end the hook when the user answers there.
+pub fn settled_by(held: &HeldAsk, what: &What) -> bool {
+    match what {
+        What::ToolEnd { call, .. } => held.call.as_ref() == Some(call),
+        What::TurnEnd => true,
+        _ => false,
+    }
 }
 
 /// gerdr's side: what it heard, and the asks waiting on their connections.
@@ -562,6 +576,30 @@ mod tests {
             path.file_name().unwrap(),
             "gerdr-live-4f2d902ac55aa4a1.sock"
         );
+    }
+
+    #[test]
+    fn an_ask_is_settled_by_its_calls_end_or_the_turns() {
+        let held = HeldAsk {
+            pane: "w1:p2".into(),
+            conn: 0,
+            stream: UnixStream::pair().unwrap().0,
+            call: Some("c1".into()),
+        };
+        let end = |call: &str| What::ToolEnd {
+            call: call.into(),
+            failed: false,
+        };
+        assert!(settled_by(&held, &end("c1")));
+        // Another call, run beside it, ends: still waiting.
+        assert!(!settled_by(&held, &end("c2")));
+        assert!(settled_by(&held, &What::TurnEnd));
+        let start = What::ToolStart {
+            call: "c3".into(),
+            name: "Read".into(),
+            gist: "x".into(),
+        };
+        assert!(!settled_by(&held, &start));
     }
 
     #[test]

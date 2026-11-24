@@ -136,7 +136,11 @@ impl Gerdr {
                     let reply = AskReply::Pass;
                     return super::answer(&mut stream, &Answer { ask, reply });
                 }
+                let mut call = None;
                 if let Some(chat) = chat_mut(&mut self.workspaces, &pane) {
+                    call = (chat.live.running.iter().rev())
+                        .find(|r| r.name == tool && r.gist == gist)
+                        .map(|r| r.call.clone());
                     chat.live.ask = Some(PendingAsk {
                         ask: ask.clone(),
                         tool,
@@ -149,6 +153,7 @@ impl Gerdr {
                     pane: pane.clone(),
                     conn,
                     stream,
+                    call,
                 };
                 self.chats.live.asks.insert(ask.clone(), held);
                 let timer = Timer::from_duration(ASK_WAIT);
@@ -165,6 +170,13 @@ impl Gerdr {
             }
             What::AskGone { ask } => self.live_drop_ask(&ask),
             what => {
+                let settled: Vec<String> = (self.chats.live.asks.iter())
+                    .filter(|(_, held)| held.pane == pane && super::settled_by(held, &what))
+                    .map(|(ask, _)| ask.clone())
+                    .collect();
+                for ask in settled {
+                    self.live_answer(&ask, AskReply::Pass);
+                }
                 if let Some(chat) = chat_mut(&mut self.workspaces, &pane) {
                     chat.live.hear(&what, event.at_ms);
                 }
@@ -400,6 +412,7 @@ mod tests {
             pane: pane.into(),
             conn: 0,
             stream: UnixStream::pair().unwrap().0,
+            call: None,
         };
         let asks = HashMap::from([
             ("a".to_owned(), held("w1:p1")),
