@@ -208,7 +208,8 @@ async function push(what) {
 async function go(pane) {
   const d = await get("/api/features");
   const f = d.features.find((f) => f.agents.some((a) => a.pane === pane));
-  location.replace(f ? href("pane", f.project, f.slug, pane) : "#/");
+  const w = d.agents.find((w) => w.agents.some((a) => a.pane === pane));
+  location.replace(f ? href("pane", f.project, f.slug, pane) : w ? href("agent", w.project, pane) : "#/");
   return { title: "gerdr", html: "" };
 }
 
@@ -221,9 +222,20 @@ async function list() {
   const group = (name, fs) => fs.length
     ? `<h2>${name} <span class="count">${fs.length}</span></h2>` + fs.map((f) => card(f, d.now)).join("") : "";
   html += group("Waiting for you", waiting) + group("In progress", rest);
+  html += d.agents.map(workspaceAgents).join("");
   html += `<a class="new-link" href="#/new">New feature</a>`;
   html += await pushCard();
   return { title: "gerdr", html };
+}
+
+// A project's agents in workspaces of no feature: those waiting first,
+// then those at work.
+const RANK = { "waiting for you": 0, "working": 1 };
+function workspaceAgents(w) {
+  const agents = [...w.agents].sort((a, b) => (RANK[a.status] ?? 2) - (RANK[b.status] ?? 2));
+  return `<h2>Agents in ${esc(w.projectName)} <span class="count">${agents.length}</span></h2><div class="group">` +
+    agents.map((a) => `<a class="row" href="${href("agent", w.project, a.pane)}">
+      <span>${esc(a.label)}</span>${chip(a, a.status)}</a>`).join("") + `</div>`;
 }
 
 // The feature tab's rail: numbered nodes joined as the desktop joins them,
@@ -635,11 +647,11 @@ async function pane(p, s, id) {
   const since = d.working == null ? null : turnAt(id, d.working);
   const working = since === null ? "" : `<div class="work-row small"><span class="sdot blink"></span>working
     <span class="clock" data-since="${since}"></span></div>`;
-  return { title: d.label, back: href("f", p, s), html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
+  return { title: d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
     bar: `${ask}<form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
-        <button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button></div>` };
+        ${s ? `<button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button>` : ""}</div>` };
 }
 
 // When the working agent's turn began, in this phone's time: kept across
@@ -680,6 +692,7 @@ function route() {
     case "f": return { load: () => feature(parts[1], parts[2], parts[3]), every: 5000 };
     case "doc": return { load: () => doc(parts[1], parts[2], parts[3]), every: 10000 };
     case "pane": return { load: () => pane(parts[1], parts[2], parts[3]), every: 2000 };
+    case "agent": return { load: () => pane(parts[1], "", parts[2]), every: 2000 };
     case "go": return { load: () => go(parts[1]), every: 0 };
     case "new": return { load: newForm, every: 10000 };
     default: return { load: list, every: 5000 };
@@ -791,8 +804,12 @@ async function render(fresh, force, keepBottom) {
   if (r.every && !document.hidden) timer = setTimeout(() => render(false), r.every);
 }
 
-// The route's feature and pane: `#/f/<p>/<s>` or `#/pane/<p>/<s>/<pane>`.
-const here = () => location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+// The route's feature and pane: `#/f/<p>/<s>` or `#/pane/<p>/<s>/<pane>`;
+// a workspace's agent, `#/agent/<p>/<pane>`, as a pane of no feature.
+const here = () => {
+  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+  return parts[0] === "agent" ? ["pane", parts[1], "", parts[2]] : parts;
+};
 
 // A question in a sheet over the page: a confirm with the button that
 // does it (`go`), or, with `field`, the text a button asks for. Its box
