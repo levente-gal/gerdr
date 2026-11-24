@@ -11,14 +11,20 @@
 //! `cursor`). Item ids come from the transcript (a message's, a call's), so
 //! they stay the same when it is read again and folds keep.
 
+mod antigravity;
 mod codex;
 mod cursor;
 mod opencode;
 pub(crate) mod patch;
+mod pi;
 
 pub(crate) use opencode::gist;
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
 
 use serde_json::Value;
 
@@ -58,6 +64,11 @@ pub struct Reader {
     /// Which of `subs` a sidechain line is of, by its agent id or by a line's
     /// uuid (older transcripts have no agent ids).
     sub_of: HashMap<String, usize>,
+    /// Calls whose results come in their order, with no id to tell
+    /// (Antigravity's), first first.
+    waiting: VecDeque<String>,
+    /// The steps read, by their index (Antigravity's).
+    steps: HashSet<u64>,
 }
 
 /// A subagent's work: its item, read by a reader of its own.
@@ -84,6 +95,8 @@ impl Reader {
             agent_calls: HashMap::new(),
             subs: Vec::new(),
             sub_of: HashMap::new(),
+            waiting: VecDeque::new(),
+            steps: HashSet::new(),
         }
     }
 
@@ -92,7 +105,10 @@ impl Reader {
     /// gets its result.
     pub fn feed(&mut self, lines: &[u8]) {
         // OpenCode's and Cursor's are read with `snapshot`.
-        if !matches!(self.agent, AgentKind::Claude | AgentKind::Codex) {
+        if !matches!(
+            self.agent,
+            AgentKind::Claude | AgentKind::Codex | AgentKind::Pi | AgentKind::Antigravity
+        ) {
             return;
         }
         self.rest.extend_from_slice(lines);
@@ -107,6 +123,8 @@ impl Reader {
             }
             match serde_json::from_slice::<Value>(raw) {
                 Ok(line) if self.agent == AgentKind::Codex => self.codex_line(&line),
+                Ok(line) if self.agent == AgentKind::Pi => self.pi_line(&line),
+                Ok(line) if self.agent == AgentKind::Antigravity => self.antigravity_line(&line),
                 Ok(line) => self.route(&line),
                 // Reading can start mid-file: the first line may be cut short.
                 Err(_) if self.lines == 1 => {}
@@ -1058,3 +1076,4 @@ mod tests {
         assert!(reader.items().is_empty());
     }
 }
+

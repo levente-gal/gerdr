@@ -375,6 +375,9 @@ pub enum AgentKind {
     Codex,
     OpenCode,
     T3,
+    Pi,
+    /// Google's Antigravity CLI (`agy`).
+    Antigravity,
     Unknown,
 }
 
@@ -388,6 +391,8 @@ impl AgentKind {
             n if n.starts_with("codex") => Self::Codex,
             n if n.starts_with("opencode") => Self::OpenCode,
             n if n.starts_with("t3") => Self::T3,
+            "pi" => Self::Pi,
+            n if n.starts_with("antigravity") || n == "agy" => Self::Antigravity,
             _ => Self::Unknown,
         }
     }
@@ -400,6 +405,8 @@ impl AgentKind {
             Self::Codex => "codex",
             Self::OpenCode => "opencode",
             Self::T3 => "t3",
+            Self::Pi => "pi",
+            Self::Antigravity => "antigravity",
             Self::Unknown => "unknown",
         }
     }
