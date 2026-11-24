@@ -55,6 +55,8 @@ fn phone_may(outcome: &PanelOutcome) -> bool {
             | O::RerunCi
             | O::RerunShipCi(_)
             | O::FixCi(..)
+            | O::FixShipProblem(_)
+            | O::PushBase(_)
             | O::ResolveConflicts(..)
             | O::ResolveAllConflicts(_)
             | O::UpdateAllBases

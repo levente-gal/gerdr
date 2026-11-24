@@ -632,6 +632,10 @@ impl Gerdr {
             PanelOutcome::StopResolving(_) => self.ask_stop_resolving(&project, &slug),
             PanelOutcome::FixCi(_, planning) => self.fix_ship_ci(&project, &slug, planning),
             PanelOutcome::RerunShipCi(repo) => self.rerun_ship_ci(&project, &slug, &repo),
+            PanelOutcome::PushBase(repo) => self.push_merged_base(&project, &slug, &repo),
+            PanelOutcome::FixShipProblem(planning) => {
+                self.fix_ship_problem(&project, &slug, planning);
+            }
             PanelOutcome::EditSummary => self.edit_ship_summary(&project, &slug),
             PanelOutcome::PickAgent(stage, name) => {
                 self.pick_stage_agent(&project, &slug, stage, &name);

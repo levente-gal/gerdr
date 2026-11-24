@@ -4779,6 +4779,62 @@ fn feature_tab_ship_base_ci() -> super::FeatureTabView {
     view
 }
 
+/// `feature_tab_ship_live` once shipping stopped: why, its fix buttons,
+/// and web merged into dev here only, its push unticked.
+fn feature_tab_ship_stopped() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, Dot, PageButton, PageSection};
+    let mut view = feature_tab_ship_live();
+    (view.page.sections).retain(|s| !matches!(s, PageSection::Recap(_)));
+    let at = view.page.buttons.len();
+    for (label, style) in [
+        ("Plan fix", ButtonStyle::Primary),
+        ("Fix directly", ButtonStyle::Plain),
+        ("Push dev\u{2026}", ButtonStyle::Primary),
+    ] {
+        view.page.buttons.push(PageButton {
+            label: label.into(),
+            style,
+        });
+    }
+    let web = (view.page.sections.iter())
+        .position(|s| matches!(s, PageSection::ShipGroup(g) if g.head.starts_with("web")));
+    let web = web.unwrap_or(view.page.sections.len() - 1);
+    if let Some(PageSection::ShipGroup(group)) = view.page.sections.get_mut(web)
+        && let Some(card) = group.card.as_mut()
+    {
+        card.dot = Dot::Blocked;
+        card.state = tab_line(
+            "merged into dev here only: not on origin",
+            CheckTone::Blocker,
+        );
+        card.buttons = vec![at + 2];
+    }
+    let lines = vec![
+        tab_line(
+            "Couldn't push dev of api: husky - pre-push hook exited with code 1 \u{b7} 2m ago",
+            CheckTone::Failed,
+        ),
+        tab_line(
+            "A hook refused the code: the Build agent fixes it, then Verify and the reviews run again",
+            CheckTone::Note,
+        ),
+    ];
+    view.page.sections.insert(
+        1,
+        PageSection::Lines {
+            label: "Shipping stopped".into(),
+            lines,
+        },
+    );
+    view.page.sections.insert(
+        2,
+        PageSection::Toolbar {
+            groups: vec![(String::new(), vec![at, at + 1])],
+        },
+    );
+    view
+}
+
 /// A done feature, Ship's page shown read-only, with its pull requests.
 fn feature_tab_approved() -> super::FeatureTabView {
     feature_tab_brief(false)
@@ -6504,7 +6560,7 @@ fn placed(mut view: super::FeatureTabView) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 59] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 60] {
     let views = [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -6521,6 +6577,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 59] {
         ("tab_ship_conflicts", feature_tab_ship_conflicts()),
         ("tab_ship_ci", feature_tab_ship_ci()),
         ("tab_ship_base_ci", feature_tab_ship_base_ci()),
+        ("tab_ship_stopped", feature_tab_ship_stopped()),
         ("tab_ship_after", feature_tab_ship_after()),
         ("tab_done", feature_tab_done()),
         ("tab_later", feature_tab_later()),
@@ -6579,7 +6636,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 59] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 76] = [
+const TAB_SURFACES: [(&str, i32); 77] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -6650,6 +6707,7 @@ const TAB_SURFACES: [(&str, i32); 76] = [
     ("tab_ship_picks", 860),
     ("tab_ship_ci", 860),
     ("tab_ship_base_ci", 1180),
+    ("tab_ship_stopped", 860),
     ("tab_ship_checking", 1180),
     ("tab_verify_regressed", 1180),
     ("tab_verify_machine", 860),
@@ -6658,7 +6716,7 @@ const TAB_SURFACES: [(&str, i32); 76] = [
     ("tab_discover_research", 860),
 ];
 
-const FEATURE_TAB: [&str; 76] = [
+const FEATURE_TAB: [&str; 77] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -6729,6 +6787,7 @@ const FEATURE_TAB: [&str; 76] = [
     "tab_ship_picks_860",
     "tab_ship_ci_860",
     "tab_ship_base_ci_1180",
+    "tab_ship_stopped_860",
     "tab_ship_checking_1180",
     "tab_verify_regressed_1180",
     "tab_verify_machine_860",
@@ -6738,7 +6797,7 @@ const FEATURE_TAB: [&str; 76] = [
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
     // Dark at 1
     [
         0xa85bec63adf6c004, // tab_build_860
@@ -6811,6 +6870,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xf40ac477d14785e5, // tab_ship_picks_860
         0x85ff726fc5f0a98d, // tab_ship_ci_860
         0xd0d7623f25a0db15, // tab_ship_base_ci_1180
+        0x5abc2fc5ea8d0aca, // tab_ship_stopped_860
         0x0d29fb85dd2ec61f, // tab_ship_checking_1180
         0xd79f2ae07b504dcb, // tab_verify_regressed_1180
         0x4b2e2423c7e42e6c, // tab_verify_machine_860
@@ -6890,6 +6950,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xe95a027c61b41224, // tab_ship_picks_860
         0x63d540992bb3c807, // tab_ship_ci_860
         0xc19d62726306ca17, // tab_ship_base_ci_1180
+        0xe42047e5325b42f5, // tab_ship_stopped_860
         0x7bf7bd484bd1418c, // tab_ship_checking_1180
         0xb57df7a155554e8c, // tab_verify_regressed_1180
         0x6be6e8dccf97d26e, // tab_verify_machine_860
@@ -6969,6 +7030,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xa3f5a4917bc74b18, // tab_ship_picks_860
         0xe8f404b65e5a2d6a, // tab_ship_ci_860
         0x9d8df21bd6463d35, // tab_ship_base_ci_1180
+        0xdcd837b221117ba0, // tab_ship_stopped_860
         0xb095820b01c1f30f, // tab_ship_checking_1180
         0xfcff387c15772795, // tab_verify_regressed_1180
         0x5d49ce354f5d4282, // tab_verify_machine_860
@@ -7048,6 +7110,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x0190d7fa623a858c, // tab_ship_picks_860
         0x7b8deae3f8385f48, // tab_ship_ci_860
         0x72eb82655e5c874a, // tab_ship_base_ci_1180
+        0x14504ee37fc766d1, // tab_ship_stopped_860
         0xfb149b0388901b80, // tab_ship_checking_1180
         0x3ffeb089fc4e2b3e, // tab_verify_regressed_1180
         0x42271a11cd38aa76, // tab_verify_machine_860
@@ -8831,7 +8894,7 @@ const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
         0xa984852d813c6db5, // popup_no_comments_850
         0xf80132fb8f3fe8a2, // popup_listed_1180
         0x799bfe46156fc713, // inline_listed_1180
-        0x1506713ac3716265, // code_diff_1180
+        0xc13d428bb2eaf8ca, // code_diff_1180
     ],
     // Dark at 2
     [
@@ -8851,7 +8914,7 @@ const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
         0x64c028cba67c38a7, // popup_no_comments_850
         0xb5d0388c18b70338, // popup_listed_1180
         0xedadca0d6059a1bc, // inline_listed_1180
-        0xf02780bb56cf0ecc, // code_diff_1180
+        0x549a388d757e8b35, // code_diff_1180
     ],
     // Light at 1
     [
@@ -8871,7 +8934,7 @@ const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
         0x3f438765bc7c1b2d, // popup_no_comments_850
         0xd64d70db828f6643, // popup_listed_1180
         0x126bd42ab5ecebf3, // inline_listed_1180
-        0x8b82a85eb8d65ac0, // code_diff_1180
+        0x3630ae1a18b33627, // code_diff_1180
     ],
     // Light at 2
     [
@@ -8891,7 +8954,7 @@ const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
         0x82f7e1c5f8a0e0ea, // popup_no_comments_850
         0x55714f9f31d8664b, // popup_listed_1180
         0xe28cd76b2fd88514, // inline_listed_1180
-        0xa98de4b41ec7cb9b, // code_diff_1180
+        0xd6d59cafe9771060, // code_diff_1180
     ],
 ];
 
@@ -9758,46 +9821,46 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 const GOLDEN_CHATS: [[u64; 8]; 4] = [
     // Dark at 1
     [
-        0x34f5c127c120d1ed, // chat_finding
+        0xa5039d4ee1fb06ee, // chat_finding
         0x4c9a3c6fa240b9e9, // chat_missing
-        0xe62f6563a1eeac2e, // chat
+        0x9f85d649e034a3ad, // chat
         0xe71506c1721ec8a1, // chat_waiting
         0x828c73a35d6b1c0a, // chat_composer
-        0x02d46d385ef4f4b3, // chat_picked
-        0x9a23a216b18cb6ef, // chat_scrolled
+        0x336344c70c851544, // chat_picked
+        0x404446eb993dd555, // chat_scrolled
         0xa6d0dcccaae204f6, // chat_question
     ],
     // Dark at 2
     [
-        0xec1976d290048334, // chat_finding
+        0xd211836f5dcb7548, // chat_finding
         0x0c94100d5ab7460b, // chat_missing
-        0xb3d59c93d9fbf1cb, // chat
+        0xd11591ee80ab6397, // chat
         0xec5068206a45e5f8, // chat_waiting
         0xee8c28267b0af3c8, // chat_composer
-        0x1e4161af6a0d6808, // chat_picked
-        0x84d42e23648715bd, // chat_scrolled
+        0x6a515ed6af7ed950, // chat_picked
+        0xbbb09541105aaf77, // chat_scrolled
         0x503c5a806a45c7b1, // chat_question
     ],
     // Light at 1
     [
-        0x9f8d35218d37180b, // chat_finding
+        0xcfe875ed39718011, // chat_finding
         0x8599e48c1a3a84f1, // chat_missing
-        0xffbc752638e857e3, // chat
+        0xee98c0f4e9c9b8df, // chat
         0x8dd5c5644401e39e, // chat_waiting
         0xc9eb7c27910b0a3e, // chat_composer
-        0x59f0422ab7b915c7, // chat_picked
-        0xb19e302e46961c37, // chat_scrolled
+        0xc4a1da2ac75e7e03, // chat_picked
+        0xe23ae76ee4fa5bff, // chat_scrolled
         0xfbb6e5a61a1a9b5f, // chat_question
     ],
     // Light at 2
     [
-        0xc4ca8ace7d109487, // chat_finding
+        0x6a839f3b4ab2b79c, // chat_finding
         0x50c48f549721099b, // chat_missing
-        0xd41f83058e2a3d1a, // chat
+        0x9665dc98473271fb, // chat
         0x02aaf735fffad541, // chat_waiting
         0x57f4e1b82e7ef3e0, // chat_composer
-        0x96bdf7c7946faeb1, // chat_picked
-        0x071d09e3768b9028, // chat_scrolled
+        0xc1031423a1b0c52c, // chat_picked
+        0x487f717d28fa8f37, // chat_scrolled
         0x7472c7255b9cfe88, // chat_question
     ],
 ];

@@ -28,6 +28,10 @@ pub(super) struct Kept {
     marks: HashMap<&'static str, i64>,
     /// OpenCode: whether the chat is in the v2 tables; None: not looked.
     v2: Option<bool>,
+    /// OpenCode: the child sessions its `task` calls started (subagents),
+    /// by id, each kept as a chat of its own; and whether its calls ended,
+    /// so it grows no more and isn't read again.
+    children: HashMap<String, (Kept, bool)>,
 }
 
 impl Kept {
@@ -46,23 +50,49 @@ impl Kept {
     }
 
     /// The rows, as `parse::snapshot` takes them: OpenCode v1 messages
-    /// carry their parts.
+    /// carry their parts, and a `task` part its child session's rows, once
+    /// read, as `subagent`.
     pub fn rows(&self) -> Vec<Cow<'_, Value>> {
         (self.rows.iter())
             .map(|((_, id), row)| {
                 let from = (id.clone(), i64::MIN, String::new());
                 let parts: Vec<Value> = (self.parts.range(from..))
                     .take_while(|((message, ..), _)| message == id)
-                    .map(|(_, part)| part.clone())
+                    .map(|(_, part)| {
+                        let mut part = part.clone();
+                        self.attach(&mut part["data"]);
+                        part
+                    })
                     .collect();
-                if parts.is_empty() {
+                let content = row["data"]["content"].as_array().into_iter().flatten();
+                let tasks = content.clone().any(|part| self.child(part).is_some());
+                if parts.is_empty() && !tasks {
                     return Cow::Borrowed(row);
                 }
                 let mut row = row.clone();
-                row["parts"] = Value::Array(parts);
+                if !parts.is_empty() {
+                    row["parts"] = Value::Array(parts);
+                }
+                let content = row["data"]["content"].as_array_mut().into_iter().flatten();
+                content.for_each(|part| self.attach(part));
                 Cow::Owned(row)
             })
             .collect()
+    }
+
+    /// The child session OpenCode tool part `part` started, when it is a
+    /// `task` call and that session was read.
+    fn child<'a>(&'a self, part: &Value) -> Option<&'a Kept> {
+        let (child, _) = self.children.get(started(part)?)?;
+        child.v2.is_some().then_some(child)
+    }
+
+    /// Tool part `part` given its child session's rows, when it has one.
+    fn attach(&self, part: &mut Value) {
+        if let Some(child) = self.child(part) {
+            let rows = child.rows().into_iter().map(Cow::into_owned).collect();
+            part["subagent"] = Value::Array(rows);
+        }
     }
 
     fn cursor(&mut self, conn: &rusqlite::Connection) -> rusqlite::Result<()> {
@@ -125,7 +155,42 @@ impl Kept {
             self.opencode_table(conn, table, id)
                 .map_err(|err| format!("reading {table}: {err}"))?;
         }
+        self.subagents(conn, id);
         Ok(())
+    }
+
+    /// Read what changed in the child sessions the `task` calls started:
+    /// those still running, and each once after its calls ended.
+    fn subagents(&mut self, conn: &rusqlite::Connection, own: &str) {
+        // A session a later call resumes has all its calls to end.
+        let mut tasks: HashMap<String, bool> = HashMap::new();
+        let parts = (self.parts.values().map(|part| &part["data"])).chain(
+            (self.rows.values())
+                .flat_map(|row| row["data"]["content"].as_array().into_iter().flatten()),
+        );
+        for part in parts {
+            // A session naming itself would read itself without end.
+            if let Some(child) = started(part).filter(|child| *child != own) {
+                let ended = matches!(
+                    part["state"]["status"].as_str(),
+                    Some("completed" | "error")
+                );
+                *tasks.entry(child.to_owned()).or_insert(true) &= ended;
+            }
+        }
+        self.children.retain(|child, _| tasks.contains_key(child));
+        for (id, ended) in tasks {
+            let (child, settled) = self.children.entry(id.clone()).or_default();
+            // A later call resuming it reads it again.
+            if *settled && ended {
+                continue;
+            }
+            match child.opencode(conn, &id) {
+                Ok(()) => *settled = ended,
+                // One subagent unread leaves the chat as it is: its call shows.
+                Err(err) => tracing::warn!("agent chat: can't read OpenCode subagent {id}: {err}"),
+            }
+        }
     }
 
     /// Read OpenCode table `table`'s rows of chat `id` written since the
@@ -179,6 +244,16 @@ impl Kept {
     }
 }
 
+/// The child session OpenCode tool part `part` (v1's or v2's) started:
+/// a `task` call's, as its metadata names it from when it runs.
+fn started(part: &Value) -> Option<&str> {
+    let name = part["tool"].as_str().or(part["name"].as_str());
+    if name != Some("task") {
+        return None;
+    }
+    part["state"]["metadata"]["sessionId"].as_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +304,112 @@ mod tests {
         assert_eq!(kept.marks["part"], 900);
         let mut other = Kept::default();
         assert!(other.read(AgentKind::OpenCode, "ses_c", &conn).is_err());
+    }
+
+    /// The items of what `kept` read, as the chat shows them.
+    fn items(kept: &Kept) -> Vec<crate::chat::Item> {
+        let rows = kept.rows();
+        crate::chat::parse::snapshot(AgentKind::OpenCode, rows.iter().map(|row| &**row))
+    }
+
+    /// The texts of the answers in subagent card `item`.
+    fn said(item: &crate::chat::Item) -> (String, Vec<String>, bool) {
+        let crate::chat::Item::Subagent {
+            id, items, output, ..
+        } = item
+        else {
+            panic!("{item:?}")
+        };
+        let said = (items.iter())
+            .filter_map(|item| match item {
+                crate::chat::Item::Assistant { blocks, .. } => Some(format!("{blocks:?}")),
+                _ => None,
+            })
+            .collect();
+        (id.clone(), said, output.is_some())
+    }
+
+    #[test]
+    fn an_opencode_task_shows_its_child_session_as_it_grows() {
+        let conn = opencode_db();
+        let task = |status: &str| {
+            format!(
+                "{{\"type\":\"tool\",\"tool\":\"task\",\"callID\":\"call_t\",\"state\":{{\"status\":\"{status}\",\
+                 \"input\":{{\"description\":\"Look around\",\"prompt\":\"go\"}},\
+                 \"metadata\":{{\"sessionId\":\"ses_c\"}},\"output\":\"done\"}}}}"
+            )
+        };
+        conn.execute(
+            "INSERT INTO part VALUES ('p9', 'm2', 'ses_a', 850, 850, ?1)",
+            [task("running")],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO session VALUES ('ses_c');
+             INSERT INTO message VALUES ('c1', 'ses_c', 860, 860, '{\"role\":\"assistant\"}');
+             INSERT INTO part VALUES ('cp1', 'c1', 'ses_c', 861, 861, '{\"type\":\"text\",\"text\":\"Reading\"}');",
+        )
+        .unwrap();
+        let mut kept = Kept::default();
+        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        let card = |kept: &Kept| said(items(kept).last().unwrap());
+        let (id, words, ended) = card(&kept);
+        assert_eq!(id, "agent:call_t");
+        assert_eq!(words.len(), 1);
+        assert!(!ended);
+        // The child grows, the parent not: read all the same.
+        conn.execute_batch(
+            "INSERT INTO message VALUES ('c2', 'ses_c', 870, 870, '{\"role\":\"assistant\"}');
+             INSERT INTO part VALUES ('cp2', 'c2', 'ses_c', 871, 871, '{\"type\":\"text\",\"text\":\"Found\"}');",
+        )
+        .unwrap();
+        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        assert_eq!(card(&kept).1.len(), 2);
+        // Its call ended: read once more, then no more.
+        conn.execute(
+            "UPDATE part SET data = ?1, time_updated = 880 WHERE id = 'p9'",
+            [task("completed")],
+        )
+        .unwrap();
+        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        assert!(card(&kept).2);
+        assert!(kept.children["ses_c"].1);
+        conn.execute_batch(
+            "INSERT INTO message VALUES ('c3', 'ses_c', 890, 890, '{\"role\":\"assistant\"}');",
+        )
+        .unwrap();
+        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        assert_eq!(kept.children["ses_c"].0.rows.len(), 2);
+        // The call gone, its child goes too.
+        conn.execute_batch("DELETE FROM part WHERE id = 'p9';")
+            .unwrap();
+        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        assert!(kept.children.is_empty());
+    }
+
+    #[test]
+    fn a_v2_opencode_task_shows_its_child_session() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (id TEXT PRIMARY KEY);
+             CREATE TABLE session_v2 (id TEXT PRIMARY KEY);
+             CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, time_updated INTEGER, data TEXT);
+             INSERT INTO session_v2 VALUES ('ses_a'); INSERT INTO session_v2 VALUES ('ses_c');
+             INSERT INTO session_message VALUES ('s1', 'ses_a', 'assistant', 1, 10, 10,
+               '{\"content\":[{\"type\":\"text\",\"text\":\"Asking\"},{\"type\":\"tool\",\"id\":\"call_t\",\"name\":\"task\",\"state\":{\"status\":\"running\",\"input\":{\"description\":\"Look\"},\"metadata\":{\"sessionId\":\"ses_c\"}}}]}');
+             INSERT INTO session_message VALUES ('c1', 'ses_c', 'assistant', 1, 11, 11,
+               '{\"content\":[{\"type\":\"text\",\"text\":\"Inside\"}]}');",
+        )
+        .unwrap();
+        let mut kept = Kept::default();
+        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        let items = items(&kept);
+        assert_eq!(items.len(), 2, "{items:?}");
+        let (id, words, ended) = said(&items[1]);
+        assert_eq!(
+            (id.as_str(), words.len(), ended),
+            ("agent:call_t", 1, false)
+        );
     }
 
     #[test]

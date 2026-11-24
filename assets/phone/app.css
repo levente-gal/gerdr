@@ -64,6 +64,16 @@ header h1 {
 }
 #back { font-size: 30px; line-height: 1; padding: 0 8px 3px 0; margin-left: -4px; }
 #seen { color: var(--quiet); font-size: 12px; white-space: nowrap; }
+#work { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-size: 12px; white-space: nowrap; }
+#work[hidden] { display: none; }
+#work .clock { font-variant-numeric: tabular-nums; }
+/* While an agent works: a stretch of line sweeping along the head's edge. */
+#sweep { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; }
+#sweep::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: -30%; width: 30%;
+  background: var(--accent); animation: sweep 1.6s linear infinite;
+}
+@keyframes sweep { to { left: 100%; } }
 #offline { background: var(--bad); color: var(--on-accent); padding: 8px 16px; font-size: 14px; }
 main { padding: 8px 16px 32px; max-width: 760px; margin: 0 auto; }
 h2 {
@@ -84,7 +94,8 @@ main > h2:first-child { margin-top: 12px; }
 }
 .blink { animation: blink 1.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) {
-  .blink, .node.pulse .disc { animation: none !important; }
+  .blink, .node.pulse .disc, #sweep::before { animation: none !important; }
+  #sweep::before { left: 0; }
 }
 
 /* A feature's card: the sidebar's, with its tone down its left edge. */
@@ -220,11 +231,16 @@ a.row:active { background: var(--raised); }
 .doc table { border-collapse: collapse; display: block; overflow-x: auto; }
 .doc th, .doc td { border: 1px solid var(--line); padding: 4px 8px; }
 .doc img { max-width: 100%; }
+/* A pane's output, and its working row right under the last line. */
+.term-box { background: var(--term-bg); margin: 0 -16px; min-height: 60vh; }
 .term {
-  background: var(--term-bg); color: var(--term-text); margin: 0 -16px;
+  color: var(--term-text); margin: 0;
   padding: 10px 12px; font: 12px/1.35 ui-monospace, "SF Mono", Menlo, monospace;
-  white-space: pre-wrap; overflow-wrap: anywhere; min-height: 60vh;
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
+/* Under a working agent's output: a blinking dot and its turn's clock. */
+.work-row { display: flex; align-items: center; gap: 6px; color: var(--accent); padding: 0 12px 10px; }
+.work-row .clock { font-variant-numeric: tabular-nums; }
 
 button {
   font: inherit; font-size: 15px; font-weight: 550; color: var(--text); background: var(--raised);

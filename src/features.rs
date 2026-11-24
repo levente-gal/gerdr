@@ -1466,6 +1466,12 @@ pub enum PanelOutcome {
     /// Run the failed GitHub Actions runs of repository `.0`'s pull request
     /// again on GitHub.
     RerunShipCi(String),
+    /// Tick pushing the base of repository `.0`, merged here only, and ship
+    /// that, after asking.
+    PushBase(String),
+    /// Have an agent fix why shipping last stopped (`Shipping::problem`):
+    /// plan first (`.0`), or fix at once.
+    FixShipProblem(bool),
     /// Open the feature's summary to edit.
     EditSummary,
     /// Reopen this done stage, once it isn't locked (see

@@ -305,6 +305,32 @@ pub(super) fn stage_page(
                 if !groups.is_empty() {
                     sections.push(PageSection::Toolbar { groups });
                 }
+                // Why shipping last stopped, until it runs again, and an
+                // agent to fix it.
+                if let Some(problem) = &feature.shipping.problem {
+                    let when = crate::clock::ago(now, problem.at);
+                    let whose = match crate::ship_fix::by_hook(&problem.why) {
+                        true => {
+                            "A hook refused the code: the Build agent fixes it, then Verify and the reviews run again"
+                        }
+                        false => {
+                            "An agent looks into git and this machine; press Ship again once it is fixed"
+                        }
+                    };
+                    sections.push(lines(
+                        "Shipping stopped",
+                        vec![
+                            line(format!("{} \u{b7} {when}", problem.why), CheckTone::Failed),
+                            line(whose, CheckTone::Note),
+                        ],
+                    ));
+                    let fix = of(|o| matches!(o, PanelOutcome::FixShipProblem(_)));
+                    if !fix.is_empty() {
+                        sections.push(PageSection::Toolbar {
+                            groups: vec![(String::new(), fix)],
+                        });
+                    }
+                }
                 let mut recap = recap_card(feature, state, now);
                 recap.buttons = (actions.iter().enumerate())
                     .filter(|(_, (_, o))| {

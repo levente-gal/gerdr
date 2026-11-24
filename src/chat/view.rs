@@ -548,7 +548,7 @@ fn take_event<'a>(
         } => {
             let n = rows(&items, &chat.unfolded).len();
             chat.picked = chat.picked.filter(|i| *i < n);
-            chat.items = items;
+            chat.items = chat.live.timed(items);
             chat.earlier = earlier;
             chat.reading_earlier = false;
             chat.source = Some(source);
@@ -735,6 +735,15 @@ impl Gerdr {
                 (self.chats.followed).insert(agent.pane_id.clone(), agent.agent_session.clone());
                 tail.follow(agent);
             }
+        }
+        // When each agent's turn began, as this round of herdr's sees it.
+        let now = crate::ai_work::now_ms();
+        let agents = &self.session.agents;
+        let turns = &mut self.chats.turns;
+        turns.retain(|id, _| agents.iter().any(|a| a.pane_id == *id));
+        for agent in agents {
+            let turn = turns.entry(agent.pane_id.clone()).or_default();
+            turn.note(agent.agent_status, now);
         }
         // What is kept of chats gone with their panes.
         let kept: HashSet<String> = chats_mut(&mut self.workspaces)
@@ -1135,6 +1144,24 @@ impl Gerdr {
 
     /// The active tab's panes shown as chats: each pane's id, its herdr
     /// pane's, and what its chat is painted from.
+    /// How long agent pane `pane_id`'s turn has run, in seconds, while it
+    /// works as its chat would say: not paused, not asking. Its chat's
+    /// words date the turn when it shows one. For the phone's working row.
+    pub(crate) fn turn_took(&self, pane_id: &str) -> Option<u64> {
+        let agent = (self.session.agents.iter()).find(|a| a.pane_id == pane_id)?;
+        let asks = (self.chats.live.asks.values()).any(|held| held.pane == pane_id);
+        if agent.agent_status != AgentStatus::Working || asks || self.pane_paused(pane_id) {
+            return None;
+        }
+        let items = (self.workspaces.iter().flat_map(|ws| &ws.tabs))
+            .flat_map(|tab| &tab.panes)
+            .filter(|p| p.herdr.as_ref().is_some_and(|h| h.pane_id == pane_id))
+            .find_map(|p| p.chat.as_deref())
+            .map_or(&[][..], |chat| &chat.items[..]);
+        let since = self.chats.turns.get(pane_id)?.since(items)?;
+        Some(crate::ai_work::now_ms().saturating_sub(since) / 1000)
+    }
+
     fn chat_places(&self) -> Vec<(u32, String, ChatView)> {
         let Some(tab) = self.tab() else {
             return Vec::new();
@@ -1190,6 +1217,7 @@ impl Gerdr {
                     hover: None,
                     running: unread(&chat.items, &chat.live.running),
                     ask: chat.live.ask.clone(),
+                    since: (self.chats.turns.get(pane_id)).and_then(|t| t.since(&chat.items)),
                 };
                 view.hover = pointer
                     .filter(|pos| view.rect.to_f64().contains(*pos))

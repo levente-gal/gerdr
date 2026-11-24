@@ -2,7 +2,9 @@
 //! why it is dismissed, its fix and the user's comment, or a comment of the
 //! user's own. Its fields hold lines, wrapped to the field.
 
-use super::wrap_field::{byte_at, first_shown, row_of, row_step, soft_rows, wrap_thumb};
+use super::wrap_field::{
+    byte_at, first_shown, row_of, row_step, soft_rows, wheel_rows, wrap_thumb,
+};
 use super::{
     BUTTON_RADIUS, ButtonStyle, CHECKBOX_GAP, Canvas, Check, DIALOG_WIDTH, PADDING, POPUP_RADIUS,
     Painter, Palette, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, Rect, Rgb, SHADOW, band, caret,
@@ -199,6 +201,22 @@ pub fn finding_field_first(
     let field = view.fields.get(i)?;
     let rows = soft_rows(&field.line, text_width(size));
     Some(rows.get(first_shown(&rows, &field.line, field.rows))?.start)
+}
+
+/// The field of the dialog the pointer at `pos` is over, and what the
+/// wheel turned `by` rows does to it (see `wheel_rows`): none off its
+/// fields, or over one showing all its rows.
+pub fn finding_field_wheel(
+    view: &FindingDialogView,
+    size: Size<i32, Logical>,
+    pos: Point<f64, Logical>,
+    by: isize,
+) -> Option<(usize, (usize, usize))> {
+    let layout = finding_dialog_layout(view, size);
+    let i = (layout.fields.iter()).position(|rect| rect.to_f64().contains(pos))?;
+    let field = view.fields.get(i)?;
+    let rows = soft_rows(&field.line, text_width(size));
+    Some((i, wheel_rows(&field.line, &rows, field.rows, by)?))
 }
 
 /// A press in field `i` held `by` rows past its shown ones (up negative),

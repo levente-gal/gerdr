@@ -97,6 +97,37 @@ pub(super) fn first_shown(rows: &[Range<usize>], line: &Line, shown: i32) -> usi
     from.clamp(caret.saturating_sub(shown - 1), caret).min(fill)
 }
 
+/// What the wheel turned `by` rows (up negative) does to `line` wrapped as
+/// `rows` in a field showing `shown` of them: the byte its view then starts
+/// at, and the byte its caret goes to, on the nearest row in view, as far
+/// along it as it was along its own (the view follows the caret, so the
+/// caret comes along). None while every row shows.
+pub(super) fn wheel_rows(
+    line: &Line,
+    rows: &[Range<usize>],
+    shown: i32,
+    by: isize,
+) -> Option<(usize, usize)> {
+    let shown = shown.max(1) as usize;
+    let fill = rows.len().checked_sub(shown).filter(|fill| *fill > 0)?;
+    let from = first_shown(rows, line, shown as i32);
+    let to = from.saturating_add_signed(by).min(fill);
+    let at = row_of(rows, line.caret);
+    let row = at.clamp(to, to + shown - 1);
+    let caret = match row == at {
+        true => line.caret,
+        false => byte_at(line, &rows[row], width(&line[rows[at].start..line.caret])),
+    };
+    Some((rows[to].start, caret))
+}
+
+/// What the wheel turned `by` rows does to the wrapped field `spot` (see
+/// `wheel_rows`).
+pub fn wrap_field_wheel(spot: &FieldSpot, by: isize) -> Option<(usize, usize)> {
+    let rows = soft_rows(&spot.line, room(spot.area.size.w));
+    wheel_rows(&spot.line, &rows, shown_rows(&spot.line, spot.area.size.w) as i32, by)
+}
+
 /// How wide the text of a wrapped field `w` wide runs (as `field_text`
 /// has it, with a pixel or two to spare for the font at any scale).
 fn room(w: i32) -> f32 {
@@ -364,5 +395,25 @@ mod tests {
         assert_eq!(row_of(&rows, past), 2);
         let far = wrap_field_past(&whole, 99, 15.0).unwrap();
         assert_eq!(row_of(&rows, far), rows.len() - 1);
+    }
+
+    #[test]
+    fn the_wheel_moves_the_rows_and_takes_the_caret_along() {
+        let text = "a\nb\nc\nd\ne\nf\ng";
+        let rows = soft_rows(text, 10_000.0);
+        assert_eq!(rows.len(), 7);
+        // Caret on the first row: down two, the view starts at "c" and the
+        // caret comes onto it.
+        let (first, caret) = wheel_rows(&at(text, 0, 0), &rows, 5, 2).unwrap();
+        assert_eq!((first, caret), (rows[2].start, rows[2].start));
+        // No further than the last row filling the field.
+        let (first, _) = wheel_rows(&at(text, 0, 0), &rows, 5, 9).unwrap();
+        assert_eq!(first, rows[2].start);
+        // Up from the bottom, the caret on the last row comes up into view.
+        let end = text.len();
+        let (first, caret) = wheel_rows(&at(text, end, rows[2].start), &rows, 5, -2).unwrap();
+        assert_eq!((first, caret), (0, rows[4].start + 1));
+        // A field showing all its rows leaves the wheel to the page.
+        assert_eq!(wheel_rows(&at(text, 0, 0), &rows, 7, 1), None);
     }
 }

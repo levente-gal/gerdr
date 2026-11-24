@@ -176,6 +176,43 @@ pub struct PaneChat {
     pub live: live::PaneLive,
 }
 
+/// When an agent's turn began, as herdr's rounds saw its status.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Turn {
+    /// When a round first saw it working, in Unix ms; none while it isn't.
+    seen: Option<u64>,
+    /// When a round last saw it not working, in Unix ms; 0 before any did.
+    idle_at: u64,
+}
+
+impl Turn {
+    /// A round saw its agent at `status` at `now` (Unix ms). Only idle or
+    /// done ends a turn: paused (unknown) or asking (blocked), it goes on.
+    pub fn note(&mut self, status: crate::herdr::AgentStatus, now: u64) {
+        use crate::herdr::AgentStatus as S;
+        match status {
+            S::Working => _ = self.seen.get_or_insert(now),
+            S::Idle | S::Done => (self.seen, self.idle_at) = (None, now),
+            S::Blocked | S::Unknown => {}
+        }
+    }
+
+    /// When the turn began while its agent works: the user's last words
+    /// in `items` if they came after it was last seen idle (or gerdr
+    /// started mid-turn), else when it was first seen working.
+    pub fn since(&self, items: &[Item]) -> Option<u64> {
+        let seen = self.seen?;
+        let said = items.iter().rev().find_map(|item| match item {
+            Item::User { at, .. } => Some(*at),
+            _ => None,
+        });
+        Some(match said.flatten() {
+            Some(at) if at >= self.idle_at => at,
+            _ => seen,
+        })
+    }
+}
+
 /// What `tail` sends back.
 #[derive(Debug)]
 pub enum Event {
@@ -192,4 +229,41 @@ pub enum Event {
     Missing { pane_id: String, why: String },
     /// Its transcript couldn't be read.
     Failed { pane_id: String, error: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(at: u64) -> Item {
+        Item::User {
+            id: "u".into(),
+            at: Some(at),
+            text: "go".into(),
+        }
+    }
+
+    #[test]
+    fn a_turn_begins_at_the_users_words_or_when_seen_working() {
+        use crate::herdr::AgentStatus::{Blocked, Idle, Unknown, Working};
+        let mut turn = Turn::default();
+        assert_eq!(turn.since(&[user(5)]), None);
+        // gerdr started mid-turn: the transcript knows when it began.
+        turn.note(Working, 900);
+        assert_eq!(turn.since(&[user(5)]), Some(5));
+        assert_eq!(turn.since(&[]), Some(900));
+        // Later rounds keep the first sighting; paused or asking, it goes on.
+        turn.note(Working, 950);
+        turn.note(Unknown, 960);
+        turn.note(Blocked, 970);
+        turn.note(Working, 980);
+        assert_eq!(turn.since(&[]), Some(900));
+        turn.note(Idle, 1000);
+        assert_eq!(turn.since(&[user(5)]), None);
+        // Words sent after it went idle start the next turn.
+        turn.note(Working, 1300);
+        assert_eq!(turn.since(&[user(5), user(1200)]), Some(1200));
+        // A turn no words started (old words only): from when it was seen.
+        assert_eq!(turn.since(&[user(5)]), Some(1300));
+    }
 }

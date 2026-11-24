@@ -233,6 +233,18 @@ pub struct Shipping {
     /// A pull request's review: each submitted to GitHub, oldest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviews: Vec<pr_submit::Posted>,
+    /// Why shipping last stopped short, until it runs again: what Ship's
+    /// page shows and an agent is asked to fix (`ship_fix`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub problem: Option<ShipProblem>,
+}
+
+/// A step of shipping that failed: when, and why in a line, as its toast
+/// said it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShipProblem {
+    pub at: u64,
+    pub why: String,
 }
 
 /// A step that follows shipping, as Ship's "Afterwards" ticks it.

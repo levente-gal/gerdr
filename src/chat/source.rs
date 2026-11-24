@@ -9,7 +9,7 @@ use super::Source;
 use crate::{
     ai_work::{
         AgentKind, Chat,
-        locate::{self, Homes},
+        locate::{self, Homes, Span},
     },
     feature::Stage,
     herdr::AgentInfo,
@@ -28,6 +28,8 @@ pub struct Run {
     pub started: u64,
     /// Where it runs.
     pub cwd: PathBuf,
+    /// Its process.
+    pub pid: u32,
 }
 
 /// The kind of agent in a pane, as herdr names it.
@@ -103,7 +105,14 @@ pub fn find(agent: &AgentInfo, homes: &Homes) -> Result<Source, String> {
             })
         }
         "id" if locate::plain_id(&session.value) => {
-            let found = locate(homes, kind, Some(&session.value), None, &HashSet::new())?;
+            let found = locate(
+                homes,
+                kind,
+                Some(&session.value),
+                None,
+                Span::of(0),
+                &HashSet::new(),
+            )?;
             found.ok_or_else(|| NOT_YET.into())
         }
         _ => Err(NOT_FOUND.into()),
@@ -120,7 +129,35 @@ pub fn by_time(
     claimed: &HashSet<String>,
 ) -> Result<Option<Source>, String> {
     match guessable(kind) {
-        true => locate(homes, kind, None, Some(run), claimed),
+        true => locate(homes, kind, None, Some(run), Span::of(run.started), claimed),
+        false => Ok(None),
+    }
+}
+
+/// How far back `newest` looks at most, so the chats it lists each few
+/// seconds stay few.
+const NEWEST_BACK: u64 = 86_400;
+
+/// The newest chat of agent `kind` in `run`'s folder begun since the run
+/// did (a day back at most), not one of `claimed`: the one the run moved
+/// on to (`/new`) from the one `by_time` guessed. A guess too.
+pub fn newest(
+    kind: AgentKind,
+    run: &Run,
+    homes: &Homes,
+    claimed: &HashSet<String>,
+) -> Result<Option<Source>, String> {
+    let now = (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH))
+        .map_or(0, |d| d.as_secs());
+    // A minute ahead for a clock a little off; the latest is the nearest it.
+    let to = now + 60;
+    let span = Span {
+        from: (Span::of(run.started).from).max(now.saturating_sub(NEWEST_BACK)),
+        to,
+        near: to,
+    };
+    match guessable(kind) {
+        true => locate(homes, kind, None, Some(run), span, claimed),
         false => Ok(None),
     }
 }
@@ -164,18 +201,20 @@ pub(super) fn chat(agent: AgentKind, id: Option<&str>, run: Option<&Run>) -> Cha
     }
 }
 
-/// Chat `id` of agent `kind`, else the one of `run`, as `locate` finds it.
+/// Chat `id` of agent `kind`, else the one of `run` begun in `span`, as
+/// `locate` finds it.
 fn locate(
     homes: &Homes,
     kind: AgentKind,
     id: Option<&str>,
     run: Option<&Run>,
+    span: Span,
     claimed: &HashSet<String>,
 ) -> Result<Option<Source>, String> {
     let chat = chat(kind, id, run);
     let found = match (kind, id) {
-        (AgentKind::Cursor, None) => locate::cursor_by_time(homes, &chat, claimed),
-        _ => locate::find(homes, &chat, claimed)
+        (AgentKind::Cursor, None) => locate::cursor_by_time(homes, &chat, claimed, span),
+        _ => locate::find_in(homes, &chat, claimed, span)
             .map_err(|err| format!("Couldn't read this agent's chats: {err}"))?,
     };
     Ok(found.map(|found| Source {
@@ -476,6 +515,7 @@ pub(crate) mod tests {
         let run = Run {
             started,
             cwd: "/work/app".into(),
+            pid: 0,
         };
         let none = HashSet::new();
         let source = by_time(AgentKind::Cursor, &run, &homes, &none).expect("read");

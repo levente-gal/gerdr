@@ -274,6 +274,12 @@ pub struct Chrome {
     /// One per pane shown as a chat.
     chats: Vec<Cached<(ChatView, Theme, f64)>>,
     spinner: [Cached<(Theme, f64)>; SPINNER_STEPS as usize],
+    /// What moves over the chats while their agents work, so the chats
+    /// aren't drawn again for it: the working rows' spinner by how far it
+    /// turned, the sweep under their heads by its width, and the clocks.
+    chat_spinner: [Cached<(Theme, f64)>; SPINNER_STEPS as usize],
+    chat_sweep: Cached<(i32, Theme, f64)>,
+    chat_clocks: Vec<Cached<ClockKey>>,
     /// Where the toasts stacked up in the last frame that had any: what a
     /// pointer over them hits (see `Gerdr::toast_rect`).
     toast_area: Option<Rect>,
@@ -358,6 +364,9 @@ impl Chrome {
             placeholders: Vec::new(),
             chats: Vec::new(),
             spinner: Default::default(),
+            chat_spinner: Default::default(),
+            chat_sweep: Cached::default(),
+            chat_clocks: Vec::new(),
             toast_area: None,
             blink_dot: Cached::default(),
             pane_bars: Vec::new(),
@@ -870,20 +879,47 @@ impl Chrome {
             parts.push(Part::new(buffer, rect.loc, rect.size, 1.0));
         }
 
-        // The panes shown as chats, each in its pane's place, and the dots
-        // of what works in them blinking over them.
+        // The panes shown as chats, each in its pane's place, and over them
+        // what moves while their agents work: the dots of what works
+        // blinking, the working row's spinner, the sweep under the head
+        // and the clocks of the turn.
         self.chats.resize_with(view.chats.len(), Cached::default);
+        let spin = self.chat_spinner[spinner_step as usize].get((theme, scale), |_| {
+            painter.running_spinner(spinner_step, scale, theme.palette())
+        });
+        let now_ms = crate::ai_work::now_ms();
+        let mut clocks = 0;
         for (cached, chat) in self.chats.iter_mut().zip(view.chats) {
             let rect = chat.rect;
             if rect.size.w <= 0 || rect.size.h <= 0 {
                 continue;
             }
             push_dots(&mut parts, dot, chat_blinkers(&chat), blink);
+            for spot in chat_spinners(&chat) {
+                parts.push(Part::new(spin, spot.loc, spot.size, 1.0));
+            }
+            if let Some(track) = chat_sweep(&chat) {
+                let buffer = (self.chat_sweep)
+                    .get((sweep_width(track), theme, scale), |(w, ..)| {
+                        painter.running_sweep(*w, scale, theme.palette())
+                    });
+                parts.push(sweep_part(buffer, track, self.epoch, now));
+            }
+            for (text, spot, font) in chat_clocks(&chat, now_ms) {
+                if self.chat_clocks.len() <= clocks {
+                    self.chat_clocks.push(Cached::default());
+                }
+                let key = ClockKey::new(&text, spot.size, font, theme.palette().muted, scale);
+                let buffer = self.chat_clocks[clocks].get(key, |key| painter.clock(key));
+                parts.push(Part::new(buffer, spot.loc, spot.size, 1.0));
+                clocks += 1;
+            }
             let buffer = cached.get((chat, theme, scale), |(chat, ..)| {
                 painter.agent_chat(chat, scale, theme.palette())
             });
             parts.push(Part::new(buffer, rect.loc, rect.size, 1.0));
         }
+        self.chat_clocks.truncate(clocks);
 
         // The strip marking the focused pane, along the top of its bar.
         // Parts pushed first are on top: it goes before the bars.

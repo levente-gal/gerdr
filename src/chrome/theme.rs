@@ -1,5 +1,6 @@
 //! The light and dark looks: Zed's One Dark and One Light palettes.
 
+use super::sidebar::contrast;
 use crate::herdr::AgentStatus;
 use crate::syntax::Kind;
 
@@ -137,9 +138,8 @@ pub(crate) struct Palette {
     pub(super) shadow: f32,
     /// How dark the scrim behind a modal dialog is, 0 to 1.
     pub(super) scrim: f32,
-    /// Code's colours in a diff: Zed's `syntax` of this look, each moved
-    /// toward `text` as far as it takes to read 4.5:1 on every row a diff
-    /// draws it on (added, removed, the cursor's).
+    /// Code's colours in a diff: Zed's `syntax` of this look, as they
+    /// are. `code_on` shades them to read on each row.
     pub(super) syntax: SyntaxColors,
     /// What Zed's terminal uses with this look: its background and
     /// foreground, and the 16 ANSI colours (the 8 normal, then the 8
@@ -182,12 +182,12 @@ pub(super) const ONE_DARK: Palette = Palette {
     shadow: 0.45,
     scrim: 0.40,
     syntax: SyntaxColors {
-        keyword: hex(0xc8aada),
+        keyword: hex(0xb477cf),
         string: hex(0xa1c181),
-        comment: hex(0xb0b5bf),
-        constant: hex(0xcab198),
-        type_: hex(0x86bec7),
-        function: hex(0x8bb9e8),
+        comment: hex(0x989eaa),
+        constant: hex(0xbf956a),
+        type_: hex(0x6eb4bf),
+        function: hex(0x73ade9),
     },
     terminal_background: hex(0x282c34),
     terminal_foreground: hex(0xabb2bf),
@@ -235,12 +235,12 @@ pub(super) const ONE_LIGHT: Palette = Palette {
     shadow: 0.18,
     scrim: 0.22,
     syntax: SyntaxColors {
-        keyword: hex(0x87418d),
-        string: hex(0x456441),
-        comment: hex(0x5a5c60),
-        constant: hex(0x7d5426),
-        type_: hex(0x316185),
-        function: hex(0x46599c),
+        keyword: hex(0xa449ab),
+        string: hex(0x649f57),
+        comment: hex(0x636569),
+        constant: hex(0xad6e25),
+        type_: hex(0x3882b7),
+        function: hex(0x5b79e3),
     },
     terminal_background: hex(0xfafafa),
     terminal_foreground: hex(0x2a2c33),
@@ -289,6 +289,35 @@ impl Palette {
             Kind::Type => s.type_,
             Kind::Function => s.function,
         }
+    }
+
+    /// The colour code of `kind` is drawn in on `ground`: its own, made
+    /// lighter (on a dark ground) or darker only as far as it takes to
+    /// read at text's 4.5:1 there. Lightness alone moves, so the hue and
+    /// its strength stay: a plain row keeps Zed's colours, a lit or tinted
+    /// one gets them a shade off.
+    pub(super) fn code_on(&self, kind: Kind, ground: Rgb) -> Rgb {
+        const READS: f32 = 4.5;
+        let base = self.code(kind);
+        if contrast(base, ground) >= READS {
+            return base;
+        }
+        let (h, s, l) = hsl(base);
+        let to = match contrast(ground, [255; 3]) > contrast(ground, [0; 3]) {
+            true => 1.0,
+            false => 0.0,
+        };
+        let at = |t: f32| rgb(h, s, l + (to - l) * t);
+        // The least move that reads, to within a 4096th of the way.
+        let (mut lo, mut hi) = (0.0, 1.0);
+        for _ in 0..12 {
+            let t = (lo + hi) / 2.0;
+            match contrast(at(t), ground) >= READS {
+                true => hi = t,
+                false => lo = t,
+            }
+        }
+        at(hi)
     }
 
     pub(super) fn status(&self, status: AgentStatus) -> Rgb {
@@ -390,6 +419,39 @@ pub(super) fn mix(a: Rgb, b: Rgb, t: f32) -> Rgb {
     std::array::from_fn(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8)
 }
 
+/// `color` as hue (0 to 6), saturation and lightness (0 to 1).
+fn hsl(color: Rgb) -> (f32, f32, f32) {
+    let [r, g, b] = color.map(|v| f32::from(v) / 255.0);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let (l, d) = ((max + min) / 2.0, max - min);
+    if d == 0.0 {
+        return (0.0, 0.0, l);
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs());
+    let h = match max {
+        _ if max == r => ((g - b) / d).rem_euclid(6.0),
+        _ if max == g => (b - r) / d + 2.0,
+        _ => (r - g) / d + 4.0,
+    };
+    (h, s, l)
+}
+
+/// The colour of hue `h` (0 to 6), saturation `s` and lightness `l`.
+fn rgb(h: f32, s: f32, l: f32) -> Rgb {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - (h.rem_euclid(2.0) - 1.0).abs());
+    let (r, g, b) = match h as u8 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    [r, g, b].map(|v| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ONE_DARK, ONE_LIGHT, ONE_LIGHT_PAGE, Palette, Rgb, Theme, ThemeMode};
@@ -437,6 +499,20 @@ mod tests {
     }
 
     #[test]
+    fn a_colour_goes_through_hsl_and_back_the_same() {
+        for c in [
+            [0xb4, 0x77, 0xcf],
+            [0xa1, 0xc1, 0x81],
+            [0, 0, 0],
+            [255; 3],
+            [0x3f, 0x5c, 0xcc],
+        ] {
+            let (h, s, l) = super::hsl(c);
+            assert_eq!(super::rgb(h, s, l), c);
+        }
+    }
+
+    #[test]
     fn code_colours_read_on_every_row_of_a_diff() {
         use super::super::repos::{DIFF_TINT, DIFF_WORD_TINT, PICKED_LIT};
         use super::super::search::{CARET_TINT, CHOSEN_TINT};
@@ -468,8 +544,13 @@ mod tests {
             ];
             for (row, ground) in rows {
                 for kind in kinds {
-                    let ratio = contrast(p.code(kind), ground);
+                    let shaded = p.code_on(kind, ground);
+                    let ratio = contrast(shaded, ground);
                     assert!(ratio >= 4.5, "{name}: {kind:?} on {row} is {ratio:.2}:1");
+                    // A colour that reads as it is stays Zed's.
+                    if contrast(p.code(kind), ground) >= 4.5 {
+                        assert_eq!(shaded, p.code(kind), "{name}: {kind:?} on {row}");
+                    }
                 }
             }
             // Over these tints the code is drawn in `text`.

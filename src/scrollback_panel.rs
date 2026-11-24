@@ -26,6 +26,7 @@ use crate::{
     key_table,
     scroll::Motion,
     scrollback::{self, Fit, Key, Outcome, Scrollback, Source},
+    stats_panel,
     toast::ToastHit,
     tooltip::Tooltip,
 };
@@ -137,9 +138,16 @@ fn read_log(path: &Path) -> std::io::Result<(String, u64)> {
 type PaneRead = Result<(String, u64, String), String>;
 
 /// All herdr at `socket` keeps of pane `pane_id`'s output, and its colours.
+/// A Claude Code pane keeps none, as it draws on the alternate screen: the
+/// end of its chat's transcript is put above its screen, plain.
 fn read_pane(socket: PathBuf, pane_id: &str) -> PaneRead {
     let mut herdr = herdr::Herdr::on_socket(socket);
     let (text, from_bottom) = herdr.pane_scrollback(pane_id)?;
+    if herdr.pane_scrollback_rows(pane_id) == Ok(0)
+        && let Some(chat) = stats_panel::claude_chat(&mut herdr, pane_id)
+    {
+        return Ok((stats_panel::chat_and_screen(&chat, &text), 0, String::new()));
+    }
     let styled = read_styled(&mut herdr, pane_id, &text);
     Ok((text, from_bottom, styled))
 }
