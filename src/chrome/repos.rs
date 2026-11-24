@@ -16,11 +16,13 @@
 //! Actions the footer has no room for go behind a "more" button.
 
 use super::{
+    CODE_FONT_SIZE,
     BUTTON_RADIUS, ButtonStyle, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DETAIL_FONT_SIZE,
     DOCK_GAP, Density, FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN,
     HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState,
     MENU_MARK_WIDTH, MENU_RADIUS, PADDING, Painter, Palette, QUIT_BUTTON_GAP, Rect, Rgb, SHADOW,
     SMALL_FONT_SIZE, SearchBar, SearchPart, arrow, band, check, chevron_down, coverage, field_text,
+    line,
     folder, found_split, found_within, git_branch, icon_sdf, magnifier, measure, measure_bold,
     measure_mono, mix, phys, physical, plus, rect_px, rounded_rect, search_field_text,
     search_spots, segment, trash,
@@ -38,11 +40,11 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 const REPOS_MAX_WIDTH: i32 = 1600;
 const REPOS_MAX_HEIGHT: i32 = 1200;
 /// A button's height and the error line's height.
-const ROW_BUTTON: i32 = 28;
-const ERROR_HEIGHT: i32 = 22;
+const ROW_BUTTON: i32 = line(FONT_SIZE, 13);
+const ERROR_HEIGHT: i32 = line(SMALL_FONT_SIZE, 9);
 /// The header row with the title and the summary, and the gap between
 /// them.
-pub const REPOS_HEADER: i32 = 44;
+pub const REPOS_HEADER: i32 = line(LABEL_FONT_SIZE, 27);
 const HEADER_GAP: i32 = 12;
 /// The tree's share of the panel's width unless dragged, the least and
 /// most it can be dragged to, the narrowest it gets (unless that is more
@@ -57,7 +59,9 @@ pub const REVIEW_TREE_SHARE: f64 = 0.25;
 /// How wide a feature's code review must be to have its file list beside
 /// the diff, logical pixels.
 pub const REVIEW_TREE_MIN_PANEL: i32 = 640;
-const REPOS_TREE_MIN: i32 = 300;
+/// The tree's least width: about nine letters of a name in its filter
+/// beside the toolbar's buttons, so it grows with the text.
+const REPOS_TREE_MIN: i32 = (FONT_SIZE * 20.0) as i32;
 pub const SPLITTER_GRAB: i32 = 5;
 /// The room above and below the tree's lines and the detail's, and beside
 /// the tree's.
@@ -66,8 +70,8 @@ const REPOS_PAD: i32 = 6;
 /// far a file's line is indented under its repository's.
 pub fn repos_row(density: Density) -> i32 {
     match density {
-        Density::Comfortable => 30,
-        Density::Compact => 26,
+        Density::Comfortable => line(FONT_SIZE, 15),
+        Density::Compact => line(FONT_SIZE, 11),
     }
 }
 const REPOS_LINE_INSET: i32 = 4;
@@ -94,19 +98,18 @@ const REPOS_CODE: i32 = 16;
 const REPOS_CODE_GAP: i32 = 2;
 /// A repository's chip: its height, the room either side of its text and
 /// its corners.
-const CHIP_HEIGHT: i32 = 20;
+const CHIP_HEIGHT: i32 = line(DETAIL_FONT_SIZE, 8);
 const CHIP_PAD: i32 = 6;
 const CHIP_RADIUS: f32 = 4.0;
 /// The detail pane: its title row, a line of a diff or log at each
 /// density, and the size of the monospace font they are in.
-const REPOS_DETAIL_TITLE: i32 = 40;
+const REPOS_DETAIL_TITLE: i32 = line(FONT_SIZE, 25);
 pub fn repos_detail_line(density: Density) -> i32 {
     match density {
-        Density::Comfortable => 22,
-        Density::Compact => 19,
+        Density::Comfortable => line(CODE_FONT_SIZE, 8),
+        Density::Compact => line(CODE_FONT_SIZE, 5),
     }
 }
-const REPOS_MONO_SIZE: f32 = 14.0;
 /// How strongly a finding's heading band takes its severity's colour.
 const COMMENT_HEAD_TINT: f32 = 0.24;
 /// Between the parts of a comment's heading.
@@ -143,16 +146,16 @@ pub(super) const PICKED_LIT: f32 = 0.5;
 const REPOS_TAB_WIDTH: i32 = 64;
 const REPOS_TAB_GAP: i32 = 4;
 /// The field's row, and the field in it.
-const REPOS_FIELD_ROW: i32 = 44;
-const REPOS_FIELD: i32 = 32;
+const REPOS_FIELD_ROW: i32 = line(FONT_SIZE, 29);
+const REPOS_FIELD: i32 = line(FONT_SIZE, 17);
 /// The result bar, and the gap between its buttons.
-const REPOS_RESULT: i32 = 36;
+const REPOS_RESULT: i32 = line(FONT_SIZE, 21);
 const REPOS_BUTTON_GAP: i32 = 6;
 /// The footer: the room above and below its rows of actions, a row, the
 /// most rows (the rest go behind the "more" button), the gap between
 /// actions and the room inside either end of one.
 const REPOS_FOOTER_PAD: i32 = 4;
-const REPOS_HINT_ROW: i32 = 32;
+const REPOS_HINT_ROW: i32 = line(SMALL_FONT_SIZE, 19);
 const REPOS_FOOTER_ROWS: usize = 2;
 const HINT_GAP: i32 = 4;
 const HINT_PAD: i32 = 6;
@@ -169,10 +172,10 @@ const GUESS_SLACK: f64 = 4.0;
 /// repository's name takes.
 const SHEET_WIDTH: i32 = 640;
 const SHEET_PAD: i32 = 18;
-const SHEET_TITLE: i32 = 28;
-const SHEET_LINE: i32 = 28;
+const SHEET_TITLE: i32 = line(LABEL_FONT_SIZE, 11);
+const SHEET_LINE: i32 = line(FONT_SIZE, 13);
 const SHEET_GAP: i32 = 10;
-const SHEET_BUTTON: i32 = 34;
+const SHEET_BUTTON: i32 = line(FONT_SIZE, 19);
 const SHEET_BUTTON_GAP: i32 = QUIT_BUTTON_GAP;
 const SHEET_BUTTON_PAD: i32 = 16;
 const SHEET_BUTTON_MIN: i32 = 84;
@@ -1520,9 +1523,9 @@ fn line_chip_rects(
 ) -> Vec<Rect> {
     let mut rects = chip_rects(rect, widths);
     if let (Some(DetailRow::Line(line)), Some(first)) = (row, rects.first()) {
-        let advance = measure_mono("0", REPOS_MONO_SIZE)
+        let advance = measure_mono("0", CODE_FONT_SIZE)
             .filter(|a| *a > 0.0)
-            .unwrap_or(REPOS_MONO_SIZE * 0.6);
+            .unwrap_or(CODE_FONT_SIZE * 0.6);
         let chars: usize = line.text.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum();
         let text_end = rect.loc.x
             + DIFF_INSET
@@ -1750,9 +1753,9 @@ fn gutter_width(digits: usize, plain: bool) -> i32 {
 /// digits (`plain`: of the one column), where a comment's row holds `cols`
 /// (`repos_detail_cols`).
 pub fn diff_line_room(cols: usize, digits: usize, plain: bool) -> usize {
-    let advance = measure_mono("0", REPOS_MONO_SIZE)
+    let advance = measure_mono("0", CODE_FONT_SIZE)
         .filter(|a| *a > 0.0)
-        .unwrap_or(REPOS_MONO_SIZE * 0.6);
+        .unwrap_or(CODE_FONT_SIZE * 0.6);
     let px = cols as f32 * advance + COMMENT_INDENT as f32 - gutter_width(digits, plain) as f32;
     ((px / advance).floor() as usize).max(8)
 }
@@ -1761,9 +1764,9 @@ pub fn diff_line_room(cols: usize, digits: usize, plain: bool) -> usize {
 /// `detail` wide.
 fn detail_cols(detail: i32) -> usize {
     let text = detail - 2 * HELP_PADDING - SCROLLBAR - 2 * DIFF_INSET - COMMENT_INDENT;
-    let advance = measure_mono("0", REPOS_MONO_SIZE)
+    let advance = measure_mono("0", CODE_FONT_SIZE)
         .filter(|a| *a > 0.0)
-        .unwrap_or(REPOS_MONO_SIZE * 0.6);
+        .unwrap_or(CODE_FONT_SIZE * 0.6);
     ((text.max(0) as f32 / advance).floor() as usize).max(16)
 }
 
@@ -2881,7 +2884,7 @@ pub fn repos_diff_char(
         return None;
     };
     let x0 = layout.detail_rows.get(i)?.loc.x + DIFF_INSET;
-    let advance = measure_mono("0", REPOS_MONO_SIZE).filter(|a| *a > 0.0)? as f64;
+    let advance = measure_mono("0", CODE_FONT_SIZE).filter(|a| *a > 0.0)? as f64;
     let start = match view.detail.rows.get(i)? {
         DetailRow::Line(_) => x0 + gutter_width(view.detail.gutter, view.detail.plain),
         DetailRow::Editor { .. } => return editor_char(view, &layout, i, pos.x),
@@ -2921,7 +2924,7 @@ pub fn repos_editor_char(
         _ => false,
     };
     let rect = layout.detail_rows.get(nearest.unwrap_or(0))?;
-    let advance = measure_mono("0", REPOS_MONO_SIZE).filter(|a| *a > 0.0)? as f64;
+    let advance = measure_mono("0", CODE_FONT_SIZE).filter(|a| *a > 0.0)? as f64;
     let card = rect.loc.x + DIFF_INSET + if within { COMMENT_INDENT } else { 0 };
     let x = pos.x - (card + 1 + COMMENT_INDENT) as f64;
     Some((nearest, (x / advance).round().max(0.0) as usize))
@@ -2934,7 +2937,7 @@ fn editor_char(view: &ReposView, layout: &ReposLayout, i: usize, x: f64) -> Opti
     let DetailRow::Editor { within, .. } = view.detail.rows.get(i)? else {
         return None;
     };
-    let advance = measure_mono("0", REPOS_MONO_SIZE).filter(|a| *a > 0.0)? as f64;
+    let advance = measure_mono("0", CODE_FONT_SIZE).filter(|a| *a > 0.0)? as f64;
     let card = layout.detail_rows.get(i)?.loc.x
         + DIFF_INSET
         + if within.is_some() { COMMENT_INDENT } else { 0 };
@@ -3747,11 +3750,11 @@ impl Painter {
                     true => p.error,
                     false => code_color(file.code, p),
                 };
-                let lw = self.mono_width(&letter, REPOS_MONO_SIZE, scale);
+                let lw = self.mono_width(&letter, CODE_FONT_SIZE, scale);
                 self.mono_text(
                     c,
                     &letter,
-                    REPOS_MONO_SIZE,
+                    CODE_FONT_SIZE,
                     (code_x + (code_w - lw) / 2.0).round(),
                     f32::MAX,
                     line_band,
@@ -4257,7 +4260,7 @@ impl Painter {
                 self.mono_text(
                     c,
                     &line.text,
-                    REPOS_MONO_SIZE,
+                    CODE_FONT_SIZE,
                     bx,
                     bend,
                     row_band,
@@ -4501,7 +4504,7 @@ impl Painter {
                             .char_indices()
                             .nth(n)
                             .map_or(line.text.len(), |(b, _)| b);
-                        tx + self.mono_width(&line.text[..end], REPOS_MONO_SIZE, scale)
+                        tx + self.mono_width(&line.text[..end], CODE_FONT_SIZE, scale)
                     };
                     for w in &line.words {
                         let (x0, x1) = (upto(w.start), upto(w.end).min(bend));
@@ -4513,7 +4516,7 @@ impl Painter {
                     }
                     c.fill(tint_x, y, px(DIFF_BAR), h, tone);
                 }
-                let width = |t: &str| self.mono_width(t, REPOS_MONO_SIZE, scale);
+                let width = |t: &str| self.mono_width(t, CODE_FONT_SIZE, scale);
                 let text = &line.text;
                 if let Some(chars) = &look.chosen {
                     self.chosen_tint(c, text, chars, (tx, bend), row_band, width, scale, p);
@@ -4554,10 +4557,10 @@ impl Painter {
                     if from >= to {
                         return;
                     }
-                    let x = tx + self.mono_width(&line.text[..from], REPOS_MONO_SIZE, scale);
+                    let x = tx + self.mono_width(&line.text[..from], CODE_FONT_SIZE, scale);
                     if x < bend {
                         let text = &line.text[from..to];
-                        self.mono_text(c, text, REPOS_MONO_SIZE, x, bend, row_band, scale, color);
+                        self.mono_text(c, text, CODE_FONT_SIZE, x, bend, row_band, scale, color);
                     }
                 };
                 // In the places the search found, the selection, the caret
@@ -4623,7 +4626,7 @@ impl Painter {
                     }
                 }
                 // Cut at the row's end, or shown from a char on: marked.
-                let mark_w = (self.mono_width("›", REPOS_MONO_SIZE, scale)).ceil();
+                let mark_w = (self.mono_width("›", CODE_FONT_SIZE, scale)).ceil();
                 let ground = match tone {
                     Some(tone) => lighten(mix(p.elevated, tone, DIFF_TINT)),
                     None if lit.is_some() => lighten(p.elevated),
@@ -4635,7 +4638,7 @@ impl Painter {
                     self.mono_text(
                         c,
                         "›",
-                        REPOS_MONO_SIZE,
+                        CODE_FONT_SIZE,
                         x,
                         f32::MAX,
                         row_band,
@@ -4646,7 +4649,7 @@ impl Painter {
                 if look.skipped {
                     let x = tx - mark_w;
                     c.fill(x as i32, y, mark_w as i32, h, ground);
-                    self.mono_text(c, "‹", REPOS_MONO_SIZE, x, tx, row_band, scale, p.muted);
+                    self.mono_text(c, "‹", CODE_FONT_SIZE, x, tx, row_band, scale, p.muted);
                 }
             }
             DetailRow::Note(text) => {
@@ -4710,7 +4713,7 @@ impl Painter {
                 let tx = self.comment_card(c, (x0, x1), row_band, (*first, *last), fill, scale);
                 c.fill(x0 as i32, y, px(2).max(1), h, mix(p.elevated, accent, 0.7));
                 // What the search found in it, tinted on the card.
-                let width = |t: &str| self.mono_width(t, REPOS_MONO_SIZE, scale);
+                let width = |t: &str| self.mono_width(t, CODE_FONT_SIZE, scale);
                 let found = &look.found;
                 self.found_tints(c, text, found, (tx, bend), row_band, width, fill, scale, p);
                 // A dismissed finding's words dim.
@@ -4718,7 +4721,7 @@ impl Painter {
                     Some(Tone::Muted) => p.muted,
                     _ => p.text,
                 };
-                self.mono_text(c, text, REPOS_MONO_SIZE, tx, bend, row_band, scale, ink);
+                self.mono_text(c, text, CODE_FONT_SIZE, tx, bend, row_band, scale, ink);
             }
             DetailRow::Editor {
                 text,
@@ -4752,13 +4755,13 @@ impl Painter {
                     scale,
                 );
                 let at = |byte: usize| {
-                    tx + self.mono_width(&text[..byte.min(text.len())], REPOS_MONO_SIZE, scale)
+                    tx + self.mono_width(&text[..byte.min(text.len())], CODE_FONT_SIZE, scale)
                 };
                 if !selection.is_empty() {
                     let (sx, ex) = (at(selection.start), at(selection.end).min(x1));
                     c.fill(sx as i32, iy, (ex - sx).max(1.0) as i32, ih, p.selected);
                 }
-                self.mono_text(c, text, REPOS_MONO_SIZE, tx, x1, row_band, scale, p.text);
+                self.mono_text(c, text, CODE_FONT_SIZE, tx, x1, row_band, scale, p.text);
                 if let Some(caret) = caret.filter(|_| look.focused) {
                     let cx = at(caret).min(x1 - b) as i32;
                     let pad = px(3);
@@ -6541,7 +6544,9 @@ mod tests {
             let field = open[0].1;
             assert_eq!(open[0].0, SearchPart::Field);
             // At the tree's least, room for a name of about nine letters.
-            assert!(field.size.w >= 90, "{w}: {field:?}");
+            let (from, to) = field_text(field, 1.0);
+            let name = text_extent("repo-name", FONT_SIZE, BUTTON_CHAR) as f32;
+            assert!(to - from >= name, "{w}: {field:?} for {name}");
             assert_eq!(count.is_some(), counted, "{w}");
             let close = open[1].1;
             assert!(field.loc.x + field.size.w < close.loc.x && close.loc.x + ROW_BUTTON < tools[0].1.loc.x);
@@ -7553,7 +7558,7 @@ mod tests {
             .position(|r| matches!(r, DetailRow::Line(_)))
             .expect("a line");
         let rect = layout.detail_rows[i];
-        let advance = measure_mono("0", REPOS_MONO_SIZE).unwrap() as f64;
+        let advance = measure_mono("0", CODE_FONT_SIZE).unwrap() as f64;
         // Its text starts after the line numbers.
         let x0 = (rect.loc.x + DIFF_INSET + gutter_width(view.detail.gutter, false)) as f64;
         let y = rect.loc.y as f64 + rect.size.h as f64 / 2.0;
@@ -7614,7 +7619,7 @@ mod tests {
         let size: Size<i32, Logical> = (1280, 800).into();
         let panel = repos_panel_rect(size);
         let layout = repos_layout(&view, panel);
-        let advance = measure_mono("0", REPOS_MONO_SIZE).unwrap() as f64;
+        let advance = measure_mono("0", CODE_FONT_SIZE).unwrap() as f64;
         let (top, bottom) = (layout.detail_rows[2], layout.detail_rows[3]);
         let x0 = (top.loc.x + DIFF_INSET + 1 + COMMENT_INDENT) as f64;
         let mid = |r: Rect| r.loc.y as f64 + r.size.h as f64 / 2.0;

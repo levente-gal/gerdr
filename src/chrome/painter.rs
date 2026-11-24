@@ -6,7 +6,7 @@ use super::{
     BUTTON_RADIUS, CAP_GAP, CAP_PADDING, CAP_RADIUS, CARET_HEIGHT, CARET_WIDTH, CHECKBOX_SIZE,
     Canvas, Check, DETAIL_FONT_SIZE, FOCUS_GAP, FOCUS_RING, FONT_SIZE, GIT_MARK_GAP,
     GIT_MARK_WIDTH, KEY_FONT_SIZE, PADDING, Palette, ROW_HIGHLIGHT_RADIUS, Rect, Rgb, SHADOW,
-    SMALL_FONT_SIZE, TINY_FONT_SIZE, arrow, check, coverage, cross, mix, segment,
+    SMALL_FONT_SIZE, TINY_FONT_SIZE, arrow, check, coverage, cross, line, mix, segment,
 };
 use crate::git::{Change, GitStatus};
 use crate::text_field::Line;
@@ -15,7 +15,7 @@ use std::cell::RefCell;
 
 /// A button's count badge: its height, and the least room on each side of
 /// the number.
-const BADGE_HEIGHT: i32 = 15;
+const BADGE_HEIGHT: i32 = line(TINY_FONT_SIZE, 3);
 const BADGE_PAD: i32 = 4;
 
 /// How many bytes of popup backgrounds `Painter` keeps, besides the last
@@ -92,7 +92,7 @@ pub(super) fn field_text(rect: Rect, scale: f64) -> (f32, f32) {
 
 /// How much lower each line of a field of lines (`Painter::lines_field`)
 /// is than the one before.
-pub(super) const FIELD_LINE: i32 = 20;
+pub(super) const FIELD_LINE: i32 = line(FONT_SIZE, 5);
 
 /// How high a field of `lines` lines is: a one-line field's height, and
 /// `FIELD_LINE` more for each line past its first.

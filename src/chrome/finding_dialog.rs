@@ -6,7 +6,7 @@ use super::wrap_field::{byte_at, first_shown, row_of, row_step, soft_rows, wrap_
 use super::{
     BUTTON_RADIUS, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Canvas, Check, DIALOG_WIDTH, FONT_SIZE,
     LABEL_FONT_SIZE, PADDING, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON_GAP,
-    QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, band, caret, dialog_buttons, phys,
+    QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, band, caret, dialog_buttons, line, phys,
     rect_px,
 };
 use crate::text_field::Line;
@@ -14,7 +14,7 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// How high a line of a field is.
-const ROW: i32 = 22;
+const ROW: i32 = line(FONT_SIZE, 7);
 /// The room above and below a field's lines.
 const FIELD_PAD: i32 = 6;
 /// The Cancel button's index, then the action's.

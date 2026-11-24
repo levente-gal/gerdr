@@ -10,14 +10,14 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 use super::{
     BUTTON_RADIUS, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT, Density, Dot, FONT_SIZE, LABEL_FONT_SIZE,
     ListBar, POPUP_RADIUS, Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, Thumb, band, dot_shape,
-    hint_spots, hint_strs, icon_sdf, measure, mix, phys, physical, rect_px,
+    hint_spots, hint_strs, icon_sdf, line, measure, mix, phys, physical, rect_px,
 };
 
 /// How high the footer is at `density`.
 pub fn status_bar_height(density: Density) -> i32 {
     match density {
-        Density::Comfortable => 24,
-        Density::Compact => 20,
+        Density::Comfortable => line(SMALL_FONT_SIZE, 11),
+        Density::Compact => line(SMALL_FONT_SIZE, 7),
     }
 }
 
@@ -218,19 +218,19 @@ const PANEL_WIDTH: i32 = DIALOG_WIDTH;
 /// Room around its edges, and between it and the footer.
 const PANEL_PAD: i32 = 12;
 const PANEL_MARGIN: i32 = 6;
-const TITLE_H: i32 = 22;
+const TITLE_H: i32 = line(LABEL_FONT_SIZE, 5);
 const TITLE_GAP: i32 = 8;
-const ROW_H: i32 = 46;
+const ROW_H: i32 = line(FONT_SIZE, 15) + line(DETAIL_FONT_SIZE, 4);
 const ROW_GAP: i32 = 2;
-const EMPTY_H: i32 = 30;
-const BUTTON_H: i32 = 26;
+const EMPTY_H: i32 = line(FONT_SIZE, 15);
+const BUTTON_H: i32 = line(FONT_SIZE, 11);
 const BUTTON_PAD: i32 = 10;
 const BUTTON_GAP: i32 = 6;
 /// A row's dot column and the gap after it.
 const ROW_INSET: i32 = 8;
 const ROW_DOT: i32 = 14;
 /// The key hints' row under the tasks, and the gap above it.
-const HINTS_H: i32 = 24;
+const HINTS_H: i32 = line(SMALL_FONT_SIZE, 11);
 const HINTS_GAP: i32 = 6;
 /// The scrollbar's room right of the rows, when not all fit.
 const BAR_ROOM: i32 = 8;
@@ -498,10 +498,10 @@ impl Painter {
                 .map_or(row.loc.x + row.size.w - ROW_INSET, |b| {
                     shift(*b).loc.x - BUTTON_GAP
                 });
-            let line = |top: i32, h: i32| {
+            let at = |top: i32, h: i32| {
                 Rectangle::new((text_x, top).into(), ((text_end - text_x).max(1), h).into())
             };
-            let first = line(row.loc.y + 6, 20);
+            let first = at(row.loc.y + 6, line(FONT_SIZE, 5));
             let (x, end) = phys(first, scale);
             self.text(
                 &mut c,
@@ -513,7 +513,7 @@ impl Painter {
                 scale,
                 p.text,
             );
-            let second = line(row.loc.y + 26, 16);
+            let second = at(first.loc.y + first.size.h, line(DETAIL_FONT_SIZE, 4));
             let (x, end) = phys(second, scale);
             self.text(
                 &mut c,

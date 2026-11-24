@@ -6,9 +6,9 @@
 use super::{
     Badge, Canvas, Density, Dot, FONT_SIZE, FieldSpot, GAP, LABEL_FONT_SIZE, NEW_TAB_SIZE, PADDING,
     Painter, Palette, Rect, Rgb, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, STROKE, TAB_MAX_WIDTH,
-    Theme, ThemeMode, agent_icon, chevron_side, cross, dot_slot, eye, field_text, icon_sdf, mix,
-    moon, new_tab, no_restart, physical, rounded_rect, row_dot, segment, stages_mark, status_dot,
-    status_label, sun, tab_strip_height, tray, zoom_corners,
+    Theme, ThemeMode, agent_icon, chevron_side, cross, dot_slot, eye, field_text, icon_sdf, line,
+    mix, moon, new_tab, no_restart, physical, rounded_rect, row_dot, segment, stages_mark,
+    status_dot, status_label, sun, tab_strip_height, tray, zoom_corners,
 };
 use crate::agent_icons::AgentIcon;
 use crate::app_icons::github_icon;
@@ -532,7 +532,7 @@ const EDGE: i32 = 4;
 /// The overflow chip ("⋯ N" with its warning dot) and the PREFIX badge.
 const OVERFLOW_WIDTH: i32 = 44;
 const PREFIX_WIDTH: i32 = 64;
-const PREFIX_HEIGHT: i32 = 20;
+const PREFIX_HEIGHT: i32 = line(SMALL_FONT_SIZE, 7);
 /// The watch button: an eye and "Watch CI" (or "Watching"), and the gap
 /// between them.
 const WATCH_WIDTH: i32 = 96;

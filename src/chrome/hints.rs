@@ -5,12 +5,12 @@
 use super::{
     BUTTON_RADIUS, CAP_GAP, CAP_PADDING, Canvas, FOOTER_PAD, FOOTER_ROW, HELP_PADDING, HINT_GAP,
     HINT_KEY_GAP, KEY_FONT_SIZE, Painter, Palette, Rect, SMALL_FONT_SIZE, band, footer_rows,
-    keycap_text, measure, rect_px,
+    keycap_text, line, measure, rect_px,
 };
 use smithay::utils::{Logical, Point, Rectangle};
 
 /// How high the ground under a hovered hint is at most.
-const HINT_HOVER_HEIGHT: i32 = 24;
+const HINT_HOVER_HEIGHT: i32 = line(SMALL_FONT_SIZE, 11);
 
 /// Hints as the painter and the hit tests take them, from a view's owned
 /// ones.

@@ -8,7 +8,8 @@ use super::{
     ButtonStyle, Canvas, DIALOG_WIDTH, FIELD_LINE, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE,
     POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
     QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band, button_width,
-    dialog_buttons, field_line_spot, field_lines_height, field_text, gutter_track, phys, rect_px,
+    dialog_buttons, field_line_spot, field_lines_height, field_text, gutter_track, line, phys,
+    rect_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -46,9 +47,9 @@ const TRACK_PAD: i32 = 2;
 /// How much higher a field gets for each line past its first.
 const LINE_H: i32 = FIELD_LINE;
 /// How high the row over a field is, holding its name and suggestion.
-const ROW_LABEL: i32 = 26;
+const ROW_LABEL: i32 = line(FONT_SIZE, 11);
 /// How high a borrowed check's line is, holding its button.
-const BORROWED_H: i32 = 26;
+const BORROWED_H: i32 = line(FONT_SIZE, 11);
 /// How wide the label of the time limit's field is, and the field.
 const LIMIT_LABEL: i32 = 170;
 const LIMIT_FIELD: i32 = 100;
@@ -371,7 +372,7 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
 
 /// The Use button's label and height.
 const USE: &str = "Use";
-const USE_H: i32 = 22;
+const USE_H: i32 = line(FONT_SIZE, 7);
 
 impl CommandsLayout {
     /// What `pos` is over.

@@ -10,7 +10,7 @@ use super::{
     ButtonStyle, Canvas, DETAIL_FONT_SIZE, DOT, Dot, FONT_SIZE, HELP_MARGIN, HELP_PADDING,
     HELP_TITLE_HEIGHT, HINTS_HEIGHT, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter, Palette,
     QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band,
-    button_width, cross, dot_shape, hint_spots, hint_strs, icon_sdf, measure, phys, rect_px,
+    button_width, cross, dot_shape, hint_spots, hint_strs, icon_sdf, line, measure, phys, rect_px,
 };
 
 /// How wide the panel is, at the most; it shrinks with the output, keeping
@@ -27,7 +27,7 @@ const TAB_PAD: i32 = 10;
 /// Room around the list's rows.
 const LIST_PAD: i32 = 8;
 /// A list row or a run row: its title line and its detail line.
-const ROW_H: i32 = 46;
+const ROW_H: i32 = line(FONT_SIZE, 11) + line(DETAIL_FONT_SIZE, 8);
 const ROW_GAP: i32 = 2;
 /// A row's dot column and the gap after it.
 const ROW_INSET: i32 = 8;
@@ -35,25 +35,25 @@ const ROW_DOT: i32 = 14;
 const DOT_GAP: i32 = 6;
 /// A two-line row's lines, as (top in the row, height): as the tasks
 /// panel's.
-const TOP_LINE: (i32, i32) = (6, 20);
-const LOW_LINE: (i32, i32) = (26, 16);
+const TOP_LINE: (i32, i32) = (6, line(FONT_SIZE, 5));
+const LOW_LINE: (i32, i32) = (TOP_LINE.0 + TOP_LINE.1, line(DETAIL_FONT_SIZE, 4));
 /// The detail, from the top: room, its heading, a line per fact, the
 /// problem and what to do about it, the runs' subheading, the runs.
 const DETAIL_TOP: i32 = 10;
-const HEAD_H: i32 = 28;
-const FACT_H: i32 = 20;
-const LINE_H: i32 = 20;
+const HEAD_H: i32 = line(LABEL_FONT_SIZE, 11);
+const FACT_H: i32 = line(SMALL_FONT_SIZE, 7);
+const LINE_H: i32 = line(FONT_SIZE, 5);
 const SECTION_GAP: i32 = 10;
-const SUBHEAD_H: i32 = 26;
-const EMPTY_H: i32 = 30;
+const SUBHEAD_H: i32 = line(SMALL_FONT_SIZE, 13);
+const EMPTY_H: i32 = line(FONT_SIZE, 15);
 /// A run's buttons, right-aligned on its row.
-const RUN_BUTTON_H: i32 = 26;
+const RUN_BUTTON_H: i32 = line(FONT_SIZE, 11);
 const RUN_BUTTON_PAD: i32 = 10;
 const RUN_BUTTON_GAP: i32 = 6;
 /// Room above the machine's buttons.
 const BUTTONS_GAP: i32 = 12;
 /// The key hints' band along the bottom.
-const FOOTER_H: i32 = 36;
+const FOOTER_H: i32 = HINTS_HEIGHT + 12;
 /// The scrollbar's room right of the rows, when not all fit.
 const BAR_ROOM: i32 = 8;
 /// The most lines the problem, or what to do about it, wraps to.
@@ -74,7 +74,7 @@ const REMOVE_W: i32 = 28;
 const REMOVE_GAP: i32 = 4;
 /// The "+ Add address" row under the addresses, in the field column.
 const ADD_GAP: i32 = 6;
-const ADD_H: i32 = 28;
+const ADD_H: i32 = line(FONT_SIZE, 13);
 const ADD_ADDRESS: &str = "Add address";
 const NAME_HINT: &str = "What to call it";
 const ADDRESS_HINT: &str = "user@host";
@@ -1779,9 +1779,10 @@ mod tests {
                 }
             }
         }
-        // Six fit 600 high with nothing running there.
+        // Five fit 600 high with nothing running there (six did at 15 px
+        // text; the form does not scroll).
         let small = (870, 600).into();
-        let l = machines_layout(&addresses(0, false, false, 6), small);
+        let l = machines_layout(&addresses(0, false, false, 5), small);
         fits(&l, small);
         form_fits(&l);
         assert!(inside(l.detail, l.no_runs.unwrap()));

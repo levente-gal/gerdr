@@ -114,7 +114,10 @@ How to use it:
 
 - **L1** Sizes come from the tokens in `chrome/consts.rs` (`POPUP_RADIUS`,
   `ROW_HIGHLIGHT_RADIUS`, `DIALOG_WIDTH`). No new literal radius or dialog
-  width.
+  width. Text sizes come from its Text section (`FONT_SIZE`,
+  `SMALL_FONT_SIZE`, ...), never a new literal or a file's own size const,
+  and a height that holds a line of text is `line(SIZE, room)`, so it
+  grows when `TEXT` does.
 - **L2** Use the shared painters: `Painter::button` with `ButtonStyle`,
   `row_highlight`, `query_field`, `segmented`, `chrome/thumb.rs` scrollbars,
   `layers::scrim` behind dialogs. One hover style: selected row in

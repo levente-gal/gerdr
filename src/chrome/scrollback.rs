@@ -10,23 +10,22 @@ use std::ops::Range;
 
 use super::{
     FIELD_GAP, FONT_SIZE, FOOTER_PAD, FOOTER_ROW, FieldSpot, HELP_PADDING, HELP_RADIUS,
-    HINT_KEY_GAP, Painter, Palette, ROW_BUTTON, Rect, SHADOW, SMALL_FONT_SIZE, SearchBar,
-    SearchPart, band, hint_spots, hint_strs, layers::Part, measure, measure_mono, mix, phys,
-    physical, rect_px, search_field_text, search_spots,
+    HINT_KEY_GAP, MONO_FONT_SIZE, Painter, Palette, ROW_BUTTON, Rect, SHADOW, SMALL_FONT_SIZE,
+    SearchBar, SearchPart, band, hint_spots, hint_strs, layers::Part, line, measure, measure_mono,
+    mix, phys, physical, rect_px, search_field_text, search_spots,
 };
 use crate::scrollback::{Fit, Ink, Style};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The title row's height, and the footer's under the list.
-const TITLE: i32 = 34;
-const FOOTER: i32 = 34;
+const TITLE: i32 = line(FONT_SIZE, 19);
+const FOOTER: i32 = line(SMALL_FONT_SIZE, 21);
 /// The room around the list inside the panel.
 const PAD: i32 = 6;
 /// The room between the list's edges and its text.
 const TEXT_INSET: i32 = 8;
-/// The text's size, and a row's height.
-const MONO_SIZE: f32 = 13.0;
-const ROW: i32 = 18;
+/// A row's height.
+const ROW: i32 = line(MONO_FONT_SIZE, 5);
 /// How far apart `Painter::paint_styled_rows` paints its rows.
 pub(super) const STYLED_ROW: i32 = ROW;
 /// How far bold text is drawn again to the right, logical pixels, when
@@ -45,8 +44,8 @@ const SEARCH_MAX: i32 = 520;
 /// The keys listed (F1): a row's height, the heading's over them, the
 /// room for a row's keycaps before what it does, and the least width of
 /// a column of them.
-const KEYS_ROW: i32 = 26;
-const KEYS_HEADING: i32 = 34;
+const KEYS_ROW: i32 = line(SMALL_FONT_SIZE, 13);
+const KEYS_HEADING: i32 = line(FONT_SIZE, 19);
 const KEYS_CAPS: i32 = 190;
 const KEYS_COLUMN: i32 = 480;
 
@@ -129,9 +128,9 @@ pub enum ScrollbackHit {
 
 /// The width of a character of the text, in logical pixels.
 fn advance() -> f64 {
-    measure_mono("0", MONO_SIZE)
+    measure_mono("0", MONO_FONT_SIZE)
         .filter(|a| *a > 0.0)
-        .unwrap_or(MONO_SIZE * 0.6) as f64
+        .unwrap_or(MONO_FONT_SIZE * 0.6) as f64
 }
 
 /// Where the viewer's parts go in `panel`, with `hints` under the list.
@@ -543,7 +542,7 @@ impl Painter {
         let size = Size::from((w, ROW));
         let mut c = super::Canvas::new(physical(size, scale));
         c.fill(0, 0, c.w, c.h, p.terminal_background);
-        let adv = self.mono_width("0", MONO_SIZE, scale);
+        let adv = self.mono_width("0", MONO_FONT_SIZE, scale);
         if let Some((from, to, on)) = row.selected {
             let x = (from as f32 * adv).round();
             let end = to as f32 + if on { 0.5 } else { 0.0 };
@@ -621,7 +620,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
-        let adv = self.mono_width("0", MONO_SIZE, scale);
+        let adv = self.mono_width("0", MONO_FONT_SIZE, scale);
         let (left, top, w, h) = rect_px(rect, scale);
         let shown = (rect.size.h.max(0) as usize).div_ceil(ROW as usize);
         c.clipped(left as i32, top as i32, w as i32, h as i32, |c| {
@@ -655,7 +654,7 @@ impl Painter {
                         color = mix(color, p.terminal_background, DIM);
                     }
                     let x = left + r.start as f32 * adv;
-                    let size = MONO_SIZE;
+                    let size = MONO_FONT_SIZE;
                     match style.bold {
                         true if self.has_mono_bold() => {
                             self.mono_bold_text(c, text, size, x, f32::MAX, row_band, scale, color);
@@ -1025,6 +1024,7 @@ mod tests {
             fg: Some(fg),
             bold,
             dim,
+            ground: false,
         };
         let dim = Style {
             dim: true,

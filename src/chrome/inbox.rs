@@ -10,11 +10,11 @@
 use super::{
     BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, DOT, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
     FieldSpot, HELP_MARGIN, HELP_PADDING, LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH,
-    MENU_RADIUS, PADDING, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING, Painter, Palette,
-    ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STROKE, agent_icon, band,
-    cross, dot_slot, folder, footer_height, footer_hint_spots, git_branch, hint_at, hint_strs,
-    icon_sdf, measure, mix, pencil, phys, plus, rect_px, robot, rounded_rect, row_dot, row_fill,
-    search::query_text, segment, status_dot, tray,
+    MENU_RADIUS, MONO_FONT_SIZE, PADDING, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING,
+    Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STROKE,
+    agent_icon, band, cross, dot_slot, folder, footer_height, footer_hint_spots, git_branch,
+    hint_at, hint_strs, icon_sdf, line, measure, mix, pencil, phys, plus, rect_px, robot,
+    rounded_rect, row_dot, row_fill, search::query_text, segment, status_dot, tray,
 };
 use crate::git::{GitStatus, InProgress};
 use crate::text_field::Line;
@@ -25,11 +25,11 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 const INBOX_MAX_WIDTH: i32 = 1400;
 const INBOX_MAX_HEIGHT: i32 = 1000;
 /// Its title row, and the field's under it.
-const INBOX_TITLE: i32 = 44;
+const INBOX_TITLE: i32 = line(LABEL_FONT_SIZE, 27);
 const INBOX_FIELD: i32 = PROJECT_MENU_INPUT;
 /// How high an item's row is, and a section's label.
-pub const INBOX_ROW: i32 = 48;
-pub const INBOX_LABEL: i32 = 34;
+pub const INBOX_ROW: i32 = 2 * ROW_TITLE_TOP + ROW_TITLE + ROW_SUBTITLE;
+pub const INBOX_LABEL: i32 = line(SMALL_FONT_SIZE, 21);
 /// The list's share of the panel's width, and the narrowest it gets
 /// (short of half the panel).
 const INBOX_LIST_SHARE: f64 = 0.4;
@@ -65,7 +65,7 @@ const BADGE_TINT: f32 = 0.16;
 const DETAIL_BADGE: i32 = 36;
 /// A section label's count: its pill's height and the room either side
 /// of the number.
-const COUNT_HEIGHT: i32 = 18;
+const COUNT_HEIGHT: i32 = line(DETAIL_FONT_SIZE, 6);
 const COUNT_PAD: i32 = 7;
 /// How far above a section label's bottom its line sits: low, near the
 /// items it heads.
@@ -73,26 +73,25 @@ const LABEL_LOW: i32 = 6;
 /// The lines of an item's row: the title's band from the top, then the
 /// subtitle's.
 const ROW_TITLE_TOP: i32 = 6;
-const ROW_TITLE: i32 = 20;
-const ROW_SUBTITLE: i32 = 16;
+const ROW_TITLE: i32 = line(FONT_SIZE, 5);
+const ROW_SUBTITLE: i32 = line(SMALL_FONT_SIZE, 3);
 /// The detail: its title row, a field's line, the widest its labels'
 /// column gets, the heading over its block, a line of the block in the
-/// monospace font of this size, and the room inside the block.
-const DETAIL_TITLE: i32 = 60;
-const DETAIL_LINE: i32 = 24;
+/// monospace font (`MONO_FONT_SIZE`), and the room inside the block.
+const DETAIL_TITLE: i32 = line(LABEL_FONT_SIZE, 15) + line(SMALL_FONT_SIZE, 15);
+const DETAIL_LINE: i32 = line(FONT_SIZE, 9);
 const DETAIL_LABEL_MAX: i32 = 140;
-const DETAIL_HEADING: i32 = 28;
-const BLOCK_LINE: i32 = 19;
-const BLOCK_FONT_SIZE: f32 = 13.0;
+const DETAIL_HEADING: i32 = line(DETAIL_FONT_SIZE, 16);
+const BLOCK_LINE: i32 = line(MONO_FONT_SIZE, 6);
 const BLOCK_PAD: i32 = 6;
 /// The detail's buttons: their height, the gap between their rows, and
 /// the most rows (the rest are left out; their keys still work).
-const DETAIL_BUTTON: i32 = 30;
+const DETAIL_BUTTON: i32 = line(SMALL_FONT_SIZE, 17);
 const DETAIL_BUTTON_ROWS: usize = 2;
 /// The chip at the end of the field while composing: its height and the
 /// room either side of what it says, the widest share of the field it
 /// takes, and its arrow's width.
-const CHIP_HEIGHT: i32 = 24;
+const CHIP_HEIGHT: i32 = line(SMALL_FONT_SIZE, 11);
 const CHIP_PAD: i32 = 8;
 const CHIP_SHARE: f64 = 0.4;
 const CHIP_ARROW: i32 = 12;
@@ -873,7 +872,10 @@ fn detail_title_line(detail: &InboxDetailView, rect: Rect, title: Rect) -> Rect 
         return title;
     }
     let top = detail_badge(rect, title).loc.y - 2;
-    Rectangle::new((title.loc.x, top).into(), (title.size.w, 22).into())
+    Rectangle::new(
+        (title.loc.x, top).into(),
+        (title.size.w, line(LABEL_FONT_SIZE, 5)).into(),
+    )
 }
 
 /// Where the text of the detail's title starts, in its title row at
@@ -1691,12 +1693,12 @@ impl Painter {
             _ => text_end,
         };
         // The title over the subtitle, the two centred on the mark.
-        let line = detail_title_line(detail, rect, title);
-        let title_band = band(line, scale);
+        let title_line = detail_title_line(detail, rect, title);
+        let title_band = band(title_line, scale);
         let subtitle_band = (!detail.subtitle.is_empty()).then(|| {
             let st = Rectangle::new(
-                (title.loc.x, line.loc.y + line.size.h).into(),
-                (title.size.w, 18).into(),
+                (title.loc.x, title_line.loc.y + title_line.size.h).into(),
+                (title.size.w, line(SMALL_FONT_SIZE, 5)).into(),
             );
             band(st, scale)
         });
@@ -1790,7 +1792,7 @@ impl Painter {
                 self.mono_text(
                     c,
                     &text,
-                    BLOCK_FONT_SIZE,
+                    MONO_FONT_SIZE,
                     lx,
                     lright,
                     band(line_at(top + n), scale),
@@ -2722,7 +2724,8 @@ mod tests {
             ..whole.clone()
         };
         let l = inbox_layout(&fraction, size);
-        assert_eq!(l.rows[0].0.loc.y, b.window.loc.y - 10);
+        let cut = (0.3 * INBOX_LABEL as f64).round() as i32;
+        assert_eq!(l.rows[0].0.loc.y, b.window.loc.y - cut);
         for over in [20.0, -20.0] {
             let stretched = InboxView {
                 over,
@@ -2751,7 +2754,8 @@ mod tests {
         };
         let (top, size_top) = at(0, 0.0);
         assert_eq!(top.y, track.loc.y as f64);
-        assert_eq!(size_top.h, track.size.h / 4);
+        // To the nearest pixel, as every thumb (`Thumb::of`).
+        assert_eq!(size_top.h, (track.size.h as f64 / 4.0).round() as i32);
         let (end, _) = at(3 * page, 0.0);
         assert_eq!(
             end.y + size_top.h as f64,

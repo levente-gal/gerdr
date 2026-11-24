@@ -40,7 +40,7 @@ use smithay::{
 };
 
 use crate::{
-    Gerdr, WorkspaceKind,
+    Gerdr, WorkspaceKind, ZoomStep,
     agent_icons::AgentIcon,
     agents::AgentKey,
     app_icons::AppIcon,
@@ -120,6 +120,8 @@ pub enum Target {
     T3Updates,
     /// New terminals reloading their config file, turned on or off.
     TerminalReload,
+    /// Everything drawn a step bigger or smaller, or at the monitor's size.
+    Zoom(ZoomStep),
     /// The dialog raising the inotify limit (see `inotify_limit`).
     RaiseInotifyLimit,
     /// The tasks running in the background (see `tasks`).
@@ -193,6 +195,7 @@ impl Target {
             | Target::UpdateT3
             | Target::T3Updates
             | Target::TerminalReload
+            | Target::Zoom(_)
             | Target::RaiseInotifyLimit
             | Target::Tasks
             | Target::Phones
@@ -231,6 +234,7 @@ impl Target {
             | Target::UpdateT3
             | Target::T3Updates
             | Target::TerminalReload
+            | Target::Zoom(_)
             | Target::RaiseInotifyLimit
             | Target::Tasks
             | Target::Phones
@@ -1057,6 +1061,7 @@ fn frecency_key(
         | Target::UpdateT3
         | Target::T3Updates
         | Target::TerminalReload
+        | Target::Zoom(_)
         | Target::RaiseInotifyLimit
         | Target::Tasks
         | Target::Phones
@@ -1854,6 +1859,7 @@ impl Gerdr {
             Target::UpdateT3 => self.update_t3(None),
             Target::T3Updates => self.toggle_t3_updates(),
             Target::TerminalReload => self.toggle_terminal_reload(),
+            Target::Zoom(step) => self.step_zoom(step),
             Target::RaiseInotifyLimit => self.ask_raise_inotify(),
             Target::Tasks => self.open_tasks(0),
             Target::Phones => self.open_phones(),
@@ -2085,6 +2091,28 @@ impl Gerdr {
                 Target::TerminalReload,
             )
         });
+        // Settings' `[ui] zoom`, written there.
+        let zoom = self.settings.zoom;
+        items.push(Item::new(
+            ItemIcon::Command,
+            "Make everything bigger",
+            format!("now {zoom}% \u{b7} panes too \u{b7} [ui] zoom"),
+            Target::Zoom(ZoomStep::In),
+        ));
+        items.push(Item::new(
+            ItemIcon::Command,
+            "Make everything smaller",
+            format!("now {zoom}% \u{b7} panes too \u{b7} [ui] zoom"),
+            Target::Zoom(ZoomStep::Out),
+        ));
+        if zoom != 100 {
+            items.push(Item::new(
+                ItemIcon::Command,
+                "Draw everything at the monitor's size",
+                format!("now {zoom}%, back to 100%"),
+                Target::Zoom(ZoomStep::Reset),
+            ));
+        }
         if self.inotify.is_low() {
             items.push(Item::new(
                 ItemIcon::Command,
@@ -2756,13 +2784,20 @@ mod tests {
             Place::Split,
         );
         switcher.set_room(room(5));
+        let row = (room(2) - room(1)) as f64;
         let bar = switcher.view().bar.unwrap();
-        assert_eq!((bar.down, bar.total - switcher.list_height()), (0.0, 120.0));
+        assert_eq!(
+            (bar.down, bar.total - switcher.list_height()),
+            (0.0, 3.0 * row)
+        );
         // Part of a row down, the selection dragged along.
-        switcher.stand_at(60.0);
+        switcher.stand_at(1.5 * row);
         let view = switcher.view();
-        assert_eq!((view.rows[0].label.as_str(), view.part), ("ws1", 20.0));
-        assert_eq!((view.selected, view.bar.unwrap().down), (Some(1), 60.0));
+        assert_eq!((view.rows[0].label.as_str(), view.part), ("ws1", row / 2.0));
+        assert_eq!(
+            (view.selected, view.bar.unwrap().down),
+            (Some(1), 1.5 * row)
+        );
         // No further than the end.
         switcher.stand_at(1000.0);
         assert_eq!(labels(&switcher), ["ws3", "ws4", "ws5", "ws6", "ws7"]);
@@ -2779,10 +2814,17 @@ mod tests {
             Place::Split,
         );
         switcher.set_room(room(5));
+        let row = (room(2) - room(1)) as f64;
         let now = Instant::now();
-        switcher.scroll(Motion::Finger { px: 60.0, time: 0 }, now);
+        switcher.scroll(
+            Motion::Finger {
+                px: 1.5 * row,
+                time: 0,
+            },
+            now,
+        );
         let view = switcher.view();
-        assert_eq!(view.part, 20.0);
+        assert_eq!(view.part, row / 2.0);
         // The row shown in part under the list too; the selection is
         // dragged to the first row shown whole.
         assert_eq!(
@@ -2795,31 +2837,35 @@ mod tests {
         switcher.scroll(Motion::Finger { px: 400.0, time: 8 }, now);
         let view = switcher.view();
         assert_eq!(view.rows[0].label, "ws3");
-        assert!(view.part > 0.0 && view.part < 234.0, "{}", view.part);
+        assert!(
+            view.part > 0.0 && view.part < room(5) as f64,
+            "{}",
+            view.part
+        );
         settle(&mut switcher, Motion::Lift { time: 16 });
         assert_eq!(switcher.view().part, 0.0);
         assert_eq!(labels(&switcher), ["ws3", "ws4", "ws5", "ws6", "ws7"]);
         // A key moving the list drops the part.
         switcher.scroll(
             Motion::Finger {
-                px: -20.0,
+                px: -row / 2.0,
                 time: 3000,
             },
             now,
         );
-        assert_eq!(switcher.view().part, 20.0);
+        assert_eq!(switcher.view().part, row / 2.0);
         let none = ModifiersState::default();
         switcher.key(&none, Keysym::Page_Up, Keysym::Page_Up);
         assert_eq!(switcher.view().part, 0.0);
         // As does typing, which starts the list over.
         switcher.scroll(
             Motion::Finger {
-                px: 20.0,
+                px: row / 2.0,
                 time: 3008,
             },
             now,
         );
-        assert_eq!(switcher.view().part, 20.0);
+        assert_eq!(switcher.view().part, row / 2.0);
         type_in(&mut switcher, "w");
         assert_eq!(switcher.view().part, 0.0);
     }

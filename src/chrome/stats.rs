@@ -12,9 +12,9 @@ use smithay::{
 
 use super::{
     BUTTON_RADIUS, ButtonStyle, Canvas, icon_sdf, trash, FONT_SIZE, FieldSpot, HELP_MARGIN, HELP_PADDING,
-    HINT_KEY_GAP, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING,
+    HINT_KEY_GAP, HINTS_HEIGHT, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING,
     Painter, Palette, ROW_BUTTON, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band, button_width,
-    focus_ring, gutter_track, hint_at, hint_spots, hint_strs, measure, phys, query_text,
+    focus_ring, gutter_track, hint_at, hint_spots, hint_strs, line, measure, phys, query_text,
 };
 use crate::text_field::Line;
 
@@ -28,12 +28,12 @@ const STATS_MAX_WIDTH: i32 = 1400;
 const STATS_MAX_HEIGHT: i32 = 1100;
 /// The title row, the row of tabs and search under it, the columns'
 /// titles and the footer.
-const TITLE: i32 = 44;
+const TITLE: i32 = line(LABEL_FONT_SIZE, 27);
 const BAR: i32 = PROJECT_MENU_INPUT;
-const HEAD: i32 = 26;
-const FOOTER: i32 = 36;
+const HEAD: i32 = line(SMALL_FONT_SIZE, 13);
+const FOOTER: i32 = HINTS_HEIGHT + 12;
 /// A row of the table.
-pub const STATS_ROW: i32 = 28;
+pub const STATS_ROW: i32 = line(SMALL_FONT_SIZE, 15);
 /// The room around the list, and between its columns.
 const PAD: i32 = PROJECT_MENU_PADDING;
 const COL_GAP: i32 = 10;
@@ -48,8 +48,8 @@ const SCOPE_MAX: i32 = 220;
 const SEGMENT_PAD: i32 = 24;
 /// The keys listed (F1): a row's height, the heading's over them, the
 /// room for a row's keycaps before what it does.
-const KEYS_ROW: i32 = 26;
-const KEYS_HEADING: i32 = 34;
+const KEYS_ROW: i32 = line(SMALL_FONT_SIZE, 13);
+const KEYS_HEADING: i32 = line(FONT_SIZE, 19);
 const KEYS_CAPS: i32 = 220;
 
 /// The tabs' labels, in order.

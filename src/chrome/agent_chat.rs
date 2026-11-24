@@ -1,7 +1,8 @@
 //! An agent's pane painted as a chat (see `crate::chat`), in the pane's
 //! place: a head line, the items (folded tool cards, edits with their
-//! change, the agent's markdown), the waiting panel with the agent's
-//! screen rows and keys while it waits on the user, and the reply box.
+//! change, the agent's markdown), the waiting panel while it waits on the
+//! user (its menu as gerdr's own, else its screen rows, and the keys to
+//! answer), and the reply box.
 
 use std::{
     cell::RefCell,
@@ -26,13 +27,15 @@ use super::{
     BUTTON_WIDTH, ButtonStyle, CHEVRON_WIDTH, Canvas, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
     FieldSpot, HINTS_HEIGHT, ListBar, PANE_BAR_HEIGHT, Painter, Palette, QUIT_BUTTON, ROW_BUTTON,
     ROW_INSET, ROW_RADIUS, Rect, Rgb, SMALL_FONT_SIZE, Thumb, band, button_width, centred_dot,
-    chevron_down, chevron_side, field_text, gutter_track, hint_at, hint_spots, icon_sdf, mix, phys,
-    physical, rect_px, soft_rows, status_dot, wrap_field_height,
+    check, chevron_down, chevron_side, field_text, gutter_track, hint_at, hint_spots, icon_sdf,
+    mix, phys, physical, rect_px, soft_rows, status_dot, wrap_field_height,
 };
 use crate::{
+    ChatRows,
     chat::{
         ChatFocus, DiffSide, Item, Reading, ToolOut,
         live::{AskReply, PendingAsk, Running},
+        menu::{self, Menu},
         rows::{self, Row, Summary},
     },
     herdr::AgentStatus,
@@ -112,6 +115,9 @@ pub enum WaitKey {
     Esc,
     Up,
     Down,
+    /// To the questions' tab before or after.
+    Left,
+    Right,
     Enter,
     /// A menu choice, 1 to 9.
     Digit(u8),
@@ -180,6 +186,15 @@ impl ChatLayout {
         {
             return Some(ChatHit::AskFold);
         }
+        if let Some((at, laid)) = &parts.menu {
+            let pos = pos - at.loc.to_f64();
+            return (laid.spots.iter())
+                .find(|(rect, _)| rect.to_f64().contains(pos))
+                .and_then(|(_, spot)| match spot {
+                    Spot::Key(key) => Some(ChatHit::Key(*key)),
+                    _ => None,
+                });
+        }
         if !on(self.list) {
             return None;
         }
@@ -212,6 +227,7 @@ impl ChatLayout {
             Some(Spot::Fold) => ChatHit::Fold(i),
             Some(Spot::Path) => ChatHit::Path(i),
             Some(Spot::ShowAll) => ChatHit::ShowAll(i),
+            Some(Spot::Key(key)) => ChatHit::Key(key),
             None => ChatHit::Item(i),
         })
     }
@@ -330,15 +346,15 @@ pub const CHAT_CUT: usize = 200;
 const WAIT_ROWS: usize = 14;
 /// Room either side of a key button's label.
 const KEY_PAD: i32 = 12;
-/// The waiting panel's keys, as their buttons say them.
-const WAIT_KEYS: [(WaitKey, &str); 7] = [
-    (WaitKey::Esc, "Esc"),
-    (WaitKey::Digit(1), "1"),
-    (WaitKey::Digit(2), "2"),
-    (WaitKey::Digit(3), "3"),
-    (WaitKey::Up, "↑"),
-    (WaitKey::Down, "↓"),
-    (WaitKey::Enter, "Enter"),
+/// The waiting panel's keys under the agent's screen rows.
+const WAIT_KEYS: [WaitKey; 7] = [
+    WaitKey::Esc,
+    WaitKey::Digit(1),
+    WaitKey::Digit(2),
+    WaitKey::Digit(3),
+    WaitKey::Up,
+    WaitKey::Down,
+    WaitKey::Enter,
 ];
 /// The most lines of what an ask would run its card shows unfolded.
 const ASK_LINES: usize = 12;
@@ -356,6 +372,34 @@ pub fn ask_key(ask: &str) -> String {
     format!("{ask}\u{0}ask")
 }
 
+/// Its keys under a menu: its choices are buttons of their own. The tab
+/// keys go when it asks one question.
+const MENU_KEYS: [WaitKey; 6] = [
+    WaitKey::Esc,
+    WaitKey::Left,
+    WaitKey::Right,
+    WaitKey::Up,
+    WaitKey::Down,
+    WaitKey::Enter,
+];
+/// How wide a menu choice's number is.
+const CHOICE_NUM: i32 = 28;
+/// How big the check of an answered question's tab is.
+const TAB_CHECK: i32 = 14;
+
+/// What a key's button says.
+fn key_label(key: WaitKey) -> String {
+    match key {
+        WaitKey::Esc => "Esc".into(),
+        WaitKey::Up => "↑".into(),
+        WaitKey::Down => "↓".into(),
+        WaitKey::Left => "←".into(),
+        WaitKey::Right => "→".into(),
+        WaitKey::Enter => "Enter".into(),
+        WaitKey::Digit(d) => d.to_string(),
+    }
+}
+
 /// All of a chat's parts, in output coordinates.
 struct Parts {
     head: Rect,
@@ -365,7 +409,10 @@ struct Parts {
     /// Where the list's scrollbar goes: at the pane's right edge.
     bar_x: i32,
     waiting: Option<Rect>,
-    /// The screen rows in the waiting panel, and its key buttons.
+    /// The agent's menu in the waiting panel, laid out from where it goes.
+    menu: Option<(Rect, Rc<Laid>)>,
+    /// The screen rows in the waiting panel when it shows no menu, and
+    /// its key buttons.
     rows: Rect,
     keys: Vec<(WaitKey, Rect)>,
     /// The ask's card in the waiting panel's place: where its body is laid
@@ -422,7 +469,7 @@ fn parts(view: &ChatView) -> Parts {
     );
     let list_top = head.loc.y + head.size.h;
     let mut end = composer.loc.y - PART_GAP;
-    let (mut waiting, mut rows, mut keys) = (None, Rect::default(), Vec::new());
+    let (mut waiting, mut menu, mut rows, mut keys) = (None, None, Rect::default(), Vec::new());
     let (mut card, mut answers) = (None, Vec::new());
     let frame = 3 * PART_GAP + ROW_BUTTON;
     let inner = (w - 2 * PART_GAP).max(0);
@@ -451,17 +498,37 @@ fn parts(view: &ChatView) -> Parts {
         waiting = Some(panel);
         end = panel.loc.y - PART_GAP;
     } else if let Some(screen) = &view.waiting {
-        let room = (end - list_top - 3 * CARD_ROW - frame - PART_GAP).max(0) / STYLED_ROW;
-        let n = (screen_rows(screen).len() as i32).min(room);
-        let h = frame + n * STYLED_ROW;
+        let room = (end - list_top - 3 * CARD_ROW - frame - PART_GAP).max(0);
+        let laid = menu_laid(screen, inner, room);
+        let (body, shown_keys) = match &laid {
+            Some((laid, tabs)) => {
+                let keys = MENU_KEYS.iter().copied();
+                let keys: Vec<WaitKey> = match tabs {
+                    true => keys.collect(),
+                    false => keys
+                        .filter(|k| !matches!(k, WaitKey::Left | WaitKey::Right))
+                        .collect(),
+                };
+                (laid.h, keys)
+            }
+            None => {
+                let n = (screen_rows(screen).len() as i32).min(room / STYLED_ROW);
+                (n * STYLED_ROW, WAIT_KEYS.to_vec())
+            }
+        };
+        let h = frame + body;
         let panel = Rectangle::new((x, end - h).into(), (w, h).into());
-        rows = Rectangle::new(
+        let at = Rectangle::new(
             (x + PART_GAP, panel.loc.y + PART_GAP).into(),
-            (inner, n * STYLED_ROW).into(),
+            (inner, body).into(),
         );
-        let (mut kx, ky) = (x + PART_GAP, rows.loc.y + rows.size.h + PART_GAP);
-        for (key, label) in WAIT_KEYS {
-            let kw = key_width(label);
+        match laid {
+            Some((laid, _)) => menu = Some((at, laid)),
+            None => rows = at,
+        }
+        let (mut kx, ky) = (x + PART_GAP, at.loc.y + body + PART_GAP);
+        for key in shown_keys {
+            let kw = key_width(&key_label(key));
             if kx + kw > x + PART_GAP + inner {
                 break;
             }
@@ -484,6 +551,7 @@ fn parts(view: &ChatView) -> Parts {
         column: (x, w),
         bar_x: r.loc.x + PAD + full + 2,
         waiting,
+        menu,
         rows,
         keys,
         card,
@@ -492,6 +560,141 @@ fn parts(view: &ChatView) -> Parts {
         send,
         hints,
     }
+}
+
+/// The menu at the bottom of `screen` laid out `w` wide, if it has one
+/// and it fits `room` high (without what its choices say more, if need
+/// be), and whether it has tabs; else the panel shows the screen rows.
+/// Laid out once while they stay.
+fn menu_laid(screen: &Arc<ChatRows>, w: i32, room: i32) -> Option<(Rc<Laid>, bool)> {
+    type Kept = (Arc<ChatRows>, i32, i32, Option<(Rc<Laid>, bool)>);
+    thread_local! {
+        static MENU: RefCell<Option<Kept>> = const { RefCell::new(None) };
+    }
+    let kept = MENU.with_borrow(|memo| {
+        (memo.as_ref())
+            .filter(|(rows, mw, mr, _)| Arc::ptr_eq(rows, screen) && *mw == w && *mr == room)
+            .map(|(.., laid)| laid.clone())
+    });
+    if let Some(laid) = kept {
+        return laid;
+    }
+    let laid = menu::menu(screen).and_then(|m| {
+        let fits = |laid: &Laid| laid.h <= room;
+        let laid = Some(lay_menu(&m, w, true))
+            .filter(fits)
+            .or_else(|| Some(lay_menu(&m, w, false)).filter(fits))?;
+        Some((Rc::new(laid), !m.tabs.is_empty()))
+    });
+    MENU.set(Some((screen.clone(), w, room, laid.clone())));
+    laid
+}
+
+/// A menu laid out from `(0, 0)` for `w`: its questions' tabs, what it
+/// asks, and its choices, each a press on its key, with what they say
+/// more when `more`.
+fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
+    let mut l = Laid::default();
+    let size = Font::Body.size();
+    let mut y = 0;
+    if !m.tabs.is_empty() {
+        let mut x = 0;
+        for tab in &m.tabs {
+            let face = if tab.current { Face::Bold } else { Face::Ui };
+            let mark_w = if tab.done {
+                TAB_CHECK + PART_GAP / 2
+            } else {
+                0
+            };
+            let text_w = width_in(&tab.label, face, size).ceil() as i32;
+            let tw = mark_w + text_w + 2 * BUBBLE_PAD;
+            if x + tw > w {
+                break;
+            }
+            if tab.current {
+                l.put(rect(x, 0, tw, CARD_ROW), Bit::Picked);
+            }
+            if tab.done {
+                let y = (CARD_ROW - TAB_CHECK) / 2;
+                l.put(rect(x + BUBBLE_PAD, y, TAB_CHECK, TAB_CHECK), Bit::Check);
+            }
+            let mark = if tab.current { Mark::Text } else { Mark::Muted };
+            let bit = Bit::Label {
+                text: tab.label.clone(),
+                face,
+                size,
+                mark,
+                centred: false,
+            };
+            l.put(rect(x + BUBBLE_PAD + mark_w, 0, text_w, CARD_ROW), bit);
+            x += tw + PART_GAP / 2;
+        }
+        y = l.h + PART_GAP;
+    }
+    for (text, bold) in &m.ask {
+        let block = match bold {
+            true => DocBlock::Heading {
+                level: 2,
+                text: text.as_str().into(),
+            },
+            false => DocBlock::Para(text.as_str().into()),
+        };
+        let (pieces, h) = doc_layout::stack_of(&[block], w);
+        l.doc(pieces, (0, y));
+        y += h + PART_GAP / 2;
+    }
+    y += PART_GAP / 2;
+    let tw = (w - CHOICE_NUM).max(1);
+    for choice in &m.choices {
+        let top = y;
+        let num = format!("{}.", choice.n);
+        let num = Bit::Label {
+            text: num,
+            face: Face::Ui,
+            size,
+            mark: Mark::Muted,
+            centred: false,
+        };
+        let face = if choice.picked { Face::Bold } else { Face::Ui };
+        let label = Bit::Label {
+            text: choice.label.clone(),
+            face,
+            size,
+            mark: Mark::Text,
+            centred: false,
+        };
+        let mut bits = vec![
+            (rect(ROW_INSET, y, CHOICE_NUM, CARD_ROW), num),
+            (
+                rect(ROW_INSET + CHOICE_NUM, y, tw - ROW_INSET, CARD_ROW),
+                label,
+            ),
+        ];
+        y += CARD_ROW;
+        if more && !choice.detail.is_empty() {
+            let note = DocBlock::Note(choice.detail.clone());
+            let (pieces, h) = doc_layout::stack_of(&[note], tw - 2 * ROW_INSET);
+            let at = Point::from((ROW_INSET + CHOICE_NUM, y));
+            bits.extend(
+                (pieces.into_iter())
+                    .map(|(r, piece)| (Rectangle::new(r.loc + at, r.size), Bit::Doc(piece))),
+            );
+            y += h + PART_GAP / 2;
+        }
+        let ground = rect(0, top, w, y - top);
+        if choice.picked {
+            l.put(ground, Bit::Picked);
+        }
+        for (r, bit) in bits {
+            l.put(r, bit);
+        }
+        if (1..=9).contains(&choice.n) {
+            l.spots.push((ground, Spot::Key(WaitKey::Digit(choice.n))));
+        }
+        y += STEP_GAP / 2;
+    }
+    l.h = l.h.max(y - STEP_GAP / 2);
+    l
 }
 
 /// Where the head's status dot goes, at its left.
@@ -752,6 +955,8 @@ enum Spot {
     Fold,
     Path,
     ShowAll,
+    /// A menu's choice: presses its key.
+    Key(WaitKey),
 }
 
 /// A colour of a card's words.
@@ -807,6 +1012,11 @@ enum Bit {
     Diff(DiffSide, String),
     /// Where a running tool's dot blinks: composed, not painted.
     Running,
+    /// The ground of the choice a menu's arrow is on, or of its current
+    /// tab.
+    Picked,
+    /// The check of a question answered.
+    Check,
 }
 
 /// An item laid out from `(0, 0)` for its width: what it paints, where a
@@ -1471,25 +1681,37 @@ impl Painter {
                     let lit = view.hover == Some(*hit);
                     self.button(&mut c, label, here(*rect), (lit, false), style, scale, p);
                 }
+            } else if let Some((at, laid)) = &parts.menu {
+                let at = here(*at).loc;
+                for (rect, spot) in &laid.spots {
+                    // The bubble's tint: the hover ground is the panel's own
+                    // in the light theme.
+                    if matches!(spot, Spot::Key(key) if view.hover == Some(ChatHit::Key(*key))) {
+                        let rect = Rectangle::new(rect.loc + at, rect.size);
+                        let (x, y, w, h) = rect_px(rect, scale);
+                        c.rounded(x, y, w, h, ROW_RADIUS * scale as f32, bubble(p));
+                    }
+                }
+                for (rect, bit) in &laid.bits {
+                    let rect = Rectangle::new(rect.loc + at, rect.size);
+                    self.chat_bit(&mut c, rect, bit, scale, p);
+                }
+            } else {
+                let screen = view
+                    .waiting
+                    .as_deref()
+                    .map_or(&[][..], |rows| screen_rows(rows));
+                let n = (parts.rows.size.h / STYLED_ROW) as usize;
+                let rows: Vec<StyledRow> = (screen[screen.len().saturating_sub(n)..].iter())
+                    .map(|(text, styles)| (text.as_str(), styles.as_slice()))
+                    .collect();
+                self.paint_styled_rows(&mut c, &rows, here(parts.rows), scale, p);
             }
-            let screen = view
-                .waiting
-                .as_deref()
-                .map_or(&[][..], |rows| screen_rows(rows));
-            let n = (parts.rows.size.h / STYLED_ROW) as usize;
-            let rows: Vec<StyledRow> = (screen[screen.len().saturating_sub(n)..].iter())
-                .map(|(text, styles)| (text.as_str(), styles.as_slice()))
-                .collect();
-            self.paint_styled_rows(&mut c, &rows, here(parts.rows), scale, p);
             for (key, rect) in &parts.keys {
-                let label = WAIT_KEYS
-                    .iter()
-                    .find(|(k, _)| k == key)
-                    .map_or("", |(_, l)| l);
                 let lit = view.hover == Some(ChatHit::Key(*key));
                 self.button(
                     &mut c,
-                    label,
+                    &key_label(*key),
                     here(*rect),
                     (lit, false),
                     ButtonStyle::Plain,
@@ -1611,6 +1833,8 @@ impl Painter {
                 self.mono_text(c, text, size, tx, x + w, b, scale, p.text);
             }
             Bit::Running => {}
+            Bit::Picked => self.row_highlight(c, rect, (true, 0.0), scale, p),
+            Bit::Check => icon_sdf(c, rect, scale, p.success, |x, y| check(x, y, s)),
         }
     }
 }
@@ -1736,6 +1960,13 @@ pub(super) mod tests {
         Arc::new(crate::scrollback::parse_ansi(ansi))
     }
 
+    /// Claude Code asking the second of its questions, as herdr reads the
+    /// screen: the current tab in reverse.
+    pub(in crate::chrome) fn question() -> Arc<Vec<(String, crate::scrollback::Styled)>> {
+        let ansi = "←  ☒ Size  \x1b[7m☐ Where\x1b[27m  ✔ Submit  →\n\n\x1b[1mWhere should the size be changed from? The switcher has rows for it already, keys are quicker.\x1b[0m\n\n❯ 1. Switcher\n     Rows 'Bigger UI', 'Smaller UI' and 'Reset UI size' in the switcher, in steps of 10%.\n  2. Keys\n     Prefix keys only.\n  3. Type something.\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n";
+        Arc::new(crate::scrollback::parse_ansi(ansi))
+    }
+
     fn middle(r: Rect) -> Point<f64, Logical> {
         (
             r.loc.x as f64 + r.size.w as f64 / 2.0,
@@ -1789,14 +2020,17 @@ pub(super) mod tests {
     #[test]
     fn the_waiting_panel_holds_the_screen_rows_and_the_keys() {
         let mut v = view();
-        v.waiting = Some(screen());
+        // No menu on it: a prompt asking for a word.
+        let ansi = "\x1b[1mTrust this folder?\x1b[0m\n\n  /home/u/api\n\n  Type yes or no\n\n\n";
+        v.waiting = Some(Arc::new(crate::scrollback::parse_ansi(ansi)));
         let p = parts(&v);
         let panel = p.waiting.expect("a waiting panel");
+        assert!(p.menu.is_none());
         assert!(panel.loc.y > p.list.loc.y + p.list.size.h);
         assert!(panel.loc.y + panel.size.h < p.composer.loc.y);
-        // The rows up to the last with words on them: "3. No".
+        // The rows up to the last with words on them.
         let shown = screen_rows(v.waiting.as_deref().unwrap());
-        assert_eq!(shown.last().unwrap().0.trim(), "3. No");
+        assert_eq!(shown.last().unwrap().0.trim(), "Type yes or no");
         assert_eq!(p.rows.size.h, shown.len() as i32 * STYLED_ROW);
         assert_eq!(p.keys.len(), WAIT_KEYS.len());
         for (_, key) in &p.keys {
@@ -1817,7 +2051,7 @@ pub(super) mod tests {
             Some(ChatHit::Key(WaitKey::Digit(2)))
         );
         // A short pane keeps its list three card rows: the rows give way.
-        v.rect.size.h = 300;
+        v.rect.size.h = 260;
         let p = parts(&v);
         assert!(p.list.size.h >= 3 * CARD_ROW, "{:?}", p.list);
         assert!(p.rows.size.h < shown.len() as i32 * STYLED_ROW);
@@ -1829,6 +2063,77 @@ pub(super) mod tests {
             p.keys
                 .iter()
                 .all(|(_, key)| inside(p.waiting.unwrap(), *key))
+        );
+    }
+
+    #[test]
+    fn a_menu_on_the_screen_shows_as_choices_to_press() {
+        let mut v = view();
+        v.waiting = Some(screen());
+        let p = parts(&v);
+        let panel = p.waiting.expect("a waiting panel");
+        let (at, laid) = p.menu.clone().expect("the menu, not the rows");
+        assert!(inside(panel, at));
+        // Its choices are its buttons: no digit keys, no tab keys.
+        let keys: Vec<WaitKey> = p.keys.iter().map(|(k, _)| *k).collect();
+        assert_eq!(
+            keys,
+            [WaitKey::Esc, WaitKey::Up, WaitKey::Down, WaitKey::Enter]
+        );
+        // A press on a choice presses its number.
+        let choices: Vec<Rect> = (laid.spots.iter())
+            .map(|(r, _)| Rectangle::new(r.loc + at.loc, r.size))
+            .collect();
+        assert_eq!(choices.len(), 3);
+        let layout = chat_layout(&v);
+        for (n, choice) in (1..).zip(&choices) {
+            assert_eq!(
+                layout.hit(&v, middle(*choice)),
+                Some(ChatHit::Key(WaitKey::Digit(n)))
+            );
+        }
+        // The one under the arrow is lit, its words bold.
+        assert!(
+            laid.bits.iter().any(|(r, bit)| *bit == Bit::Picked
+                && Rectangle::new(r.loc + at.loc, r.size) == choices[0])
+        );
+        let said = |text: &str| {
+            (laid.bits.iter())
+                .any(|(_, bit)| matches!(bit, Bit::Label { text: t, .. } if t == text))
+        };
+        assert!(said("Yes") && said("No") && said("2."));
+        // A pane too short for it shows the screen's rows.
+        v.rect.size.h = 260;
+        assert!(parts(&v).menu.is_none());
+    }
+
+    #[test]
+    fn a_menu_with_questions_shows_their_tabs_and_the_tab_keys() {
+        let mut v = view();
+        v.waiting = Some(question());
+        let p = parts(&v);
+        let (_, laid) = p.menu.expect("a menu");
+        let keys: Vec<WaitKey> = p.keys.iter().map(|(k, _)| *k).collect();
+        assert_eq!(keys, MENU_KEYS);
+        let labels: Vec<&str> = (laid.bits.iter())
+            .filter_map(|(_, bit)| match bit {
+                Bit::Label { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "Size",
+                "Where",
+                "Submit",
+                "1.",
+                "Switcher",
+                "2.",
+                "Keys",
+                "3.",
+                "Type something."
+            ]
         );
     }
 

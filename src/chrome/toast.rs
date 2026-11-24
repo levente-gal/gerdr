@@ -3,7 +3,7 @@
 //! lines, some a button, and a "×" that dismisses it.
 
 use super::{
-    FONT_SIZE, Painter, Palette, Rect, Rgb, SHADOW, band, cross, icon_sdf, measure, rect_px,
+    FONT_SIZE, Painter, Palette, Rect, Rgb, SHADOW, band, cross, icon_sdf, line, measure, rect_px,
 };
 use crate::toast::Level;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -15,11 +15,11 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 /// notice pill the toasts replaced, with its inset; two lines share the
 /// toast's height but for `TOAST_LINES_INSET` above and below.
 pub const TOAST_WIDTH: i32 = 360;
-pub const TOAST_HEIGHT: i32 = 44;
-pub const TOAST_TALL: i32 = 64;
+pub const TOAST_HEIGHT: i32 = line(FONT_SIZE, 29);
+pub const TOAST_TALL: i32 = 2 * line(FONT_SIZE, 17);
 pub const TOAST_MARGIN: i32 = 16;
 pub const TOAST_GAP: i32 = 8;
-const TOAST_TEXT_BAND: i32 = 30;
+const TOAST_TEXT_BAND: i32 = line(FONT_SIZE, 15);
 const TOAST_LINES_INSET: i32 = 8;
 const TOAST_PADDING: i32 = 16;
 /// The level's colour bar at the left, inset from the panel's edge.
@@ -27,7 +27,7 @@ const TOAST_BAR: i32 = 4;
 const TOAST_BAR_INSET: i32 = 6;
 /// The button at the right: its height, the room at its ends and the gap
 /// before it.
-const TOAST_BUTTON: i32 = 26;
+const TOAST_BUTTON: i32 = line(FONT_SIZE, 11);
 const TOAST_BUTTON_PADDING: i32 = 12;
 const TOAST_BUTTON_MIN: i32 = 48;
 const TOAST_BUTTON_GAP: i32 = 12;

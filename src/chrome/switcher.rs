@@ -13,8 +13,8 @@ use super::{
     PILL_HEIGHT, PILL_PADDING, POPUP_RADIUS, Painter, Palette, ROW_ICON_GAP, ROW_ICON_WIDTH, Rect,
     SHADOW, SMALL_FONT_SIZE, SWITCHER_INPUT, SWITCHER_PADDING, SWITCHER_ROWS, SWITCHER_SECTION,
     SWITCHER_TOP, SWITCHER_WIDTH, TINY_FONT_SIZE, agent_icon, app, dot_slot, folder, folder_plus,
-    footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, measure, mix, pencil, prompt,
-    query_text, rect_px, row_dot, row_fill, status_dot, tab, terminal,
+    footer_height, footer_hint_spots, hint_at, hint_strs, icon_sdf, line, measure, mix, pencil,
+    prompt, query_text, rect_px, row_dot, row_fill, status_dot, tab, terminal,
 };
 use crate::WorkspaceKind;
 use crate::app_icons::AppIcon;
@@ -25,19 +25,19 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// A row: two lines of text.
-const ROW_HEIGHT: i32 = 40;
+const ROW_HEIGHT: i32 = line(FONT_SIZE, 7) + line(SMALL_FONT_SIZE, 5);
 /// A section's heading: the gap above it and its text.
 const SECTION_HEIGHT: i32 = SWITCHER_SECTION;
 /// The heading's text sits in the lower part of its band.
-const SECTION_TEXT: i32 = 22;
+const SECTION_TEXT: i32 = line(TINY_FONT_SIZE, 10);
 /// The gap between the two lines' bands and the row's edges.
 const LINE_INSET: i32 = 4;
 /// The first line's band; the second takes the rest.
-const LABEL_LINE: i32 = 18;
+const LABEL_LINE: i32 = line(FONT_SIZE, 3);
 /// The pill at the right of a row and the gap before it.
 const PILL_GAP: i32 = 10;
 /// A category chip's height, and the gap between chips.
-const CHIP_HEIGHT: i32 = 24;
+const CHIP_HEIGHT: i32 = line(SMALL_FONT_SIZE, 11);
 const CHIP_GAP: i32 = 4;
 /// The room either side of a chip's label; and per character of it, a
 /// guess at its width when there is no font to measure it with.
