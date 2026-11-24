@@ -23,7 +23,6 @@ use resvg::{tiny_skia, usvg};
 use serde_json::{Value, json};
 
 use crate::{
-    ai_work,
     feature::{
         Feature, Stage, Status, layout, setup,
         store,
@@ -32,6 +31,7 @@ use crate::{
     herdr::{self, AgentStatus, Herdr},
     inbox_sources, md_preview, phone_control, phone_devices,
     projects::{self, Project},
+    stats_panel::{chat_and_screen, claude_chat},
     web_push,
 };
 
@@ -46,9 +46,6 @@ const PANE_LINES: usize = 400;
 /// The most lines herdr reads with their colours; past that, all of the
 /// pane's scrollback is read, plain.
 const PANE_STYLED_MAX: usize = 1000;
-/// The most of a Claude Code transcript read for a pane on the alternate
-/// screen: its end, the turns that scrolled away.
-const CHAT_TAIL: u64 = 2 * 1024 * 1024;
 /// How many lines of a setup log are sent: its end, where it failed.
 const LOG_LINES: usize = 400;
 /// How many history events a feature's page gets, latest first.
@@ -1039,8 +1036,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     {
         return match herdr.pane_read(pane, "visible", PANE_LINES) {
             Ok(screen) => {
-                let said = chat_tail(path, CHAT_TAIL).unwrap_or_default();
-                let text = format!("{said}\n\n{}\n{screen}", "─".repeat(30));
+                let text = chat_and_screen(path, &screen);
                 let ask = pane_ask(&project.id, pane);
                 Reply::json(&json!({ "label": label, "text": text, "more": false, "ask": ask }))
             }
@@ -1068,36 +1064,6 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     }
 }
 
-/// The transcript of the Claude Code chat running in `pane`, if herdr
-/// knows its id and it is on disk.
-fn claude_chat(herdr: &mut Herdr, pane: &str) -> Option<std::path::PathBuf> {
-    let agent = herdr.agent_list().ok()?.into_iter().find(|a| a.pane_id == pane)?;
-    let session = agent.agent_session.filter(|s| s.agent == "claude" && s.kind == "id")?;
-    // It goes into a path: an id, not a way out of the folder.
-    let plain = (session.value.chars()).all(|c| c.is_ascii_alphanumeric() || c == '-');
-    let homes = ai_work::locate::Homes::here()?;
-    plain.then(|| ai_work::locate::claude(&homes, &session.value)).flatten().map(|f| f.main)
-}
-
-/// The end of transcript `path`, its last `limit` bytes at most, as who
-/// said what.
-// shortcut: earlier turns past `limit` aren't read; page back if they're wanted.
-fn chat_tail(path: &Path, limit: u64) -> Option<String> {
-    use std::io::{Seek, SeekFrom};
-    let mut file = std::fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
-    file.seek(SeekFrom::Start(len.saturating_sub(limit))).ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-    // Begun mid-line: from the first whole one.
-    let whole = match len > limit {
-        true => text.split_once('\n').map_or("", |(_, rest)| rest),
-        false => &text,
-    };
-    Some(crate::stats_panel::chat_text(whole))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1114,26 +1080,6 @@ mod tests {
         assert!(!socket_holds(&dir.join("phone-.sock"), &lock));
         assert!(!socket_holds(&dir.join("phone-../1.sock"), &lock));
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_transcript_cut_short_is_read_from_its_first_whole_line() {
-        let dir = std::env::temp_dir().join(format!("gerdr-chat-tail-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("dir");
-        let path = dir.join("chat.jsonl");
-        let line = |role: &str, text: &str| {
-            json!({ "message": { "role": role, "content": [{ "type": "text", "text": text }] } })
-                .to_string()
-        };
-        let last = line("assistant", "the end of the answer");
-        let body = [line("user", "first"), line("assistant", "middle"), last.clone()].join("\n");
-        std::fs::write(&path, &body).expect("write");
-        let all = chat_tail(&path, 1 << 20).expect("read");
-        assert!(all.starts_with("user: first") && all.ends_with("assistant: the end of the answer"));
-        // Begun inside the second line: only the third is whole.
-        let cut = chat_tail(&path, last.len() as u64 + 5).expect("read");
-        assert_eq!(cut, "assistant: the end of the answer");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
