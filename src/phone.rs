@@ -680,6 +680,21 @@ fn workspace_agent_label(agent: &AgentInfo, workspace: Option<&str>) -> String {
     }
 }
 
+/// The agent's title, as its sidebar card shows it: the one the agent
+/// gives, else its terminal's.
+fn agent_title(agent: &AgentInfo) -> Option<String> {
+    let titles = [
+        &agent.title,
+        &agent.terminal_title_stripped,
+        &agent.terminal_title,
+    ];
+    let mut titles = titles
+        .into_iter()
+        .flatten()
+        .map(|t| crate::paths::tidy_title(t));
+    titles.find(|t| !t.is_empty())
+}
+
 /// The agent in `pane` of `project` the phone may read and type to, and
 /// what to call it: one of feature `slug`'s agents; with no `slug`, any
 /// agent herdr runs in the project's session. Never a plain shell.
@@ -738,7 +753,7 @@ fn all_features() -> Value {
                 json!({
                     "pane": a.pane_id,
                     "label": workspace_agent_label(a, ws),
-                    "title": a.title,
+                    "title": agent_title(a),
                     "status": status_word(a.agent_status),
                 })
             })
@@ -1293,6 +1308,23 @@ mod tests {
             .map(|(a, ws)| format!("{} {}", a.pane_id, workspace_agent_label(a, ws)))
             .collect();
         assert_eq!(kept, ["w2:p1 api · claude", "w4:p1 claude"]);
+    }
+
+    #[test]
+    fn an_agents_title_is_its_own_else_its_terminals() {
+        let agent = |extra: Value| -> AgentInfo {
+            let mut a =
+                json!({ "pane_id": "p", "terminal_id": "t", "workspace_id": "w", "tab_id": "x" });
+            a.as_object_mut()
+                .expect("object")
+                .extend(extra.as_object().expect("object").clone());
+            serde_json::from_value(a).expect("agent")
+        };
+        let both = agent(json!({ "title": "Fix login", "terminal_title": "✳ Claude Code" }));
+        assert_eq!(agent_title(&both).as_deref(), Some("Fix login"));
+        let term = agent(json!({ "title": "", "terminal_title": "✳ Bulk edit" }));
+        assert_eq!(agent_title(&term).as_deref(), Some("Bulk edit"));
+        assert_eq!(agent_title(&agent(json!({}))), None);
     }
 
     #[test]

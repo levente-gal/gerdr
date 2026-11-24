@@ -235,7 +235,7 @@ function workspaceAgents(w) {
   const agents = [...w.agents].sort((a, b) => (RANK[a.status] ?? 2) - (RANK[b.status] ?? 2));
   return `<h2>Agents in ${esc(w.projectName)} <span class="count">${agents.length}</span></h2><div class="group">` +
     agents.map((a) => `<a class="row" href="${href("agent", w.project, a.pane)}">
-      <span>${esc(a.label)}</span>${chip(a, a.status)}</a>`).join("") + `</div>`;
+      <span class="two"><span>${esc(a.label)}</span>${a.title ? `<span class="quiet small">${esc(a.title)}</span>` : ""}</span>${chip(a, a.status)}</a>`).join("") + `</div>`;
 }
 
 // The feature tab's rail: numbered nodes joined as the desktop joins them,

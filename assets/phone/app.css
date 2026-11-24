@@ -210,6 +210,8 @@ a.node:active { background: var(--raised); }
   border-bottom: 1px solid var(--line-soft);
 }
 .row > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row > .two { display: flex; flex-direction: column; gap: 1px; }
+.row > .two > span { overflow: hidden; text-overflow: ellipsis; }
 .group { border: 1px solid var(--line-soft); border-radius: 14px; overflow: hidden; box-shadow: var(--shadow); }
 .group > .row:last-child { border-bottom: 0; }
 a.row:active { background: var(--raised); }
