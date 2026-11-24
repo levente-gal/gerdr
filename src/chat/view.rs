@@ -34,8 +34,10 @@ use crate::{
     text_field::{self, TextField},
 };
 
-/// How many of a pane's last screen rows its waiting panel shows.
-const WAITING_ROWS: usize = 14;
+/// How many of a pane's last screen rows are read while its agent waits:
+/// enough for a menu with its question (`chat::menu`); the waiting panel
+/// shows fewer of them when it finds none.
+const WAITING_ROWS: usize = 60;
 /// How often those rows are read again while its agent waits, at most.
 const WAITING_EVERY: Duration = Duration::from_secs(1);
 
@@ -412,6 +414,8 @@ fn wait_key_name(key: WaitKey) -> String {
         WaitKey::Esc => "esc".into(),
         WaitKey::Up => "Up".into(),
         WaitKey::Down => "Down".into(),
+        WaitKey::Left => "Left".into(),
+        WaitKey::Right => "Right".into(),
         WaitKey::Enter => "Enter".into(),
         WaitKey::Digit(d) => d.to_string(),
     }
@@ -494,7 +498,7 @@ fn screen_rows(herdr: &mut Herdr, pane_id: &str) -> Result<ChatRows, String> {
     let text = herdr.pane_styled(pane_id, WAITING_ROWS)?;
     // An app on the alternate screen has no scrollback: its screen, plainly.
     let text = match text.trim().is_empty() {
-        true => herdr.pane_read(pane_id, "visible", WAITING_ROWS)?,
+        true => herdr.pane_screen_styled(pane_id, WAITING_ROWS)?,
         false => text,
     };
     Ok(last_rows(

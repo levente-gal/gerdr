@@ -454,12 +454,15 @@ struct Find {
 }
 
 /// How the terminal drew some of the text: in a colour of its own (else
-/// the terminal's), bold, dim.
+/// the terminal's), bold, dim, on a ground of its own.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Style {
     pub fg: Option<Ink>,
     pub bold: bool,
     pub dim: bool,
+    /// On a background colour, or in reverse: what a menu lights its
+    /// current tab with. Not painted.
+    pub ground: bool,
 }
 
 /// A colour as the terminal names it: one of its 256 (the first 16 its
@@ -1758,6 +1761,8 @@ fn sgr(params: &str, style: &mut Style) {
             Some(1) => style.bold = true,
             Some(2) => style.dim = true,
             Some(22) => (style.bold, style.dim) = (false, false),
+            Some(7) => style.ground = true,
+            Some(27 | 49) => style.ground = false,
             Some(c @ 30..=37) => style.fg = Some(Ink::Index((c - 30) as u8)),
             Some(c @ 90..=97) => style.fg = Some(Ink::Index((c - 90 + 8) as u8)),
             Some(39) => style.fg = None,
@@ -1770,8 +1775,10 @@ fn sgr(params: &str, style: &mut Style) {
                     }
                     _ => (None, 0),
                 };
-                if c == 38 && ink.is_some() {
-                    style.fg = ink;
+                match c {
+                    38 if ink.is_some() => style.fg = ink,
+                    48 => style.ground = ink.is_some(),
+                    _ => {}
                 }
                 i += by;
             }
@@ -2084,18 +2091,26 @@ mod tests {
             lines[1].1,
             [(6..7, fg(Ink::Index(208))), (7..8, fg(Ink::Rgb([1, 2, 3])))]
         );
-        // Colons, a colour space among them; the ground's colour passed
-        // over; a style going on past the line's end.
+        // Colons, a colour space among them; the ground's colour only
+        // said to be one; a style going on past the line's end.
+        let ground = Style {
+            ground: true,
+            ..Default::default()
+        };
         let bright = Style {
             fg: Some(Ink::Index(10)),
             bold: true,
             dim: true,
+            ground: true,
         };
         assert_eq!(lines[2].0, "zwvu");
         assert_eq!(
             lines[2].1,
-            [(0..1, fg(Ink::Rgb([4, 5, 6]))), (2..3, bright)]
+            [(0..1, fg(Ink::Rgb([4, 5, 6]))), (1..2, ground), (2..3, bright)]
         );
+        // Reverse is a ground too, till it ends.
+        let rev = parse_ansi("\x1b[7ma\x1b[27mb");
+        assert_eq!(rev[0].1, [(0..1, ground)]);
         let on = parse_ansi("\x1b[33ma\nb\x1b[0m");
         assert_eq!(on[1].1, [(0..1, fg(Ink::Index(3)))]);
     }

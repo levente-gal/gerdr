@@ -1025,6 +1025,7 @@ mod tests {
             fg: Some(fg),
             bold,
             dim,
+            ground: false,
         };
         let dim = Style {
             dim: true,

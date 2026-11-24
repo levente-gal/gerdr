@@ -9651,7 +9651,7 @@ fn dump_ship_squash() {
 /// its cards (a folded and an unfolded tool, an unfolded edit, a thinking
 /// line), the same while the agent waits on the user, a reply being
 /// written, an item picked and another hovered, and scrolled down.
-const CHATS: [&str; 7] = [
+const CHATS: [&str; 8] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9659,10 +9659,11 @@ const CHATS: [&str; 7] = [
     "chat_composer",
     "chat_picked",
     "chat_scrolled",
+    "chat_question",
 ];
 
 fn chat_view(i: usize) -> super::ChatView {
-    use super::agent_chat::tests::{screen, view};
+    use super::agent_chat::tests::{question, screen, view};
     use super::{ChatHit, WaitKey};
     use crate::chat::{ChatFocus, Reading};
     let v = view();
@@ -9714,6 +9715,13 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
+        // A question of a few, its second choice hovered.
+        7 => super::ChatView {
+            status: AgentStatus::Blocked,
+            waiting: Some(question()),
+            hover: Some(ChatHit::Key(WaitKey::Digit(2))),
+            ..v
+        },
         // A shorter pane, for the list to scroll.
         _ => super::ChatView {
             rect: super::Rect::new(v.rect.loc, (v.rect.size.w, 460).into()),
@@ -9731,46 +9739,50 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 7]; 4] = [
+const GOLDEN_CHATS: [[u64; 8]; 4] = [
     // Dark at 1
     [
         0x419a9650a3a8351c, // chat_finding
         0x2f8fc013b4de6bd1, // chat_missing
         0x83ec5e80e4a05b88, // chat
-        0x117ee4af2e317200, // chat_waiting
+        0x221795d19ceffd1a, // chat_waiting
         0x5379eaf62a09409c, // chat_composer
         0xd793810f00e60a6a, // chat_picked
         0x0de22d87d3da0f9f, // chat_scrolled
+        0xb8c346a0114a5408, // chat_question
     ],
     // Dark at 2
     [
         0x3e72e534ff24238d, // chat_finding
         0xfa3ab45bc8c44b61, // chat_missing
         0x62e53b72757faab4, // chat
-        0xf6a0805f9f4adff6, // chat_waiting
+        0x9f4b907da13a2ca6, // chat_waiting
         0xd4cfe6233f0c2daa, // chat_composer
         0x6e5f95556f2f35c9, // chat_picked
         0x5c64f4d1885ca88c, // chat_scrolled
+        0xbe9d64b9bb4d8f99, // chat_question
     ],
     // Light at 1
     [
         0x429537ed2f724b56, // chat_finding
         0xa18f8840c92014da, // chat_missing
         0x16c9f51e2d5f26b0, // chat
-        0xcd0b8440380180e7, // chat_waiting
+        0xfd246aaee3d0a037, // chat_waiting
         0x7ed43d2b842fa287, // chat_composer
         0x41072adff761bdcc, // chat_picked
         0x8f59b6dda508c945, // chat_scrolled
+        0x2d645f20e3f6933b, // chat_question
     ],
     // Light at 2
     [
         0xee26782ff38f4e12, // chat_finding
         0xc628a1b5b2191c04, // chat_missing
         0x9902fd42c349001d, // chat
-        0x36bcb6c9c23d4e4e, // chat_waiting
+        0x0f9b65ba73a693cc, // chat_waiting
         0xebeaecd05273457b, // chat_composer
         0x3cad7cda202fe616, // chat_picked
         0x0b3486f960ec773a, // chat_scrolled
+        0x0da5c5f640c306d3, // chat_question
     ],
 ];
 

@@ -1299,11 +1299,22 @@ impl Herdr {
     /// the scrollback (`pane.selection.read`, which reads all of it, gives
     /// plain text only), so there may be fewer.
     pub fn pane_styled(&mut self, pane_id: &str, lines: usize) -> Result<String, String> {
+        self.pane_ansi(pane_id, "recent_unwrapped", lines)
+    }
+
+    /// The last `lines` rows of pane `pane_id`'s screen with their escape
+    /// sequences: an app on the alternate screen has no scrollback to
+    /// read them from.
+    pub fn pane_screen_styled(&mut self, pane_id: &str, lines: usize) -> Result<String, String> {
+        self.pane_ansi(pane_id, "visible", lines)
+    }
+
+    fn pane_ansi(&mut self, pane_id: &str, source: &str, lines: usize) -> Result<String, String> {
         let mut result = self.call(
             "pane.read",
             json!({
                 "pane_id": pane_id,
-                "source": "recent_unwrapped",
+                "source": source,
                 "lines": lines.min(u32::MAX as usize),
                 "format": "ansi",
                 "strip_ansi": false,
