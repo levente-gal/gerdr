@@ -101,6 +101,11 @@ pub(super) const KEY_FONT_SIZE: f32 = SMALL_FONT_SIZE;
 pub(super) const MONO_FONT_SIZE: f32 = SMALL_FONT_SIZE;
 /// Monospace code: diffs, commits and files in the repositories panel.
 pub(super) const CODE_FONT_SIZE: f32 = TEXT - 1.0;
+/// How high something holding a line of `size` text is: the text and
+/// `room` more around it. Heights made with it grow with the text.
+pub(super) const fn line(size: f32, room: i32) -> i32 {
+    size as i32 + room
+}
 pub(super) const PADDING: f32 = 10.0;
 pub(super) const HELP_MARGIN: i32 = 16;
 pub(super) const HELP_PADDING: i32 = 14;
