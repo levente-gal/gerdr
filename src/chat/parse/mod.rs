@@ -69,6 +69,8 @@ pub struct Reader {
     waiting: VecDeque<String>,
     /// The steps read, by their index (Antigravity's).
     steps: HashSet<u64>,
+    /// `invoke_subagent` calls and their subagents (Antigravity's).
+    spawns: Vec<antigravity::Spawn>,
 }
 
 /// A subagent's work: its item, read by a reader of its own.
@@ -97,6 +99,7 @@ impl Reader {
             sub_of: HashMap::new(),
             waiting: VecDeque::new(),
             steps: HashSet::new(),
+            spawns: Vec::new(),
         }
     }
 
@@ -142,7 +145,11 @@ impl Reader {
     /// each in `<chat>/subagents/agent-<id>.jsonl`, apart from the chat's.
     /// `call` is the call that started it, as the file's meta says; its
     /// work goes under it once that call is read.
+    /// Antigravity's are conversations of their own (`antigravity`).
     pub fn feed_subagent(&mut self, agent: &str, call: &str, lines: &[u8]) {
+        if self.agent == AgentKind::Antigravity {
+            return self.antigravity_subagent(agent, lines);
+        }
         (self.agent_calls).insert(agent.to_owned(), call.to_owned());
         for raw in lines.split(|b| *b == b'\n') {
             // A first line cut short, where reading began mid-file.
@@ -1076,4 +1083,3 @@ mod tests {
         assert!(reader.items().is_empty());
     }
 }
-

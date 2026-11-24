@@ -564,6 +564,9 @@ struct Chat {
     subagents: HashMap<PathBuf, u64>,
     /// The calls that started them, by file, as their meta files say.
     started_by: HashMap<PathBuf, String>,
+    /// The Antigravity CLI's conversation summaries (and WAL) when last
+    /// looked in for subagents, with how many were still to find then.
+    summaries: Option<([Option<Stamp>; 2], usize)>,
     /// Whether `offset` is at a line's start: not when the first read began
     /// mid-line.
     whole: bool,
@@ -585,6 +588,26 @@ fn stamp(path: &Path) -> std::io::Result<Stamp> {
     Ok((meta.ino(), meta.mtime(), meta.mtime_nsec(), meta.len()))
 }
 
+/// The Antigravity CLI's conversations under conversation `id`, as its
+/// summaries database `db` has them.
+fn antigravity_children(db: &Path, id: &str) -> rusqlite::Result<Vec<String>> {
+    let conn = crate::cursor_agents::open_read_only(db)?;
+    let mut rows = conn.prepare(
+        "SELECT conversation_id FROM conversation_summaries WHERE parent_conversation_id = ?1",
+    )?;
+    rows.query_map([id], |row| row.get(0))?.collect()
+}
+
+/// The first line of file `path`, once it is whole.
+fn first_line(path: &Path) -> Option<String> {
+    use std::io::BufRead as _;
+    let mut line = String::new();
+    std::io::BufReader::new(File::open(path).ok()?)
+        .read_line(&mut line)
+        .ok()?;
+    line.ends_with('\n').then_some(line)
+}
+
 /// Whether chats of agent `kind` are kept in a database.
 fn in_database(kind: AgentKind) -> bool {
     matches!(kind, AgentKind::OpenCode | AgentKind::Cursor)
@@ -604,6 +627,7 @@ impl Chat {
             chunk: CHAT_TAIL,
             subagents: HashMap::new(),
             started_by: HashMap::new(),
+            summaries: None,
             whole: true,
             prev: Vec::new(),
             sent: None,
@@ -754,6 +778,7 @@ impl Chat {
         reader.feed(&bytes[start..]);
         self.reader = reader;
         self.subagents.clear();
+        self.summaries = None;
         self.from = from;
         self.whole = true;
         self.sent = None;
@@ -766,6 +791,10 @@ impl Chat {
     /// in its `.meta.json`. Only those whose call was read: their work has a
     /// place to show. A file is read from its last `chunk` bytes.
     fn read_subagents(&mut self) -> std::io::Result<()> {
+        if self.source.agent == AgentKind::Antigravity {
+            self.read_antigravity_subagents();
+            return Ok(());
+        }
         if self.source.agent != AgentKind::Claude {
             return Ok(());
         }
@@ -795,6 +824,71 @@ impl Chat {
             }
         }
         Ok(())
+    }
+
+    /// Feed the reader what the Antigravity CLI's subagents wrote since the
+    /// last read: each a conversation of its own (`brain/<id>/…`), the one
+    /// an `invoke_subagent` call's result names; else a child conversation
+    /// of the chat's, as the summaries database says, whose first input is
+    /// a prompt the call gave.
+    fn read_antigravity_subagents(&mut self) {
+        let path = &self.source.path;
+        // `<home>/brain/<id>/.system_generated/logs/<transcript>`
+        let (Some(home), Some(name)) = (path.ancestors().nth(5), path.file_name()) else {
+            return;
+        };
+        let (home, name) = (home.to_owned(), name.to_owned());
+        let transcript = |id: &str| {
+            (home.join("brain").join(id))
+                .join(".system_generated/logs")
+                .join(&name)
+        };
+        for child in self.reader.named_subagents() {
+            if child != self.source.id && transcript(&child).is_file() {
+                self.reader.take_subagent(&child, "");
+            }
+        }
+        if self.reader.unfound_subagents() > 0 {
+            self.find_antigravity_subagents(&home.join("conversation_summaries.db"), transcript);
+        }
+        for child in self.reader.subagents() {
+            let path = transcript(&child);
+            if let Err(err) = self.read_subagent(&path, &child, "") {
+                // One subagent unread leaves the chat as it is.
+                tracing::warn!("agent chat: can't read {}: {err}", path.display());
+            }
+        }
+    }
+
+    /// Take the child conversations summaries database `db` has of the
+    /// chat as subagents, by their first input; looked in again when it
+    /// changed or more are to find.
+    fn find_antigravity_subagents(&mut self, db: &Path, transcript: impl Fn(&str) -> PathBuf) {
+        let mut wal = db.as_os_str().to_owned();
+        wal.push("-wal");
+        let now = (
+            [stamp(db).ok(), stamp(Path::new(&wal)).ok()],
+            self.reader.unfound_subagents(),
+        );
+        if now.0[0].is_none() || self.summaries == Some(now) {
+            return;
+        }
+        self.summaries = Some(now);
+        let children = match antigravity_children(db, &self.source.id) {
+            Ok(children) => children,
+            Err(err) => {
+                tracing::warn!("agent chat: can't read {}: {err}", db.display());
+                return;
+            }
+        };
+        let taken = self.reader.subagents();
+        for child in children.iter().filter(|c| !taken.contains(c)) {
+            match first_line(&transcript(child)) {
+                Some(first) => _ = self.reader.take_subagent(child, &first),
+                // Not written yet: looked for again.
+                None => self.summaries = None,
+            }
+        }
     }
 
     /// The call that started the subagent of file `path`, as its meta file
@@ -840,6 +934,7 @@ impl Chat {
     fn restart(&mut self, id: (u64, u64), len: u64) {
         self.reader = Reader::new(self.source.agent);
         self.subagents.clear();
+        self.summaries = None;
         self.file = Some(id);
         self.offset = len.saturating_sub(self.chunk);
         self.from = self.offset;
@@ -1081,6 +1176,91 @@ mod tests {
         assert!(matches!(&home.poll()[..], [Event::Items { .. }]));
         assert_eq!(steps(&home), 2);
         assert!(home.poll().is_empty(), "nothing new");
+    }
+
+    #[test]
+    fn antigravity_subagents_are_read_under_their_calls() {
+        let home = Home::new("agy-subagents");
+        let kid = "0b9c4f2e-1d3a-4c5b-8e7f-a1b2c3d4e5f6";
+        let logs = |id: &str| {
+            let dir = home
+                .dir
+                .join("brain")
+                .join(id)
+                .join(".system_generated/logs");
+            std::fs::create_dir_all(&dir).unwrap();
+            dir.join("transcript_full.jsonl")
+        };
+        let step = |n: u64, kind: &str, rest: Value| {
+            let mut line = serde_json::json!({"step_index": n, "source": "MODEL", "type": kind});
+            line.as_object_mut()
+                .unwrap()
+                .extend(rest.as_object().unwrap().clone());
+            format!("{line}\n")
+        };
+        let call = |n: u64, prompts: &[&str]| {
+            let asked: Vec<Value> = prompts
+                .iter()
+                .map(|p| serde_json::json!({"Prompt": p}))
+                .collect();
+            let args = serde_json::json!({"Subagents": asked});
+            step(
+                n,
+                "PLANNER_RESPONSE",
+                serde_json::json!({"tool_calls": [
+                {"name": "invoke_subagent", "args": args}]}),
+            )
+        };
+        let said = |n: u64, text: &str| step(n, "USER_INPUT", serde_json::json!({"content": text}));
+        let result = |n: u64, text: &str| step(n, "GENERIC", serde_json::json!({"content": text}));
+        let append = |path: &Path, text: &str| {
+            let mut file = (std::fs::OpenOptions::new().create(true).append(true))
+                .open(path)
+                .unwrap();
+            file.write_all(text.as_bytes()).unwrap();
+        };
+        // One its result names, one the summaries say is the chat's.
+        let main = logs("main");
+        append(&main, &call(0, &["Read a"]));
+        append(
+            &main,
+            &result(1, &format!("Created the following subagent:\n{kid}\n")),
+        );
+        append(&main, &call(2, &["Read b"]));
+        append(&main, &result(3, "Created the following subagent:\n"));
+        append(&logs(kid), &said(0, "Read a"));
+        append(&logs("kid-b"), &said(0, "Read b"));
+        append(&logs("kid-c"), &said(0, "Read c"));
+        let conn = rusqlite::Connection::open(home.dir.join("conversation_summaries.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id TEXT, parent_conversation_id TEXT);
+             INSERT INTO conversation_summaries VALUES ('kid-b', 'main'), ('kid-c', 'other');",
+        )
+        .unwrap();
+        let source = Source {
+            agent: AgentKind::Antigravity,
+            id: "main".into(),
+            path: main.clone(),
+            guessed: false,
+        };
+        let mut chat = Chat::new(source);
+        let mut out = Vec::new();
+        let steps = |chat: &Chat| -> Vec<usize> {
+            (chat.reader.items().iter())
+                .map(|item| match item {
+                    Item::Subagent { items, .. } => items.len(),
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        chat.poll("p1", &mut out);
+        assert_eq!(steps(&chat), [1, 1]);
+        append(
+            &logs("kid-b"),
+            &step(1, "PLANNER_RESPONSE", serde_json::json!({"content": "b"})),
+        );
+        chat.poll("p1", &mut out);
+        assert_eq!(steps(&chat), [1, 2]);
     }
 
     #[test]
