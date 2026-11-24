@@ -33,6 +33,9 @@ pub struct Settings {
     pub system_dark: bool,
     /// How much room the chrome takes, from the config file.
     pub density: Density,
+    /// How big everything is drawn, in percent of the host window's
+    /// scale, from the config file (see `Gerdr::rescale`).
+    pub zoom: u16,
     /// Whether the sidebar shows its "Needs you" list, from the config file.
     pub needs_you: bool,
     /// Whether agents that need the user say so with a desktop

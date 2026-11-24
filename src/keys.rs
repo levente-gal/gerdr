@@ -27,7 +27,7 @@ use serde::Deserialize;
 use smithay::input::keyboard::{Keysym, ModifiersState, xkb};
 
 use crate::{
-    Action,
+    Action, ZoomStep,
     chrome::{Help, HelpPress},
     layout::{Dir, Side},
 };
@@ -274,6 +274,25 @@ const ACTIONS: &[(&str, Action, &str, &str)] = &[
         "Toggle light / dark theme (not system)",
         "t",
     ),
+    // Ctrl as in browsers would be Ctrl held from the prefix: - splits.
+    (
+        "zoom-in",
+        Action::Zoom(ZoomStep::In),
+        "Make everything bigger",
+        "Alt+=",
+    ),
+    (
+        "zoom-out",
+        Action::Zoom(ZoomStep::Out),
+        "Make everything smaller",
+        "Alt+-",
+    ),
+    (
+        "zoom-reset",
+        Action::Zoom(ZoomStep::Reset),
+        "Draw everything at the monitor's size",
+        "Alt+0",
+    ),
     ("shortcuts", Action::Shortcuts, "Keep this help open", "?"),
     ("switcher", Action::Switcher, "Find and switch…", "f"),
     ("run", Action::Run, "Run an app in a split…", "r"),
@@ -429,6 +448,10 @@ const HELP_LINES: &[(&str, &[&str])] = &[
         &["next-pane", "previous-pane"],
     ),
     ("Toggle light / dark theme (not system)", &["toggle-theme"]),
+    (
+        "Make everything bigger / smaller / as the monitor's",
+        &["zoom-in", "zoom-out", "zoom-reset"],
+    ),
     ("Keep this help open", &["shortcuts"]),
     ("Find and switch…", &["switcher"]),
     ("Run an app in a split…", &["run"]),
@@ -1268,6 +1291,7 @@ mod tests {
                 "!: Move pane to a new tab",
                 "Tab / Shift+Tab: Go to the next / previous pane",
                 "T: Toggle light / dark theme (not system)",
+                "Alt+= / - / 0: Make everything bigger / smaller / as the monitor's",
                 "?: Keep this help open",
                 "F: Find and switch…",
                 "R: Run an app in a split…",

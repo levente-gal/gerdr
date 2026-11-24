@@ -125,6 +125,7 @@ browser = "firefox http://localhost:3000"
 [ui]
 theme = "system"      # or "light" or "dark"
 density = "compact"   # or "comfortable", the default
+zoom = 1.25           # everything drawn bigger, panes too; Prefix Alt+= / Alt+- / Alt+0
 
 [agents]
 claude = "claude --dangerously-skip-permissions"
