@@ -470,14 +470,15 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
 
 /// The permission the agent in `pane` of `project` asks for on gerdr's card,
 /// if it waits on one; gerdr holds its asks for the phone while it reads
-/// the pane. None without a gerdr to ask.
-fn pane_ask(project: &str, pane: &str) -> Value {
+/// the pane. And how long its turn has run, in seconds, while it works.
+/// None without a gerdr to ask.
+fn pane_ask(project: &str, pane: &str) -> (Value, Value) {
     let request = json!({ "op": "ask", "project": project, "pane": pane });
     match gerdr(Some(project), &request) {
-        Ok(answer) => answer["ask"].clone(),
+        Ok(answer) => (answer["ask"].clone(), answer["working"].clone()),
         Err(why) => {
             tracing::debug!("phone: the ask of pane {pane}: {why}");
-            Value::Null
+            (Value::Null, Value::Null)
         }
     }
 }
@@ -1037,8 +1038,9 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
         return match herdr.pane_read(pane, "visible", PANE_LINES) {
             Ok(screen) => {
                 let text = chat_and_screen(path, &screen);
-                let ask = pane_ask(&project.id, pane);
-                Reply::json(&json!({ "label": label, "text": text, "more": false, "ask": ask }))
+                let (ask, working) = pane_ask(&project.id, pane);
+                let reply = json!({ "label": label, "text": text, "more": false, "ask": ask, "working": working });
+                Reply::json(&reply)
             }
             Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
         };
@@ -1057,8 +1059,9 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             // The rows above its screen, wrapped: at worst one more read, of all.
             let more = chat.is_some()
                 || (!all && rows.is_some_and(|rows| rows > text.lines().count() as u64));
-            let ask = pane_ask(&project.id, pane);
-            Reply::json(&json!({ "label": label, "text": text, "more": more, "ask": ask }))
+            let (ask, working) = pane_ask(&project.id, pane);
+            let reply = json!({ "label": label, "text": text, "more": more, "ask": ask, "working": working });
+            Reply::json(&reply)
         }
         Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
     }
