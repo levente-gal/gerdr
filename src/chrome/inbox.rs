@@ -2724,7 +2724,8 @@ mod tests {
             ..whole.clone()
         };
         let l = inbox_layout(&fraction, size);
-        assert_eq!(l.rows[0].0.loc.y, b.window.loc.y - 10);
+        let cut = (0.3 * INBOX_LABEL as f64).round() as i32;
+        assert_eq!(l.rows[0].0.loc.y, b.window.loc.y - cut);
         for over in [20.0, -20.0] {
             let stretched = InboxView {
                 over,
@@ -2753,7 +2754,8 @@ mod tests {
         };
         let (top, size_top) = at(0, 0.0);
         assert_eq!(top.y, track.loc.y as f64);
-        assert_eq!(size_top.h, track.size.h / 4);
+        // To the nearest pixel, as every thumb (`Thumb::of`).
+        assert_eq!(size_top.h, (track.size.h as f64 / 4.0).round() as i32);
         let (end, _) = at(3 * page, 0.0);
         assert_eq!(
             end.y + size_top.h as f64,

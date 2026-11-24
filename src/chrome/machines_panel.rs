@@ -1779,9 +1779,10 @@ mod tests {
                 }
             }
         }
-        // Six fit 600 high with nothing running there.
+        // Five fit 600 high with nothing running there (six did at 15 px
+        // text; the form does not scroll).
         let small = (870, 600).into();
-        let l = machines_layout(&addresses(0, false, false, 6), small);
+        let l = machines_layout(&addresses(0, false, false, 5), small);
         fits(&l, small);
         form_fits(&l);
         assert!(inside(l.detail, l.no_runs.unwrap()));

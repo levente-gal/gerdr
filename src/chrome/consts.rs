@@ -79,7 +79,7 @@ pub(super) const FIELD_GAP: i32 = 8;
 // Text: every size the chrome sets text in, all here and all grown from
 // `TEXT`, so changing it makes all the chrome's text bigger or smaller and
 // keeps their steps. (`[ui] zoom` grows everything at run time.)
-const TEXT: f32 = 15.0;
+const TEXT: f32 = 17.0;
 /// The chrome's own text: rows, buttons, fields, dialogs.
 pub(super) const FONT_SIZE: f32 = TEXT;
 /// The welcome screen's greeting.

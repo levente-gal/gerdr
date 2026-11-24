@@ -9712,6 +9712,10 @@ mod tests {
 
     #[test]
     fn long_columns_scroll_by_what_does_not_show() {
+        // A 1080p output's height, where the page fits whole.
+        let tab_at = |view: &FeatureTabView, w: i32| {
+            feature_tab_layout(view, Rectangle::from_size((w, 1080).into()))
+        };
         let mut view = tab_view();
         assert_eq!(tab_at(&view, 1920).scroll_room(TabColumn::Page), 0);
         let row = view.activity[0].clone();

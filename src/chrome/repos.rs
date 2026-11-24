@@ -59,7 +59,9 @@ pub const REVIEW_TREE_SHARE: f64 = 0.25;
 /// How wide a feature's code review must be to have its file list beside
 /// the diff, logical pixels.
 pub const REVIEW_TREE_MIN_PANEL: i32 = 640;
-const REPOS_TREE_MIN: i32 = 300;
+/// The tree's least width: about nine letters of a name in its filter
+/// beside the toolbar's buttons, so it grows with the text.
+const REPOS_TREE_MIN: i32 = (FONT_SIZE * 20.0) as i32;
 pub const SPLITTER_GRAB: i32 = 5;
 /// The room above and below the tree's lines and the detail's, and beside
 /// the tree's.
@@ -6542,7 +6544,9 @@ mod tests {
             let field = open[0].1;
             assert_eq!(open[0].0, SearchPart::Field);
             // At the tree's least, room for a name of about nine letters.
-            assert!(field.size.w >= 90, "{w}: {field:?}");
+            let (from, to) = field_text(field, 1.0);
+            let name = text_extent("repo-name", FONT_SIZE, BUTTON_CHAR) as f32;
+            assert!(to - from >= name, "{w}: {field:?} for {name}");
             assert_eq!(count.is_some(), counted, "{w}");
             let close = open[1].1;
             assert!(field.loc.x + field.size.w < close.loc.x && close.loc.x + ROW_BUTTON < tools[0].1.loc.x);

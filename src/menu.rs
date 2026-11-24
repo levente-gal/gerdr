@@ -866,7 +866,10 @@ mod tests {
         open.step_to_end(false);
         assert_eq!(open.hover, Some(0));
         // Room for two rows: the third is not shown, picked or walked to.
-        let mut short = ContextMenu::new(menu().spec, (800, 70).into());
+        let two = (1..)
+            .find(|&h| crate::chrome::menu_rows_fitting(h) == 2)
+            .unwrap();
+        let mut short = ContextMenu::new(menu().spec, (800, two).into());
         assert_eq!(short.layout().1.len(), 2);
         assert_eq!(short.view().rows.len(), 2);
         short.step(-1);
