@@ -212,7 +212,7 @@ impl ChatLayout {
         let parts = parts(view);
         // The menu lies over the list and the waiting panel.
         if let (Some(slash), Some(i)) = (&view.slash, parts.slash.iter().position(|r| on(*r))) {
-            return Some(ChatHit::Command(slash.first + i));
+            return Some(ChatHit::Command(slash.first + parts.slash_skip + i));
         }
         if on(self.send) {
             return Some(ChatHit::Send);
@@ -556,8 +556,10 @@ struct Parts {
     composer: Rect,
     send: Rect,
     hints: Rect,
-    /// The `/` menu's rows, hanging over the reply box.
+    /// The `/` menu's rows, hanging over the reply box, and how many of
+    /// its first rows don't fit above them (the picked one always shows).
     slash: Vec<Rect>,
+    slash_skip: usize,
 }
 
 /// How wide a key button labelled `label` is.
@@ -684,7 +686,9 @@ fn parts(view: &ChatView) -> Parts {
     // As many rows as fit between the head and the reply box.
     let n = view.slash.as_ref().map_or(0, |s| s.rows.len()) as i32;
     let n = n.min((composer.loc.y - PART_GAP / 2 - list_top - 2 * SLASH_BORDER) / suggestion_row());
-    let slash = (0..n.max(0))
+    let n = n.max(0);
+    let slash_skip = view.slash.as_ref().map_or(0, |s| (s.picked + 1).saturating_sub(n as usize));
+    let slash = (0..n)
         .map(|i| {
             let y = composer.loc.y - PART_GAP / 2 - SLASH_BORDER - (n - i) * suggestion_row();
             rect(x, y, w, suggestion_row())
@@ -705,6 +709,7 @@ fn parts(view: &ChatView) -> Parts {
         send,
         hints,
         slash,
+        slash_skip,
     }
 }
 
@@ -1926,7 +1931,8 @@ impl Painter {
         );
 
         if let Some(slash) = &view.slash {
-            self.chat_slash(&mut c, view, slash, &parts.slash, &here, scale, p);
+            let rows = (parts.slash.as_slice(), parts.slash_skip);
+            self.chat_slash(&mut c, view, slash, rows, &here, scale, p);
         }
 
         let hints = chat_hints(view);
@@ -1944,7 +1950,7 @@ impl Painter {
         c: &mut Canvas,
         view: &ChatView,
         slash: &SlashView,
-        rows: &[Rect],
+        (rows, skip): (&[Rect], usize),
         here: &dyn Fn(Rect) -> Rect,
         scale: f64,
         p: &Palette,
@@ -1964,7 +1970,8 @@ impl Painter {
         let (b, r) = ((scale.round() as f32).max(1.0), BUTTON_RADIUS * s);
         c.rounded(x, y, w, h, r, p.border);
         c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
-        for (i, (row, (name, about))) in rows.iter().zip(&slash.rows).enumerate() {
+        let shown = slash.rows.iter().enumerate().skip(skip);
+        for (row, (i, (name, about))) in rows.iter().zip(shown) {
             let row = here(*row);
             let (x, y, w, h) = rect_px(row, scale);
             if i == slash.picked {
@@ -2402,6 +2409,18 @@ pub(super) mod tests {
         };
         let p = parts(&short);
         assert!(p.slash.len() < 3);
+        assert_eq!(p.slash_skip, 0, "the picked first row shows");
+        let short = ChatView {
+            slash: Some(SlashView {
+                picked: 2,
+                ..short.slash.clone().unwrap()
+            }),
+            ..short
+        };
+        let p = parts(&short);
+        assert_eq!(p.slash_skip + p.slash.len(), 3, "the picked last row shows");
+        let last = *p.slash.last().unwrap();
+        assert_eq!(chat_layout(&short).hit(&short, middle(last)), Some(ChatHit::Command(7)));
         assert!(p.slash.iter().all(|r| r.loc.y >= p.head.loc.y + p.head.size.h));
     }
 
