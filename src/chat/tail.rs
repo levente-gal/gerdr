@@ -20,11 +20,7 @@ use super::{
     source::{self, Run},
 };
 use crate::{
-    ai_work::{
-        AgentKind,
-        locate::{self, Form, Homes},
-        usage,
-    },
+    ai_work::{AgentKind, locate::Homes},
     herdr::{AgentInfo, Herdr},
 };
 
@@ -193,7 +189,7 @@ impl Chats {
             agent,
             looked: Instant::now(),
         };
-        followed.found(found, &self.homes, out);
+        followed.found(found, out);
         self.panes.insert(pane_id, followed);
     }
 
@@ -218,14 +214,14 @@ impl Chats {
             chat.sent = None;
             return;
         }
-        chat.poll(&self.homes, pane_id, out);
+        chat.poll(pane_id, out);
     }
 
     /// Read what each chat grew by; look again for the chats not found.
     /// Read pane `pane_id`'s chat now, if it was found.
     fn read_now(&mut self, pane_id: &str, out: &mut Vec<Event>) {
         if let Some(Ok(chat)) = self.panes.get_mut(pane_id).map(|f| &mut f.chat) {
-            chat.poll(&self.homes, pane_id, out);
+            chat.poll(pane_id, out);
         }
     }
 
@@ -233,7 +229,7 @@ impl Chats {
         let mut again = Vec::new();
         for (pane_id, followed) in &mut self.panes {
             match &mut followed.chat {
-                Ok(chat) => chat.poll(&self.homes, pane_id, out),
+                Ok(chat) => chat.poll(pane_id, out),
                 Err(_) if followed.looked.elapsed() < FIND_AGAIN => {}
                 Err(_) => again.push(pane_id.clone()),
             }
@@ -246,7 +242,7 @@ impl Chats {
             };
             followed.looked = Instant::now();
             if found.as_ref().err() != followed.chat.as_ref().err() {
-                followed.found(found, &self.homes, out);
+                followed.found(found, out);
             }
         }
     }
@@ -387,12 +383,12 @@ fn clock_ticks() -> u64 {
 
 impl Followed {
     /// Take chat `found`: read it, or say why there is none.
-    fn found(&mut self, found: Result<Source, String>, homes: &Homes, out: &mut Vec<Event>) {
+    fn found(&mut self, found: Result<Source, String>, out: &mut Vec<Event>) {
         let pane_id = self.agent.pane_id.clone();
         match found {
             Ok(source) => {
                 let mut chat = Chat::new(source);
-                chat.poll(homes, &pane_id, out);
+                chat.poll(&pane_id, out);
                 self.chat = Ok(chat);
             }
             Err(why) => {
@@ -408,6 +404,8 @@ impl Followed {
     }
 }
 
+mod db;
+
 /// A transcript being read, line by line as it grows; or a database chat
 /// (OpenCode's, Cursor's), read whole each time it changes.
 struct Chat {
@@ -415,6 +413,8 @@ struct Chat {
     reader: Reader,
     /// A database chat's items, as last read.
     snapshot: Vec<Item>,
+    /// A database chat's rows, as last read.
+    kept: db::Kept,
     /// What the database and its WAL were (`stamp`) when last read.
     stamped: Option<[Option<Stamp>; 2]>,
     /// The file read (device and inode): another one is read from the start.
@@ -456,36 +456,12 @@ fn in_database(kind: AgentKind) -> bool {
     matches!(kind, AgentKind::OpenCode | AgentKind::Cursor)
 }
 
-/// The rows of database chat `source`, as `parse::snapshot` takes them.
-fn rows(source: &Source, homes: &Homes) -> Result<Vec<Value>, String> {
-    if source.agent == AgentKind::Cursor {
-        let read = || {
-            let conn = crate::cursor_agents::open_read_only(&source.path)?;
-            conn.busy_timeout(Duration::from_secs(1))?;
-            usage::cursor_messages_in(&conn)
-        };
-        return read().map_err(|err| err.to_string());
-    }
-    let chat = source::chat(source.agent, Some(&source.id), None);
-    match locate::find(homes, &chat, &HashSet::new())? {
-        Some(locate::Found {
-            form: Form::Made(lines),
-            ..
-        }) => Ok((lines.split(|b| *b == b'\n'))
-            .filter_map(|line| serde_json::from_slice(line).ok())
-            .collect()),
-        _ => Err(format!(
-            "{} holds this chat no more",
-            homes.opencode.display()
-        )),
-    }
-}
-
 impl Chat {
     fn new(source: Source) -> Self {
         Self {
             reader: Reader::new(source.agent),
             snapshot: Vec::new(),
+            kept: db::Kept::default(),
             stamped: None,
             source,
             file: None,
@@ -503,9 +479,9 @@ impl Chat {
     }
 
     /// Read what it grew by, and send its items if they changed.
-    fn poll(&mut self, homes: &Homes, pane_id: &str, out: &mut Vec<Event>) {
+    fn poll(&mut self, pane_id: &str, out: &mut Vec<Event>) {
         let read = match in_database(self.source.agent) {
-            true => self.read_rows(homes),
+            true => self.read_rows(),
             false => {
                 (self.read().and_then(|()| self.read_subagents())).map_err(|err| err.to_string())
             }
@@ -540,11 +516,9 @@ impl Chat {
         }
     }
 
-    /// Read a database chat's rows again if the database or its WAL changed
-    /// since the last read.
-    // shortcut: the whole session is read again on each change; read only
-    // the rows past the last one read once long chats make a read slow.
-    fn read_rows(&mut self, homes: &Homes) -> Result<(), String> {
+    /// Read what changed in a database chat's rows if the database or its
+    /// WAL changed since the last read.
+    fn read_rows(&mut self) -> Result<(), String> {
         let mut wal = self.source.path.clone().into_os_string();
         wal.push("-wal");
         let now = [
@@ -554,7 +528,12 @@ impl Chat {
         if self.stamped == Some(now) {
             return Ok(());
         }
-        self.snapshot = parse::snapshot(self.source.agent, &rows(&self.source, homes)?);
+        let conn = crate::cursor_agents::open_read_only(&self.source.path)
+            .and_then(|conn| conn.busy_timeout(Duration::from_secs(1)).map(|()| conn))
+            .map_err(|err| err.to_string())?;
+        (self.kept).read(self.source.agent, &self.source.id, &conn)?;
+        let rows = self.kept.rows();
+        self.snapshot = parse::snapshot(self.source.agent, rows.iter().map(|row| &**row));
         self.stamped = Some(now);
         self.resets += 1;
         Ok(())
@@ -1142,7 +1121,7 @@ mod tests {
         add_blobs(&db, &[r#"{"role":"assistant","content":"done"}"#, "\u{1}x"]);
         home.poll();
         assert_eq!(home.chat().resets, 2);
-        let rows = rows(&home.chat().source, &home.chats.homes).unwrap();
+        let rows = home.chat().kept.rows();
         let roles: Vec<&str> = rows.iter().filter_map(|r| r["role"].as_str()).collect();
         assert_eq!(roles, ["user", "assistant"]);
         // Gone: told once, then read again once it is back.
@@ -1151,35 +1130,6 @@ mod tests {
         assert!(home.poll().is_empty(), "told once");
         cursor_store(&home.dir, "c-1", &[]);
         assert!(matches!(&home.poll()[..], [Event::Items { .. }]));
-    }
-
-    #[test]
-    fn an_opencode_chat_is_read_as_its_rows() {
-        let home = Home::new("opencode");
-        let homes = &home.chats.homes;
-        std::fs::create_dir_all(homes.opencode.parent().unwrap()).unwrap();
-        let conn = rusqlite::Connection::open(&homes.opencode).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, time_created INTEGER);
-             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
-             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
-             INSERT INTO session VALUES ('ses_a', NULL, '/w', 100500);
-             INSERT INTO message VALUES ('m1', 'ses_a', 100700, '{\"role\":\"user\"}');
-             INSERT INTO message VALUES ('m2', 'ses_a', 100800, '{\"role\":\"assistant\"}');
-             INSERT INTO part VALUES ('p1', 'm1', 'ses_a', 100701, '{\"text\":\"hi\"}');",
-        )
-        .unwrap();
-        drop(conn);
-        let source = source::find(&agent("opencode", "id", "ses_a"), homes).unwrap();
-        let read = rows(&source, homes).unwrap();
-        assert_eq!(read.len(), 2);
-        assert_eq!(read[0]["parts"][0]["data"]["text"], "hi");
-        assert_eq!(read[1]["data"]["role"], "assistant");
-        let gone = Source {
-            id: "ses_b".into(),
-            ..source
-        };
-        assert!(rows(&gone, homes).is_err());
     }
 
     /// A herdr on a socket of its own answering `integration.list` and
