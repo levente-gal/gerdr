@@ -1396,7 +1396,7 @@ impl Gerdr {
         self.settings.density = settings.ui.density;
         self.set_zoom(settings.ui.zoom);
         // Cached drawings see the new size; `arrange` below lays out again.
-        crate::chrome::set_text_size(f32::from(settings.ui.text_size));
+        self.set_text_size(settings.ui.text_size);
         self.settings.needs_you = settings.ui.needs_you;
         // Turned on again: added again, now.
         if settings.ui.agent_hooks && !self.settings.agent_hooks {
@@ -1471,6 +1471,17 @@ impl Gerdr {
             self.settings.zoom = zoom;
             self.rescale();
         }
+    }
+
+    /// Set the chrome's text at `px`: the sidebar keeps its width in
+    /// characters, growing or shrinking with it.
+    fn set_text_size(&mut self, px: u16) {
+        let chars = crate::chrome::from_text(self.sidebar_width);
+        crate::chrome::set_text_size(f32::from(px));
+        let max = crate::chrome::at_text(crate::chrome::SIDEBAR_MAX_WIDTH)
+            .min(self.output_size().w - crate::MIN_PANE);
+        let min = crate::chrome::at_text(crate::chrome::SIDEBAR_MIN_WIDTH);
+        self.sidebar_width = crate::chrome::at_text(chars).min(max).max(min);
     }
 
     /// Draw everything a step bigger or smaller, or at the monitor's own

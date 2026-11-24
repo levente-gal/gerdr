@@ -15,12 +15,14 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use super::Item;
 use crate::herdr::AgentSession;
 
 pub mod claude;
@@ -128,6 +130,9 @@ pub struct PendingAsk {
 pub struct PaneLive {
     pub running: Vec<Running>,
     pub ask: Option<PendingAsk>,
+    /// How long the calls heard start and end took, in ms, by call: for
+    /// the tools a chat gives no time of (Cursor's).
+    pub took: HashMap<String, u64>,
 }
 
 impl PaneLive {
@@ -146,13 +151,52 @@ impl PaneLive {
                 true
             }
             What::ToolEnd { call, .. } => {
-                let had = self.running.len();
-                self.running.retain(|r| r.call != *call);
-                had != self.running.len()
+                let Some(at) = self.running.iter().position(|r| r.call == *call) else {
+                    return false;
+                };
+                let since = self.running.remove(at).since_ms;
+                self.took
+                    .insert(call.clone(), (at_ms - since).max(0) as u64);
+                true
             }
             What::TurnEnd => !std::mem::take(&mut self.running).is_empty(),
             What::Session { .. } | What::Ask { .. } | What::AskGone { .. } => false,
         }
+    }
+
+    /// `items` with the times heard on the tools whose chat gives none.
+    pub fn timed(&self, mut items: Arc<Vec<Item>>) -> Arc<Vec<Item>> {
+        fn untimed(items: &[Item], took: &HashMap<String, u64>) -> bool {
+            items.iter().any(|item| match item {
+                Item::Tool { id, output, .. } | Item::Subagent { id, output, .. }
+                    if output.as_ref().is_some_and(|out| out.ms.is_none())
+                        && took.contains_key(id) =>
+                {
+                    true
+                }
+                Item::Subagent { items, .. } => untimed(items, took),
+                _ => false,
+            })
+        }
+        fn fill(items: &mut Arc<Vec<Item>>, took: &HashMap<String, u64>) {
+            if !untimed(items, took) {
+                return;
+            }
+            for item in Arc::make_mut(items) {
+                let (Item::Tool { id, output, .. } | Item::Subagent { id, output, .. }) = item
+                else {
+                    continue;
+                };
+                if let Some(out) = output.as_mut().filter(|out| out.ms.is_none()) {
+                    out.ms = took.get(id.as_str()).copied();
+                }
+                if let Item::Subagent { items, .. } = item {
+                    fill(items, took);
+                }
+            }
+        }
+        fill(&mut items, &self.took);
+        items
     }
 }
 
@@ -527,8 +571,45 @@ mod tests {
         assert!(live.hear(&end, 3));
         assert!(!live.hear(&end, 3));
         assert_eq!(live.running.len(), 1);
+        assert_eq!(live.took["a"], 2);
         assert!(live.hear(&What::TurnEnd, 4));
         assert!(live.running.is_empty());
+    }
+
+    #[test]
+    fn tools_untimed_get_the_time_heard() {
+        let tool = |id: &str, ms| Item::Tool {
+            id: id.into(),
+            name: "Shell".into(),
+            gist: "ls".into(),
+            input: String::new(),
+            output: Some(super::super::ToolOut {
+                text: String::new(),
+                failed: false,
+                ms,
+            }),
+        };
+        let mut live = PaneLive::default();
+        let items = Arc::new(vec![tool("a", None), tool("b", Some(7))]);
+        assert!(
+            Arc::ptr_eq(&live.timed(items.clone()), &items),
+            "nothing heard"
+        );
+        live.took = HashMap::from([("a".into(), 1500), ("b".into(), 9)]);
+        let sub = Item::Subagent {
+            id: "s".into(),
+            title: "look".into(),
+            items: Arc::new(vec![tool("a", None)]),
+            output: None,
+        };
+        let items = Arc::new(vec![tool("a", None), tool("b", Some(7)), sub]);
+        let timed = live.timed(items);
+        assert_eq!(timed[0], tool("a", Some(1500)));
+        assert_eq!(timed[1], tool("b", Some(7)), "the chat's own time stays");
+        let Item::Subagent { items, .. } = &timed[2] else {
+            panic!()
+        };
+        assert_eq!(items[0], tool("a", Some(1500)));
     }
 
     #[test]

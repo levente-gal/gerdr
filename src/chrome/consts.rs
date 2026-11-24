@@ -34,8 +34,8 @@ pub(super) const BRANCH_ICON_GAP: i32 = 5;
 /// ahead, behind), and the gap before it.
 pub(super) const GIT_MARK_WIDTH: i32 = 8;
 pub(super) const GIT_MARK_GAP: i32 = 4;
-/// Width of the workspace sidebar, in logical pixels: at start, and the
-/// range it can be dragged to.
+/// Width of the workspace sidebar, in logical pixels at the default text
+/// size (see `at_text`): at start, and the range it can be dragged to.
 pub const SIDEBAR_WIDTH: i32 = 200;
 pub const SIDEBAR_MIN_WIDTH: i32 = 120;
 pub const SIDEBAR_MAX_WIDTH: i32 = 480;
@@ -108,6 +108,15 @@ pub fn set_text_size(px: f32) {
         px.clamp(TEXT_MIN, TEXT_MAX)
     };
     TEXT_PX.store(px.to_bits(), Ordering::Relaxed);
+}
+/// `px` at the default text size, at the current one: a width the user
+/// sets (the sidebar's) keeps its room in characters as the text grows.
+pub fn at_text(px: i32) -> i32 {
+    (px as f32 * text_size() / DEFAULT_TEXT).round() as i32
+}
+/// `at_text` undone: `px` now, at the default text size, as it is saved.
+pub fn from_text(px: i32) -> i32 {
+    (px as f32 * DEFAULT_TEXT / text_size()).round() as i32
 }
 /// `memo`, emptied first when the text size changed since it was filled:
 /// for memos of measured text or layout, which hold for one size only.

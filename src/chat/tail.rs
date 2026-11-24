@@ -20,11 +20,7 @@ use super::{
     source::{self, Run},
 };
 use crate::{
-    ai_work::{
-        AgentKind,
-        locate::{self, Form, Homes},
-        usage,
-    },
+    ai_work::{AgentKind, locate::Homes},
     herdr::{AgentInfo, Herdr},
 };
 
@@ -193,7 +189,12 @@ impl Chats {
             agent,
             looked: Instant::now(),
         };
-        followed.found(found, &self.homes, out);
+        followed.found(found, out);
+        // A guess (shown again, say) looks for a newer chat at the next
+        // poll, once the panes followed with it hold theirs.
+        if followed.chat.as_ref().is_ok_and(|chat| chat.source.guessed) {
+            followed.looked = (followed.looked.checked_sub(FIND_AGAIN)).unwrap_or(followed.looked);
+        }
         self.panes.insert(pane_id, followed);
     }
 
@@ -218,25 +219,35 @@ impl Chats {
             chat.sent = None;
             return;
         }
-        chat.poll(&self.homes, pane_id, out);
+        chat.poll(pane_id, out);
     }
 
     /// Read what each chat grew by; look again for the chats not found.
     /// Read pane `pane_id`'s chat now, if it was found.
     fn read_now(&mut self, pane_id: &str, out: &mut Vec<Event>) {
         if let Some(Ok(chat)) = self.panes.get_mut(pane_id).map(|f| &mut f.chat) {
-            chat.poll(&self.homes, pane_id, out);
+            chat.poll(pane_id, out);
         }
     }
 
     fn poll(&mut self, out: &mut Vec<Event>) {
         let mut again = Vec::new();
+        let mut guessed = Vec::new();
         for (pane_id, followed) in &mut self.panes {
+            let due = followed.looked.elapsed() >= FIND_AGAIN;
             match &mut followed.chat {
-                Ok(chat) => chat.poll(&self.homes, pane_id, out),
-                Err(_) if followed.looked.elapsed() < FIND_AGAIN => {}
+                Ok(chat) => {
+                    chat.poll(pane_id, out);
+                    if chat.source.guessed && due {
+                        guessed.push(pane_id.clone());
+                    }
+                }
+                Err(_) if !due => {}
                 Err(_) => again.push(pane_id.clone()),
             }
+        }
+        for pane_id in guessed {
+            self.move_on(&pane_id, out);
         }
         for pane_id in again {
             let agent = self.panes[&pane_id].agent.clone();
@@ -246,7 +257,7 @@ impl Chats {
             };
             followed.looked = Instant::now();
             if found.as_ref().err() != followed.chat.as_ref().err() {
-                followed.found(found, &self.homes, out);
+                followed.found(found, out);
             }
         }
     }
@@ -289,6 +300,36 @@ impl Chats {
         }
     }
 
+    /// Move pane `pane_id`'s guessed chat on to the newest of its agent's
+    /// run, when that is another: one the agent began since (`/new`), as
+    /// no live report or herdr names it.
+    fn move_on(&mut self, pane_id: &str, out: &mut Vec<Event>) {
+        let Some(followed) = self.panes.get_mut(pane_id) else {
+            return;
+        };
+        followed.looked = Instant::now();
+        let Ok(chat) = &followed.chat else {
+            return;
+        };
+        let (kind, had) = (chat.source.agent, chat.source.id.clone());
+        let agent = followed.agent.clone();
+        let Some(run) = self.run_of(&agent) else {
+            return;
+        };
+        let claimed = self.claimed(pane_id);
+        match source::newest(kind, &run, &self.homes, &claimed) {
+            // Another agent of its kind in the folder may have begun it.
+            Ok(Some(newer)) if newer.id != had && self.alone(pane_id, kind, &run.cwd) => {
+                if let Some(followed) = self.panes.get_mut(pane_id) {
+                    followed.found(Ok(newer), out);
+                }
+            }
+            // The chat had still shows: only the log hears of it.
+            Err(why) => tracing::warn!("agent chat of pane {pane_id}: {why}"),
+            _ => {}
+        }
+    }
+
     /// The ids of the chats of the panes other than `pane_id`.
     fn claimed(&self, pane_id: &str) -> HashSet<String> {
         (self.panes.iter())
@@ -325,6 +366,26 @@ impl Chats {
 
     /// When the agent in `agent`'s pane began and where it runs: herdr's
     /// foreground process there, as `/proc` says.
+    /// Whether no other pane, shown or not, runs an agent of `kind` in
+    /// `cwd`: a chat begun there since could be that one's.
+    fn alone(&mut self, pane_id: &str, kind: AgentKind, cwd: &Path) -> bool {
+        let Some(herdr) = self.herdr.as_mut() else {
+            return false;
+        };
+        match herdr.agent_list() {
+            Ok(agents) => !agents.iter().any(|a| {
+                a.pane_id != pane_id
+                    && source::kind(a) == Some(kind)
+                    && a.foreground_cwd.as_deref().or(a.cwd.as_deref()) == Some(cwd)
+            }),
+            // Not knowing, the guess stays.
+            Err(err) => {
+                tracing::warn!("agent chat of pane {pane_id}: {err}");
+                false
+            }
+        }
+    }
+
     fn run_of(&mut self, agent: &AgentInfo) -> Option<Run> {
         let info = (self.herdr.as_mut()?.process_info(&agent.pane_id))
             .map_err(|err| tracing::warn!("agent chat of pane {}: {err}", agent.pane_id))
@@ -387,12 +448,12 @@ fn clock_ticks() -> u64 {
 
 impl Followed {
     /// Take chat `found`: read it, or say why there is none.
-    fn found(&mut self, found: Result<Source, String>, homes: &Homes, out: &mut Vec<Event>) {
+    fn found(&mut self, found: Result<Source, String>, out: &mut Vec<Event>) {
         let pane_id = self.agent.pane_id.clone();
         match found {
             Ok(source) => {
                 let mut chat = Chat::new(source);
-                chat.poll(homes, &pane_id, out);
+                chat.poll(&pane_id, out);
                 self.chat = Ok(chat);
             }
             Err(why) => {
@@ -408,6 +469,8 @@ impl Followed {
     }
 }
 
+mod db;
+
 /// A transcript being read, line by line as it grows; or a database chat
 /// (OpenCode's, Cursor's), read whole each time it changes.
 struct Chat {
@@ -415,6 +478,8 @@ struct Chat {
     reader: Reader,
     /// A database chat's items, as last read.
     snapshot: Vec<Item>,
+    /// A database chat's rows, as last read.
+    kept: db::Kept,
     /// What the database and its WAL were (`stamp`) when last read.
     stamped: Option<[Option<Stamp>; 2]>,
     /// The file read (device and inode): another one is read from the start.
@@ -456,36 +521,12 @@ fn in_database(kind: AgentKind) -> bool {
     matches!(kind, AgentKind::OpenCode | AgentKind::Cursor)
 }
 
-/// The rows of database chat `source`, as `parse::snapshot` takes them.
-fn rows(source: &Source, homes: &Homes) -> Result<Vec<Value>, String> {
-    if source.agent == AgentKind::Cursor {
-        let read = || {
-            let conn = crate::cursor_agents::open_read_only(&source.path)?;
-            conn.busy_timeout(Duration::from_secs(1))?;
-            usage::cursor_messages_in(&conn)
-        };
-        return read().map_err(|err| err.to_string());
-    }
-    let chat = source::chat(source.agent, Some(&source.id), None);
-    match locate::find(homes, &chat, &HashSet::new())? {
-        Some(locate::Found {
-            form: Form::Made(lines),
-            ..
-        }) => Ok((lines.split(|b| *b == b'\n'))
-            .filter_map(|line| serde_json::from_slice(line).ok())
-            .collect()),
-        _ => Err(format!(
-            "{} holds this chat no more",
-            homes.opencode.display()
-        )),
-    }
-}
-
 impl Chat {
     fn new(source: Source) -> Self {
         Self {
             reader: Reader::new(source.agent),
             snapshot: Vec::new(),
+            kept: db::Kept::default(),
             stamped: None,
             source,
             file: None,
@@ -503,9 +544,9 @@ impl Chat {
     }
 
     /// Read what it grew by, and send its items if they changed.
-    fn poll(&mut self, homes: &Homes, pane_id: &str, out: &mut Vec<Event>) {
+    fn poll(&mut self, pane_id: &str, out: &mut Vec<Event>) {
         let read = match in_database(self.source.agent) {
-            true => self.read_rows(homes),
+            true => self.read_rows(),
             false => {
                 (self.read().and_then(|()| self.read_subagents())).map_err(|err| err.to_string())
             }
@@ -540,11 +581,9 @@ impl Chat {
         }
     }
 
-    /// Read a database chat's rows again if the database or its WAL changed
-    /// since the last read.
-    // shortcut: the whole session is read again on each change; read only
-    // the rows past the last one read once long chats make a read slow.
-    fn read_rows(&mut self, homes: &Homes) -> Result<(), String> {
+    /// Read what changed in a database chat's rows if the database or its
+    /// WAL changed since the last read.
+    fn read_rows(&mut self) -> Result<(), String> {
         let mut wal = self.source.path.clone().into_os_string();
         wal.push("-wal");
         let now = [
@@ -554,7 +593,12 @@ impl Chat {
         if self.stamped == Some(now) {
             return Ok(());
         }
-        self.snapshot = parse::snapshot(self.source.agent, &rows(&self.source, homes)?);
+        let conn = crate::cursor_agents::open_read_only(&self.source.path)
+            .and_then(|conn| conn.busy_timeout(Duration::from_secs(1)).map(|()| conn))
+            .map_err(|err| err.to_string())?;
+        (self.kept).read(self.source.agent, &self.source.id, &conn)?;
+        let rows = self.kept.rows();
+        self.snapshot = parse::snapshot(self.source.agent, rows.iter().map(|row| &**row));
         self.stamped = Some(now);
         self.resets += 1;
         Ok(())
@@ -1142,7 +1186,7 @@ mod tests {
         add_blobs(&db, &[r#"{"role":"assistant","content":"done"}"#, "\u{1}x"]);
         home.poll();
         assert_eq!(home.chat().resets, 2);
-        let rows = rows(&home.chat().source, &home.chats.homes).unwrap();
+        let rows = home.chat().kept.rows();
         let roles: Vec<&str> = rows.iter().filter_map(|r| r["role"].as_str()).collect();
         assert_eq!(roles, ["user", "assistant"]);
         // Gone: told once, then read again once it is back.
@@ -1153,38 +1197,15 @@ mod tests {
         assert!(matches!(&home.poll()[..], [Event::Items { .. }]));
     }
 
-    #[test]
-    fn an_opencode_chat_is_read_as_its_rows() {
-        let home = Home::new("opencode");
-        let homes = &home.chats.homes;
-        std::fs::create_dir_all(homes.opencode.parent().unwrap()).unwrap();
-        let conn = rusqlite::Connection::open(&homes.opencode).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, time_created INTEGER);
-             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
-             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
-             INSERT INTO session VALUES ('ses_a', NULL, '/w', 100500);
-             INSERT INTO message VALUES ('m1', 'ses_a', 100700, '{\"role\":\"user\"}');
-             INSERT INTO message VALUES ('m2', 'ses_a', 100800, '{\"role\":\"assistant\"}');
-             INSERT INTO part VALUES ('p1', 'm1', 'ses_a', 100701, '{\"text\":\"hi\"}');",
-        )
-        .unwrap();
-        drop(conn);
-        let source = source::find(&agent("opencode", "id", "ses_a"), homes).unwrap();
-        let read = rows(&source, homes).unwrap();
-        assert_eq!(read.len(), 2);
-        assert_eq!(read[0]["parts"][0]["data"]["text"], "hi");
-        assert_eq!(read[1]["data"]["role"], "assistant");
-        let gone = Source {
-            id: "ses_b".into(),
-            ..source
-        };
-        assert!(rows(&gone, homes).is_err());
-    }
-
     /// A herdr on a socket of its own answering `integration.list` and
     /// `pane.process_info` with process `pid` in `cwd`, `calls` times.
-    fn fake_herdr(name: &str, pid: u32, cwd: &Path, calls: usize) -> PathBuf {
+    fn fake_herdr(
+        name: &str,
+        pid: u32,
+        cwd: &Path,
+        calls: usize,
+        agents: Arc<std::sync::Mutex<Vec<Value>>>,
+    ) -> PathBuf {
         use std::{io::BufRead as _, os::unix::net::UnixListener};
         let socket = std::env::temp_dir().join(format!("gerdr-tail-{name}-{}", std::process::id()));
         let _ = std::fs::remove_file(&socket);
@@ -1199,6 +1220,7 @@ mod tests {
                     .unwrap();
                 let asked: Value = serde_json::from_str(&line).unwrap();
                 let result = match asked["method"].as_str() {
+                    Some("agent.list") => serde_json::json!({"agents": *agents.lock().unwrap()}),
                     Some("integration.list") => serde_json::json!({"integrations": [
                         {"target": "cursor", "state": "not_installed"},
                     ]}),
@@ -1227,7 +1249,13 @@ mod tests {
             .arg("30")
             .spawn()
             .unwrap();
-        let socket = fake_herdr("guess", child.id(), Path::new("/work/app"), 2);
+        let socket = fake_herdr(
+            "guess",
+            child.id(),
+            Path::new("/work/app"),
+            2,
+            Default::default(),
+        );
         home.chats.herdr = Some(Herdr::on_socket(socket.clone()));
         let mut none = agent("cursor", "id", "c-1");
         none.agent_session = None;
@@ -1240,6 +1268,70 @@ mod tests {
             chat_problems("cursor"),
             [source::not_installed(AgentKind::Cursor, "cursor")]
         );
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    /// A Codex rollout of chat `id` run in `cwd`, begun at `at`.
+    fn codex_rollout(dir: &Path, id: &str, cwd: &Path, at: u64) {
+        let day = crate::ai_work::locate::codex_days(at)[1].clone();
+        let s = at % 86_400;
+        let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
+        let iso = format!("{}T{h:02}:{m:02}:{s:02}Z", day.replace('/', "-"));
+        let meta = serde_json::json!({"type": "session_meta",
+            "payload": {"id": id, "timestamp": iso, "cwd": cwd}});
+        let path = dir.join(format!(".codex/sessions/{day}/rollout-x-{id}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("{meta}\n")).unwrap();
+    }
+
+    #[test]
+    fn a_guess_moves_on_to_a_newer_chat_no_other_pane_holds() {
+        let mut home = Home::new("move-on");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
+        let boot = std::fs::read_to_string("/proc/stat").unwrap();
+        let started = started_at(&stat, &boot, clock_ticks()).unwrap();
+        let work = Path::new("/work/app");
+        codex_rollout(&home.dir, "c-old", work, started);
+        let others = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let socket = fake_herdr("move-on", child.id(), work, 20, others.clone());
+        home.chats.herdr = Some(Herdr::on_socket(socket.clone()));
+        let mut none = agent("codex", "id", "c-old");
+        none.agent_session = None;
+        home.chats.follow(none, &mut Vec::new());
+        assert_eq!(home.chat().source.id, "c-old");
+        // Looked again at the next poll: nothing newer yet.
+        assert!(home.poll().is_empty());
+        // The agent begins another chat (`/new`), which another pane holds.
+        codex_rollout(&home.dir, "c-new", work, started + 30);
+        let mut other = agent("codex", "id", "c-new");
+        other.pane_id = "p2".into();
+        home.chats.follow(other, &mut Vec::new());
+        let ago = |home: &mut Home| home.chats.panes.get_mut("p1").unwrap().looked -= FIND_AGAIN;
+        ago(&mut home);
+        assert!(home.poll().is_empty(), "the other pane's");
+        assert_eq!(home.chat().source.id, "c-old");
+        // Once it lets go, the guess moves on, a guess still.
+        home.chats.stop("p2");
+        assert!(home.poll().is_empty(), "looked at once a FIND_AGAIN");
+        // Another Codex in the folder, in a pane not shown: it may be its.
+        others.lock().unwrap().push(serde_json::json!({
+            "pane_id": "p3", "terminal_id": "t3", "workspace_id": "w1", "tab_id": "tab2",
+            "agent": "codex", "cwd": work,
+        }));
+        ago(&mut home);
+        assert!(home.poll().is_empty(), "maybe the other agent's");
+        assert_eq!(home.chat().source.id, "c-old");
+        others.lock().unwrap().clear();
+        ago(&mut home);
+        assert_eq!(items_of(&home.poll()), ["c-new"]);
+        let source = &home.chat().source;
+        assert_eq!((source.id.as_str(), source.guessed), ("c-new", true));
+        child.kill().ok();
+        child.wait().ok();
         let _ = std::fs::remove_file(&socket);
     }
 }

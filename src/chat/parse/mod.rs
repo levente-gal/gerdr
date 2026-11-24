@@ -587,12 +587,12 @@ fn more(lines: usize) -> String {
 /// row with its `parts`, or a `session_message` row, its JSON columns as
 /// what they hold), Cursor's `store.db` messages as
 /// `ai_work::usage::cursor_messages` gives them. Other agents' have none.
-pub fn snapshot(agent: AgentKind, rows: &[Value]) -> Vec<Item> {
+pub fn snapshot<'a>(agent: AgentKind, rows: impl IntoIterator<Item = &'a Value>) -> Vec<Item> {
     let mut reader = Reader::new(agent);
     match agent {
-        AgentKind::OpenCode => rows.iter().for_each(|row| reader.opencode_row(row)),
+        AgentKind::OpenCode => rows.into_iter().for_each(|row| reader.opencode_row(row)),
         AgentKind::Cursor => {
-            (rows.iter().enumerate()).for_each(|(n, row)| reader.cursor_row(n, row))
+            (rows.into_iter().enumerate()).for_each(|(n, row)| reader.cursor_row(n, row))
         }
         _ => {}
     }

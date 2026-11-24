@@ -193,8 +193,10 @@ impl Gerdr {
                 for ask in settled {
                     self.live_answer(&ask, AskReply::Pass);
                 }
-                if let Some(chat) = chat_mut(&mut self.workspaces, &pane) {
-                    chat.live.hear(&what, event.at_ms);
+                if let Some(chat) = chat_mut(&mut self.workspaces, &pane)
+                    && chat.live.hear(&what, event.at_ms)
+                {
+                    chat.items = chat.live.timed(chat.items.clone());
                 }
             }
         }
