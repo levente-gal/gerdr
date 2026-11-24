@@ -635,7 +635,7 @@ impl StatsPanel {
     /// Put the list where its scrollbar's thumb was dragged: `pos` rows
     /// (in pixels) down, `page` rows shown.
     pub fn scroll_to(&mut self, pos: f64, page: usize, now: u64) {
-        let row = (pos / chrome::STATS_ROW as f64).round() as isize;
+        let row = (pos / chrome::stats_row() as f64).round() as isize;
         let by = row - self.first as isize;
         self.scroll_by(by, page, now);
     }
@@ -1905,7 +1905,7 @@ impl Gerdr {
         if self.overlays.ai_stats.is_none() {
             return;
         }
-        let rows = self.motion_rows(motion, chrome::STATS_ROW as f64);
+        let rows = self.motion_rows(motion, chrome::stats_row() as f64);
         let page = self.ai_stats_page();
         if let Some(panel) = self.overlays.ai_stats.as_mut() {
             panel.scroll_by(rows, page, crate::clock::now_secs());
@@ -2686,9 +2686,9 @@ mod tests {
                 .collect();
             Some(Ok(v))
         });
-        panel.scroll_to(12.0 * chrome::STATS_ROW as f64, 10, NOW);
+        panel.scroll_to(12.0 * chrome::stats_row() as f64, 10, NOW);
         assert_eq!(panel.first, 12);
-        panel.scroll_to(0.4 * chrome::STATS_ROW as f64, 10, NOW);
+        panel.scroll_to(0.4 * chrome::stats_row() as f64, 10, NOW);
         assert_eq!(panel.first, 0);
     }
 

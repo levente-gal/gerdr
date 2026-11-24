@@ -3,9 +3,9 @@
 //! to do about it.
 
 use super::{
-    ButtonStyle, DIALOG_WIDTH, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE, POPUP_RADIUS, Painter,
-    Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE,
-    Rect, Rgb, SHADOW, band, dialog_buttons, field_text, phys,
+    ButtonStyle, DIALOG_WIDTH, FieldSpot, POPUP_RADIUS, Painter, Palette, QUIT_BUTTON_GAP,
+    QUIT_LINE_GAP, QUIT_PADDING, Rect, Rgb, SHADOW, band, dialog_buttons, field_text, font_size,
+    label_font_size, phys, quit_body, quit_button, quit_title,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -83,14 +83,14 @@ pub struct MachineLayout {
 pub fn machine_layout(view: &MachineView, size: Size<i32, Logical>) -> MachineLayout {
     let lines = i32::from(view.error.is_some()) + i32::from(view.how.is_some());
     let height = 2 * QUIT_PADDING
-        + QUIT_TITLE
+        + quit_title()
         + QUIT_LINE_GAP
-        + QUIT_BODY
+        + quit_body()
         + QUIT_LINE_GAP
-        + 2 * (QUIT_BUTTON + QUIT_LINE_GAP)
-        + lines * (QUIT_BODY + QUIT_LINE_GAP)
+        + 2 * (quit_button() + QUIT_LINE_GAP)
+        + lines * (quit_body() + QUIT_LINE_GAP)
         + ROWS_END
-        + QUIT_BUTTON;
+        + quit_button();
     let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
@@ -107,11 +107,11 @@ pub fn machine_layout(view: &MachineView, size: Size<i32, Logical>) -> MachineLa
         y += h + QUIT_LINE_GAP;
         rect
     };
-    let title = next(QUIT_TITLE);
-    let body = next(QUIT_BODY);
-    let rows = [next(QUIT_BUTTON), next(QUIT_BUTTON)];
-    let error = view.error.is_some().then(|| next(QUIT_BODY));
-    let how = view.how.is_some().then(|| next(QUIT_BODY));
+    let title = next(quit_title());
+    let body = next(quit_body());
+    let rows = [next(quit_button()), next(quit_button())];
+    let error = view.error.is_some().then(|| next(quit_body()));
+    let how = view.how.is_some().then(|| next(quit_body()));
     let split = |row: Rect| {
         let label = Rectangle::new(row.loc, (LABEL_W, row.size.h).into());
         let field = Rectangle::new(
@@ -172,7 +172,7 @@ pub fn machine_field(
     Some(FieldSpot {
         area,
         text: field_text(area, scale),
-        size: FONT_SIZE,
+        size: font_size(),
         line: line.clone(),
     })
 }
@@ -205,12 +205,12 @@ impl Painter {
             &mut c,
             "Connect a machine",
             layout.title,
-            LABEL_FONT_SIZE,
+            label_font_size(),
             p.text,
         );
-        line(&mut c, &view.body, layout.body, FONT_SIZE, p.muted);
+        line(&mut c, &view.body, layout.body, font_size(), p.muted);
         for (label, rect) in ["Address", "Name"].into_iter().zip(layout.labels) {
-            line(&mut c, label, rect, FONT_SIZE, p.muted);
+            line(&mut c, label, rect, font_size(), p.muted);
         }
         let focused = |focus| !view.busy && view.focus == focus;
         self.field(
@@ -237,10 +237,10 @@ impl Painter {
             p,
         );
         if let (Some(rect), Some(error)) = (layout.error, &view.error) {
-            line(&mut c, error, rect, FONT_SIZE, p.error);
+            line(&mut c, error, rect, font_size(), p.error);
         }
         if let (Some(rect), Some(how)) = (layout.how, &view.how) {
-            line(&mut c, how, rect, FONT_SIZE, p.muted);
+            line(&mut c, how, rect, font_size(), p.muted);
         }
 
         // Left of the buttons, the keys besides them; then the buttons, the

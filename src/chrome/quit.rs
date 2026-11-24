@@ -1,10 +1,10 @@
 //! The quit dialog over everything; also asked when switching projects.
 
 use super::{
-    ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, Check, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE,
-    POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
-    QUIT_PADDING, QUIT_TITLE, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW, band, dialog_buttons, mix, phys,
-    rect_px,
+    ButtonStyle, CHECKBOX_GAP, Check, DIALOG_WIDTH, POPUP_RADIUS, Painter, Palette,
+    QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, ROW_HIGHLIGHT_RADIUS, Rect, SHADOW, band,
+    checkbox_row, dialog_buttons, font_size, label_font_size, mix, phys, quit_body, quit_button,
+    quit_title, rect_px,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -101,13 +101,13 @@ fn buttons(switching: bool) -> &'static [&'static str] {
 /// `switching`.
 pub fn quit_layout(size: Size<i32, Logical>, rows: usize, switching: bool) -> QuitLayout {
     let height = 2 * QUIT_PADDING
-        + QUIT_TITLE
+        + quit_title()
         + 2 * QUIT_LINE_GAP
-        + QUIT_BODY
-        + rows as i32 * (CHECKBOX_ROW + ROW_GAP)
+        + quit_body()
+        + rows as i32 * (checkbox_row() + ROW_GAP)
         - ROW_GAP
         + ROWS_END
-        + QUIT_BUTTON;
+        + quit_button();
     let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
@@ -119,14 +119,14 @@ pub fn quit_layout(size: Size<i32, Logical>, rows: usize, switching: bool) -> Qu
     );
     let (x, y) = (panel.loc.x + QUIT_PADDING, panel.loc.y + QUIT_PADDING);
     let inner = width - 2 * QUIT_PADDING;
-    let title = Rectangle::new((x, y).into(), (inner, QUIT_TITLE).into());
-    let body_y = y + QUIT_TITLE + QUIT_LINE_GAP;
-    let body = Rectangle::new((x, body_y).into(), (inner, QUIT_BODY).into());
-    let rows_y = body_y + QUIT_BODY + QUIT_LINE_GAP;
+    let title = Rectangle::new((x, y).into(), (inner, quit_title()).into());
+    let body_y = y + quit_title() + QUIT_LINE_GAP;
+    let body = Rectangle::new((x, body_y).into(), (inner, quit_body()).into());
+    let rows_y = body_y + quit_body() + QUIT_LINE_GAP;
     let rows = (0..rows as i32)
         .map(|i| {
-            let y = rows_y + i * (CHECKBOX_ROW + ROW_GAP);
-            Rectangle::new((x, y).into(), (inner, CHECKBOX_ROW).into())
+            let y = rows_y + i * (checkbox_row() + ROW_GAP);
+            Rectangle::new((x, y).into(), (inner, checkbox_row()).into())
         })
         .collect();
     let buttons = dialog_buttons(panel, buttons(switching));
@@ -173,7 +173,7 @@ impl Painter {
         self.text(
             &mut c,
             &title_text,
-            LABEL_FONT_SIZE,
+            label_font_size(),
             title_x,
             title_end,
             band(title, scale),
@@ -196,7 +196,7 @@ impl Painter {
         self.text(
             &mut c,
             &body_text,
-            FONT_SIZE,
+            font_size(),
             body_x,
             body_end,
             band(body, scale),
@@ -229,7 +229,7 @@ impl Painter {
             let after = self.text(
                 &mut c,
                 &row.label,
-                FONT_SIZE,
+                font_size(),
                 box_end + (CHECKBOX_GAP as f32 * s).round(),
                 end,
                 row_band,
@@ -239,7 +239,7 @@ impl Painter {
             self.text(
                 &mut c,
                 &row.detail,
-                FONT_SIZE,
+                font_size(),
                 after + (DETAIL_GAP as f32 * s).round(),
                 end,
                 row_band,

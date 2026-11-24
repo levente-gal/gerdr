@@ -8,16 +8,16 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::{
-    BUTTON_RADIUS, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT, Density, Dot, FONT_SIZE, LABEL_FONT_SIZE,
-    ListBar, POPUP_RADIUS, Painter, Palette, Rect, SHADOW, SMALL_FONT_SIZE, Thumb, band, dot_shape,
-    hint_spots, hint_strs, icon_sdf, line, measure, mix, phys, physical, rect_px,
+    BUTTON_RADIUS, DIALOG_WIDTH, DOT, Density, Dot, ListBar, POPUP_RADIUS, Painter, Palette, Rect,
+    SHADOW, Thumb, band, detail_font_size, dot_shape, font_size, hint_spots, hint_strs, icon_sdf,
+    label_font_size, line, measure, mix, phys, physical, rect_px, small_font_size,
 };
 
 /// How high the footer is at `density`.
 pub fn status_bar_height(density: Density) -> i32 {
     match density {
-        Density::Comfortable => line(SMALL_FONT_SIZE, 11),
-        Density::Compact => line(SMALL_FONT_SIZE, 7),
+        Density::Comfortable => line(small_font_size(), 11),
+        Density::Compact => line(small_font_size(), 7),
     }
 }
 
@@ -87,7 +87,7 @@ fn count_text(tasks: usize) -> String {
 /// Where the footer's chips and count go on a footer of `size`.
 pub fn footer_layout(view: &FooterView, size: Size<i32, Logical>) -> FooterLayout {
     let h = size.h;
-    let count_w = text_w(&count_text(view.tasks.len()), SMALL_FONT_SIZE) + 2 * CHIP_PAD;
+    let count_w = text_w(&count_text(view.tasks.len()), small_font_size()) + 2 * CHIP_PAD;
     let count = Rectangle::new(
         ((size.w - EDGE - count_w).max(0), 0).into(),
         (count_w, h).into(),
@@ -96,7 +96,7 @@ pub fn footer_layout(view: &FooterView, size: Size<i32, Logical>) -> FooterLayou
     let mut x = EDGE;
     let mut chips = Vec::new();
     for task in &view.tasks {
-        let label = text_w(&task.chip, SMALL_FONT_SIZE).min(CHIP_MAX);
+        let label = text_w(&task.chip, small_font_size()).min(CHIP_MAX);
         let w = CHIP_PAD + DOT + DOT_GAP + label + CHIP_PAD;
         if x + w > end {
             break;
@@ -190,7 +190,7 @@ impl Painter {
             self.text(
                 &mut c,
                 &task.chip,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 start,
                 end,
                 band(*chip, scale),
@@ -208,7 +208,14 @@ impl Painter {
         } else {
             p.muted
         };
-        self.centered(&mut c, &count, SMALL_FONT_SIZE, layout.count, scale, color);
+        self.centered(
+            &mut c,
+            &count,
+            small_font_size(),
+            layout.count,
+            scale,
+            color,
+        );
         c.into_buffer(true)
     }
 }
@@ -218,19 +225,29 @@ const PANEL_WIDTH: i32 = DIALOG_WIDTH;
 /// Room around its edges, and between it and the footer.
 const PANEL_PAD: i32 = 12;
 const PANEL_MARGIN: i32 = 6;
-const TITLE_H: i32 = line(LABEL_FONT_SIZE, 5);
+fn title_h() -> i32 {
+    line(label_font_size(), 5)
+}
 const TITLE_GAP: i32 = 8;
-const ROW_H: i32 = line(FONT_SIZE, 15) + line(DETAIL_FONT_SIZE, 4);
+fn row_h() -> i32 {
+    line(font_size(), 15) + line(detail_font_size(), 4)
+}
 const ROW_GAP: i32 = 2;
-const EMPTY_H: i32 = line(FONT_SIZE, 15);
-const BUTTON_H: i32 = line(FONT_SIZE, 11);
+fn empty_h() -> i32 {
+    line(font_size(), 15)
+}
+fn button_h() -> i32 {
+    line(font_size(), 11)
+}
 const BUTTON_PAD: i32 = 10;
 const BUTTON_GAP: i32 = 6;
 /// A row's dot column and the gap after it.
 const ROW_INSET: i32 = 8;
 const ROW_DOT: i32 = 14;
 /// The key hints' row under the tasks, and the gap above it.
-const HINTS_H: i32 = line(SMALL_FONT_SIZE, 11);
+fn hints_h() -> i32 {
+    line(small_font_size(), 11)
+}
 const HINTS_GAP: i32 = 6;
 /// The scrollbar's room right of the rows, when not all fit.
 const BAR_ROOM: i32 = 8;
@@ -282,15 +299,15 @@ pub struct TasksLayout {
 
 /// How wide a button labelled `label` is.
 fn button_w(label: &str) -> i32 {
-    text_w(label, FONT_SIZE) + 2 * BUTTON_PAD
+    text_w(label, font_size()) + 2 * BUTTON_PAD
 }
 
 /// How many of `rows` tasks fit on an output of `output` over a footer
 /// `footer` high: at least one.
 pub fn tasks_shown(rows: usize, output: Size<i32, Logical>, footer: i32) -> usize {
-    let fixed = 2 * PANEL_MARGIN + 2 * PANEL_PAD + TITLE_H + TITLE_GAP + HINTS_GAP + HINTS_H;
+    let fixed = 2 * PANEL_MARGIN + 2 * PANEL_PAD + title_h() + TITLE_GAP + HINTS_GAP + hints_h();
     let room = output.h - footer - fixed + ROW_GAP;
-    let fit = (room / (ROW_H + ROW_GAP)).max(1) as usize;
+    let fit = (room / (row_h() + ROW_GAP)).max(1) as usize;
     rows.min(fit)
 }
 
@@ -302,25 +319,25 @@ pub fn tasks_layout(view: &TasksView, output: Size<i32, Logical>, footer: i32) -
     let shown = tasks_shown(total, output, footer);
     let first = view.first.min(total - shown);
     let rows_h = if total == 0 {
-        EMPTY_H
+        empty_h()
     } else {
-        shown as i32 * (ROW_H + ROW_GAP) - ROW_GAP
+        shown as i32 * (row_h() + ROW_GAP) - ROW_GAP
     };
-    let height = 2 * PANEL_PAD + TITLE_H + TITLE_GAP + rows_h + HINTS_GAP + HINTS_H;
+    let height = 2 * PANEL_PAD + title_h() + TITLE_GAP + rows_h + HINTS_GAP + hints_h();
     let width = PANEL_WIDTH.min(output.w - 2 * PANEL_MARGIN).max(1);
     let y = (output.h - footer - PANEL_MARGIN - height).max(PANEL_MARGIN);
     let panel = Rectangle::new((PANEL_MARGIN, y).into(), (width, height).into());
     let x = panel.loc.x + PANEL_PAD;
     let inner = width - 2 * PANEL_PAD;
-    let title = Rectangle::new((x, y + PANEL_PAD).into(), (inner, TITLE_H).into());
-    let rows_y = title.loc.y + TITLE_H + TITLE_GAP;
+    let title = Rectangle::new((x, y + PANEL_PAD).into(), (inner, title_h()).into());
+    let rows_y = title.loc.y + title_h() + TITLE_GAP;
     let scrolls = shown < total;
     let row_w = if scrolls { inner - BAR_ROOM } else { inner };
     let rows: Vec<Rect> = (0..shown as i32)
         .map(|i| {
             Rectangle::new(
-                (x, rows_y + i * (ROW_H + ROW_GAP)).into(),
-                (row_w, ROW_H).into(),
+                (x, rows_y + i * (row_h() + ROW_GAP)).into(),
+                (row_w, row_h()).into(),
             )
         })
         .collect();
@@ -335,7 +352,7 @@ pub fn tasks_layout(view: &TasksView, output: Size<i32, Logical>, footer: i32) -
         .zip(&view.rows[first..])
         .map(|(row, task)| {
             let mut right = row.loc.x + row.size.w - ROW_INSET;
-            let by = row.loc.y + (ROW_H - BUTTON_H) / 2;
+            let by = row.loc.y + (row_h() - button_h()) / 2;
             let mut rects: Vec<Rect> = task
                 .buttons
                 .iter()
@@ -343,7 +360,7 @@ pub fn tasks_layout(view: &TasksView, output: Size<i32, Logical>, footer: i32) -
                 .map(|label| {
                     let w = button_w(label);
                     right -= w;
-                    let rect = Rectangle::new((right, by).into(), (w, BUTTON_H).into());
+                    let rect = Rectangle::new((right, by).into(), (w, button_h()).into());
                     right -= BUTTON_GAP;
                     rect
                 })
@@ -354,7 +371,7 @@ pub fn tasks_layout(view: &TasksView, output: Size<i32, Logical>, footer: i32) -
         .collect();
     let hints_rect = Rectangle::new(
         (x, rows_y + rows_h + HINTS_GAP).into(),
-        (inner, HINTS_H).into(),
+        (inner, hints_h()).into(),
     );
     TasksLayout {
         panel,
@@ -420,7 +437,7 @@ impl Painter {
         self.text(
             &mut c,
             view.title,
-            LABEL_FONT_SIZE,
+            label_font_size(),
             tx,
             tend,
             band(title, scale),
@@ -442,14 +459,14 @@ impl Painter {
         );
         if view.rows.is_empty() {
             let empty = Rectangle::new(
-                (title.loc.x, title.loc.y + TITLE_H + TITLE_GAP).into(),
-                (title.size.w, EMPTY_H).into(),
+                (title.loc.x, title.loc.y + title_h() + TITLE_GAP).into(),
+                (title.size.w, empty_h()).into(),
             );
             let (x, end) = phys(empty, scale);
             self.text(
                 &mut c,
                 "Nothing runs in the background",
-                FONT_SIZE,
+                font_size(),
                 x,
                 end,
                 band(empty, scale),
@@ -501,24 +518,24 @@ impl Painter {
             let at = |top: i32, h: i32| {
                 Rectangle::new((text_x, top).into(), ((text_end - text_x).max(1), h).into())
             };
-            let first = at(row.loc.y + 6, line(FONT_SIZE, 5));
+            let first = at(row.loc.y + 6, line(font_size(), 5));
             let (x, end) = phys(first, scale);
             self.text(
                 &mut c,
                 &task.title,
-                FONT_SIZE,
+                font_size(),
                 x,
                 end,
                 band(first, scale),
                 scale,
                 p.text,
             );
-            let second = at(first.loc.y + first.size.h, line(DETAIL_FONT_SIZE, 4));
+            let second = at(first.loc.y + first.size.h, line(detail_font_size(), 4));
             let (x, end) = phys(second, scale);
             self.text(
                 &mut c,
                 &task.detail,
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 x,
                 end,
                 band(second, scale),

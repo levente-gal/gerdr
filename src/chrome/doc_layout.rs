@@ -9,7 +9,7 @@ use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc};
 
 use smithay::utils::{Logical, Point, Rectangle};
 
-use super::features::{BODY_LINE, Font, Ink, SMALL_LINE, StageMark, stage_dot, width_of};
+use super::features::{Font, Ink, StageMark, body_line, small_line, stage_dot, width_of};
 use super::glyphs::{self, Face};
 use super::{Canvas, Painter, Palette, Rect, Rgb, band, check, icon_sdf, rect_px};
 use crate::md_blocks::{DocBlock, Inline, ItemMark, Styled, spans};
@@ -244,34 +244,34 @@ impl Column {
         let top = self.y;
         self.indented(indent, |s| {
             if mark != ItemMark::Under {
-                let spot = Rectangle::new((s.x, s.y).into(), (gutter, BODY_LINE).into());
+                let spot = Rectangle::new((s.x, s.y).into(), (gutter, body_line()).into());
                 s.pieces.push((spot, DocPiece::ItemMark(mark)));
             }
             s.indented(gutter, |s| {
-                s.text(text, Font::Body, Ink::Text, false, BODY_LINE);
+                s.text(text, Font::Body, Ink::Text, false, body_line());
             });
         });
         // A mark with no words of its own still takes its line.
-        self.y = self.y.max(top + BODY_LINE);
+        self.y = self.y.max(top + body_line());
     }
 
     /// A file's block, from here down.
     fn block(&mut self, block: &DocBlock) {
         match block {
             DocBlock::Heading { level: 1, text } => {
-                self.text(text, Font::Heading, Ink::Text, true, BODY_LINE + 6);
+                self.text(text, Font::Heading, Ink::Text, true, body_line() + 6);
             }
             DocBlock::Heading { text, .. } => {
-                self.text(text, Font::Body, Ink::Text, true, BODY_LINE);
+                self.text(text, Font::Body, Ink::Text, true, body_line());
             }
-            DocBlock::Para(text) => self.text(text, Font::Body, Ink::Text, false, BODY_LINE),
+            DocBlock::Para(text) => self.text(text, Font::Body, Ink::Text, false, body_line()),
             DocBlock::Note(text) => {
                 self.text(
                     &text.as_str().into(),
                     Font::Body,
                     Ink::Muted,
                     false,
-                    BODY_LINE,
+                    body_line(),
                 );
             }
             DocBlock::Item { depth, mark, text } => self.item(*depth, *mark, text),
@@ -280,14 +280,14 @@ impl Column {
                     |s: &mut Column| s.put(DOC_CODE_PAD / 2, DocPiece::CodeLine(String::new()));
                 edge(self);
                 for code in lines {
-                    self.put(SMALL_LINE, DocPiece::CodeLine(code.clone()));
+                    self.put(small_line(), DocPiece::CodeLine(code.clone()));
                 }
                 edge(self);
             }
             DocBlock::Quote(text) => {
                 let top = self.y;
                 self.indented(DOC_QUOTE, |s| {
-                    s.text(text, Font::Body, Ink::Muted, false, BODY_LINE);
+                    s.text(text, Font::Body, Ink::Muted, false, body_line());
                 });
                 let bar =
                     Rectangle::new((self.x, top).into(), (DOC_QUOTE_BAR, self.y - top).into());
@@ -295,7 +295,7 @@ impl Column {
             }
             DocBlock::Table(rows) => {
                 for (i, row) in rows.iter().enumerate() {
-                    self.text(row, Font::Small, Ink::Text, i == 0, SMALL_LINE);
+                    self.text(row, Font::Small, Ink::Text, i == 0, small_line());
                 }
             }
             DocBlock::Rule => {
@@ -346,13 +346,14 @@ struct DocMemo {
 const DOC_MEMOS: usize = 2;
 
 thread_local! {
-    static DOC_MEMO: RefCell<Vec<DocMemo>> = const { RefCell::new(Vec::new()) };
+    static DOC_MEMO: RefCell<(u32, Vec<DocMemo>)> = const { RefCell::new((0, Vec::new())) };
 }
 
 /// `blocks` laid out for a column `w` wide: the pieces from `(0, 0)`, and
 /// how high they all are.
 pub(super) fn laid_out(blocks: &Arc<Vec<DocBlock>>, w: i32) -> (Rc<Vec<(Rect, DocPiece)>>, i32) {
     DOC_MEMO.with_borrow_mut(|memo| {
+        let memo = super::sized(memo);
         let found = (memo.iter()).position(|m| m.w == w && Arc::ptr_eq(&m.blocks, blocks));
         let entry = match found {
             Some(i) => memo.remove(i),
@@ -437,7 +438,7 @@ impl Painter {
             }
             DocPiece::ItemMark(mark) => {
                 let spot = Rectangle::new(
-                    (rect.loc.x, rect.loc.y + (BODY_LINE - 14) / 2).into(),
+                    (rect.loc.x, rect.loc.y + (body_line() - 14) / 2).into(),
                     (14, 14).into(),
                 );
                 match mark {

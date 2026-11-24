@@ -1,12 +1,12 @@
 //! The welcome screen covering everything while no project is shown.
 
 use super::{
-    BUTTON_RADIUS, CARET_WIDTH, Canvas, FONT_SIZE, FieldSpot, GREETING_FONT_SIZE, GREETING_HEIGHT,
-    HELP_MARGIN, HINTS_HEIGHT, LABEL_FONT_SIZE, ListBar, NOTE_GAP, NOTE_HEIGHT, PADDING, Painter,
-    Palette, ROW_RADIUS, Rect, SMALL_FONT_SIZE, STATUS_GAP, STATUS_WIDTH, SUBTITLE_HEIGHT, Thumb,
-    WELCOME_BUTTON, WELCOME_BUTTON_WIDTH, WELCOME_GAP, WELCOME_LABEL, WELCOME_MIDDLE, WELCOME_ROWS,
-    WELCOME_WIDTH, band, coverage, field_text, focus_ring, gutter_track, hint_at, hint_spots,
-    hint_strs, icon_sdf, line, mix, phys, physical, plus, rect_px,
+    BUTTON_RADIUS, CARET_WIDTH, Canvas, FieldSpot, HELP_MARGIN, ListBar, NOTE_GAP, PADDING,
+    Painter, Palette, ROW_RADIUS, Rect, STATUS_GAP, STATUS_WIDTH, Thumb, WELCOME_BUTTON_WIDTH,
+    WELCOME_GAP, WELCOME_MIDDLE, WELCOME_ROWS, WELCOME_WIDTH, band, coverage, field_text,
+    focus_ring, font_size, greeting_font_size, greeting_height, gutter_track, hint_at, hint_spots,
+    hint_strs, hints_height, icon_sdf, label_font_size, line, mix, note_height, phys, physical,
+    plus, rect_px, small_font_size, subtitle_height, welcome_button, welcome_label_px,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -14,16 +14,24 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// A project card: its name over its path and age (a row and the second
 /// line), and the gap to the next.
-pub(super) const WELCOME_CARD: i32 = CARD_DETAIL_TOP + CARD_DETAIL_HEIGHT + 6;
+pub(super) fn welcome_card() -> i32 {
+    card_detail_top() + card_detail_height() + 6
+}
 pub(super) const WELCOME_CARD_GAP: i32 = 6;
 /// The gap between the button (or the note under it) and the key hints.
 pub(super) const HINTS_GAP: i32 = 24;
 /// Where a card's two lines sit: the name's band and the detail's, from
 /// the card's top.
 const CARD_NAME_TOP: i32 = 10;
-const CARD_NAME_HEIGHT: i32 = line(LABEL_FONT_SIZE, 5);
-const CARD_DETAIL_TOP: i32 = CARD_NAME_TOP + CARD_NAME_HEIGHT;
-const CARD_DETAIL_HEIGHT: i32 = line(SMALL_FONT_SIZE, 5);
+fn card_name_height() -> i32 {
+    line(label_font_size(), 5)
+}
+fn card_detail_top() -> i32 {
+    CARD_NAME_TOP + card_name_height()
+}
+fn card_detail_height() -> i32 {
+    line(small_font_size(), 5)
+}
 /// How far right of the cards their scrollbar stands, besides the gutter's
 /// own gap.
 const WELCOME_BAR_GAP: i32 = 4;
@@ -137,45 +145,48 @@ pub fn welcome_layout(size: Size<i32, Logical>, parts: WelcomeParts) -> WelcomeL
     let w = WELCOME_WIDTH.min(size.w - 2 * HELP_MARGIN).max(1);
     let x = (size.w - w) / 2;
     let rect = |y: i32, h: i32| Rectangle::new((x, y).into(), (w, h).into());
-    let bar = rect((size.h - HELP_MARGIN - HINTS_HEIGHT).max(0), HINTS_HEIGHT);
+    let bar = rect(
+        (size.h - HELP_MARGIN - hints_height()).max(0),
+        hints_height(),
+    );
     let list_h = list_height(rows);
-    let note_h = if note { NOTE_GAP + NOTE_HEIGHT } else { 0 };
-    let block = WELCOME_FIXED - (NOTE_GAP + NOTE_HEIGHT) + note_h + list_h;
+    let note_h = if note { NOTE_GAP + note_height() } else { 0 };
+    let block = welcome_fixed() - (NOTE_GAP + note_height()) + note_h + list_h;
     let middle = (size.h as f64 * WELCOME_MIDDLE).round() as i32;
     let top = (middle - block / 2)
         .min(bar.loc.y - HELP_MARGIN - block)
         .max(HELP_MARGIN.min(size.h / 2));
 
-    let greeting = rect(top, GREETING_HEIGHT);
-    let subtitle = rect(greeting.loc.y + GREETING_HEIGHT, SUBTITLE_HEIGHT);
+    let greeting = rect(top, greeting_height());
+    let subtitle = rect(greeting.loc.y + greeting_height(), subtitle_height());
     let label = rect(
-        subtitle.loc.y + SUBTITLE_HEIGHT + WELCOME_GAP,
-        WELCOME_LABEL,
+        subtitle.loc.y + subtitle_height() + WELCOME_GAP,
+        welcome_label_px(),
     );
-    let list = rect(label.loc.y + WELCOME_LABEL, list_h);
+    let list = rect(label.loc.y + welcome_label_px(), list_h);
     let row_rects = (0..rows as i32)
         .map(|i| {
             rect(
-                list.loc.y + i * (WELCOME_CARD + WELCOME_CARD_GAP),
-                WELCOME_CARD,
+                list.loc.y + i * (welcome_card() + WELCOME_CARD_GAP),
+                welcome_card(),
             )
         })
         .collect();
     let button_y = list.loc.y + list_h + WELCOME_GAP;
     let button = if naming {
-        rect(button_y, WELCOME_BUTTON)
+        rect(button_y, welcome_button())
     } else {
         let bw = WELCOME_BUTTON_WIDTH.min(w);
         Rectangle::new(
             ((size.w - bw) / 2, button_y).into(),
-            (bw, WELCOME_BUTTON).into(),
+            (bw, welcome_button()).into(),
         )
     };
     let note = rect(
-        button_y + WELCOME_BUTTON + if note { NOTE_GAP } else { 0 },
-        if note { NOTE_HEIGHT } else { 0 },
+        button_y + welcome_button() + if note { NOTE_GAP } else { 0 },
+        if note { note_height() } else { 0 },
     );
-    let hints = rect(note.loc.y + note.size.h + HINTS_GAP, HINTS_HEIGHT);
+    let hints = rect(note.loc.y + note.size.h + HINTS_GAP, hints_height());
     WelcomeLayout {
         greeting,
         subtitle,
@@ -253,26 +264,29 @@ pub fn welcome_thumb(view: &WelcomeView, layout: &WelcomeLayout) -> Option<Thumb
 /// How high the list of `rows` cards is.
 fn list_height(rows: usize) -> i32 {
     let rows = rows as i32;
-    rows * WELCOME_CARD + (rows - 1).max(0) * WELCOME_CARD_GAP
+    rows * welcome_card() + (rows - 1).max(0) * WELCOME_CARD_GAP
 }
 
 /// The welcome screen's height above the quit bar without its rows, with
 /// a note.
-pub(super) const WELCOME_FIXED: i32 = GREETING_HEIGHT
-    + SUBTITLE_HEIGHT
-    + WELCOME_GAP
-    + WELCOME_LABEL
-    + WELCOME_GAP
-    + WELCOME_BUTTON
-    + NOTE_GAP
-    + NOTE_HEIGHT
-    + HINTS_GAP
-    + HINTS_HEIGHT;
+pub(super) fn welcome_fixed() -> i32 {
+    greeting_height()
+        + subtitle_height()
+        + WELCOME_GAP
+        + welcome_label_px()
+        + WELCOME_GAP
+        + welcome_button()
+        + NOTE_GAP
+        + note_height()
+        + HINTS_GAP
+        + hints_height()
+}
 
 /// How many project rows fit on the welcome screen of an output of `size`.
 pub fn welcome_page(size: Size<i32, Logical>) -> usize {
-    let room = size.h - WELCOME_FIXED - 3 * HELP_MARGIN - HINTS_HEIGHT;
-    ((room + WELCOME_CARD_GAP) / (WELCOME_CARD + WELCOME_CARD_GAP)).clamp(1, WELCOME_ROWS) as usize
+    let room = size.h - welcome_fixed() - 3 * HELP_MARGIN - hints_height();
+    ((room + WELCOME_CARD_GAP) / (welcome_card() + WELCOME_CARD_GAP)).clamp(1, WELCOME_ROWS)
+        as usize
 }
 
 /// The welcome screen's text field with the keyboard, on an output of
@@ -286,7 +300,7 @@ pub fn welcome_field(
     let line = view.naming.clone()?;
     let area = welcome_layout(size, WelcomeParts::of(view)).button;
     Some(FieldSpot {
-        size: FONT_SIZE,
+        size: font_size(),
         area,
         text: field_text(area, scale),
         line,
@@ -324,7 +338,7 @@ impl Painter {
         self.centered(
             &mut c,
             &view.greeting,
-            GREETING_FONT_SIZE,
+            greeting_font_size(),
             layout.greeting,
             scale,
             p.text,
@@ -332,7 +346,7 @@ impl Painter {
         self.centered(
             &mut c,
             &view.subtitle,
-            FONT_SIZE,
+            font_size(),
             layout.subtitle,
             scale,
             p.muted,
@@ -342,9 +356,9 @@ impl Painter {
         // so far, with its caret, at its right.
         let label = welcome_label(view);
         let label_size = if view.rows.is_empty() {
-            FONT_SIZE
+            font_size()
         } else {
-            SMALL_FONT_SIZE
+            small_font_size()
         };
         self.centered(
             &mut c,
@@ -359,7 +373,7 @@ impl Painter {
             let label_end = (left + right + self.text_width(label, label_size, scale)) / 2.0;
             let right = right - PADDING * s;
             let end = right - (px(CARET_WIDTH).max(1) + px(1)) as f32;
-            let width = self.text_width(&view.query, FONT_SIZE, scale);
+            let width = self.text_width(&view.query, font_size(), scale);
             let start = (end - width).max(label_end + px(16) as f32);
             self.edit_line(
                 &mut c,
@@ -368,7 +382,7 @@ impl Painter {
                 (start, end),
                 band(layout.label, scale),
                 true,
-                FONT_SIZE,
+                font_size(),
                 scale,
                 p,
             );
@@ -399,7 +413,7 @@ impl Painter {
                 // A "+" and the label, centred together.
                 let label = "New project";
                 let (arm, gap) = ((5.0 * s).round(), (8.0 * s).round());
-                let content = 2.0 * arm + gap + self.text_width(label, FONT_SIZE, scale);
+                let content = 2.0 * arm + gap + self.text_width(label, font_size(), scale);
                 let start = (x + (w - content) / 2.0).round();
                 let (cx, cy) = (start + arm, y + h / 2.0);
                 let reach = (arm + 2.0 * s).ceil() as i32;
@@ -414,7 +428,7 @@ impl Painter {
                 self.text(
                     &mut c,
                     label,
-                    FONT_SIZE,
+                    font_size(),
                     start + 2.0 * arm + gap,
                     x + w,
                     band(button, scale),
@@ -425,7 +439,14 @@ impl Painter {
         }
 
         if let Some(note) = &view.note {
-            self.centered(&mut c, note, SMALL_FONT_SIZE, layout.note, scale, p.warning);
+            self.centered(
+                &mut c,
+                note,
+                small_font_size(),
+                layout.note,
+                scale,
+                p.warning,
+            );
         }
 
         let (spots, quit) = hint_layout(view, &layout);
@@ -493,7 +514,7 @@ impl Painter {
             self.text(
                 c,
                 &format!("Press Delete again to forget {}", row.name),
-                FONT_SIZE,
+                font_size(),
                 name_x,
                 right,
                 band(rect, scale),
@@ -520,13 +541,13 @@ impl Painter {
             .filter_map(|&h| h.checked_sub(name_len + 1))
             .collect();
         let top = px(rect.loc.y);
-        let name_band = (top + px(CARD_NAME_TOP), px(CARD_NAME_HEIGHT));
-        let detail_band = (top + px(CARD_DETAIL_TOP), px(CARD_DETAIL_HEIGHT));
+        let name_band = (top + px(CARD_NAME_TOP), px(card_name_height()));
+        let detail_band = (top + px(card_detail_top()), px(card_detail_height()));
         let after = self.marked(
             c,
             &row.name,
             &name_hits,
-            LABEL_FONT_SIZE,
+            label_font_size(),
             name_x,
             right,
             name_band,
@@ -537,7 +558,7 @@ impl Painter {
             self.text(
                 c,
                 "current",
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 after + (8.0 * s).round(),
                 right,
                 name_band,
@@ -549,7 +570,7 @@ impl Painter {
             c,
             &row.detail,
             &detail_hits,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             name_x,
             right,
             detail_band,
@@ -560,7 +581,7 @@ impl Painter {
             self.text(
                 c,
                 &format!(" · {}", row.ago),
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 after,
                 right,
                 detail_band,
@@ -574,8 +595,8 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{
-        HINTS_GAP, ListBar, ProjectRow, WELCOME_CARD, WELCOME_CARD_GAP, WelcomeHit, WelcomeParts,
-        WelcomeView, running_label, welcome_label, welcome_layout, welcome_mark, welcome_page,
+        HINTS_GAP, ListBar, ProjectRow, WELCOME_CARD_GAP, WelcomeHit, WelcomeParts, WelcomeView,
+        running_label, welcome_card, welcome_label, welcome_layout, welcome_mark, welcome_page,
         welcome_thumb,
     };
     use crate::chrome::{
@@ -661,7 +682,7 @@ mod tests {
                         .windows(2)
                         .all(|r| r[0].loc.y + r[0].size.h + WELCOME_CARD_GAP == r[1].loc.y)
                 );
-                assert!(l.rows.iter().all(|r| r.size.h == WELCOME_CARD));
+                assert!(l.rows.iter().all(|r| r.size.h == welcome_card()));
                 assert!(l.subtitle.loc.y >= l.greeting.loc.y + l.greeting.size.h);
                 assert!(l.label.loc.y + l.label.size.h <= l.list.loc.y);
                 assert!(l.button.loc.y >= l.list.loc.y + l.list.size.h);

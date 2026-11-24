@@ -3,9 +3,9 @@
 //! (see `crate::checkout`).
 
 use super::{
-    ButtonStyle, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE, POPUP_RADIUS, Painter, Palette,
-    QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, SHADOW,
-    band, dialog_buttons, hint_strs, line, phys,
+    ButtonStyle, DIALOG_WIDTH, POPUP_RADIUS, Painter, Palette, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
+    QUIT_PADDING, Rect, SHADOW, band, dialog_buttons, font_size, hint_strs, label_font_size, line,
+    phys, quit_body, quit_button, quit_title,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -14,7 +14,9 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 const BUTTONS: [&str; 3] = ["Cancel", "Leave behind", "Bring along"];
 /// A file's row, the gap between rows, and the room between the last and
 /// the buttons.
-const ROW: i32 = line(FONT_SIZE, 9);
+fn row_px() -> i32 {
+    line(font_size(), 9)
+}
 const ROW_GAP: i32 = 2;
 const ROWS_END: i32 = 16;
 /// How far a row's text sits in from the row's left edge.
@@ -73,11 +75,12 @@ pub struct CheckoutLayout {
 /// Where the checkout dialog's parts go, with `rows` files, centred on an
 /// output of `size`: as many rows as fit.
 pub fn checkout_layout(size: Size<i32, Logical>, rows: usize) -> CheckoutLayout {
-    let fixed = 2 * QUIT_PADDING + QUIT_TITLE + 2 * QUIT_LINE_GAP + QUIT_BODY + ROWS_END - ROW_GAP
-        + QUIT_BUTTON;
-    let fit = ((size.h - 2 * MARGIN - fixed) / (ROW + ROW_GAP)).max(1) as usize;
+    let fixed = 2 * QUIT_PADDING + quit_title() + 2 * QUIT_LINE_GAP + quit_body() + ROWS_END
+        - ROW_GAP
+        + quit_button();
+    let fit = ((size.h - 2 * MARGIN - fixed) / (row_px() + ROW_GAP)).max(1) as usize;
     let shown = rows.min(fit).min(MAX_ROWS);
-    let height = fixed + shown as i32 * (ROW + ROW_GAP);
+    let height = fixed + shown as i32 * (row_px() + ROW_GAP);
     let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
@@ -89,14 +92,14 @@ pub fn checkout_layout(size: Size<i32, Logical>, rows: usize) -> CheckoutLayout 
     );
     let (x, y) = (panel.loc.x + QUIT_PADDING, panel.loc.y + QUIT_PADDING);
     let inner = width - 2 * QUIT_PADDING;
-    let title = Rectangle::new((x, y).into(), (inner, QUIT_TITLE).into());
-    let body_y = y + QUIT_TITLE + QUIT_LINE_GAP;
-    let body = Rectangle::new((x, body_y).into(), (inner, QUIT_BODY).into());
-    let rows_y = body_y + QUIT_BODY + QUIT_LINE_GAP;
+    let title = Rectangle::new((x, y).into(), (inner, quit_title()).into());
+    let body_y = y + quit_title() + QUIT_LINE_GAP;
+    let body = Rectangle::new((x, body_y).into(), (inner, quit_body()).into());
+    let rows_y = body_y + quit_body() + QUIT_LINE_GAP;
     let rows = (0..shown as i32)
         .map(|i| {
-            let y = rows_y + i * (ROW + ROW_GAP);
-            Rectangle::new((x, y).into(), (inner, ROW).into())
+            let y = rows_y + i * (row_px() + ROW_GAP);
+            Rectangle::new((x, y).into(), (inner, row_px()).into())
         })
         .collect();
     let buttons = dialog_buttons(panel, &BUTTONS);
@@ -152,7 +155,7 @@ impl Painter {
         self.text(
             &mut c,
             &format!("Check out {} in {}?", view.branch, view.main),
-            LABEL_FONT_SIZE,
+            label_font_size(),
             title_x,
             title_end,
             band(title, scale),
@@ -179,7 +182,7 @@ impl Painter {
         self.text(
             &mut c,
             &body_text,
-            FONT_SIZE,
+            font_size(),
             body_x,
             body_end,
             band(body, scale),
@@ -201,7 +204,7 @@ impl Painter {
                 self.text(
                     &mut c,
                     &format!("+{left} more"),
-                    FONT_SIZE,
+                    font_size(),
                     x,
                     end,
                     row_band,
@@ -213,7 +216,7 @@ impl Painter {
             let after = self.name_first(
                 &mut c,
                 &row.path,
-                FONT_SIZE,
+                font_size(),
                 (x, end),
                 row_band,
                 scale,
@@ -226,7 +229,7 @@ impl Painter {
                 pen = self.text(
                     &mut c,
                     &tag,
-                    FONT_SIZE,
+                    font_size(),
                     pen + gap,
                     end,
                     row_band,
@@ -238,7 +241,7 @@ impl Painter {
                 self.text(
                     &mut c,
                     &format!("stays: in {} already", view.main),
-                    FONT_SIZE,
+                    font_size(),
                     pen + gap,
                     end,
                     row_band,

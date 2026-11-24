@@ -7,10 +7,10 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::{
-    ButtonStyle, Canvas, DETAIL_FONT_SIZE, DOT, Dot, FONT_SIZE, HELP_MARGIN, HELP_PADDING,
-    HELP_TITLE_HEIGHT, HINTS_HEIGHT, LABEL_FONT_SIZE, ListBar, POPUP_RADIUS, Painter, Palette,
-    QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band,
-    button_width, cross, dot_shape, hint_spots, hint_strs, icon_sdf, line, measure, phys, rect_px,
+    ButtonStyle, Canvas, DOT, Dot, HELP_MARGIN, HELP_PADDING, ListBar, POPUP_RADIUS, Painter,
+    Palette, QUIT_BUTTON_GAP, QUIT_LINE_GAP, Rect, Rgb, SHADOW, Thumb, band, button_width, cross,
+    detail_font_size, dot_shape, font_size, help_title_height, hint_spots, hint_strs, hints_height,
+    icon_sdf, label_font_size, line, measure, phys, quit_button, rect_px, small_font_size,
 };
 
 /// How wide the panel is, at the most; it shrinks with the output, keeping
@@ -19,7 +19,9 @@ const PANEL_WIDTH: i32 = 860;
 const MARGIN: i32 = HELP_MARGIN;
 /// Room inside the panel's edges and the detail's.
 const PAD: i32 = HELP_PADDING;
-const TITLE_H: i32 = HELP_TITLE_HEIGHT;
+fn title_h() -> i32 {
+    help_title_height()
+}
 /// The list's column, at the most a third of the panel.
 const LIST_W: i32 = 240;
 /// Room either side of a tab's label in the title row.
@@ -27,7 +29,9 @@ const TAB_PAD: i32 = 10;
 /// Room around the list's rows.
 const LIST_PAD: i32 = 8;
 /// A list row or a run row: its title line and its detail line.
-const ROW_H: i32 = line(FONT_SIZE, 11) + line(DETAIL_FONT_SIZE, 8);
+fn row_h() -> i32 {
+    line(font_size(), 11) + line(detail_font_size(), 8)
+}
 const ROW_GAP: i32 = 2;
 /// A row's dot column and the gap after it.
 const ROW_INSET: i32 = 8;
@@ -35,31 +39,49 @@ const ROW_DOT: i32 = 14;
 const DOT_GAP: i32 = 6;
 /// A two-line row's lines, as (top in the row, height): as the tasks
 /// panel's.
-const TOP_LINE: (i32, i32) = (6, line(FONT_SIZE, 5));
-const LOW_LINE: (i32, i32) = (TOP_LINE.0 + TOP_LINE.1, line(DETAIL_FONT_SIZE, 4));
+fn top_line() -> (i32, i32) {
+    (6, line(font_size(), 5))
+}
+fn low_line() -> (i32, i32) {
+    (top_line().0 + top_line().1, line(detail_font_size(), 4))
+}
 /// The detail, from the top: room, its heading, a line per fact, the
 /// problem and what to do about it, the runs' subheading, the runs.
 const DETAIL_TOP: i32 = 10;
-const HEAD_H: i32 = line(LABEL_FONT_SIZE, 11);
-const FACT_H: i32 = line(SMALL_FONT_SIZE, 7);
-const LINE_H: i32 = line(FONT_SIZE, 5);
+fn head_h() -> i32 {
+    line(label_font_size(), 11)
+}
+fn fact_h() -> i32 {
+    line(small_font_size(), 7)
+}
+fn line_h() -> i32 {
+    line(font_size(), 5)
+}
 const SECTION_GAP: i32 = 10;
-const SUBHEAD_H: i32 = line(SMALL_FONT_SIZE, 13);
-const EMPTY_H: i32 = line(FONT_SIZE, 15);
+fn subhead_h() -> i32 {
+    line(small_font_size(), 13)
+}
+fn empty_h() -> i32 {
+    line(font_size(), 15)
+}
 /// A run's buttons, right-aligned on its row.
-const RUN_BUTTON_H: i32 = line(FONT_SIZE, 11);
+fn run_button_h() -> i32 {
+    line(font_size(), 11)
+}
 const RUN_BUTTON_PAD: i32 = 10;
 const RUN_BUTTON_GAP: i32 = 6;
 /// Room above the machine's buttons.
 const BUTTONS_GAP: i32 = 12;
 /// The key hints' band along the bottom.
-const FOOTER_H: i32 = HINTS_HEIGHT + 12;
+fn footer_h() -> i32 {
+    hints_height() + 12
+}
 /// The scrollbar's room right of the rows, when not all fit.
 const BAR_ROOM: i32 = 8;
 /// The most lines the problem, or what to do about it, wraps to.
 const MOST_LINES: usize = 3;
 /// The edit form: room under the heading, then its rows as the connect
-/// dialog's (a label column, a field `QUIT_BUTTON` high per row,
+/// dialog's (a label column, a field `quit_button()` high per row,
 /// `QUIT_LINE_GAP` apart).
 const EDIT_TOP: i32 = 4;
 const EDIT_LABEL_W: i32 = 80;
@@ -74,7 +96,9 @@ const REMOVE_W: i32 = 28;
 const REMOVE_GAP: i32 = 4;
 /// The "+ Add address" row under the addresses, in the field column.
 const ADD_GAP: i32 = 6;
-const ADD_H: i32 = line(FONT_SIZE, 13);
+fn add_h() -> i32 {
+    line(font_size(), 13)
+}
 const ADD_ADDRESS: &str = "Add address";
 const NAME_HINT: &str = "What to call it";
 const ADDRESS_HINT: &str = "user@host";
@@ -318,8 +342,8 @@ fn tab_rects(title: Rect) -> Vec<Rect> {
         .iter()
         .map(|tab| {
             // As wide as its bold label: the tab shown is in bold.
-            let bold = super::measure_bold(tab.label(), LABEL_FONT_SIZE).map(|w| w.ceil() as i32);
-            let w = bold.unwrap_or_else(|| text_w(tab.label(), LABEL_FONT_SIZE)) + 2 * TAB_PAD;
+            let bold = super::measure_bold(tab.label(), label_font_size()).map(|w| w.ceil() as i32);
+            let w = bold.unwrap_or_else(|| text_w(tab.label(), label_font_size())) + 2 * TAB_PAD;
             let rect = Rectangle::new((x - TAB_PAD, title.loc.y).into(), (w, title.size.h).into());
             x += w;
             rect
@@ -340,7 +364,7 @@ fn list_width(panel: i32) -> i32 {
 
 /// How high the list and the detail can be on an output `h` high.
 fn body_room(h: i32) -> i32 {
-    h - 2 * MARGIN - TITLE_H - FOOTER_H
+    h - 2 * MARGIN - title_h() - footer_h()
 }
 
 /// How wide the detail's text is in a panel `panel` wide.
@@ -357,8 +381,8 @@ fn wrap(text: &str, size: f32, width: i32) -> Vec<String> {
 
 /// The detail's lines: the problem's, then the how's.
 fn detail_lines(d: &MachineDetailView, width: i32) -> (Vec<String>, Vec<String>) {
-    let problem = (d.problem.as_deref()).map_or_else(Vec::new, |t| wrap(t, FONT_SIZE, width));
-    let how = (d.how.as_deref()).map_or_else(Vec::new, |t| wrap(t, SMALL_FONT_SIZE, width));
+    let problem = (d.problem.as_deref()).map_or_else(Vec::new, |t| wrap(t, font_size(), width));
+    let how = (d.how.as_deref()).map_or_else(Vec::new, |t| wrap(t, small_font_size(), width));
     (problem, how)
 }
 
@@ -369,21 +393,21 @@ fn edit_lines(e: &MachineEditView, width: i32) -> [Vec<String>; 3] {
         (text.as_deref()).map_or_else(Vec::new, |t| wrap(t, size, width))
     };
     if e.busy {
-        [lines(&e.progress, FONT_SIZE), Vec::new(), Vec::new()]
+        [lines(&e.progress, font_size()), Vec::new(), Vec::new()]
     } else {
         [
             Vec::new(),
-            lines(&e.error, FONT_SIZE),
-            lines(&e.how, SMALL_FONT_SIZE),
+            lines(&e.error, font_size()),
+            lines(&e.how, small_font_size()),
         ]
     }
 }
 
 /// How high `lines` lines are under what comes before them: none, or a
-/// half gap and a `LINE_H` each.
+/// half gap and a `line_h()` each.
 fn lines_h(lines: usize) -> i32 {
     if lines > 0 {
-        SECTION_GAP / 2 + lines as i32 * LINE_H
+        SECTION_GAP / 2 + lines as i32 * line_h()
     } else {
         0
     }
@@ -394,15 +418,15 @@ fn buttons_h(buttons: &[String]) -> i32 {
     if buttons.is_empty() {
         0
     } else {
-        BUTTONS_GAP + QUIT_BUTTON
+        BUTTONS_GAP + quit_button()
     }
 }
 
 /// How high the edit form's rows are: the name, an address each, the add
 /// row (none while the address is tried).
 fn edit_rows_h(e: &MachineEditView) -> i32 {
-    let add = if e.busy { 0 } else { ADD_GAP + ADD_H };
-    QUIT_BUTTON + e.addresses.len() as i32 * (QUIT_LINE_GAP + QUIT_BUTTON) + add
+    let add = if e.busy { 0 } else { ADD_GAP + add_h() };
+    quit_button() + e.addresses.len() as i32 * (QUIT_LINE_GAP + quit_button()) + add
 }
 
 /// How high the edit form is, under the heading.
@@ -420,19 +444,19 @@ fn detail_fixed(d: &MachineDetailView, width: i32) -> i32 {
         None => {
             let (problem, how) = detail_lines(d, width);
             (
-                d.facts.len() as i32 * FACT_H + lines_h(problem.len() + how.len()),
+                d.facts.len() as i32 * fact_h() + lines_h(problem.len() + how.len()),
                 buttons_h(&d.buttons),
             )
         }
     };
-    DETAIL_TOP + HEAD_H + upper + SECTION_GAP + SUBHEAD_H + buttons + PAD
+    DETAIL_TOP + head_h() + upper + SECTION_GAP + subhead_h() + buttons + PAD
 }
 
 /// How many list rows (machines and the add row) fit on an output of
 /// `output`: at least one.
 pub fn machines_shown(rows: usize, output: Size<i32, Logical>) -> usize {
     let room = body_room(output.h) - 2 * LIST_PAD + ROW_GAP;
-    let fit = (room / (ROW_H + ROW_GAP)).max(1) as usize;
+    let fit = (room / (row_h() + ROW_GAP)).max(1) as usize;
     rows.min(fit).max(1)
 }
 
@@ -443,19 +467,19 @@ pub fn machine_runs_shown(view: &MachinesPanelView, output: Size<i32, Logical>) 
     };
     let (panel, _) = widths(output.w);
     let room = body_room(output.h) - detail_fixed(d, detail_inner(panel)) + ROW_GAP;
-    let fit = (room / (ROW_H + ROW_GAP)).max(1) as usize;
+    let fit = (room / (row_h() + ROW_GAP)).max(1) as usize;
     d.runs.len().min(fit).max(1)
 }
 
 /// Where `buttons` go right-aligned on `row`, each as wide as its label.
 fn run_buttons(row: Rect, buttons: &[String]) -> Vec<Rect> {
     let mut right = row.loc.x + row.size.w - ROW_INSET;
-    let y = row.loc.y + (ROW_H - RUN_BUTTON_H) / 2;
+    let y = row.loc.y + (row_h() - run_button_h()) / 2;
     let mut rects: Vec<Rect> = (buttons.iter().rev())
         .map(|label| {
-            let w = text_w(label, FONT_SIZE) + 2 * RUN_BUTTON_PAD;
+            let w = text_w(label, font_size()) + 2 * RUN_BUTTON_PAD;
             right -= w;
-            let rect = Rectangle::new((right, y).into(), (w, RUN_BUTTON_H).into());
+            let rect = Rectangle::new((right, y).into(), (w, run_button_h()).into());
             right -= RUN_BUTTON_GAP;
             rect
         })
@@ -472,7 +496,7 @@ fn button_row(right: i32, y: i32, labels: &[String]) -> Vec<Rect> {
     let mut bx = right - all;
     (bw.into_iter())
         .map(|w| {
-            let rect = Rectangle::new((bx, y).into(), (w, QUIT_BUTTON).into());
+            let rect = Rectangle::new((bx, y).into(), (w, quit_button()).into());
             bx += w + QUIT_BUTTON_GAP;
             rect
         })
@@ -482,13 +506,18 @@ fn button_row(right: i32, y: i32, labels: &[String]) -> Vec<Rect> {
 /// Rows `h` high from `top`, `ROW_GAP` apart, `count` of them.
 fn stack(x: i32, top: i32, w: i32, count: usize) -> Vec<Rect> {
     (0..count as i32)
-        .map(|i| Rectangle::new((x, top + i * (ROW_H + ROW_GAP)).into(), (w, ROW_H).into()))
+        .map(|i| {
+            Rectangle::new(
+                (x, top + i * (row_h() + ROW_GAP)).into(),
+                (w, row_h()).into(),
+            )
+        })
         .collect()
 }
 
 /// How high `count` rows stacked are.
 fn stack_h(count: usize) -> i32 {
-    (count as i32 * (ROW_H + ROW_GAP) - ROW_GAP).max(0)
+    (count as i32 * (row_h() + ROW_GAP) - ROW_GAP).max(0)
 }
 
 /// Where the machines panel's parts go on an output of `output`: centred,
@@ -520,16 +549,16 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
     let detail_h = match &view.detail {
         Some(d) => {
             let runs_h = if runs_shown == 0 {
-                EMPTY_H
+                empty_h()
             } else {
                 stack_h(runs_shown)
             };
             detail_fixed(d, inner) + runs_h
         }
-        None => DETAIL_TOP + HEAD_H + PAD,
+        None => DETAIL_TOP + head_h() + PAD,
     };
     let body_h = list_h.max(detail_h);
-    let height = (TITLE_H + body_h + FOOTER_H).min((output.h - 2 * MARGIN).max(1));
+    let height = (title_h() + body_h + footer_h()).min((output.h - 2 * MARGIN).max(1));
     let panel = Rectangle::new(
         (
             ((output.w - width) / 2).max(0),
@@ -539,9 +568,9 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
         (width, height).into(),
     );
     let (x, y) = (panel.loc.x, panel.loc.y);
-    let title = Rectangle::new((x + PAD, y).into(), (width - 2 * PAD, TITLE_H).into());
-    let body_top = y + TITLE_H;
-    let body_h = (height - TITLE_H - FOOTER_H).max(0);
+    let title = Rectangle::new((x + PAD, y).into(), (width - 2 * PAD, title_h()).into());
+    let body_top = y + title_h();
+    let body_h = (height - title_h() - footer_h()).max(0);
     let list = Rectangle::new((x, body_top).into(), (list_w, body_h).into());
     let detail = Rectangle::new(
         (x + list_w, body_top).into(),
@@ -565,8 +594,8 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
     let dx = detail.loc.x + PAD;
     let line = |top: i32, h: i32| Rectangle::new((dx, top).into(), (inner, h).into());
     let mut top = body_top + DETAIL_TOP;
-    let heading = line(top, HEAD_H);
-    top += HEAD_H;
+    let heading = line(top, head_h());
+    top += head_h();
     let mut facts = Vec::new();
     let mut problem = Vec::new();
     let mut how = Vec::new();
@@ -594,13 +623,13 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
             let field_x = dx + EDIT_LABEL_W;
             let field_w = (inner - EDIT_LABEL_W).max(1);
             let label =
-                |top: i32| Rectangle::new((dx, top).into(), (EDIT_LABEL_W, QUIT_BUTTON).into());
+                |top: i32| Rectangle::new((dx, top).into(), (EDIT_LABEL_W, quit_button()).into());
             edit_labels.push(label(top));
             edit_name = Some(Rectangle::new(
                 (field_x, top).into(),
-                (field_w, QUIT_BUTTON).into(),
+                (field_w, quit_button()).into(),
             ));
-            top += QUIT_BUTTON;
+            top += quit_button();
             // Shortened for the × on two or more, while tried too: the
             // fields stay where they were.
             let several = e.addresses.len() > 1;
@@ -616,23 +645,23 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
                 }
                 edit_addresses.push(Rectangle::new(
                     (field_x, top).into(),
-                    (address_w, QUIT_BUTTON).into(),
+                    (address_w, quit_button()).into(),
                 ));
                 edit_removes.push((several && !e.busy).then(|| {
                     Rectangle::new(
                         (field_x + field_w - REMOVE_W, top).into(),
-                        (REMOVE_W, QUIT_BUTTON).into(),
+                        (REMOVE_W, quit_button()).into(),
                     )
                 }));
-                top += QUIT_BUTTON;
+                top += quit_button();
             }
             if !e.busy {
                 top += ADD_GAP;
                 edit_add = Some(Rectangle::new(
                     (field_x, top).into(),
-                    (field_w, ADD_H).into(),
+                    (field_w, add_h()).into(),
                 ));
-                top += ADD_H;
+                top += add_h();
             }
             let [progress_lines, error_lines, how_lines] = edit_lines(e, inner);
             (
@@ -641,8 +670,8 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
             )
         } else {
             for _ in &d.facts {
-                facts.push(line(top, FACT_H));
-                top += FACT_H;
+                facts.push(line(top, fact_h()));
+                top += fact_h();
             }
             let (problem_lines, how_lines) = detail_lines(d, inner);
             (vec![problem_lines, how_lines], vec![&mut problem, &mut how])
@@ -652,20 +681,20 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
         }
         for (lines, out) in texts.into_iter().zip(outs) {
             for text in lines {
-                out.push((text, line(top, LINE_H)));
-                top += LINE_H;
+                out.push((text, line(top, line_h())));
+                top += line_h();
             }
         }
         if let Some(e) = d.edit.as_ref().filter(|e| !e.buttons.is_empty()) {
             top += BUTTONS_GAP;
             edit_buttons = button_row(dx + inner, top, &e.buttons);
-            top += QUIT_BUTTON;
+            top += quit_button();
         }
         top += SECTION_GAP;
-        runs_head = line(top, SUBHEAD_H);
-        top += SUBHEAD_H;
+        runs_head = line(top, subhead_h());
+        top += subhead_h();
         if runs_shown == 0 {
-            no_runs = Some(line(top, EMPTY_H));
+            no_runs = Some(line(top, empty_h()));
         } else {
             let scrolls = runs_shown < runs_total;
             let run_w = inner - if scrolls { BAR_ROOM } else { 0 };
@@ -682,15 +711,18 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
             });
         }
         if d.edit.is_none() {
-            let by = detail.loc.y + detail.size.h - PAD - QUIT_BUTTON;
+            let by = detail.loc.y + detail.size.h - PAD - quit_button();
             buttons = button_row(dx + inner, by, &d.buttons);
         }
     }
 
-    let footer = Rectangle::new((x, y + height - FOOTER_H).into(), (width, FOOTER_H).into());
+    let footer = Rectangle::new(
+        (x, y + height - footer_h()).into(),
+        (width, footer_h()).into(),
+    );
     let hints_rect = Rectangle::new(
-        (x + PAD, footer.loc.y + (FOOTER_H - HINTS_HEIGHT) / 2).into(),
-        (width - 2 * PAD, HINTS_HEIGHT).into(),
+        (x + PAD, footer.loc.y + (footer_h() - hints_height()) / 2).into(),
+        (width - 2 * PAD, hints_height()).into(),
     );
     MachinesLayout {
         edit_name,
@@ -837,7 +869,7 @@ fn row_dot(row: Rect) -> Rect {
     Rectangle::new(
         (
             row.loc.x + ROW_INSET + (ROW_DOT - DOT) / 2,
-            row.loc.y + TOP_LINE.0 + 2 + (TOP_LINE.1 - 2 - DOT) / 2,
+            row.loc.y + top_line().0 + 2 + (top_line().1 - 2 - DOT) / 2,
         )
             .into(),
         (DOT, DOT).into(),
@@ -884,18 +916,18 @@ impl Painter {
         let text_x = row.loc.x + ROW_INSET + ROW_DOT + DOT_GAP;
         let w = (end - text_x).max(1);
         let first = Rectangle::new(
-            (text_x, row.loc.y + TOP_LINE.0).into(),
-            (w, TOP_LINE.1).into(),
+            (text_x, row.loc.y + top_line().0).into(),
+            (w, top_line().1).into(),
         );
-        self.line_in(c, title, FONT_SIZE, first, bold, scale, p.text);
+        self.line_in(c, title, font_size(), first, bold, scale, p.text);
         let second = Rectangle::new(
-            (text_x, row.loc.y + LOW_LINE.0).into(),
-            (w, LOW_LINE.1).into(),
+            (text_x, row.loc.y + low_line().0).into(),
+            (w, low_line().1).into(),
         );
         self.line_in(
             c,
             detail,
-            DETAIL_FONT_SIZE,
+            detail_font_size(),
             second,
             false,
             scale,
@@ -931,7 +963,15 @@ impl Painter {
                 ((rect.size.w - 2 * TAB_PAD).max(1), rect.size.h).into(),
             );
             let colour = if shown || lit { p.text } else { p.muted };
-            self.line_in(&mut c, tab.label(), LABEL_FONT_SIZE, label, shown, scale, colour);
+            self.line_in(
+                &mut c,
+                tab.label(),
+                label_font_size(),
+                label,
+                shown,
+                scale,
+                colour,
+            );
         }
         // The lines under the title, over the hints, and between the list
         // and the detail.
@@ -977,7 +1017,7 @@ impl Painter {
             None => self.line_in(
                 &mut c,
                 ADD_NOTE,
-                FONT_SIZE,
+                font_size(),
                 shift(layout.heading),
                 false,
                 scale,
@@ -1025,15 +1065,15 @@ impl Painter {
                 // The add row.
                 let plus = Rectangle::new(
                     (row.loc.x + ROW_INSET, row.loc.y).into(),
-                    (ROW_DOT, ROW_H).into(),
+                    (ROW_DOT, row_h()).into(),
                 );
-                self.centered(c, "+", FONT_SIZE, plus, scale, p.muted);
+                self.centered(c, "+", font_size(), plus, scale, p.muted);
                 let text_x = row.loc.x + ROW_INSET + ROW_DOT + DOT_GAP;
                 let label = Rectangle::new(
                     (text_x, row.loc.y).into(),
-                    ((end - text_x).max(1), ROW_H).into(),
+                    ((end - text_x).max(1), row_h()).into(),
                 );
-                self.line_in(c, ADD_LABEL, FONT_SIZE, label, false, scale, p.text);
+                self.line_in(c, ADD_LABEL, font_size(), label, false, scale, p.text);
                 continue;
             };
             let detail = if machine.armed {
@@ -1075,7 +1115,7 @@ impl Painter {
         let spot = Rectangle::new(
             (
                 heading.loc.x + (ROW_DOT - DOT) / 2,
-                heading.loc.y + (HEAD_H - DOT) / 2,
+                heading.loc.y + (head_h() - DOT) / 2,
             )
                 .into(),
             (DOT, DOT).into(),
@@ -1089,24 +1129,32 @@ impl Painter {
         };
         let name = Rectangle::new(
             (name_x, heading.loc.y).into(),
-            ((heading.loc.x + heading.size.w - name_x).max(1), HEAD_H).into(),
+            ((heading.loc.x + heading.size.w - name_x).max(1), head_h()).into(),
         );
-        self.line_in(c, &d.name, LABEL_FONT_SIZE, name, true, scale, p.text);
+        self.line_in(c, &d.name, label_font_size(), name, true, scale, p.text);
         if let Some(e) = &d.edit {
             self.machine_edit(c, view, e, layout, shift, scale, p);
         }
         for (i, (fact, rect)) in d.facts.iter().zip(&layout.facts).enumerate() {
             let color = if i == 0 { p.text } else { p.muted };
-            self.line_in(c, fact, SMALL_FONT_SIZE, shift(*rect), false, scale, color);
+            self.line_in(
+                c,
+                fact,
+                small_font_size(),
+                shift(*rect),
+                false,
+                scale,
+                color,
+            );
         }
         for (text, rect) in &layout.problem {
-            self.line_in(c, text, FONT_SIZE, shift(*rect), false, scale, p.error);
+            self.line_in(c, text, font_size(), shift(*rect), false, scale, p.error);
         }
         for (text, rect) in &layout.how {
             self.line_in(
                 c,
                 text,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 shift(*rect),
                 false,
                 scale,
@@ -1118,9 +1166,17 @@ impl Painter {
             MachinesTab::Machines => RUNS_HEAD,
             MachinesTab::Placement => STAGES_HEAD,
         };
-        self.line_in(c, head_text, SMALL_FONT_SIZE, head, true, scale, p.muted);
+        self.line_in(c, head_text, small_font_size(), head, true, scale, p.muted);
         if let Some(rect) = layout.no_runs {
-            self.line_in(c, &d.no_runs, FONT_SIZE, shift(rect), false, scale, p.muted);
+            self.line_in(
+                c,
+                &d.no_runs,
+                font_size(),
+                shift(rect),
+                false,
+                scale,
+                p.muted,
+            );
         }
         if let Some(track) = layout.runs_track {
             let bar = ListBar {
@@ -1205,7 +1261,7 @@ impl Painter {
             ADDRESS_LABEL
         };
         for (label, rect) in [NAME_LABEL, address_label].iter().zip(&layout.edit_labels) {
-            self.line_in(c, label, FONT_SIZE, shift(*rect), false, scale, p.muted);
+            self.line_in(c, label, font_size(), shift(*rect), false, scale, p.muted);
         }
         let name = (
             layout.edit_name,
@@ -1236,7 +1292,7 @@ impl Painter {
                 self.text(
                     c,
                     line,
-                    FONT_SIZE,
+                    font_size(),
                     x,
                     end,
                     band(rect, scale),
@@ -1280,7 +1336,7 @@ impl Painter {
                 (row.loc.x + ROW_INSET, row.loc.y).into(),
                 (ROW_DOT, row.size.h).into(),
             );
-            self.centered(c, "+", FONT_SIZE, plus, scale, p.muted);
+            self.centered(c, "+", font_size(), plus, scale, p.muted);
             let text_x = row.loc.x + ROW_INSET + ROW_DOT + DOT_GAP;
             let label = Rectangle::new(
                 (text_x, row.loc.y).into(),
@@ -1291,12 +1347,12 @@ impl Painter {
                     .into(),
             );
             let color = if lit { p.text } else { p.muted };
-            self.line_in(c, ADD_ADDRESS, FONT_SIZE, label, false, scale, color);
+            self.line_in(c, ADD_ADDRESS, font_size(), label, false, scale, color);
         }
         let lines = [
-            (&layout.edit_progress, FONT_SIZE, p.muted),
-            (&layout.edit_error, FONT_SIZE, p.error),
-            (&layout.edit_how, SMALL_FONT_SIZE, p.muted),
+            (&layout.edit_progress, font_size(), p.muted),
+            (&layout.edit_error, font_size(), p.error),
+            (&layout.edit_how, small_font_size(), p.muted),
         ];
         for (lines, size, color) in lines {
             for (text, rect) in lines {
@@ -1338,7 +1394,7 @@ pub fn machines_panel_field(
     Some(super::FieldSpot {
         area,
         text: super::field_text(area, scale),
-        size: FONT_SIZE,
+        size: font_size(),
         line: line.clone(),
     })
 }
@@ -1617,7 +1673,10 @@ mod tests {
         }
         assert!(l.heading.loc.y + l.heading.size.h <= name.loc.y);
         assert!(name.loc.y + name.size.h <= address.loc.y);
-        assert_eq!((name.size.h, address.size.h), (QUIT_BUTTON, QUIT_BUTTON));
+        assert_eq!(
+            (name.size.h, address.size.h),
+            (quit_button(), quit_button())
+        );
         assert_eq!(l.edit_removes.len(), l.edit_addresses.len());
         // The addresses one under the other in the name's column, each ×
         // right of its field, at the name's right end.
@@ -1787,7 +1846,7 @@ mod tests {
         form_fits(&l);
         assert!(inside(l.detail, l.no_runs.unwrap()));
         // "Addresses" fits its label column.
-        assert!(text_w(ADDRESSES_LABEL, FONT_SIZE) < EDIT_LABEL_W);
+        assert!(text_w(ADDRESSES_LABEL, font_size()) < EDIT_LABEL_W);
     }
 
     #[test]

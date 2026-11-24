@@ -301,7 +301,7 @@ impl Gerdr {
         let by = crate::scrolling::edge_steps(&mut panel.pick_edge, now, edge);
         if by != 0 {
             let scroll = &mut panel.scroll[col];
-            let to = (scroll.pos() + (by * i64::from(chrome::BODY_LINE)) as f64).clamp(0.0, room);
+            let to = (scroll.pos() + (by * i64::from(chrome::body_line())) as f64).clamp(0.0, room);
             if to != scroll.pos() {
                 scroll.jump(to);
                 self.drag_page_text(self.mouse.pos);

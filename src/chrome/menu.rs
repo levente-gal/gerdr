@@ -3,8 +3,8 @@
 //! opens one and what its items do).
 
 use super::{
-    FONT_SIZE, MENU_ITEM_HEIGHT, MENU_PADDING, MENU_WIDTH, PADDING, POPUP_RADIUS, Painter, Palette,
-    Rect, SHADOW, SMALL_FONT_SIZE, line,
+    MENU_PADDING, MENU_WIDTH, PADDING, POPUP_RADIUS, Painter, Palette, Rect, SHADOW, font_size,
+    line, menu_item_height, small_font_size,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -19,7 +19,9 @@ const MENU_GAP: i32 = 2;
 /// The gap between a row's label and its key hint.
 const MENU_HINT_GAP: i32 = 16;
 /// How tall a row of a message is: its lines close, as a paragraph's.
-const MENU_NOTE_HEIGHT: i32 = line(FONT_SIZE, 5);
+fn menu_note_height() -> i32 {
+    line(font_size(), 5)
+}
 /// How tall a rule between groups of rows is (a note with no text).
 const MENU_RULE_HEIGHT: i32 = 9;
 
@@ -41,8 +43,8 @@ pub struct MenuRow {
 fn row_height(row: &MenuRow) -> i32 {
     match row.note {
         true if row.label.is_empty() => MENU_RULE_HEIGHT,
-        true => MENU_NOTE_HEIGHT,
-        false => MENU_ITEM_HEIGHT,
+        true => menu_note_height(),
+        false => menu_item_height(),
     }
 }
 
@@ -70,7 +72,7 @@ pub fn menu_width(rows: &[MenuRow]) -> i32 {
 /// How many rows a menu has room for on an output `height` high: a menu
 /// with more shows only these (see `crate::menu::ContextMenu`).
 pub fn menu_rows_fitting(height: i32) -> usize {
-    ((height - 2 * MENU_PADDING) / MENU_ITEM_HEIGHT).max(1) as usize
+    ((height - 2 * MENU_PADDING) / menu_item_height()).max(1) as usize
 }
 
 /// A menu of `rows` just below `anchor` (window coordinates; it may reach
@@ -155,12 +157,12 @@ impl Painter {
             let (left, right) = (x as f32 + PADDING * s, (x + w) as f32 - PADDING * s);
             let mut label_end = right;
             if let Some(hint) = &row.hint {
-                let hint_w = self.text_width(hint, SMALL_FONT_SIZE, scale);
+                let hint_w = self.text_width(hint, small_font_size(), scale);
                 let hint_x = (right - hint_w).max(left);
                 self.text(
                     &mut c,
                     hint,
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     hint_x,
                     right,
                     (y, h),
@@ -172,7 +174,7 @@ impl Painter {
             self.text(
                 &mut c,
                 &row.label,
-                FONT_SIZE,
+                font_size(),
                 left,
                 label_end,
                 (y, h),
@@ -187,7 +189,7 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::{MENU_HINT_ROOM, MENU_NOTE_WIDTH, MenuRow, menu_layout, menu_width};
-    use crate::chrome::{BAR_HEIGHT, MENU_ITEM_HEIGHT, MENU_PADDING, MENU_WIDTH, Rect};
+    use crate::chrome::{BAR_HEIGHT, MENU_PADDING, MENU_WIDTH, Rect, menu_item_height};
 
     fn rows(n: usize, hint: bool) -> Vec<MenuRow> {
         (0..n)
@@ -218,10 +220,10 @@ mod tests {
         assert_eq!(b.loc.y, a.loc.y + a.size.h);
         assert_eq!(row.loc.y, b.loc.y + b.size.h);
         assert!(a.size.h < row.size.h);
-        assert_eq!(row.size.h, MENU_ITEM_HEIGHT);
+        assert_eq!(row.size.h, menu_item_height());
         assert_eq!(
             panel.size.h,
-            2 * MENU_PADDING + 2 * a.size.h + MENU_ITEM_HEIGHT
+            2 * MENU_PADDING + 2 * a.size.h + menu_item_height()
         );
     }
 
@@ -232,12 +234,12 @@ mod tests {
         let (panel, items) = menu_layout(anchor, &rows(3, false), output);
         assert_eq!(panel.loc, (150, BAR_HEIGHT + 2).into());
         assert_eq!(panel.size.w, MENU_WIDTH);
-        assert_eq!(panel.size.h, 2 * MENU_PADDING + 3 * MENU_ITEM_HEIGHT);
+        assert_eq!(panel.size.h, 2 * MENU_PADDING + 3 * menu_item_height());
         assert_eq!(items.len(), 3);
         for (i, item) in items.iter().enumerate() {
             assert_eq!(
                 item.loc.y,
-                panel.loc.y + MENU_PADDING + i as i32 * MENU_ITEM_HEIGHT
+                panel.loc.y + MENU_PADDING + i as i32 * menu_item_height()
             );
             assert_eq!(item.size.w, MENU_WIDTH - 2 * MENU_PADDING);
         }

@@ -9,25 +9,33 @@
 use std::ops::Range;
 
 use super::{
-    FIELD_GAP, FONT_SIZE, FOOTER_PAD, FOOTER_ROW, FieldSpot, HELP_PADDING, HELP_RADIUS,
-    HINT_KEY_GAP, MONO_FONT_SIZE, Painter, Palette, ROW_BUTTON, Rect, SHADOW, SMALL_FONT_SIZE,
-    SearchBar, SearchPart, band, hint_spots, hint_strs, layers::Part, line, measure, measure_mono,
-    mix, phys, physical, rect_px, search_field_text, search_spots,
+    FIELD_GAP, FOOTER_PAD, FieldSpot, HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, Painter, Palette,
+    Rect, SHADOW, SearchBar, SearchPart, band, font_size, footer_row, hint_spots, hint_strs,
+    layers::Part, line, measure, measure_mono, mix, mono_font_size, phys, physical, rect_px,
+    row_button, search_field_text, search_spots, small_font_size,
 };
 use crate::scrollback::{Fit, Ink, Style};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 /// The title row's height, and the footer's under the list.
-const TITLE: i32 = line(FONT_SIZE, 19);
-const FOOTER: i32 = line(SMALL_FONT_SIZE, 21);
+fn title_px() -> i32 {
+    line(font_size(), 19)
+}
+fn footer_px() -> i32 {
+    line(small_font_size(), 21)
+}
 /// The room around the list inside the panel.
 const PAD: i32 = 6;
 /// The room between the list's edges and its text.
 const TEXT_INSET: i32 = 8;
 /// A row's height.
-const ROW: i32 = line(MONO_FONT_SIZE, 5);
+fn row_px() -> i32 {
+    line(mono_font_size(), 5)
+}
 /// How far apart `Painter::paint_styled_rows` paints its rows.
-pub(super) const STYLED_ROW: i32 = ROW;
+pub(super) fn styled_row() -> i32 {
+    row_px()
+}
 /// How far bold text is drawn again to the right, logical pixels, when
 /// the monospace font has no bold face (see `Painter::has_mono_bold`).
 const BOLD_SHIFT: f32 = 0.6;
@@ -44,8 +52,12 @@ const SEARCH_MAX: i32 = 520;
 /// The keys listed (F1): a row's height, the heading's over them, the
 /// room for a row's keycaps before what it does, and the least width of
 /// a column of them.
-const KEYS_ROW: i32 = line(SMALL_FONT_SIZE, 13);
-const KEYS_HEADING: i32 = line(FONT_SIZE, 19);
+fn keys_row() -> i32 {
+    line(small_font_size(), 13)
+}
+fn keys_heading() -> i32 {
+    line(font_size(), 19)
+}
 const KEYS_CAPS: i32 = 190;
 const KEYS_COLUMN: i32 = 480;
 
@@ -128,19 +140,19 @@ pub enum ScrollbackHit {
 
 /// The width of a character of the text, in logical pixels.
 fn advance() -> f64 {
-    measure_mono("0", MONO_FONT_SIZE)
+    measure_mono("0", mono_font_size())
         .filter(|a| *a > 0.0)
-        .unwrap_or(MONO_FONT_SIZE * 0.6) as f64
+        .unwrap_or(mono_font_size() * 0.6) as f64
 }
 
 /// Where the viewer's parts go in `panel`, with `hints` under the list.
 pub fn scrollback_layout(panel: Rect, hints: &[(String, String)]) -> ScrollbackLayout {
-    let title = Rectangle::new(panel.loc, (panel.size.w, TITLE).into());
+    let title = Rectangle::new(panel.loc, (panel.size.w, title_px()).into());
     let list = Rectangle::new(
-        (panel.loc.x + PAD, panel.loc.y + TITLE).into(),
+        (panel.loc.x + PAD, panel.loc.y + title_px()).into(),
         (
             (panel.size.w - 2 * PAD).max(1),
-            (panel.size.h - TITLE - FOOTER).max(1),
+            (panel.size.h - title_px() - footer_px()).max(1),
         )
             .into(),
     );
@@ -154,7 +166,7 @@ pub fn scrollback_layout(panel: Rect, hints: &[(String, String)]) -> ScrollbackL
     );
     let footer = Rectangle::new(
         (panel.loc.x, list.loc.y + list.size.h).into(),
-        (panel.size.w, FOOTER).into(),
+        (panel.size.w, footer_px()).into(),
     );
     let hints = footer_spots(&hint_strs(hints), footer);
     ScrollbackLayout {
@@ -172,7 +184,7 @@ pub fn scrollback_layout(panel: Rect, hints: &[(String, String)]) -> ScrollbackL
 fn footer_spots(hints: &[(&str, &str)], footer: Rect) -> Vec<(usize, Rect)> {
     let row = Rectangle::new(
         (footer.loc.x + HELP_PADDING, footer.loc.y + FOOTER_PAD).into(),
-        ((footer.size.w - 2 * HELP_PADDING).max(0), FOOTER_ROW).into(),
+        ((footer.size.w - 2 * HELP_PADDING).max(0), footer_row()).into(),
     );
     let mut keep: Vec<usize> = (0..hints.len()).collect();
     loop {
@@ -193,10 +205,10 @@ pub fn scrollback_keys_spots(layout: &ScrollbackLayout, n: usize) -> (Rect, Vec<
     let inset = TITLE_INSET - PAD;
     let heading = Rectangle::new(
         (list.loc.x + inset, list.loc.y + PAD).into(),
-        ((list.size.w - 2 * inset).max(1), KEYS_HEADING).into(),
+        ((list.size.w - 2 * inset).max(1), keys_heading()).into(),
     );
-    let top = heading.loc.y + KEYS_HEADING;
-    let per_column = ((list.loc.y + list.size.h - PAD - top) / KEYS_ROW).max(1) as usize;
+    let top = heading.loc.y + keys_heading();
+    let per_column = ((list.loc.y + list.size.h - PAD - top) / keys_row()).max(1) as usize;
     let columns = n.div_ceil(per_column).max(1);
     let w = heading.size.w / columns as i32;
     let rows = (0..n)
@@ -205,10 +217,10 @@ pub fn scrollback_keys_spots(layout: &ScrollbackLayout, n: usize) -> (Rect, Vec<
             Rectangle::new(
                 (
                     heading.loc.x + column as i32 * w,
-                    top + row as i32 * KEYS_ROW,
+                    top + row as i32 * keys_row(),
                 )
                     .into(),
-                (w, KEYS_ROW).into(),
+                (w, keys_row()).into(),
             )
         })
         .collect();
@@ -228,8 +240,8 @@ pub fn scrollback_fit(panel: Rect) -> Fit {
     let text = scrollback_layout(panel, &[]).text;
     Fit {
         cols: ((text.size.w as f64 / advance()).floor() as usize).max(1),
-        page: (text.size.h / ROW).max(1) as usize,
-        row_h: ROW as f64,
+        page: (text.size.h / row_px()).max(1) as usize,
+        row_h: row_px() as f64,
         view_h: text.size.h as f64,
     }
 }
@@ -237,7 +249,7 @@ pub fn scrollback_fit(panel: Rect) -> Fit {
 /// How many rows of the text show at most in a viewer at `panel`, the
 /// first and the last perhaps in part.
 pub fn scrollback_shown(panel: Rect) -> usize {
-    (scrollback_layout(panel, &[]).text.size.h / ROW) as usize + 2
+    (scrollback_layout(panel, &[]).text.size.h / row_px()) as usize + 2
 }
 
 /// Where the search's parts go in the title row, left of the note (see
@@ -249,20 +261,20 @@ pub fn scrollback_search(
     layout: &ScrollbackLayout,
 ) -> (Vec<(SearchPart, Rect)>, Option<Rect>) {
     let title = layout.title;
-    let note = measure(&view.note, SMALL_FONT_SIZE).unwrap_or(0.0).ceil() as i32;
+    let note = measure(&view.note, small_font_size()).unwrap_or(0.0).ceil() as i32;
     let right = title.loc.x + title.size.w - TITLE_INSET - note - FIELD_GAP;
     let left = (title.loc.x + TITLE_INSET).max(right - SEARCH_MAX);
-    let y = title.loc.y + (TITLE - ROW_BUTTON) / 2;
+    let y = title.loc.y + (title_px() - row_button()) / 2;
     match &view.search {
         None => {
             let open = Rectangle::new(
-                (right - ROW_BUTTON, y).into(),
-                (ROW_BUTTON, ROW_BUTTON).into(),
+                (right - row_button(), y).into(),
+                (row_button(), row_button()).into(),
             );
             (vec![(SearchPart::Open, open)], None)
         }
         Some(_) => {
-            let (parts, count) = search_spots(left, right, y, ROW_BUTTON);
+            let (parts, count) = search_spots(left, right, y, row_button());
             (parts, Some(count))
         }
     }
@@ -276,7 +288,7 @@ pub fn scrollback_field(view: &ScrollbackView, scale: f64) -> Option<FieldSpot> 
     let (parts, _) = scrollback_search(view, &layout);
     let &(_, area) = parts.iter().find(|(part, _)| *part == SearchPart::Field)?;
     Some(FieldSpot {
-        size: FONT_SIZE,
+        size: font_size(),
         area,
         text: search_field_text(area, scale),
         line: bar.query.clone(),
@@ -340,8 +352,8 @@ fn scrollback_spot(
     pos: Point<f64, Logical>,
 ) -> (i64, f64) {
     let text = layout.text;
-    let y = pos.y - text.loc.y as f64 + view.part * ROW as f64 - view.overscroll;
-    let row = view.first as i64 + (y / ROW as f64).floor() as i64;
+    let y = pos.y - text.loc.y as f64 + view.part * row_px() as f64 - view.overscroll;
+    let row = view.first as i64 + (y / row_px() as f64).floor() as i64;
     (row, (pos.x - text.loc.x as f64) / advance())
 }
 
@@ -374,7 +386,7 @@ fn track(layout: &ScrollbackLayout) -> Rect {
 
 /// The scrollbar for `view`, while its text does not all show.
 pub fn scrollback_thumb(view: &ScrollbackView, layout: &ScrollbackLayout) -> Option<super::Thumb> {
-    let page = (layout.text.size.h / ROW).max(1);
+    let page = (layout.text.size.h / row_px()).max(1);
     let bar = super::ListBar {
         down: view.first as f64 + view.part,
         total: view.total as f64,
@@ -432,7 +444,7 @@ impl Painter {
         let title = shift(layout.title);
         let (left, right) = phys(title, scale);
         let inset = (TITLE_INSET as f32 * s).round();
-        let note_w = (measure(&view.note, SMALL_FONT_SIZE).unwrap_or(0.0) * s).ceil();
+        let note_w = (measure(&view.note, small_font_size()).unwrap_or(0.0) * s).ceil();
         let note_x = right - inset - note_w;
         let (search, count) = scrollback_search(view, &layout);
         // Left of the search, open or not, if there is room.
@@ -443,7 +455,7 @@ impl Painter {
         self.text(
             &mut c,
             &view.note,
-            SMALL_FONT_SIZE,
+            small_font_size(),
             note_x,
             right,
             band(title, scale),
@@ -454,7 +466,7 @@ impl Painter {
             self.text(
                 &mut c,
                 &view.title,
-                FONT_SIZE,
+                font_size(),
                 left + inset,
                 title_end,
                 band(title, scale),
@@ -516,7 +528,16 @@ impl Painter {
         let (left, right) = phys(heading, scale);
         let text = "Keys in the scrollback viewer";
         let heading_band = band(heading, scale);
-        self.text(c, text, FONT_SIZE, left, right, heading_band, scale, p.text);
+        self.text(
+            c,
+            text,
+            font_size(),
+            left,
+            right,
+            heading_band,
+            scale,
+            p.text,
+        );
         let (caps, gap) = (KEYS_CAPS as f32 * s, HINT_KEY_GAP as f32 * s);
         for ((keys, what), rect) in view.keys.iter().zip(rows) {
             let rect = shift(rect);
@@ -525,7 +546,7 @@ impl Painter {
             let end = self.keycaps(c, keys, left, row_band, scale, p);
             let x = (left + caps).max(end + gap);
             let end = right - gap;
-            self.text(c, what, SMALL_FONT_SIZE, x, end, row_band, scale, p.text);
+            self.text(c, what, small_font_size(), x, end, row_band, scale, p.text);
         }
     }
 
@@ -539,10 +560,10 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) -> super::Canvas {
-        let size = Size::from((w, ROW));
+        let size = Size::from((w, row_px()));
         let mut c = super::Canvas::new(physical(size, scale));
         c.fill(0, 0, c.w, c.h, p.terminal_background);
-        let adv = self.mono_width("0", MONO_FONT_SIZE, scale);
+        let adv = self.mono_width("0", mono_font_size(), scale);
         if let Some((from, to, on)) = row.selected {
             let x = (from as f32 * adv).round();
             let end = to as f32 + if on { 0.5 } else { 0.0 };
@@ -608,7 +629,7 @@ impl Painter {
     }
 
     /// Terminal rows, as `crate::scrollback::parse_ansi` reads them, in the
-    /// monospace font `ROW` apart down from the top left of `rect` and cut
+    /// monospace font `row_px()` apart down from the top left of `rect` and cut
     /// to it, over a ground the caller fills: each run in its colour, bold
     /// (in the bold monospace face) and dim, where its first character
     /// goes, the rest in the terminal's colour.
@@ -620,14 +641,14 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
-        let adv = self.mono_width("0", MONO_FONT_SIZE, scale);
+        let adv = self.mono_width("0", mono_font_size(), scale);
         let (left, top, w, h) = rect_px(rect, scale);
-        let shown = (rect.size.h.max(0) as usize).div_ceil(ROW as usize);
+        let shown = (rect.size.h.max(0) as usize).div_ceil(row_px() as usize);
         c.clipped(left as i32, top as i32, w as i32, h as i32, |c| {
             for (i, (text, styles)) in rows.iter().take(shown).enumerate() {
                 let line = Rectangle::new(
-                    (rect.loc.x, rect.loc.y + i as i32 * ROW).into(),
-                    (rect.size.w, ROW).into(),
+                    (rect.loc.x, rect.loc.y + i as i32 * row_px()).into(),
+                    (rect.size.w, row_px()).into(),
                 );
                 let row_band = band(line, scale);
                 let chars: Vec<(usize, char)> = text.char_indices().collect();
@@ -654,7 +675,7 @@ impl Painter {
                         color = mix(color, p.terminal_background, DIM);
                     }
                     let x = left + r.start as f32 * adv;
-                    let size = MONO_FONT_SIZE;
+                    let size = mono_font_size();
                     match style.bold {
                         true if self.has_mono_bold() => {
                             self.mono_bold_text(c, text, size, x, f32::MAX, row_band, scale, color);
@@ -716,10 +737,10 @@ impl Painter {
             self.search_ticks(&mut c, &view.ticks, at, p.terminal_background, scale, p);
         }
         let text = layout.text;
-        let top = text.loc.y as f64 - view.part * ROW as f64 + view.overscroll;
+        let top = text.loc.y as f64 - view.part * row_px() as f64 + view.overscroll;
         for (i, row) in view.rows.iter().enumerate() {
             let buffer = self.scrollback_row(row, text.size.w, scale, p);
-            let y = top + (i as i32 * ROW) as f64 - origin.y as f64;
+            let y = top + (i as i32 * row_px()) as f64 - origin.y as f64;
             super::inbox::blit(
                 &mut c,
                 &buffer,
@@ -791,14 +812,14 @@ impl ScrollbackLayers {
                 (text.loc.x, layout.list.loc.y + 1).into(),
                 (text.size.w, layout.list.size.h - 2).into(),
             );
-            let top = text.loc.y as f64 - view.part * ROW as f64 + view.overscroll;
+            let top = text.loc.y as f64 - view.part * row_px() as f64 + view.overscroll;
             for (i, row) in view.rows.iter().enumerate() {
-                let size = Size::from((text.size.w, ROW));
+                let size = Size::from((text.size.w, row_px()));
                 let key = (row.clone(), text.size.w, theme, scale);
                 let buffer = rows.get(key, size, scale, |(row, w, ..)| {
                     painter.scrollback_row(row, *w, scale, p).into_buffer(true)
                 });
-                let at = Point::from((text.loc.x as f64, top + (i as i32 * ROW) as f64));
+                let at = Point::from((text.loc.x as f64, top + (i as i32 * row_px()) as f64));
                 parts.push(Part::new(&buffer, text.loc, size, 1.0).at(at).clipped(clip));
             }
             parts
@@ -853,7 +874,7 @@ mod tests {
         let at = |row: f64, col: f64| {
             Point::from((
                 text.loc.x as f64 + col * adv,
-                text.loc.y as f64 + row * ROW as f64,
+                text.loc.y as f64 + row * row_px() as f64,
             ))
         };
         assert_eq!(scrollback_point(&v, &layout, at(0.5, 3.0)), (40, 3));
@@ -935,7 +956,7 @@ mod tests {
         assert_eq!(rows.len(), 25);
         assert_eq!(
             rows[0].loc,
-            (heading.loc.x, heading.loc.y + KEYS_HEADING).into()
+            (heading.loc.x, heading.loc.y + keys_heading()).into()
         );
         for r in &rows {
             assert!(layout.list.contains(r.loc));
@@ -1140,7 +1161,7 @@ mod tests {
             .iter()
             .map(|(t, s)| (t.as_str(), s.as_slice()))
             .collect();
-        let rect = Rectangle::new((20, 10).into(), (120, 2 * ROW).into());
+        let rect = Rectangle::new((20, 10).into(), (120, 2 * row_px()).into());
         let mut c = super::super::Canvas::new((200, 100).into());
         painter.paint_styled_rows(&mut c, &rows, rect, 1.0, p);
         let inked = |x: i32, y: i32| c.px[((y * c.w + x) * 4 + 3) as usize] > 0;
@@ -1158,7 +1179,7 @@ mod tests {
         assert_eq!(outside, 0);
         // The second row is drawn too, under the first.
         assert!(
-            (rect.loc.y + ROW..rect.loc.y + 2 * ROW)
+            (rect.loc.y + row_px()..rect.loc.y + 2 * row_px())
                 .any(|y| (rect.loc.x..rect.loc.x + rect.size.w).any(|x| inked(x, y)))
         );
     }

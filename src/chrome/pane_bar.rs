@@ -2,7 +2,7 @@
 //! and the strip marking the focused pane, whatever it shows.
 //!
 //! Every pane has its bar, always: a flat band along its top, as wide as
-//! the pane and `PANE_BAR_HEIGHT` high. The window starts under it (see
+//! the pane and `pane_bar_height()` high. The window starts under it (see
 //! `pane_bar_rects`), so the bar covers nothing of it. A terminal's says
 //! what runs, after a mark for how it is; a web page's has its address
 //! between its steps; an app's has its title. Its buttons sit at its ends,
@@ -13,10 +13,10 @@
 //! rest, its mark says where it stands, as its card's dot does.
 
 use super::{
-    BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, DETAIL_FONT_SIZE, Dot,
-    PANE_BAR_HEIGHT, Painter, Palette, ROW_HIGHLIGHT_RADIUS, Rect, Rgb, SHADOW, STATUS_GAP,
-    STATUS_WIDTH, STROKE, band, centred_dot, chevron_side, copy, cross, icon_sdf, mix, physical,
-    rect_px, restart_arrow, rounded_rect, segment, send, status_dot, status_mark, stop, terminal,
+    BAR_BUTTON, BAR_BUTTON_GAP, BAR_INSET, BAR_NOTE_GAP, Canvas, Dot, Painter, Palette,
+    ROW_HIGHLIGHT_RADIUS, Rect, Rgb, SHADOW, STATUS_GAP, STATUS_WIDTH, STROKE, band, centred_dot,
+    chevron_side, copy, cross, detail_font_size, icon_sdf, mix, pane_bar_height, physical, rect_px,
+    restart_arrow, rounded_rect, segment, send, status_dot, status_mark, stop, terminal,
     text_lines, zoom_corners,
 };
 use crate::herdr::AgentStatus;
@@ -36,11 +36,11 @@ const BUTTON_INSET_Y: i32 = 2;
 /// sits in the middle of the room between the buttons.
 const FIELD_MAX: i32 = 760;
 
-/// A pane's place split in two: its bar on top, `PANE_BAR_HEIGHT` high,
+/// A pane's place split in two: its bar on top, `pane_bar_height()` high,
 /// and its window below it, at least a pixel high. Everything that places
 /// a pane's bar or its window goes through this.
 pub fn pane_bar_rects(pane: Rect) -> (Rect, Rect) {
-    let h = PANE_BAR_HEIGHT.min(pane.size.h - 1).max(0);
+    let h = pane_bar_height().min(pane.size.h - 1).max(0);
     let bar = Rectangle::new(pane.loc, (pane.size.w, h).into());
     let client = Rectangle::new(
         (pane.loc.x, pane.loc.y + h).into(),
@@ -450,11 +450,11 @@ impl Painter {
             let band = band(field, scale);
             let (left, right) = (x + pad, x + w - pad);
             let (host, path) = split_address(&view.label);
-            let host = self.cut_middle(host, DETAIL_FONT_SIZE, right - left, scale);
+            let host = self.cut_middle(host, detail_font_size(), right - left, scale);
             let end = self.text(
                 &mut c,
                 &host,
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 left,
                 right,
                 band,
@@ -462,11 +462,11 @@ impl Painter {
                 ink,
             );
             if !path.is_empty() && end < right {
-                let path = self.cut_middle(path, DETAIL_FONT_SIZE, right - end, scale);
+                let path = self.cut_middle(path, detail_font_size(), right - end, scale);
                 self.text(
                     &mut c,
                     &path,
-                    DETAIL_FONT_SIZE,
+                    detail_font_size(),
                     end,
                     right,
                     band,
@@ -504,15 +504,15 @@ impl Painter {
             let right = px(end_x - BAR_NOTE_GAP / 2) as f32;
             // The note keeps its room; the label is cut short before it.
             let note_w = view.note.map_or(0.0, |note| {
-                self.text_width(note, DETAIL_FONT_SIZE, scale) + px(BAR_NOTE_GAP) as f32
+                self.text_width(note, detail_font_size(), scale) + px(BAR_NOTE_GAP) as f32
             });
             let label_right = (right - note_w).max(left);
-            let label = self.cut_middle(&view.label, DETAIL_FONT_SIZE, label_right - left, scale);
+            let label = self.cut_middle(&view.label, detail_font_size(), label_right - left, scale);
             let band = band(bar, scale);
             let end = self.text(
                 &mut c,
                 &label,
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 left,
                 label_right,
                 band,
@@ -528,7 +528,7 @@ impl Painter {
                 self.text(
                     &mut c,
                     note,
-                    DETAIL_FONT_SIZE,
+                    detail_font_size(),
                     end + px(BAR_NOTE_GAP) as f32,
                     right,
                     band,
@@ -642,12 +642,12 @@ mod tests {
         UNZOOM_BUTTON, UNZOOM_MARGIN, field_fill, focus_strip, focus_strip_rect, pane_bar_buttons,
         pane_bar_field, pane_bar_hit, pane_bar_rects, split_address, unzoom_button_rect,
     };
-    use crate::chrome::{BAR_BUTTON, BAR_INSET, PANE_BAR_HEIGHT, Painter, Rect, Theme};
+    use crate::chrome::{BAR_BUTTON, BAR_INSET, Painter, Rect, Theme, pane_bar_height};
     use crate::herdr::AgentStatus;
 
     fn view(w: i32) -> PaneBarView {
         PaneBarView {
-            rect: Rect::new((0, 0).into(), (w, PANE_BAR_HEIGHT).into()),
+            rect: Rect::new((0, 0).into(), (w, pane_bar_height()).into()),
             label: "npm run dev -- --port 3000 --host 0.0.0.0".into(),
             note: None,
             status: BarStatus::Running,
@@ -695,13 +695,13 @@ mod tests {
         // As wide as the pane, and the window right under it: no overlap.
         assert_eq!(
             bar,
-            Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into())
+            Rect::new((200, 50).into(), (600, pane_bar_height()).into())
         );
         assert_eq!(
             client,
             Rect::new(
-                (200, 50 + PANE_BAR_HEIGHT).into(),
-                (600, 400 - PANE_BAR_HEIGHT).into()
+                (200, 50 + pane_bar_height()).into(),
+                (600, 400 - pane_bar_height()).into()
             )
         );
         assert!(bar.intersection(client).is_none_or(|both| both.is_empty()));
@@ -726,7 +726,7 @@ mod tests {
 
     #[test]
     fn tiny_pane_keeps_a_window() {
-        for h in [0, 1, 10, PANE_BAR_HEIGHT] {
+        for h in [0, 1, 10, pane_bar_height()] {
             let pane = Rect::new((0, 0).into(), (300, h).into());
             let (bar, client) = pane_bar_rects(pane);
             assert!(client.size.h >= 1, "{h}");
@@ -781,13 +781,13 @@ mod tests {
             bar.loc.x + bar.size.w - BAR_INSET
         );
         assert_eq!(pane_bar_field(bar, BarButtons::Terminal, None), None);
-        let narrow = Rect::new((0, 0).into(), (120, PANE_BAR_HEIGHT).into());
+        let narrow = Rect::new((0, 0).into(), (120, pane_bar_height()).into());
         assert_eq!(pane_bar_field(narrow, WEB, Some(false)), None);
     }
 
     #[test]
     fn a_wide_web_bar_keeps_its_address_in_the_middle() {
-        let bar = Rect::new((0, 0).into(), (3000, PANE_BAR_HEIGHT).into());
+        let bar = Rect::new((0, 0).into(), (3000, pane_bar_height()).into());
         let buttons = pane_bar_buttons(bar, WEB, None);
         let field = pane_bar_field(bar, WEB, None).unwrap();
         assert_eq!(field.size.w, FIELD_MAX);
@@ -852,7 +852,7 @@ mod tests {
 
     #[test]
     fn pane_bar_buttons_do_not_overlap() {
-        let bar = Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into());
+        let bar = Rect::new((200, 50).into(), (600, pane_bar_height()).into());
         let kinds = [BarButtons::Terminal, WEB, BarButtons::None];
         for (kind, zoom) in kinds
             .into_iter()
@@ -877,7 +877,7 @@ mod tests {
                 assert!(pair[0].1.loc.x + pair[0].1.size.w <= pair[1].1.loc.x);
             }
             // Square, and inside the bar.
-            let top = 50 + (PANE_BAR_HEIGHT - BAR_BUTTON) / 2;
+            let top = 50 + (pane_bar_height() - BAR_BUTTON) / 2;
             assert!(buttons.iter().all(|(_, r)| r.loc.y == top
                 && r.size.h == BAR_BUTTON
                 && r.size.w == BAR_BUTTON
@@ -907,7 +907,7 @@ mod tests {
 
     #[test]
     fn pane_bar_hit_agrees_with_the_buttons() {
-        let bar = Rect::new((200, 50).into(), (600, PANE_BAR_HEIGHT).into());
+        let bar = Rect::new((200, 50).into(), (600, pane_bar_height()).into());
         for kind in [BarButtons::Terminal, WEB] {
             for zoom in [None, Some(false), Some(true)] {
                 for (button, rect) in pane_bar_buttons(bar, kind, zoom) {
@@ -947,7 +947,7 @@ mod tests {
         let mark_end = 200 + BAR_INSET + super::STATUS_WIDTH;
         assert!(dot.loc.x >= 200 + BAR_INSET && dot.loc.x + dot.size.w <= mark_end);
         let mid = dot.loc.y + dot.size.h / 2;
-        assert!((mid - (50 + PANE_BAR_HEIGHT / 2)).abs() <= 1);
+        assert!((mid - (50 + pane_bar_height() / 2)).abs() <= 1);
         v.status = BarStatus::Exited;
         assert_eq!(v.blinker(), None);
         // An agent blinks only at work, which is `Running`.

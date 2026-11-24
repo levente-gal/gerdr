@@ -5,9 +5,9 @@
 //! (`Painter::dialog_keys`).
 
 use super::{
-    ButtonStyle, Canvas, DIALOG_WIDTH, FONT_SIZE, LABEL_FONT_SIZE, POPUP_RADIUS, Painter, Palette,
-    QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP, QUIT_PADDING, QUIT_TITLE, Rect, SHADOW,
-    band, button_width, hint_spots, phys,
+    ButtonStyle, Canvas, DIALOG_WIDTH, POPUP_RADIUS, Painter, Palette, QUIT_BUTTON_GAP,
+    QUIT_LINE_GAP, QUIT_PADDING, Rect, SHADOW, band, button_width, font_size, hint_spots,
+    label_font_size, phys, quit_body, quit_button, quit_title,
 };
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -18,12 +18,12 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 pub(super) fn dialog_buttons(panel: Rect, labels: &[&str]) -> Vec<Rect> {
     let widths: Vec<i32> = labels.iter().map(|label| button_width(label)).collect();
     let total = widths.iter().sum::<i32>() + (widths.len() as i32 - 1).max(0) * QUIT_BUTTON_GAP;
-    let y = panel.loc.y + panel.size.h - QUIT_PADDING - QUIT_BUTTON;
+    let y = panel.loc.y + panel.size.h - QUIT_PADDING - quit_button();
     let mut x = panel.loc.x + panel.size.w - QUIT_PADDING - total;
     widths
         .into_iter()
         .map(|w| {
-            let rect = Rectangle::new((x, y).into(), (w, QUIT_BUTTON).into());
+            let rect = Rectangle::new((x, y).into(), (w, quit_button()).into());
             x += w + QUIT_BUTTON_GAP;
             rect
         })
@@ -80,7 +80,7 @@ pub fn confirm_body_rows(body: &str, size: Size<i32, Logical>) -> Vec<String> {
     (body.lines())
         .flat_map(|line| match line.trim().is_empty() {
             true => vec![String::new()],
-            false => super::features::wrap_all(line, FONT_SIZE, width),
+            false => super::features::wrap_all(line, font_size(), width),
         })
         .collect()
 }
@@ -94,9 +94,13 @@ pub fn confirm_body_lines(body: &str, size: Size<i32, Logical>) -> usize {
 /// its button doing it labelled `go`, its body `lines` lines high (one
 /// for every dialog but the Ship sheet).
 pub fn confirm_lines_layout(size: Size<i32, Logical>, go: &str, lines: usize) -> ConfirmLayout {
-    let body_h = QUIT_BODY * lines.max(1) as i32;
-    let height =
-        2 * QUIT_PADDING + QUIT_TITLE + QUIT_LINE_GAP + body_h + 2 * QUIT_LINE_GAP + QUIT_BUTTON;
+    let body_h = quit_body() * lines.max(1) as i32;
+    let height = 2 * QUIT_PADDING
+        + quit_title()
+        + QUIT_LINE_GAP
+        + body_h
+        + 2 * QUIT_LINE_GAP
+        + quit_button();
     let width = DIALOG_WIDTH.min(size.w);
     let panel = Rectangle::new(
         (
@@ -108,8 +112,8 @@ pub fn confirm_lines_layout(size: Size<i32, Logical>, go: &str, lines: usize) ->
     );
     let (x, y) = (panel.loc.x + QUIT_PADDING, panel.loc.y + QUIT_PADDING);
     let inner = width - 2 * QUIT_PADDING;
-    let title = Rectangle::new((x, y).into(), (inner, QUIT_TITLE).into());
-    let body_y = y + QUIT_TITLE + QUIT_LINE_GAP;
+    let title = Rectangle::new((x, y).into(), (inner, quit_title()).into());
+    let body_y = y + quit_title() + QUIT_LINE_GAP;
     let body = Rectangle::new((x, body_y).into(), (inner, body_h).into());
     let buttons = dialog_buttons(panel, &["Cancel", go]);
     ConfirmLayout {
@@ -184,25 +188,25 @@ impl Painter {
         self.text(
             &mut c,
             text,
-            LABEL_FONT_SIZE,
+            label_font_size(),
             x,
             end,
             title_band,
             scale,
             p.text,
         );
-        // The body, a line per `QUIT_BODY`.
+        // The body, a line per `quit_body()`.
         let body = shift(layout.body);
         for (i, line) in rows.iter().enumerate() {
             let rect = Rectangle::new(
-                (body.loc.x, body.loc.y + i as i32 * QUIT_BODY).into(),
-                (body.size.w, QUIT_BODY).into(),
+                (body.loc.x, body.loc.y + i as i32 * quit_body()).into(),
+                (body.size.w, quit_body()).into(),
             );
             let (x, end) = phys(rect, scale);
             self.text(
                 &mut c,
                 line,
-                FONT_SIZE,
+                font_size(),
                 x,
                 end,
                 band(rect, scale),
@@ -294,7 +298,7 @@ mod tests {
         assert_eq!(one, confirm_lines_layout(size, "Ship", 1));
         let three = confirm_lines_layout(size, "Ship", 3);
         assert_eq!(three.body.size.h, 3 * one.body.size.h);
-        assert_eq!(three.panel.size.h - one.panel.size.h, 2 * QUIT_BODY);
+        assert_eq!(three.panel.size.h - one.panel.size.h, 2 * quit_body());
         assert!(three.buttons[0].loc.y >= three.body.loc.y + three.body.size.h);
         assert_eq!(confirm_body_lines("a\nb\nc", size), 3);
         assert_eq!(confirm_body_lines("a\n\nb", size), 3);

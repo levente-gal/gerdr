@@ -114,10 +114,12 @@ How to use it:
 
 - **L1** Sizes come from the tokens in `chrome/consts.rs` (`POPUP_RADIUS`,
   `ROW_HIGHLIGHT_RADIUS`, `DIALOG_WIDTH`). No new literal radius or dialog
-  width. Text sizes come from its Text section (`FONT_SIZE`,
-  `SMALL_FONT_SIZE`, ...), never a new literal or a file's own size const,
-  and a height that holds a line of text is `line(SIZE, room)`, so it
-  grows when `TEXT` does.
+  width. Text sizes come from its Text section (`font_size()`,
+  `small_font_size()`, ...), never a new literal or a file's own size
+  const, and a height that holds a line of text is a fn returning
+  `line(size, room)`, never a const, so it grows when `text_size()` does.
+  A cache of drawn text or layout goes stale with the text size: use
+  `Cached`, `RowCache` or `sized`.
 - **L2** Use the shared painters: `Painter::button` with `ButtonStyle`,
   `row_highlight`, `query_field`, `segmented`, `chrome/thumb.rs` scrollbars,
   `layers::scrim` behind dialogs. One hover style: selected row in
@@ -271,7 +273,7 @@ added | grep -E 'let _ = |\.ok\(\);|debug!\('           # E2 dropped errors
 added | grep -E 'Command::new|spawn\('                  # E2 new tool calls
 added | grep -E 'kill|stop_|close_|remove_dir|delete'   # C1 direct destructive calls
 added | grep -E 'Keysym::|KEY_[A-Z]|chord: "'           # K1 new chords
-added | grep -E 'keycaps\(|KEY_FONT_SIZE|hint_button\('  # K7 key on a button
+added | grep -E 'keycaps\(|key_font_size|hint_button\('  # K7 key on a button
 added | grep -E 'radius|[0-9]+\.0 *[,)]|width: [0-9]+'  # L1 literal sizes
 added | grep -E 'show_[a-z]+\(|toast' | grep '\."'      # W2 full stop in toasts
 added | grep -E 'project|workspace' | grep '"'          # W1 term in user text

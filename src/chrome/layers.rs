@@ -190,6 +190,8 @@ pub(super) struct RowCache<K> {
     frame: u64,
     /// How many rows were drawn, for tests.
     drawn: Cell<usize>,
+    /// The text size the rows were drawn at (as `f32` bits).
+    text: u32,
 }
 
 struct Row<K> {
@@ -205,6 +207,7 @@ impl<K> Default for RowCache<K> {
             rows: Vec::new(),
             frame: 0,
             drawn: Cell::new(0),
+            text: 0,
         }
     }
 }
@@ -219,6 +222,11 @@ impl<K: PartialEq> RowCache<K> {
         scale: f64,
         draw: impl FnOnce(&K) -> MemoryRenderBuffer,
     ) -> MemoryRenderBuffer {
+        let text = super::text_size().to_bits();
+        if self.text != text {
+            self.rows.clear();
+            self.text = text;
+        }
         let frame = self.frame;
         let row = match self.rows.iter().position(|r| r.key == key) {
             Some(i) => self.rows.remove(i),

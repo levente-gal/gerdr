@@ -5,11 +5,10 @@
 //! the buttons stay.
 
 use super::{
-    ButtonStyle, Canvas, DIALOG_WIDTH, FIELD_LINE, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE,
-    POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP, QUIT_LINE_GAP,
-    QUIT_PADDING, QUIT_TITLE, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, Thumb, band, button_width,
-    dialog_buttons, field_line_spot, field_lines_height, field_text, gutter_track, line, phys,
-    rect_px,
+    ButtonStyle, Canvas, DIALOG_WIDTH, FieldSpot, POPUP_RADIUS, Painter, Palette, QUIT_BUTTON_GAP,
+    QUIT_LINE_GAP, QUIT_PADDING, Rect, Rgb, SHADOW, Thumb, band, button_width, dialog_buttons,
+    field_line, field_line_spot, field_lines_height, field_text, font_size, gutter_track,
+    label_font_size, line, phys, quit_body, quit_button, quit_title, rect_px, small_font_size,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -45,22 +44,32 @@ const TAB_W: i32 = 80;
 /// The room between the tabs' outline and its segments.
 const TRACK_PAD: i32 = 2;
 /// How much higher a field gets for each line past its first.
-const LINE_H: i32 = FIELD_LINE;
+fn line_h() -> i32 {
+    field_line()
+}
 /// How high the row over a field is, holding its name and suggestion.
-const ROW_LABEL: i32 = line(FONT_SIZE, 11);
+fn row_label() -> i32 {
+    line(font_size(), 11)
+}
 /// How high a borrowed check's line is, holding its button.
-const BORROWED_H: i32 = line(FONT_SIZE, 11);
+fn borrowed_h() -> i32 {
+    line(font_size(), 11)
+}
 /// How wide the label of the time limit's field is, and the field.
 const LIMIT_LABEL: i32 = 170;
 const LIMIT_FIELD: i32 = 100;
 /// The room between a name and what is said beside it.
 const TAG_GAP: f32 = 8.0;
 /// How high the shortest list of fields is on a low output.
-const LIST_MIN: i32 = 2 * (ROW_LABEL + QUIT_BUTTON);
+fn list_min() -> i32 {
+    2 * (row_label() + quit_button())
+}
 /// How high the list of fields is where the output has room: the same on
 /// every tab and as fields grow, so the dialog doesn't change height; more
 /// scrolls.
-const LIST_TALL: i32 = 6 * (ROW_LABEL + QUIT_BUTTON);
+fn list_tall() -> i32 {
+    6 * (row_label() + quit_button())
+}
 /// How far a turn of the wheel moves the list.
 pub const COMMANDS_NOTCH: i32 = 40;
 
@@ -221,16 +230,20 @@ fn list_height(view: &CommandsView) -> i32 {
     let rows: i32 = (view.rows.iter())
         .map(|row| {
             let heading = if row.heading.is_some() {
-                QUIT_BODY + QUIT_LINE_GAP
+                quit_body() + QUIT_LINE_GAP
             } else {
                 0
             };
-            let borrowed = row.borrowed.len() as i32 * BORROWED_H;
-            heading + ROW_LABEL + borrowed + field_lines_height(lines_of(&row.line)) + QUIT_LINE_GAP
+            let borrowed = row.borrowed.len() as i32 * borrowed_h();
+            heading
+                + row_label()
+                + borrowed
+                + field_lines_height(lines_of(&row.line))
+                + QUIT_LINE_GAP
         })
         .sum();
     let limit = if view.limit.is_some() {
-        QUIT_BUTTON + QUIT_LINE_GAP
+        quit_button() + QUIT_LINE_GAP
     } else {
         0
     };
@@ -251,15 +264,15 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
     // not, and the list is as high on every tab: the dialog stays put.
     let line = |h: i32| h + QUIT_LINE_GAP;
     let fixed = 2 * QUIT_PADDING
-        + (QUIT_BUTTON + QUIT_LINE_GAP)
-        + (QUIT_BODY + QUIT_LINE_GAP)
-        + line(QUIT_BODY)
+        + (quit_button() + QUIT_LINE_GAP)
+        + (quit_body() + QUIT_LINE_GAP)
+        + line(quit_body())
         + QUIT_LINE_GAP
-        + line(QUIT_BODY)
-        + QUIT_BUTTON;
+        + line(quit_body())
+        + quit_button();
     let total = list_height(view);
-    let room = (size.h - 2 * MARGIN - fixed).max(LIST_MIN);
-    let list_h = LIST_TALL.min(room);
+    let room = (size.h - 2 * MARGIN - fixed).max(list_min());
+    let list_h = list_tall().min(room);
     let height = fixed + list_h;
     // Wider than other dialogs by a tab, so its six leave the title room.
     let width = (DIALOG_WIDTH + TAB_W).min(size.w);
@@ -278,12 +291,12 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
         y += h + QUIT_LINE_GAP;
         rect
     };
-    let header = next(QUIT_BUTTON);
-    let body = next(QUIT_BODY);
-    let note_line = next(QUIT_BODY);
+    let header = next(quit_button());
+    let body = next(quit_body());
+    let note_line = next(quit_body());
     let note = view.note.as_ref().map(|_| note_line);
     let list = next(list_h);
-    let error_line = next(QUIT_BODY);
+    let error_line = next(quit_body());
     let error = view.error.as_ref().map(|_| error_line);
 
     let track_w = view.tabs.len() as i32 * TAB_W + 2 * TRACK_PAD;
@@ -292,8 +305,16 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
         (track_w, header.size.h).into(),
     );
     let title = Rectangle::new(
-        (header.loc.x, header.loc.y + (QUIT_BUTTON - QUIT_TITLE) / 2).into(),
-        ((header.size.w - track_w - QUIT_LINE_GAP).max(0), QUIT_TITLE).into(),
+        (
+            header.loc.x,
+            header.loc.y + (quit_button() - quit_title()) / 2,
+        )
+            .into(),
+        (
+            (header.size.w - track_w - QUIT_LINE_GAP).max(0),
+            quit_title(),
+        )
+            .into(),
     );
     let segment = |i: i32| {
         Rectangle::new(
@@ -307,23 +328,23 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
     let rows = (view.rows.iter())
         .map(|row| {
             let heading = row.heading.as_ref().map(|_| {
-                let rect = Rectangle::new((x, at).into(), (inner, QUIT_BODY).into());
-                at += QUIT_BODY + QUIT_LINE_GAP;
+                let rect = Rectangle::new((x, at).into(), (inner, quit_body()).into());
+                at += quit_body() + QUIT_LINE_GAP;
                 rect
             });
-            let label = Rectangle::new((x, at).into(), (inner, ROW_LABEL).into());
+            let label = Rectangle::new((x, at).into(), (inner, row_label()).into());
             let use_button = row.suggestion.as_ref().map(|_| {
                 let w = button_width(USE);
                 Rectangle::new(
-                    (x + inner - w, at + (ROW_LABEL - USE_H) / 2).into(),
-                    (w, USE_H).into(),
+                    (x + inner - w, at + (row_label() - use_h()) / 2).into(),
+                    (w, use_h()).into(),
                 )
             });
-            at += ROW_LABEL;
+            at += row_label();
             let borrowed = (row.borrowed.iter())
                 .map(|_| {
-                    let rect = Rectangle::new((x, at).into(), (inner, BORROWED_H).into());
-                    at += BORROWED_H;
+                    let rect = Rectangle::new((x, at).into(), (inner, borrowed_h()).into());
+                    at += borrowed_h();
                     rect
                 })
                 .collect();
@@ -341,7 +362,7 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
         .collect();
     let limit = view.limit.as_ref().map(|_| {
         let cell =
-            |from: i32, w: i32| Rectangle::new((x + from, at).into(), (w, QUIT_BUTTON).into());
+            |from: i32, w: i32| Rectangle::new((x + from, at).into(), (w, quit_button()).into());
         [
             cell(0, LIMIT_LABEL),
             cell(LIMIT_LABEL, LIMIT_FIELD),
@@ -372,7 +393,9 @@ pub fn commands_layout(view: &CommandsView, size: Size<i32, Logical>) -> Command
 
 /// The Use button's label and height.
 const USE: &str = "Use";
-const USE_H: i32 = line(FONT_SIZE, 7);
+fn use_h() -> i32 {
+    line(font_size(), 7)
+}
 
 impl CommandsLayout {
     /// What `pos` is over.
@@ -432,9 +455,9 @@ impl CommandsLayout {
         if let CommandsFocus::Borrowed(i, line) = view.focus {
             let rect = *self.rows.get(i)?.borrowed.get(line)?;
             // Its first line brings the name over it along.
-            let lead = if line == 0 { ROW_LABEL } else { 0 };
+            let lead = if line == 0 { row_label() } else { 0 };
             let top = rect.loc.y - self.list.loc.y + view.down;
-            return Some((top - lead, BORROWED_H + lead));
+            return Some((top - lead, borrowed_h() + lead));
         }
         let (rect, line_at) = match view.focus {
             CommandsFocus::Row(i) => {
@@ -445,15 +468,15 @@ impl CommandsLayout {
             CommandsFocus::Limit => (self.limit?[1], 0),
             CommandsFocus::Borrowed(..) => return None,
         };
-        let top = rect.loc.y - self.list.loc.y + view.down + line_at * LINE_H;
+        let top = rect.loc.y - self.list.loc.y + view.down + line_at * line_h();
         // A field's first line brings the name over it along.
         let lead = match view.focus {
             CommandsFocus::Row(i) if line_at == 0 => {
-                ROW_LABEL + view.rows[i].borrowed.len() as i32 * BORROWED_H
+                row_label() + view.rows[i].borrowed.len() as i32 * borrowed_h()
             }
             _ => 0,
         };
-        Some((top - lead, QUIT_BUTTON + lead))
+        Some((top - lead, quit_button() + lead))
     }
 }
 
@@ -501,7 +524,7 @@ pub fn commands_field(
     Some(FieldSpot {
         area: clip(area, layout.list)?,
         text: field_text(area, scale),
-        size: FONT_SIZE,
+        size: font_size(),
         line: line.clone(),
     })
 }
@@ -532,7 +555,7 @@ impl Painter {
         };
         // As its button says: the tabs leave no room for more, and the one
         // picked says whose they are.
-        line(&mut c, "Commands", layout.title, LABEL_FONT_SIZE, p.text);
+        line(&mut c, "Commands", layout.title, label_font_size(), p.text);
         let tabs: Vec<_> = (layout.tabs.iter())
             .map(|(tab, rect)| (tab.label(), shift(*rect)))
             .collect();
@@ -550,10 +573,10 @@ impl Painter {
             scale,
             p,
         );
-        line(&mut c, view.body, layout.body, FONT_SIZE, p.muted);
+        line(&mut c, view.body, layout.body, font_size(), p.muted);
         if let (Some(rect), Some((note, bad))) = (layout.note, &view.note) {
             let color = if *bad { p.error } else { p.muted };
-            line(&mut c, note, rect, FONT_SIZE, color);
+            line(&mut c, note, rect, font_size(), color);
         }
 
         let list = shift(layout.list);
@@ -561,7 +584,7 @@ impl Painter {
         c.clipped(x as i32, y as i32, w as i32, h as i32, |c| {
             for (i, (row, rects)) in view.rows.iter().zip(&layout.rows).enumerate() {
                 if let (Some(heading), Some(rect)) = (&row.heading, rects.heading) {
-                    line(c, heading, rect, FONT_SIZE, p.text);
+                    line(c, heading, rect, font_size(), p.text);
                 }
                 self.commands_row_label(c, view, row, rects, i, &shift, scale, p);
                 for (k, (borrowed, rect)) in row.borrowed.iter().zip(&rects.borrowed).enumerate() {
@@ -589,7 +612,7 @@ impl Painter {
                 );
             }
             if let (Some(limit), Some(rects)) = (&view.limit, layout.limit) {
-                line(c, "Time limit per check", rects[0], FONT_SIZE, p.muted);
+                line(c, "Time limit per check", rects[0], font_size(), p.muted);
                 self.field(
                     c,
                     limit,
@@ -599,7 +622,7 @@ impl Painter {
                     scale,
                     p,
                 );
-                line(c, "seconds", rects[2], FONT_SIZE, p.muted);
+                line(c, "seconds", rects[2], font_size(), p.muted);
             }
         });
         let track = gutter_track(list.loc.x + list.size.w, list);
@@ -611,7 +634,7 @@ impl Painter {
             self.thumb_in(&mut c, &thumb, scale, p);
         }
         if let (Some(rect), Some(error)) = (layout.error, &view.error) {
-            line(&mut c, error, rect, FONT_SIZE, p.error);
+            line(&mut c, error, rect, font_size(), p.error);
         }
 
         // Left of the buttons, the keys besides them; then Cancel and the
@@ -667,10 +690,10 @@ impl Painter {
         let button = Rectangle::new(
             (
                 rect.loc.x + rect.size.w - w,
-                rect.loc.y + (BORROWED_H - USE_H) / 2,
+                rect.loc.y + (borrowed_h() - use_h()) / 2,
             )
                 .into(),
-            (w, USE_H).into(),
+            (w, use_h()).into(),
         );
         let style = ButtonStyle::Plain;
         self.button(c, label, button, (hovered, false), style, scale, p);
@@ -681,7 +704,7 @@ impl Painter {
             false => (format!("project: {}", borrowed.command), p.text),
         };
         let row_band = band(rect, scale);
-        self.text(c, &text, SMALL_FONT_SIZE, x, end, row_band, scale, color);
+        self.text(c, &text, small_font_size(), x, end, row_band, scale, color);
     }
 
     /// The row over a field: its name, what is said of it, and at the
@@ -709,19 +732,19 @@ impl Painter {
             self.button(c, USE, button, (hovered, false), style, scale, p);
             end = phys(button, scale).0 - TAG_GAP * s;
         }
-        let name_w = self.text_width(&row.label, FONT_SIZE, scale);
+        let name_w = self.text_width(&row.label, font_size(), scale);
         let tag_x = x + name_w + TAG_GAP * s;
         let tag_w = (row.tag.as_ref()).map_or(0.0, |tag| {
-            self.text_width(tag, SMALL_FONT_SIZE, scale) + TAG_GAP * s
+            self.text_width(tag, small_font_size(), scale) + TAG_GAP * s
         });
         if let Some(suggestion) = &row.suggestion {
             let text = format!("suggested: {suggestion}");
-            let w = self.text_width(&text, SMALL_FONT_SIZE, scale);
+            let w = self.text_width(&text, small_font_size(), scale);
             let from = (end - w).max(tag_x + tag_w);
             self.text(
                 c,
                 &text,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 from,
                 end,
                 row_band,
@@ -730,12 +753,12 @@ impl Painter {
             );
             end = from - TAG_GAP * s;
         }
-        self.text(c, &row.label, FONT_SIZE, x, end, row_band, scale, p.text);
+        self.text(c, &row.label, font_size(), x, end, row_band, scale, p.text);
         if let Some(tag) = &row.tag {
             self.text(
                 c,
                 tag,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 tag_x,
                 end,
                 row_band,
@@ -790,7 +813,10 @@ mod tests {
     fn a_line_more_makes_the_field_higher() {
         let one = commands_layout(&view(vec![row("api", "a")]), BIG.into());
         let two = commands_layout(&view(vec![row("api", "a\nb")]), BIG.into());
-        assert_eq!(two.rows[0].field.size.h - one.rows[0].field.size.h, LINE_H);
+        assert_eq!(
+            two.rows[0].field.size.h - one.rows[0].field.size.h,
+            line_h()
+        );
         // The dialog stays as high: its list has the room.
         assert_eq!(two.panel.size.h, one.panel.size.h);
     }
@@ -872,9 +898,9 @@ mod tests {
         let rows = &layout.rows[0];
         assert_eq!(
             rows.field.loc.y - rows.label.loc.y,
-            ROW_LABEL + 2 * BORROWED_H
+            row_label() + 2 * borrowed_h()
         );
-        assert_eq!(layout.total - plain.total, 2 * BORROWED_H);
+        assert_eq!(layout.total - plain.total, 2 * borrowed_h());
         assert_eq!(
             layout.hit(centre(rows.borrowed[1])),
             Some(CommandsHit::Borrowed(0, 1))
@@ -883,12 +909,12 @@ mod tests {
         // Its first line brings them along, with the name.
         let (top, height) = layout.focus_span(&v).unwrap();
         assert_eq!(top, rows.label.loc.y - layout.list.loc.y);
-        assert_eq!(height, ROW_LABEL + 2 * BORROWED_H + QUIT_BUTTON);
+        assert_eq!(height, row_label() + 2 * borrowed_h() + quit_button());
         // On a borrowed check, no field takes the pointer.
         v.focus = CommandsFocus::Borrowed(0, 1);
         let (top, height) = layout.focus_span(&v).unwrap();
         assert_eq!(top, rows.borrowed[1].loc.y - layout.list.loc.y);
-        assert_eq!(height, BORROWED_H);
+        assert_eq!(height, borrowed_h());
         assert!(commands_field(&v, BIG.into(), 1.0).is_none());
     }
 
@@ -925,7 +951,8 @@ mod tests {
         let at = |y: i32| Point::from((field.loc.x as f64 + 5.0, (field.loc.y + y) as f64));
         let (first, base) = commands_field_at(&v, BIG.into(), 1.0, at(5), false).unwrap();
         assert_eq!((first.line.as_str(), base), ("abc", 0));
-        let (second, base) = commands_field_at(&v, BIG.into(), 1.0, at(LINE_H + 5), false).unwrap();
+        let (second, base) =
+            commands_field_at(&v, BIG.into(), 1.0, at(line_h() + 5), false).unwrap();
         assert_eq!((second.line.as_str(), base), ("def", 4));
         // Off the field it counts only when dragging from it, then on the
         // nearest line.
@@ -950,6 +977,6 @@ mod tests {
         v.rows[1].line.caret = 0;
         v.rows[1].line.anchor = 0;
         let first = commands_layout(&v, BIG.into()).focus_span(&v).unwrap();
-        assert_eq!(plain.0 + plain.1 - (first.0 + first.1), LINE_H);
+        assert_eq!(plain.0 + plain.1 - (first.0 + first.1), line_h());
     }
 }

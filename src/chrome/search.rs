@@ -7,9 +7,9 @@
 use std::ops::Range;
 
 use super::{
-    BUTTON_RADIUS, CARET_WIDTH, Canvas, FIELD_GAP, FONT_SIZE, HELP_PADDING, MENU_MARK_GAP,
-    MENU_MARK_WIDTH, PADDING, PROJECT_MENU_PADDING, Painter, Palette, Rect, Rgb, SMALL_FONT_SIZE,
-    band, chevron_down, cross, icon_sdf, magnifier, mix, physical, rect_px,
+    BUTTON_RADIUS, CARET_WIDTH, Canvas, FIELD_GAP, HELP_PADDING, MENU_MARK_GAP, MENU_MARK_WIDTH,
+    PADDING, PROJECT_MENU_PADDING, Painter, Palette, Rect, Rgb, band, chevron_down, cross,
+    font_size, icon_sdf, magnifier, mix, physical, rect_px, small_font_size,
 };
 use crate::text_field::Line;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -211,7 +211,7 @@ impl Painter {
             query_text(rect, scale),
             band(rect, scale),
             focused,
-            FONT_SIZE,
+            font_size(),
             scale,
             p,
         );
@@ -255,7 +255,7 @@ impl Painter {
                 let (text_x, mut text_end) = search_field_text(rect, scale);
                 // A whole word: a tag at the right end says so.
                 if bar.whole {
-                    let tw = self.text_width(WHOLE_TAG, SMALL_FONT_SIZE, scale);
+                    let tw = self.text_width(WHOLE_TAG, small_font_size(), scale);
                     let pad = (6.0 * s).round();
                     let (tx, tend) = (text_end - tw - pad, text_end + pad / 2.0);
                     if tx - pad > text_x {
@@ -266,7 +266,7 @@ impl Painter {
                         self.text(
                             c,
                             WHOLE_TAG,
-                            SMALL_FONT_SIZE,
+                            small_font_size(),
                             tx,
                             tend,
                             band,
@@ -283,7 +283,7 @@ impl Painter {
                     (text_x, text_end),
                     band(rect, scale),
                     bar.focused,
-                    FONT_SIZE,
+                    font_size(),
                     scale,
                     p,
                 );
@@ -318,7 +318,7 @@ impl Painter {
         }
         if let (Some(bar), Some(rect)) = (bar, count) {
             let color = if bar.found { p.muted } else { p.error };
-            self.centered(c, &bar.count, SMALL_FONT_SIZE, rect, scale, color);
+            self.centered(c, &bar.count, small_font_size(), rect, scale, color);
         }
     }
 

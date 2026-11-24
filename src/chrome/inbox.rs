@@ -8,13 +8,13 @@
 //! its items into an `InboxView`.
 
 use super::{
-    BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, DOT, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
-    FieldSpot, HELP_MARGIN, HELP_PADDING, LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH,
-    MENU_RADIUS, MONO_FONT_SIZE, PADDING, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING,
-    Painter, Palette, ROW_BUTTON, ROW_BUTTON_INSET, Rect, Rgb, SHADOW, SMALL_FONT_SIZE, STROKE,
-    agent_icon, band, cross, dot_slot, folder, footer_height, footer_hint_spots, git_branch,
-    hint_at, hint_strs, icon_sdf, line, measure, mix, pencil, phys, plus, rect_px, robot,
-    rounded_rect, row_dot, row_fill, search::query_text, segment, status_dot, tray,
+    BUTTON_RADIUS, Badge, Canvas, DOT, DOT_SLOT, Dot, FIELD_GAP, FieldSpot, HELP_MARGIN,
+    HELP_PADDING, MENU_MARK_GAP, MENU_MARK_WIDTH, MENU_RADIUS, PADDING, POPUP_RADIUS,
+    PROJECT_MENU_PADDING, Painter, Palette, ROW_BUTTON_INSET, Rect, Rgb, SHADOW, STROKE,
+    agent_icon, band, cross, detail_font_size, dot_slot, folder, font_size, footer_height,
+    footer_hint_spots, git_branch, hint_at, hint_strs, icon_sdf, label_font_size, line, measure,
+    mix, mono_font_size, pencil, phys, plus, project_menu_input, rect_px, robot, rounded_rect,
+    row_button, row_dot, row_fill, search::query_text, segment, small_font_size, status_dot, tray,
 };
 use crate::git::{GitStatus, InProgress};
 use crate::text_field::Line;
@@ -25,11 +25,19 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 const INBOX_MAX_WIDTH: i32 = 1400;
 const INBOX_MAX_HEIGHT: i32 = 1000;
 /// Its title row, and the field's under it.
-const INBOX_TITLE: i32 = line(LABEL_FONT_SIZE, 27);
-const INBOX_FIELD: i32 = PROJECT_MENU_INPUT;
+fn inbox_title_px() -> i32 {
+    line(label_font_size(), 27)
+}
+fn inbox_field_px() -> i32 {
+    project_menu_input()
+}
 /// How high an item's row is, and a section's label.
-pub const INBOX_ROW: i32 = 2 * ROW_TITLE_TOP + ROW_TITLE + ROW_SUBTITLE;
-pub const INBOX_LABEL: i32 = line(SMALL_FONT_SIZE, 21);
+pub fn inbox_row_px() -> i32 {
+    2 * ROW_TITLE_TOP + row_title() + row_subtitle()
+}
+pub fn inbox_label() -> i32 {
+    line(small_font_size(), 21)
+}
 /// The list's share of the panel's width, and the narrowest it gets
 /// (short of half the panel).
 const INBOX_LIST_SHARE: f64 = 0.4;
@@ -65,7 +73,9 @@ const BADGE_TINT: f32 = 0.16;
 const DETAIL_BADGE: i32 = 36;
 /// A section label's count: its pill's height and the room either side
 /// of the number.
-const COUNT_HEIGHT: i32 = line(DETAIL_FONT_SIZE, 6);
+fn count_height() -> i32 {
+    line(detail_font_size(), 6)
+}
 const COUNT_PAD: i32 = 7;
 /// How far above a section label's bottom its line sits: low, near the
 /// items it heads.
@@ -73,25 +83,41 @@ const LABEL_LOW: i32 = 6;
 /// The lines of an item's row: the title's band from the top, then the
 /// subtitle's.
 const ROW_TITLE_TOP: i32 = 6;
-const ROW_TITLE: i32 = line(FONT_SIZE, 5);
-const ROW_SUBTITLE: i32 = line(SMALL_FONT_SIZE, 3);
+fn row_title() -> i32 {
+    line(font_size(), 5)
+}
+fn row_subtitle() -> i32 {
+    line(small_font_size(), 3)
+}
 /// The detail: its title row, a field's line, the widest its labels'
 /// column gets, the heading over its block, a line of the block in the
-/// monospace font (`MONO_FONT_SIZE`), and the room inside the block.
-const DETAIL_TITLE: i32 = line(LABEL_FONT_SIZE, 15) + line(SMALL_FONT_SIZE, 15);
-const DETAIL_LINE: i32 = line(FONT_SIZE, 9);
+/// monospace font (`mono_font_size()`), and the room inside the block.
+fn detail_title() -> i32 {
+    line(label_font_size(), 15) + line(small_font_size(), 15)
+}
+fn detail_line() -> i32 {
+    line(font_size(), 9)
+}
 const DETAIL_LABEL_MAX: i32 = 140;
-const DETAIL_HEADING: i32 = line(DETAIL_FONT_SIZE, 16);
-const BLOCK_LINE: i32 = line(MONO_FONT_SIZE, 6);
+fn detail_heading() -> i32 {
+    line(detail_font_size(), 16)
+}
+fn block_line() -> i32 {
+    line(mono_font_size(), 6)
+}
 const BLOCK_PAD: i32 = 6;
 /// The detail's buttons: their height, the gap between their rows, and
 /// the most rows (the rest are left out; their keys still work).
-const DETAIL_BUTTON: i32 = line(SMALL_FONT_SIZE, 17);
+fn detail_button() -> i32 {
+    line(small_font_size(), 17)
+}
 const DETAIL_BUTTON_ROWS: usize = 2;
 /// The chip at the end of the field while composing: its height and the
 /// room either side of what it says, the widest share of the field it
 /// takes, and its arrow's width.
-const CHIP_HEIGHT: i32 = line(SMALL_FONT_SIZE, 11);
+fn chip_height() -> i32 {
+    line(small_font_size(), 11)
+}
 const CHIP_PAD: i32 = 8;
 const CHIP_SHARE: f64 = 0.4;
 const CHIP_ARROW: i32 = 12;
@@ -344,7 +370,7 @@ fn panel_rect(size: Size<i32, Logical>) -> Rect {
 /// The list and the detail beside it, between the field and a footer
 /// `footer_h` high in `panel`.
 fn body(panel: Rect, footer_h: i32) -> (Rect, Rect) {
-    let top = panel.loc.y + INBOX_TITLE + INBOX_FIELD;
+    let top = panel.loc.y + inbox_title_px() + inbox_field_px();
     let h = (panel.loc.y + panel.size.h - footer_h - top).max(0);
     let w = panel.size.w;
     let list_w = ((w as f64 * INBOX_LIST_SHARE).round() as i32).max(INBOX_LIST_MIN.min(w / 2));
@@ -364,8 +390,8 @@ fn row_span(list: Rect) -> (i32, i32) {
 /// How high `row` is.
 fn row_height(row: &InboxRow) -> i32 {
     match row {
-        InboxRow::Label { .. } => INBOX_LABEL,
-        InboxRow::Item(_) => INBOX_ROW,
+        InboxRow::Label { .. } => inbox_label(),
+        InboxRow::Item(_) => inbox_row_px(),
     }
 }
 
@@ -449,12 +475,12 @@ fn scroll_track(list: Rect) -> Rect {
 /// fits (a section's label is lower than an item's row).
 pub fn inbox_page(size: Size<i32, Logical>) -> usize {
     let (list, _) = body(panel_rect(size), footer_height(usize::MAX));
-    ((list.size.h - 2 * INBOX_PAD) / INBOX_ROW).max(1) as usize
+    ((list.size.h - 2 * INBOX_PAD) / inbox_row_px()).max(1) as usize
 }
 
 /// How wide a row's button is: its label and the room either side.
 fn row_button_width(button: &InboxButton) -> i32 {
-    extent(&button.label, FONT_SIZE) + 2 * BUTTON_PAD
+    extent(&button.label, font_size()) + 2 * BUTTON_PAD
 }
 
 /// The first of `buttons` that fit at the right end of a row in `rect`,
@@ -473,11 +499,11 @@ fn row_buttons(buttons: &[InboxButton], rect: Rect) -> Vec<Rect> {
         widths.push(w);
     }
     let mut x = rect.loc.x + rect.size.w - ROW_BUTTON_INSET - used.max(0);
-    let top = rect.loc.y + (rect.size.h - ROW_BUTTON) / 2;
+    let top = rect.loc.y + (rect.size.h - row_button()) / 2;
     widths
         .into_iter()
         .map(|w| {
-            let r = Rectangle::new((x, top).into(), (w, ROW_BUTTON).into());
+            let r = Rectangle::new((x, top).into(), (w, row_button()).into());
             x += w + BUTTON_GAP;
             r
         })
@@ -486,7 +512,7 @@ fn row_buttons(buttons: &[InboxButton], rect: Rect) -> Vec<Rect> {
 
 /// How wide a detail's button is: its label with room either side.
 fn detail_button_width(button: &InboxButton) -> i32 {
-    2 * BUTTON_PAD + extent(&button.label, SMALL_FONT_SIZE)
+    2 * BUTTON_PAD + extent(&button.label, small_font_size())
 }
 
 /// Where the parts of the detail showing `detail` go in `rect`.
@@ -527,7 +553,7 @@ fn detail_parts(detail: &InboxDetailView, rect: Rect) -> DetailParts {
             break;
         }
     }
-    let row_step = DETAIL_BUTTON + 2 * BUTTON_GAP;
+    let row_step = detail_button() + 2 * BUTTON_GAP;
     let buttons_top = bottom - rows.len() as i32 * row_step + 2 * BUTTON_GAP;
     let buttons = rows
         .iter()
@@ -536,7 +562,7 @@ fn detail_parts(detail: &InboxDetailView, rect: Rect) -> DetailParts {
             let y = buttons_top + r as i32 * row_step;
             let mut bx = x;
             widths.iter().map(move |&bw| {
-                let b = Rectangle::new((bx, y).into(), (bw, DETAIL_BUTTON).into());
+                let b = Rectangle::new((bx, y).into(), (bw, detail_button()).into());
                 bx += bw + BUTTON_GAP;
                 b
             })
@@ -548,36 +574,36 @@ fn detail_parts(detail: &InboxDetailView, rect: Rect) -> DetailParts {
         buttons_top - HELP_PADDING
     };
 
-    let title = Rectangle::new(rect.loc, (rect.size.w, DETAIL_TITLE).into());
-    let mut y = rect.loc.y + DETAIL_TITLE + BLOCK_PAD;
+    let title = Rectangle::new(rect.loc, (rect.size.w, detail_title()).into());
+    let mut y = rect.loc.y + detail_title() + BLOCK_PAD;
     let mut fields = Vec::new();
     for _ in &detail.fields {
-        if y + DETAIL_LINE > end {
+        if y + detail_line() > end {
             break;
         }
-        fields.push(Rectangle::new((x, y).into(), (w, DETAIL_LINE).into()));
-        y += DETAIL_LINE;
+        fields.push(Rectangle::new((x, y).into(), (w, detail_line()).into()));
+        y += detail_line();
     }
     let widest = detail
         .fields
         .iter()
-        .map(|(label, _)| extent(label, SMALL_FONT_SIZE))
+        .map(|(label, _)| extent(label, small_font_size()))
         .max()
         .unwrap_or(0);
     let label_w = (widest + 2 * FIELD_GAP).min(DETAIL_LABEL_MAX).min(w / 2);
 
     let mut heading = None;
-    if detail.block_title.is_some() && y + BLOCK_PAD + DETAIL_HEADING <= end {
+    if detail.block_title.is_some() && y + BLOCK_PAD + detail_heading() <= end {
         y += BLOCK_PAD;
-        heading = Some(Rectangle::new((x, y).into(), (w, DETAIL_HEADING).into()));
-        y += DETAIL_HEADING;
+        heading = Some(Rectangle::new((x, y).into(), (w, detail_heading()).into()));
+        y += detail_heading();
     } else if !fields.is_empty() {
         y += BLOCK_PAD;
     }
     let mut block = None;
     let room = end - y;
-    if !detail.block.is_empty() && room >= BLOCK_LINE + 2 * BLOCK_PAD {
-        let wanted = detail.block.len() as i32 * BLOCK_LINE + 2 * BLOCK_PAD;
+    if !detail.block.is_empty() && room >= block_line() + 2 * BLOCK_PAD {
+        let wanted = detail.block.len() as i32 * block_line() + 2 * BLOCK_PAD;
         block = Some(Rectangle::new((x, y).into(), (w, wanted.min(room)).into()));
     }
     DetailParts {
@@ -603,15 +629,15 @@ fn compose_chip(compose: &InboxCompose, query: Rect) -> Rect {
     } else {
         0
     };
-    let w = (2 * CHIP_PAD + arrow + extent(chip_label(compose), SMALL_FONT_SIZE))
+    let w = (2 * CHIP_PAD + arrow + extent(chip_label(compose), small_font_size()))
         .min((query.size.w as f64 * CHIP_SHARE) as i32);
     Rectangle::new(
         (
             query.loc.x + query.size.w - HELP_PADDING - w,
-            query.loc.y + (query.size.h - CHIP_HEIGHT) / 2,
+            query.loc.y + (query.size.h - chip_height()) / 2,
         )
             .into(),
-        (w, CHIP_HEIGHT).into(),
+        (w, chip_height()).into(),
     )
 }
 
@@ -632,17 +658,17 @@ fn field_text(view: &InboxView, query: Rect, scale: f64) -> (f32, f32) {
 /// The scope toggle's segments at the right of the title row `title`, as
 /// (for every workspace, rect): "This workspace", then "All".
 pub(super) fn scope_segments(title: Rect) -> Vec<(bool, Rect)> {
-    let y = title.loc.y + (title.size.h - ROW_BUTTON) / 2;
+    let y = title.loc.y + (title.size.h - row_button()) / 2;
     let all_x = title.loc.x + title.size.w - SCOPE_INSET - SCOPE_ALL;
     let own_x = all_x - SCOPE_OWN;
     vec![
         (
             false,
-            Rectangle::new((own_x, y).into(), (SCOPE_OWN, ROW_BUTTON).into()),
+            Rectangle::new((own_x, y).into(), (SCOPE_OWN, row_button()).into()),
         ),
         (
             true,
-            Rectangle::new((all_x, y).into(), (SCOPE_ALL, ROW_BUTTON).into()),
+            Rectangle::new((all_x, y).into(), (SCOPE_ALL, row_button()).into()),
         ),
     ]
 }
@@ -653,13 +679,16 @@ pub(super) fn scope_segments(title: Rect) -> Vec<(bool, Rect)> {
 pub fn inbox_layout(view: &InboxView, size: Size<i32, Logical>) -> InboxLayout {
     let panel = panel_rect(size);
     let (x, top, w) = (panel.loc.x, panel.loc.y, panel.size.w);
-    let title = Rectangle::new(panel.loc, (w, INBOX_TITLE).into());
+    let title = Rectangle::new(panel.loc, (w, inbox_title_px()).into());
     let scope = if view.all.is_some() {
         scope_segments(title)
     } else {
         Vec::new()
     };
-    let query = Rectangle::new((x, top + INBOX_TITLE).into(), (w, INBOX_FIELD).into());
+    let query = Rectangle::new(
+        (x, top + inbox_title_px()).into(),
+        (w, inbox_field_px()).into(),
+    );
     let hints = hint_strs(&view.hints);
     let footer_h = super::measured_footer_height(&hints, w);
     let footer = Rectangle::new(
@@ -770,7 +799,7 @@ pub fn inbox_field(view: &InboxView, size: Size<i32, Logical>, scale: f64) -> Fi
         None => view.query.clone(),
     };
     FieldSpot {
-        size: FONT_SIZE,
+        size: font_size(),
         area,
         text: field_text(view, area, scale),
         line,
@@ -840,11 +869,11 @@ fn item_line(rect: Rect) -> Rect {
 /// What of the label row at `rect` its buttons take: as far across as
 /// an item's (see `item_line`), a button high round the label's line.
 fn label_line(rect: Rect) -> Rect {
-    let mid = rect.loc.y + rect.size.h - LABEL_LOW - COUNT_HEIGHT / 2;
+    let mid = rect.loc.y + rect.size.h - LABEL_LOW - count_height() / 2;
     let w = item_line(rect).size.w;
     Rectangle::new(
-        (rect.loc.x, mid - ROW_BUTTON / 2).into(),
-        (w, ROW_BUTTON).into(),
+        (rect.loc.x, mid - row_button() / 2).into(),
+        (w, row_button()).into(),
     )
 }
 
@@ -874,7 +903,7 @@ fn detail_title_line(detail: &InboxDetailView, rect: Rect, title: Rect) -> Rect 
     let top = detail_badge(rect, title).loc.y - 2;
     Rectangle::new(
         (title.loc.x, top).into(),
-        (title.size.w, line(LABEL_FONT_SIZE, 5)).into(),
+        (title.size.w, line(label_font_size(), 5)).into(),
     )
 }
 
@@ -889,7 +918,7 @@ fn detail_text_x(title: Rect) -> i32 {
 /// at the row's end when the title reaches it.
 fn detail_dot(detail: &InboxDetailView, rect: Rect, title: Rect) -> Rect {
     let line = detail_title_line(detail, rect, title);
-    let after = detail_text_x(title) + extent(&detail.title, LABEL_FONT_SIZE) + DETAIL_DOT_GAP;
+    let after = detail_text_x(title) + extent(&detail.title, label_font_size()) + DETAIL_DOT_GAP;
     let most = title.loc.x + title.size.w - HELP_PADDING - DOT;
     Rectangle::new(
         (after.min(most), line.loc.y + (line.size.h - DOT) / 2).into(),
@@ -1073,7 +1102,7 @@ impl Painter {
         let list = shift(layout.list);
         let listed = view.total > 0;
         if !listed {
-            self.centered(&mut c, &view.empty, FONT_SIZE, list, scale, p.placeholder);
+            self.centered(&mut c, &view.empty, font_size(), list, scale, p.placeholder);
         }
         // The line between the list and the detail.
         c.fill(
@@ -1091,7 +1120,7 @@ impl Painter {
                 self.centered(
                     &mut c,
                     "Nothing selected",
-                    FONT_SIZE,
+                    font_size(),
                     detail,
                     scale,
                     p.placeholder,
@@ -1249,7 +1278,7 @@ impl Painter {
         let mut after = self.text(
             c,
             "Inbox",
-            LABEL_FONT_SIZE,
+            label_font_size(),
             x,
             right,
             title_band,
@@ -1260,7 +1289,7 @@ impl Painter {
             after = self.any_text(
                 c,
                 project,
-                FONT_SIZE,
+                font_size(),
                 after + 1.5 * gap,
                 right,
                 title_band,
@@ -1272,7 +1301,7 @@ impl Painter {
             self.text(
                 c,
                 "· hidden items",
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 after + gap,
                 right,
                 title_band,
@@ -1366,7 +1395,7 @@ impl Painter {
             field_text(view, query, scale),
             band(query, scale),
             true,
-            FONT_SIZE,
+            font_size(),
             scale,
             p,
         );
@@ -1393,7 +1422,7 @@ impl Painter {
         self.any_text(
             c,
             chip_label(compose),
-            SMALL_FONT_SIZE,
+            small_font_size(),
             pen,
             end,
             band(chip, scale),
@@ -1443,10 +1472,10 @@ impl Painter {
                 let low = Rectangle::new(
                     (
                         rect.loc.x,
-                        rect.loc.y + rect.size.h - COUNT_HEIGHT - LABEL_LOW,
+                        rect.loc.y + rect.size.h - count_height() - LABEL_LOW,
                     )
                         .into(),
-                    (rect.size.w, COUNT_HEIGHT).into(),
+                    (rect.size.w, count_height()).into(),
                 );
                 for (k, &button) in buttons.iter().enumerate() {
                     let label = labels.get(k).map_or("", |b| b.label.as_str());
@@ -1469,7 +1498,7 @@ impl Painter {
                 let after = self.text(
                     c,
                     title,
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     text_x,
                     right,
                     label_band,
@@ -1477,17 +1506,17 @@ impl Painter {
                     p.muted,
                 );
                 let number = count.to_string();
-                let pill_w = extent(&number, DETAIL_FONT_SIZE) + 2 * COUNT_PAD;
+                let pill_w = extent(&number, detail_font_size()) + 2 * COUNT_PAD;
                 let pill_x = after + gap;
                 if pill_x + px(pill_w) as f32 <= right {
                     let (_, py, _, ph) = rect_px(low, scale);
                     let pw = px(pill_w) as f32;
                     c.rounded(pill_x, py, pw, ph, ph / 2.0, p.element);
-                    let nw = self.text_width(&number, DETAIL_FONT_SIZE, scale);
+                    let nw = self.text_width(&number, detail_font_size(), scale);
                     self.text(
                         c,
                         &number,
-                        DETAIL_FONT_SIZE,
+                        detail_font_size(),
                         pill_x + (pw - nw) / 2.0,
                         right,
                         label_band,
@@ -1498,7 +1527,7 @@ impl Painter {
                         self.text(
                             c,
                             &format!("{hidden} hidden"),
-                            DETAIL_FONT_SIZE,
+                            detail_font_size(),
                             pill_x + pw + gap,
                             right,
                             label_band,
@@ -1528,11 +1557,11 @@ impl Painter {
         } else {
             let t = Rectangle::new(
                 (rect.loc.x, rect.loc.y + ROW_TITLE_TOP).into(),
-                (rect.size.w, ROW_TITLE).into(),
+                (rect.size.w, row_title()).into(),
             );
             let st = Rectangle::new(
-                (rect.loc.x, rect.loc.y + ROW_TITLE_TOP + ROW_TITLE).into(),
-                (rect.size.w, ROW_SUBTITLE).into(),
+                (rect.loc.x, rect.loc.y + ROW_TITLE_TOP + row_title()).into(),
+                (rect.size.w, row_subtitle()).into(),
             );
             (t, Some(st))
         };
@@ -1570,14 +1599,14 @@ impl Painter {
         let title_band = band(title_rect, scale);
         let mut title_end = end;
         if !line.age.is_empty() {
-            let age_w = self.text_width(&line.age, SMALL_FONT_SIZE, scale);
+            let age_w = self.text_width(&line.age, small_font_size(), scale);
             let age_x = end - age_w;
             // Only where it leaves the title some room.
             if age_x > text_x + 4.0 * gap {
                 self.text(
                     c,
                     &line.age,
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     age_x,
                     end + s,
                     title_band,
@@ -1590,7 +1619,7 @@ impl Painter {
         self.any_text(
             c,
             &line.title,
-            FONT_SIZE,
+            font_size(),
             text_x,
             title_end,
             title_band,
@@ -1602,7 +1631,7 @@ impl Painter {
             let after = self.any_text(
                 c,
                 &line.subtitle,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 text_x,
                 end,
                 st_band,
@@ -1644,7 +1673,7 @@ impl Painter {
             self.text(
                 c,
                 &note,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 after + gap,
                 max_x,
                 band,
@@ -1698,14 +1727,14 @@ impl Painter {
         let subtitle_band = (!detail.subtitle.is_empty()).then(|| {
             let st = Rectangle::new(
                 (title.loc.x, title_line.loc.y + title_line.size.h).into(),
-                (title.size.w, line(SMALL_FONT_SIZE, 5)).into(),
+                (title.size.w, line(small_font_size(), 5)).into(),
             );
             band(st, scale)
         });
         self.any_text(
             c,
             &detail.title,
-            LABEL_FONT_SIZE,
+            label_font_size(),
             text_x,
             title_end,
             title_band,
@@ -1716,7 +1745,7 @@ impl Painter {
             self.any_text(
                 c,
                 &detail.subtitle,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 text_x,
                 text_end,
                 subtitle_band,
@@ -1739,7 +1768,7 @@ impl Painter {
             self.text(
                 c,
                 label,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 fx,
                 value_x - gap,
                 field_band,
@@ -1747,7 +1776,14 @@ impl Painter {
                 p.placeholder,
             );
             self.any_text(
-                c, value, FONT_SIZE, value_x, fright, field_band, scale, p.text,
+                c,
+                value,
+                font_size(),
+                value_x,
+                fright,
+                field_band,
+                scale,
+                p.text,
             );
         }
 
@@ -1756,7 +1792,7 @@ impl Painter {
             self.text(
                 c,
                 &text.to_uppercase(),
-                DETAIL_FONT_SIZE,
+                detail_font_size(),
                 hx,
                 hright,
                 band(heading, scale),
@@ -1767,7 +1803,7 @@ impl Painter {
         if let Some(block) = parts.block {
             let (bx, by, bw, bh) = rect_px(block, scale);
             c.rounded(bx, by, bw, bh, MENU_RADIUS * s, p.tab_active);
-            let fit = ((block.size.h - 2 * BLOCK_PAD) / BLOCK_LINE).max(0) as usize;
+            let fit = ((block.size.h - 2 * BLOCK_PAD) / block_line()).max(0) as usize;
             let cut = detail.block.len() > fit && fit >= 2;
             let shown = if cut { fit.saturating_sub(1) } else { fit };
             let (lx, lright) = (
@@ -1776,8 +1812,12 @@ impl Painter {
             );
             let line_at = |n: usize| {
                 Rectangle::new(
-                    (block.loc.x, block.loc.y + BLOCK_PAD + n as i32 * BLOCK_LINE).into(),
-                    (block.size.w, BLOCK_LINE).into(),
+                    (
+                        block.loc.x,
+                        block.loc.y + BLOCK_PAD + n as i32 * block_line(),
+                    )
+                        .into(),
+                    (block.size.w, block_line()).into(),
                 )
             };
             let more = detail.block.len().saturating_sub(shown);
@@ -1792,7 +1832,7 @@ impl Painter {
                 self.mono_text(
                     c,
                     &text,
-                    MONO_FONT_SIZE,
+                    mono_font_size(),
                     lx,
                     lright,
                     band(line_at(top + n), scale),
@@ -1805,7 +1845,7 @@ impl Painter {
                 self.text(
                     c,
                     &format!("… {more} {what}"),
-                    SMALL_FONT_SIZE,
+                    small_font_size(),
                     lx,
                     lright,
                     band(line_at(cut_at), scale),
@@ -1829,7 +1869,7 @@ impl Painter {
             self.text(
                 c,
                 &b.label,
-                SMALL_FONT_SIZE,
+                small_font_size(),
                 x + pad,
                 right - pad + s,
                 button_band,
@@ -2586,7 +2626,8 @@ mod tests {
             assert!(inside(l.list, last), "{w}×{h}");
             // And one more would not have.
             assert!(
-                last.loc.y + last.size.h + INBOX_ROW > l.list.loc.y + l.list.size.h - INBOX_PAD
+                last.loc.y + last.size.h + inbox_row_px()
+                    > l.list.loc.y + l.list.size.h - INBOX_PAD
                     || l.footer.size.h < footer_height(usize::MAX),
                 "{w}×{h}"
             );
@@ -2695,10 +2736,10 @@ mod tests {
         assert_eq!(a.window, b.window);
         assert!(inside(b.list, b.window));
         // Up half the first row, all of them.
-        assert_eq!(b.rows[0].0.loc.y, b.window.loc.y - INBOX_LABEL / 2);
+        assert_eq!(b.rows[0].0.loc.y, b.window.loc.y - inbox_label() / 2);
         for ((ra, _), (rb, _)) in a.rows.iter().zip(&b.rows) {
             if ra.size.h > 0 && rb.size.h > 0 {
-                assert_eq!(rb.loc.y, ra.loc.y - INBOX_LABEL / 2);
+                assert_eq!(rb.loc.y, ra.loc.y - inbox_label() / 2);
             }
         }
         // The last row showing is cut by the window's bottom, and those
@@ -2724,7 +2765,7 @@ mod tests {
             ..whole.clone()
         };
         let l = inbox_layout(&fraction, size);
-        let cut = (0.3 * INBOX_LABEL as f64).round() as i32;
+        let cut = (0.3 * inbox_label() as f64).round() as i32;
         assert_eq!(l.rows[0].0.loc.y, b.window.loc.y - cut);
         for over in [20.0, -20.0] {
             let stretched = InboxView {
@@ -2733,7 +2774,7 @@ mod tests {
             };
             let l = inbox_layout(&stretched, size);
             assert_eq!(l.rows[0].0.loc.y, l.window.loc.y + over as i32);
-            assert_eq!(l.rows[0].0.size.h, INBOX_LABEL);
+            assert_eq!(l.rows[0].0.size.h, inbox_label());
         }
     }
 
@@ -2838,7 +2879,7 @@ mod tests {
             assert_eq!(layers.overlay.cached.key, frame);
             // The first row up by its part, to the fraction, in the window.
             let row = &parts[1];
-            let want = window.loc.y as f64 - part * INBOX_ROW as f64;
+            let want = window.loc.y as f64 - part * inbox_row_px() as f64;
             assert!((row.loc.y - want).abs() < 1e-9, "{} {want}", row.loc.y);
             assert_eq!(row.clip, Some(window));
             drawn = layers.rows.drawn();
