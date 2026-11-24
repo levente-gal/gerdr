@@ -9805,46 +9805,46 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 const GOLDEN_CHATS: [[u64; 8]; 4] = [
     // Dark at 1
     [
-        0x34f5c127c120d1ed, // chat_finding
+        0xa5039d4ee1fb06ee, // chat_finding
         0x4c9a3c6fa240b9e9, // chat_missing
-        0xe62f6563a1eeac2e, // chat
+        0x9f85d649e034a3ad, // chat
         0xe71506c1721ec8a1, // chat_waiting
         0x828c73a35d6b1c0a, // chat_composer
-        0x02d46d385ef4f4b3, // chat_picked
-        0x9a23a216b18cb6ef, // chat_scrolled
+        0x336344c70c851544, // chat_picked
+        0x404446eb993dd555, // chat_scrolled
         0xa6d0dcccaae204f6, // chat_question
     ],
     // Dark at 2
     [
-        0xec1976d290048334, // chat_finding
+        0xd211836f5dcb7548, // chat_finding
         0x0c94100d5ab7460b, // chat_missing
-        0xb3d59c93d9fbf1cb, // chat
+        0xd11591ee80ab6397, // chat
         0xec5068206a45e5f8, // chat_waiting
         0xee8c28267b0af3c8, // chat_composer
-        0x1e4161af6a0d6808, // chat_picked
-        0x84d42e23648715bd, // chat_scrolled
+        0x6a515ed6af7ed950, // chat_picked
+        0xbbb09541105aaf77, // chat_scrolled
         0x503c5a806a45c7b1, // chat_question
     ],
     // Light at 1
     [
-        0x9f8d35218d37180b, // chat_finding
+        0xcfe875ed39718011, // chat_finding
         0x8599e48c1a3a84f1, // chat_missing
-        0xffbc752638e857e3, // chat
+        0xee98c0f4e9c9b8df, // chat
         0x8dd5c5644401e39e, // chat_waiting
         0xc9eb7c27910b0a3e, // chat_composer
-        0x59f0422ab7b915c7, // chat_picked
-        0xb19e302e46961c37, // chat_scrolled
+        0xc4a1da2ac75e7e03, // chat_picked
+        0xe23ae76ee4fa5bff, // chat_scrolled
         0xfbb6e5a61a1a9b5f, // chat_question
     ],
     // Light at 2
     [
-        0xc4ca8ace7d109487, // chat_finding
+        0x6a839f3b4ab2b79c, // chat_finding
         0x50c48f549721099b, // chat_missing
-        0xd41f83058e2a3d1a, // chat
+        0x9665dc98473271fb, // chat
         0x02aaf735fffad541, // chat_waiting
         0x57f4e1b82e7ef3e0, // chat_composer
-        0x96bdf7c7946faeb1, // chat_picked
-        0x071d09e3768b9028, // chat_scrolled
+        0xc1031423a1b0c52c, // chat_picked
+        0x487f717d28fa8f37, // chat_scrolled
         0x7472c7255b9cfe88, // chat_question
     ],
 ];

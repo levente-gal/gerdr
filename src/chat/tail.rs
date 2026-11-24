@@ -311,15 +311,18 @@ impl Chats {
         let Ok(chat) = &followed.chat else {
             return;
         };
-        let (kind, had) = (chat.source.agent, chat.source.id.clone());
+        let (kind, had, had_path) = (
+            chat.source.agent,
+            chat.source.id.clone(),
+            chat.source.path.clone(),
+        );
         let agent = followed.agent.clone();
         let Some(run) = self.run_of(&agent) else {
             return;
         };
         let claimed = self.claimed(pane_id);
         match source::newest(kind, &run, &self.homes, &claimed) {
-            // Another agent of its kind in the folder may have begun it.
-            Ok(Some(newer)) if newer.id != had && self.alone(pane_id, kind, &run.cwd) => {
+            Ok(Some(newer)) if newer.id != had && moves(&run, &had_path, &newer.path) => {
                 if let Some(followed) = self.panes.get_mut(pane_id) {
                     followed.found(Ok(newer), out);
                 }
@@ -366,26 +369,6 @@ impl Chats {
 
     /// When the agent in `agent`'s pane began and where it runs: herdr's
     /// foreground process there, as `/proc` says.
-    /// Whether no other pane, shown or not, runs an agent of `kind` in
-    /// `cwd`: a chat begun there since could be that one's.
-    fn alone(&mut self, pane_id: &str, kind: AgentKind, cwd: &Path) -> bool {
-        let Some(herdr) = self.herdr.as_mut() else {
-            return false;
-        };
-        match herdr.agent_list() {
-            Ok(agents) => !agents.iter().any(|a| {
-                a.pane_id != pane_id
-                    && source::kind(a) == Some(kind)
-                    && a.foreground_cwd.as_deref().or(a.cwd.as_deref()) == Some(cwd)
-            }),
-            // Not knowing, the guess stays.
-            Err(err) => {
-                tracing::warn!("agent chat of pane {pane_id}: {err}");
-                false
-            }
-        }
-    }
-
     fn run_of(&mut self, agent: &AgentInfo) -> Option<Run> {
         let info = (self.herdr.as_mut()?.process_info(&agent.pane_id))
             .map_err(|err| tracing::warn!("agent chat of pane {}: {err}", agent.pane_id))
@@ -406,8 +389,90 @@ impl Chats {
         Some(Run {
             started: started_at(&stat, &boot, clock_ticks())?,
             cwd,
+            pid: u32::try_from(lead.pid).ok()?,
         })
     }
+}
+
+/// Whether `run`'s guessed chat, at `had`, moves on to the newer one at
+/// `newer`. Exact for an agent that keeps its chat open (Codex's rollout,
+/// Cursor's store.db): the one it holds. Else only while no other process
+/// of its agent runs in its folder: a chat begun there since could be that
+/// one's.
+// shortcut: an agent that keeps no chat open takes the chat of another one
+// that ran in its folder and ended; ask the agent's own word (live hooks).
+fn moves(run: &Run, had: &Path, newer: &Path) -> bool {
+    let procs = procs();
+    let tree = tree(run.pid, &procs);
+    if holds(&tree, newer) {
+        return true;
+    }
+    if holds(&tree, had) {
+        return false;
+    }
+    let read = |pid: u32, what: &str| std::fs::read_to_string(format!("/proc/{pid}/{what}"));
+    let Ok(name) = read(run.pid, "comm") else {
+        return false;
+    };
+    let cwd = std::fs::canonicalize(&run.cwd).unwrap_or_else(|_| run.cwd.clone());
+    !procs.iter().any(|&(pid, _)| {
+        !tree.contains(&pid)
+            && read(pid, "comm").is_ok_and(|comm| comm == name)
+            && std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|open| open == cwd)
+    })
+}
+
+/// Every process, with its parent's id.
+fn procs() -> Vec<(u32, u32)> {
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    (dir.flatten())
+        .filter_map(|p| {
+            let pid = p.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(p.path().join("stat")).ok()?;
+            // The fourth field, past the name in parentheses.
+            let parent = stat
+                .rsplit_once(')')?
+                .1
+                .split_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()?;
+            Some((pid, parent))
+        })
+        .collect()
+}
+
+/// Process `pid` and those under it.
+fn tree(pid: u32, procs: &[(u32, u32)]) -> Vec<u32> {
+    let mut tree = vec![pid];
+    let mut i = 0;
+    while let Some(&top) = tree.get(i) {
+        tree.extend(
+            procs
+                .iter()
+                .filter(|(_, parent)| *parent == top)
+                .map(|(pid, _)| *pid),
+        );
+        i += 1;
+    }
+    tree
+}
+
+/// Whether one of the processes `tree` has file `path` open.
+fn holds(tree: &[u32], path: &Path) -> bool {
+    // An open file's link names it with no symlinks on the way.
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    tree.iter().any(|pid| {
+        (std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .into_iter()
+            .flatten()
+            .flatten())
+        .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|open| open == path))
+    })
 }
 
 /// The states of herdr's integrations by target, out of its
@@ -1199,13 +1264,7 @@ mod tests {
 
     /// A herdr on a socket of its own answering `integration.list` and
     /// `pane.process_info` with process `pid` in `cwd`, `calls` times.
-    fn fake_herdr(
-        name: &str,
-        pid: u32,
-        cwd: &Path,
-        calls: usize,
-        agents: Arc<std::sync::Mutex<Vec<Value>>>,
-    ) -> PathBuf {
+    fn fake_herdr(name: &str, pid: u32, cwd: &Path, calls: usize) -> PathBuf {
         use std::{io::BufRead as _, os::unix::net::UnixListener};
         let socket = std::env::temp_dir().join(format!("gerdr-tail-{name}-{}", std::process::id()));
         let _ = std::fs::remove_file(&socket);
@@ -1220,7 +1279,6 @@ mod tests {
                     .unwrap();
                 let asked: Value = serde_json::from_str(&line).unwrap();
                 let result = match asked["method"].as_str() {
-                    Some("agent.list") => serde_json::json!({"agents": *agents.lock().unwrap()}),
                     Some("integration.list") => serde_json::json!({"integrations": [
                         {"target": "cursor", "state": "not_installed"},
                     ]}),
@@ -1249,13 +1307,7 @@ mod tests {
             .arg("30")
             .spawn()
             .unwrap();
-        let socket = fake_herdr(
-            "guess",
-            child.id(),
-            Path::new("/work/app"),
-            2,
-            Default::default(),
-        );
+        let socket = fake_herdr("guess", child.id(), Path::new("/work/app"), 2);
         home.chats.herdr = Some(Herdr::on_socket(socket.clone()));
         let mut none = agent("cursor", "id", "c-1");
         none.agent_session = None;
@@ -1285,6 +1337,22 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_open_in_the_agent_or_under_it_is_held() {
+        let home = Home::new("holds");
+        let path = home.dir.join("rollout.jsonl");
+        let _open = File::create(&path).unwrap();
+        // Named through a symlink: still the file held.
+        let link = home.dir.join("link");
+        std::os::unix::fs::symlink(&home.dir, &link).unwrap();
+        let me = std::process::id();
+        let tree = tree(me, &procs());
+        assert!(holds(&tree, &path));
+        assert!(holds(&tree, &link.join("rollout.jsonl")));
+        assert!(!holds(&tree, &home.dir.join("other.jsonl")));
+        assert!(!holds(&[], &path));
+    }
+
+    #[test]
     fn a_guess_moves_on_to_a_newer_chat_no_other_pane_holds() {
         let mut home = Home::new("move-on");
         let mut child = std::process::Command::new("sleep")
@@ -1294,10 +1362,10 @@ mod tests {
         let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
         let boot = std::fs::read_to_string("/proc/stat").unwrap();
         let started = started_at(&stat, &boot, clock_ticks()).unwrap();
-        let work = Path::new("/work/app");
+        let work = &home.dir.join("app");
+        std::fs::create_dir_all(work).unwrap();
         codex_rollout(&home.dir, "c-old", work, started);
-        let others = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let socket = fake_herdr("move-on", child.id(), work, 20, others.clone());
+        let socket = fake_herdr("move-on", child.id(), work, 8);
         home.chats.herdr = Some(Herdr::on_socket(socket.clone()));
         let mut none = agent("codex", "id", "c-old");
         none.agent_session = None;
@@ -1317,15 +1385,17 @@ mod tests {
         // Once it lets go, the guess moves on, a guess still.
         home.chats.stop("p2");
         assert!(home.poll().is_empty(), "looked at once a FIND_AGAIN");
-        // Another Codex in the folder, in a pane not shown: it may be its.
-        others.lock().unwrap().push(serde_json::json!({
-            "pane_id": "p3", "terminal_id": "t3", "workspace_id": "w1", "tab_id": "tab2",
-            "agent": "codex", "cwd": work,
-        }));
+        // Another of its agent in the folder, in no pane shown: maybe its.
+        let mut another = std::process::Command::new("sleep")
+            .arg("30")
+            .current_dir(work)
+            .spawn()
+            .unwrap();
         ago(&mut home);
         assert!(home.poll().is_empty(), "maybe the other agent's");
         assert_eq!(home.chat().source.id, "c-old");
-        others.lock().unwrap().clear();
+        another.kill().ok();
+        another.wait().ok();
         ago(&mut home);
         assert_eq!(items_of(&home.poll()), ["c-new"]);
         let source = &home.chat().source;

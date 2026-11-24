@@ -225,6 +225,9 @@ a.row:active { background: var(--raised); }
   padding: 10px 12px; font: 12px/1.35 ui-monospace, "SF Mono", Menlo, monospace;
   white-space: pre-wrap; overflow-wrap: anywhere; min-height: 60vh;
 }
+/* Under a working agent's output: a blinking dot and its turn's clock. */
+.working { display: flex; align-items: center; gap: 6px; color: var(--accent); padding: 8px 0 2px; }
+.working .clock { font-variant-numeric: tabular-nums; }
 
 button {
   font: inherit; font-size: 15px; font-weight: 550; color: var(--text); background: var(--raised);

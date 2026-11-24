@@ -303,7 +303,7 @@ impl Gerdr {
                 let asked = self.phone_ask(&pane).map(
                     |a| json!({ "ask": a.ask, "tool": a.tool, "gist": a.gist, "input": a.input }),
                 );
-                json!({ "ask": asked })
+                json!({ "ask": asked, "working": self.turn_took(&pane) })
             }
             Request::Answer {
                 pane, ask, reply, ..

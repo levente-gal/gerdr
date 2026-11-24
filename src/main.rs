@@ -392,6 +392,9 @@ pub struct Chats {
     pub shown: HashSet<String>,
     /// What the agents say live, and the asks waiting (`chat::live`).
     pub live: chat::live::Hub,
+    /// When each agent's turn began, by pane: for the chats' and the
+    /// phone's working rows.
+    pub turns: HashMap<String, chat::Turn>,
 }
 
 /// A process we started for a tab whose window hasn't shown up yet.

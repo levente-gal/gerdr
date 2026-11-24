@@ -2130,7 +2130,7 @@ fn run_row() -> i32 {
 const RUN_PAD: i32 = 4;
 const RUN_INSET: i32 = 12;
 const RUN_GAP: i32 = 10;
-const RUN_SPIN: i32 = 14;
+pub(super) const RUN_SPIN: i32 = 14;
 const RUN_SPIN_GAP: i32 = 10;
 const RUN_BAR_W: i32 = 72;
 const RUN_BAR_H: i32 = 6;
@@ -2141,6 +2141,33 @@ const RUN_BELOW: i32 = 4;
 pub(super) const SWEEP_H: i32 = 2;
 pub(super) const SWEEP_PERIOD: std::time::Duration = std::time::Duration::from_millis(1600);
 const SWEEP_SHARE: f64 = 0.3;
+
+/// How wide the sweep moving along `track` is.
+pub(super) fn sweep_width(track: Rect) -> i32 {
+    (f64::from(track.size.w) * SWEEP_SHARE).round() as i32
+}
+
+/// The sweep `buffer`, `sweep_width(track)` wide, where it stands along
+/// `track` at `now`: from before its left end past its right one, still at
+/// the left unless the chrome moves fully (L4).
+pub(super) fn sweep_part(
+    buffer: &MemoryRenderBuffer,
+    track: Rect,
+    epoch: std::time::Instant,
+    now: std::time::Instant,
+) -> super::layers::Part {
+    let w = sweep_width(track);
+    let travel = f64::from(track.size.w + w);
+    let dx = match crate::anim::motion() == crate::anim::Motion::Full {
+        true => f64::from(crate::anim::phase(epoch, SWEEP_PERIOD, now)) * travel - f64::from(w),
+        false => 0.0,
+    };
+    let loc = track.loc.to_f64() + Point::from((dx, 0.0));
+    let size = Size::from((w, SWEEP_H));
+    super::layers::Part::new(buffer, track.loc, size, 1.0)
+        .at(loc)
+        .clipped(track)
+}
 /// The row of repository chips on a narrow tab, and a chip's height,
 /// inner room and the gap between two.
 fn chip_row() -> i32 {
@@ -6275,6 +6302,24 @@ pub(super) struct ClockKey {
     scale: f64,
 }
 
+impl ClockKey {
+    pub(super) fn new(
+        text: &str,
+        size: Size<i32, Logical>,
+        font: f32,
+        color: Rgb,
+        scale: f64,
+    ) -> Self {
+        Self {
+            text: text.to_owned(),
+            size,
+            font: font.to_bits(),
+            color,
+            scale,
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct FeatureTabLayers {
     overlay: super::Overlay<BackKey>,
@@ -6399,26 +6444,10 @@ impl FeatureTabLayers {
                     at(card) + Point::from((r, 1)),
                     ((card.size.w - 2 * r).max(1), SWEEP_H).into(),
                 );
-                let w = (f64::from(track.size.w) * SWEEP_SHARE).round() as i32;
-                let buffer = sweep.get((w, theme, scale), |(w, ..)| {
+                let buffer = sweep.get((sweep_width(track), theme, scale), |(w, ..)| {
                     painter.running_sweep(*w, scale, p)
                 });
-                let moving = crate::anim::motion() == crate::anim::Motion::Full;
-                let travel = f64::from(track.size.w + w);
-                let dx = match moving {
-                    true => {
-                        f64::from(crate::anim::phase(epoch, SWEEP_PERIOD, now)) * travel
-                            - f64::from(w)
-                    }
-                    false => 0.0,
-                };
-                let loc = track.loc.to_f64() + Point::from((dx, 0.0));
-                let size = Size::from((w, SWEEP_H));
-                parts.push(
-                    Part::new(buffer, track.loc, size, 1.0)
-                        .at(loc)
-                        .clipped(track),
-                );
+                parts.push(sweep_part(buffer, track, epoch, now));
             }
             // The clocks: each row's under the rail, then each running
             // check's on its card, scrolling with the page.
@@ -6451,13 +6480,7 @@ impl FeatureTabLayers {
             for ((text, rect, font, color, place), cache) in
                 ticks.into_iter().zip(clocks.iter_mut())
             {
-                let key = ClockKey {
-                    text: text.to_owned(),
-                    size: rect.size,
-                    font: font.to_bits(),
-                    color,
-                    scale,
-                };
+                let key = ClockKey::new(text, rect.size, font, color, scale);
                 let buffer = cache.get(key, |key| painter.clock(key));
                 let part = Part::new(buffer, at(rect), rect.size, 1.0);
                 parts.push(match place {
