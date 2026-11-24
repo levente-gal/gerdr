@@ -11,12 +11,15 @@ use smithay::reexports::calloop::{
 
 use super::{
     ASK_WAIT, Answer, AskReply, Changed, HeldAsk, LiveEvent, PHONE_SIGHT, PendingAsk, SOURCE, What,
-    claude, opencode,
+    antigravity, claude, opencode,
 };
 use crate::{
     Gerdr, ai_work::AgentKind, chat::view::chat_mut, herdr::AgentInfo, herdr::AgentSession,
     menu::MenuAction,
 };
+
+/// pi's extension, as gerdr writes it to `~/.pi/agent/extensions/`.
+const PI_EXTENSION: &str = include_str!("../../../assets/pi/gerdr-live.ts");
 
 /// How often a waiting ask looks whether its chat is still in sight.
 const ASK_LOOK: std::time::Duration = std::time::Duration::from_secs(1);
@@ -352,6 +355,20 @@ impl Gerdr {
                 take(super::install(&path, merge));
             }
         }
+        // pi loads every extension in its folder: gerdr's goes beside herdr's.
+        if home.join(".pi/agent").is_dir() {
+            let path = home.join(".pi/agent/extensions/gerdr-live.ts");
+            take(super::install(&path, |_| Ok(PI_EXTENSION.to_owned())));
+        }
+        if home.join(".gemini/config").is_dir() {
+            take(
+                super::hook_command(antigravity::HOOK_COMMAND).and_then(|command| {
+                    super::install(&home.join(".gemini/config/hooks.json"), |text| {
+                        antigravity::merged(text, &command)
+                    })
+                }),
+            );
+        }
         for err in &failed {
             tracing::warn!("agent live: adding gerdr's hooks: {err}");
         }
@@ -423,6 +440,12 @@ fn live_session<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pis_extension_names_the_socket_as_gerdr_does() {
+        assert!(PI_EXTENSION.contains("gerdr-live-${hash}.sock"));
+        assert!(PI_EXTENSION.contains("digest(\"hex\").slice(0, 16)"));
+    }
 
     #[test]
     fn a_session_heard_beats_herdrs_only_when_herdrs_is_another_agents() {

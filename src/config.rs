@@ -18,7 +18,7 @@
 //! needs_you = false     # hide the sidebar's "Needs you" list; shown by default
 //! motion = "reduced"    # or "off": no blinking dots or pulses; "full", the default
 //! footer = false        # hide the footer with the background tasks; shown by default
-//! agent_hooks = false   # don't add gerdr's hooks to Claude, Cursor and OpenCode; added by default
+//! agent_hooks = false   # don't add gerdr's hooks to Claude, Cursor, OpenCode, pi and Antigravity; added by default
 //!
 //! [git]
 //! # Branch names that are one branch across repositories, in the
@@ -1147,7 +1147,7 @@ const TEMPLATE: &str = "\
 # theme = \"light\"       # or \"dark\" or \"system\"; else the last choice
 # needs_you = false     # hide the sidebar's \"Needs you\" list; shown by default
 # footer = false        # hide the footer with the background tasks; shown by default
-# agent_hooks = false   # don't add gerdr's hooks to Claude, Cursor and OpenCode; added by default
+# agent_hooks = false   # don't add gerdr's hooks to Claude, Cursor, OpenCode, pi and Antigravity; added by default
 # motion = \"reduced\"    # or \"off\": no blinking dots or pulses; \"full\", the default
 # zoom = 1.25           # draw everything bigger, panes too; Prefix Alt+= / Alt+- / Alt+0
 # text_size = 19        # gerdr's own text, 12 to 24, 17 by default; Prefix Alt+Shift+= / - / 0
