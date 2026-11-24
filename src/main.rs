@@ -1404,7 +1404,7 @@ pub struct PendingEnter {
     folders: Vec<PathBuf>,
 }
 
-/// A step of the `[ui] zoom`.
+/// A step of the `[ui] zoom` or `[ui] text_size`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ZoomStep {
     In,
@@ -1452,6 +1452,9 @@ pub enum Action {
     /// Draw everything bigger or smaller, or as the monitor would (see
     /// `Gerdr::step_zoom`).
     Zoom(ZoomStep),
+    /// Set gerdr's own text bigger or smaller, or back (see
+    /// `Gerdr::step_text_size`).
+    TextSize(ZoomStep),
     /// Keep the key help open, or close it again.
     Shortcuts,
     /// Open the switcher, to search for what to switch to.
@@ -4509,6 +4512,7 @@ impl Gerdr {
             Action::NewAgent => self.open_agent_picker(self.active_workspace),
             Action::PauseAgents => self.toggle_agents_paused(),
             Action::Zoom(step) => self.step_zoom(step),
+            Action::TextSize(step) => self.step_text_size(step),
             Action::CloseTab => self.close_tab(tab),
             Action::RenameTab if tabs > 0 => self.start_rename(RenameTarget::Tab(ws, tab)),
             Action::MoveTab(step) => self.move_tab(step),
@@ -7523,6 +7527,7 @@ fn new_gerdr(
         problems: settings_problems,
     } = settings;
     anim::set_motion(ui.motion);
+    chrome::set_text_size(f32::from(ui.text_size));
     let mut state = Gerdr {
         start_time: Instant::now(),
         display_handle: dh.clone(),

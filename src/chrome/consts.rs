@@ -101,7 +101,6 @@ pub fn text_size() -> f32 {
 }
 /// Sets the chrome's text size, held to `TEXT_MIN..=TEXT_MAX`. Cached
 /// drawings and layouts see the change and are made again.
-#[allow(dead_code)] // set from `[ui] text_size` (the next change)
 pub fn set_text_size(px: f32) {
     let px = if px.is_nan() {
         DEFAULT_TEXT

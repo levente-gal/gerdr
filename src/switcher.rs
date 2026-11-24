@@ -122,6 +122,7 @@ pub enum Target {
     TerminalReload,
     /// Everything drawn a step bigger or smaller, or at the monitor's size.
     Zoom(ZoomStep),
+    TextSize(ZoomStep),
     /// The dialog raising the inotify limit (see `inotify_limit`).
     RaiseInotifyLimit,
     /// The tasks running in the background (see `tasks`).
@@ -196,6 +197,7 @@ impl Target {
             | Target::T3Updates
             | Target::TerminalReload
             | Target::Zoom(_)
+            | Target::TextSize(_)
             | Target::RaiseInotifyLimit
             | Target::Tasks
             | Target::Phones
@@ -235,6 +237,7 @@ impl Target {
             | Target::T3Updates
             | Target::TerminalReload
             | Target::Zoom(_)
+            | Target::TextSize(_)
             | Target::RaiseInotifyLimit
             | Target::Tasks
             | Target::Phones
@@ -1062,6 +1065,7 @@ fn frecency_key(
         | Target::T3Updates
         | Target::TerminalReload
         | Target::Zoom(_)
+        | Target::TextSize(_)
         | Target::RaiseInotifyLimit
         | Target::Tasks
         | Target::Phones
@@ -1860,6 +1864,7 @@ impl Gerdr {
             Target::T3Updates => self.toggle_t3_updates(),
             Target::TerminalReload => self.toggle_terminal_reload(),
             Target::Zoom(step) => self.step_zoom(step),
+            Target::TextSize(step) => self.step_text_size(step),
             Target::RaiseInotifyLimit => self.ask_raise_inotify(),
             Target::Tasks => self.open_tasks(0),
             Target::Phones => self.open_phones(),
@@ -2111,6 +2116,28 @@ impl Gerdr {
                 "Draw everything at the monitor's size",
                 format!("now {zoom}%, back to 100%"),
                 Target::Zoom(ZoomStep::Reset),
+            ));
+        }
+        // Settings' `[ui] text_size`, written there.
+        let px = crate::chrome::text_size();
+        items.push(Item::new(
+            ItemIcon::Command,
+            "Bigger text",
+            format!("now {px} px \u{b7} gerdr's own text \u{b7} [ui] text_size"),
+            Target::TextSize(ZoomStep::In),
+        ));
+        items.push(Item::new(
+            ItemIcon::Command,
+            "Smaller text",
+            format!("now {px} px \u{b7} gerdr's own text \u{b7} [ui] text_size"),
+            Target::TextSize(ZoomStep::Out),
+        ));
+        if px != crate::chrome::DEFAULT_TEXT {
+            items.push(Item::new(
+                ItemIcon::Command,
+                "Reset text size",
+                format!("now {px} px, back to {} px", crate::chrome::DEFAULT_TEXT),
+                Target::TextSize(ZoomStep::Reset),
             ));
         }
         if self.inotify.is_low() {

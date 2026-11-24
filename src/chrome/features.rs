@@ -4795,9 +4795,11 @@ pub fn feature_tab_layout(view: &FeatureTabView, frame: Rect) -> FeatureTabLayou
 /// out at their own origins.
 const TAB_LAYOUTS_MAX: usize = 4;
 
+/// Tab layouts laid out, each with its view and rect.
+type TabLayouts = Vec<(FeatureTabView, Rect, FeatureTabLayout)>;
+
 thread_local! {
-    static TAB_LAYOUTS: RefCell<(u32, Vec<(FeatureTabView, Rect, FeatureTabLayout)>)> =
-        const { RefCell::new((0, Vec::new())) };
+    static TAB_LAYOUTS: RefCell<(u32, TabLayouts)> = const { RefCell::new((0, Vec::new())) };
 }
 
 /// `feature_tab_layout`, laying out.
