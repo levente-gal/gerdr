@@ -548,7 +548,7 @@ fn take_event<'a>(
         } => {
             let n = rows(&items, &chat.unfolded).len();
             chat.picked = chat.picked.filter(|i| *i < n);
-            chat.items = items;
+            chat.items = chat.live.timed(items);
             chat.earlier = earlier;
             chat.reading_earlier = false;
             chat.source = Some(source);
