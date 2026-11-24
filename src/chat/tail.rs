@@ -414,10 +414,11 @@ fn moves(run: &Run, had: &Path, newer: &Path) -> bool {
     let Ok(name) = read(run.pid, "comm") else {
         return false;
     };
+    let cwd = std::fs::canonicalize(&run.cwd).unwrap_or_else(|_| run.cwd.clone());
     !procs.iter().any(|&(pid, _)| {
         !tree.contains(&pid)
             && read(pid, "comm").is_ok_and(|comm| comm == name)
-            && std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|cwd| cwd == run.cwd)
+            && std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|open| open == cwd)
     })
 }
 
@@ -461,6 +462,10 @@ fn tree(pid: u32, procs: &[(u32, u32)]) -> Vec<u32> {
 
 /// Whether one of the processes `tree` has file `path` open.
 fn holds(tree: &[u32], path: &Path) -> bool {
+    // An open file's link names it with no symlinks on the way.
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return false;
+    };
     tree.iter().any(|pid| {
         (std::fs::read_dir(format!("/proc/{pid}/fd"))
             .into_iter()
@@ -1336,9 +1341,13 @@ mod tests {
         let home = Home::new("holds");
         let path = home.dir.join("rollout.jsonl");
         let _open = File::create(&path).unwrap();
+        // Named through a symlink: still the file held.
+        let link = home.dir.join("link");
+        std::os::unix::fs::symlink(&home.dir, &link).unwrap();
         let me = std::process::id();
         let tree = tree(me, &procs());
         assert!(holds(&tree, &path));
+        assert!(holds(&tree, &link.join("rollout.jsonl")));
         assert!(!holds(&tree, &home.dir.join("other.jsonl")));
         assert!(!holds(&[], &path));
     }
