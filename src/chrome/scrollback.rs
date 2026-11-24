@@ -9,6 +9,7 @@
 use std::ops::Range;
 
 use super::{
+    MONO_FONT_SIZE,
     FIELD_GAP, FONT_SIZE, FOOTER_PAD, FOOTER_ROW, FieldSpot, HELP_PADDING, HELP_RADIUS,
     HINT_KEY_GAP, Painter, Palette, ROW_BUTTON, Rect, SHADOW, SMALL_FONT_SIZE, SearchBar,
     SearchPart, band, hint_spots, hint_strs, layers::Part, measure, measure_mono, mix, phys,
@@ -24,8 +25,7 @@ const FOOTER: i32 = 34;
 const PAD: i32 = 6;
 /// The room between the list's edges and its text.
 const TEXT_INSET: i32 = 8;
-/// The text's size, and a row's height.
-const MONO_SIZE: f32 = 13.0;
+/// A row's height.
 const ROW: i32 = 18;
 /// How far apart `Painter::paint_styled_rows` paints its rows.
 pub(super) const STYLED_ROW: i32 = ROW;
@@ -129,9 +129,9 @@ pub enum ScrollbackHit {
 
 /// The width of a character of the text, in logical pixels.
 fn advance() -> f64 {
-    measure_mono("0", MONO_SIZE)
+    measure_mono("0", MONO_FONT_SIZE)
         .filter(|a| *a > 0.0)
-        .unwrap_or(MONO_SIZE * 0.6) as f64
+        .unwrap_or(MONO_FONT_SIZE * 0.6) as f64
 }
 
 /// Where the viewer's parts go in `panel`, with `hints` under the list.
@@ -543,7 +543,7 @@ impl Painter {
         let size = Size::from((w, ROW));
         let mut c = super::Canvas::new(physical(size, scale));
         c.fill(0, 0, c.w, c.h, p.terminal_background);
-        let adv = self.mono_width("0", MONO_SIZE, scale);
+        let adv = self.mono_width("0", MONO_FONT_SIZE, scale);
         if let Some((from, to, on)) = row.selected {
             let x = (from as f32 * adv).round();
             let end = to as f32 + if on { 0.5 } else { 0.0 };
@@ -621,7 +621,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
-        let adv = self.mono_width("0", MONO_SIZE, scale);
+        let adv = self.mono_width("0", MONO_FONT_SIZE, scale);
         let (left, top, w, h) = rect_px(rect, scale);
         let shown = (rect.size.h.max(0) as usize).div_ceil(ROW as usize);
         c.clipped(left as i32, top as i32, w as i32, h as i32, |c| {
@@ -655,7 +655,7 @@ impl Painter {
                         color = mix(color, p.terminal_background, DIM);
                     }
                     let x = left + r.start as f32 * adv;
-                    let size = MONO_SIZE;
+                    let size = MONO_FONT_SIZE;
                     match style.bold {
                         true if self.has_mono_bold() => {
                             self.mono_bold_text(c, text, size, x, f32::MAX, row_band, scale, color);

@@ -75,16 +75,32 @@ pub(super) const PILL_HEIGHT: i32 = 16;
 pub(super) const PILL_PADDING: i32 = 6;
 /// Gap between a detail's label and its value.
 pub(super) const FIELD_GAP: i32 = 8;
-pub(super) const FONT_SIZE: f32 = 15.0;
-/// Tab labels and workspace names.
-pub(super) const LABEL_FONT_SIZE: f32 = 17.0;
-pub(super) const SMALL_FONT_SIZE: f32 = 13.0;
+
+// Text: every size the chrome sets text in, all here and all grown from
+// `TEXT`, so changing it makes all the chrome's text bigger or smaller and
+// keeps their steps. (`[ui] zoom` grows everything at run time.)
+const TEXT: f32 = 15.0;
+/// The chrome's own text: rows, buttons, fields, dialogs.
+pub(super) const FONT_SIZE: f32 = TEXT;
+/// The welcome screen's greeting.
+pub(super) const GREETING_FONT_SIZE: f32 = TEXT + 13.0;
+/// A feature tab's title, and its page's headings.
+pub(super) const TITLE_FONT_SIZE: f32 = TEXT + 5.0;
+/// Tab labels and workspace names, and a feature page's body.
+pub(super) const LABEL_FONT_SIZE: f32 = TEXT + 2.0;
+/// Secondary text: details under a row, hints, tooltips.
+pub(super) const SMALL_FONT_SIZE: f32 = TEXT - 2.0;
 /// Agent card details, and their ids and status pill.
-pub(super) const DETAIL_FONT_SIZE: f32 = 12.0;
+pub(super) const DETAIL_FONT_SIZE: f32 = TEXT - 3.0;
 /// The smallest text (counts on badges and pills): the same size as the
 /// details, one size under `SMALL_FONT_SIZE`.
 pub(super) const TINY_FONT_SIZE: f32 = DETAIL_FONT_SIZE;
-pub(super) const KEY_FONT_SIZE: f32 = 13.0;
+/// Keys on keycaps.
+pub(super) const KEY_FONT_SIZE: f32 = SMALL_FONT_SIZE;
+/// Monospace text read as output: the scrollback, an inbox item's blocks.
+pub(super) const MONO_FONT_SIZE: f32 = SMALL_FONT_SIZE;
+/// Monospace code: diffs, commits and files in the repositories panel.
+pub(super) const CODE_FONT_SIZE: f32 = TEXT - 1.0;
 pub(super) const PADDING: f32 = 10.0;
 pub(super) const HELP_MARGIN: i32 = 16;
 pub(super) const HELP_PADDING: i32 = 14;
@@ -124,7 +140,6 @@ pub(super) const CARET_HEIGHT: i32 = 18;
 
 /// The welcome screen: a column at most this wide, centred on the output.
 pub(super) const WELCOME_WIDTH: i32 = 560;
-pub(super) const GREETING_FONT_SIZE: f32 = 28.0;
 /// From the top: greeting, subtitle, a gap, the "Recent projects" label,
 /// the rows, a gap, the button and the note under it.
 pub(super) const GREETING_HEIGHT: i32 = 40;

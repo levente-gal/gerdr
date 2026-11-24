@@ -14,6 +14,7 @@ use std::{
 };
 
 use super::{
+    TITLE_FONT_SIZE,
     AGENT_ICON, BUTTON_PADDING, ButtonStyle, CHECKBOX_GAP, CHECKBOX_ROW, CHECKBOX_SIZE, Canvas,
     Check, DETAIL_FONT_SIZE, DIALOG_WIDTH, DOT, Dot, FONT_SIZE, FieldSpot, LABEL_FONT_SIZE,
     ListBar, POPUP_RADIUS, Painter, Palette, QUIT_BODY, QUIT_BUTTON, QUIT_BUTTON_GAP,
@@ -2053,8 +2054,6 @@ const TAB_PAD: i32 = 16;
 /// How wide the feature tab's contents are at most: past it, the rest is
 /// margin either side.
 const TAB_MAX: i32 = 1760;
-/// The feature's title, in the header.
-const TAB_TITLE_FONT: f32 = 20.0;
 /// How high the header's title and sub lines are.
 const TAB_TITLE: i32 = QUIT_TITLE + 4;
 const TAB_SUB: i32 = 20;
@@ -2328,7 +2327,7 @@ impl Font {
     /// over the chrome's own, as the page is read, not glanced at.
     pub(super) const fn size(self) -> f32 {
         match self {
-            Self::Heading => TAB_TITLE_FONT,
+            Self::Heading => TITLE_FONT_SIZE,
             Self::Body => LABEL_FONT_SIZE,
             Self::Small => FONT_SIZE,
             Self::Detail => DETAIL_FONT_SIZE,
@@ -7079,7 +7078,7 @@ impl Painter {
         self.bold_text(
             c,
             &view.title,
-            TAB_TITLE_FONT,
+            TITLE_FONT_SIZE,
             tx,
             tend,
             band(l.title, scale),

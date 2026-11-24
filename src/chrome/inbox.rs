@@ -8,6 +8,7 @@
 //! its items into an `InboxView`.
 
 use super::{
+    MONO_FONT_SIZE,
     BUTTON_RADIUS, Badge, Canvas, DETAIL_FONT_SIZE, DOT, DOT_SLOT, Dot, FIELD_GAP, FONT_SIZE,
     FieldSpot, HELP_MARGIN, HELP_PADDING, LABEL_FONT_SIZE, MENU_MARK_GAP, MENU_MARK_WIDTH,
     MENU_RADIUS, PADDING, POPUP_RADIUS, PROJECT_MENU_INPUT, PROJECT_MENU_PADDING, Painter, Palette,
@@ -77,13 +78,12 @@ const ROW_TITLE: i32 = 20;
 const ROW_SUBTITLE: i32 = 16;
 /// The detail: its title row, a field's line, the widest its labels'
 /// column gets, the heading over its block, a line of the block in the
-/// monospace font of this size, and the room inside the block.
+/// monospace font (`MONO_FONT_SIZE`), and the room inside the block.
 const DETAIL_TITLE: i32 = 60;
 const DETAIL_LINE: i32 = 24;
 const DETAIL_LABEL_MAX: i32 = 140;
 const DETAIL_HEADING: i32 = 28;
 const BLOCK_LINE: i32 = 19;
-const BLOCK_FONT_SIZE: f32 = 13.0;
 const BLOCK_PAD: i32 = 6;
 /// The detail's buttons: their height, the gap between their rows, and
 /// the most rows (the rest are left out; their keys still work).
@@ -1790,7 +1790,7 @@ impl Painter {
                 self.mono_text(
                     c,
                     &text,
-                    BLOCK_FONT_SIZE,
+                    MONO_FONT_SIZE,
                     lx,
                     lright,
                     band(line_at(top + n), scale),

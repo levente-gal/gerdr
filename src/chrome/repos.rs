@@ -16,6 +16,7 @@
 //! Actions the footer has no room for go behind a "more" button.
 
 use super::{
+    CODE_FONT_SIZE,
     BUTTON_RADIUS, ButtonStyle, CAP_PADDING, CAP_RADIUS, CHECKBOX_SIZE, Canvas, DETAIL_FONT_SIZE,
     DOCK_GAP, Density, FIELD_GAP, FONT_SIZE, FieldSpot, GIT_MARK_GAP, GIT_MARK_WIDTH, HELP_MARGIN,
     HELP_PADDING, HELP_RADIUS, HINT_KEY_GAP, KEY_FONT_SIZE, LABEL_FONT_SIZE, LineState,
@@ -106,7 +107,6 @@ pub fn repos_detail_line(density: Density) -> i32 {
         Density::Compact => 19,
     }
 }
-const REPOS_MONO_SIZE: f32 = 14.0;
 /// How strongly a finding's heading band takes its severity's colour.
 const COMMENT_HEAD_TINT: f32 = 0.24;
 /// Between the parts of a comment's heading.
@@ -1520,9 +1520,9 @@ fn line_chip_rects(
 ) -> Vec<Rect> {
     let mut rects = chip_rects(rect, widths);
     if let (Some(DetailRow::Line(line)), Some(first)) = (row, rects.first()) {
-        let advance = measure_mono("0", REPOS_MONO_SIZE)
+        let advance = measure_mono("0", CODE_FONT_SIZE)
             .filter(|a| *a > 0.0)
-            .unwrap_or(REPOS_MONO_SIZE * 0.6);
+            .unwrap_or(CODE_FONT_SIZE * 0.6);
         let chars: usize = line.text.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum();
         let text_end = rect.loc.x
             + DIFF_INSET
@@ -1750,9 +1750,9 @@ fn gutter_width(digits: usize, plain: bool) -> i32 {
 /// digits (`plain`: of the one column), where a comment's row holds `cols`
 /// (`repos_detail_cols`).
 pub fn diff_line_room(cols: usize, digits: usize, plain: bool) -> usize {
-    let advance = measure_mono("0", REPOS_MONO_SIZE)
+    let advance = measure_mono("0", CODE_FONT_SIZE)
         .filter(|a| *a > 0.0)
-        .unwrap_or(REPOS_MONO_SIZE * 0.6);
+        .unwrap_or(CODE_FONT_SIZE * 0.6);
     let px = cols as f32 * advance + COMMENT_INDENT as f32 - gutter_width(digits, plain) as f32;
     ((px / advance).floor() as usize).max(8)
 }
@@ -1761,9 +1761,9 @@ pub fn diff_line_room(cols: usize, digits: usize, plain: bool) -> usize {
 /// `detail` wide.
 fn detail_cols(detail: i32) -> usize {
     let text = detail - 2 * HELP_PADDING - SCROLLBAR - 2 * DIFF_INSET - COMMENT_INDENT;
-    let advance = measure_mono("0", REPOS_MONO_SIZE)
+    let advance = measure_mono("0", CODE_FONT_SIZE)
         .filter(|a| *a > 0.0)
-        .unwrap_or(REPOS_MONO_SIZE * 0.6);
+        .unwrap_or(CODE_FONT_SIZE * 0.6);
     ((text.max(0) as f32 / advance).floor() as usize).max(16)
 }
 
@@ -2881,7 +2881,7 @@ pub fn repos_diff_char(
         return None;
     };
     let x0 = layout.detail_rows.get(i)?.loc.x + DIFF_INSET;
-    let advance = measure_mono("0", REPOS_MONO_SIZE).filter(|a| *a > 0.0)? as f64;
+    let advance = measure_mono("0", CODE_FONT_SIZE).filter(|a| *a > 0.0)? as f64;
     let start = match view.detail.rows.get(i)? {
         DetailRow::Line(_) => x0 + gutter_width(view.detail.gutter, view.detail.plain),
         DetailRow::Editor { .. } => return editor_char(view, &layout, i, pos.x),
@@ -2921,7 +2921,7 @@ pub fn repos_editor_char(
         _ => false,
     };
     let rect = layout.detail_rows.get(nearest.unwrap_or(0))?;
-    let advance = measure_mono("0", REPOS_MONO_SIZE).filter(|a| *a > 0.0)? as f64;
+    let advance = measure_mono("0", CODE_FONT_SIZE).filter(|a| *a > 0.0)? as f64;
     let card = rect.loc.x + DIFF_INSET + if within { COMMENT_INDENT } else { 0 };
     let x = pos.x - (card + 1 + COMMENT_INDENT) as f64;
     Some((nearest, (x / advance).round().max(0.0) as usize))
@@ -2934,7 +2934,7 @@ fn editor_char(view: &ReposView, layout: &ReposLayout, i: usize, x: f64) -> Opti
     let DetailRow::Editor { within, .. } = view.detail.rows.get(i)? else {
         return None;
     };
-    let advance = measure_mono("0", REPOS_MONO_SIZE).filter(|a| *a > 0.0)? as f64;
+    let advance = measure_mono("0", CODE_FONT_SIZE).filter(|a| *a > 0.0)? as f64;
     let card = layout.detail_rows.get(i)?.loc.x
         + DIFF_INSET
         + if within.is_some() { COMMENT_INDENT } else { 0 };
@@ -3747,11 +3747,11 @@ impl Painter {
                     true => p.error,
                     false => code_color(file.code, p),
                 };
-                let lw = self.mono_width(&letter, REPOS_MONO_SIZE, scale);
+                let lw = self.mono_width(&letter, CODE_FONT_SIZE, scale);
                 self.mono_text(
                     c,
                     &letter,
-                    REPOS_MONO_SIZE,
+                    CODE_FONT_SIZE,
                     (code_x + (code_w - lw) / 2.0).round(),
                     f32::MAX,
                     line_band,
@@ -4257,7 +4257,7 @@ impl Painter {
                 self.mono_text(
                     c,
                     &line.text,
-                    REPOS_MONO_SIZE,
+                    CODE_FONT_SIZE,
                     bx,
                     bend,
                     row_band,
@@ -4501,7 +4501,7 @@ impl Painter {
                             .char_indices()
                             .nth(n)
                             .map_or(line.text.len(), |(b, _)| b);
-                        tx + self.mono_width(&line.text[..end], REPOS_MONO_SIZE, scale)
+                        tx + self.mono_width(&line.text[..end], CODE_FONT_SIZE, scale)
                     };
                     for w in &line.words {
                         let (x0, x1) = (upto(w.start), upto(w.end).min(bend));
@@ -4513,7 +4513,7 @@ impl Painter {
                     }
                     c.fill(tint_x, y, px(DIFF_BAR), h, tone);
                 }
-                let width = |t: &str| self.mono_width(t, REPOS_MONO_SIZE, scale);
+                let width = |t: &str| self.mono_width(t, CODE_FONT_SIZE, scale);
                 let text = &line.text;
                 if let Some(chars) = &look.chosen {
                     self.chosen_tint(c, text, chars, (tx, bend), row_band, width, scale, p);
@@ -4554,10 +4554,10 @@ impl Painter {
                     if from >= to {
                         return;
                     }
-                    let x = tx + self.mono_width(&line.text[..from], REPOS_MONO_SIZE, scale);
+                    let x = tx + self.mono_width(&line.text[..from], CODE_FONT_SIZE, scale);
                     if x < bend {
                         let text = &line.text[from..to];
-                        self.mono_text(c, text, REPOS_MONO_SIZE, x, bend, row_band, scale, color);
+                        self.mono_text(c, text, CODE_FONT_SIZE, x, bend, row_band, scale, color);
                     }
                 };
                 // In the places the search found, the selection, the caret
@@ -4623,7 +4623,7 @@ impl Painter {
                     }
                 }
                 // Cut at the row's end, or shown from a char on: marked.
-                let mark_w = (self.mono_width("›", REPOS_MONO_SIZE, scale)).ceil();
+                let mark_w = (self.mono_width("›", CODE_FONT_SIZE, scale)).ceil();
                 let ground = match tone {
                     Some(tone) => lighten(mix(p.elevated, tone, DIFF_TINT)),
                     None if lit.is_some() => lighten(p.elevated),
@@ -4635,7 +4635,7 @@ impl Painter {
                     self.mono_text(
                         c,
                         "›",
-                        REPOS_MONO_SIZE,
+                        CODE_FONT_SIZE,
                         x,
                         f32::MAX,
                         row_band,
@@ -4646,7 +4646,7 @@ impl Painter {
                 if look.skipped {
                     let x = tx - mark_w;
                     c.fill(x as i32, y, mark_w as i32, h, ground);
-                    self.mono_text(c, "‹", REPOS_MONO_SIZE, x, tx, row_band, scale, p.muted);
+                    self.mono_text(c, "‹", CODE_FONT_SIZE, x, tx, row_band, scale, p.muted);
                 }
             }
             DetailRow::Note(text) => {
@@ -4710,7 +4710,7 @@ impl Painter {
                 let tx = self.comment_card(c, (x0, x1), row_band, (*first, *last), fill, scale);
                 c.fill(x0 as i32, y, px(2).max(1), h, mix(p.elevated, accent, 0.7));
                 // What the search found in it, tinted on the card.
-                let width = |t: &str| self.mono_width(t, REPOS_MONO_SIZE, scale);
+                let width = |t: &str| self.mono_width(t, CODE_FONT_SIZE, scale);
                 let found = &look.found;
                 self.found_tints(c, text, found, (tx, bend), row_band, width, fill, scale, p);
                 // A dismissed finding's words dim.
@@ -4718,7 +4718,7 @@ impl Painter {
                     Some(Tone::Muted) => p.muted,
                     _ => p.text,
                 };
-                self.mono_text(c, text, REPOS_MONO_SIZE, tx, bend, row_band, scale, ink);
+                self.mono_text(c, text, CODE_FONT_SIZE, tx, bend, row_band, scale, ink);
             }
             DetailRow::Editor {
                 text,
@@ -4752,13 +4752,13 @@ impl Painter {
                     scale,
                 );
                 let at = |byte: usize| {
-                    tx + self.mono_width(&text[..byte.min(text.len())], REPOS_MONO_SIZE, scale)
+                    tx + self.mono_width(&text[..byte.min(text.len())], CODE_FONT_SIZE, scale)
                 };
                 if !selection.is_empty() {
                     let (sx, ex) = (at(selection.start), at(selection.end).min(x1));
                     c.fill(sx as i32, iy, (ex - sx).max(1.0) as i32, ih, p.selected);
                 }
-                self.mono_text(c, text, REPOS_MONO_SIZE, tx, x1, row_band, scale, p.text);
+                self.mono_text(c, text, CODE_FONT_SIZE, tx, x1, row_band, scale, p.text);
                 if let Some(caret) = caret.filter(|_| look.focused) {
                     let cx = at(caret).min(x1 - b) as i32;
                     let pad = px(3);
@@ -7553,7 +7553,7 @@ mod tests {
             .position(|r| matches!(r, DetailRow::Line(_)))
             .expect("a line");
         let rect = layout.detail_rows[i];
-        let advance = measure_mono("0", REPOS_MONO_SIZE).unwrap() as f64;
+        let advance = measure_mono("0", CODE_FONT_SIZE).unwrap() as f64;
         // Its text starts after the line numbers.
         let x0 = (rect.loc.x + DIFF_INSET + gutter_width(view.detail.gutter, false)) as f64;
         let y = rect.loc.y as f64 + rect.size.h as f64 / 2.0;
@@ -7614,7 +7614,7 @@ mod tests {
         let size: Size<i32, Logical> = (1280, 800).into();
         let panel = repos_panel_rect(size);
         let layout = repos_layout(&view, panel);
-        let advance = measure_mono("0", REPOS_MONO_SIZE).unwrap() as f64;
+        let advance = measure_mono("0", CODE_FONT_SIZE).unwrap() as f64;
         let (top, bottom) = (layout.detail_rows[2], layout.detail_rows[3]);
         let x0 = (top.loc.x + DIFF_INSET + 1 + COMMENT_INDENT) as f64;
         let mid = |r: Rect| r.loc.y as f64 + r.size.h as f64 / 2.0;
