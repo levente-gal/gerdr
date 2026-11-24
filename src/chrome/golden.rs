@@ -3085,6 +3085,17 @@ fn commands(case: usize) -> super::CommandsView {
             view.limit = None;
             view.keys.push(("Alt+U", "use"));
         }
+        7 => {
+            view.tabs = &super::COMMANDS_FEATURE_TABS;
+            view.tab = super::CommandsTab::Network;
+            view.body = crate::project_commands::NETWORK_BODY;
+            view.rows = vec![row("Outside ports", None, None, "8080\n5000")];
+            view.limit = None;
+            view.error = Some(
+                "Each outside port is a number from 1 to 65535, one a line: \u{201c}localhost:8080\u{201d} isn't."
+                    .into(),
+            );
+        }
         _ => {}
     }
     view
@@ -3108,7 +3119,7 @@ fn paint_commands(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
         .collect()
 }
 
-const COMMANDS: [&str; 7] = [
+const COMMANDS: [&str; 8] = [
     "commands",
     "commands_setup",
     "commands_stale",
@@ -3116,49 +3127,54 @@ const COMMANDS: [&str; 7] = [
     "commands_run",
     "commands_feature",
     "commands_pages",
+    "commands_network",
 ];
 
 /// The recorded hashes of `COMMANDS`, per case in `CASES`.
-const GOLDEN_COMMANDS: [[u64; 7]; 4] = [
+const GOLDEN_COMMANDS: [[u64; 8]; 4] = [
     // Dark at 1
     [
-        0x4b68c279b631247f, // commands
-        0xb9f2d3709ab1a448, // commands_setup
-        0x5dae424212e9c9eb, // commands_stale
-        0xbbd1ece890b082e1, // commands_low
-        0xadd8f1af46928d65, // commands_run
-        0xf6f444832f2f8658, // commands_feature
-        0xbf383635656b6196, // commands_pages
+        0xefa5667aa340fbd1, // commands
+        0x9b5d1ea82406943a, // commands_setup
+        0xc5757aa1ec07cff5, // commands_stale
+        0x2828bc28ed3b83bb, // commands_low
+        0x8d4a1245bf79f2c3, // commands_run
+        0xe9062521c9f49116, // commands_feature
+        0xd0bfa2ebef6b9cb4, // commands_pages
+        0x9b3415a7d00660ea, // commands_network
     ],
     // Dark at 2
     [
-        0x1a4c263938e1e902, // commands
-        0xcbd90d77ed10cb21, // commands_setup
-        0xf6a012a46d4a09a2, // commands_stale
-        0x769895bfc9759c43, // commands_low
-        0xc1d2681163b7f6af, // commands_run
-        0x8c107e4f27f49308, // commands_feature
-        0xf71b979a00d2a843, // commands_pages
+        0x65dcc091f5d5c600, // commands
+        0x81531f49e24ce253, // commands_setup
+        0xdcf500af4cde9edc, // commands_stale
+        0x6a9c1c55a7314b39, // commands_low
+        0x2d2d208513bb6961, // commands_run
+        0xc8c6f60632aeb8de, // commands_feature
+        0x93187e4f6540be34, // commands_pages
+        0x0a2735b70f20363c, // commands_network
     ],
     // Light at 1
     [
-        0xd79a0c52c4e8f551, // commands
-        0xdf74ffecbcdd81b4, // commands_setup
-        0xd0e3b25224c7f31c, // commands_stale
-        0xe0b8bc74a69b0ae1, // commands_low
-        0x895411f814c3b6e4, // commands_run
-        0x9fdefc66d7c4bcf6, // commands_feature
-        0xdd98c7c18dade87e, // commands_pages
+        0x3e664be644696b9b, // commands
+        0xa713e8c59cbcf84a, // commands_setup
+        0x2bea8ad292ffec26, // commands_stale
+        0x50ef515ea32b252f, // commands_low
+        0x9bea4ef327bda93a, // commands_run
+        0xa00f7ba922ed0c0c, // commands_feature
+        0x71f285ffc59dd0b1, // commands_pages
+        0x883b1d2e92b8bdfb, // commands_network
     ],
     // Light at 2
     [
-        0x80f47cd4612cc5d4, // commands
-        0xf4fd6315979622a4, // commands_setup
-        0x22aae9fa0b3c428f, // commands_stale
-        0xab9b42508090f326, // commands_low
-        0x7777f33e37d1159f, // commands_run
-        0xa691e55b5a165950, // commands_feature
-        0x4f86e5baaae71998, // commands_pages
+        0x803c45b08656802e, // commands
+        0xd926daf694d8559a, // commands_setup
+        0x630b1eec3ead9639, // commands_stale
+        0x21dc0cc10e4c8c64, // commands_low
+        0x0a6bef3b2a4f0c31, // commands_run
+        0xde7adcbcfe536b82, // commands_feature
+        0x00207344d96f1b61, // commands_pages
+        0xe40f8394f4b9e5ce, // commands_network
     ],
 ];
 

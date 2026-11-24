@@ -1,7 +1,8 @@
 //! The project commands dialog: what Verify checks (`workflow.verify`,
 //! `verify_timeout`), what sets a new worktree up (`workflow.setup`) and what a
-//! sandbox runs (`workflow.run`, `workflow.prepare`) and the pages of its app
-//! (`workflow.sandbox_pages`), without editing the project file by hand.
+//! sandbox runs (`workflow.run`, `workflow.prepare`), the pages of its app
+//! (`workflow.sandbox_pages`) and the ports it reaches outside itself
+//! (`workflow.sandbox_outside`), without editing the project file by hand.
 //!
 //! Each repository has a field of lines, a command a line; emptied, its key
 //! goes. Only what was edited is written, so a command a hand wrote over
@@ -106,6 +107,9 @@ struct Row {
     pages: Option<Slot>,
     /// Those its sandbox commands tell of, as lines.
     suggested_pages: Vec<String>,
+    /// The ports the project's sandboxes reach outside themselves, a line
+    /// each: on the home project's whole-feature row only, as pages are.
+    outside: Option<Slot>,
 }
 
 impl Row {
@@ -117,6 +121,7 @@ impl Row {
             CommandsTab::Prepare => self.prepare.as_ref(),
             CommandsTab::Feature => self.own.as_ref(),
             CommandsTab::Pages => self.pages.as_ref(),
+            CommandsTab::Network => self.outside.as_ref(),
         }
     }
 
@@ -128,6 +133,7 @@ impl Row {
             CommandsTab::Prepare => self.prepare.as_mut(),
             CommandsTab::Feature => self.own.as_mut(),
             CommandsTab::Pages => self.pages.as_mut(),
+            CommandsTab::Network => self.outside.as_mut(),
         }
     }
 
@@ -153,6 +159,7 @@ impl Row {
             suggested: Suggested::default(),
             pages: (key == FEATURE_KEY).then(|| Slot::new(Some(&page_lines(workflow)))),
             suggested_pages: Vec::new(),
+            outside: (key == FEATURE_KEY).then(|| Slot::new(Some(&port_lines(workflow)))),
         }
     }
 
@@ -195,6 +202,7 @@ impl Row {
             // What a repository suggests is for all its features.
             CommandsTab::Feature => &[],
             CommandsTab::Pages => &self.suggested_pages,
+            CommandsTab::Network => &[],
         }
     }
 }
@@ -206,6 +214,32 @@ fn page_lines(workflow: &Workflow) -> Vec<String> {
         (true, Some(url)) => vec![format!("App {url}")],
         _ => sandbox_pages::to_lines(&workflow.sandbox_pages),
     }
+}
+
+/// The ports `workflow` leads out of its sandboxes, a line each.
+fn port_lines(workflow: &Workflow) -> Vec<String> {
+    workflow.sandbox_outside.iter().map(u16::to_string).collect()
+}
+
+/// The ports in `text`, one a line, in order and each once; else why not,
+/// as a sentence.
+fn parse_ports(text: &str) -> Result<Vec<u16>, String> {
+    let mut ports = Vec::new();
+    for line in lines_of(text) {
+        match line.parse::<u16>() {
+            Ok(port) if port > 0 => {
+                if !ports.contains(&port) {
+                    ports.push(port);
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "Each outside port is a number from 1 to 65535, one a line: \u{201c}{line}\u{201d} isn't."
+                ));
+            }
+        }
+    }
+    Ok(ports)
 }
 
 /// The pages the sandbox commands `run` tell of in `root`'s repositories, as
@@ -260,6 +294,7 @@ pub struct CommandsBefore {
     verify_timeout: Option<u64>,
     sandbox_url: Option<String>,
     sandbox_pages: Vec<sandbox_pages::Page>,
+    sandbox_outside: Vec<u16>,
 }
 
 impl CommandsBefore {
@@ -273,6 +308,7 @@ impl CommandsBefore {
             verify_timeout: w.verify_timeout,
             sandbox_url: w.sandbox_url.clone(),
             sandbox_pages: w.sandbox_pages.clone(),
+            sandbox_outside: w.sandbox_outside.clone(),
         }
     }
 
@@ -284,6 +320,7 @@ impl CommandsBefore {
         w.verify_timeout = self.verify_timeout;
         w.sandbox_url = self.sandbox_url.clone();
         w.sandbox_pages = self.sandbox_pages.clone();
+        w.sandbox_outside = self.sandbox_outside.clone();
     }
 }
 
@@ -749,6 +786,17 @@ impl CommandsDialog {
         sandbox_pages::from_lines(&slot.field).err()
     }
 
+    /// The edited outside ports' row, if they were edited.
+    fn outside_row(&self) -> Option<&Row> {
+        (self.rows.iter()).find(|r| r.outside.as_ref().is_some_and(Slot::changed))
+    }
+
+    /// Why the edited outside ports can't be saved, if they can't.
+    fn outside_error(&self) -> Option<String> {
+        let slot = self.outside_row()?.outside.as_ref()?;
+        parse_ports(&slot.field).err()
+    }
+
     /// The pages the commands of `project` tell of, as lines: suggested
     /// for its sandbox app if it is the home project.
     fn found_pages(&mut self, project: &str, pages: Vec<String>) {
@@ -856,6 +904,10 @@ impl CommandsDialog {
                 workflow.sandbox_pages = pages;
                 workflow.sandbox_url = None;
             }
+            let outside = row.outside.as_ref().filter(|s| s.changed());
+            if let Some(Ok(ports)) = outside.map(|s| parse_ports(&s.field)) {
+                workflow.sandbox_outside = ports;
+            }
         }
         if project == self.scope.project && self.limit_changed() {
             workflow.verify_timeout = limit;
@@ -867,8 +919,9 @@ impl CommandsDialog {
     fn row_view(&self, row: &Row, slot: &Slot, heading: Option<String>) -> CommandsRow {
         let on_feature = self.tab == CommandsTab::Feature;
         let on_pages = self.tab == CommandsTab::Pages;
+        let on_network = self.tab == CommandsTab::Network;
         // What listens there now is said by gerdr (`commands_view`).
-        let tag = if on_pages {
+        let tag = if on_pages || on_network {
             None
         } else if row.is_feature() {
             Some("in the feature folder")
@@ -885,6 +938,7 @@ impl CommandsDialog {
         CommandsRow {
             heading,
             label: match (on_pages, row.is_feature()) {
+                _ if on_network => "Outside ports".to_owned(),
                 (true, _) => "Sandbox app".to_owned(),
                 (false, true) => "Whole feature".to_owned(),
                 (false, false) => row.key.clone(),
@@ -986,6 +1040,7 @@ impl CommandsDialog {
                 }
                 CommandsTab::Feature => FEATURE_BODY,
                 CommandsTab::Pages => PAGES_BODY,
+                CommandsTab::Network => NETWORK_BODY,
             },
             note: self.note(rows.len()),
             limit: self.has_limit().then(|| self.limit.line()),
@@ -1016,6 +1071,10 @@ fn saved_said(what: &str, pages: bool, rest: bool) -> String {
 
 /// What the tab of the sandbox app's pages says they are.
 pub const PAGES_BODY: &str = "A page per line: a name, then its address. Open app opens the first; no port takes what listens.";
+
+/// What the tab of the ports a sandbox reaches outside itself says they are.
+pub const NETWORK_BODY: &str =
+    "A port per line: the sandbox reaches it on its machine, outside it, at the same number.";
 
 /// What the dialog says once a project's file changed outside gerdr.
 const STALE: &str = "The project file was edited outside gerdr. Reload it to save here.";
@@ -1257,6 +1316,15 @@ impl Gerdr {
                 dialog.focus = Focus::Row(row.project.clone(), row.key.clone());
             }
             dialog.tab = CommandsTab::Pages;
+            dialog.follow(size);
+            return;
+        }
+        if let Some(why) = dialog.outside_error() {
+            dialog.error = Some(why);
+            if let Some(row) = dialog.outside_row() {
+                dialog.focus = Focus::Row(row.project.clone(), row.key.clone());
+            }
+            dialog.tab = CommandsTab::Network;
             dialog.follow(size);
             return;
         }
@@ -1986,9 +2054,11 @@ mod tests {
         press(&mut d, ctrl(), Keysym::Page_Down);
         assert_eq!(d.tab, CommandsTab::Pages);
         press(&mut d, ctrl(), Keysym::Page_Down);
+        assert_eq!(d.tab, CommandsTab::Network);
+        press(&mut d, ctrl(), Keysym::Page_Down);
         assert_eq!(d.tab, CommandsTab::Checks);
         press(&mut d, ctrl(), Keysym::Page_Up);
-        assert_eq!(d.tab, CommandsTab::Pages);
+        assert_eq!(d.tab, CommandsTab::Network);
     }
 
     #[test]
@@ -2274,6 +2344,46 @@ mod tests {
         assert!(d.pages_error().unwrap().contains("has no address"));
     }
 
+    fn outside(d: &mut CommandsDialog) -> &mut TextField {
+        &mut row(d, FEATURE_KEY).outside.as_mut().unwrap().field
+    }
+
+    #[test]
+    fn the_network_tab_sets_the_home_projects_outside_ports() {
+        let mut w = workflow();
+        w.sandbox_outside = vec![8080];
+        let projects = vec![
+            ("home".into(), "Home".into(), w),
+            ("other".into(), "Other".into(), workflow()),
+        ];
+        let mut d = CommandsDialog::new(1, scope(), &projects, CommandsTab::Network);
+        assert_eq!(labels(&d), ["Outside ports"]);
+        assert_eq!(d.view().rows[0].tag, None);
+        assert_eq!(**outside(&mut d), *"8080");
+        assert!(d.changed_projects().is_empty());
+        outside(&mut d).set("8080\n 5000 \n\n8080");
+        assert_eq!(d.changed_projects(), ["home"]);
+        assert_eq!(d.outside_error(), None);
+        let mut saved = projects[0].2.clone();
+        d.apply("home", &mut saved, Some(90));
+        assert_eq!(saved.sandbox_outside, [8080, 5000]);
+        // It applies from the next start, as the commands do.
+        assert!(d.changed_besides_pages());
+        outside(&mut d).set("");
+        d.apply("home", &mut saved, Some(90));
+        assert!(saved.sandbox_outside.is_empty());
+        for wrong in ["localhost:8080", "0", "70000"] {
+            outside(&mut d).set(wrong);
+            let why = d.outside_error().unwrap();
+            assert!(why.contains(wrong) && why.ends_with('.'), "{why}");
+        }
+        // A draft keeps it.
+        outside(&mut d).set("9000");
+        let mut again = CommandsDialog::new(2, scope(), &projects, CommandsTab::Checks);
+        again.restore(d.draft(), &projects);
+        assert_eq!(**outside(&mut again), *"9000");
+    }
+
     #[test]
     fn the_pages_the_run_commands_tell_of_are_suggested_and_kept_in_a_draft() {
         let mut d = CommandsDialog::new(1, scope(), &projects(), CommandsTab::Pages);
@@ -2298,12 +2408,14 @@ mod tests {
         w.run.insert("api".into(), vec!["cargo run".into()]);
         w.prepare.insert("api".into(), vec!["make db".into()]);
         w.sandbox_url = Some("http://localhost:1".into());
+        w.sandbox_outside = vec![8080];
         let before = CommandsBefore::of("home", &w);
         let mut after = Workflow::default();
         before.put_back(&mut after);
         assert_eq!(after.run, w.run);
         assert_eq!(after.prepare, w.prepare);
         assert_eq!(after.sandbox_url, w.sandbox_url);
+        assert_eq!(after.sandbox_outside, [8080]);
         assert_eq!(after.verify, w.verify);
         assert_eq!(after.verify_timeout, w.verify_timeout);
     }
