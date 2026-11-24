@@ -24,6 +24,7 @@ use smithay::{
 
 use super::{
     ChatFocus, Event, Item, PaneChat, Reading,
+    commands::{self, Command, Slash},
     live::AskReply,
     rows::{rows, unread},
     tail::Tail,
@@ -90,6 +91,18 @@ enum ComposerKey {
     /// Back to the list, the reply kept as a draft.
     Back,
     Discard,
+}
+
+/// A key of the `/` menu over the reply box, while it shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SlashKey {
+    Next,
+    Previous,
+    /// Fill the reply with the command picked, to add to it.
+    Fill,
+    /// Send the command picked.
+    Run,
+    Close,
 }
 
 /// A key of the ask's card, while its agent waits on the chat's answer.
@@ -257,6 +270,67 @@ const COMPOSER_KEYS: &[Binding<(), ComposerKey>] = &[
     },
 ];
 
+/// The `/` menu's keys: they come before the reply box's while it shows.
+const SLASH_KEYS: &[Binding<(), SlashKey>] = &[
+    Binding {
+        chord: "Enter",
+        does: |_| Some(SlashKey::Run),
+        footer: true,
+        f1: "send the command picked to the agent",
+    },
+    Binding {
+        chord: "Tab",
+        does: |_| Some(SlashKey::Fill),
+        footer: true,
+        f1: "fill in the command picked, to add to it",
+    },
+    Binding {
+        chord: "Down",
+        does: |_| Some(SlashKey::Next),
+        footer: true,
+        f1: "pick the next command",
+    },
+    key_table::alias("Ctrl+J", |_| Some(SlashKey::Next)),
+    Binding {
+        chord: "Up",
+        does: |_| Some(SlashKey::Previous),
+        footer: true,
+        f1: "pick the previous command",
+    },
+    key_table::alias("Ctrl+K", |_| Some(SlashKey::Previous)),
+    Binding {
+        chord: "Esc",
+        does: |_| Some(SlashKey::Close),
+        footer: true,
+        f1: "close the commands, keeping the reply",
+    },
+];
+
+/// The footer's key hints while the `/` menu shows (checklist K3).
+pub(crate) fn slash_footer() -> Vec<(String, String)> {
+    key_table::joined(key_table::hints(SLASH_KEYS, &(), |k| {
+        match k {
+            SlashKey::Run => "run",
+            SlashKey::Fill => "fill in",
+            SlashKey::Next | SlashKey::Previous => "pick",
+            SlashKey::Close => "close",
+        }
+        .to_owned()
+    }))
+}
+
+/// Open, filter or close `chat`'s `/` menu for its reply as it now is;
+/// `load` lists its agent's commands, read each time the menu opens.
+fn slash_sync(chat: &mut PaneChat, load: impl FnOnce() -> Vec<Command>) {
+    let typed = (chat.focus == ChatFocus::Composer)
+        .then(|| commands::query(&chat.draft).map(str::to_owned))
+        .flatten();
+    match typed {
+        Some(typed) => chat.slash.get_or_insert_with(|| Slash::new(load())).sync(&typed),
+        None => chat.slash = None,
+    }
+}
+
 /// The footer's key hints of a chat whose keys are at `focus` (checklist
 /// K3: from the tables the keys are read with). Esc in the list does
 /// nothing, so it has none; Esc in the reply box says what becomes of the
@@ -309,6 +383,24 @@ enum ChatDo {
     Page(i8),
 }
 
+/// A key of the reply box, while it has the keys.
+fn composer_key(
+    chat: &mut PaneChat,
+    mods: &ModifiersState,
+    sym: Keysym,
+    typed: Keysym,
+) -> Option<ChatDo> {
+    match key_table::press(COMPOSER_KEYS, &(), mods, sym) {
+        Some(ComposerKey::Send) => return Some(ChatDo::Send),
+        Some(ComposerKey::Newline) => _ = chat.draft.newline(),
+        // Never saved nor thrown away (checklist K2).
+        Some(ComposerKey::Back) => chat.focus = ChatFocus::List,
+        Some(ComposerKey::Discard) => chat.draft.clear(),
+        None => _ = chat.draft.key(mods, sym, typed),
+    }
+    None
+}
+
 /// Whether the key typed is a character, to write into the reply box.
 fn types(mods: &ModifiersState, typed: Keysym) -> bool {
     !(mods.ctrl || mods.alt || mods.logo) && typed.key_char().is_some_and(|c| !c.is_control())
@@ -335,16 +427,25 @@ fn chat_key(
             None => {}
         }
     }
-    if chat.focus == ChatFocus::Composer {
-        match key_table::press(COMPOSER_KEYS, &(), mods, sym) {
-            Some(ComposerKey::Send) => return Some(ChatDo::Send),
-            Some(ComposerKey::Newline) => _ = chat.draft.newline(),
-            // Never saved nor thrown away (checklist K2).
-            Some(ComposerKey::Back) => chat.focus = ChatFocus::List,
-            Some(ComposerKey::Discard) => chat.draft.clear(),
-            None => _ = chat.draft.key(mods, sym, typed),
+    if chat.focus == ChatFocus::Composer
+        && let Some(slash) = chat.slash.as_mut().filter(|slash| slash.open())
+    {
+        let name = slash.picked().map(|c| c.name.clone()).unwrap_or_default();
+        match key_table::press(SLASH_KEYS, &(), mods, sym) {
+            Some(SlashKey::Next) => slash.step(1),
+            Some(SlashKey::Previous) => slash.step(-1),
+            Some(SlashKey::Close) => slash.hidden = true,
+            Some(SlashKey::Fill) => chat.draft.set(&format!("/{name} ")),
+            Some(SlashKey::Run) => {
+                chat.draft.set(&format!("/{name}"));
+                return Some(ChatDo::Send);
+            }
+            None => return composer_key(chat, mods, sym, typed),
         }
         return None;
+    }
+    if chat.focus == ChatFocus::Composer {
+        return composer_key(chat, mods, sym, typed);
     }
     // The keys move over the rows as they show: a fold of steps is one.
     let shown = rows(&chat.items, &chat.unfolded);
@@ -1015,6 +1116,23 @@ impl Gerdr {
                 }
             }
         }
+        self.chat_slash_sync(&pane_id);
+    }
+
+    /// Open, filter or close pane `pane_id`'s `/` menu for its reply.
+    fn chat_slash_sync(&mut self, pane_id: &str) {
+        let agent = self.session.agents.iter().find(|a| a.pane_id == pane_id);
+        let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
+            return;
+        };
+        slash_sync(chat, || {
+            let kind = agent.and_then(super::source::kind);
+            let cwd = agent.and_then(|a| a.cwd.as_deref());
+            match (kind, cwd) {
+                (Some(kind), Some(cwd)) => commands::here(kind, cwd),
+                _ => Vec::new(),
+            }
+        });
     }
 
     /// Stand pane `pane_id`'s chat at `top` pixels down, or at its bottom
@@ -1208,8 +1326,14 @@ impl Gerdr {
                         .map(|ask| ask_footer(chat.unfolded.contains(&chrome::ask_key(&ask.ask))))
                         .unwrap_or_default()
                         .into_iter()
-                        .chain(footer(chat.focus, chat.draft.line().text.is_empty()))
+                        .chain(match chat.slash.as_ref().is_some_and(|s| s.open()) {
+                            true => slash_footer(),
+                            false => footer(chat.focus, chat.draft.line().text.is_empty()),
+                        })
                         .collect(),
+                    slash: (chat.slash.as_ref())
+                        .filter(|slash| slash.open())
+                        .map(chrome::SlashView::of),
                     earlier: match (chat.earlier, chat.reading_earlier) {
                         (false, _) => None,
                         (true, reading) => Some(reading),
@@ -1296,6 +1420,15 @@ impl Gerdr {
             ChatHit::Composer => {
                 chat.focus = ChatFocus::Composer;
                 field(self);
+            }
+            ChatHit::Command(i) => {
+                let name = (chat.slash.as_ref())
+                    .and_then(|slash| slash.shown.get(i).map(|c| slash.all[*c].name.clone()));
+                if let Some(name) = name {
+                    chat.draft.set(&format!("/{name} "));
+                    chat.focus = ChatFocus::Composer;
+                    chat.slash = None;
+                }
             }
             ChatHit::Send => self.chat_send(&pane_id),
             ChatHit::Answer(reply) => self.chat_answer(&pane_id, reply),
@@ -1586,6 +1719,78 @@ mod tests {
         press(&mut chat, "Ctrl+Shift+Del", '\u{7f}');
         assert_eq!(chat.draft, "");
         assert_eq!(one_line("fix it\n  and test\n"), "fix it and test");
+    }
+
+    /// Type `text` into `chat`, the `/` menu kept up after each key as
+    /// gerdr does, from `all`.
+    fn type_in(chat: &mut PaneChat, text: &str, all: &[&str]) {
+        for c in text.chars() {
+            let sym = Keysym::from_char(c);
+            chat_key(chat, &ModifiersState::default(), sym, sym);
+            sync(chat, all);
+        }
+    }
+
+    fn sync(chat: &mut PaneChat, all: &[&str]) {
+        let cmd = |name: &&str| Command {
+            name: (*name).into(),
+            about: String::new(),
+            hint: String::new(),
+        };
+        slash_sync(chat, || all.iter().map(cmd).collect());
+    }
+
+    #[test]
+    fn a_slash_offers_the_agents_commands_to_pick() {
+        let all = ["clear", "compact", "config"];
+        let mut chat = with_items(Vec::new());
+        type_in(&mut chat, "/co", &all);
+        assert_eq!(chat.focus, ChatFocus::Composer);
+        let slash = chat.slash.as_ref().unwrap();
+        assert!(slash.open());
+        assert_eq!(slash.shown.len(), 2);
+        assert_eq!(footer_of(&chat)[0].1, "run");
+        // Down picks the next; Tab fills it in and closes the menu.
+        press(&mut chat, "Down", '\0');
+        let picked = chat.slash.as_ref().unwrap().picked().unwrap().name.clone();
+        press(&mut chat, "Tab", '\t');
+        sync(&mut chat, &all);
+        assert_eq!(chat.draft, &*format!("/{picked} "));
+        assert!(chat.slash.is_none());
+
+        // Esc closes the menu and keeps the reply, then goes to the list.
+        press(&mut chat, "Ctrl+Shift+Del", '\u{7f}');
+        sync(&mut chat, &all);
+        type_in(&mut chat, "/cl", &all);
+        press(&mut chat, "Esc", '\u{1b}');
+        sync(&mut chat, &all);
+        assert!(!chat.slash.as_ref().unwrap().open());
+        assert_eq!((&*chat.draft, chat.focus), ("/cl", ChatFocus::Composer));
+        // Typing on opens it again; Enter sends the command picked.
+        type_in(&mut chat, "e", &all);
+        assert!(chat.slash.as_ref().unwrap().open());
+        assert_eq!(press(&mut chat, "Enter", '\r'), Some(ChatDo::Send));
+        assert_eq!(chat.draft, "/clear");
+        press(&mut chat, "Esc", '\u{1b}');
+        press(&mut chat, "Esc", '\u{1b}');
+        assert_eq!(chat.focus, ChatFocus::List);
+        sync(&mut chat, &all);
+        assert!(chat.slash.is_none());
+
+        // No command matches: Enter sends what was typed.
+        press(&mut chat, "I", 'i');
+        press(&mut chat, "Ctrl+Shift+Del", '\u{7f}');
+        type_in(&mut chat, "/xyz", &all);
+        assert!(!chat.slash.as_ref().unwrap().open());
+        assert_eq!(press(&mut chat, "Enter", '\r'), Some(ChatDo::Send));
+        assert_eq!(chat.draft, "/xyz");
+    }
+
+    fn footer_of(chat: &PaneChat) -> Vec<(String, String)> {
+        match chat.slash.as_ref().is_some_and(|s| s.open()) {
+            true => slash_footer(),
+            false => footer(chat.focus, chat.draft.is_empty()),
+        }
     }
 
     #[test]

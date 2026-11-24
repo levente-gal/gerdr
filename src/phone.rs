@@ -335,6 +335,7 @@ fn answer(target: &str, icons: &Icons, from: &str) -> Reply {
         "/api/feature" => feature_page(arg("p"), arg("s"), arg("stage").parse().ok()),
         "/api/doc" => doc(arg("p"), arg("s"), arg("f")),
         "/api/pane" => pane(arg("p"), arg("s"), arg("pane"), arg("lines")),
+        "/api/commands" => commands(arg("p"), arg("s"), arg("pane")),
         "/sw.js" => Reply::ok("text/javascript; charset=utf-8", SW_JS),
         "/api/push" => match web_push::public_key() {
             Ok(key) => Reply::json(&json!({ "key": key, "on": web_push::claim(arg("e"), from) })),
@@ -1019,6 +1020,34 @@ fn doc(project: &str, slug: &str, name: &str) -> Reply {
 /// `more`: its scrollback holds more than was sent. A Claude Code pane on
 /// the alternate screen keeps no scrollback: read deeper, it gives the
 /// end of its chat's transcript, then its screen.
+/// The slash commands the agent in one of a feature's panes takes, for the
+/// reply box's `/` menu: `[{name, about, hint}]`, none when herdr finds no
+/// agent there.
+fn commands(project: &str, slug: &str, pane: &str) -> Reply {
+    let (project, f) = match find(project, slug) {
+        Ok(found) => found,
+        Err(reply) => return reply,
+    };
+    if !agent_panes(&f).any(|(_, p, _)| p == pane) {
+        return Reply::error(404, "Not one of this feature's agents");
+    }
+    let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
+    let agents = match herdr.agent_list() {
+        Ok(agents) => agents,
+        Err(err) => return Reply::error(502, &format!("Couldn't ask herdr: {err}")),
+    };
+    let listed = (agents.iter().find(|a| a.pane_id == pane))
+        .and_then(|a| {
+            let kind = crate::chat::source::kind(a)?;
+            Some(crate::chat::commands::here(kind, a.cwd.as_deref()?))
+        })
+        .unwrap_or_default();
+    let listed: Vec<Value> = (listed.iter())
+        .map(|c| json!({ "name": c.name, "about": c.about, "hint": c.hint }))
+        .collect();
+    Reply::json(&Value::Array(listed))
+}
+
 fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     let (project, f) = match find(project, slug) {
         Ok(found) => found,
@@ -1161,6 +1190,7 @@ mod tests {
         assert!(!doc_name_ok(".hidden.md"));
         assert!(!doc_name_ok("feature.json"));
         assert_eq!(doc("p", "s", "../../x.md").status, 404);
+        assert_eq!(commands("no-such", "x", "p1").status, 404);
     }
 
     #[test]

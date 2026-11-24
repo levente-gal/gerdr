@@ -24,16 +24,17 @@ use super::glyphs::Face;
 use super::repos::{DIFF_BAR, DIFF_INSET, DIFF_TINT};
 use super::scrollback::{StyledRow, styled_row};
 use super::{
-    BUTTON_WIDTH, ButtonStyle, CHEVRON_WIDTH, Canvas, DOT_SLOT, Dot, FIELD_GAP, FieldSpot, ListBar,
+    BUTTON_RADIUS, BUTTON_WIDTH, ButtonStyle, CHEVRON_WIDTH, Canvas, DOT_SLOT, Dot, FIELD_GAP, FieldSpot, ListBar,
     Painter, Palette, ROW_INSET, ROW_RADIUS, Rect, Rgb, Thumb, band, button_width, centred_dot,
     check, chevron_down, chevron_side, field_text, font_size, gutter_track, hint_at, hint_spots,
     hints_height, icon_sdf, mix, pane_bar_height, phys, physical, quit_button, rect_px, row_button,
-    small_font_size, soft_rows, status_dot, wrap_field_height,
+    small_font_size, soft_rows, status_dot, suggestion_row, wrap_field_height,
 };
 use crate::{
     ChatRows,
     chat::{
         ChatFocus, DiffSide, Item, Reading, ToolOut,
+        commands::Slash,
         live::{AskReply, PendingAsk, Running},
         menu::{self, Menu},
         rows::{self, Row, Summary},
@@ -82,6 +83,39 @@ pub struct ChatView {
     /// When its agent's turn began (Unix ms), while it works: what the
     /// clocks of the head and the working row count from.
     pub since: Option<u64>,
+    /// The `/` menu over the reply box, while it shows.
+    pub slash: Option<SlashView>,
+}
+
+/// The `/` menu's rows in sight, as painted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlashView {
+    /// Each command's `/name` with what it takes, and what it does.
+    pub rows: Vec<(String, String)>,
+    /// Where the first row is among the commands matching.
+    pub first: usize,
+    /// The row picked, among `rows`.
+    pub picked: usize,
+}
+
+impl SlashView {
+    pub fn of(slash: &Slash) -> Self {
+        let (first, shown) = slash.in_sight();
+        let rows = (shown.iter().map(|i| &slash.all[*i]))
+            .map(|c| {
+                let name = match c.hint.is_empty() {
+                    true => format!("/{}", c.name),
+                    false => format!("/{} {}", c.name, c.hint),
+                };
+                (name, c.about.clone())
+            })
+            .collect();
+        Self {
+            rows,
+            first,
+            picked: slash.picked - first,
+        }
+    }
 }
 
 impl PartialEq for ChatView {
@@ -110,6 +144,7 @@ impl PartialEq for ChatView {
             && self.running == other.running
             && self.ask == other.ask
             && self.since == other.since
+            && self.slash == other.slash
     }
 }
 
@@ -154,6 +189,8 @@ pub enum ChatHit {
     AskFold,
     /// The list's scrollbar.
     Scrollbar,
+    /// A command of the `/` menu, by its place among those matching.
+    Command(usize),
 }
 
 /// Where a chat's parts go, in output coordinates.
@@ -172,13 +209,17 @@ impl ChatLayout {
     /// What is at `pos`, if anything.
     pub fn hit(&self, view: &ChatView, pos: Point<f64, Logical>) -> Option<ChatHit> {
         let on = |rect: Rect| rect.to_f64().contains(pos);
+        let parts = parts(view);
+        // The menu lies over the list and the waiting panel.
+        if let (Some(slash), Some(i)) = (&view.slash, parts.slash.iter().position(|r| on(*r))) {
+            return Some(ChatHit::Command(slash.first + i));
+        }
         if on(self.send) {
             return Some(ChatHit::Send);
         }
         if on(self.composer) {
             return Some(ChatHit::Composer);
         }
-        let parts = parts(view);
         if let Some((key, _)) = parts.keys.iter().find(|(_, rect)| on(*rect)) {
             return Some(ChatHit::Key(*key));
         }
@@ -406,6 +447,8 @@ fn head_clock(view: &ChatView, head: Rect) -> Option<Rect> {
 /// Room in from the chat's sides, and between its parts.
 const PAD: i32 = 12;
 const PART_GAP: i32 = 8;
+/// Between the `/` menu's edge and its rows.
+const SLASH_BORDER: i32 = 2;
 /// The head line.
 fn head_px() -> i32 {
     pane_bar_height()
@@ -513,6 +556,8 @@ struct Parts {
     composer: Rect,
     send: Rect,
     hints: Rect,
+    /// The `/` menu's rows, hanging over the reply box.
+    slash: Vec<Rect>,
 }
 
 /// How wide a key button labelled `label` is.
@@ -636,6 +681,15 @@ fn parts(view: &ChatView) -> Parts {
         (r.loc.x, list_top).into(),
         (r.size.w, (end - list_top).max(0)).into(),
     );
+    // As many rows as fit between the head and the reply box.
+    let n = view.slash.as_ref().map_or(0, |s| s.rows.len()) as i32;
+    let n = n.min((composer.loc.y - PART_GAP / 2 - list_top - 2 * SLASH_BORDER) / suggestion_row());
+    let slash = (0..n.max(0))
+        .map(|i| {
+            let y = composer.loc.y - PART_GAP / 2 - SLASH_BORDER - (n - i) * suggestion_row();
+            rect(x, y, w, suggestion_row())
+        })
+        .collect();
     Parts {
         head,
         list,
@@ -650,6 +704,7 @@ fn parts(view: &ChatView) -> Parts {
         composer,
         send,
         hints,
+        slash,
     }
 }
 
@@ -1870,10 +1925,63 @@ impl Painter {
             p,
         );
 
+        if let Some(slash) = &view.slash {
+            self.chat_slash(&mut c, view, slash, &parts.slash, &here, scale, p);
+        }
+
         let hints = chat_hints(view);
         let spots = hint_spots(&hints, here(parts.hints));
         self.hints(&mut c, &hints, &spots, None, scale, p);
         c.into_buffer(true)
+    }
+
+    /// The `/` menu in a box over the reply box, as the folder suggestions
+    /// of the new project form: the picked row on the selected ground, the
+    /// hovered one half way to it.
+    #[allow(clippy::too_many_arguments)]
+    fn chat_slash(
+        &self,
+        c: &mut Canvas,
+        view: &ChatView,
+        slash: &SlashView,
+        rows: &[Rect],
+        here: &dyn Fn(Rect) -> Rect,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+            return;
+        };
+        let s = scale as f32;
+        let edge = SLASH_BORDER;
+        let frame = here(rect(
+            first.loc.x - edge,
+            first.loc.y - edge,
+            first.size.w + 2 * edge,
+            last.loc.y + last.size.h - first.loc.y + 2 * edge,
+        ));
+        let (x, y, w, h) = rect_px(frame, scale);
+        let (b, r) = ((scale.round() as f32).max(1.0), BUTTON_RADIUS * s);
+        c.rounded(x, y, w, h, r, p.border);
+        c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, r - b, p.element);
+        for (i, (row, (name, about))) in rows.iter().zip(&slash.rows).enumerate() {
+            let row = here(*row);
+            let (x, y, w, h) = rect_px(row, scale);
+            if i == slash.picked {
+                c.rounded(x, y, w, h, r - b, p.selected);
+            } else if view.hover == Some(ChatHit::Command(slash.first + i)) {
+                c.rounded(x, y, w, h, r - b, mix(p.element, p.selected, 0.5));
+            }
+            let (start, end) = phys(row, scale);
+            let pad = (f64::from(PART_GAP) * scale) as f32;
+            let band = band(row, scale);
+            let size = small_font_size();
+            let after = self.text(c, name, size, start + pad, end - pad, band, scale, p.text);
+            if !about.is_empty() {
+                let x = after + 2.0 * pad;
+                self.text(c, about, size, x, end - pad, band, scale, p.placeholder);
+            }
+        }
     }
 
     /// Row `i`, laid out as `laid`, with its `(0, 0)` at `at`: on the
@@ -2080,6 +2188,7 @@ pub(super) mod tests {
             running: Vec::new(),
             ask: None,
             since: Some(1_000),
+            slash: None,
         }
     }
 
@@ -2264,6 +2373,36 @@ pub(super) mod tests {
                 "Type something."
             ]
         );
+    }
+
+    #[test]
+    fn the_slash_menu_hangs_over_the_reply_box_and_its_rows_take_presses() {
+        let rows = (0..3).map(|i| (format!("/c{i}"), String::new())).collect();
+        let v = ChatView {
+            focus: ChatFocus::Composer,
+            slash: Some(SlashView {
+                rows,
+                first: 5,
+                picked: 0,
+            }),
+            ..view()
+        };
+        let p = parts(&v);
+        assert_eq!(p.slash.len(), 3);
+        let last = p.slash[2];
+        assert!(last.loc.y + last.size.h <= p.composer.loc.y);
+        let layout = chat_layout(&v);
+        assert_eq!(layout.hit(&v, middle(p.slash[0])), Some(ChatHit::Command(5)));
+        assert_eq!(layout.hit(&v, middle(last)), Some(ChatHit::Command(7)));
+        assert_eq!(layout.hit(&v, middle(p.composer)), Some(ChatHit::Composer));
+        // A pane too short for its rows shows those that fit.
+        let short = ChatView {
+            rect: Rect::new(v.rect.loc, (v.rect.size.w, 150).into()),
+            ..v
+        };
+        let p = parts(&short);
+        assert!(p.slash.len() < 3);
+        assert!(p.slash.iter().all(|r| r.loc.y >= p.head.loc.y + p.head.size.h));
     }
 
     #[test]

@@ -636,7 +636,7 @@ async function pane(p, s, id) {
   const working = since === null ? "" : `<div class="work-row small"><span class="sdot blink"></span>working
     <span class="clock" data-since="${since}"></span></div>`;
   return { title: d.label, back: href("f", p, s), html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
-    bar: `${ask}<form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
+    bar: `${ask}<ul id="slash" hidden></ul><form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
         <button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button></div>` };
@@ -892,6 +892,7 @@ document.addEventListener("submit", async (e) => {
   const line = document.getElementById("line");
   if (!line.value.trim()) return;
   const [, p, s, pane] = here();
+  document.getElementById("slash").hidden = true;
   const a = await post("/api/agent", { p, s, pane, text: line.value });
   if (a.error) say([{ text: a.error }], true);
   else { line.value = ""; fit(line); }
@@ -920,6 +921,45 @@ function shade(box) {
   box.classList.toggle("more-below", box.scrollTop + box.clientHeight < box.scrollHeight - bottom - 1);
 }
 document.addEventListener("input", (e) => { if (e.target.matches("textarea")) fit(e.target); });
+
+// The `/` menu over the reply box, as on gerdr's chat: the agent's
+// commands, read once per pane, those that start with what follows the `/`
+// first, then those that hold it. A tap fills one in, to send or add to.
+const commandsOf = new Map();
+async function slashMenu(box) {
+  const menu = document.getElementById("slash");
+  const typed = /^\/(\S*)$/.exec(box.value);
+  if (!menu) return;
+  if (!typed) { menu.hidden = true; return; }
+  const [, p, s, pane] = here();
+  if (!commandsOf.has(pane)) {
+    commandsOf.set(pane, get(`/api/commands?${q({ p, s, pane })}`)
+      .catch(() => { commandsOf.delete(pane); return []; }));
+  }
+  const all = await commandsOf.get(pane);
+  // Typed on meanwhile: that key's own read shows the menu.
+  if (box.value !== typed[0]) return;
+  const t = typed[1].toLowerCase();
+  const starts = all.filter((c) => c.name.toLowerCase().startsWith(t));
+  const holds = all.filter((c) => !starts.includes(c) && c.name.toLowerCase().includes(t));
+  const shown = [...starts, ...holds].slice(0, 8);
+  menu.innerHTML = shown.map((c) => `<li><button type="button" data-command="${esc(c.name)}">
+    <b>/${esc(c.name)}</b>${c.hint ? ` <span class="quiet">${esc(c.hint)}</span>` : ""}
+    ${c.about ? `<span class="about small quiet">${esc(c.about)}</span>` : ""}</button></li>`).join("");
+  menu.hidden = !shown.length;
+}
+document.addEventListener("input", (e) => { if (e.target.id === "line") slashMenu(e.target); });
+// A tap on a command keeps the keyboard up.
+document.addEventListener("pointerdown", (e) => { if (e.target.closest?.("[data-command]")) e.preventDefault(); });
+document.addEventListener("click", (e) => {
+  const b = e.target.closest?.("[data-command]");
+  if (!b) return;
+  const line = document.getElementById("line");
+  line.value = `/${b.dataset.command} `;
+  fit(line);
+  line.focus();
+  document.getElementById("slash").hidden = true;
+});
 document.addEventListener("scroll", (e) => { if (e.target.matches?.("textarea")) shade(e.target); }, true);
 // The page's end stays clear of the bar as its box grows.
 new ResizeObserver(() => document.body.style.setProperty("--bar-h", `${bar.offsetHeight}px`)).observe(bar);

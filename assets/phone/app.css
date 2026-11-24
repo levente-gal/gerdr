@@ -307,6 +307,15 @@ body.with-bar #note { bottom: calc(var(--bar-h, calc(104px + env(safe-area-inset
 #bar .ask .buttons { display: flex; gap: 8px; margin-top: 8px; }
 #bar .ask .buttons button { flex: 1; min-height: 44px; }
 #bar .keys button { flex: 1; min-width: 0; padding: 6px 0; min-height: 44px; }
+#bar #slash {
+  list-style: none; margin: 0 0 8px; padding: 4px; max-height: 40vh; overflow: auto;
+  border: 1px solid var(--line-soft); border-radius: 10px;
+}
+#bar #slash button {
+  display: block; width: 100%; min-height: 44px; padding: 6px 10px; text-align: left;
+  background: transparent; border: 0; border-radius: 8px; overflow-wrap: anywhere;
+}
+#bar #slash .about { display: block; }
 body.with-bar main { padding-bottom: calc(var(--bar-h, 110px) + 20px); }
 
 /* A stage's page, as the desktop has it, in words. */
