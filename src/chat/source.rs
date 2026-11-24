@@ -354,6 +354,33 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn pi_and_antigravity_chats_named_by_path_are_read_there() {
+        let dir = std::env::temp_dir().join(format!("gerdr-piagy-{}", std::process::id()));
+        let homes = Homes::under(&dir);
+        let put = |path: &Path| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "{}\n").unwrap();
+        };
+        let session = homes.pi.join("--w--/2026-01-02T03-04-05-000Z_p-1.jsonl");
+        put(&session);
+        let found = find(&agent("pi", "path", session.to_str().unwrap()), &homes).unwrap();
+        assert_eq!((found.id.as_str(), found.guessed), ("p-1", false));
+        // herdr's hook names the cut transcript: the whole one is read.
+        let logs = homes.antigravity.join("brain/a-1/.system_generated/logs");
+        put(&logs.join("transcript.jsonl"));
+        put(&logs.join("transcript_full.jsonl"));
+        let cut = logs.join("transcript.jsonl");
+        let found = find(&agent("agy", "path", cut.to_str().unwrap()), &homes).unwrap();
+        assert_eq!(found.id, "a-1");
+        assert!(found.path.ends_with("logs/transcript_full.jsonl"));
+        // Out of their folders: not theirs.
+        let out = dir.join("x.jsonl");
+        put(&out);
+        assert!(find(&agent("pi", "path", out.to_str().unwrap()), &homes).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     pub(crate) fn agent(name: &str, kind: &str, value: &str) -> AgentInfo {
         let info = serde_json::json!({
             "pane_id": "p1", "terminal_id": "t1", "workspace_id": "w1", "tab_id": "tab1",
