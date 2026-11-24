@@ -49,7 +49,11 @@ pub fn named(agent: &AgentInfo) -> bool {
 pub fn guessable(kind: AgentKind) -> bool {
     matches!(
         kind,
-        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Cursor
+        AgentKind::Codex
+            | AgentKind::OpenCode
+            | AgentKind::Cursor
+            | AgentKind::Pi
+            | AgentKind::Antigravity
     )
 }
 
@@ -77,6 +81,10 @@ pub fn find(agent: &AgentInfo, homes: &Homes) -> Result<Source, String> {
             let path = match kind {
                 AgentKind::Claude => claude_transcript(&session.value, &homes.claude),
                 AgentKind::Codex => codex_rollout(&session.value, &homes.codex),
+                AgentKind::Pi => {
+                    transcript(&session.value, std::slice::from_ref(&homes.pi), |_| true)
+                }
+                AgentKind::Antigravity => antigravity_transcript(&session.value, homes),
                 _ => None,
             };
             let unwritten = |under: &[PathBuf]| not_written(&session.value, under);
@@ -89,12 +97,24 @@ pub fn find(agent: &AgentInfo, homes: &Homes) -> Result<Source, String> {
                 (None, AgentKind::Codex) if unwritten(&[homes.codex.join("sessions")]) => {
                     return Err(NOT_YET.into());
                 }
+                (None, AgentKind::Pi) if unwritten(std::slice::from_ref(&homes.pi)) => {
+                    return Err(NOT_YET.into());
+                }
+                (None, AgentKind::Antigravity) if unwritten(&[homes.antigravity.join("brain")]) => {
+                    return Err(NOT_YET.into());
+                }
                 (None, _) => return Err(NOT_FOUND.into()),
             };
             let stem = (path.file_stem().and_then(|s| s.to_str())).ok_or(NOT_FOUND)?;
-            // A rollout is `rollout-<yyyy-mm-ddThh-mm-ss>-<id>`.
+            // A rollout is `rollout-<yyyy-mm-ddThh-mm-ss>-<id>`, a pi session
+            // `<time>_<id>`, an Antigravity transcript in
+            // `brain/<id>/.system_generated/logs/`.
             let id = match kind {
                 AgentKind::Codex => stem.get("rollout-".len() + 20..).unwrap_or(stem),
+                AgentKind::Pi => stem.split_once('_').map_or(stem, |(_, id)| id),
+                AgentKind::Antigravity => (path.ancestors().nth(3))
+                    .and_then(|dir| dir.file_name()?.to_str())
+                    .unwrap_or(stem),
                 _ => stem,
             };
             Ok(Source {
@@ -225,6 +245,16 @@ fn locate(
     }))
 }
 
+/// The whole transcript of the Antigravity CLI conversation whose
+/// transcript is at `path` (herdr's hook names the cut one), if it is one
+/// under its home's `brain/`.
+fn antigravity_transcript(path: &str, homes: &Homes) -> Option<PathBuf> {
+    let brain = homes.antigravity.join("brain");
+    let real = transcript(path, std::slice::from_ref(&brain), |_| true)?;
+    let full = real.with_file_name("transcript_full.jsonl");
+    Some(if full.is_file() { full } else { real })
+}
+
 /// `path` as it really is, if it is a Claude transcript: a regular
 /// `.jsonl` file under `projects/` of one of the config folders `homes`.
 fn claude_transcript(path: &str, homes: &[PathBuf]) -> Option<PathBuf> {
@@ -321,6 +351,33 @@ pub(crate) mod tests {
             find(&agent("claude", "path", sneaky.to_str().unwrap()), &homes),
             Err(NOT_FOUND.into())
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn pi_and_antigravity_chats_named_by_path_are_read_there() {
+        let dir = std::env::temp_dir().join(format!("gerdr-piagy-{}", std::process::id()));
+        let homes = Homes::under(&dir);
+        let put = |path: &Path| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "{}\n").unwrap();
+        };
+        let session = homes.pi.join("--w--/2026-01-02T03-04-05-000Z_p-1.jsonl");
+        put(&session);
+        let found = find(&agent("pi", "path", session.to_str().unwrap()), &homes).unwrap();
+        assert_eq!((found.id.as_str(), found.guessed), ("p-1", false));
+        // herdr's hook names the cut transcript: the whole one is read.
+        let logs = homes.antigravity.join("brain/a-1/.system_generated/logs");
+        put(&logs.join("transcript.jsonl"));
+        put(&logs.join("transcript_full.jsonl"));
+        let cut = logs.join("transcript.jsonl");
+        let found = find(&agent("agy", "path", cut.to_str().unwrap()), &homes).unwrap();
+        assert_eq!(found.id, "a-1");
+        assert!(found.path.ends_with("logs/transcript_full.jsonl"));
+        // Out of their folders: not theirs.
+        let out = dir.join("x.jsonl");
+        put(&out);
+        assert!(find(&agent("pi", "path", out.to_str().unwrap()), &homes).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

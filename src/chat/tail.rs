@@ -271,7 +271,11 @@ impl Chats {
         let Some(kind) = source::kind(agent).filter(|kind| *kind != AgentKind::Unknown) else {
             return found;
         };
-        let target = kind.name();
+        // herdr's name for the integration: the agent's, but Antigravity's.
+        let target = match kind {
+            AgentKind::Antigravity => "antigravity-cli",
+            _ => kind.name(),
+        };
         if source::named(agent) {
             crate::problems::clear_at(PROBLEMS, target);
             return found;

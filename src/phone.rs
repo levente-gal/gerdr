@@ -23,14 +23,12 @@ use resvg::{tiny_skia, usvg};
 use serde_json::{Value, json};
 
 use crate::{
-    feature::{
-        Feature, Stage, Status, layout, setup,
-        store,
-    },
+    feature::{Feature, Stage, Status, layout, setup, store},
     feature_agents::{self, Gate},
-    herdr::{self, AgentStatus, Herdr},
+    feature_workspace::feature_on,
+    herdr::{self, AgentInfo, AgentStatus, Herdr, WorkspaceInfo},
     inbox_sources, md_preview, phone_control, phone_devices,
-    projects::{self, Project},
+    projects::{self, Project, WorkspaceRecord},
     stats_panel::{chat_and_screen, claude_chat},
     web_push,
 };
@@ -553,23 +551,21 @@ fn socket_holds(socket: &Path, lock: &Path) -> bool {
 /// The keys the phone may press in an agent's pane: herdr's names.
 const AGENT_KEYS: [&str; 4] = ["Enter", "esc", "Up", "Down"];
 
-/// Type `line` to an agent of feature `slug` (Enter after it), or press
-/// `key`, or type a menu's number; `close` closes its pane, as closing its
+/// Type `line` to an agent of feature `slug` (with no `slug`, of a
+/// workspace: see `agent_of`), Enter after it, or press `key`, or type a
+/// menu's number; `close` closes a feature agent's pane, as closing its
 /// tab on the desktop does: a research agent that answered nothing.
 fn agent_input(project: &str, slug: &str, pane: &str, line: &str, key: &str) -> Reply {
-    let (project, f) = match find(project, slug) {
-        Ok(found) => found,
+    let project = match agent_of(project, slug, pane) {
+        Ok((project, _)) => project,
         Err(reply) => return reply,
     };
-    if !agent_panes(&f).any(|(_, p, _)| p == pane) {
-        return Reply::error(404, "Not one of this feature's agents");
-    }
     let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
     let sent = if !line.trim().is_empty() {
         // A line break would go as Enter: one line it is.
         let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
         herdr.send_agent_line(pane, &line)
-    } else if key == "close" {
+    } else if key == "close" && !slug.is_empty() {
         herdr.pane_close(pane)
     } else if AGENT_KEYS.contains(&key) {
         herdr.send_keys(pane, &[key])
@@ -631,39 +627,128 @@ fn projects() -> Vec<Project> {
 /// error when its session can't be asked (gerdr's not running it, say).
 fn agent_states(session: &str) -> Result<HashMap<String, AgentStatus>, String> {
     let mut herdr = Herdr::on_socket(herdr::socket_path(session));
-    let agents = herdr.agent_list()?;
-    Ok(agents
-        .into_iter()
-        .map(|a| (a.pane_id, a.agent_status))
-        .collect())
+    Ok(states_of(&herdr.agent_list()?))
+}
+
+fn states_of(agents: &[AgentInfo]) -> HashMap<String, AgentStatus> {
+    (agents.iter())
+        .map(|a| (a.pane_id.clone(), a.agent_status))
+        .collect()
+}
+
+/// Every agent of a project's session, and its workspaces; an error when
+/// its session can't be asked.
+fn session_agents(session: &str) -> Result<(Vec<AgentInfo>, Vec<WorkspaceInfo>), String> {
+    let mut herdr = Herdr::on_socket(herdr::socket_path(session));
+    Ok((herdr.agent_list()?, herdr.workspace_list()?))
+}
+
+/// The agents of `agents` that aren't `features`' (a project's): in no
+/// feature's workspace, nor one of a feature's own panes. Each with the
+/// name of its workspace, if herdr has it. A workspace's folder is the
+/// project's record of it (`records`), else the one gerdr gave herdr: a
+/// restored herdr server keeps no metadata.
+fn workspace_agents<'a>(
+    agents: &'a [AgentInfo],
+    workspaces: &'a [WorkspaceInfo],
+    records: &[WorkspaceRecord],
+    features: &[Feature],
+) -> Vec<(&'a AgentInfo, Option<&'a str>)> {
+    let feature_pane =
+        |pane: &str| (features.iter()).any(|f| agent_panes(f).any(|(_, p, _)| p == pane));
+    (agents.iter())
+        .filter(|a| !feature_pane(&a.pane_id))
+        .filter_map(|a| {
+            let ws = workspaces.iter().find(|w| w.workspace_id == a.workspace_id);
+            let record = |w: &WorkspaceInfo| {
+                let r = records.iter().find(|r| r.mirrors(&w.workspace_id));
+                r.map(|r| r.dir.clone())
+            };
+            let dir = ws.and_then(|w| record(w).or_else(|| w.dir()));
+            match dir.is_some_and(|d| feature_on(features, &d).is_some()) {
+                true => None,
+                false => Some((a, ws.map(|w| w.label.as_str()))),
+            }
+        })
+        .collect()
+}
+
+/// What the phone calls a workspace's agent: its workspace, then its name.
+fn workspace_agent_label(agent: &AgentInfo, workspace: Option<&str>) -> String {
+    match workspace {
+        Some(w) => format!("{w} · {}", agent.label()),
+        None => agent.label().to_owned(),
+    }
+}
+
+/// The agent in `pane` of `project` the phone may read and type to, and
+/// what to call it: one of feature `slug`'s agents; with no `slug`, any
+/// agent herdr runs in the project's session. Never a plain shell.
+fn agent_of(project: &str, slug: &str, pane: &str) -> Result<(Project, String), Reply> {
+    if !slug.is_empty() {
+        let (project, f) = find(project, slug)?;
+        let found = agent_panes(&f).find(|(_, p, _)| *p == pane);
+        let (label, _, _) =
+            found.ok_or_else(|| Reply::error(404, "Not one of this feature's agents"))?;
+        return Ok((project, label));
+    }
+    let project = project_of(project)?;
+    let (agents, workspaces) = session_agents(&project.session)
+        .map_err(|err| Reply::error(502, &format!("Couldn't ask herdr: {err}")))?;
+    let agent = (agents.iter().find(|a| a.pane_id == pane))
+        .ok_or_else(|| Reply::error(404, "No such agent"))?;
+    let ws = workspaces
+        .iter()
+        .find(|w| w.workspace_id == agent.workspace_id);
+    let label = workspace_agent_label(agent, ws.map(|w| w.label.as_str()));
+    Ok((project, label))
 }
 
 /// Every open feature of every project, the ones waiting for the user
-/// first.
+/// first; and each project's agents in workspaces of no feature.
 fn all_features() -> Value {
     let mut features = Vec::new();
+    let mut others = Vec::new();
     let mut problems = Vec::new();
     for project in projects() {
-        let open: Vec<Feature> = match store::load_all(None, &project.id) {
-            Ok(all) => all
-                .into_iter()
-                .filter(|f| f.status == Status::Open)
-                .collect(),
+        let all = match store::load_all(None, &project.id) {
+            Ok(all) => all,
             Err(err) => {
                 tracing::warn!("Couldn't read {}'s features: {err}", project.name);
                 problems.push(format!("Couldn't read {}'s features: {err}", project.name));
                 continue;
             }
         };
-        if open.is_empty() {
-            continue;
-        }
-        let states = agent_states(&project.session);
-        if let Err(err) = &states {
+        let session = session_agents(&project.session);
+        if let Err(err) = &session {
             // Normal for a project gerdr isn't running: said on its cards.
-            tracing::debug!("No agent states for {}: {err}", project.name);
+            tracing::debug!("No agents of {}: {err}", project.name);
         }
-        features.extend(open.iter().map(|f| summary(&project, f, &states)));
+        let states = session
+            .as_ref()
+            .map(|(a, _)| states_of(a))
+            .map_err(Clone::clone);
+        let open = all.iter().filter(|f| f.status == Status::Open);
+        features.extend(open.map(|f| summary(&project, f, &states)));
+        let Ok((agents, workspaces)) = &session else {
+            continue;
+        };
+        let found = workspace_agents(agents, workspaces, &project.workspaces, &all);
+        let theirs: Vec<Value> = (found.into_iter())
+            .map(|(a, ws)| {
+                json!({
+                    "pane": a.pane_id,
+                    "label": workspace_agent_label(a, ws),
+                    "title": a.title,
+                    "status": status_word(a.agent_status),
+                })
+            })
+            .collect();
+        if !theirs.is_empty() {
+            let entry =
+                json!({ "project": project.id, "projectName": project.name, "agents": theirs });
+            others.push(entry);
+        }
     }
     features.sort_by_key(|f| {
         let waits = f["waits"]["since"].as_u64();
@@ -671,7 +756,12 @@ fn all_features() -> Value {
         (waits.is_none(), waits.unwrap_or(0), u64::MAX - updated)
     });
     add_cards(&mut features);
-    json!({ "features": features, "problems": problems, "now": crate::clock::now_secs() })
+    json!({
+        "features": features,
+        "agents": others,
+        "problems": problems,
+        "now": crate::clock::now_secs(),
+    })
 }
 
 /// Put on each of `features` its sidebar card as gerdr draws it (marks,
@@ -798,11 +888,13 @@ fn status_word(status: AgentStatus) -> &'static str {
     }
 }
 
+fn project_of(id: &str) -> Result<Project, Reply> {
+    (projects().into_iter().find(|p| p.id == id))
+        .ok_or_else(|| Reply::error(404, "No such project"))
+}
+
 fn find(project: &str, slug: &str) -> Result<(Project, Feature), Reply> {
-    let project = projects()
-        .into_iter()
-        .find(|p| p.id == project)
-        .ok_or_else(|| Reply::error(404, "No such project"))?;
+    let project = project_of(project)?;
     let feature = store::read_at(&store::dir(None, &project.id, slug))
         .map_err(|err| Reply::error(404, &format!("Couldn't read the feature: {err}")))?;
     Ok((project, feature))
@@ -842,7 +934,11 @@ fn feature_page(project: &str, slug: &str, stage: Option<usize>) -> Reply {
             "sections": [],
         });
     }
-    add_files(&mut shown, &store::dir(None, &project.id, slug), fix_plan_waits(&f));
+    add_files(
+        &mut shown,
+        &store::dir(None, &project.id, slug),
+        fix_plan_waits(&f),
+    );
     page["page"] = shown;
     page["offer"] = offer;
     page["now"] = crate::clock::now_secs().into();
@@ -904,7 +1000,9 @@ fn add_files(page: &mut Value, dir: &Path, waits: bool) {
     let mut mine: Vec<&String> = names
         .iter()
         .filter(|n| {
-            stage.is_some_and(|s| file_stage(n) == Some(s)) || file_stage(n).is_none() || mine_too(n)
+            stage.is_some_and(|s| file_stage(n) == Some(s))
+                || file_stage(n).is_none()
+                || mine_too(n)
         })
         .collect();
     let order = |n: &str| (stage.map(stage_files).unwrap_or_default().iter()).position(|x| *x == n);
@@ -1016,21 +1114,18 @@ fn doc(project: &str, slug: &str, name: &str) -> Reply {
 
 /// The last lines of an agent's pane, with their colours: `lines` of them
 /// (`PANE_LINES` when not a number), or `all` its scrollback, plain. Only
-/// a pane one of the feature's agents runs in: not the user's own shells.
+/// a pane an agent runs in (see `agent_of`): not the user's own shells.
 /// `more`: its scrollback holds more than was sent. A Claude Code pane on
 /// the alternate screen keeps no scrollback: read deeper, it gives the
 /// end of its chat's transcript, then its screen.
-/// The slash commands the agent in one of a feature's panes takes, for the
+/// The slash commands the agent in `pane` takes (as `agent_of` finds it), for the
 /// reply box's `/` menu: `[{name, about, hint}]`, none when herdr finds no
 /// agent there.
 fn commands(project: &str, slug: &str, pane: &str) -> Reply {
-    let (project, f) = match find(project, slug) {
+    let (project, _) = match agent_of(project, slug, pane) {
         Ok(found) => found,
         Err(reply) => return reply,
     };
-    if !agent_panes(&f).any(|(_, p, _)| p == pane) {
-        return Reply::error(404, "Not one of this feature's agents");
-    }
     let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
     let agents = match herdr.agent_list() {
         Ok(agents) => agents,
@@ -1049,18 +1144,20 @@ fn commands(project: &str, slug: &str, pane: &str) -> Reply {
 }
 
 fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
-    let (project, f) = match find(project, slug) {
+    let (project, label) = match agent_of(project, slug, pane) {
         Ok(found) => found,
         Err(reply) => return reply,
     };
-    let Some((label, _, _)) = agent_panes(&f).find(|(_, p, _)| *p == pane) else {
-        return Reply::error(404, "Not one of this feature's agents");
-    };
     let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
     let all = lines == "all";
-    let want = lines.parse().unwrap_or(PANE_LINES).clamp(1, PANE_STYLED_MAX);
+    let want = lines
+        .parse()
+        .unwrap_or(PANE_LINES)
+        .clamp(1, PANE_STYLED_MAX);
     let rows = herdr.pane_scrollback_rows(pane).ok();
-    let chat = (rows == Some(0)).then(|| claude_chat(&mut herdr, pane)).flatten();
+    let chat = (rows == Some(0))
+        .then(|| claude_chat(&mut herdr, pane))
+        .flatten();
     if let Some(path) = &chat
         && (all || want > PANE_LINES)
     {
@@ -1170,6 +1267,58 @@ mod tests {
             act("/api/agent", br#"{"p":"no-such","s":"x"}"#, "localhost", "").status,
             404
         );
+        // A workspace's agent: no feature named.
+        assert_eq!(
+            act("/api/agent", br#"{"p":"no-such","s":""}"#, "localhost", "").status,
+            404
+        );
+    }
+
+    #[test]
+    fn workspace_agents_are_those_of_no_feature() {
+        let agent = |pane: &str, ws: &str| -> AgentInfo {
+            serde_json::from_value(json!({
+                "pane_id": pane, "terminal_id": "t", "workspace_id": ws, "tab_id": "x",
+                "agent": "claude", "agent_status": "working",
+            }))
+            .expect("agent")
+        };
+        let workspace = |id: &str, label: &str, dir: &str| -> WorkspaceInfo {
+            serde_json::from_value(json!({
+                "workspace_id": id, "label": label, "tokens": { "gerdr_kind": "terminal", "gerdr_dir_0": dir },
+            }))
+            .expect("workspace")
+        };
+        let mut f = crate::feature::tests::feature("f", 1);
+        f.dir = "/work/.features/f".into();
+        let run = crate::feature::agents::StageRun {
+            pane: Some("w3:p1".into()),
+            ..Default::default()
+        };
+        f.runs.insert(Stage::Build, run);
+        let workspaces = [
+            workspace("w1", "f", "/work/.features/f"),
+            workspace("w2", "api", "/work/api"),
+            // Restored: no metadata, only the project's record.
+            serde_json::from_value(json!({ "workspace_id": "w5", "label": "f" })).expect("ws"),
+        ];
+        let records: Vec<WorkspaceRecord> = serde_json::from_value(json!([
+            { "herdr_id": "w5", "label": "f", "kind": "terminal", "dir": "/work/.features/f" },
+        ]))
+        .expect("records");
+        // Its feature's workspaces, its own agent elsewhere, and the user's.
+        let agents = [
+            agent("w1:p1", "w1"),
+            agent("w5:p1", "w5"),
+            agent("w3:p1", "w3"),
+            agent("w2:p1", "w2"),
+            agent("w4:p1", "w4"),
+        ];
+        let kept: Vec<String> = workspace_agents(&agents, &workspaces, &records, &[f])
+            .into_iter()
+            .map(|(a, ws)| format!("{} {}", a.pane_id, workspace_agent_label(a, ws)))
+            .collect();
+        assert_eq!(kept, ["w2:p1 api · claude", "w4:p1 claude"]);
     }
 
     #[test]
@@ -1232,7 +1381,10 @@ mod tests {
         let files = page["files"].as_array().expect("files");
         let names: Vec<&str> = files.iter().filter_map(|f| f["name"].as_str()).collect();
         assert_eq!(names[..2], ["fix-plan.md", "evidence.md"]);
-        assert_eq!((files[0]["open"].clone(), files[1]["open"].clone()), (json!(true), json!(false)));
+        assert_eq!(
+            (files[0]["open"].clone(), files[1]["open"].clone()),
+            (json!(true), json!(false))
+        );
         assert!(files[1]["html"].as_str().is_some_and(|h| h.contains("Ev")));
         // Code review's fix plan leaves the page for the files, folded once made.
         let doc = json!({ "kind": "doc", "name": "fix-plan.md" });

@@ -207,7 +207,11 @@ pub fn list(kind: AgentKind, cwd: &Path, homes: &Homes, config: &Path) -> Vec<Co
             }
             CODEX
         }
-        AgentKind::T3 | AgentKind::Unknown => return Vec::new(),
+        // shortcut: no list for Pi and Antigravity yet; add theirs when
+        // someone uses them here.
+        AgentKind::Pi | AgentKind::Antigravity | AgentKind::T3 | AgentKind::Unknown => {
+            return Vec::new();
+        }
     };
     found.extend(builtin.iter().map(|(name, about)| Command {
         name: (*name).to_owned(),
