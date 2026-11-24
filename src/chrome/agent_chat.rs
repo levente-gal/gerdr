@@ -79,6 +79,9 @@ pub struct ChatView {
     /// What its agent asks to run, waiting on the chat's answer: a card in
     /// the waiting panel's place.
     pub ask: Option<PendingAsk>,
+    /// When its agent's turn began (Unix ms), while it works: what the
+    /// clocks of the head and the working row count from.
+    pub since: Option<u64>,
 }
 
 impl PartialEq for ChatView {
@@ -106,6 +109,7 @@ impl PartialEq for ChatView {
             && self.hover == other.hover
             && self.running == other.running
             && self.ask == other.ask
+            && self.since == other.since
     }
 }
 
@@ -215,9 +219,9 @@ impl ChatLayout {
             return (0..parts.column.1).contains(&x).then_some(ChatHit::Earlier);
         }
         let i = items.partition_point(|(t, laid)| t + laid.h <= y);
-        // The running rows at the end aren't the transcript's: nothing to
-        // pick or fold there.
-        if i >= items.len() - view.running.len() {
+        // The running rows and the working row at the end aren't the
+        // transcript's: nothing to pick or fold there.
+        if i >= items.len() - view.running.len() - usize::from(works(view)) {
             return None;
         }
         let (t, laid) = items.get(i).filter(|(t, _)| *t <= y)?;
@@ -292,28 +296,111 @@ pub fn chat_hint_at(view: &ChatView, pos: Point<f64, Logical>) -> Option<usize> 
 /// Where the dots of what works in `view` blink (output coordinates): its
 /// head's while its agent works, and its running tools' in view.
 pub fn chat_blinkers(view: &ChatView) -> Vec<Rect> {
-    let (dot, _) = standing(view);
-    if !dot.blinks() {
+    if !works(view) {
         return Vec::new();
     }
     let parts = parts(view);
-    let mut dots = vec![centred_dot(head_slot(parts.head))];
+    let running = in_sight(view, &parts, &Bit::Running)
+        .into_iter()
+        .map(centred_dot);
+    std::iter::once(centred_dot(head_slot(parts.head)))
+        .chain(running.filter(|dot| parts.list.contains_rect(*dot)))
+        .collect()
+}
+
+/// Where the spinner of the working row turns (output coordinates), while
+/// its agent works and the row is in view.
+pub fn chat_spinners(view: &ChatView) -> Vec<Rect> {
+    if !works(view) {
+        return Vec::new();
+    }
+    let parts = parts(view);
+    let side = super::features::RUN_SPIN;
+    (in_sight(view, &parts, &Bit::Spinner).into_iter())
+        .map(|slot| {
+            let at = slot.loc + Point::from(((slot.size.w - side) / 2, (slot.size.h - side) / 2));
+            Rectangle::new(at, (side, side).into())
+        })
+        .filter(|spin| parts.list.contains_rect(*spin))
+        .collect()
+}
+
+/// The clocks telling how long its agent has worked this turn at `now`
+/// (Unix ms), with where they go (output coordinates) and their font size:
+/// the head's, and the working row's while it is in view.
+pub fn chat_clocks(view: &ChatView, now: u64) -> Vec<(String, Rect, f32)> {
+    let Some(since) = view.since.filter(|_| works(view)) else {
+        return Vec::new();
+    };
+    let text = crate::clock::took(std::time::Duration::from_millis(now.saturating_sub(since)));
+    let parts = parts(view);
+    let fit = |slot: Rect, size: f32| {
+        let w = (width_in(&text, Face::Ui, size).ceil() as i32).min(slot.size.w);
+        (
+            text.clone(),
+            Rectangle::new(slot.loc, (w, slot.size.h).into()),
+            size,
+        )
+    };
+    let head = head_clock(view, parts.head).map(|slot| fit(slot, small_font_size()));
+    let rows = (in_sight(view, &parts, &Bit::Clock).into_iter())
+        .filter(|slot| parts.list.contains_rect(*slot))
+        .map(|slot| fit(slot, font_size()));
+    head.into_iter().chain(rows).collect()
+}
+
+/// Where the line sweeping under the head goes while its agent works
+/// (output coordinates): along the head's bottom edge.
+pub fn chat_sweep(view: &ChatView) -> Option<Rect> {
+    let head = parts(view).head;
+    let h = super::features::SWEEP_H;
+    works(view).then(|| rect(head.loc.x, head.loc.y + head.size.h - h, head.size.w, h))
+}
+
+/// Where the rows in sight of `view`'s list hold `bit` (output
+/// coordinates); none while the list shows a message instead.
+fn in_sight(view: &ChatView, parts: &Parts, bit: &Bit) -> Vec<Rect> {
     if message(view).is_some() {
-        return dots;
+        return Vec::new();
     }
     let list = parts.list;
     let (items, content) = stacked(view, parts.column.1);
     let top = top_of(view, content, list.size.h);
+    let mut found = Vec::new();
     for (y, laid) in &items[in_view(&items, top, list.size.h)] {
         let at = Point::from((parts.column.0, list.loc.y + y - top));
-        let running = laid.bits.iter().filter(|(_, bit)| *bit == Bit::Running);
-        dots.extend(
-            running
-                .map(|(rect, _)| centred_dot(Rectangle::new(rect.loc + at, rect.size)))
-                .filter(|dot| list.contains_rect(*dot)),
+        found.extend(
+            (laid.bits.iter())
+                .filter(|(_, b)| b == bit)
+                .map(|(rect, _)| Rectangle::new(rect.loc + at, rect.size)),
         );
     }
-    dots
+    found
+}
+
+/// Whether its agent works: neither paused nor asking (what the head's dot
+/// blinking says).
+fn works(view: &ChatView) -> bool {
+    standing(view).0.blinks()
+}
+
+/// The longest a clock reads (`clock::took`), every digit its widest: what
+/// its place is laid out for, so the time it tells never changes the chat.
+const CLOCK_WIDEST: &str = "88m 88s";
+/// Between "working" and its clock: a space.
+const CLOCK_GAP: i32 = 4;
+
+/// Where the head's clock goes while its agent works, at the head's right
+/// end after "working".
+fn head_clock(view: &ChatView, head: Rect) -> Option<Rect> {
+    view.since.filter(|_| works(view))?;
+    let w = width_in(CLOCK_WIDEST, Face::Ui, small_font_size()).ceil() as i32;
+    Some(rect(
+        head.loc.x + head.size.w - PAD - w,
+        head.loc.y,
+        w,
+        head.size.h,
+    ))
 }
 
 /// Room in from the chat's sides, and between its parts.
@@ -721,7 +808,7 @@ fn standing(view: &ChatView) -> (Dot, &'static str) {
         return (Dot::of_status(AgentStatus::Blocked), "waits for you");
     }
     let word = match view.status {
-        AgentStatus::Working => "working",
+        AgentStatus::Working => WORKING,
         AgentStatus::Blocked => "waits for you",
         AgentStatus::Idle => "idle",
         AgentStatus::Done => "done",
@@ -743,7 +830,7 @@ fn agent_name(label: &str) -> &str {
 fn message(view: &ChatView) -> Option<(&str, bool)> {
     match &view.reading {
         Reading::Missing(why) | Reading::Failed(why) => Some((why, true)),
-        _ if !view.running.is_empty() => None,
+        _ if !view.running.is_empty() || works(view) => None,
         Reading::Finding if view.items.is_empty() => Some(("Reading the chat…", false)),
         Reading::Read if view.items.is_empty() => Some(("Nothing said yet", false)),
         _ => None,
@@ -800,7 +887,8 @@ fn stacked(view: &ChatView, w: i32) -> (Vec<(i32, Rc<Laid>)>, i32) {
         (yours, laid_row(view, row, w))
     });
     let running = (view.running.iter()).map(|r| (false, running_row(view, r, w)));
-    for (yours, laid) in said.chain(running) {
+    let working = works(view).then(|| (false, working_row()));
+    for (yours, laid) in said.chain(running).chain(working) {
         if let Some(was) = was {
             y += if was == yours { STEP_GAP } else { TURN_GAP };
         }
@@ -868,6 +956,28 @@ fn running_row(view: &ChatView, r: &Running, w: i32) -> Rc<Laid> {
     };
     laid(&item, w, 0, &view.unfolded, view.cwd.as_deref())
 }
+
+/// The row at the list's end while its agent works: a spinner in the fold
+/// marks' column, "working", and its clock's place (both composed).
+fn working_row() -> Rc<Laid> {
+    let mut l = Laid::default();
+    l.put(rect(0, 0, CHEVRON_WIDTH, card_row()), Bit::Spinner);
+    let word_w = width_in(WORKING, Face::Ui, font_size()).ceil() as i32;
+    let x = CHEVRON_WIDTH;
+    l.put(
+        rect(x, 0, word_w, card_row()),
+        label(WORKING, Face::Ui, Mark::Muted),
+    );
+    let clock_w = width_in(CLOCK_WIDEST, Face::Ui, font_size()).ceil() as i32;
+    l.put(
+        rect(x + word_w + CLOCK_GAP, 0, clock_w, card_row()),
+        Bit::Clock,
+    );
+    Rc::new(l)
+}
+
+/// What the head and the working row say while the agent works.
+const WORKING: &str = "working";
 
 /// The ask's card laid out from `(0, 0)` for `w` wide: the tool and its
 /// gist on a row that folds, under it unfolded the first `lines` of what it
@@ -1018,6 +1128,9 @@ enum Bit {
     Diff(DiffSide, String),
     /// Where a running tool's dot blinks: composed, not painted.
     Running,
+    /// Where the working row's spinner turns and its clock ticks: composed.
+    Spinner,
+    Clock,
     /// The ground of the choice a menu's arrow is on, or of its current
     /// tab.
     Picked,
@@ -1576,14 +1689,19 @@ impl Painter {
         status_dot(&mut c, centred_dot(head_slot(head)), dot, scale, p);
         let (hx, hend) = phys(head, scale);
         let pad = px(PAD) as f32;
-        let word_x = hend - pad - self.text_width(word, small_font_size(), scale);
+        // While it works, its clock is composed after the word.
+        let word_end = match head_clock(view, parts.head) {
+            Some(clock) => px(clock.loc.x - r.loc.x - CLOCK_GAP) as f32,
+            None => hend - pad,
+        };
+        let word_x = word_end - self.text_width(word, small_font_size(), scale);
         let b = band(head, scale);
         self.text(
             &mut c,
             word,
             small_font_size(),
             word_x,
-            hend,
+            word_end,
             b,
             scale,
             p.muted,
@@ -1842,7 +1960,7 @@ impl Painter {
                 let size = Font::Small.size();
                 self.mono_text(c, text, size, tx, x + w, b, scale, p.text);
             }
-            Bit::Running => {}
+            Bit::Running | Bit::Spinner | Bit::Clock => {}
             Bit::Picked => self.row_highlight(c, rect, (true, 0.0), scale, p),
             Bit::Check => icon_sdf(c, rect, scale, p.success, |x, y| check(x, y, s)),
         }
@@ -1961,6 +2079,7 @@ pub(super) mod tests {
             hover: None,
             running: Vec::new(),
             ask: None,
+            since: Some(1_000),
         }
     }
 
@@ -2217,6 +2336,8 @@ pub(super) mod tests {
         // Pressed where the list shows it: in its open steps, row 1.
         let mut parts_v = v.clone();
         parts_v.top = f64::MAX;
+        // No working row under it.
+        parts_v.status = AgentStatus::Idle;
         let layout = chat_layout(&parts_v);
         let list = layout.list;
         let p = parts(&parts_v);
@@ -2396,6 +2517,7 @@ pub(super) mod tests {
             output: None,
         }]);
         v.unfolded = ["agent:t".to_owned()].into();
+        v.status = AgentStatus::Idle;
         let layout = chat_layout(&v);
         // The card, its words, its steps: three rows, the steps in from it.
         let steps = item_rect(&v, 2);
@@ -2416,7 +2538,11 @@ pub(super) mod tests {
 
     #[test]
     fn items_are_laid_out_once_until_they_change() {
-        let v = view();
+        // Idle: no working row, which is laid out every time.
+        let v = ChatView {
+            status: AgentStatus::Idle,
+            ..view()
+        };
         let w = parts(&v).column.1;
         let count = || LAYS.with(|n| n.get());
         let _ = stacked(&v, w);
@@ -2485,6 +2611,9 @@ pub(super) mod tests {
         let mut v = view();
         v.items = Arc::new(Vec::new());
         v.reading = Reading::Finding;
+        // While it works, its working row shows instead.
+        assert_eq!(message(&v), None);
+        v.status = AgentStatus::Idle;
         assert_eq!(message(&v), Some(("Reading the chat…", false)));
         v.reading = Reading::Read;
         assert_eq!(message(&v), Some(("Nothing said yet", false)));
@@ -2579,15 +2708,76 @@ pub(super) mod tests {
         v.top = 1e9;
         let (rows, _) = stacked(&v, w);
         assert_eq!(rows.len(), before + 1);
-        let last = item_rect(&v, before);
-        assert!(rows[before].1.bits.iter().any(|(_, b)| *b == Bit::Running));
+        // Above the working row, the list's last.
+        let ran = before - 1;
+        let last = item_rect(&v, ran);
+        assert!(rows[ran].1.bits.iter().any(|(_, b)| *b == Bit::Running));
         // Its dot blinks while the agent works; a press there picks nothing.
         assert!(chat_blinkers(&v).iter().any(|dot| inside(last, *dot)));
         assert_eq!(chat_layout(&v).hit(&v, middle(last)), None);
         // An empty chat shows it, not "Nothing said yet".
         v.items = Arc::new(Vec::new());
         assert!(message(&v).is_none());
-        assert_eq!(stacked(&v, w).0.len(), 1);
+        assert_eq!(stacked(&v, w).0.len(), 2);
+    }
+
+    #[test]
+    fn the_working_row_spinner_sweep_and_clocks_show_only_while_it_works() {
+        let mut v = view();
+        v.top = 1e9;
+        let w = parts(&v).column.1;
+        let (rows, _) = stacked(&v, w);
+        let last = &rows.last().expect("rows").1;
+        assert!(last.bits.iter().any(|(_, b)| *b == Bit::Spinner));
+        assert!(last.bits.iter().any(|(_, b)| *b == Bit::Clock));
+        let row = item_rect(&v, rows.len() - 1);
+        let spins = chat_spinners(&v);
+        assert_eq!(spins.len(), 1, "{spins:?}");
+        assert!(inside(row, spins[0]));
+        // 72 s since the turn began, in the head and on the row.
+        let clocks = chat_clocks(&v, 1_000 + 72_000);
+        assert_eq!(clocks.len(), 2, "{clocks:?}");
+        assert!(clocks.iter().all(|(text, ..)| text == "1m 12s"));
+        assert!(inside(parts(&v).head, clocks[0].1));
+        assert!(inside(row, clocks[1].1));
+        let sweep = chat_sweep(&v).expect("a sweep");
+        assert!(inside(parts(&v).head, sweep));
+        // A press on the row picks nothing.
+        assert_eq!(chat_layout(&v).hit(&v, middle(row)), None);
+        // In a short pane scrolled up, the row is out of view: only the
+        // head's clock.
+        let up = ChatView {
+            rect: Rectangle::new(v.rect.loc, (v.rect.size.w, 360).into()),
+            top: 0.0,
+            ..v.clone()
+        };
+        assert!(chat_spinners(&up).is_empty());
+        assert_eq!(chat_clocks(&up, 73_000).len(), 1);
+        // None of it while it waits, is paused, asks or is idle.
+        let still = |v: &ChatView| {
+            let (rows, _) = stacked(v, w);
+            let row = rows
+                .last()
+                .is_some_and(|(_, l)| l.bits.iter().any(|(_, b)| *b == Bit::Spinner));
+            !row && chat_spinners(v).is_empty()
+                && chat_clocks(v, 73_000).is_empty()
+                && chat_sweep(v).is_none()
+        };
+        for status in [AgentStatus::Idle, AgentStatus::Blocked, AgentStatus::Done] {
+            assert!(still(&ChatView { status, ..view() }), "{status:?}");
+        }
+        assert!(still(&ChatView {
+            paused: true,
+            ..view()
+        }));
+        assert!(still(&ChatView {
+            ask: Some(ask()),
+            ..view()
+        }));
+        // No turn start known: the row and sweep, no clocks.
+        v.since = None;
+        assert!(chat_clocks(&v, 73_000).is_empty());
+        assert_eq!(chat_spinners(&v).len(), 1);
     }
 
     fn ask() -> PendingAsk {

@@ -736,9 +736,17 @@ impl Gerdr {
                 tail.follow(agent);
             }
         }
-        // What is kept of chats gone with their panes.
+        // When each agent's turn began, as this round of herdr's sees it;
+        // and what is kept of chats gone with their panes.
+        let now = crate::ai_work::now_ms();
+        let agents = &self.session.agents;
         let kept: HashSet<String> = chats_mut(&mut self.workspaces)
-            .map(|(id, _)| id.to_owned())
+            .map(|(id, chat)| {
+                let agent = agents.iter().find(|a| a.pane_id == id);
+                let working = agent.is_some_and(|a| a.agent_status == AgentStatus::Working);
+                chat.turn.note(working, now);
+                id.to_owned()
+            })
             .collect();
         self.chats.scrolls.retain(|id, _| kept.contains(id));
         self.chats.read_at.retain(|id, _| kept.contains(id));
@@ -1190,6 +1198,7 @@ impl Gerdr {
                     hover: None,
                     running: unread(&chat.items, &chat.live.running),
                     ask: chat.live.ask.clone(),
+                    since: chat.turn.since(&chat.items),
                 };
                 view.hover = pointer
                     .filter(|pos| view.rect.to_f64().contains(*pos))
