@@ -9729,8 +9729,9 @@ fn dump_ship_squash() {
 /// A pane shown as a chat: still reading it, none found, the chat with
 /// its cards (a folded and an unfolded tool, an unfolded edit, a thinking
 /// line), the same while the agent waits on the user, a reply being
-/// written, an item picked and another hovered, and scrolled down.
-const CHATS: [&str; 8] = [
+/// written, an item picked and another hovered, scrolled down, and the `/`
+/// menu over the reply box.
+const CHATS: [&str; 9] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9739,6 +9740,7 @@ const CHATS: [&str; 8] = [
     "chat_picked",
     "chat_scrolled",
     "chat_question",
+    "chat_slash",
 ];
 
 fn chat_view(i: usize) -> super::ChatView {
@@ -9801,6 +9803,34 @@ fn chat_view(i: usize) -> super::ChatView {
             hover: Some(ChatHit::Key(WaitKey::Digit(2))),
             ..v
         },
+        // The `/` menu: the second command picked, the third hovered.
+        8 => {
+            let text = "/co";
+            let row = |name: &str, about: &str| (name.to_owned(), about.to_owned());
+            super::ChatView {
+                status: AgentStatus::Idle,
+                focus: ChatFocus::Composer,
+                draft: Line {
+                    text: text.into(),
+                    caret: text.len(),
+                    anchor: text.len(),
+                    scroll: 0,
+                },
+                hints: crate::chat::slash_footer(),
+                slash: Some(super::SlashView {
+                    rows: vec![
+                        row("/compact", "Compact the conversation, keeping a summary"),
+                        row("/config", "Open the settings"),
+                        row("/context", "Show what fills the context"),
+                        row("/caveman:compress [file]", ""),
+                    ],
+                    first: 0,
+                    picked: 1,
+                }),
+                hover: Some(ChatHit::Command(2)),
+                ..v
+            }
+        }
         // A shorter pane, for the list to scroll.
         _ => super::ChatView {
             rect: super::Rect::new(v.rect.loc, (v.rect.size.w, 460).into()),
@@ -9818,7 +9848,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 8]; 4] = [
+const GOLDEN_CHATS: [[u64; 9]; 4] = [
     // Dark at 1
     [
         0xa5039d4ee1fb06ee, // chat_finding
@@ -9829,6 +9859,7 @@ const GOLDEN_CHATS: [[u64; 8]; 4] = [
         0x336344c70c851544, // chat_picked
         0x404446eb993dd555, // chat_scrolled
         0xa6d0dcccaae204f6, // chat_question
+        0x350b10267bd544d0, // chat_slash
     ],
     // Dark at 2
     [
@@ -9840,6 +9871,7 @@ const GOLDEN_CHATS: [[u64; 8]; 4] = [
         0x6a515ed6af7ed950, // chat_picked
         0xbbb09541105aaf77, // chat_scrolled
         0x503c5a806a45c7b1, // chat_question
+        0x59de8e2f81514423, // chat_slash
     ],
     // Light at 1
     [
@@ -9851,6 +9883,7 @@ const GOLDEN_CHATS: [[u64; 8]; 4] = [
         0xc4a1da2ac75e7e03, // chat_picked
         0xe23ae76ee4fa5bff, // chat_scrolled
         0xfbb6e5a61a1a9b5f, // chat_question
+        0x014696fd5f206c34, // chat_slash
     ],
     // Light at 2
     [
@@ -9862,6 +9895,7 @@ const GOLDEN_CHATS: [[u64; 8]; 4] = [
         0xc1031423a1b0c52c, // chat_picked
         0x487f717d28fa8f37, // chat_scrolled
         0x7472c7255b9cfe88, // chat_question
+        0x1b47d4c333fafeda, // chat_slash
     ],
 ];
 

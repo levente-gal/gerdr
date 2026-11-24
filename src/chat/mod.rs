@@ -8,6 +8,7 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use crate::{ai_work::AgentKind, md_blocks::DocBlock, text_field::TextField};
 
+pub mod commands;
 pub mod menu;
 pub mod parse;
 pub mod rows;
@@ -17,7 +18,7 @@ pub mod tail;
 mod view;
 
 #[cfg(test)]
-pub(crate) use view::footer;
+pub(crate) use view::{footer, slash_footer};
 
 /// One thing said or done in a chat, in order.
 #[derive(Clone, Debug, PartialEq)]
@@ -168,6 +169,9 @@ pub struct PaneChat {
     pub focus: ChatFocus,
     /// The reply being written: kept unsaved, as a draft (K2).
     pub draft: TextField,
+    /// The `/` menu over the reply box, while the reply is a command being
+    /// typed.
+    pub slash: Option<commands::Slash>,
     /// The pane's last screen rows while its agent waits on the user: the
     /// approval menu, which the transcript doesn't hold. As
     /// `crate::scrollback::parse_ansi` reads them.
