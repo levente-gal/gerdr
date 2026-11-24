@@ -190,6 +190,11 @@ impl Chats {
             looked: Instant::now(),
         };
         followed.found(found, out);
+        // A guess (shown again, say) looks for a newer chat at the next
+        // poll, once the panes followed with it hold theirs.
+        if followed.chat.as_ref().is_ok_and(|chat| chat.source.guessed) {
+            followed.looked = (followed.looked.checked_sub(FIND_AGAIN)).unwrap_or(followed.looked);
+        }
         self.panes.insert(pane_id, followed);
     }
 
@@ -227,12 +232,22 @@ impl Chats {
 
     fn poll(&mut self, out: &mut Vec<Event>) {
         let mut again = Vec::new();
+        let mut guessed = Vec::new();
         for (pane_id, followed) in &mut self.panes {
+            let due = followed.looked.elapsed() >= FIND_AGAIN;
             match &mut followed.chat {
-                Ok(chat) => chat.poll(pane_id, out),
-                Err(_) if followed.looked.elapsed() < FIND_AGAIN => {}
+                Ok(chat) => {
+                    chat.poll(pane_id, out);
+                    if chat.source.guessed && due {
+                        guessed.push(pane_id.clone());
+                    }
+                }
+                Err(_) if !due => {}
                 Err(_) => again.push(pane_id.clone()),
             }
+        }
+        for pane_id in guessed {
+            self.move_on(&pane_id, out);
         }
         for pane_id in again {
             let agent = self.panes[&pane_id].agent.clone();
@@ -282,6 +297,35 @@ impl Chats {
             Some(Err(why)) => Err(why),
             _ if missing => Err(source::missing_integration(target)),
             _ => found,
+        }
+    }
+
+    /// Move pane `pane_id`'s guessed chat on to the newest of its agent's
+    /// run, when that is another: one the agent began since (`/new`), as
+    /// no live report or herdr names it.
+    fn move_on(&mut self, pane_id: &str, out: &mut Vec<Event>) {
+        let Some(followed) = self.panes.get_mut(pane_id) else {
+            return;
+        };
+        followed.looked = Instant::now();
+        let Ok(chat) = &followed.chat else {
+            return;
+        };
+        let (kind, had) = (chat.source.agent, chat.source.id.clone());
+        let agent = followed.agent.clone();
+        let Some(run) = self.run_of(&agent) else {
+            return;
+        };
+        let claimed = self.claimed(pane_id);
+        match source::newest(kind, &run, &self.homes, &claimed) {
+            Ok(Some(newer)) if newer.id != had => {
+                if let Some(followed) = self.panes.get_mut(pane_id) {
+                    followed.found(Ok(newer), out);
+                }
+            }
+            // The chat had still shows: only the log hears of it.
+            Err(why) => tracing::warn!("agent chat of pane {pane_id}: {why}"),
+            _ => {}
         }
     }
 
@@ -1190,6 +1234,60 @@ mod tests {
             chat_problems("cursor"),
             [source::not_installed(AgentKind::Cursor, "cursor")]
         );
+        let _ = std::fs::remove_file(&socket);
+    }
+
+    /// A Codex rollout of chat `id` run in `cwd`, begun at `at`.
+    fn codex_rollout(dir: &Path, id: &str, cwd: &Path, at: u64) {
+        let day = crate::ai_work::locate::codex_days(at)[1].clone();
+        let s = at % 86_400;
+        let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
+        let iso = format!("{}T{h:02}:{m:02}:{s:02}Z", day.replace('/', "-"));
+        let meta = serde_json::json!({"type": "session_meta",
+            "payload": {"id": id, "timestamp": iso, "cwd": cwd}});
+        let path = dir.join(format!(".codex/sessions/{day}/rollout-x-{id}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("{meta}\n")).unwrap();
+    }
+
+    #[test]
+    fn a_guess_moves_on_to_a_newer_chat_no_other_pane_holds() {
+        let mut home = Home::new("move-on");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", child.id())).unwrap();
+        let boot = std::fs::read_to_string("/proc/stat").unwrap();
+        let started = started_at(&stat, &boot, clock_ticks()).unwrap();
+        let work = Path::new("/work/app");
+        codex_rollout(&home.dir, "c-old", work, started);
+        let socket = fake_herdr("move-on", child.id(), work, 5);
+        home.chats.herdr = Some(Herdr::on_socket(socket.clone()));
+        let mut none = agent("codex", "id", "c-old");
+        none.agent_session = None;
+        home.chats.follow(none, &mut Vec::new());
+        assert_eq!(home.chat().source.id, "c-old");
+        // Looked again at the next poll: nothing newer yet.
+        assert!(home.poll().is_empty());
+        // The agent begins another chat (`/new`), which another pane holds.
+        codex_rollout(&home.dir, "c-new", work, started + 30);
+        let mut other = agent("codex", "id", "c-new");
+        other.pane_id = "p2".into();
+        home.chats.follow(other, &mut Vec::new());
+        let ago = |home: &mut Home| home.chats.panes.get_mut("p1").unwrap().looked -= FIND_AGAIN;
+        ago(&mut home);
+        assert!(home.poll().is_empty(), "the other pane's");
+        assert_eq!(home.chat().source.id, "c-old");
+        // Once it lets go, the guess moves on, a guess still.
+        home.chats.stop("p2");
+        assert!(home.poll().is_empty(), "looked at once a FIND_AGAIN");
+        ago(&mut home);
+        assert_eq!(items_of(&home.poll()), ["c-new"]);
+        let source = &home.chat().source;
+        assert_eq!((source.id.as_str(), source.guessed), ("c-new", true));
+        child.kill().ok();
+        child.wait().ok();
         let _ = std::fs::remove_file(&socket);
     }
 }

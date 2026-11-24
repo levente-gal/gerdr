@@ -20,6 +20,27 @@ const CODEX_AFTER: u64 = 600;
 /// The most of a rollout's first line read: its `session_meta`.
 const FIRST_LINE: u64 = 1 << 20;
 
+/// When a chat found by folder and time began: from `from` to `to`, the
+/// one begun nearest `near` picked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub from: u64,
+    pub to: u64,
+    pub near: u64,
+}
+
+impl Span {
+    /// A run's begun at `started`: from a minute before it to ten after,
+    /// nearest it.
+    pub fn of(started: u64) -> Self {
+        Self {
+            from: started.saturating_sub(CODEX_BEFORE),
+            to: started + CODEX_AFTER,
+            near: started,
+        }
+    }
+}
+
 /// A chat found on disk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
@@ -111,6 +132,16 @@ pub fn find(
     chat: &Chat,
     claimed: &HashSet<String>,
 ) -> Result<Option<Found>, String> {
+    find_in(homes, chat, claimed, Span::of(chat.started))
+}
+
+/// `chat` as `find` finds it, one without an id begun in `span`.
+pub fn find_in(
+    homes: &Homes,
+    chat: &Chat,
+    claimed: &HashSet<String>,
+    span: Span,
+) -> Result<Option<Found>, String> {
     let id = chat.id.as_deref().filter(|id| plain_id(id));
     if chat.id.is_some() && id.is_none() {
         return Err(format!("{:?} isn't a chat id", chat.id));
@@ -119,8 +150,8 @@ pub fn find(
         (AgentKind::Claude, Some(id)) => claude(homes, id),
         (AgentKind::Cursor, Some(id)) => cursor(homes, id),
         (AgentKind::Codex, Some(id)) => codex_by_id(&homes.codex, id),
-        (AgentKind::Codex, None) => codex_by_time(&homes.codex, chat, claimed),
-        (AgentKind::OpenCode, _) => opencode(&homes.opencode, chat, claimed)?,
+        (AgentKind::Codex, None) => codex_by_time(&homes.codex, chat, claimed, span),
+        (AgentKind::OpenCode, _) => opencode(&homes.opencode, chat, claimed, span)?,
         (AgentKind::T3, Some(id)) => t3(homes, chat, id)?,
         _ => None,
     })
@@ -253,8 +284,13 @@ fn codex_by_id(codex: &Path, id: &str) -> Option<Found> {
 /// The Codex date folders a run that began at `started` may have put its
 /// chat in: the day before to the day after, whatever the time zone.
 pub fn codex_days(started: u64) -> Vec<String> {
-    let day = (started / 86_400) as i64;
-    (day - 1..=day + 1)
+    days_of_span(started, started)
+}
+
+/// The Codex date folders of chats begun from `from` to `to`, a day more
+/// on either side.
+fn days_of_span(from: u64, to: u64) -> Vec<String> {
+    ((from / 86_400) as i64 - 1..=(to / 86_400) as i64 + 1)
         .map(|day| {
             let (y, m, d) = civil(day);
             format!("{y:04}/{m:02}/{d:02}")
@@ -287,20 +323,19 @@ fn codex_meta(first: &str) -> Option<CodexMeta> {
     })
 }
 
-/// Of `metas`, the one of `chat`'s run: in one of its folders, begun from a
-/// minute before it to ten after, not `claimed`; the nearest in time.
+/// Of `metas`, the one of `chat`'s run: in one of its folders, begun in
+/// `span`, not `claimed`; the nearest in time.
 fn codex_pick<'a, T>(
     chat: &Chat,
+    span: Span,
     claimed: &HashSet<String>,
     metas: impl Iterator<Item = (T, &'a CodexMeta)>,
 ) -> Option<T> {
-    let from = chat.started.saturating_sub(CODEX_BEFORE);
-    let to = chat.started + CODEX_AFTER;
     (metas)
-        .filter(|(_, meta)| (from..=to).contains(&meta.started))
+        .filter(|(_, meta)| (span.from..=span.to).contains(&meta.started))
         .filter(|(_, meta)| !claimed.contains(&meta.id))
         .filter(|(_, meta)| chat.folders.iter().any(|f| meta.cwd.starts_with(f)))
-        .min_by_key(|(_, meta)| meta.started.abs_diff(chat.started))
+        .min_by_key(|(_, meta)| meta.started.abs_diff(span.near))
         .map(|(it, _)| it)
 }
 
@@ -315,9 +350,14 @@ fn first_line(path: &Path) -> Option<String> {
 }
 
 /// The Codex chat of `chat`'s run, by folder and time.
-fn codex_by_time(codex: &Path, chat: &Chat, claimed: &HashSet<String>) -> Option<Found> {
+fn codex_by_time(
+    codex: &Path,
+    chat: &Chat,
+    claimed: &HashSet<String>,
+    span: Span,
+) -> Option<Found> {
     let sessions = codex.join("sessions");
-    let metas: Vec<(PathBuf, CodexMeta)> = (codex_days(chat.started).iter())
+    let metas: Vec<(PathBuf, CodexMeta)> = (days_of_span(span.from, span.to).iter())
         .flat_map(|day| rollouts(&sessions.join(day)))
         .filter_map(|path| {
             let meta = codex_meta(&first_line(&path)?)?;
@@ -326,6 +366,7 @@ fn codex_by_time(codex: &Path, chat: &Chat, claimed: &HashSet<String>) -> Option
         .collect();
     let at = codex_pick(
         chat,
+        span,
         claimed,
         metas.iter().enumerate().map(|(i, (_, m))| (i, m)),
     )?;
@@ -361,22 +402,27 @@ fn cursor_slug_is(name: &str, slug: &str) -> bool {
 }
 
 /// Of Cursor transcripts `begun` (an id and when its folder was made), the
-/// ones `chat`'s run may have, nearest its start first: begun from a minute
-/// before it to ten after, not `claimed`.
-fn cursor_pick(chat: &Chat, claimed: &HashSet<String>, begun: Vec<(String, u64)>) -> Vec<String> {
-    let from = chat.started.saturating_sub(CODEX_BEFORE);
-    let to = chat.started + CODEX_AFTER;
+/// ones a run may have, nearest `span`'s time first: begun in `span`, not
+/// `claimed`.
+fn cursor_pick(span: Span, claimed: &HashSet<String>, begun: Vec<(String, u64)>) -> Vec<String> {
     let mut fit: Vec<(String, u64)> = (begun.into_iter())
-        .filter(|(id, at)| (from..=to).contains(at) && !claimed.contains(id) && plain_id(id))
+        .filter(|(id, at)| {
+            (span.from..=span.to).contains(at) && !claimed.contains(id) && plain_id(id)
+        })
         .collect();
-    fit.sort_by_key(|(id, at)| (at.abs_diff(chat.started), id.clone()));
+    fit.sort_by_key(|(id, at)| (at.abs_diff(span.near), id.clone()));
     fit.into_iter().map(|(id, _)| id).collect()
 }
 
 /// The Cursor chat of `chat`'s run, by folder and time: Cursor keeps a
 /// transcript folder per chat, `projects/<slug>/agent-transcripts/<id>/`,
 /// made with its first message; the chat is the `store.db` of that id.
-pub fn cursor_by_time(homes: &Homes, chat: &Chat, claimed: &HashSet<String>) -> Option<Found> {
+pub fn cursor_by_time(
+    homes: &Homes,
+    chat: &Chat,
+    claimed: &HashSet<String>,
+    span: Span,
+) -> Option<Found> {
     let slugs: Vec<String> = chat.folders.iter().map(|f| cursor_slug(f)).collect();
     let begun = (subdirs(&homes.cursor.join("projects")).into_iter())
         .filter(|dir| {
@@ -392,7 +438,7 @@ pub fn cursor_by_time(homes: &Homes, chat: &Chat, claimed: &HashSet<String>) -> 
             Some((id, at))
         })
         .collect();
-    (cursor_pick(chat, claimed, begun).iter()).find_map(|id| cursor(homes, id))
+    (cursor_pick(span, claimed, begun).iter()).find_map(|id| cursor(homes, id))
 }
 
 /// `value` of a database row as JSON: texts of JSON columns (`*_json`,
@@ -450,7 +496,12 @@ fn pretty(value: &Value) -> Vec<u8> {
 /// The OpenCode chat of `chat`: by its id, or by folder and time. Its
 /// schema isn't known for sure, so it is asked first; a database not as
 /// expected finds nothing.
-fn opencode(db: &Path, chat: &Chat, claimed: &HashSet<String>) -> Result<Option<Found>, String> {
+fn opencode(
+    db: &Path,
+    chat: &Chat,
+    claimed: &HashSet<String>,
+    span: Span,
+) -> Result<Option<Found>, String> {
     if !db.is_file() {
         return Ok(None);
     }
@@ -473,7 +524,7 @@ fn opencode(db: &Path, chat: &Chat, claimed: &HashSet<String>) -> Result<Option<
         }
         let mut hit = None;
         for (session, v2) in schemas {
-            if let Some(row) = opencode_session(&conn, session, chat, claimed)? {
+            if let Some(row) = opencode_session(&conn, session, chat, claimed, span)? {
                 hit = Some((row, v2));
                 break;
             }
@@ -535,14 +586,14 @@ fn opencode_session(
     table: &str,
     chat: &Chat,
     claimed: &HashSet<String>,
+    span: Span,
 ) -> rusqlite::Result<Option<Value>> {
     if let Some(id) = &chat.id {
         let rows = rows_json(conn, &format!("SELECT * FROM {table} WHERE id = ?1"), id)?;
         return Ok(rows.into_iter().next());
     }
     // OpenCode's times are in milliseconds.
-    let from = chat.started.saturating_sub(CODEX_BEFORE) * 1000;
-    let to = (chat.started + CODEX_AFTER) * 1000;
+    let (from, to) = (span.from * 1000, span.to * 1000);
     let rows = rows_json(
         conn,
         &format!(
@@ -551,7 +602,7 @@ fn opencode_session(
         ),
         "",
     )?;
-    let started = chat.started * 1000;
+    let near = span.near * 1000;
     Ok((rows.into_iter())
         .filter(|row| row["parent_id"].is_null())
         .filter(|row| !row["id"].as_str().is_some_and(|id| claimed.contains(id)))
@@ -559,7 +610,7 @@ fn opencode_session(
             let dir = Path::new(row["directory"].as_str().unwrap_or(""));
             !dir.as_os_str().is_empty() && chat.folders.iter().any(|f| dir.starts_with(f))
         })
-        .min_by_key(|row| row["time_created"].as_u64().unwrap_or(0).abs_diff(started)))
+        .min_by_key(|row| row["time_created"].as_u64().unwrap_or(0).abs_diff(near)))
 }
 
 /// A T3 Code thread's rows: the thread, its runs, its agents' threads.
@@ -781,6 +832,7 @@ pub fn read_listing(chat: &Chat, out: &str, claimed: &HashSet<String>) -> Option
         (None, None) if chat.agent == AgentKind::Codex => {
             let at = codex_pick(
                 chat,
+                Span::of(chat.started),
                 claimed,
                 candidates.iter().enumerate().map(|(i, (_, m))| (i, m)),
             )?;
@@ -1077,21 +1129,27 @@ mod tests {
             .unwrap()
             .as_secs();
         let c = chat(AgentKind::Cursor, None, now, &[work]);
-        let f = cursor_by_time(&homes, &c, &HashSet::new()).unwrap();
+        let f = cursor_by_time(&homes, &c, &HashSet::new(), Span::of(now)).unwrap();
         assert_eq!((f.id.as_str(), f.form), ("c-2", Form::Store));
         assert_eq!(
-            cursor_by_time(&homes, &c, &HashSet::from(["c-2".into()])),
+            cursor_by_time(&homes, &c, &HashSet::from(["c-2".into()]), Span::of(now)),
             None
         );
         let other = chat(AgentKind::Cursor, None, now, &[Path::new("/work/my")]);
-        assert_eq!(cursor_by_time(&homes, &other, &HashSet::new()), None);
+        assert_eq!(
+            cursor_by_time(&homes, &other, &HashSet::new(), Span::of(now)),
+            None
+        );
         let later = chat(AgentKind::Cursor, None, now + 3600, &[work]);
-        assert_eq!(cursor_by_time(&homes, &later, &HashSet::new()), None);
+        assert_eq!(
+            cursor_by_time(&homes, &later, &HashSet::new(), Span::of(now + 3600)),
+            None
+        );
     }
 
     #[test]
     fn the_cursor_chat_begun_nearest_its_run_is_picked() {
-        let c = chat(AgentKind::Cursor, None, 1000, &[]);
+        let c = Span::of(1000);
         let begun = |list: &[(&str, u64)]| -> Vec<(String, u64)> {
             list.iter().map(|(id, at)| (id.to_string(), *at)).collect()
         };
@@ -1104,11 +1162,11 @@ mod tests {
             ("../x", 1000),
         ]);
         assert_eq!(
-            cursor_pick(&c, &HashSet::new(), all.clone()),
+            cursor_pick(c, &HashSet::new(), all.clone()),
             ["after", "before", "far"]
         );
         let claimed = HashSet::from(["after".to_owned()]);
-        assert_eq!(cursor_pick(&c, &claimed, all), ["before", "far"]);
+        assert_eq!(cursor_pick(c, &claimed, all), ["before", "far"]);
     }
 
     #[test]
