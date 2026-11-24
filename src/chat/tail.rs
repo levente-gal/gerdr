@@ -311,15 +311,18 @@ impl Chats {
         let Ok(chat) = &followed.chat else {
             return;
         };
-        let (kind, had) = (chat.source.agent, chat.source.id.clone());
+        let (kind, had, had_path) = (
+            chat.source.agent,
+            chat.source.id.clone(),
+            chat.source.path.clone(),
+        );
         let agent = followed.agent.clone();
         let Some(run) = self.run_of(&agent) else {
             return;
         };
         let claimed = self.claimed(pane_id);
         match source::newest(kind, &run, &self.homes, &claimed) {
-            // Another agent of its kind in the folder may have begun it.
-            Ok(Some(newer)) if newer.id != had && alone(&run) => {
+            Ok(Some(newer)) if newer.id != had && moves(&run, &had_path, &newer.path) => {
                 if let Some(followed) = self.panes.get_mut(pane_id) {
                     followed.found(Ok(newer), out);
                 }
@@ -391,33 +394,79 @@ impl Chats {
     }
 }
 
-/// Whether no other process named as `run`'s agent, but its own children,
-/// runs in its folder: a chat begun there since could be that one's. Read
-/// from /proc: herdr sees a new agent only seconds late, and not one
-/// outside it.
-fn alone(run: &Run) -> bool {
-    let read = |pid: &str, what: &str| std::fs::read_to_string(format!("/proc/{pid}/{what}"));
-    let Ok(name) = read(&run.pid.to_string(), "comm") else {
+/// Whether `run`'s guessed chat, at `had`, moves on to the newer one at
+/// `newer`. Exact for an agent that keeps its chat open (Codex's rollout,
+/// Cursor's store.db): the one it holds. Else only while no other process
+/// of its agent runs in its folder: a chat begun there since could be that
+/// one's.
+// shortcut: an agent that keeps no chat open takes the chat of another one
+// that ran in its folder and ended; ask the agent's own word (live hooks).
+fn moves(run: &Run, had: &Path, newer: &Path) -> bool {
+    let procs = procs();
+    let tree = tree(run.pid, &procs);
+    if holds(&tree, newer) {
+        return true;
+    }
+    if holds(&tree, had) {
+        return false;
+    }
+    let read = |pid: u32, what: &str| std::fs::read_to_string(format!("/proc/{pid}/{what}"));
+    let Ok(name) = read(run.pid, "comm") else {
         return false;
     };
-    let Ok(procs) = std::fs::read_dir("/proc") else {
-        return false;
+    !procs.iter().any(|&(pid, _)| {
+        !tree.contains(&pid)
+            && read(pid, "comm").is_ok_and(|comm| comm == name)
+            && std::fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|cwd| cwd == run.cwd)
+    })
+}
+
+/// Every process, with its parent's id.
+fn procs() -> Vec<(u32, u32)> {
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
     };
-    !procs.flatten().any(|p| {
-        let pid = p.file_name().to_string_lossy().into_owned();
-        // The fourth field of stat, past the name in parentheses.
-        let parent = (read(&pid, "stat").ok()).and_then(|stat| {
-            stat.rsplit_once(')')?
+    (dir.flatten())
+        .filter_map(|p| {
+            let pid = p.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(p.path().join("stat")).ok()?;
+            // The fourth field, past the name in parentheses.
+            let parent = stat
+                .rsplit_once(')')?
                 .1
                 .split_whitespace()
                 .nth(1)?
                 .parse()
-                .ok()
-        });
-        pid.parse::<u32>().is_ok_and(|n| n != run.pid)
-            && parent != Some(run.pid)
-            && read(&pid, "comm").is_ok_and(|comm| comm == name)
-            && std::fs::read_link(p.path().join("cwd")).is_ok_and(|cwd| cwd == run.cwd)
+                .ok()?;
+            Some((pid, parent))
+        })
+        .collect()
+}
+
+/// Process `pid` and those under it.
+fn tree(pid: u32, procs: &[(u32, u32)]) -> Vec<u32> {
+    let mut tree = vec![pid];
+    let mut i = 0;
+    while let Some(&top) = tree.get(i) {
+        tree.extend(
+            procs
+                .iter()
+                .filter(|(_, parent)| *parent == top)
+                .map(|(pid, _)| *pid),
+        );
+        i += 1;
+    }
+    tree
+}
+
+/// Whether one of the processes `tree` has file `path` open.
+fn holds(tree: &[u32], path: &Path) -> bool {
+    tree.iter().any(|pid| {
+        (std::fs::read_dir(format!("/proc/{pid}/fd"))
+            .into_iter()
+            .flatten()
+            .flatten())
+        .any(|fd| std::fs::read_link(fd.path()).is_ok_and(|open| open == path))
     })
 }
 
@@ -1280,6 +1329,18 @@ mod tests {
         let path = dir.join(format!(".codex/sessions/{day}/rollout-x-{id}.jsonl"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, format!("{meta}\n")).unwrap();
+    }
+
+    #[test]
+    fn a_chat_open_in_the_agent_or_under_it_is_held() {
+        let home = Home::new("holds");
+        let path = home.dir.join("rollout.jsonl");
+        let _open = File::create(&path).unwrap();
+        let me = std::process::id();
+        let tree = tree(me, &procs());
+        assert!(holds(&tree, &path));
+        assert!(!holds(&tree, &home.dir.join("other.jsonl")));
+        assert!(!holds(&[], &path));
     }
 
     #[test]
