@@ -1462,7 +1462,10 @@ pub fn run_undo(
         let result = match undo {
             Undo::ClosePr { url, .. } => close_pr(repo, url, gh),
             Undo::DeleteBranch { sha, .. } => delete_branch(repo, &branch, sha.as_deref()),
-            Undo::ResetSquash { base, .. } => reset_squash(repo, base, &branch),
+            Undo::ResetSquash { base, .. } => {
+                let made = feature.ship_done(key, ShipStep::Merge).and_then(|d| d.sha);
+                reset_squash(repo, base, &branch, made.as_deref())
+            }
         };
         match result {
             Ok(()) => undone.push((key.to_owned(), step)),
@@ -1512,8 +1515,10 @@ fn delete_branch(repo: &Repo, branch: &str, sha: Option<&str>) -> Result<(), Str
 
 /// Take the squash of `branch` off `base` in `repo`'s main worktree: only
 /// while it is the last commit there, on `base`, not on origin, the
-/// worktree clean.
-fn reset_squash(repo: &Repo, base: &str, branch: &str) -> Result<(), String> {
+/// worktree clean. The last commit is the squash when it is `made`, the
+/// commit Ship recorded, or else changes what the branch does: a commit
+/// hook may have changed the one, and the branch moved on since.
+fn reset_squash(repo: &Repo, base: &str, branch: &str, made: Option<&str>) -> Result<(), String> {
     let name = repo.key();
     let main = &base_tree(repo);
     let tree = tree_words(repo, main);
@@ -1530,11 +1535,14 @@ fn reset_squash(repo: &Repo, base: &str, branch: &str) -> Result<(), String> {
     if git(main, &["rev-parse", "--verify", "-q", "HEAD~1"]).is_err() {
         return Err(not_squash());
     }
-    let fork = git(main, &["merge-base", "HEAD~1", branch])?;
-    let squash = patch::diff_id(main, "HEAD~1", "HEAD")?;
-    let feature = patch::diff_id(main, fork.trim(), branch)?;
-    if squash.is_empty() || squash != feature {
-        return Err(not_squash());
+    let head = git(main, &["rev-parse", "HEAD"])?;
+    if made != Some(head.trim()) {
+        let fork = git(main, &["merge-base", "HEAD~1", branch])?;
+        let squash = patch::diff_id(main, "HEAD~1", "HEAD")?;
+        let feature = patch::diff_id(main, fork.trim(), branch)?;
+        if squash.is_empty() || squash != feature {
+            return Err(not_squash());
+        }
     }
     // Origin as it is now: a push from another clone counts too.
     if let Err(failed) = git_ops::fetch_branch(main, "origin", base) {
@@ -2272,6 +2280,29 @@ esac
         assert_eq!(unpushed(&f), Some(1));
         run(&f.repos[0].main, &["push", "-q", "origin", "main"]);
         assert_eq!(unpushed(&f), Some(0));
+    }
+
+    #[test]
+    fn a_squash_a_hook_changed_comes_off_by_its_commit_after_the_branch_moved() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "x", "feature");
+        mark_all(&mut f);
+        let main = f.repos[0].main.clone();
+        let hook = main.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho formatted >> x && git add x\n").unwrap();
+        std::fs::set_permissions(&hook, PermissionsExt::from_mode(0o755)).unwrap();
+        let check = planned(&f, &Modes::default());
+        let done = squash(&f, &squash_trees(&f, &check.actions, None), "m");
+        assert!(done.failed.is_none(), "{:?}", done.failed);
+        let made = done.went[0].1.clone();
+        // A fix on the branch since, as a Build fix round makes.
+        commit(&wt(&f, "api"), "y", "fix");
+        let err = reset_squash(&f.repos[0], "main", "feature/f", None).unwrap_err();
+        assert!(err.contains("isn't the feature's squash"), "{err}");
+        reset_squash(&f.repos[0], "main", "feature/f", Some(&made)).unwrap();
+        assert_ne!(run(&main, &["rev-parse", "HEAD"]).trim(), made);
     }
 
     #[test]
@@ -3207,7 +3238,7 @@ esac
         // there, through the other feature's guard, which stays.
         let done = squash(&f, &trees, "squash");
         assert!(done.failed.is_none(), "{:?}", done.failed);
-        reset_squash(&f.repos[0], "main", "feature/f").unwrap();
+        reset_squash(&f.repos[0], "main", "feature/f", None).unwrap();
         run(&other, &["merge", "-q", "--squash", "feature/f"]);
         run(&other, &["commit", "-q", "-m", "squash"]);
         hook::guard(&main, "main").unwrap();

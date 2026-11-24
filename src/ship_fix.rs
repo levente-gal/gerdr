@@ -13,7 +13,7 @@ use crate::{
 
 /// What a fix round from a Ship problem is about, in its toasts, log and
 /// file names.
-const WHAT: &str = "Ship problem";
+const WHAT: &str = "Ship problems";
 
 /// Whether `why` says a git hook here refused it: the feature's code is
 /// what such a hook checks, so the Build agent fixes it. A hook on origin
