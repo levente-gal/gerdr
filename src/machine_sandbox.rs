@@ -101,6 +101,8 @@ pub(crate) struct ThereJob {
     env: Vec<(String, String)>,
     /// Ports other sandboxes hold there, though stopped.
     taken: Vec<u16>,
+    /// Ports leading out of it to that machine (`workflow.sandbox_outside`).
+    outside: Vec<u16>,
 }
 
 /// `repos`, as named on the machine `paths` lead to.
@@ -202,6 +204,7 @@ impl ThereJob {
             prepare: &prepare,
             env: &self.env,
             taken: &self.taken,
+            outside: &self.outside,
             stop,
         };
         sandbox_run::start(&job, progress)
@@ -915,6 +918,7 @@ impl Gerdr {
         id: &str,
         env: &BTreeMap<String, String>,
         taken: Vec<u16>,
+        outside: Vec<u16>,
     ) -> Option<ThereJob> {
         let remote = self.machine_remote(id, feature)?;
         let on = |lines: Vec<SandboxLine>| -> Vec<SandboxLine> {
@@ -929,6 +933,7 @@ impl Gerdr {
             feature: feature.clone(),
             env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             taken,
+            outside,
         })
     }
 

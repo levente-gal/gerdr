@@ -445,6 +445,10 @@ pub struct Forward {
     /// The port the copy publishes on the loopback addresses.
     pub host_port: u16,
     pub udp: bool,
+    /// It leads out of the sandbox to `host_port` on its machine: a port of
+    /// `workflow.sandbox_outside`, not a copy's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outside: bool,
 }
 
 /// A named volume of main's to copy.
@@ -680,6 +684,7 @@ fn rewrite_ports(
             main_port,
             host_port,
             udp,
+            outside: false,
         });
         for address in ["127.0.0.1", "::1"] {
             let mut copy = port.clone();
@@ -1340,6 +1345,7 @@ mod tests {
                 main_port: 5433,
                 host_port: 41001,
                 udp: false,
+                outside: false,
             }]
         );
         let ports = out.compose["services"]["db"]["ports"].as_array().unwrap();
@@ -1569,12 +1575,14 @@ mod tests {
                 main_port: 5433,
                 host_port: 41001,
                 udp: false,
+                outside: false,
             },
             Forward {
                 service: "r".to_owned(),
                 main_port: 6379,
                 host_port: 41002,
                 udp: false,
+                outside: false,
             },
         ];
         assert_eq!(pasta_spec(&forwards, false), "5433:41001,6379:41002");
