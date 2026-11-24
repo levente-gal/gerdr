@@ -4640,10 +4640,15 @@ impl Painter {
                         run(part.start, part.end, if plain { p.text } else { color });
                     }
                 };
+                // The row's own ground: code's colours are made to read on it.
+                let ground = match tone {
+                    Some(tone) => lighten(mix(p.elevated, tone, DIFF_TINT)),
+                    None => lighten(p.elevated),
+                };
                 let mut at = 0;
                 for (range, kind) in &line.syntax {
                     run(at, range.start, p.text);
-                    run(range.start, range.end, p.code(*kind));
+                    run(range.start, range.end, p.code_on(*kind, ground));
                     at = range.end;
                 }
                 run(at, usize::MAX, p.text);
@@ -4688,11 +4693,6 @@ impl Painter {
                 }
                 // Cut at the row's end, or shown from a char on: marked.
                 let mark_w = (self.mono_width("›", code_font_size(), scale)).ceil();
-                let ground = match tone {
-                    Some(tone) => lighten(mix(p.elevated, tone, DIFF_TINT)),
-                    None if lit.is_some() => lighten(p.elevated),
-                    None => p.elevated,
-                };
                 if tx + width(&line.text) > bend {
                     let x = bend - mark_w;
                     c.fill(x as i32, y, mark_w as i32 + 1, h, ground);
