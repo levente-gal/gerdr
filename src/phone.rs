@@ -450,6 +450,7 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
         "/api/new" => "create",
         "/api/press" => "press",
         "/api/send-back" => "send-back",
+        "/api/answer" => "answer",
         "/api/agent" => {
             let (pane, line, key) = (text("pane"), text("text"), text("key"));
             return agent_input(&project, &slug, &pane, &line, &key);
@@ -467,6 +468,20 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
     match gerdr_within(Some(&project), &request, time) {
         Ok(answer) => Reply::json(&answer),
         Err(why) => Reply::error(502, &why),
+    }
+}
+
+/// The permission the agent in `pane` of `project` asks for on gerdr's card,
+/// if it waits on one; gerdr holds its asks for the phone while it reads
+/// the pane. None without a gerdr to ask.
+fn pane_ask(project: &str, pane: &str) -> Value {
+    let request = json!({ "op": "ask", "project": project, "pane": pane });
+    match gerdr(Some(project), &request) {
+        Ok(answer) => answer["ask"].clone(),
+        Err(why) => {
+            tracing::debug!("phone: the ask of pane {pane}: {why}");
+            Value::Null
+        }
     }
 }
 
@@ -1026,7 +1041,8 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             Ok(screen) => {
                 let said = chat_tail(path, CHAT_TAIL).unwrap_or_default();
                 let text = format!("{said}\n\n{}\n{screen}", "─".repeat(30));
-                Reply::json(&json!({ "label": label, "text": text, "more": false }))
+                let ask = pane_ask(&project.id, pane);
+                Reply::json(&json!({ "label": label, "text": text, "more": false, "ask": ask }))
             }
             Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
         };
@@ -1045,7 +1061,8 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             // The rows above its screen, wrapped: at worst one more read, of all.
             let more = chat.is_some()
                 || (!all && rows.is_some_and(|rows| rows > text.lines().count() as u64));
-            Reply::json(&json!({ "label": label, "text": text, "more": more }))
+            let ask = pane_ask(&project.id, pane);
+            Reply::json(&json!({ "label": label, "text": text, "more": more, "ask": ask }))
         }
         Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
     }

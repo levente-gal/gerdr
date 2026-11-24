@@ -77,7 +77,18 @@ pub fn find(agent: &AgentInfo, homes: &Homes) -> Result<Source, String> {
                 AgentKind::Codex => codex_rollout(&session.value, &homes.codex),
                 _ => None,
             };
-            let path = path.ok_or(NOT_FOUND)?;
+            let unwritten = |under: &[PathBuf]| not_written(&session.value, under);
+            let path = match (path, kind) {
+                (Some(path), _) => path,
+                // Claude names its chat at start, before writing a line.
+                (None, AgentKind::Claude) if unwritten(&claude_projects(&homes.claude)) => {
+                    return Err(NOT_YET.into());
+                }
+                (None, AgentKind::Codex) if unwritten(&[homes.codex.join("sessions")]) => {
+                    return Err(NOT_YET.into());
+                }
+                (None, _) => return Err(NOT_FOUND.into()),
+            };
             let stem = (path.file_stem().and_then(|s| s.to_str())).ok_or(NOT_FOUND)?;
             // A rollout is `rollout-<yyyy-mm-ddThh-mm-ss>-<id>`.
             let id = match kind {
@@ -178,8 +189,43 @@ fn locate(
 /// `path` as it really is, if it is a Claude transcript: a regular
 /// `.jsonl` file under `projects/` of one of the config folders `homes`.
 fn claude_transcript(path: &str, homes: &[PathBuf]) -> Option<PathBuf> {
-    let projects: Vec<PathBuf> = homes.iter().map(|home| home.join("projects")).collect();
-    transcript(path, &projects, |_| true)
+    transcript(path, &claude_projects(homes), |_| true)
+}
+
+/// Where Claude keeps its transcripts under each of its `homes`.
+fn claude_projects(homes: &[PathBuf]) -> Vec<PathBuf> {
+    homes.iter().map(|home| home.join("projects")).collect()
+}
+
+/// Whether `path` names a `.jsonl` file not written yet under one of
+/// folders `under`: the folders on its way that are there lead into one
+/// (no link or `..` out), and the file isn't there.
+fn not_written(path: &str, under: &[PathBuf]) -> bool {
+    let path = Path::new(path);
+    if !path.is_absolute() || path.exists() || path.extension().is_none_or(|ext| ext != "jsonl") {
+        return false;
+    }
+    // The nearest folder on its way that is there, as it really is, and
+    // the plain names after it.
+    let mut rest = Vec::new();
+    let mut at = path;
+    let real = loop {
+        let Some(name) = at.file_name() else {
+            return false;
+        };
+        rest.push(name);
+        let Some(parent) = at.parent() else {
+            return false;
+        };
+        if let Ok(real) = parent.canonicalize() {
+            break real;
+        }
+        at = parent;
+    };
+    let real = rest.iter().rev().fold(real, |path, name| path.join(name));
+    (under.iter())
+        .filter_map(|dir| dir.canonicalize().ok())
+        .any(|dir| real.starts_with(dir))
 }
 
 /// `path` as it really is, if it is a Codex rollout: a regular
@@ -211,6 +257,33 @@ fn transcript(path: &str, under: &[PathBuf], name_ok: impl Fn(&str) -> bool) -> 
 pub(crate) mod tests {
     use super::*;
     use crate::herdr::AgentSession;
+
+    #[test]
+    fn a_claude_chat_named_before_its_first_line_is_not_written_yet() {
+        let dir = std::env::temp_dir().join(format!("gerdr-nw-{}", std::process::id()));
+        let claude = dir.join(".claude");
+        std::fs::create_dir_all(claude.join("projects")).unwrap();
+        let homes = Homes {
+            claude: vec![claude.clone()],
+            ..Homes::under(&dir)
+        };
+        // Its project's folder isn't there either yet.
+        let path = claude.join("projects/-new/s1.jsonl");
+        let found = find(&agent("claude", "path", path.to_str().unwrap()), &homes);
+        assert_eq!(found, Err(NOT_YET.into()));
+        // Out of Claude's folders, or through `..`: not its chat.
+        let out = dir.join("elsewhere/s1.jsonl");
+        assert_eq!(
+            find(&agent("claude", "path", out.to_str().unwrap()), &homes),
+            Err(NOT_FOUND.into())
+        );
+        let sneaky = claude.join("projects/../../x/s1.jsonl");
+        assert_eq!(
+            find(&agent("claude", "path", sneaky.to_str().unwrap()), &homes),
+            Err(NOT_FOUND.into())
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     pub(crate) fn agent(name: &str, kind: &str, value: &str) -> AgentInfo {
         let info = serde_json::json!({

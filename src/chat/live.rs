@@ -30,6 +30,9 @@ mod serve;
 /// How long an ask waits for an answer from the chat before the agent's TUI
 /// asks itself.
 pub const ASK_WAIT: Duration = Duration::from_secs(60);
+/// How long after a phone last read an agent pane (it reads a shown one
+/// every 2 s) its asks still wait on the phone's card.
+pub const PHONE_SIGHT: Duration = Duration::from_secs(5);
 /// How long a hook waits on gerdr for anything but an ask's answer.
 const SEND_WAIT: Duration = Duration::from_millis(500);
 /// The most of one line gerdr reads from a connection.
@@ -161,6 +164,23 @@ pub struct HeldAsk {
     /// The running call it asks for, as its tool and line match: once that
     /// call ends, the TUI's own prompt answered it (`settled_by`).
     pub call: Option<String>,
+    /// What it asks, for the phone view (the pane's chat may never have
+    /// shown here).
+    pub asked: PendingAsk,
+}
+
+/// The running call an ask for `tool` running `gist` is for: the oldest of
+/// those that match, but those other asks wait for (`claimed`). Claude
+/// asks for calls made side by side one after the other, in order.
+pub fn asked_call(
+    running: &[Running],
+    tool: &str,
+    gist: &str,
+    claimed: &[String],
+) -> Option<String> {
+    (running.iter())
+        .find(|r| r.name == tool && r.gist == gist && !claimed.contains(&r.call))
+        .map(|r| r.call.clone())
 }
 
 /// Whether `what`, heard from the pane of ask `held`, says the ask was
@@ -186,6 +206,9 @@ pub struct Hub {
     pub asks: HashMap<String, HeldAsk>,
     /// The id the next connection gets.
     pub next_conn: u64,
+    /// When a phone last showed each agent pane: its asks wait on the
+    /// phone's card too, for `PHONE_SIGHT` after.
+    pub phone_seen: HashMap<String, Instant>,
     /// The files gerdr changed to be told (`install`), this run: the hooks
     /// are added once a run, the first time a chat shows.
     pub installed: bool,
@@ -579,12 +602,40 @@ mod tests {
     }
 
     #[test]
+    fn an_ask_is_for_the_oldest_matching_call_not_asked_for_yet() {
+        let run = |call: &str, gist: &str| Running {
+            call: call.into(),
+            name: "Bash".into(),
+            gist: gist.into(),
+            since_ms: 0,
+        };
+        let running = [run("a", "ls"), run("b", "rm x"), run("c", "rm x")];
+        assert_eq!(asked_call(&running, "Bash", "rm x", &[]), Some("b".into()));
+        assert_eq!(
+            asked_call(&running, "Bash", "rm x", &["b".into()]),
+            Some("c".into())
+        );
+        assert_eq!(
+            asked_call(&running, "Bash", "rm x", &["b".into(), "c".into()]),
+            None
+        );
+        assert_eq!(asked_call(&running, "Edit", "ls", &[]), None);
+    }
+
+    #[test]
     fn an_ask_is_settled_by_its_calls_end_or_the_turns() {
         let held = HeldAsk {
             pane: "w1:p2".into(),
             conn: 0,
             stream: UnixStream::pair().unwrap().0,
             call: Some("c1".into()),
+            asked: PendingAsk {
+                ask: "q".into(),
+                tool: "Bash".into(),
+                gist: "rm x".into(),
+                input: String::new(),
+                since: Instant::now(),
+            },
         };
         let end = |call: &str| What::ToolEnd {
             call: call.into(),

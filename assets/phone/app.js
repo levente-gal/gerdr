@@ -624,8 +624,13 @@ async function pane(p, s, id) {
     .replace(/([─━═▀▄])\1{29,}/g, (_, c) => c.repeat(30));
   const text = readable(new AnsiUp().ansi_to_html(raw));
   const above = depth.more ? `<div class="above quiet small">Scroll up for earlier output</div>` : "";
+  // A permission its agent asks for on gerdr's card: answered here too.
+  const a = d.ask;
+  const ask = a ? `<div class="ask"><div class="what"><b>${esc(a.tool)}</b> <code>${esc(a.gist)}</code></div>
+      <details><summary class="quiet small">What it would run</summary><pre class="input">${esc(a.input)}</pre></details>
+      <div class="buttons"><button class="primary" data-answer="allow" data-ask="${esc(a.ask)}">Allow</button><button data-answer="deny" data-ask="${esc(a.ask)}">Deny</button></div></div>` : "";
   return { title: d.label, back: href("f", p, s), html: `${above}<pre class="term">${text}</pre>`, pane: true,
-    bar: `<form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
+    bar: `${ask}<form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
         <button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button></div>` };
@@ -797,7 +802,7 @@ document.addEventListener("pointerdown", (e) => {
 });
 
 document.addEventListener("click", async (e) => {
-  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push]");
+  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push], button[data-answer]");
   if (!b || b.disabled) return;
   const [, p, s, pane] = here();
   // The feature's page names its stage where the address does.
@@ -827,6 +832,10 @@ document.addEventListener("click", async (e) => {
       const box = document.getElementById("backText");
       if (!box.value.trim() && b.dataset.lines === "0") { say([{ text: "Say what should change" }], true); return; }
       if (await ask("/api/send-back", { p, s, text: box.value })) { box.value = ""; fit(box); }
+    } else if (b.dataset.answer) {
+      const a = await post("/api/answer", { p, s, pane, ask: b.dataset.ask, reply: b.dataset.answer });
+      if (a.error) say([{ text: a.error }], true);
+      setTimeout(() => render(false, true), 400);
     } else if (b.dataset.key) {
       if (b.dataset.key === "close" &&
           !(await sheetAsk({ title: `Close ${titleEl.textContent}?`, body: "Its tab closes, as on the desktop.", go: "Close" }))) return;

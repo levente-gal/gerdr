@@ -89,6 +89,17 @@ pub enum Request {
     },
     /// What a new feature of each project may start on: Discover's agents.
     NewOffer { projects: Vec<String> },
+    /// The phone shows agent pane `pane` of `project`: the permission its
+    /// agent asks for, if it waits on one (see `chat::live`). Its asks wait
+    /// on the phone's card while it shows the pane.
+    Ask { project: String, pane: String },
+    /// Answer ask `ask` of agent pane `pane`: allow or deny it.
+    Answer {
+        project: String,
+        pane: String,
+        ask: String,
+        reply: crate::chat::live::AskReply,
+    },
     /// Start a feature, and its Discover agent: answered once both are.
     Create {
         project: String,
@@ -288,6 +299,18 @@ impl Gerdr {
                 stage,
             } => self.phone_offer(&project, &slug, stage),
             Request::Cards { features } => self.phone_cards(&features),
+            Request::Ask { pane, .. } => {
+                let asked = self.phone_ask(&pane).map(
+                    |a| json!({ "ask": a.ask, "tool": a.tool, "gist": a.gist, "input": a.input }),
+                );
+                json!({ "ask": asked })
+            }
+            Request::Answer {
+                pane, ask, reply, ..
+            } => match self.phone_answer(&pane, &ask, reply) {
+                true => json!({ "ok": true }),
+                false => json!({ "error": "It was answered already" }),
+            },
             Request::Press {
                 project,
                 slug,
@@ -379,6 +402,22 @@ mod tests {
             serde_json::from_str(r#"{"op":"cards","features":[["p","s"]]}"#).expect("cards");
         let features = vec![("p".to_owned(), "s".to_owned())];
         assert_eq!(cards, Request::Cards { features });
+        // The phone sends the feature's slug too: not needed for an ask.
+        let ask: Request =
+            serde_json::from_str(r#"{"op":"ask","project":"p","slug":"s","pane":"w1:p2"}"#)
+                .expect("ask");
+        assert!(matches!(ask, Request::Ask { pane, .. } if pane == "w1:p2"));
+        let answer: Request = serde_json::from_str(
+            r#"{"op":"answer","project":"p","slug":"s","pane":"w1:p2","ask":"q1","reply":"deny"}"#,
+        )
+        .expect("answer");
+        assert!(matches!(
+            answer,
+            Request::Answer {
+                reply: crate::chat::live::AskReply::Deny,
+                ..
+            }
+        ));
         let create: Request = serde_json::from_str(
             r#"{"op":"create","project":"p","slug":"","title":"Bulk edit","repos":["api"]}"#,
         )

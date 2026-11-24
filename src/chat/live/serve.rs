@@ -10,8 +10,8 @@ use smithay::reexports::calloop::{
 };
 
 use super::{
-    ASK_WAIT, Answer, AskReply, Changed, HeldAsk, LiveEvent, PendingAsk, SOURCE, What, claude,
-    opencode,
+    ASK_WAIT, Answer, AskReply, Changed, HeldAsk, LiveEvent, PHONE_SIGHT, PendingAsk, SOURCE, What,
+    claude, opencode,
 };
 use crate::{
     Gerdr, ai_work::AgentKind, chat::view::chat_mut, herdr::AgentInfo, herdr::AgentSession,
@@ -134,29 +134,33 @@ impl Gerdr {
                 let Some(mut stream) = stream else {
                     return;
                 };
-                // Nobody sees the chat: the TUI asks, at once.
-                if !self.chat_in_sight(&pane) {
+                // Nobody sees the chat, here or on a phone: the TUI asks, at once.
+                if !self.ask_in_sight(&pane) {
                     let reply = AskReply::Pass;
                     return super::answer(&mut stream, &Answer { ask, reply });
                 }
+                let claimed: Vec<String> = (self.chats.live.asks.values())
+                    .filter_map(|held| held.call.clone())
+                    .collect();
+                let asked = PendingAsk {
+                    ask: ask.clone(),
+                    tool,
+                    gist,
+                    input,
+                    since: std::time::Instant::now(),
+                };
                 let mut call = None;
                 if let Some(chat) = chat_mut(&mut self.workspaces, &pane) {
-                    call = (chat.live.running.iter().rev())
-                        .find(|r| r.name == tool && r.gist == gist)
-                        .map(|r| r.call.clone());
-                    chat.live.ask = Some(PendingAsk {
-                        ask: ask.clone(),
-                        tool,
-                        gist,
-                        input,
-                        since: std::time::Instant::now(),
-                    });
+                    call =
+                        super::asked_call(&chat.live.running, &asked.tool, &asked.gist, &claimed);
+                    chat.live.ask = Some(asked.clone());
                 }
                 let held = HeldAsk {
                     pane: pane.clone(),
                     conn,
                     stream,
                     call,
+                    asked,
                 };
                 self.chats.live.asks.insert(ask.clone(), held);
                 // Looked at every `ASK_LOOK`: one that waited `ASK_WAIT`, or
@@ -167,7 +171,7 @@ impl Gerdr {
                     let Some(pane) = state.chats.live.asks.get(&ask).map(|h| h.pane.clone()) else {
                         return TimeoutAction::Drop;
                     };
-                    if since.elapsed() < ASK_WAIT && state.chat_in_sight(&pane) {
+                    if since.elapsed() < ASK_WAIT && state.ask_in_sight(&pane) {
                         return TimeoutAction::ToDuration(ASK_LOOK);
                     }
                     state.live_answer(&ask, AskReply::Pass);
@@ -260,9 +264,40 @@ impl Gerdr {
     /// The asks of chats no longer in sight go back to their TUIs (called
     /// as `chats_sync` ends).
     pub(crate) fn live_release_hidden(&mut self) {
-        for ask in hidden_asks(&self.chats.live.asks, &self.chats.followed) {
+        let hidden = hidden_asks(&self.chats.live.asks, |pane| self.ask_in_sight(pane));
+        for ask in hidden {
             self.live_answer(&ask, AskReply::Pass);
         }
+    }
+
+    /// Whether an ask of agent pane `pane` can be answered on a card: its
+    /// chat shows here (`chat_in_sight`), or a phone showed the pane lately.
+    fn ask_in_sight(&self, pane: &str) -> bool {
+        let phone =
+            (self.chats.live.phone_seen.get(pane)).is_some_and(|at| at.elapsed() < PHONE_SIGHT);
+        phone || self.chat_in_sight(pane)
+    }
+
+    /// The phone shows agent pane `pane` now: the ask waiting on it, if any,
+    /// for its card. Asks wait on the phone's card while it does.
+    pub(crate) fn phone_ask(&mut self, pane: &str) -> Option<PendingAsk> {
+        let now = std::time::Instant::now();
+        let seen = &mut self.chats.live.phone_seen;
+        seen.retain(|_, at| now.duration_since(*at) < PHONE_SIGHT);
+        seen.insert(pane.to_owned(), now);
+        (self.chats.live.asks.values())
+            .find(|held| held.pane == pane)
+            .map(|held| held.asked.clone())
+    }
+
+    /// The phone answered ask `ask` of agent pane `pane` with `reply`:
+    /// whether it still waited.
+    pub(crate) fn phone_answer(&mut self, pane: &str, ask: &str, reply: AskReply) -> bool {
+        let waits = (self.chats.live.asks.get(ask)).is_some_and(|held| held.pane == pane);
+        if waits {
+            self.live_answer(ask, reply);
+        }
+        waits
     }
 
     /// `agent` with the session heard live, when herdr names none.
@@ -360,14 +395,12 @@ impl Gerdr {
     }
 }
 
-/// The asks of `asks` whose pane's chat isn't `followed` (shown, in sight):
-/// flipped to its screen, closed, or in a tab out of sight.
-fn hidden_asks(
-    asks: &HashMap<String, HeldAsk>,
-    followed: &HashMap<String, Option<AgentSession>>,
-) -> Vec<String> {
+/// The asks of `asks` whose pane isn't `in_sight`: its chat flipped to its
+/// screen, closed, in a tab out of sight or under a panel, and no phone on
+/// it.
+fn hidden_asks(asks: &HashMap<String, HeldAsk>, in_sight: impl Fn(&str) -> bool) -> Vec<String> {
     (asks.iter())
-        .filter(|(_, held)| !followed.contains_key(&held.pane))
+        .filter(|(_, held)| !in_sight(&held.pane))
         .map(|(ask, _)| ask.clone())
         .collect()
 }
@@ -425,13 +458,19 @@ mod tests {
             conn: 0,
             stream: UnixStream::pair().unwrap().0,
             call: None,
+            asked: PendingAsk {
+                ask: "q".into(),
+                tool: "Bash".into(),
+                gist: "ls".into(),
+                input: String::new(),
+                since: std::time::Instant::now(),
+            },
         };
         let asks = HashMap::from([
             ("a".to_owned(), held("w1:p1")),
             ("b".to_owned(), held("w1:p2")),
         ]);
-        let followed = HashMap::from([("w1:p1".to_owned(), None)]);
-        assert_eq!(hidden_asks(&asks, &followed), ["b"]);
-        assert_eq!(hidden_asks(&asks, &HashMap::new()).len(), 2);
+        assert_eq!(hidden_asks(&asks, |pane| pane == "w1:p1"), ["b"]);
+        assert_eq!(hidden_asks(&asks, |_| false).len(), 2);
     }
 }
