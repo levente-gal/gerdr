@@ -346,6 +346,7 @@ fn check(blockers: &[&str], repos: &[&str], notes: &[&str]) -> Option<ShipCheck>
         head: None,
         pushed: None,
         reattach: false,
+        unpushed: None,
     };
     Some(ShipCheck {
         blockers: blockers.iter().map(|b| (*b).to_owned()).collect(),

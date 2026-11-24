@@ -2720,6 +2720,126 @@ fn checks_failing_on_a_pull_request_go_to_build_from_its_card() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+#[test]
+fn a_base_merged_here_only_and_a_stopped_ship_say_so_with_their_fixes() {
+    use crate::feature::{RepoPlan, ShipDone, ShipProblem};
+    let root = std::env::temp_dir().join(format!("gerdr-ship-local-{}", std::process::id()));
+    let mut r = repo("api", true);
+    r.worktree = root.join("api");
+    std::fs::create_dir_all(&r.worktree).unwrap();
+    let mut f = feature("s", vec![r], Stage::ALL.len());
+    f.status = Status::Done;
+    // Squashed into main here, its push left unticked.
+    f.ship_plan
+        .repos
+        .insert("api".into(), RepoPlan::new(Route::Merge));
+    f.ship_ran(ShipDone {
+        at: 1_900,
+        repo: "api".into(),
+        step: ShipStep::Merge,
+        sha: Some("sq".into()),
+        url: None,
+        undone: None,
+    });
+    let mut found = check(&[], &["api"], &[]).unwrap();
+    found.repos[0].route = Route::Merge;
+    found.repos[0].merged = true;
+    found.repos[0].unpushed = Some(1);
+    let p = probe(Some(found));
+    let ctx = RowCtx {
+        ship_read: true,
+        ..RowCtx::default()
+    };
+    let state = PanelState {
+        probe: Some(&p),
+        ..PanelState::default()
+    };
+    let page = |f: &Feature, p: &Probe| {
+        let mut actions = page_actions(f, Stage::Ship, ctx);
+        actions.extend(round_plan_actions(f, Stage::Ship, Some(p)));
+        let state = PanelState {
+            probe: Some(p),
+            ..PanelState::default()
+        };
+        (stage_page(f, Stage::Ship, &state, &actions, 2_000), actions)
+    };
+    let (shown, actions) = page(&f, &p);
+    let card = |sections: &[PageSection]| {
+        (sections.iter())
+            .find_map(|s| match s {
+                PageSection::ShipGroup(g) if g.head == "api" => g.card.clone(),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let api = card(&shown.sections);
+    assert_eq!(api.dot, Dot::Blocked);
+    assert_eq!(
+        api.state,
+        line(
+            "merged into main here only: not on origin",
+            CheckTone::Blocker
+        )
+    );
+    let held: Vec<&str> = (api.buttons.iter())
+        .map(|b| actions[*b].0.label.as_str())
+        .collect();
+    assert_eq!(held, ["Push main\u{2026}"]);
+    let lines = check_lines(&f, Some(&p), false, 2_000);
+    assert_eq!(
+        lines[0],
+        line(
+            "Merged here only, not on origin: main of api",
+            CheckTone::Blocker
+        )
+    );
+    assert!(
+        !lines.iter().any(|l| l.text.starts_with("Next:")),
+        "{lines:?}"
+    );
+    // Pushed by hand: shipped as far as origin knows.
+    let mut pushed = p.clone();
+    if let Some(check) = pushed.ship.as_mut() {
+        check.repos[0].unpushed = Some(0);
+    }
+    let (_, actions) = page(&f, &pushed);
+    assert!(
+        !actions
+            .iter()
+            .any(|(_, o)| matches!(o, PanelOutcome::PushBase(_)))
+    );
+    let first = check_lines(&f, Some(&pushed), false, 2_000).remove(0);
+    assert_eq!(
+        first,
+        line("Shipped: every step ticked ran", CheckTone::Note)
+    );
+    // Shipping stopped: why, and an agent to fix it, planned first.
+    f.shipping.problem = Some(ShipProblem {
+        at: 1_950,
+        why: "Couldn't push main of api: Updates were rejected".into(),
+    });
+    let (shown, actions) = page(&f, &p);
+    let stopped = (shown.sections.iter())
+        .position(|s| matches!(s, PageSection::Lines { label, .. } if label == "Shipping stopped"));
+    let stopped = stopped.expect("a Shipping stopped section");
+    let PageSection::Toolbar { groups } = &shown.sections[stopped + 1] else {
+        panic!("its buttons follow it");
+    };
+    let labels: Vec<&str> = (groups[0].1.iter())
+        .map(|b| actions[*b].0.label.as_str())
+        .collect();
+    assert_eq!(labels, ["Plan fix", "Fix directly"]);
+    assert_eq!(
+        keys_what(&f, ctx, &p, "Ctrl+Shift+Enter"),
+        "plan fix",
+        "{:?}",
+        ship_keys(&f, ctx, Some(&p), None)
+    );
+    assert_eq!(keys_what(&f, ctx, &p, "Ctrl+Enter"), "fix directly");
+    drop(state);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// What the footer says of `chord` on Ship's page of `f`.
 fn keys_what(f: &Feature, ctx: RowCtx, p: &Probe, chord: &str) -> String {
     (ship_keys(f, ctx, Some(p), None).into_iter())

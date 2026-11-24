@@ -601,6 +601,24 @@ pub fn classify(stderr: &str, stdout: &str) -> Failure {
     Failure::Other
 }
 
+/// The hook that refused `command` (a git shell line), as its output says:
+/// a push that failed with no ref refused by the remote, or a commit that
+/// failed with nothing of git's own, stopped in a hook here. git names no
+/// hook then: the hook's own lines are all there is.
+fn hook_refused(command: &str, stderr: &str, stdout: &str) -> Option<&'static str> {
+    let text = format!("{stderr}\n{stdout}");
+    let git_said = (text.lines().map(str::trim))
+        .any(|l| l.starts_with("! [") || l.starts_with("fatal:") || l.starts_with("remote:"));
+    if git_said || text.contains("nothing to commit") || text.contains("nothing added to commit") {
+        return None;
+    }
+    match command {
+        c if c.starts_with("git push ") => Some("a pre-push hook"),
+        c if c.starts_with("git commit ") => Some("a commit hook"),
+        _ => None,
+    }
+}
+
 /// The branch gerdr's pre-push hook refused, from its "gerdr: <branch> is
 /// a gerdr feature's branch" (`feature::hook::HOOK`).
 fn guarded(text: &str) -> Option<String> {
@@ -813,6 +831,11 @@ impl<'a> Op<'a> {
         let mut why = why(&out.stderr, &out.stdout);
         if why.is_empty() {
             why = format!("{} failed", out.ran.command);
+        }
+        if failure == Failure::Other
+            && let Some(hook) = hook_refused(&out.ran.command, &out.stderr, &out.stdout)
+        {
+            why = format!("{hook} refused it: {why}");
         }
         log_failed(self.dir, &log);
         Failed { failure, why, log }
@@ -2114,6 +2137,40 @@ pub fn set_identity(roots: &[PathBuf], global: bool, who: &Identity) -> Result<(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::hook_refused;
+
+    #[test]
+    fn a_local_hooks_refusal_is_named_and_gits_own_is_not() {
+        let failed = "error: failed to push some refs to '/o/web.git'";
+        let lint =
+            format!("lint: 2 errors in app.ts\nhusky - pre-push script failed (code 1)\n{failed}");
+        assert_eq!(
+            hook_refused("git push origin main", &lint, ""),
+            Some("a pre-push hook")
+        );
+        let remote =
+            format!(" ! [remote rejected] main -> main (pre-receive hook declined)\n{failed}");
+        assert_eq!(hook_refused("git push origin main", &remote, ""), None);
+        let net = "fatal: unable to access 'https://x/': Could not resolve host: x";
+        assert_eq!(hook_refused("git push origin main", net, ""), None);
+        assert_eq!(
+            hook_refused("git commit -m x", "prettier: 1 file failed", ""),
+            Some("a commit hook")
+        );
+        assert_eq!(
+            hook_refused(
+                "git commit -m x",
+                "",
+                "nothing to commit, working tree clean"
+            ),
+            None
+        );
+        assert_eq!(hook_refused("git merge --squash x", "oops", ""), None);
+    }
 }
 
 #[cfg(test)]

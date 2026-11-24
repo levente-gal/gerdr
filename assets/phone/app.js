@@ -630,9 +630,9 @@ async function pane(p, s, id) {
       <details><summary class="quiet small">What it would run</summary><pre class="input">${esc(a.input)}</pre></details>
       <div class="buttons"><button class="primary" data-answer="allow" data-ask="${esc(a.ask)}">Allow</button><button data-answer="deny" data-ask="${esc(a.ask)}">Deny</button></div></div>` : "";
   // While it works, as on gerdr's chat: a row under its output, with its turn's clock.
-  const working = d.working == null ? "" : `<div class="working small"><span class="sdot blink"></span>working
+  const working = d.working == null ? "" : `<div class="work-row small"><span class="sdot blink"></span>working
     <span class="clock" data-since="${turnAt(id, d.working)}"></span></div>`;
-  return { title: d.label, back: href("f", p, s), html: `${above}<pre class="term">${text}</pre>${working}`, pane: true,
+  return { title: d.label, back: href("f", p, s), html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true,
     bar: `${ask}<form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}

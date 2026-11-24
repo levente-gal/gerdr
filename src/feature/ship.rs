@@ -138,6 +138,9 @@ pub struct RepoCheck {
     /// Its worktree is on no branch, and `feature/<slug>` goes back on its
     /// commit losing nothing: Ship does that first (`Action::Reattach`).
     pub reattach: bool,
+    /// Merged: the commits of its base here that origin's base lacks, as
+    /// last fetched; none when that couldn't be read.
+    pub unpushed: Option<usize>,
 }
 
 impl RepoCheck {
@@ -782,9 +785,17 @@ fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) ->
             head,
             pushed: tracking(repo, &branch),
             reattach,
+            unpushed: merged.then(|| unpushed(repo)).flatten(),
         });
     }
     out
+}
+
+/// The commits of `repo`'s base that origin's base lacks, if read.
+fn unpushed(repo: &Repo) -> Option<usize> {
+    let range = format!("origin/{0}..{0}", repo.base);
+    let count = git(&repo.main, &["rev-list", "--count", &range]).ok()?;
+    count.trim().parse().ok()
 }
 
 /// Whether `repo`'s worktree is on no branch (a detached HEAD): then
@@ -1451,7 +1462,10 @@ pub fn run_undo(
         let result = match undo {
             Undo::ClosePr { url, .. } => close_pr(repo, url, gh),
             Undo::DeleteBranch { sha, .. } => delete_branch(repo, &branch, sha.as_deref()),
-            Undo::ResetSquash { base, .. } => reset_squash(repo, base, &branch),
+            Undo::ResetSquash { base, .. } => {
+                let made = feature.ship_done(key, ShipStep::Merge).and_then(|d| d.sha);
+                reset_squash(repo, base, &branch, made.as_deref())
+            }
         };
         match result {
             Ok(()) => undone.push((key.to_owned(), step)),
@@ -1501,8 +1515,10 @@ fn delete_branch(repo: &Repo, branch: &str, sha: Option<&str>) -> Result<(), Str
 
 /// Take the squash of `branch` off `base` in `repo`'s main worktree: only
 /// while it is the last commit there, on `base`, not on origin, the
-/// worktree clean.
-fn reset_squash(repo: &Repo, base: &str, branch: &str) -> Result<(), String> {
+/// worktree clean. The last commit is the squash when it is `made`, the
+/// commit Ship recorded, or else changes what the branch does: a commit
+/// hook may have changed the one, and the branch moved on since.
+fn reset_squash(repo: &Repo, base: &str, branch: &str, made: Option<&str>) -> Result<(), String> {
     let name = repo.key();
     let main = &base_tree(repo);
     let tree = tree_words(repo, main);
@@ -1519,11 +1535,14 @@ fn reset_squash(repo: &Repo, base: &str, branch: &str) -> Result<(), String> {
     if git(main, &["rev-parse", "--verify", "-q", "HEAD~1"]).is_err() {
         return Err(not_squash());
     }
-    let fork = git(main, &["merge-base", "HEAD~1", branch])?;
-    let squash = patch::diff_id(main, "HEAD~1", "HEAD")?;
-    let feature = patch::diff_id(main, fork.trim(), branch)?;
-    if squash.is_empty() || squash != feature {
-        return Err(not_squash());
+    let head = git(main, &["rev-parse", "HEAD"])?;
+    if made != Some(head.trim()) {
+        let fork = git(main, &["merge-base", "HEAD~1", branch])?;
+        let squash = patch::diff_id(main, "HEAD~1", "HEAD")?;
+        let feature = patch::diff_id(main, fork.trim(), branch)?;
+        if squash.is_empty() || squash != feature {
+            return Err(not_squash());
+        }
     }
     // Origin as it is now: a push from another clone counts too.
     if let Err(failed) = git_ops::fetch_branch(main, "origin", base) {
@@ -1740,6 +1759,50 @@ pub fn squash_message(feature: &Feature) -> String {
 pub struct Squashed {
     pub went: Vec<(String, String)>,
     pub failed: Option<(String, String)>,
+    /// Those a commit hook changed as they were committed, by key.
+    pub hooked: Vec<(String, Hooked)>,
+}
+
+/// What a commit hook changed in a squash: the files whose content isn't
+/// the branch's merged, and whether only spacing, line breaks, commas and
+/// semicolons differ, as a formatter changes them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hooked {
+    pub files: Vec<String>,
+    pub layout: bool,
+}
+
+/// What a commit hook changed in the squash of `branch` just committed in
+/// `dir`, against merging it into the commit before (`git merge-tree`):
+/// none when nothing did, or that couldn't be read.
+fn hooked(dir: &Path, branch: &str) -> Option<Hooked> {
+    let merged = git(dir, &["merge-tree", "--write-tree", "HEAD~1", branch]).ok()?;
+    let want = merged.lines().next()?.trim().to_owned();
+    let have = git(dir, &["rev-parse", "HEAD^{tree}"])
+        .ok()?
+        .trim()
+        .to_owned();
+    if want == have {
+        return None;
+    }
+    let names = git(dir, &["diff", "--name-only", &want, &have]).ok()?;
+    let files: Vec<String> = (names.lines())
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    // A file gone or new on one side reads as empty there: content, not layout.
+    let squeezed = |tree: &str, file: &str| {
+        (git(dir, &["show", &format!("{tree}:{file}")]).ok()).map(|text| {
+            (text.chars())
+                .filter(|c| !c.is_whitespace() && !matches!(c, ',' | ';'))
+                .collect::<String>()
+        })
+    };
+    let layout = (files.iter()).all(|f| {
+        let (a, b) = (squeezed(&want, f), squeezed(&have, f));
+        a.is_some() && a == b
+    });
+    Some(Hooked { files, layout })
 }
 
 /// Squash `feature`'s branch into each of `trees` (`squash_trees`) in turn,
@@ -1764,7 +1827,12 @@ pub fn squash(feature: &Feature, trees: &[(String, PathBuf)], msg: &str) -> Squa
             Ok(git(dir, &["rev-parse", "HEAD"])?.trim().to_owned())
         };
         match one() {
-            Ok(sha) => out.went.push((key.clone(), sha)),
+            Ok(sha) => {
+                if let Some(changed) = hooked(dir, &branch) {
+                    out.hooked.push((key.clone(), changed));
+                }
+                out.went.push((key.clone(), sha));
+            }
             Err(why) => {
                 out.failed = Some((key.clone(), why));
                 break;
@@ -1887,7 +1955,10 @@ esac
         std::fs::write(&chained, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
         std::fs::set_permissions(&chained, PermissionsExt::from_mode(0o755)).unwrap();
         let (why, so_far) = open_prs(&f, &check.actions, &gh).unwrap_err();
-        assert_eq!(why, "Couldn't push feature/f of api: lint failed");
+        assert_eq!(
+            why,
+            "Couldn't push feature/f of api: a pre-push hook refused it: lint failed"
+        );
         assert!(so_far.is_empty());
         let guard_file = f.repos[0].main.join(".git/gerdr/guard/feature/f");
         assert_eq!(std::fs::read_to_string(&guard_file).unwrap(), "");
@@ -2151,6 +2222,12 @@ esac
         let check = planned(&f, &Modes::default());
         let done = squash(&f, &squash_trees(&f, &check.actions, None), "Hooked");
         assert!(done.failed.is_none(), "{:?}", done.failed);
+        // It says so: a word added is more than layout.
+        let changed = Hooked {
+            files: vec!["x".into()],
+            layout: false,
+        };
+        assert_eq!(done.hooked, [("api".to_owned(), changed)]);
         f.shipping.squash_at = Some(5);
         f.shipping.squash_repos = vec!["api".into()];
         assert!(
@@ -2162,6 +2239,70 @@ esac
         // Taken back off the base, it isn't.
         run(&main, &["reset", "-q", "--hard", "HEAD~1"]);
         assert!(!probe(&f, &Modes::default()).merged);
+    }
+
+    #[test]
+    fn a_hook_that_only_reformats_the_squash_reads_as_layout_and_none_as_nothing() {
+        let t = Temp::new();
+        let f = feature_over(&t, &["api", "web"], &[]);
+        commit(&wt(&f, "api"), "x", "a b");
+        commit(&wt(&f, "web"), "y", "a b");
+        let api = f.repos[0].main.clone();
+        // Spacing and a trailing comma, as prettier wraps a line.
+        let hook = api.join(".git/hooks/pre-commit");
+        let script = "#!/bin/sh\nprintf 'a\\n  b,\\n' > x && git add x\n";
+        std::fs::write(&hook, script).unwrap();
+        std::fs::set_permissions(&hook, PermissionsExt::from_mode(0o755)).unwrap();
+        let trees: Vec<(String, PathBuf)> = (f.repos.iter())
+            .map(|r| (r.key(), r.main.clone()))
+            .collect();
+        let done = squash(&f, &trees, "m");
+        assert!(done.failed.is_none(), "{:?}", done.failed);
+        let layout = Hooked {
+            files: vec!["x".into()],
+            layout: true,
+        };
+        assert_eq!(done.hooked, [("api".to_owned(), layout)]);
+    }
+
+    #[test]
+    fn a_merged_base_counts_what_origin_lacks_until_pushed() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "x", "feature");
+        mark_all(&mut f);
+        let check = planned(&f, &Modes::default());
+        let done = squash(&f, &squash_trees(&f, &check.actions, None), "m");
+        assert!(done.failed.is_none(), "{:?}", done.failed);
+        f.shipping.squash_shas = done.went.into_iter().collect();
+        let unpushed = |f: &Feature| probe(f, &Modes::default()).ship.unwrap().repos[0].unpushed;
+        assert_eq!(unpushed(&f), Some(1));
+        run(&f.repos[0].main, &["push", "-q", "origin", "main"]);
+        assert_eq!(unpushed(&f), Some(0));
+    }
+
+    #[test]
+    fn a_squash_a_hook_changed_comes_off_by_its_commit_after_the_branch_moved() {
+        let t = Temp::new();
+        let mut f = feature_over(&t, &["api"], &[]);
+        origins(&t, &f);
+        commit(&wt(&f, "api"), "x", "feature");
+        mark_all(&mut f);
+        let main = f.repos[0].main.clone();
+        let hook = main.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho formatted >> x && git add x\n").unwrap();
+        std::fs::set_permissions(&hook, PermissionsExt::from_mode(0o755)).unwrap();
+        let check = planned(&f, &Modes::default());
+        let done = squash(&f, &squash_trees(&f, &check.actions, None), "m");
+        assert!(done.failed.is_none(), "{:?}", done.failed);
+        let made = done.went[0].1.clone();
+        // A fix on the branch since, as a Build fix round makes.
+        commit(&wt(&f, "api"), "y", "fix");
+        let err = reset_squash(&f.repos[0], "main", "feature/f", None).unwrap_err();
+        assert!(err.contains("isn't the feature's squash"), "{err}");
+        reset_squash(&f.repos[0], "main", "feature/f", Some(&made)).unwrap();
+        assert_ne!(run(&main, &["rev-parse", "HEAD"]).trim(), made);
     }
 
     #[test]
@@ -2652,6 +2793,7 @@ esac
             head: None,
             pushed: None,
             reattach: false,
+            unpushed: None,
         };
         assert!(check(squash_blocker(&f.repos[0], &f.branch(), &f.branch())).pulls_base());
         assert_eq!(pull_base(&f.repos[0]), Ok(1));
@@ -2887,6 +3029,7 @@ esac
             head: Some(head.into()),
             pushed: pushed.map(str::to_owned),
             reattach: false,
+            unpushed: None,
         };
         assert!(step_done(&f, &repo("a", Some("a")), ShipStep::Push).is_some());
         assert!(step_done(&f, &repo("b", Some("a")), ShipStep::Push).is_none());
@@ -3095,7 +3238,7 @@ esac
         // there, through the other feature's guard, which stays.
         let done = squash(&f, &trees, "squash");
         assert!(done.failed.is_none(), "{:?}", done.failed);
-        reset_squash(&f.repos[0], "main", "feature/f").unwrap();
+        reset_squash(&f.repos[0], "main", "feature/f", None).unwrap();
         run(&other, &["merge", "-q", "--squash", "feature/f"]);
         run(&other, &["commit", "-q", "-m", "squash"]);
         hook::guard(&main, "main").unwrap();

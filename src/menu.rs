@@ -333,6 +333,8 @@ pub enum MenuAction {
     SetupLog(String, String),
     /// Show what the failed Prepare step of feature `.1`'s sandbox printed.
     SandboxLog(String, String),
+    /// Have an agent plan how to fix why shipping feature `.1` stopped.
+    FixShipProblem(String, String),
     /// Show tab `t` of workspace `w`.
     SwitchTab(usize, usize),
     /// Go back (`true`) or forward to tab `id`, as the back or forward
@@ -673,6 +675,9 @@ impl Gerdr {
             MenuAction::OpenLog => self.open_log(crate::launch::Place::Tab),
             MenuAction::SetupLog(project, slug) => self.open_setup_log(&project, &slug),
             MenuAction::SandboxLog(project, slug) => self.open_sandbox_log(&project, &slug),
+            MenuAction::FixShipProblem(project, slug) => {
+                self.fix_ship_problem(&project, &slug, true);
+            }
             MenuAction::FoldAll(folded) => self.fold_all(folded),
             MenuAction::SwitchTab(w, t) => {
                 self.switch_workspace(w);
