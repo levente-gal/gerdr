@@ -84,10 +84,20 @@ pub fn context(agent: AgentKind, tail: &[u8]) -> Option<Context> {
             let window = info["model_context_window"].as_u64();
             (used > 0).then_some(Context { used, window })
         }),
+        // Each assistant message says what its request sent; pi names no
+        // window.
+        AgentKind::Pi => lines.find_map(|v| {
+            let m = &v["message"];
+            if v["type"] != "message" || m["role"] != "assistant" {
+                return None;
+            }
+            let u = &m["usage"];
+            let used = num(&u["input"]) + num(&u["cacheRead"]) + num(&u["cacheWrite"]);
+            (used > 0).then_some(Context { used, window: None })
+        }),
         AgentKind::Cursor
         | AgentKind::OpenCode
         | AgentKind::T3
-        | AgentKind::Pi
         | AgentKind::Antigravity
         | AgentKind::Unknown => None,
     }
@@ -117,7 +127,7 @@ pub fn read_contexts(feature: &Feature, dir: &Path) -> BTreeMap<Stage, (u32, Con
             let chat = observe::chat(feature, *stage, run, run.session());
             if !matches!(
                 chat.agent,
-                AgentKind::Claude | AgentKind::Codex | AgentKind::Cursor
+                AgentKind::Claude | AgentKind::Codex | AgentKind::Cursor | AgentKind::Pi
             ) {
                 return None;
             }
@@ -288,6 +298,20 @@ mod tests {
         );
         assert_eq!(context(AgentKind::Cursor, tail.as_bytes()), None);
         assert_eq!(context(AgentKind::Codex, b"not json\n"), None);
+        // pi's: its last assistant message's, cached input counted in.
+        let pi = |input: u64| {
+            format!(
+                r#"{{"type":"message","message":{{"role":"assistant","usage":{{"input":{input},"output":9,"cacheRead":100,"cacheWrite":10}}}}}}"#
+            )
+        };
+        let tail = format!("{}\n{}\n", pi(1), pi(5));
+        assert_eq!(
+            context(AgentKind::Pi, tail.as_bytes()),
+            Some(Context {
+                used: 115,
+                window: None
+            })
+        );
     }
 
     /// Protobuf field `n` as bytes: its key, its length, then `body`.

@@ -69,6 +69,10 @@ pub struct Reader {
     waiting: VecDeque<String>,
     /// The steps read, by their index (Antigravity's).
     steps: HashSet<u64>,
+    /// How many items there were after each entry read, by its id, and
+    /// the last entry's id (pi's: a chat is a tree of entries).
+    entries: HashMap<String, usize>,
+    last_entry: Option<String>,
 }
 
 /// A subagent's work: its item, read by a reader of its own.
@@ -97,6 +101,8 @@ impl Reader {
             sub_of: HashMap::new(),
             waiting: VecDeque::new(),
             steps: HashSet::new(),
+            entries: HashMap::new(),
+            last_entry: None,
         }
     }
 
