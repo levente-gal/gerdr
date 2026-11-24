@@ -6,6 +6,7 @@ A web page of your features, for a phone. It shows:
 - each feature's rail as its feature tab draws it (each stage's mark, short line and agent, and the line back to Build), and, from another stage's page, what it waits for: a tap goes to that stage
 - the page of the stage it is at, as the desktop's stage page says it in words: its agent, the stage's file to read (the brief, the plan, the final plan), Build's progress (tap it for the milestones, ticked as they are made), fix rounds (folded: tap one for what it fixes; rounds before the latest fold under Earlier rounds), Verify's checks, AI review's findings, the Ship check. Tap a stage on the rail for its page. Latest files lists a stage's files: the fix plan and Verify's evidence unfold in place, the fix plan open while it waits to be made; the others (decisions, research, the build log) open on their own page
 - its history, folded: the last event shows, tap for the latest 50
+- the agents of workspaces that aren't a feature's, under Agents in <project> below the features, those waiting for you first
 - each agent's state (working, waiting for you, idle) and the last lines of its pane, refreshed every 2 s; scrolled to the top, it reads more (1000 lines, then all it keeps, without colours). Claude Code on the alternate screen keeps nothing above its screen: scrolled to the top, its chat's transcript shows, who said what, above its screen
 
 What runs blinks: a working agent's dot, and the stage dot or rail node at work. It stays still when the phone asks for reduced motion.
@@ -23,7 +24,7 @@ From a new feature to Code review, every step can be done on the phone. Code rev
 - **Text the desktop asks in a field.** A button whose desktop opens a field asks on the phone first, in a sheet over the page (Enter breaks the line, its button sends; Cancel keeps what you wrote for the next time that button asks): Dismiss… and Reject… ask why, Comment and Answer ask for the text, Add comment… or Add suggestion… asks what should change.
 - **Findings and suggestions.** The findings card counts what is left to decide by severity, as the desktop's pills do; its bar shows what was taken in green and what was dismissed in grey. A finding names its file and line; tap it for the full path. AI review's findings and Plan review's suggestions are decided on their cards: Fix or Accept, Dismiss… or Reject…, Reopen, a comment, deleting your own.
 - **Send back.** A brief, plan or fix plan waiting for review can go back to its agent with your comment. Line comments made on the desktop go with it, and are listed above the box.
-- **Agents.** An agent's page has a reply box (Enter breaks the line, Send sends it), keys for its menus (Esc, 1, 2, 3, ↑, ↓ and Enter) and Close, which closes its tab as on the desktop: a research agent that stopped without an answer holds up Approve until then.
+- **Agents.** An agent's page has a reply box (Enter breaks the line, Send sends it), keys for its menus (Esc, 1, 2, 3, ↑, ↓ and Enter) and Close, which closes its tab as on the desktop: a research agent that stopped without an answer holds up Approve until then. A workspace's agent has no Close: close it on the desktop.
 
 Every text box grows with what is written in it, up to five rows. Past that it scrolls, and a shade along its top or bottom edge shows there is more that way.
 
