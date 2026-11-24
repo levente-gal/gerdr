@@ -4763,6 +4763,62 @@ fn feature_tab_ship_base_ci() -> super::FeatureTabView {
     view
 }
 
+/// `feature_tab_ship_live` once shipping stopped: why, its fix buttons,
+/// and web merged into dev here only, its push unticked.
+fn feature_tab_ship_stopped() -> super::FeatureTabView {
+    use super::{ButtonStyle, CheckTone, Dot, PageButton, PageSection};
+    let mut view = feature_tab_ship_live();
+    (view.page.sections).retain(|s| !matches!(s, PageSection::Recap(_)));
+    let at = view.page.buttons.len();
+    for (label, style) in [
+        ("Plan fix", ButtonStyle::Primary),
+        ("Fix directly", ButtonStyle::Plain),
+        ("Push dev\u{2026}", ButtonStyle::Primary),
+    ] {
+        view.page.buttons.push(PageButton {
+            label: label.into(),
+            style,
+        });
+    }
+    let web = (view.page.sections.iter())
+        .position(|s| matches!(s, PageSection::ShipGroup(g) if g.head.starts_with("web")));
+    let web = web.unwrap_or(view.page.sections.len() - 1);
+    if let Some(PageSection::ShipGroup(group)) = view.page.sections.get_mut(web)
+        && let Some(card) = group.card.as_mut()
+    {
+        card.dot = Dot::Blocked;
+        card.state = tab_line(
+            "merged into dev here only: not on origin",
+            CheckTone::Blocker,
+        );
+        card.buttons = vec![at + 2];
+    }
+    let lines = vec![
+        tab_line(
+            "Couldn't push dev of api: husky - pre-push hook exited with code 1 \u{b7} 2m ago",
+            CheckTone::Failed,
+        ),
+        tab_line(
+            "A hook refused the code: the Build agent fixes it, then Verify and the reviews run again",
+            CheckTone::Note,
+        ),
+    ];
+    view.page.sections.insert(
+        1,
+        PageSection::Lines {
+            label: "Shipping stopped".into(),
+            lines,
+        },
+    );
+    view.page.sections.insert(
+        2,
+        PageSection::Toolbar {
+            groups: vec![(String::new(), vec![at, at + 1])],
+        },
+    );
+    view
+}
+
 /// A done feature, Ship's page shown read-only, with its pull requests.
 fn feature_tab_approved() -> super::FeatureTabView {
     feature_tab_brief(false)
@@ -6488,7 +6544,7 @@ fn placed(mut view: super::FeatureTabView) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 59] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 60] {
     let views = [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -6505,6 +6561,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 59] {
         ("tab_ship_conflicts", feature_tab_ship_conflicts()),
         ("tab_ship_ci", feature_tab_ship_ci()),
         ("tab_ship_base_ci", feature_tab_ship_base_ci()),
+        ("tab_ship_stopped", feature_tab_ship_stopped()),
         ("tab_ship_after", feature_tab_ship_after()),
         ("tab_done", feature_tab_done()),
         ("tab_later", feature_tab_later()),
@@ -6563,7 +6620,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 59] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 76] = [
+const TAB_SURFACES: [(&str, i32); 77] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -6634,6 +6691,7 @@ const TAB_SURFACES: [(&str, i32); 76] = [
     ("tab_ship_picks", 860),
     ("tab_ship_ci", 860),
     ("tab_ship_base_ci", 1180),
+    ("tab_ship_stopped", 860),
     ("tab_ship_checking", 1180),
     ("tab_verify_regressed", 1180),
     ("tab_verify_machine", 860),
@@ -6642,7 +6700,7 @@ const TAB_SURFACES: [(&str, i32); 76] = [
     ("tab_discover_research", 860),
 ];
 
-const FEATURE_TAB: [&str; 76] = [
+const FEATURE_TAB: [&str; 77] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -6713,6 +6771,7 @@ const FEATURE_TAB: [&str; 76] = [
     "tab_ship_picks_860",
     "tab_ship_ci_860",
     "tab_ship_base_ci_1180",
+    "tab_ship_stopped_860",
     "tab_ship_checking_1180",
     "tab_verify_regressed_1180",
     "tab_verify_machine_860",
@@ -6722,7 +6781,7 @@ const FEATURE_TAB: [&str; 76] = [
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
     // Dark at 1
     [
         0xa85bec63adf6c004, // tab_build_860
@@ -6795,6 +6854,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xf40ac477d14785e5, // tab_ship_picks_860
         0x85ff726fc5f0a98d, // tab_ship_ci_860
         0xd0d7623f25a0db15, // tab_ship_base_ci_1180
+        0x5abc2fc5ea8d0aca, // tab_ship_stopped_860
         0x0d29fb85dd2ec61f, // tab_ship_checking_1180
         0xd79f2ae07b504dcb, // tab_verify_regressed_1180
         0x4b2e2423c7e42e6c, // tab_verify_machine_860
@@ -6874,6 +6934,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xe95a027c61b41224, // tab_ship_picks_860
         0x63d540992bb3c807, // tab_ship_ci_860
         0xc19d62726306ca17, // tab_ship_base_ci_1180
+        0xe42047e5325b42f5, // tab_ship_stopped_860
         0x7bf7bd484bd1418c, // tab_ship_checking_1180
         0xb57df7a155554e8c, // tab_verify_regressed_1180
         0x6be6e8dccf97d26e, // tab_verify_machine_860
@@ -6953,6 +7014,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0xa3f5a4917bc74b18, // tab_ship_picks_860
         0xe8f404b65e5a2d6a, // tab_ship_ci_860
         0x9d8df21bd6463d35, // tab_ship_base_ci_1180
+        0xdcd837b221117ba0, // tab_ship_stopped_860
         0xb095820b01c1f30f, // tab_ship_checking_1180
         0xfcff387c15772795, // tab_verify_regressed_1180
         0x5d49ce354f5d4282, // tab_verify_machine_860
@@ -7032,6 +7094,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 76]; 4] = [
         0x0190d7fa623a858c, // tab_ship_picks_860
         0x7b8deae3f8385f48, // tab_ship_ci_860
         0x72eb82655e5c874a, // tab_ship_base_ci_1180
+        0x14504ee37fc766d1, // tab_ship_stopped_860
         0xfb149b0388901b80, // tab_ship_checking_1180
         0x3ffeb089fc4e2b3e, // tab_verify_regressed_1180
         0x42271a11cd38aa76, // tab_verify_machine_860

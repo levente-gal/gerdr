@@ -220,6 +220,14 @@ pub(super) fn check_lines(
             line(text, CheckTone::Note)
         }
         (true, _, false) => line(NOTHING_TICKED.into(), CheckTone::Note),
+        // Merged here with its push unticked: not shipped as far as origin knows.
+        (_, _, true) if !local_bases(feature, check).is_empty() => line(
+            format!(
+                "Merged here only, not on origin: {}",
+                local_bases(feature, check).join(", ")
+            ),
+            CheckTone::Blocker,
+        ),
         // Its pull requests merged on GitHub: that is what shipped means.
         (_, _, true) if !feature.shipping.prs.is_empty() && planned.steps() == 0 => {
             line(MERGED_DONE.into(), CheckTone::Ready)
@@ -452,14 +460,25 @@ pub(super) fn ship_rows(feature: &Feature, probe: Option<&Probe>) -> Vec<ShipRow
     rows
 }
 
+/// The bases of `feature`'s repositories, as `check` read them, that hold
+/// its squash here only, their push unticked: "dev of api".
+pub(super) fn local_bases(feature: &Feature, check: &ship::ShipCheck) -> Vec<String> {
+    (check.repos.iter())
+        .filter(|r| r.merged && ship_step_open(feature, r, ShipStep::PushBase))
+        .filter(|r| !ship::repo_plan(feature, r).ticked(ShipStep::PushBase))
+        .map(|r| format!("{} of {}", r.base, r.key))
+        .collect()
+}
+
 /// Whether `step` of `repo` can still be ticked: it didn't run, and its
-/// repository isn't merged, but for pushing its base after its squash.
-fn ship_step_open(feature: &Feature, repo: &ship::RepoCheck, step: ShipStep) -> bool {
+/// repository isn't merged, but for pushing its base after its squash,
+/// while origin's base lacks commits of it (pushed by hand, it doesn't).
+pub(super) fn ship_step_open(feature: &Feature, repo: &ship::RepoCheck, step: ShipStep) -> bool {
     if ship::step_done(feature, repo, step).is_some() {
         return false;
     }
     let squashed = feature.ship_done(&repo.key, ShipStep::Merge).is_some();
-    !repo.merged || (step == ShipStep::PushBase && squashed)
+    !repo.merged || (step == ShipStep::PushBase && squashed && repo.unpushed != Some(0))
 }
 
 /// What repository `repo`'s card says under its name: "12 commits \u{b7}
@@ -505,12 +524,20 @@ fn ship_card_state(
     if repo.merged {
         let base = &repo.base;
         let left = ship_step_open(feature, repo, ShipStep::PushBase);
-        return match left && plan.ticked(ShipStep::PushBase) {
-            true => (
+        return match (left, plan.ticked(ShipStep::PushBase)) {
+            (true, true) => (
                 Dot::Idle,
                 line(format!("merged into {base}: push it"), CheckTone::Note),
             ),
-            false => (
+            // Its push unticked: "merged" alone reads as shipped.
+            (true, false) => (
+                Dot::Blocked,
+                line(
+                    format!("merged into {base} here only: not on origin"),
+                    CheckTone::Blocker,
+                ),
+            ),
+            (false, _) => (
                 Dot::Done,
                 line(format!("merged into {base}"), CheckTone::Ready),
             ),
@@ -779,6 +806,7 @@ pub(super) fn ship_sections(
             .filter(|(_, (_, o))| match o {
                 PanelOutcome::UpdateBase(r, _)
                 | PanelOutcome::PullBase(r)
+                | PanelOutcome::PushBase(r)
                 | PanelOutcome::FixCi(r, _) => *r == repo.key,
                 // A base's runs are the Base CI lines'.
                 PanelOutcome::RerunShipCi(r) => *r == repo.key && pr.is_some(),

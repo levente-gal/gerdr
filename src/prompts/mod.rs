@@ -33,6 +33,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "conflicts" => (include_str!("../../assets/prompts/conflicts.md"), 1),
         "conflicts-plan" => (include_str!("../../assets/prompts/conflicts-plan.md"), 1),
         "sandbox-fix" => (include_str!("../../assets/prompts/sandbox-fix.md"), 1),
+        "ship-fix" => (include_str!("../../assets/prompts/ship-fix.md"), 1),
         _ => return None,
     })
 }
@@ -135,6 +136,10 @@ mod tests {
             ("sandbox.line", "sh -c 'python manage.py migrate'"),
             ("sandbox.excerpt", "CommandError: Conflicting migrations detected"),
             ("sandbox.log", "/d/bulk-edit/sandbox/prepare.log"),
+            ("ship.why", "Couldn't push dev of api: pre-push hook declined"),
+            ("ship.log", "/s/gerdr/git.log"),
+            ("ship.bases", "- api: dev in /w/api"),
+            ("ship.plan", "yes"),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
@@ -165,6 +170,7 @@ mod tests {
             "conflicts",
             "conflicts-plan",
             "sandbox-fix",
+            "ship-fix",
             "decisions",
             "research",
         ] {

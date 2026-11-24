@@ -122,15 +122,21 @@ pub(super) const SHIP_KEYS: &[Binding<ShipCtx, PanelOutcome>] = &[
     },
     Binding {
         chord: "Ctrl+Enter",
-        does: |c| c.find(|o| matches!(o, PanelOutcome::FixCi(_, false))),
+        does: |c| {
+            c.find(|o| matches!(o, PanelOutcome::FixCi(_, false)))
+                .or_else(|| c.find(|o| *o == PanelOutcome::FixShipProblem(false)))
+        },
         footer: true,
-        f1: "Ship: have the Build agent fix the checks failing on every pull request at once, then back through Verify and the reviews",
+        f1: "Ship: have the Build agent fix the checks failing on every pull request at once, then back through Verify and the reviews; else, shipping stopped, have an agent fix why (Fix directly)",
     },
     Binding {
         chord: "Ctrl+Shift+Enter",
-        does: |c| c.find(|o| matches!(o, PanelOutcome::FixCi(_, true))),
+        does: |c| {
+            c.find(|o| matches!(o, PanelOutcome::FixCi(_, true)))
+                .or_else(|| c.find(|o| *o == PanelOutcome::FixShipProblem(true)))
+        },
         footer: true,
-        f1: "Ship: have the Build agent plan fixes for the checks failing on every pull request first",
+        f1: "Ship: have the Build agent plan fixes for the checks failing on every pull request first; else, shipping stopped, have an agent plan how to fix why (Plan fix)",
     },
     Binding {
         chord: "Alt+R",

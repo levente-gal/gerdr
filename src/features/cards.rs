@@ -1646,6 +1646,23 @@ pub(super) fn ship_base_actions(
 ) -> Vec<(PageButton, PanelOutcome)> {
     // The bases it pushed: those, its worktrees gone or not.
     let mut out = base_ci_actions(probe);
+    // Shipping stopped: an agent fixes why, planned first by default. Not
+    // while a round is open or a squash goes, which Ship waits for anyway.
+    if feature.shipping.problem.is_some() && feature.fix_round.is_none() && !feature.squash_going()
+    {
+        let button = |label: &str, style| PageButton {
+            label: label.to_owned(),
+            style,
+        };
+        out.push((
+            button("Plan fix", ButtonStyle::Primary),
+            PanelOutcome::FixShipProblem(true),
+        ));
+        out.push((
+            button("Fix directly", ButtonStyle::Plain),
+            PanelOutcome::FixShipProblem(false),
+        ));
+    }
     if !feature.ships() || feature.squash_going() {
         return out;
     }
@@ -1741,6 +1758,16 @@ pub(super) fn ship_base_actions(
             out.push((
                 button("Rebase\u{2026}", ButtonStyle::Quiet),
                 PanelOutcome::UpdateBase(key.clone(), feature::UpdateWay::Rebase),
+            ));
+        }
+    }
+    // Merged here, its push unticked: pushing it, the way Ship does.
+    for repo in repos {
+        let open = super::ship_page::ship_step_open(feature, repo, ShipStep::PushBase);
+        if repo.merged && open && !ship::repo_plan(feature, repo).ticked(ShipStep::PushBase) {
+            out.push((
+                button(&format!("Push {}\u{2026}", repo.base), ButtonStyle::Primary),
+                PanelOutcome::PushBase(repo.key.clone()),
             ));
         }
     }
@@ -1858,6 +1885,7 @@ pub(super) fn ship_outcome_repo(feature: &Feature, outcome: &PanelOutcome) -> Op
         PanelOutcome::UpdateBase(repo, _)
         | PanelOutcome::UndoShip(repo, _)
         | PanelOutcome::FixCi(repo, _)
+        | PanelOutcome::PushBase(repo)
         | PanelOutcome::RerunShipCi(repo) => Some(repo.clone()),
         PanelOutcome::ResolveConflicts(repo, _) if feature.shipping.resolving.is_none() => {
             Some(repo.clone())

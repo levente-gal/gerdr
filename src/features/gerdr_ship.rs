@@ -338,6 +338,8 @@ impl Gerdr {
             })
             .collect();
         self.settle_ship_plan(project, slug);
+        // Shipping again: what stopped it last time is past.
+        self.set_ship_problem(project, slug, None);
         let busy = Busy {
             project: project.to_owned(),
             slug: slug.to_owned(),
@@ -409,15 +411,14 @@ impl Gerdr {
         let trees = ship::squash_trees(&feature, squash, check);
         if trees.is_empty() {
             tracing::warn!("shipping feature {project}/{slug}: nothing to squash into");
-            return self.show_error(format!(
-                "Couldn't ship \u{201c}{title}\u{201d}: none of its repositories is there to squash into"
-            ));
+            let why = "none of its repositories is there to squash into".to_owned();
+            self.set_ship_problem(project, slug, Some(why.clone()));
+            return self.show_error(format!("Couldn't ship \u{201c}{title}\u{201d}: {why}"));
         }
         if let Some((_, dir)) = trees.iter().find(|(_, dir)| !dir.exists()) {
-            return self.show_error(format!(
-                "Couldn't ship \u{201c}{title}\u{201d}: {} is gone",
-                short_folder(dir)
-            ));
+            let why = format!("{} is gone", short_folder(dir));
+            self.set_ship_problem(project, slug, Some(why.clone()));
+            return self.show_error(format!("Couldn't ship \u{201c}{title}\u{201d}: {why}"));
         }
         let busy = Busy {
             project: project.to_owned(),
@@ -456,6 +457,24 @@ impl Gerdr {
         for (key, _) in &done.went {
             feature.log(now, format!("Squashed into the base of {key}"));
         }
+        // A commit hook changed what went in: said, as the squash then
+        // isn't what Verify and the reviews saw.
+        let hooked: Vec<(String, bool)> = (done.hooked.iter())
+            .map(|(key, h)| (hooked_text(key, h), h.layout))
+            .collect();
+        for (text, _) in &hooked {
+            feature.log(now, text.clone());
+        }
+        for (text, layout) in hooked {
+            let text = format!("\u{201c}{title}\u{201d}: {text}");
+            match layout {
+                true => self.show_notice(text),
+                false => self.show_warning(text),
+            }
+        }
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
         let Some((key, why)) = done.failed else {
             feature.shipping.squash_at = Some(now);
             feature.shipping.squash_repos = done.went.iter().map(|(key, _)| key.clone()).collect();
@@ -483,6 +502,10 @@ impl Gerdr {
         }
         let text = format!("Couldn't squash \u{201c}{title}\u{201d} into the base of {key}: {why}");
         feature.log(now, text.clone());
+        feature.shipping.problem = Some(feature::ShipProblem {
+            at: now,
+            why: format!("Couldn't squash into the base of {key}: {why}"),
+        });
         self.save_feature(project, slug);
         self.keep_squash_draft(project, slug, "", message);
         tracing::warn!("shipping feature {project}/{slug}: {text}");
@@ -642,6 +665,10 @@ impl Gerdr {
         }
         if let Some(why) = failed {
             feature.log(now, format!("Shipping stopped: {why}"));
+            feature.shipping.problem = Some(feature::ShipProblem {
+                at: now,
+                why: why.clone(),
+            });
             self.save_feature(project, slug);
             tracing::warn!("shipping feature {project}/{slug}: {why}");
             self.show_error(format!("Couldn't ship \u{201c}{title}\u{201d}: {why}"));
@@ -814,6 +841,18 @@ impl Gerdr {
             plan.route = route;
             self.save_feature(project, slug);
         }
+    }
+
+    /// Tick pushing the base of repository `repo` of feature `slug`, merged
+    /// here only, then ask to ship it as any tick is.
+    pub(super) fn push_merged_base(&mut self, project: &str, slug: &str, repo: &str) {
+        let ticked = (self.feature(project, slug))
+            .and_then(|f| f.ship_plan.repos.get(repo))
+            .is_some_and(|plan| plan.ticked(ShipStep::PushBase));
+        if !ticked {
+            self.tick_ship_step(project, slug, repo, ShipStep::PushBase);
+        }
+        self.ask_ship_feature(project, slug);
     }
 
     /// Flip tick `step` of repository `repo` of feature `slug`.
@@ -1070,5 +1109,23 @@ impl Gerdr {
         if let Some(feature) = self.feature(project, slug).cloned() {
             self.forget_on_machines(&feature);
         }
+    }
+}
+
+/// What the feature's log and a toast say of a commit hook changing the
+/// squash into repository `key`'s base, as `hooked` found.
+fn hooked_text(key: &str, hooked: &ship::Hooked) -> String {
+    let n = match hooked.files.len() {
+        1 => "1 file".to_owned(),
+        n => format!("{n} files"),
+    };
+    match hooked.layout {
+        true => format!(
+            "A commit hook reformatted {n} of the squash into {key}: only spacing, line breaks, commas and semicolons"
+        ),
+        false => format!(
+            "A commit hook changed {n} of the squash into {key} beyond layout: what went in isn't what was checked; look at {}",
+            hooked.files.first().map_or("", String::as_str)
+        ),
     }
 }

@@ -519,7 +519,20 @@ impl Gerdr {
         let bases: Vec<feature::Repo> = (feature.shipping.push_base.iter())
             .filter_map(|key| feature.repo(key).cloned())
             .collect();
+        // Squashed with its push unticked: only here, which "done" hides.
+        let local = (feature.shipping.squash_repos.iter())
+            .filter(|key| !feature.shipping.push_base.contains(key))
+            .filter_map(|key| Some(format!("{} of {key}", feature.repo(key)?.base)))
+            .collect::<Vec<String>>();
+        let local = (!local.is_empty()).then(|| {
+            let text = format!("Only here, not on origin: {}", local.join(", "));
+            feature.log(now, text.clone());
+            format!("\u{201c}{title}\u{201d}: {text}; Push on Ship's page sends it")
+        });
         self.save_feature(project, slug);
+        if let Some(local) = local {
+            self.show_warning(local);
+        }
         self.feature_cursor_to_current_of(project, slug);
         let mut text = format!("\u{201c}{title}\u{201d} is merged: done");
         // Pushed here, not in the tab: a tab closing with the workspace would
@@ -585,6 +598,12 @@ impl Gerdr {
                     failed.get_or_insert(text);
                 }
             }
+        }
+        if let Some(why) = &failed {
+            feature.shipping.problem = Some(feature::ShipProblem {
+                at: now,
+                why: why.clone(),
+            });
         }
         self.save_feature(project, slug);
         let kept = finishing.then(|| self.after_ship(project, slug)).flatten();
