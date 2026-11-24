@@ -18,6 +18,9 @@ use crate::{
     menu::MenuAction,
 };
 
+/// How often a waiting ask looks whether its chat is still in sight.
+const ASK_LOOK: std::time::Duration = std::time::Duration::from_secs(1);
+
 impl Gerdr {
     /// Hear the agents of the herdr session at `herdr_socket` (see
     /// `super::socket_for`), till gerdr follows another session: its
@@ -132,7 +135,7 @@ impl Gerdr {
                     return;
                 };
                 // Nobody sees the chat: the TUI asks, at once.
-                if !self.chats.followed.contains_key(&pane) {
+                if !self.chat_in_sight(&pane) {
                     let reply = AskReply::Pass;
                     return super::answer(&mut stream, &Answer { ask, reply });
                 }
@@ -156,8 +159,17 @@ impl Gerdr {
                     call,
                 };
                 self.chats.live.asks.insert(ask.clone(), held);
-                let timer = Timer::from_duration(ASK_WAIT);
+                // Looked at every `ASK_LOOK`: one that waited `ASK_WAIT`, or
+                // whose chat a panel came over, goes back to the TUI.
+                let since = std::time::Instant::now();
+                let timer = Timer::from_duration(ASK_LOOK);
                 let waited = self.loop_handle.insert_source(timer, move |_, _, state| {
+                    let Some(pane) = state.chats.live.asks.get(&ask).map(|h| h.pane.clone()) else {
+                        return TimeoutAction::Drop;
+                    };
+                    if since.elapsed() < ASK_WAIT && state.chat_in_sight(&pane) {
+                        return TimeoutAction::ToDuration(ASK_LOOK);
+                    }
                     state.live_answer(&ask, AskReply::Pass);
                     TimeoutAction::Drop
                 });

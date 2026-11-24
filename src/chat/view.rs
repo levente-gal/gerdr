@@ -492,6 +492,13 @@ fn wait_key_name(key: WaitKey) -> String {
     }
 }
 
+/// Whether `over`, the overlay on top at a chat's middle, hides it: the
+/// small ones that come and go over everything don't.
+fn covers_chat(over: Option<crate::overlay::Overlay>) -> bool {
+    use crate::overlay::Overlay;
+    over.is_some_and(|o| !matches!(o, Overlay::Tooltip | Overlay::Toasts | Overlay::Help))
+}
+
 /// Which panes' chats to follow afresh and which to stop following: `wanted`
 /// are those to follow now (shown, in sight), with their agents as herdr has
 /// them. One already followed is followed again when herdr says its agent
@@ -594,7 +601,10 @@ fn chat_bounds(layout: &ChatLayout) -> Bounds {
 
 /// The chat of herdr pane `pane_id`, among `workspaces`' panes and those
 /// whose window is still to come.
-pub(crate) fn chat_mut<'a>(workspaces: &'a mut [Workspace], pane_id: &str) -> Option<&'a mut PaneChat> {
+pub(crate) fn chat_mut<'a>(
+    workspaces: &'a mut [Workspace],
+    pane_id: &str,
+) -> Option<&'a mut PaneChat> {
     chats_mut(workspaces).find_map(|(id, chat)| (id == pane_id).then_some(chat))
 }
 
@@ -1110,6 +1120,19 @@ impl Gerdr {
         self.open_in_zed(&file, crate::launch::Place::Tab, "the file");
     }
 
+    /// Whether herdr pane `pane_id`'s chat can be seen: painted in the active
+    /// tab, and no panel or dialog over it (the feature panel, the
+    /// repositories, the inbox…). An ask waits on its card only then.
+    pub(crate) fn chat_in_sight(&self, pane_id: &str) -> bool {
+        (self.chat_places().iter())
+            .find(|(_, pane, _)| pane == pane_id)
+            .is_some_and(|(_, _, view)| {
+                let r = view.rect.to_f64();
+                let middle = Point::from((r.loc.x + r.size.w / 2.0, r.loc.y + r.size.h / 2.0));
+                !covers_chat(self.overlay_at(middle))
+            })
+    }
+
     /// The active tab's panes shown as chats: each pane's id, its herdr
     /// pane's, and what its chat is painted from.
     fn chat_places(&self) -> Vec<(u32, String, ChatView)> {
@@ -1367,6 +1390,18 @@ impl Gerdr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panel_over_a_chat_hides_it_but_toasts_and_help_dont() {
+        use crate::overlay::Overlay;
+        assert!(!covers_chat(None));
+        assert!(covers_chat(Some(Overlay::Features)));
+        assert!(covers_chat(Some(Overlay::Repos)));
+        assert!(covers_chat(Some(Overlay::Confirm)));
+        assert!(!covers_chat(Some(Overlay::Toasts)));
+        assert!(!covers_chat(Some(Overlay::Help)));
+        assert!(!covers_chat(Some(Overlay::Tooltip)));
+    }
     use crate::chat::{DiffLine, DiffSide, Source, ToolOut};
     use crate::herdr::Process;
 
