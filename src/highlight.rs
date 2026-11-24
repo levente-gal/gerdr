@@ -80,7 +80,9 @@ fn grammar(name: &str) -> Option<&'static SyntaxReference> {
 /// the file at a path is in, one `Spans` per line by char index, read as
 /// one text from the first. Each line syntect reads takes one of
 /// `budget`'s; with none left the light highlighter goes on from there.
-/// `None` when neither knows the language.
+/// Where a grammar leaves a word plain (Rust's calls, types and `self`),
+/// the light highlighter's kind for it fills in (`fill`). `None` when
+/// neither knows the language.
 pub fn lines<'a>(
     lang_or_path: &str,
     lines: impl IntoIterator<Item = &'a str>,
@@ -99,14 +101,19 @@ pub fn lines<'a>(
     }
     let mut state = syntax::State::default();
     let mut line = |line: &str| {
+        // Read on every line, so its comments and long strings carry on
+        // into the lines past the budget.
+        let shaped = light.map(|lang| syntax::highlight(lang, line, &mut state));
         if let Some(read) = read.as_mut().filter(|r| *budget > 0 && !r.failed) {
             *budget -= 1;
-            return read.line(line);
+            let spans = read.line(line);
+            return match shaped {
+                // A long line shows plain, as do the rest after a failure.
+                Some(shaped) if line.len() <= LONG_LINE && !read.failed => fill(spans, shaped),
+                _ => spans,
+            };
         }
-        match light {
-            Some(lang) => syntax::highlight(lang, line, &mut state),
-            None => Spans::new(),
-        }
+        shaped.unwrap_or_default()
     };
     Some(lines.into_iter().map(&mut line).collect())
 }
@@ -166,6 +173,21 @@ fn kind(stack: &ScopeStack) -> Option<Kind> {
         .and_then(|(_, kind)| kind)
 }
 
+/// The grammar's `spans`, and the words of the light highlighter's `shaped`
+/// that fall where the grammar coloured nothing: Sublime's Rust grammar
+/// leaves calls, most types, macros and `self` plain. Its strings and
+/// comments aren't taken: the grammar knows those better.
+fn fill(mut spans: Spans, shaped: Spans) -> Spans {
+    let words = shaped.into_iter().filter(|(range, kind)| {
+        !matches!(kind, Kind::String | Kind::Comment)
+            && !(spans.iter()).any(|(r, _)| r.start < range.end && range.start < r.end)
+    });
+    let words: Vec<_> = words.collect();
+    spans.extend(words);
+    spans.sort_by_key(|(range, _)| range.start);
+    spans
+}
+
 /// `range` as `kind` after `spans`, one run with the last when they meet.
 fn push(spans: &mut Spans, range: Range<usize>, kind: Kind) {
     match spans.last_mut() {
@@ -221,6 +243,44 @@ mod tests {
     }
 
     #[test]
+    fn words_the_grammar_leaves_plain_take_their_shape() {
+        let line = "let r = Foo::new(self.n as u8, MAX_LEN); assert_eq!(r, \"call(x)\"); // go(y)";
+        let spans = &read("x.rs", [line]).unwrap()[0];
+        assert_eq!(kind_of(line, spans, "let"), Some(Kind::Keyword));
+        assert_eq!(kind_of(line, spans, "Foo"), Some(Kind::Type));
+        assert_eq!(kind_of(line, spans, "new"), Some(Kind::Function));
+        assert_eq!(kind_of(line, spans, "self"), Some(Kind::Keyword));
+        assert_eq!(kind_of(line, spans, "MAX_LEN"), Some(Kind::Constant));
+        assert_eq!(kind_of(line, spans, "assert_eq"), Some(Kind::Function));
+        // Inside the grammar's strings and comments nothing is filled.
+        assert_eq!(kind_of(line, spans, "call"), Some(Kind::String));
+        assert_eq!(kind_of(line, spans, "go(y)"), Some(Kind::Comment));
+        assert!(spans.windows(2).all(|w| w[0].0.end <= w[1].0.start));
+        let py = "x = do_it(a)";
+        let spans = &read("python", [py]).unwrap()[0];
+        assert_eq!(kind_of(py, spans, "do_it"), Some(Kind::Function));
+    }
+
+    #[test]
+    fn fill_keeps_the_grammars_runs_and_their_order() {
+        let grammar = vec![(4..8, Kind::String)];
+        let shaped = vec![
+            (0..3, Kind::Keyword),
+            (5..7, Kind::Function),
+            (8..10, Kind::Comment),
+            (10..12, Kind::Type),
+        ];
+        assert_eq!(
+            fill(grammar, shaped),
+            [
+                (0..3, Kind::Keyword),
+                (4..8, Kind::String),
+                (10..12, Kind::Type)
+            ]
+        );
+    }
+
+    #[test]
     fn a_fence_name_finds_its_grammar_and_unknown_ones_fall_back() {
         let py = ["def f():", "    return 1  # one"];
         let spans = read("python", py).unwrap();
@@ -247,7 +307,9 @@ mod tests {
         let spans = lines("x.rs", ["/* a", "b */ let x;"], &mut budget).unwrap();
         assert_eq!(budget, 0);
         assert_eq!(spans[0], [(0..4, Kind::Comment)]);
-        assert_eq!(spans[1][0].1, Kind::Keyword);
+        // The light highlighter read the first line too: the comment goes on.
+        assert_eq!(spans[1][0], (0..4, Kind::Comment));
+        assert_eq!(spans[1][1].1, Kind::Keyword);
         // Haskell has a grammar only: past the budget it is plain.
         let spans = lines("x.hs", ["main = 1 -- c"], &mut 0).unwrap();
         assert!(spans[0].is_empty());

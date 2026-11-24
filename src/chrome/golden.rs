@@ -8815,7 +8815,7 @@ const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
         0xa984852d813c6db5, // popup_no_comments_850
         0xf80132fb8f3fe8a2, // popup_listed_1180
         0x799bfe46156fc713, // inline_listed_1180
-        0x1506713ac3716265, // code_diff_1180
+        0xcaac64f1ad955031, // code_diff_1180
     ],
     // Dark at 2
     [
@@ -8835,7 +8835,7 @@ const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
         0x64c028cba67c38a7, // popup_no_comments_850
         0xb5d0388c18b70338, // popup_listed_1180
         0xedadca0d6059a1bc, // inline_listed_1180
-        0xf02780bb56cf0ecc, // code_diff_1180
+        0xc2421c89899384bb, // code_diff_1180
     ],
     // Light at 1
     [
@@ -8855,7 +8855,7 @@ const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
         0x3f438765bc7c1b2d, // popup_no_comments_850
         0xd64d70db828f6643, // popup_listed_1180
         0x126bd42ab5ecebf3, // inline_listed_1180
-        0x8b82a85eb8d65ac0, // code_diff_1180
+        0x6fcda59ef5292da2, // code_diff_1180
     ],
     // Light at 2
     [
@@ -8875,7 +8875,7 @@ const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
         0x82f7e1c5f8a0e0ea, // popup_no_comments_850
         0x55714f9f31d8664b, // popup_listed_1180
         0xe28cd76b2fd88514, // inline_listed_1180
-        0xa98de4b41ec7cb9b, // code_diff_1180
+        0x83acd67151754f90, // code_diff_1180
     ],
 ];
 
