@@ -13,7 +13,10 @@ use super::{
     ASK_WAIT, Answer, AskReply, Changed, HeldAsk, LiveEvent, PendingAsk, SOURCE, What, claude,
     opencode,
 };
-use crate::{Gerdr, chat::view::chat_mut, herdr::AgentInfo, herdr::AgentSession, menu::MenuAction};
+use crate::{
+    Gerdr, ai_work::AgentKind, chat::view::chat_mut, herdr::AgentInfo, herdr::AgentSession,
+    menu::MenuAction,
+};
 
 impl Gerdr {
     /// Hear the agents of the herdr session at `herdr_socket` (see
@@ -241,8 +244,8 @@ impl Gerdr {
     /// `agent` with the session heard live, when herdr names none.
     pub(crate) fn with_live_session(&self, agent: &AgentInfo) -> AgentInfo {
         let mut agent = agent.clone();
-        if agent.agent_session.is_none() {
-            agent.agent_session = self.chats.live.sessions.get(&agent.pane_id).cloned();
+        if let Some(heard) = live_session(&agent, self.chats.live.sessions.get(&agent.pane_id)) {
+            agent.agent_session = Some(heard.clone());
         }
         agent
     }
@@ -345,9 +348,51 @@ fn hidden_asks(
         .collect()
 }
 
+/// The session heard live for `agent`'s pane, `heard`, if it is that
+/// agent's and herdr names none of that agent's: herdr may hold one left from
+/// an earlier agent in the pane.
+fn live_session<'a>(
+    agent: &AgentInfo,
+    heard: Option<&'a AgentSession>,
+) -> Option<&'a AgentSession> {
+    let kind = |name: &str| AgentKind::of(name);
+    let running = kind(agent.agent.as_deref()?);
+    let herdrs = (agent.agent_session.as_ref()).is_some_and(|s| kind(&s.agent) == running);
+    heard.filter(|s| !herdrs && kind(&s.agent) == running)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_heard_beats_herdrs_only_when_herdrs_is_another_agents() {
+        let heard = |agent: &str| AgentSession {
+            source: SOURCE.into(),
+            agent: agent.into(),
+            kind: "path".into(),
+            value: "/t.jsonl".into(),
+        };
+        // herdr kept a Codex chat for the pane Claude runs in now.
+        let stale = crate::chat::source::tests::agent("codex", "id", "x");
+        let mut claude = stale.clone();
+        claude.agent = Some("claude".into());
+        assert_eq!(
+            live_session(&claude, Some(&heard("claude"))),
+            Some(&heard("claude"))
+        );
+        // herdr names Claude's own: herdr's stays.
+        let named = crate::chat::source::tests::agent("claude", "path", "/h.jsonl");
+        assert_eq!(live_session(&named, Some(&heard("claude"))), None);
+        // A session heard from another agent than the one running: not it.
+        assert_eq!(live_session(&claude, Some(&heard("cursor"))), None);
+        let mut none = claude.clone();
+        none.agent_session = None;
+        assert_eq!(
+            live_session(&none, Some(&heard("claude"))),
+            Some(&heard("claude"))
+        );
+    }
 
     #[test]
     fn asks_go_back_once_their_chat_is_out_of_sight() {

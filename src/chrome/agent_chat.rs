@@ -533,10 +533,10 @@ fn agent_name(label: &str) -> &str {
 /// under it; none while it shows items.
 fn message(view: &ChatView) -> Option<(&str, bool)> {
     match &view.reading {
+        Reading::Missing(why) | Reading::Failed(why) => Some((why, true)),
         _ if !view.running.is_empty() => None,
         Reading::Finding if view.items.is_empty() => Some(("Reading the chat…", false)),
         Reading::Read if view.items.is_empty() => Some(("Nothing said yet", false)),
-        Reading::Missing(why) | Reading::Failed(why) => Some((why, true)),
         _ => None,
     }
 }
