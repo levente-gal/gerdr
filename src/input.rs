@@ -662,6 +662,11 @@ impl Gerdr {
                     }
                     return;
                 }
+                // Over a field holding more rows than it shows, its rows
+                // move, not the page it is on.
+                if motion.is_some_and(|motion| self.field_wheel(motion)) {
+                    return;
+                }
                 // Nothing scrolls behind an overlay; what the one on top
                 // lists moves instead (see `overlay_scroll`), if it lists
                 // anything.
@@ -1638,6 +1643,44 @@ impl Gerdr {
             }
             _ => false,
         }
+    }
+
+    /// The wheel over a field wrapped to its width that holds more rows
+    /// than it shows: its view moves by rows, its caret along onto the
+    /// nearest row in view. Whether the pointer was over one.
+    fn field_wheel(&mut self, motion: crate::scroll::Motion) -> bool {
+        let pos = self.mouse.pos;
+        let by = || self.motion_rows(motion, chrome::field_line() as f64);
+        let (at, field) = if self.text_overlay() == Some(Overlay::FindingDialog) {
+            let Some(view) = self.finding_dialog_view() else {
+                return false;
+            };
+            let size = self.output_size();
+            let Some((i, at)) = chrome::finding_field_wheel(&view, size, pos, by()) else {
+                return false;
+            };
+            let dialog = self.features.finding_dialog.as_mut();
+            (at, dialog.and_then(|dialog| dialog.fields.get_mut(i)))
+        } else {
+            let Some(spot) = self.field_spot().filter(|_| self.field_wraps()) else {
+                return false;
+            };
+            if !spot.area.to_f64().contains(pos) {
+                return false;
+            }
+            let Some(at) = chrome::wrap_field_wheel(&spot, by()) else {
+                return false;
+            };
+            (at, self.field_mut())
+        };
+        if let Some(field) = field {
+            let (first, caret) = at;
+            let extend = !field.line().selection().is_empty();
+            field.move_to(caret, extend);
+            field.set_scroll(first);
+        }
+        self.mouse.field_scroll_due = true;
+        true
     }
 
     /// Up or Down in a field wrapped to its width: the caret goes a row up

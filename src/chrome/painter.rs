@@ -94,7 +94,7 @@ pub(super) fn field_text(rect: Rect, scale: f64) -> (f32, f32) {
 
 /// How much lower each line of a field of lines (`Painter::lines_field`)
 /// is than the one before.
-pub(super) fn field_line() -> i32 {
+pub fn field_line() -> i32 {
     line(font_size(), 5)
 }
 
