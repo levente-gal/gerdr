@@ -53,13 +53,10 @@ pub fn read(agent: AgentKind, raw: &[u8]) -> Vec<Message> {
         AgentKind::Claude => claude(raw),
         AgentKind::Codex => codex(raw),
         AgentKind::Cursor => cursor(raw),
-        // shortcut: pi's assistant messages hold usage too; read it when
-        // the stats should count pi.
-        AgentKind::OpenCode
-        | AgentKind::T3
-        | AgentKind::Pi
-        | AgentKind::Antigravity
-        | AgentKind::Unknown => Vec::new(),
+        AgentKind::Pi => pi(raw),
+        AgentKind::OpenCode | AgentKind::T3 | AgentKind::Antigravity | AgentKind::Unknown => {
+            Vec::new()
+        }
     }
 }
 
@@ -72,6 +69,34 @@ fn json_lines(raw: &[u8]) -> impl Iterator<Item = (usize, Value)> + '_ {
 
 fn num(v: &Value) -> u64 {
     v.as_u64().unwrap_or(0)
+}
+
+/// pi's session: each assistant message says what its request used, its
+/// cached input apart.
+fn pi(raw: &[u8]) -> Vec<Message> {
+    (json_lines(raw))
+        .filter_map(|(_, line)| {
+            let m = &line["message"];
+            if line["type"] != "message" || m["role"] != "assistant" {
+                return None;
+            }
+            let u = &m["usage"];
+            let parts = m["content"].as_array().into_iter().flatten();
+            Some(Message {
+                at_ms: num(&m["timestamp"]),
+                model: m["model"].as_str().unwrap_or_default().to_owned(),
+                sidechain: false,
+                usage: Usage {
+                    messages: 1,
+                    tool_calls: parts.filter(|p| p["type"] == "toolCall").count() as u64,
+                    input: num(&u["input"]),
+                    output: num(&u["output"]),
+                    cache_create: num(&u["cacheWrite"]),
+                    cache_read: num(&u["cacheRead"]),
+                },
+            })
+        })
+        .collect()
 }
 
 /// Claude Code's transcript: a line per content block of an assistant
@@ -477,6 +502,26 @@ mod tests {
         });
         assert_eq!(total.input, 4);
         assert_eq!(total.output, 107);
+    }
+
+    #[test]
+    fn pi_messages_say_their_own_usage() {
+        let raw = concat!(
+            r#"{"type":"session","id":"s"}"#,
+            "\n",
+            r#"{"type":"message","message":{"role":"user","content":"hi","timestamp":1}}"#,
+            "\n",
+            r#"{"type":"message","message":{"role":"assistant","model":"m1","timestamp":2,"#,
+            r#""content":[{"type":"toolCall"},{"type":"text"}],"#,
+            r#""usage":{"input":10,"output":3,"cacheRead":100,"cacheWrite":7}}}"#,
+            "\n",
+        );
+        let got = read(AgentKind::Pi, raw.as_bytes());
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].at_ms, got[0].model.as_str()), (2, "m1"));
+        let u = &got[0].usage;
+        assert_eq!((u.messages, u.tool_calls, u.input, u.output), (1, 1, 10, 3));
+        assert_eq!((u.cache_create, u.cache_read), (7, 100));
     }
 
     #[test]

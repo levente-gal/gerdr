@@ -4,9 +4,10 @@
 //! (text, thinking and tool calls as parts), a tool's result, a shell
 //! command the user ran (`!`).
 //!
-//! shortcut: entries show in file order, every branch's (`/tree` goes back
-//! and branches); follow only the branch of the last entry if branched
-//! chats turn out to read badly.
+//! The entries are a tree: `/tree` goes back to an earlier entry and the
+//! chat goes on from there. An entry whose parent isn't the entry before it
+//! begins such a branch: what came after its parent goes, and the chat
+//! reads on from there, as pi shows it.
 
 use serde_json::Value;
 
@@ -15,18 +16,49 @@ use super::{
     opencode::{capped, gist, input_text},
 };
 
+/// Said where the chat went back to an earlier point and on from there.
+const BACK: &str = "Went back to an earlier point of the chat";
+
 impl Reader {
     /// Read session line `line`.
     pub(super) fn pi_line(&mut self, line: &Value) {
         let id = (line["id"].as_str()).map_or_else(|| format!("line{}", self.lines), str::to_owned);
-        match line["type"].as_str().unwrap_or_default() {
+        let kind = line["type"].as_str().unwrap_or_default();
+        if let Some(parent) = line["parentId"].as_str()
+            && self
+                .last_entry
+                .as_deref()
+                .is_some_and(|last| last != parent)
+            && let Some(&kept) = self.entries.get(parent)
+        {
+            self.back_to(kept);
+            // A summary of the branch left says so itself.
+            if kind != "branch_summary" {
+                let (id, text) = (format!("{id}.back"), BACK.to_owned());
+                self.push(Item::Note { id, text });
+            }
+        }
+        self.pi_entry(line, kind, id.clone());
+        self.entries.insert(id.clone(), self.items.len());
+        self.last_entry = Some(id);
+    }
+
+    /// The chat back to its first `kept` items: a branch of it left.
+    fn back_to(&mut self, kept: usize) {
+        self.items.truncate(kept);
+        self.calls.retain(|_, (at, _)| *at < kept);
+        self.answer = None;
+    }
+
+    fn pi_entry(&mut self, line: &Value, kind: &str, id: String) {
+        match kind {
             "message" => self.pi_message(&line["message"], id),
             "compaction" => {
                 let text = "The chat was compacted".to_owned();
                 self.push(Item::Note { id, text });
             }
             "branch_summary" => {
-                let text = "Went back to an earlier point of the chat".to_owned();
+                let text = BACK.to_owned();
                 self.push(Item::Note { id, text });
             }
             // The header, model and thinking level changes, labels, names,
@@ -258,6 +290,37 @@ mod tests {
         assert_eq!(diff[1].side, DiffSide::Added);
         assert!(matches!(&items[5], Item::Note { text, .. } if text == "rate limited"));
         assert_eq!(items.len(), 6);
+    }
+
+    #[test]
+    fn a_branch_shows_only_from_where_it_went_back() {
+        let entry = |id: &str, parent: Option<&str>, text: &str| {
+            let mut m = message(id, json!({"role": "user", "content": text}));
+            m["parentId"] = json!(parent);
+            m
+        };
+        let items = read(&[
+            entry("e1", None, "one"),
+            entry("e2", Some("e1"), "two"),
+            entry("e3", Some("e2"), "three"),
+            // `/tree` back to e1, then on.
+            entry("e4", Some("e1"), "four"),
+            entry("e5", Some("e4"), "five"),
+        ]);
+        let said: Vec<&str> = (items.iter())
+            .map(|item| match item {
+                Item::User { text, .. } => text.as_str(),
+                Item::Note { .. } => "back",
+                _ => "?",
+            })
+            .collect();
+        assert_eq!(said, ["one", "back", "four", "five"]);
+        // A parent read before reading began: nothing to go back to.
+        let items = read(&[
+            entry("e8", Some("e7"), "eight"),
+            entry("e9", Some("e2"), "nine"),
+        ]);
+        assert_eq!(items.len(), 2);
     }
 
     #[test]
