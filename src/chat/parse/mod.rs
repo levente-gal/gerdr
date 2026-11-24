@@ -73,6 +73,8 @@ pub struct Reader {
     /// the last entry's id (pi's: a chat is a tree of entries).
     entries: HashMap<String, usize>,
     last_entry: Option<String>,
+    /// `invoke_subagent` calls and their subagents (Antigravity's).
+    spawns: Vec<antigravity::Spawn>,
 }
 
 /// A subagent's work: its item, read by a reader of its own.
@@ -103,6 +105,7 @@ impl Reader {
             steps: HashSet::new(),
             entries: HashMap::new(),
             last_entry: None,
+            spawns: Vec::new(),
         }
     }
 
@@ -148,7 +151,11 @@ impl Reader {
     /// each in `<chat>/subagents/agent-<id>.jsonl`, apart from the chat's.
     /// `call` is the call that started it, as the file's meta says; its
     /// work goes under it once that call is read.
+    /// Antigravity's are conversations of their own (`antigravity`).
     pub fn feed_subagent(&mut self, agent: &str, call: &str, lines: &[u8]) {
+        if self.agent == AgentKind::Antigravity {
+            return self.antigravity_subagent(agent, lines);
+        }
         (self.agent_calls).insert(agent.to_owned(), call.to_owned());
         for raw in lines.split(|b| *b == b'\n') {
             // A first line cut short, where reading began mid-file.
@@ -1082,4 +1089,3 @@ mod tests {
         assert!(reader.items().is_empty());
     }
 }
-
