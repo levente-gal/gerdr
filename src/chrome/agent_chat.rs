@@ -287,6 +287,8 @@ const TURN_GAP: i32 = 18;
 const BUBBLE_SHARE: i32 = 75;
 /// How many lines of an edit's change show while it is folded.
 const EDIT_PEEK: usize = 8;
+/// How many lines of the prompt a subagent was given show while folded.
+const PROMPT_PEEK: usize = 3;
 /// A card's head row: its fold mark, name, gist and state.
 const CARD_ROW: i32 = ROW_BUTTON;
 const CARD_GAP: i32 = 8;
@@ -869,7 +871,25 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
             let inner = (cw * BUBBLE_SHARE / 100 - 2 * BUBBLE_PAD).max(1);
             let blocks: Vec<DocBlock> =
                 paragraphs(text).map(|p| DocBlock::Para(p.into())).collect();
-            let (pieces, h) = doc_layout::stack_of(&blocks, inner);
+            let (mut pieces, mut h) = doc_layout::stack_of(&blocks, inner);
+            // A subagent's prompt is long and said already by its card's
+            // title: its first lines, unfolded on asking.
+            let mut more = 0;
+            if nest > 0 && !open {
+                let mut tops: Vec<i32> = (pieces.iter())
+                    .filter(|(_, piece)| matches!(piece, DocPiece::Text { .. }))
+                    .map(|(r, _)| r.loc.y)
+                    .collect();
+                tops.dedup();
+                if let Some(&cut) = tops.get(PROMPT_PEEK) {
+                    more = tops.len() - PROMPT_PEEK;
+                    pieces.retain(|(r, _)| r.loc.y < cut);
+                    h = (pieces.iter())
+                        .map(|(r, _)| r.loc.y + r.size.h)
+                        .max()
+                        .unwrap_or(0);
+                }
+            }
             let wide = (pieces.iter())
                 .filter_map(|(_, piece)| match piece {
                     DocPiece::Text { text, .. } => {
@@ -883,6 +903,17 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
             let bx = x + cw - bw;
             l.put(rect(bx, 0, bw, h + 2 * BUBBLE_PAD), Bit::Bubble);
             l.doc(pieces, (bx + BUBBLE_PAD, BUBBLE_PAD));
+            if more > 0 || (nest > 0 && open) {
+                l.spots
+                    .push((rect(bx, 0, bw, h + 2 * BUBBLE_PAD), Spot::Fold));
+            }
+            if more > 0 {
+                let text = format!("{more} more lines");
+                let wide = width_in(&text, Face::Ui, FONT_SIZE).ceil() as i32;
+                let row = rect(x + cw - wide, l.below(), wide, SMALL_LINE);
+                l.put(row, label(&text, Face::Ui, Mark::Link));
+                l.spots.push((row, Spot::Fold));
+            }
         }
         Item::Assistant { blocks, .. } => {
             let (pieces, _) = doc_layout::stack_of(blocks, cw);
@@ -1792,6 +1823,35 @@ pub(super) mod tests {
         assert!(path);
         let open = laid(&edit, 500, 0, &HashSet::from(["big".to_owned()]), cwd);
         assert_eq!(lines(&open), 20);
+    }
+
+    #[test]
+    fn a_subagents_prompt_shows_its_first_lines_till_unfolded() {
+        let text = (0..10)
+            .map(|i| format!("Line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let user = Item::User {
+            id: "p".into(),
+            at: None,
+            text,
+        };
+        let lines = |l: &Laid| {
+            (l.bits.iter())
+                .filter(|(_, b)| matches!(b, Bit::Doc(DocPiece::Text { .. })))
+                .count()
+        };
+        let none = HashSet::new();
+        // The chat's own words show whole.
+        assert_eq!(lines(&laid(&user, 500, 0, &none, None)), 10);
+        let folded = laid(&user, 500, NEST, &none, None);
+        assert_eq!(lines(&folded), PROMPT_PEEK);
+        let more = (folded.bits.iter())
+            .any(|(_, b)| matches!(b, Bit::Label { text, .. } if text == "7 more lines"));
+        assert!(more);
+        let open = laid(&user, 500, NEST, &HashSet::from(["p".to_owned()]), None);
+        assert_eq!(lines(&open), 10);
+        assert!(open.spots.iter().any(|(_, s)| *s == Spot::Fold));
     }
 
     #[test]
