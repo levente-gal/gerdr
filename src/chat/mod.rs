@@ -11,6 +11,7 @@ use crate::{ai_work::AgentKind, md_blocks::DocBlock, text_field::TextField};
 pub mod parse;
 pub mod rows;
 pub mod source;
+pub mod live;
 pub mod tail;
 mod view;
 
@@ -170,6 +171,8 @@ pub struct PaneChat {
     /// approval menu, which the transcript doesn't hold. As
     /// `crate::scrollback::parse_ansi` reads them.
     pub waiting: Option<Vec<(String, crate::scrollback::Styled)>>,
+    /// What its agent said live: the tools running, an ask (`live`).
+    pub live: live::PaneLive,
 }
 
 /// What `tail` sends back.

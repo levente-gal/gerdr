@@ -51,6 +51,7 @@ enum Cmd {
     Follow(Box<AgentInfo>),
     Stop(String),
     Earlier(String),
+    Read(String),
 }
 
 /// The thread: what it is asked to follow.
@@ -95,6 +96,12 @@ impl Tail {
         self.send(Cmd::Earlier(pane_id.to_owned()));
     }
 
+    /// Read the chat of pane `pane_id` now: its agent said something
+    /// (`live`).
+    pub fn read(&self, pane_id: &str) {
+        self.send(Cmd::Read(pane_id.to_owned()));
+    }
+
     fn send(&self, cmd: Cmd) {
         if self.cmds.send(cmd).is_err() {
             tracing::warn!("agent chats: the thread that reads them has ended");
@@ -123,6 +130,7 @@ fn run(asked: &mpsc::Receiver<Cmd>, chats: &mut Chats, out: &channel::Sender<Eve
             }
             Ok(Cmd::Stop(pane_id)) => chats.stop(&pane_id),
             Ok(Cmd::Earlier(pane_id)) => chats.earlier(&pane_id, &mut events),
+            Ok(Cmd::Read(pane_id)) => chats.read_now(&pane_id, &mut events),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 chats.poll(&mut events);
                 next = Instant::now() + POLL;
@@ -214,6 +222,13 @@ impl Chats {
     }
 
     /// Read what each chat grew by; look again for the chats not found.
+    /// Read pane `pane_id`'s chat now, if it was found.
+    fn read_now(&mut self, pane_id: &str, out: &mut Vec<Event>) {
+        if let Some(Ok(chat)) = self.panes.get_mut(pane_id).map(|f| &mut f.chat) {
+            chat.poll(&self.homes, pane_id, out);
+        }
+    }
+
     fn poll(&mut self, out: &mut Vec<Event>) {
         let mut again = Vec::new();
         for (pane_id, followed) in &mut self.panes {

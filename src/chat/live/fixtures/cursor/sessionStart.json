@@ -1,0 +1,13 @@
+{
+  "conversation_id": "9db0b999-6676-492c-9967-b1429261dfe8",
+  "generation_id": "9db0b999-6676-492c-9967-b1429261dfe8",
+  "model": "default",
+  "is_background_agent": false,
+  "session_id": "9db0b999-6676-492c-9967-b1429261dfe8",
+  "hook_event_name": "sessionStart",
+  "cursor_version": "2026.11.22-e9042b2",
+  "workspace_roots": [
+    "/tmp/claude-1000/-home-lgal-Personal-gerdr/107013c1-3089-469a-b982-88a7e65a3ff0/scratchpad/w0/cursor/proj"
+  ],
+  "transcript_path": null
+}

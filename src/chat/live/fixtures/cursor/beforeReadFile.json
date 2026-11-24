@@ -1,0 +1,16 @@
+{
+  "conversation_id": "9db0b999-6676-492c-9967-b1429261dfe8",
+  "generation_id": "9db0b999-6676-492c-9967-b1429261dfe8",
+  "model": "default",
+  "content": "hello\n",
+  "file_path": "/tmp/claude-1000/-home-lgal-Personal-gerdr/107013c1-3089-469a-b982-88a7e65a3ff0/scratchpad/w0/cursor/proj/note.txt",
+  "attachments": [],
+  "tool_use_id": "call-a6a76516-1783-4b11-a60f-3fcf01c8fe19-0\nfc_898edd54-5e88-44a3-aa55-106e2b9be671_0",
+  "session_id": "9db0b999-6676-492c-9967-b1429261dfe8",
+  "hook_event_name": "beforeReadFile",
+  "cursor_version": "2026.11.22-e9042b2",
+  "workspace_roots": [
+    "/tmp/claude-1000/-home-lgal-Personal-gerdr/107013c1-3089-469a-b982-88a7e65a3ff0/scratchpad/w0/cursor/proj"
+  ],
+  "transcript_path": null
+}

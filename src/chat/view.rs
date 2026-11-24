@@ -519,7 +519,7 @@ fn chat_bounds(layout: &ChatLayout) -> Bounds {
 
 /// The chat of herdr pane `pane_id`, among `workspaces`' panes and those
 /// whose window is still to come.
-fn chat_mut<'a>(workspaces: &'a mut [Workspace], pane_id: &str) -> Option<&'a mut PaneChat> {
+pub(crate) fn chat_mut<'a>(workspaces: &'a mut [Workspace], pane_id: &str) -> Option<&'a mut PaneChat> {
     chats_mut(workspaces).find_map(|(id, chat)| (id == pane_id).then_some(chat))
 }
 
@@ -627,10 +627,13 @@ impl Gerdr {
                     };
                     shown.insert(agent.pane_id.clone());
                     if self.is_visible(w, t) {
-                        wanted.push(agent.clone());
+                        wanted.push(self.with_live_session(agent));
                     }
                 }
             }
+        }
+        if !shown.is_empty() {
+            self.install_live_hooks();
         }
         self.chats.shown = shown;
         let (follow, stop) = follow_plan(&self.chats.followed, &wanted);
@@ -655,6 +658,7 @@ impl Gerdr {
         self.chats.scrolls.retain(|id, _| kept.contains(id));
         self.chats.read_at.retain(|id, _| kept.contains(id));
         self.chats_read_rows(&wanted);
+        self.live_release_hidden();
     }
 
     /// Start the thread following the chats, the first time one shows;

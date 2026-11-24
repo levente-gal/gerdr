@@ -1,0 +1,25 @@
+{
+  "session_id": "6fb38566-1971-4203-aa76-98d613a7987b",
+  "transcript_path": "/home/lgal/.claude/projects/-tmp-claude-1000--home-lgal-Personal-gerdr-107013c1-3089-469a-b982-88a7e65a3ff0-scratchpad-w0-claude-proj/6fb38566-1971-4203-aa76-98d613a7987b.jsonl",
+  "cwd": "/tmp/claude-1000/-home-lgal-Personal-gerdr/107013c1-3089-469a-b982-88a7e65a3ff0/scratchpad/w0/claude/proj",
+  "prompt_id": "967e8699-b72c-4daf-9a9d-0b2732c6b3b6",
+  "permission_mode": "default",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "echo done > out.txt",
+    "description": "Write \"done\" into out.txt in project directory"
+  },
+  "permission_suggestions": [
+    {
+      "type": "addDirectories",
+      "directories": [
+        "/tmp/claude-1000/-home-lgal-Personal-gerdr/107013c1-3089-469a-b982-88a7e65a3ff0/scratchpad/w0/claude/proj"
+      ],
+      "destination": "session"
+    }
+  ]
+}

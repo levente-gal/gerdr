@@ -1,0 +1,25 @@
+{
+  "conversation_id": "9db0b999-6676-492c-9967-b1429261dfe8",
+  "generation_id": "ab116849-c68a-4d16-af43-378e0a4a6251-1-azk3",
+  "model": "cursor-grok-4.5-high",
+  "model_id": "grok-4.5",
+  "model_params": [
+    {
+      "id": "effort",
+      "value": "high"
+    },
+    {
+      "id": "speed",
+      "value": "default"
+    }
+  ],
+  "text": "The user asked me to read note.txt (which contains \"hello\"), run echo done > out.txt, and say ok.",
+  "duration_ms": 1446,
+  "session_id": "9db0b999-6676-492c-9967-b1429261dfe8",
+  "hook_event_name": "afterAgentThought",
+  "cursor_version": "2026.11.22-e9042b2",
+  "workspace_roots": [
+    "/tmp/claude-1000/-home-lgal-Personal-gerdr/107013c1-3089-469a-b982-88a7e65a3ff0/scratchpad/w0/cursor/proj"
+  ],
+  "transcript_path": "/home/lgal/.cursor/projects/tmp-claude-1000-home-lgal-Personal-gerdr-107013c1-3089-469a-b982-88a7e65a3ff0-scratchpad-w0-cursor-proj/agent-transcripts/9db0b999-6676-492c-9967-b1429261dfe8/9db0b999-6676-492c-9967-b1429261dfe8.jsonl"
+}

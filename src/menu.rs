@@ -25,6 +25,9 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum MenuAction {
     NewTerminal,
+    /// Put back the files gerdr changed to hear agents live: its toast's
+    /// Undo (see `Gerdr::install_live_hooks`).
+    UndoLiveHooks(Vec<crate::chat::live::Changed>),
     /// Give project `.0` the id `.1` (see `Gerdr::change_project_id`): a
     /// change's Undo.
     ChangeProjectId(String, String),
@@ -571,6 +574,7 @@ impl Gerdr {
     pub fn menu_action(&mut self, action: MenuAction) {
         match action {
             MenuAction::NewTerminal => self.run_action(Action::NewTerminal),
+            MenuAction::UndoLiveHooks(changed) => self.undo_live_hooks(&changed),
             MenuAction::ReviewDoc(project, slug, stage) => {
                 let file = crate::doc_review::DocFile::Stage(stage);
                 self.open_doc_tab(&project, &slug, file);

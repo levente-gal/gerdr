@@ -1,0 +1,16 @@
+{
+  "conversation_id": "9db0b999-6676-492c-9967-b1429261dfe8",
+  "generation_id": "9db0b999-6676-492c-9967-b1429261dfe8",
+  "model": "default",
+  "command": "echo done > out.txt",
+  "cwd": "",
+  "sandbox": false,
+  "tool_use_id": "76a33794-2f13-4600-8bcc-c9434423bb48",
+  "session_id": "9db0b999-6676-492c-9967-b1429261dfe8",
+  "hook_event_name": "beforeShellExecution",
+  "cursor_version": "2026.11.22-e9042b2",
+  "workspace_roots": [
+    "/tmp/claude-1000/-home-lgal-Personal-gerdr/107013c1-3089-469a-b982-88a7e65a3ff0/scratchpad/w0/cursor/proj"
+  ],
+  "transcript_path": null
+}

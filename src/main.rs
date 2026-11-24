@@ -389,6 +389,8 @@ pub struct Chats {
     /// The panes showing their chat as last arranged: an agent coming or
     /// going changes that.
     pub shown: HashSet<String>,
+    /// What the agents say live, and the asks waiting (`chat::live`).
+    pub live: chat::live::Hub,
 }
 
 /// A process we started for a tab whose window hasn't shown up yet.
@@ -2209,6 +2211,7 @@ impl Gerdr {
         let subscribed = herdr.subscribe();
         let socket = herdr.socket().to_path_buf();
         self.session.herdr = Some(herdr);
+        self.listen_live(&socket);
         // Let go of the workspaces closed while gerdr wasn't looking: their
         // apps come back without them (see `restore_saved`). An empty
         // list may be a server still restoring: keep them then, unless it
@@ -7280,6 +7283,12 @@ fn command_line() -> Option<Args> {
     // Run by Cursor's hooks, many times a chat: in and out at once.
     if std::env::args().nth(1).as_deref() == Some(cursor_agents::HOOK_COMMAND) {
         cursor_agents::run_hook();
+        return None;
+    }
+    // Run by Claude Code's hooks: in and out at once, but an ask, which
+    // waits for the chat's answer (see `chat::live`).
+    if std::env::args().nth(1).as_deref() == Some(chat::live::claude::HOOK_COMMAND) {
+        chat::live::claude::run_hook();
         return None;
     }
     // Run by the browser, for gerdr's extension in it: nothing may go to
