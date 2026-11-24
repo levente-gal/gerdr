@@ -56,14 +56,20 @@ pub struct LiveEvent {
 pub enum What {
     /// The chat the pane's agent holds: `kind` `id` or `path`, as herdr's
     /// `agent_session`.
-    Session { kind: String, value: String },
+    Session {
+        kind: String,
+        value: String,
+    },
     /// A tool started: its call id, its name, its one line.
     ToolStart {
         call: String,
         name: String,
         gist: String,
     },
-    ToolEnd { call: String, failed: bool },
+    ToolEnd {
+        call: String,
+        failed: bool,
+    },
     /// The agent's turn ended: nothing runs.
     TurnEnd,
     /// The agent asks to run `tool`; the connection waits for an `Answer`.
@@ -74,7 +80,9 @@ pub enum What {
         input: String,
     },
     /// An ask was answered elsewhere (in the TUI) or withdrawn.
-    AskGone { ask: String },
+    AskGone {
+        ask: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,7 +190,9 @@ pub fn socket_for(herdr_socket: &Path) -> Option<PathBuf> {
 /// and its pane; `None` outside herdr.
 pub fn from_env() -> Option<(PathBuf, String)> {
     let herdr = std::env::var_os("HERDR_SOCKET_PATH")?;
-    let pane = std::env::var("HERDR_PANE_ID").ok().filter(|p| !p.is_empty())?;
+    let pane = std::env::var("HERDR_PANE_ID")
+        .ok()
+        .filter(|p| !p.is_empty())?;
     Some((socket_for(Path::new(&herdr))?, pane))
 }
 
@@ -378,11 +388,6 @@ pub fn undo(changed: &Changed) -> Result<(), String> {
     .map_err(|err| format!("{}: {err}", path.display()))
 }
 
-/// The marker that the user undid gerdr's hooks: they aren't added again.
-pub fn declined_marker() -> PathBuf {
-    crate::state_dir().join("live-hooks-declined")
-}
-
 /// The command a hook runs this gerdr with: `<exe> <subcommand>`.
 pub fn hook_command(subcommand: &str) -> Result<String, String> {
     let exe = std::env::current_exe().map_err(|err| err.to_string())?;
@@ -460,7 +465,10 @@ mod tests {
     #[test]
     fn the_wire_names_are_plain() {
         let line = serde_json::to_string(&event(What::AskGone { ask: "x".into() })).unwrap();
-        assert!(line.contains(r#""what":{"type":"ask_gone","ask":"x"}"#), "{line}");
+        assert!(
+            line.contains(r#""what":{"type":"ask_gone","ask":"x"}"#),
+            "{line}"
+        );
         let answer: Answer = serde_json::from_str(r#"{"ask":"x","reply":"allow"}"#).unwrap();
         assert_eq!(answer.reply, AskReply::Allow);
     }

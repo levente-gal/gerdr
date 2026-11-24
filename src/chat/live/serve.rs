@@ -23,7 +23,13 @@ impl Gerdr {
         self.chats.live.sessions.clear();
         for (_, mut held) in self.chats.live.asks.drain() {
             let ask = String::new();
-            super::answer(&mut held.stream, &Answer { ask, reply: AskReply::Pass });
+            super::answer(
+                &mut held.stream,
+                &Answer {
+                    ask,
+                    reply: AskReply::Pass,
+                },
+            );
         }
         let Some(path) = super::socket_for(herdr_socket) else {
             return tracing::warn!("agent live: no XDG_RUNTIME_DIR");
@@ -33,12 +39,14 @@ impl Gerdr {
             Err(err) => return tracing::warn!("agent live, {}: {err}", path.display()),
         };
         let source = Generic::new(listener, Interest::READ, Mode::Level);
-        let inserted = self.loop_handle.insert_source(source, |_, listener, state| {
-            while let Ok((stream, _)) = listener.accept() {
-                state.live_connection(stream);
-            }
-            Ok(PostAction::Continue)
-        });
+        let inserted = self
+            .loop_handle
+            .insert_source(source, |_, listener, state| {
+                while let Ok((stream, _)) = listener.accept() {
+                    state.live_connection(stream);
+                }
+                Ok(PostAction::Continue)
+            });
         match inserted {
             Ok(token) => {
                 self.session.sources.push(token);
@@ -57,27 +65,29 @@ impl Gerdr {
         self.chats.live.next_conn += 1;
         let mut buf = Vec::new();
         let source = Generic::new(stream, Interest::READ, Mode::Level);
-        let inserted = self.loop_handle.insert_source(source, move |_, stream, state| {
-            let mut stream: &UnixStream = stream;
-            let mut chunk = [0u8; 16 << 10];
-            let closed = loop {
-                match stream.read(&mut chunk) {
-                    Ok(0) => break true,
-                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
-                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break false,
-                    Err(_) => break true,
+        let inserted = self
+            .loop_handle
+            .insert_source(source, move |_, stream, state| {
+                let mut stream: &UnixStream = stream;
+                let mut chunk = [0u8; 16 << 10];
+                let closed = loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break true,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break false,
+                        Err(_) => break true,
+                    }
+                };
+                let (events, too_long) = super::take_lines(&mut buf);
+                for event in events {
+                    state.live_event(event, conn, stream.try_clone().ok());
                 }
-            };
-            let (events, too_long) = super::take_lines(&mut buf);
-            for event in events {
-                state.live_event(event, conn, stream.try_clone().ok());
-            }
-            if closed || too_long {
-                state.live_closed(conn);
-                return Ok(PostAction::Remove);
-            }
-            Ok(PostAction::Continue)
-        });
+                if closed || too_long {
+                    state.live_closed(conn);
+                    return Ok(PostAction::Remove);
+                }
+                Ok(PostAction::Continue)
+            });
         if let Err(err) = inserted {
             tracing::warn!("agent live: {err}");
         }
@@ -85,7 +95,12 @@ impl Gerdr {
 
     /// Take in what pane `event.pane`'s agent says, by connection `conn`
     /// (`stream`, to answer an ask on).
-    pub(crate) fn live_event(&mut self, mut event: LiveEvent, conn: u64, stream: Option<UnixStream>) {
+    pub(crate) fn live_event(
+        &mut self,
+        mut event: LiveEvent,
+        conn: u64,
+        stream: Option<UnixStream>,
+    ) {
         let now = super::now_ms();
         if event.at_ms <= 0 || event.at_ms > now {
             event.at_ms = now;
@@ -127,7 +142,11 @@ impl Gerdr {
                         since: std::time::Instant::now(),
                     });
                 }
-                let held = HeldAsk { pane: pane.clone(), conn, stream };
+                let held = HeldAsk {
+                    pane: pane.clone(),
+                    conn,
+                    stream,
+                };
                 self.chats.live.asks.insert(ask.clone(), held);
                 let timer = Timer::from_duration(ASK_WAIT);
                 let waited = self.loop_handle.insert_source(timer, move |_, _, state| {
@@ -137,6 +156,9 @@ impl Gerdr {
                 if let Err(err) = waited {
                     tracing::warn!("agent live: {err}");
                 }
+                // The sidebar and the tab say it waits too (X1).
+                self.mark_agent_statuses();
+                self.notify_agents();
             }
             What::AskGone { ask } => self.live_drop_ask(&ask),
             what => {
@@ -160,7 +182,13 @@ impl Gerdr {
             return;
         };
         let ask = ask.to_owned();
-        super::answer(&mut held.stream, &Answer { ask: ask.clone(), reply });
+        super::answer(
+            &mut held.stream,
+            &Answer {
+                ask: ask.clone(),
+                reply,
+            },
+        );
         self.live_clear_card(&held.pane, &ask);
     }
 
@@ -222,9 +250,7 @@ impl Gerdr {
     /// Add gerdr's hooks to the agents installed here, once a run, unless
     /// the user undid them: a toast says what changed, with Undo (D1).
     pub(crate) fn install_live_hooks(&mut self) {
-        if std::mem::replace(&mut self.chats.live.installed, true)
-            || super::declined_marker().exists()
-        {
+        if std::mem::replace(&mut self.chats.live.installed, true) || !self.settings.agent_hooks {
             return;
         }
         let Some(home) = crate::home_dir() else {
@@ -238,19 +264,23 @@ impl Gerdr {
             Err(err) => failed.push(err),
         };
         if home.join(".claude").is_dir() {
-            take(super::hook_command(claude::HOOK_COMMAND).and_then(|command| {
-                super::install(&home.join(".claude/settings.json"), |text| {
-                    claude::merged(text, &command)
-                })
-            }));
+            take(
+                super::hook_command(claude::HOOK_COMMAND).and_then(|command| {
+                    super::install(&home.join(".claude/settings.json"), |text| {
+                        claude::merged(text, &command)
+                    })
+                }),
+            );
         }
         // Cursor's CLI runs the hooks Cursor's IDE does.
         if home.join(".cursor").is_dir() {
-            take(super::hook_command(crate::cursor_agents::HOOK_COMMAND).and_then(|command| {
-                super::install(&home.join(".cursor/hooks.json"), |text| {
-                    crate::cursor_agents::merge_hooks(text, &command)
-                })
-            }));
+            take(
+                super::hook_command(crate::cursor_agents::HOOK_COMMAND).and_then(|command| {
+                    super::install(&home.join(".cursor/hooks.json"), |text| {
+                        crate::cursor_agents::merge_hooks(text, &command)
+                    })
+                }),
+            );
         }
         let config = home.join(".config/opencode");
         if config.is_dir() {
@@ -262,7 +292,9 @@ impl Gerdr {
             tracing::warn!("agent live: adding gerdr's hooks: {err}");
         }
         if let Some(err) = failed.first() {
-            self.show_warning(format!("Agent chats won't hear their agents at once: {err}"));
+            self.show_warning(format!(
+                "Agent chats won't hear their agents at once: {err}"
+            ));
         }
         if changed.is_empty() {
             return;
@@ -281,19 +313,22 @@ impl Gerdr {
     }
 
     /// Put back the files `install_live_hooks` changed, and don't add the
-    /// hooks again.
+    /// hooks again: `[ui] agent_hooks = false` in the settings file (S3).
     pub(crate) fn undo_live_hooks(&mut self, changed: &[Changed]) {
-        let failed: Vec<String> = changed.iter().filter_map(|c| super::undo(c).err()).collect();
-        let marker = super::declined_marker();
-        if let Some(dir) = marker.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Err(err) = std::fs::write(&marker, b"") {
-            tracing::warn!("agent live: {}: {err}", marker.display());
+        let failed: Vec<String> = changed
+            .iter()
+            .filter_map(|c| super::undo(c).err())
+            .collect();
+        self.settings.agent_hooks = false;
+        if let Err(err) = crate::config::write_bool("ui", "agent_hooks", false) {
+            tracing::warn!("agent live: [ui] agent_hooks: {err}");
+            return self.show_error(format!("Couldn't save that gerdr adds no hooks: {err}"));
         }
         match failed.first() {
             Some(err) => self.show_error(format!("Couldn't take gerdr's hooks out: {err}")),
-            None => self.show_notice("gerdr's hooks are out; it won't add them again".into()),
+            None => self.show_success(
+                "gerdr's hooks are out; [ui] agent_hooks = true adds them again".into(),
+            ),
         }
     }
 }

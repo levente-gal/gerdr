@@ -134,15 +134,20 @@ impl Gerdr {
 
     /// herdr's list of the shown project's agents, but a paused one's status
     /// unknown: herdr's is from before it stopped, and would show it at work.
-    pub(crate) fn mark_paused_agents(&mut self) {
+    /// One whose hook waits on its chat's answer is blocked: its screen
+    /// shows no prompt for herdr to see (`chat::live`).
+    pub(crate) fn mark_agent_statuses(&mut self) {
         let project = self.project.clone();
         let paused: Vec<String> = (self.paused_live())
             .filter(|p| Some(&p.project) == project.as_ref())
             .map(|p| p.pane.clone())
             .collect();
+        let asks = &self.chats.live.asks;
         for agent in &mut self.session.agents {
             if paused.contains(&agent.pane_id) {
                 agent.agent_status = herdr::AgentStatus::Unknown;
+            } else if asks.values().any(|held| held.pane == agent.pane_id) {
+                agent.agent_status = herdr::AgentStatus::Blocked;
             }
         }
     }
@@ -216,7 +221,7 @@ impl Gerdr {
         self.projects.paused_agents.retain(Paused::live);
         self.projects.paused_agents.extend(found.paused);
         self.projects.save();
-        self.mark_paused_agents();
+        self.mark_agent_statuses();
         if !found.unread.is_empty() {
             let names: Vec<String> = (found.unread.iter())
                 .map(|id| {

@@ -18,6 +18,7 @@
 //! needs_you = false     # hide the sidebar's "Needs you" list; shown by default
 //! motion = "reduced"    # or "off": no blinking dots or pulses; "full", the default
 //! footer = false        # hide the footer with the background tasks; shown by default
+//! agent_hooks = false   # don't add gerdr's hooks to Claude, Cursor and OpenCode; added by default
 //!
 //! [git]
 //! # Branch names that are one branch across repositories, in the
@@ -697,6 +698,7 @@ struct UiConfig {
     needs_you: Option<bool>,
     motion: Option<String>,
     footer: Option<bool>,
+    agent_hooks: Option<bool>,
 }
 
 /// The `[git]` table, as written.
@@ -802,6 +804,9 @@ pub struct Ui {
     pub motion: Motion,
     /// Whether the footer with the background tasks shows.
     pub footer: bool,
+    /// Whether gerdr adds its hooks to the agents, for their chats to hear
+    /// them at once (see `chat::live`).
+    pub agent_hooks: bool,
 }
 
 impl Default for Ui {
@@ -812,6 +817,7 @@ impl Default for Ui {
             needs_you: true,
             motion: Motion::Full,
             footer: true,
+            agent_hooks: true,
         }
     }
 }
@@ -960,6 +966,9 @@ pub fn from_text(
     if let Some(footer) = config.ui.footer {
         ui.footer = footer;
     }
+    if let Some(agent_hooks) = config.ui.agent_hooks {
+        ui.agent_hooks = agent_hooks;
+    }
     let mut git = Git::default();
     if let Some(groups) = config.git.same_branches {
         git.same_branches = same_branches(groups, &mut problems);
@@ -1073,6 +1082,7 @@ const TEMPLATE: &str = "\
 # theme = \"light\"       # or \"dark\" or \"system\"; else the last choice
 # needs_you = false     # hide the sidebar's \"Needs you\" list; shown by default
 # footer = false        # hide the footer with the background tasks; shown by default
+# agent_hooks = false   # don't add gerdr's hooks to Claude, Cursor and OpenCode; added by default
 # motion = \"reduced\"    # or \"off\": no blinking dots or pulses; \"full\", the default
 #
 # [git]
@@ -1318,6 +1328,11 @@ impl Gerdr {
         self.launcher.apps = settings.apps;
         self.settings.density = settings.ui.density;
         self.settings.needs_you = settings.ui.needs_you;
+        // Turned on again: added again, now.
+        if settings.ui.agent_hooks && !self.settings.agent_hooks {
+            self.chats.live.installed = false;
+        }
+        self.settings.agent_hooks = settings.ui.agent_hooks;
         // The panes take the footer's room, or give it back (`arrange`).
         self.settings.show_footer = settings.ui.footer;
         if !self.settings.show_footer {
@@ -1655,6 +1670,7 @@ other = 1
                 needs_you: true,
                 motion: crate::anim::Motion::Full,
                 footer: true,
+                agent_hooks: true,
             }
         );
         assert!(problems.is_empty());
@@ -1665,6 +1681,14 @@ other = 1
         assert!(ui("").0.needs_you);
         let (parsed, problems) = ui("[ui]\nneeds_you = false\n");
         assert!(!parsed.needs_you);
+        assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn agent_hooks_are_added_unless_the_file_says_not() {
+        assert!(ui("").0.agent_hooks);
+        let (parsed, problems) = ui("[ui]\nagent_hooks = false\n");
+        assert!(!parsed.agent_hooks);
         assert!(problems.is_empty());
     }
 

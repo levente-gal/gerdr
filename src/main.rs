@@ -2519,7 +2519,7 @@ impl Gerdr {
                 }
                 if let Some(agents) = round.agents {
                     state.session.agents = agents;
-                    state.mark_paused_agents();
+                    state.mark_agent_statuses();
                     state.notify_agents();
                     state.stage_agents_tick();
                     state.chats_refresh();
@@ -3027,7 +3027,7 @@ impl Gerdr {
         match herdr.agent_list() {
             Ok(agents) => {
                 self.session.agents = agents;
-                self.mark_paused_agents();
+                self.mark_agent_statuses();
                 self.notify_agents();
                 self.stage_agents_tick();
                 self.chats_refresh();
@@ -7589,6 +7589,7 @@ fn new_gerdr(
             system_dark: true,
             density: ui.density,
             needs_you: ui.needs_you,
+            agent_hooks: ui.agent_hooks,
             notify: notifications.enabled,
             sounds,
             live_config_reload: terminal.live_config_reload,

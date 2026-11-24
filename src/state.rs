@@ -35,6 +35,8 @@ pub struct Settings {
     pub density: Density,
     /// Whether the sidebar shows its "Needs you" list, from the config file.
     pub needs_you: bool,
+    /// Whether gerdr adds its hooks to the agents (`[ui] agent_hooks`).
+    pub agent_hooks: bool,
     /// Whether agents that need the user say so with a desktop
     /// notification, from the config file.
     pub notify: bool,
