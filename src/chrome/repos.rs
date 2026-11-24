@@ -152,8 +152,12 @@ const HEADER_TINT: f32 = 0.07;
 pub(super) const DIFF_WORD_TINT: f32 = 0.28;
 /// How far the cursor's row is lit toward `selected`.
 pub(super) const PICKED_LIT: f32 = 0.5;
-/// The Diff and Log tabs: each this wide, this far apart.
-const REPOS_TAB_WIDTH: i32 = 64;
+/// How wide each of the Diff, Log and Stashes tabs is: 64 at the default
+/// text, growing with it so "Stashes" keeps its room.
+fn repos_tab_width() -> i32 {
+    (small_font_size() * 64.0 / 15.0).round() as i32
+}
+/// How far apart those tabs are.
 const REPOS_TAB_GAP: i32 = 4;
 /// The field's row, and the field in it.
 fn repos_field_row() -> i32 {
@@ -2324,7 +2328,7 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
     };
     let modes = view.modes.as_ref().map(|switch| {
         let n = switch.labels.len() as i32;
-        let (b, track_w) = (1, n * REPOS_TAB_WIDTH + 2);
+        let (b, track_w) = (1, n * repos_tab_width() + 2);
         let track = Rectangle::new(
             (
                 x + w - HELP_PADDING - track_w,
@@ -2336,8 +2340,8 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         let segments = (0..n)
             .map(|i| {
                 Rectangle::new(
-                    (track.loc.x + b + i * REPOS_TAB_WIDTH, track.loc.y + b).into(),
-                    (REPOS_TAB_WIDTH, row_button_px() - 2 * b).into(),
+                    (track.loc.x + b + i * repos_tab_width(), track.loc.y + b).into(),
+                    (repos_tab_width(), row_button_px() - 2 * b).into(),
                 )
             })
             .collect();
@@ -2352,15 +2356,15 @@ fn parts(view: &ReposView, panel: Rect) -> Parts {
         true => &[],
         false => &[DetailTab::Diff, DetailTab::Log, DetailTab::Stashes],
     };
-    let tabs_w = (tabs.len() as i32 * (REPOS_TAB_WIDTH + REPOS_TAB_GAP) - REPOS_TAB_GAP).max(0);
+    let tabs_w = (tabs.len() as i32 * (repos_tab_width() + REPOS_TAB_GAP) - REPOS_TAB_GAP).max(0);
     let tabs_x = detail.loc.x + detail.size.w - HELP_PADDING - tabs_w;
     let detail_tabs = tabs
         .iter()
         .copied()
         .enumerate()
         .map(|(k, tab)| {
-            let tx = tabs_x + k as i32 * (REPOS_TAB_WIDTH + REPOS_TAB_GAP);
-            let size = (REPOS_TAB_WIDTH, row_button_px());
+            let tx = tabs_x + k as i32 * (repos_tab_width() + REPOS_TAB_GAP);
+            let size = (repos_tab_width(), row_button_px());
             (tab, Rectangle::new((tx, tab_y).into(), size.into()))
         })
         .collect();
