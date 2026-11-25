@@ -12,6 +12,8 @@ const sweep = document.getElementById("sweep");
 const offline = document.getElementById("offline");
 const note = document.getElementById("note");
 const bar = document.getElementById("bar");
+// On a pane's page scrolled up from its end, a button goes back to it.
+const toEnd = document.getElementById("end");
 
 // Colours an agent pane's output. Served from here: no outside script
 // runs on a page that can type to agents.
@@ -788,6 +790,7 @@ async function render(fresh, force, keepBottom) {
       else if (!fresh) window.scrollTo(0, y);
     }
     if (fresh && !v.pane) window.scrollTo(0, 0);
+    endButton();
   } catch (e) {
     if (hash !== location.hash || read !== reads) return;
     if (!fresh && typing()) {
@@ -980,6 +983,16 @@ document.addEventListener("click", (e) => {
 document.addEventListener("scroll", (e) => { if (e.target.matches?.("textarea")) shade(e.target); }, true);
 // The page's end stays clear of the bar as its box grows.
 new ResizeObserver(() => document.body.style.setProperty("--bar-h", `${bar.offsetHeight}px`)).observe(bar);
+
+function endButton() {
+  const below = document.body.scrollHeight - window.innerHeight - window.scrollY;
+  toEnd.hidden = here()[0] !== "pane" || below < 120;
+}
+toEnd.addEventListener("click", () => {
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  window.scrollTo({ top: document.body.scrollHeight, behavior: still ? "auto" : "smooth" });
+});
+window.addEventListener("scroll", endButton, { passive: true });
 
 // At the top of a pane's output, read more of it; back at its end, only
 // its last lines again.
