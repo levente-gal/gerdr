@@ -104,7 +104,7 @@ pub fn context(agent: AgentKind, tail: &[u8]) -> Option<Context> {
 }
 
 /// The last `TAIL` bytes of the file at `path`.
-fn tail_of(path: &Path) -> Option<Vec<u8>> {
+pub(crate) fn tail_of(path: &Path) -> Option<Vec<u8>> {
     let mut file = std::fs::File::open(path).ok()?;
     let from = file.metadata().ok()?.len().saturating_sub(TAIL);
     file.seek(SeekFrom::Start(from)).ok()?;

@@ -12,6 +12,7 @@ pub mod btw;
 pub mod commands;
 pub mod menu;
 pub mod mode;
+pub mod model;
 pub mod parse;
 pub mod rows;
 pub mod source;
@@ -202,6 +203,9 @@ pub struct PaneChat {
     pub live: live::PaneLive,
     /// The user's picks on the card of its ask's questions, till Submit.
     pub card: questions::Card,
+    /// The model its agent is on, as its chat last said or as last picked
+    /// here (`model`).
+    pub model: Option<String>,
 }
 
 /// When an agent's turn began, as herdr's rounds saw its status.
@@ -252,6 +256,9 @@ pub enum Event {
         /// The transcript holds more before them, read on asking
         /// (`Tail::earlier`).
         earlier: bool,
+        /// The model the agent is on, where its chat or config says
+        /// (`model`).
+        model: Option<String>,
     },
     /// No chat found for the pane, and why.
     Missing { pane_id: String, why: String },

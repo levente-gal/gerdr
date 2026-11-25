@@ -29,6 +29,7 @@ use super::{
     menu::{self, ChoiceKind, Menu},
     questions::Card,
     mode,
+    model,
     rows::{rows, unread},
     tail::Tail,
 };
@@ -525,6 +526,15 @@ const MODE_KEYS: &[Binding<(), ()>] = &[Binding {
     f1: "switch the agent to its next mode (plan, build, …)",
 }];
 
+/// The model key, from the list and the reply box alike: the key that
+/// picks a stage agent's model on the feature tab.
+pub(crate) const MODEL_KEYS: &[Binding<(), ()>] = &[Binding {
+    chord: "Alt+Shift+A",
+    does: |_| Some(()),
+    footer: true,
+    f1: "pick the model the agent runs on",
+}];
+
 /// The `/` menu's keys: they come before the reply box's while it shows.
 const SLASH_KEYS: &[Binding<(), SlashKey>] = &[
     Binding {
@@ -591,17 +601,22 @@ fn slash_sync(chat: &mut PaneChat, load: impl FnOnce() -> Vec<Command>) {
 
 /// The footer's key hints of a chat whose keys are at `focus` (checklist
 /// K3: from the tables the keys are read with), with the mode key's if its
-/// agent has `modes`. Esc in the list does nothing, so it has none; Esc in
+/// agent has `modes` and the model key's if it `models`. Esc in the list does nothing, so it has none; Esc in
 /// the reply box says what becomes of the draft.
 pub(crate) fn footer(
     focus: ChatFocus,
     draft_empty: bool,
     suggested: bool,
     modes: bool,
+    models: bool,
 ) -> Vec<(String, String)> {
     let fill = draft_empty && suggested;
     let mode = (key_table::hints(MODE_KEYS, &(), |_| "mode".to_owned()).into_iter())
         .filter(|_| modes)
+        .chain(
+            (key_table::hints(MODEL_KEYS, &(), |_| "model".to_owned()).into_iter())
+                .filter(|_| models),
+        )
         .map(|(chord, said)| (chord.to_owned(), said));
     let keys = match focus {
         ChatFocus::List => key_table::joined(key_table::hints(LIST_KEYS, &fill, |k| {
@@ -640,7 +655,7 @@ pub(crate) fn footer(
 /// The footer's key hints of `chat` (K3): its ask card's, or its questions'
 /// card's while that has the keys, then those of where its keys are, but
 /// for a key the card took.
-fn chat_footer(chat: &PaneChat, modes: bool) -> Vec<(String, String)> {
+fn chat_footer(chat: &PaneChat, modes: bool, models: bool) -> Vec<(String, String)> {
     let ask = chat.live.ask.as_ref();
     let questions = ask.filter(|a| !a.questions.is_empty());
     let card = questions.filter(|_| chat.focus == ChatFocus::List);
@@ -662,6 +677,7 @@ fn chat_footer(chat: &PaneChat, modes: bool) -> Vec<(String, String)> {
             chat.draft.line().text.is_empty(),
             chat.suggestion.is_some(),
             modes,
+            models,
         ),
     };
     let taken = |chord: &str| card.is_some() && CARD_KEYS.iter().any(|b| b.chord == chord);
@@ -687,6 +703,8 @@ enum ChatDo {
     Page(i8),
     /// Step the agent to its next mode.
     NextMode,
+    /// Open the picker of the agent's model.
+    PickModel,
 }
 
 /// A key of the reply box, while it has the keys.
@@ -758,6 +776,9 @@ fn chat_key(
     }
     if key_table::press(MODE_KEYS, &(), mods, sym).is_some() {
         return Some(ChatDo::NextMode);
+    }
+    if key_table::press(MODEL_KEYS, &(), mods, sym).is_some() {
+        return Some(ChatDo::PickModel);
     }
     if chat.focus == ChatFocus::Composer
         && let Some(slash) = chat.slash.as_mut().filter(|slash| slash.open())
@@ -979,8 +1000,14 @@ fn take_event<'a>(
             source,
             items,
             earlier,
+            model,
             ..
         } => {
+            // Another chat in the pane (another agent, a new session): its
+            // own model, not the last one's.
+            if model.is_some() || chat.source.as_ref() != Some(&source) {
+                chat.model = model;
+            }
             let n = rows(&items, &chat.unfolded).len();
             chat.picked = chat.picked.filter(|i| *i < n);
             chat.items = chat.live.timed(items);
@@ -989,8 +1016,14 @@ fn take_event<'a>(
             chat.source = Some(source);
             chat.reading = Reading::Read;
         }
-        Event::Missing { why, .. } => chat.reading = Reading::Missing(why),
-        Event::Failed { error, .. } => chat.reading = Reading::Failed(error),
+        Event::Missing { why, .. } => {
+            chat.reading = Reading::Missing(why);
+            chat.model = None;
+        }
+        Event::Failed { error, .. } => {
+            chat.reading = Reading::Failed(error);
+            chat.model = None;
+        }
     }
     true
 }
@@ -1578,6 +1611,7 @@ impl Gerdr {
                 self.show_success(format!("Copied {lines} line{s}"));
             }
             Some(ChatDo::NextMode) => self.chat_next_mode(&pane_id),
+            Some(ChatDo::PickModel) => self.chat_open_model_picker(&pane_id),
             Some(ChatDo::Top) => self.chat_scroll_to(&pane_id, Some(0.0)),
             Some(ChatDo::Bottom) => self.chat_scroll_to(&pane_id, None),
             Some(ChatDo::Page(by)) => {
@@ -1891,6 +1925,58 @@ impl Gerdr {
         agent_in_front(&herdr.process_info(pane_id))
     }
 
+    /// Open the picker of pane `pane_id`'s agent's model, on the one its
+    /// chat says it is on; nothing for an agent gerdr can't switch.
+    pub(crate) fn chat_open_model_picker(&mut self, pane_id: &str) {
+        let Some(slot) = self.chat_model_slot(pane_id) else {
+            return;
+        };
+        let of = crate::switcher::ModelFor::Chat {
+            pane: pane_id.to_owned(),
+        };
+        self.open_model_picker(of, slot);
+    }
+
+    /// The agent of pane `pane_id`'s chat, for the picker of its model;
+    /// none for one gerdr can't switch.
+    pub(crate) fn chat_model_slot(
+        &mut self,
+        pane_id: &str,
+    ) -> Option<crate::feature_agents::ModelSlot> {
+        let kind = (self.chat_agent(pane_id).and_then(super::source::kind))
+            .filter(|kind| model::picks(*kind))?;
+        let now = chat_mut(&mut self.workspaces, pane_id).and_then(|chat| chat.model.clone());
+        let offers = model::offers(kind, &self.features.cursor_models.offers);
+        Some(crate::feature_agents::ModelSlot {
+            agent: model::name(kind).to_owned(),
+            base: model::base(kind).to_owned(),
+            picked: now.and_then(|now| model::picked(&offers, &now)),
+        })
+    }
+
+    /// Switch pane `pane_id`'s agent to model `id`, picked in its chat:
+    /// its `/model` line typed into its pane. Its button says `id`'s name
+    /// till its chat says what it is on.
+    pub(crate) fn chat_pick_model(&mut self, pane_id: &str, id: &str) {
+        let Some(kind) = self.chat_agent(pane_id).and_then(super::source::kind) else {
+            return;
+        };
+        let sent = (self.mode_key_goes(pane_id))
+            .and_then(|()| self.send_to_agent(pane_id, &model::line(id)));
+        if let Err(why) = sent {
+            tracing::warn!("switching the agent in pane {pane_id} to model {id}: {why}");
+            return self.show_error(format!("Couldn't switch the agent to {id}: {why}"));
+        }
+        let offers = model::offers(kind, &self.features.cursor_models.offers);
+        let name = match id {
+            "default" => "Default",
+            _ => (offers.iter().find(|o| o.id == id)).map_or(id, |o| o.name.as_str()),
+        };
+        if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
+            chat.model = Some(name.to_owned());
+        }
+    }
+
     /// Switching pane `pane_id`'s agent to mode `want` failed for `why`.
     fn chat_mode_failed(&mut self, pane_id: &str, want: &str, why: &str) {
         tracing::warn!("switching the agent in pane {pane_id} to {want}: {why}");
@@ -2038,6 +2124,10 @@ impl Gerdr {
                 if chat.source.as_ref().is_some_and(|source| source.guessed) {
                     label.push_str(" · found by folder and time");
                 }
+                // Its model's button: what its chat says it is on.
+                let model = (super::source::kind(agent))
+                    .filter(|kind| model::picks(*kind))
+                    .map(|_| chat.model.clone().unwrap_or_else(|| "Model".to_owned()));
                 let modes = (super::source::kind(agent))
                     .filter(|kind| !mode::modes(*kind).is_empty())
                     .map_or_else(Vec::new, |kind| {
@@ -2059,7 +2149,7 @@ impl Gerdr {
                     draft: chat.draft.line(),
                     waiting: self.chats.waiting.get(pane_id).cloned(),
                     suggestion: chat.suggestion.clone(),
-                    hints: chat_footer(chat, !modes.is_empty()),
+                    hints: chat_footer(chat, !modes.is_empty(), model.is_some()),
                     slash: (chat.slash.as_ref())
                         .filter(|slash| slash.open())
                         .map(chrome::SlashView::of),
@@ -2076,6 +2166,7 @@ impl Gerdr {
                     since: (self.chats.turns.get(pane_id)).and_then(|t| t.since(&chat.items)),
                     modes,
                     mode: self.chats.modes.get(pane_id).cloned(),
+                    model,
                 };
                 view.hover = pointer
                     .filter(|pos| view.rect.to_f64().contains(*pos))
@@ -2106,6 +2197,10 @@ impl Gerdr {
         }
         if let Some(bar) = chrome::chat_pinned(&view).filter(|bar| bar.to_f64().contains(pos)) {
             return Some(crate::tooltip::Tooltip::new("Go to your message", bar));
+        }
+        if let Some(rect) = chrome::chat_model_at(&view, pos) {
+            let tip = "Pick the model the agent runs on";
+            return Some(crate::tooltip::Tooltip::new(tip, rect).key(MODEL_KEYS[0].chord));
         }
         let button = chrome::chat_bottom_button(&view)?;
         (button.to_f64().contains(pos))
@@ -2192,6 +2287,7 @@ impl Gerdr {
                     self.chat_pick_mode(&pane_id, want);
                 }
             }
+            ChatHit::Model => self.chat_open_model_picker(&pane_id),
             ChatHit::Answer(reply) => self.chat_answer(&pane_id, reply, None),
             ChatHit::Card(hit) => {
                 let answers = card_press(chat, hit);
@@ -2421,6 +2517,7 @@ mod tests {
             source: source.clone(),
             items: Arc::new(vec![user("u1", "hi")]),
             earlier: true,
+            model: Some("Opus 5.5".into()),
         };
         assert!(take_event(
             [("w1:p1", &mut one), ("w1:p2", &mut two)],
@@ -2429,14 +2526,19 @@ mod tests {
         assert_eq!(two.reading, Reading::Read);
         assert_eq!(two.items.len(), 1);
         assert!(two.earlier && !two.reading_earlier);
+        assert_eq!(two.model.as_deref(), Some("Opus 5.5"));
         assert_eq!(two.source, Some(source));
         assert_eq!(one.reading, Reading::Finding);
+        // Another agent in the pane, its chat not written yet: the last
+        // one's model goes.
+        one.model = Some("Haiku 5.5".into());
         let missing = Event::Missing {
             pane_id: "w1:p1".into(),
             why: "no chat".into(),
         };
         assert!(take_event([("w1:p1", &mut one)], missing));
         assert_eq!(one.reading, Reading::Missing("no chat".into()));
+        assert_eq!(one.model, None);
         let gone = Event::Failed {
             pane_id: "w1:p9".into(),
             error: "x".into(),
@@ -2558,7 +2660,13 @@ mod tests {
     fn footer_of(chat: &PaneChat) -> Vec<(String, String)> {
         match chat.slash.as_ref().is_some_and(|s| s.open()) {
             true => slash_footer(),
-            false => footer(chat.focus, chat.draft.is_empty(), chat.suggestion.is_some(), false),
+            false => footer(
+                chat.focus,
+                chat.draft.is_empty(),
+                chat.suggestion.is_some(),
+                false,
+                false,
+            ),
         }
     }
 
@@ -2647,7 +2755,11 @@ mod tests {
         assert_eq!(press(&mut chat, "Shift+Tab", '\t'), Some(ChatDo::NextMode));
         assert_eq!(chat.draft, "/co");
         // Hinted only where the agent has modes.
-        let has = |modes| footer(ChatFocus::List, true, false, modes).iter().any(|(k, _)| k == "Shift+Tab");
+        let has = |modes| {
+            footer(ChatFocus::List, true, false, modes, false)
+                .iter()
+                .any(|(k, _)| k == "Shift+Tab")
+        };
         assert!(has(true) && !has(false));
         // It means nothing else in the chat (K1).
         let others: Vec<&str> = (LIST_KEYS.iter().map(|b| b.chord))
@@ -2656,6 +2768,36 @@ mod tests {
             .chain(ASK_KEYS.iter().map(|b| b.chord))
             .collect();
         assert!(!others.contains(&"Shift+Tab"));
+    }
+
+    #[test]
+    fn alt_shift_a_picks_the_model_from_the_list_and_the_reply_box() {
+        let mut chat = with_items(vec![user("u1", "one")]);
+        assert_eq!(
+            press(&mut chat, "Alt+Shift+A", 'A'),
+            Some(ChatDo::PickModel)
+        );
+        chat.focus = ChatFocus::Composer;
+        chat.draft.set("hi");
+        assert_eq!(
+            press(&mut chat, "Alt+Shift+A", 'A'),
+            Some(ChatDo::PickModel)
+        );
+        assert_eq!(chat.draft, "hi");
+        // Hinted only where gerdr can switch the agent's model.
+        let has = |models| {
+            (footer(ChatFocus::List, true, false, false, models).iter())
+                .any(|(k, said)| k == "Alt+Shift+A" && said == "model")
+        };
+        assert!(has(true) && !has(false));
+        let others: Vec<&str> = (LIST_KEYS.iter().map(|b| b.chord))
+            .chain(COMPOSER_KEYS.iter().map(|b| b.chord))
+            .chain(SLASH_KEYS.iter().map(|b| b.chord))
+            .chain(ASK_KEYS.iter().map(|b| b.chord))
+            .chain(MODE_KEYS.iter().map(|b| b.chord))
+            .collect();
+        assert!(!others.contains(&MODEL_KEYS[0].chord));
+        assert!(crate::keys::hint_key(MODEL_KEYS[0].chord).is_some());
     }
 
     #[test]
@@ -2885,7 +3027,7 @@ mod tests {
         // While the card has the keys, the list's hints lose its keys.
         let mut chat = with_items(Vec::new());
         chat.live.ask = Some(ask);
-        let hints = chat_footer(&chat, false);
+        let hints = chat_footer(&chat, false, false);
         assert!(hints.iter().all(|(k, s)| k != "Space" || s != "fold"));
         assert!(hints.iter().any(|(k, _)| k == "Y"));
     }

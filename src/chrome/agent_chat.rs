@@ -95,6 +95,10 @@ pub struct ChatView {
     pub modes: Vec<String>,
     /// The one its screen last said it is in.
     pub mode: Option<String>,
+    /// The label of its model's button at the right of the modes, for an
+    /// agent whose model gerdr can switch (`chat::model`): the model it is
+    /// on, else "Model".
+    pub model: Option<String>,
     /// The user's picks on the card of the ask's questions, while it asks
     /// some.
     pub card: Option<CardView>,
@@ -161,6 +165,7 @@ impl PartialEq for ChatView {
             && self.slash == other.slash
             && self.modes == other.modes
             && self.mode == other.mode
+            && self.model == other.model
             && self.card == other.card
     }
 }
@@ -217,6 +222,9 @@ pub enum ChatHit {
     /// One of the agent's modes under the reply box, by its place in
     /// `ChatView::modes`: switches the agent to it.
     Mode(usize),
+    /// The model's button under the reply box: opens the picker of the
+    /// agent's model.
+    Model,
     /// A part of the card of the ask's questions.
     Card(CardHit),
 }
@@ -263,6 +271,9 @@ impl ChatLayout {
         }
         if let Some((i, _)) = parts.modes.iter().find(|(_, rect)| on(*rect)) {
             return Some(ChatHit::Mode(*i));
+        }
+        if parts.model.is_some_and(on) {
+            return Some(ChatHit::Model);
         }
         if let Some((key, _)) = parts.keys.iter().find(|(_, rect)| on(*rect)) {
             return Some(ChatHit::Key(*key));
@@ -700,6 +711,8 @@ struct Parts {
     /// that fits, by its place in `ChatView::modes`.
     mode_track: Option<Rect>,
     modes: Vec<(usize, Rect)>,
+    /// The model's button, at the right end of the modes' row.
+    model: Option<Rect>,
 }
 
 /// How wide a key button labelled `label` is.
@@ -733,14 +746,21 @@ fn parts(view: &ChatView) -> Parts {
     let send_w = button_width("Send");
     let field_w = (w - send_w - FIELD_GAP).max(0);
     let field_h = wrap_field_height(&view.draft, field_w);
-    // As many of the modes as fit across, on a track as high as a button.
+    // As many of the modes as fit across, on a track as high as a button,
+    // left of the model's button.
     let (mut mode_track, mut modes, mut modes_h) = (None, Vec::new(), 0);
+    let y = hints.loc.y - PART_GAP / 2 - row_button();
+    let model = (view.model.as_ref()).map(|label| {
+        // A long name is cut short: the modes keep their room.
+        let mw = key_width(label).min(w / 2);
+        rect(x + w - mw, y, mw, row_button())
+    });
+    let end = model.map_or(x + w, |m| m.loc.x - FIELD_GAP);
     if !view.modes.is_empty() {
-        let y = hints.loc.y - PART_GAP / 2 - row_button();
         let mut sx = x + MODE_INSET;
         for (i, mode) in view.modes.iter().enumerate() {
             let sw = width_in(mode, Face::Ui, small_font_size()).ceil() as i32 + 2 * KEY_PAD;
-            if sx + sw + MODE_INSET > x + w {
+            if sx + sw + MODE_INSET > end {
                 break;
             }
             let h = row_button() - 2 * MODE_INSET;
@@ -748,6 +768,8 @@ fn parts(view: &ChatView) -> Parts {
             sx += sw;
         }
         mode_track = Some(rect(x, y, sx + MODE_INSET - x, row_button()));
+    }
+    if !view.modes.is_empty() || model.is_some() {
         modes_h = row_button() + PART_GAP / 2;
     }
     let composer = Rectangle::new(
@@ -879,6 +901,7 @@ fn parts(view: &ChatView) -> Parts {
         slash_skip,
         mode_track,
         modes,
+        model,
     }
 }
 
@@ -1522,6 +1545,11 @@ pub fn chat_bottom_button(view: &ChatView) -> Option<Rect> {
 /// where its segment is.
 pub fn chat_mode_at(view: &ChatView, pos: Point<f64, Logical>) -> Option<(usize, Rect)> {
     (parts(view).modes.into_iter()).find(|(_, rect)| rect.to_f64().contains(pos))
+}
+
+/// The model's button, if `pos` is on it.
+pub fn chat_model_at(view: &ChatView, pos: Point<f64, Logical>) -> Option<Rect> {
+    parts(view).model.filter(|rect| rect.to_f64().contains(pos))
 }
 
 /// The list's scrollbar in the room right of its items, while they don't
@@ -2502,6 +2530,18 @@ impl Painter {
             };
             self.segmented(&mut c, here(track), &segments, on, hover, scale, p);
         }
+        if let (Some(rect), Some(label)) = (parts.model, view.model.as_deref()) {
+            let lit = view.hover == Some(ChatHit::Model);
+            self.button(
+                &mut c,
+                label,
+                here(rect),
+                (lit, false),
+                ButtonStyle::Plain,
+                scale,
+                p,
+            );
+        }
 
         if let Some(slash) = &view.slash {
             let rows = (parts.slash.as_slice(), parts.slash_skip);
@@ -2773,7 +2813,7 @@ pub(super) mod tests {
             draft: Line::default(),
             waiting: None,
             suggestion: None,
-            hints: crate::chat::footer(ChatFocus::List, true, false, false),
+            hints: crate::chat::footer(ChatFocus::List, true, false, false, false),
             earlier: None,
             hover: None,
             running: Vec::new(),
@@ -2782,6 +2822,7 @@ pub(super) mod tests {
             slash: None,
             modes: Vec::new(),
             mode: None,
+            model: None,
             card: None,
         }
     }
@@ -3128,6 +3169,30 @@ pub(super) mod tests {
         };
         let shown = parts(&narrow).modes.len();
         assert!((1..4).contains(&shown), "{shown}");
+    }
+
+    #[test]
+    fn the_models_button_sits_right_of_the_modes() {
+        let v = ChatView {
+            modes: ["Auto", "Manual", "Edits", "Plan"].map(String::from).into(),
+            model: Some("Opus 5.5".into()),
+            ..view()
+        };
+        let (layout, p) = (chat_layout(&v), parts(&v));
+        let model = p.model.expect("its button");
+        assert_eq!(layout.hit(&v, middle(model)), Some(ChatHit::Model));
+        assert_eq!(chat_model_at(&v, middle(model)), Some(model));
+        let track = p.mode_track.unwrap();
+        assert!(track.loc.x + track.size.w <= model.loc.x);
+        assert_eq!(model.loc.y, track.loc.y);
+        assert!(model.loc.y >= layout.composer.loc.y + layout.composer.size.h);
+        // Alone, without modes, it still gets its row.
+        let alone = ChatView {
+            model: Some("Model".into()),
+            ..view()
+        };
+        assert!(parts(&alone).model.is_some());
+        assert!(parts(&alone).composer.loc.y < parts(&view()).composer.loc.y);
     }
 
     #[test]
@@ -3642,11 +3707,11 @@ pub(super) mod tests {
         };
         assert_eq!(keys(&v), ["J / K", "Space", "Y", "I"]);
         v.focus = ChatFocus::Composer;
-        v.hints = crate::chat::footer(ChatFocus::Composer, true, false, false);
+        v.hints = crate::chat::footer(ChatFocus::Composer, true, false, false, false);
         assert_eq!(chat_hints(&v)[2], ("Esc", "back"));
         assert!(!keys(&v).iter().any(|k| k == crate::text_field::DISCARD_KEY));
         v.draft.text = "half a reply".into();
-        v.hints = crate::chat::footer(ChatFocus::Composer, false, false, false);
+        v.hints = crate::chat::footer(ChatFocus::Composer, false, false, false, false);
         assert_eq!(chat_hints(&v)[2], ("Esc", "keep draft"));
         assert!(keys(&v).iter().any(|k| k == crate::text_field::DISCARD_KEY));
         let spots = hint_spots(&chat_hints(&v), parts(&v).hints);

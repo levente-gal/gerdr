@@ -23,7 +23,8 @@ use resvg::{tiny_skia, usvg};
 use serde_json::{Value, json};
 
 use crate::{
-    chat::mode,
+    ai_work::AgentKind,
+    chat::{mode, model},
     feature::{Feature, Stage, Status, layout, setup, store},
     feature_agents::{self, Gate},
     feature_workspace::feature_on,
@@ -457,6 +458,10 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
             if !mode.is_empty() {
                 return agent_mode(&project, &slug, &pane, &mode, &text("from"));
             }
+            let picked = text("model");
+            if !picked.is_empty() {
+                return agent_model(&project, &slug, &pane, &picked);
+            }
             return agent_input(&project, &slug, &pane, &line, &key);
         }
         _ => return Reply::error(404, "Nothing here"),
@@ -480,19 +485,59 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
 /// the pane. And how long its turn has run, in seconds, while it works,
 /// and the side questions asked of it this run. None without a gerdr to
 /// ask.
-fn pane_ask(project: &str, pane: &str) -> (Value, Value, Value) {
-    let request = json!({ "op": "ask", "project": project, "pane": pane });
+fn pane_ask(project: &str, pane: &str, cursor: bool) -> (Value, Value, Value, Value) {
+    let request = json!({ "op": "ask", "project": project, "pane": pane, "cursor": cursor });
     match gerdr(Some(project), &request) {
         Ok(answer) => (
             answer["ask"].clone(),
             answer["working"].clone(),
             answer["sides"].clone(),
+            answer["cursor_models"].clone(),
         ),
         Err(why) => {
             tracing::debug!("phone: the ask of pane {pane}: {why}");
-            (Value::Null, Value::Null, Value::Null)
+            (Value::Null, Value::Null, Value::Null, Value::Null)
         }
     }
+}
+
+/// The models the agent of `kind` in a pane can be switched to, as the
+/// desktop chat's picker offers them (`cursor`: Cursor's, as gerdr last
+/// read them), the one it is on (`chat`: its Claude Code transcript), and
+/// that one's id among them: `[models, model, model_id]`. Empty for an
+/// agent gerdr can't switch.
+fn pane_models(kind: Option<AgentKind>, chat: Option<&Path>, cursor: &Value) -> [Value; 3] {
+    let Some(kind) = kind.filter(|k| model::picks(*k)) else {
+        return [json!([]), Value::Null, Value::Null];
+    };
+    let cursor: Vec<crate::stage_models::Offer> = (cursor.as_array().into_iter().flatten())
+        .filter_map(|o| {
+            Some(crate::stage_models::Offer {
+                id: o["id"].as_str()?.to_owned(),
+                name: o["name"].as_str()?.to_owned(),
+            })
+        })
+        .collect();
+    let mut offers = model::offers(kind, &cursor);
+    let now = match kind {
+        AgentKind::Cursor => model::cursor_now(),
+        _ => {
+            (chat.and_then(crate::ai_work::context::tail_of)).and_then(|tail| model::last_in(&tail))
+        }
+    };
+    let picked = now.as_deref().and_then(|now| model::picked(&offers, now));
+    // Claude Code's own choice, as the desktop's Default row.
+    if kind == AgentKind::Claude {
+        let own = crate::stage_models::Offer {
+            id: "default".into(),
+            name: "Default".into(),
+        };
+        offers.insert(0, own);
+    }
+    let listed: Vec<Value> = (offers.iter())
+        .map(|o| json!({ "id": o.id, "name": o.name }))
+        .collect();
+    [json!(listed), json!(now), json!(picked)]
 }
 
 /// Ask the gerdr running here: `request` on its phone socket (see
@@ -637,6 +682,41 @@ fn agent_mode(project: &str, slug: &str, pane: &str, want: &str, from: &str) -> 
     match went {
         Ok(()) => Reply::json(&json!({ "said": [] })),
         Err(why) => Reply::error(409, &format!("Couldn't switch the agent to {want}: {why}")),
+    }
+}
+
+/// Switch the agent in `pane` to model `id`, as the desktop chat does: its
+/// own `/model` line typed (`chat::model`).
+fn agent_model(project: &str, slug: &str, pane: &str, id: &str) -> Reply {
+    // One word: it goes on the agent's command line as typed.
+    if id.len() > 100 || id.split_whitespace().count() != 1 {
+        return Reply::error(400, "Not a model's id");
+    }
+    let project = match agent_of(project, slug, pane) {
+        Ok((project, _)) => project,
+        Err(reply) => return reply,
+    };
+    let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
+    let agent = match herdr.agent_list() {
+        Ok(agents) => agents.into_iter().find(|a| a.pane_id == pane),
+        Err(err) => return Reply::error(502, &format!("Couldn't reach the agent: {err}")),
+    };
+    if !(agent.as_ref().and_then(crate::chat::source::kind)).is_some_and(model::picks) {
+        return Reply::error(404, "No agent whose model gerdr can switch runs there");
+    }
+    // The line would answer its menu.
+    if agent
+        .as_ref()
+        .is_some_and(|a| a.agent_status == AgentStatus::Blocked)
+    {
+        return Reply::error(
+            409,
+            &format!("Couldn't switch the agent to {id}: the agent waits on an answer first"),
+        );
+    }
+    match herdr.send_agent_line(pane, &model::line(id)) {
+        Ok(()) => Reply::json(&json!({ "said": [] })),
+        Err(err) => Reply::error(502, &format!("Couldn't reach the agent: {err}")),
     }
 }
 
@@ -1241,8 +1321,8 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     let suggestion = (agent.as_ref())
         .filter(|a| crate::chat::suggests(a))
         .and_then(|_| pane_suggestion(&mut herdr, pane));
-    let kind = (agent.as_ref().and_then(crate::chat::source::kind))
-        .filter(|kind| !mode::modes(*kind).is_empty());
+    let agent_kind = agent.as_ref().and_then(crate::chat::source::kind);
+    let kind = agent_kind.filter(|kind| !mode::modes(*kind).is_empty());
     // The modes it offers and the one `screen` (its last rows) shows.
     let modes = |screen: &str| match kind {
         Some(kind) => {
@@ -1265,15 +1345,24 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     let chat = (rows == Some(0))
         .then(|| claude_chat(&mut herdr, pane))
         .flatten();
+    // Its transcript, for its model.
+    let transcript = match (&chat, agent_kind) {
+        (Some(path), _) => Some(path.clone()),
+        (None, Some(AgentKind::Claude)) => claude_chat(&mut herdr, pane),
+        _ => None,
+    };
+    let cursor = agent_kind == Some(AgentKind::Cursor);
     if let Some(path) = &chat
         && (all || want > PANE_LINES)
     {
         return match herdr.pane_read(pane, "visible", PANE_LINES) {
             Ok(screen) => {
                 let text = chat_and_screen(path, &screen);
-                let (ask, working, sides) = pane_ask(&project.id, pane);
+                let (ask, working, sides, cursor) = pane_ask(&project.id, pane, cursor);
                 let (modes, mode) = modes(&screen);
-                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "said": said });
+                let [models, model, model_id] =
+                    pane_models(agent_kind, transcript.as_deref(), &cursor);
+                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "models": models, "model": model, "model_id": model_id, "said": said });
                 Reply::json(&reply)
             }
             Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
@@ -1293,9 +1382,10 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             // The rows above its screen, wrapped: at worst one more read, of all.
             let more = chat.is_some()
                 || (!all && rows.is_some_and(|rows| rows > text.lines().count() as u64));
-            let (ask, working, sides) = pane_ask(&project.id, pane);
+            let (ask, working, sides, cursor) = pane_ask(&project.id, pane, cursor);
             let (modes, mode) = modes(&text);
-            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "said": said });
+            let [models, model, model_id] = pane_models(agent_kind, transcript.as_deref(), &cursor);
+            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "models": models, "model": model, "model_id": model_id, "said": said });
             Reply::json(&reply)
         }
         Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
@@ -1381,6 +1471,21 @@ mod tests {
             act("/api/agent", br#"{"p":"no-such","s":""}"#, "localhost", "").status,
             404
         );
+    }
+
+    #[test]
+    fn a_model_is_one_word_and_offered_for_claude_and_cursor_only() {
+        let body = br#"{"p":"no-such","s":"","pane":"w1:p1","model":"opus; rm"}"#;
+        assert_eq!(act("/api/agent", body, "localhost", "").status, 400);
+        let [models, now, id] = pane_models(Some(AgentKind::Pi), None, &Value::Null);
+        assert_eq!((models, now, id), (json!([]), Value::Null, Value::Null));
+        let [models, now, _] = pane_models(Some(AgentKind::Claude), None, &Value::Null);
+        assert_eq!(models[0], json!({ "id": "default", "name": "Default" }));
+        assert!(models.as_array().unwrap().iter().any(|m| m["id"] == "opus"));
+        assert_eq!(now, Value::Null);
+        let cursor = json!([{ "id": "gpt-5.2", "name": "GPT-5.2" }]);
+        let [models, _, _] = pane_models(Some(AgentKind::Cursor), None, &cursor);
+        assert_eq!(models, cursor);
     }
 
     #[test]

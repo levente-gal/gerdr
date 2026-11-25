@@ -9734,9 +9734,10 @@ fn dump_ship_squash() {
 /// hovered) and on its screen (check boxes, an edge after every row), and
 /// Claude Code's suggestion in the reply box, the agent's modes under it,
 /// side questions (`/btw`) answered and being answered, a plan on its
-/// card, cut and whole, and plan mode asking to go ahead with it,
-/// and the user's words kept on top of a list scrolled up past them.
-const CHATS: [&str; 19] = [
+/// card, cut and whole, plan mode asking to go ahead with it, and the
+/// model's button right of the modes, hovered, and the user's words kept
+/// on top of a list scrolled up past them.
+const CHATS: [&str; 20] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9755,6 +9756,7 @@ const CHATS: [&str; 19] = [
     "chat_plan",
     "chat_plan_open",
     "chat_plan_ask",
+    "chat_model",
     "chat_pinned",
 ];
 
@@ -9791,7 +9793,7 @@ fn chat_view(i: usize) -> super::ChatView {
             super::ChatView {
                 status: AgentStatus::Idle,
                 focus: ChatFocus::Composer,
-                hints: crate::chat::footer(ChatFocus::Composer, false, false, false),
+                hints: crate::chat::footer(ChatFocus::Composer, false, false, false, false),
                 draft: Line {
                     text: text.into(),
                     caret: text.len(),
@@ -9903,13 +9905,13 @@ fn chat_view(i: usize) -> super::ChatView {
             status: AgentStatus::Idle,
             focus: ChatFocus::Composer,
             suggestion: Some("commit this and run the tests".into()),
-            hints: crate::chat::footer(ChatFocus::Composer, true, true, false),
+            hints: crate::chat::footer(ChatFocus::Composer, true, true, false, false),
             ..v
         },
         // Claude's modes, in plan mode, another one hovered.
         13 => super::ChatView {
             status: AgentStatus::Idle,
-            hints: crate::chat::footer(ChatFocus::List, true, false, true),
+            hints: crate::chat::footer(ChatFocus::List, true, false, true, false),
             modes: ["Auto", "Manual", "Edits", "Plan"].map(String::from).into(),
             mode: Some("Plan".into()),
             hover: Some(ChatHit::Mode(0)),
@@ -9972,9 +9974,19 @@ fn chat_view(i: usize) -> super::ChatView {
             ask: Some(super::agent_chat::tests::plan_ask()),
             ..v
         },
+        // The model's button right of Claude's modes, hovered.
+        18 => super::ChatView {
+            status: AgentStatus::Idle,
+            hints: crate::chat::footer(ChatFocus::List, true, false, true, true),
+            modes: ["Auto", "Manual", "Edits", "Plan"].map(String::from).into(),
+            mode: Some("Auto".into()),
+            model: Some("Opus 5.5".into()),
+            hover: Some(ChatHit::Model),
+            ..v
+        },
         // Scrolled up past the user's words: the bar of them on top,
         // under the pointer.
-        18 => {
+        19 => {
             let mut items = (*v.items).clone();
             items.extend((0..6).map(|i| crate::chat::Item::Assistant {
                 id: format!("more{i}"),
@@ -10008,7 +10020,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 19]; 4] = [
+const GOLDEN_CHATS: [[u64; 20]; 4] = [
     // Dark at 1
     [
         0xa5039d4ee1fb06ee, // chat_finding
@@ -10029,6 +10041,7 @@ const GOLDEN_CHATS: [[u64; 19]; 4] = [
         0x6c4d3e75cd1fbbd3, // chat_plan
         0x29f78ea279039845, // chat_plan_open
         0xe7cbee2c7746c067, // chat_plan_ask
+        0x1baa8146186136c6, // chat_model
         0x46bfe697efbe6271, // chat_pinned
     ],
     // Dark at 2
@@ -10051,6 +10064,7 @@ const GOLDEN_CHATS: [[u64; 19]; 4] = [
         0x2ca34c602eea2776, // chat_plan
         0xb137c3c620610f92, // chat_plan_open
         0x3d17e45cb1fc313a, // chat_plan_ask
+        0x70646c8cb13e8898, // chat_model
         0xd0a47890d6ecabfe, // chat_pinned
     ],
     // Light at 1
@@ -10073,6 +10087,7 @@ const GOLDEN_CHATS: [[u64; 19]; 4] = [
         0x32a2e31d552691ef, // chat_plan
         0xf89f6063d627b9c2, // chat_plan_open
         0xfd65a0a88ee3c27e, // chat_plan_ask
+        0x1f5a36a977d402d0, // chat_model
         0x3a9fb789f9a3a6e3, // chat_pinned
     ],
     // Light at 2
@@ -10095,6 +10110,7 @@ const GOLDEN_CHATS: [[u64; 19]; 4] = [
         0xca8f7ab03bda90dd, // chat_plan
         0xf1c18370a8a4e7d3, // chat_plan_open
         0xa086dc1a84e0d05c, // chat_plan_ask
+        0x723a472ff593632d, // chat_model
         0x18b2695a30b259e4, // chat_pinned
     ],
 ];

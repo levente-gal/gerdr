@@ -165,6 +165,9 @@ pub enum ModelFor {
     /// The agent CLI `command`, to start now in a new tab of workspace
     /// `workspace` (see `Gerdr::new_agent`).
     Free { workspace: usize, command: String },
+    /// The agent in herdr pane `pane`, shown as a chat: switched now, with
+    /// its own `/model` (see `Gerdr::chat_pick_model`).
+    Chat { pane: String },
 }
 
 impl ModelPick {
@@ -987,7 +990,13 @@ fn model_rows(slot: &ModelSlot, pick: &ModelPick, cursor: &[Offer], t3: &[Offer]
         )
     };
     let own = format!("{}'s own choice", slot.agent);
-    let mut items = vec![row("Default".to_owned(), own, None)];
+    // Cursor's `/model` takes no default back.
+    let chat_cursor =
+        matches!(pick.of, ModelFor::Chat { .. }) && Flavor::of(&slot.base) == Flavor::Cursor;
+    let mut items = match chat_cursor {
+        true => Vec::new(),
+        false => vec![row("Default".to_owned(), own, None)],
+    };
     items.extend((offers.into_iter()).map(|o| row(o.name, o.id.clone(), Some(o.id))));
     items
 }
@@ -1247,7 +1256,7 @@ impl Gerdr {
             ..pick.clone()
         });
         let mut switcher = Switcher::new(Vec::new(), false, Place::Tab);
-        switcher.model_hint = self.model_hint(&slot, pick.free());
+        switcher.model_hint = self.model_hint(&slot, &pick.of);
         switcher.model_slot = Some(pick);
         switcher.set_items(self.model_items(&slot, switcher.model_slot.as_ref()));
         switcher.select(&now);
@@ -1272,19 +1281,21 @@ impl Gerdr {
                 base: command.clone(),
                 picked: None,
             }),
+            ModelFor::Chat { pane } => self.chat_model_slot(pane),
         });
-        if let Some(slot) = slot {
-            let free = switcher.model_slot.as_ref().is_some_and(ModelPick::free);
-            switcher.model_hint = self.model_hint(&slot, free);
+        if let (Some(slot), Some(of)) = (slot, switcher.model_slot.as_ref().map(|p| p.of.clone())) {
+            switcher.model_hint = self.model_hint(&slot, &of);
             switcher.set_items(self.model_items(&slot, switcher.model_slot.as_ref()));
         }
         self.overlays.switcher = Some(switcher);
     }
 
-    /// What the picker of `slot`'s model says over its list, for a stage
-    /// or, `free`, a new agent.
-    fn model_hint(&self, slot: &ModelSlot, free: bool) -> &'static str {
+    /// What the picker of `slot`'s model says over its list, for what `of`
+    /// says: a stage, a new agent or a chat's.
+    fn model_hint(&self, slot: &ModelSlot, of: &ModelFor) -> &'static str {
         let models = &self.features.cursor_models;
+        let free = matches!(of, ModelFor::Free { .. });
+        let chat = matches!(of, ModelFor::Chat { .. });
         match Flavor::of(&slot.base) {
             Flavor::Cursor if models.offers.is_empty() => match models.reading {
                 Reading::Busy => "Reading Cursor's models…",
@@ -1293,7 +1304,12 @@ impl Gerdr {
             },
             // Tried on 2026.10.22: its first message saves `--model` as the
             // default of every Cursor chat, as its own `/model` does.
-            Flavor::Cursor if free => "Model for this agent; Cursor keeps it as its default…",
+            Flavor::Cursor if free || chat => {
+                "Model for this agent; Cursor keeps it as its default…"
+            }
+            // Tried on 2.1.325: its `/model` saves the model as the default
+            // of new sessions.
+            _ if chat => "Model for this agent; Claude Code may keep it as its default…",
             Flavor::Cursor => "Model for this stage's next start; Cursor keeps it as its default…",
             Flavor::T3 => "Model for this stage's T3 Code draft; type one as provider/model…",
             _ if free => "Model for this agent…",
@@ -1886,6 +1902,9 @@ impl Gerdr {
                     workspace,
                     &crate::feature::agents::with_model(&command, pick.model.as_deref()),
                 ),
+                ModelFor::Chat { pane } => {
+                    self.chat_pick_model(&pane, pick.model.as_deref().unwrap_or("default"))
+                }
             },
             Target::Settings => self.open_settings(place),
             Target::ProjectFile(id) => self.open_project_file(&id),
@@ -2598,6 +2617,33 @@ mod tests {
         let with_model = crate::feature::agents::with_model;
         assert_eq!(with_model(command, model.as_deref()), "claude --model opus");
         assert_eq!(with_model(command, None), "claude");
+    }
+
+    #[test]
+    fn a_chats_cursor_model_picker_has_no_default() {
+        let cursor = [Offer {
+            id: "gpt-5.2".into(),
+            name: "GPT-5.2".into(),
+        }];
+        let slot = |base: &str| ModelSlot {
+            agent: "Cursor".into(),
+            base: base.into(),
+            picked: Some("gpt-5.2".into()),
+        };
+        let pick = ModelPick {
+            of: ModelFor::Chat {
+                pane: "w1:p1".into(),
+            },
+            agent: "Cursor".into(),
+            model: None,
+        };
+        let rows = model_rows(&slot("cursor-agent"), &pick, &cursor, &[]);
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["GPT-5.2"]);
+        assert!(rows[0].detail.contains("picked"));
+        // Claude Code's chat keeps its own choice.
+        let rows = model_rows(&slot("claude"), &pick, &cursor, &[]);
+        assert_eq!(rows[0].label, "Default");
     }
 
     #[test]
