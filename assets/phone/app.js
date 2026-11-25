@@ -12,6 +12,8 @@ const sweep = document.getElementById("sweep");
 const offline = document.getElementById("offline");
 const note = document.getElementById("note");
 const bar = document.getElementById("bar");
+// On a pane's page scrolled up from its end, a button goes back to it.
+const toEnd = document.getElementById("end");
 
 // Colours an agent pane's output. Served from here: no outside script
 // runs on a page that can type to agents.
@@ -788,6 +790,7 @@ async function render(fresh, force, keepBottom) {
       else if (!fresh) window.scrollTo(0, y);
     }
     if (fresh && !v.pane) window.scrollTo(0, 0);
+    endButton();
   } catch (e) {
     if (hash !== location.hash || read !== reads) return;
     if (!fresh && typing()) {
@@ -995,6 +998,16 @@ function onKeyboard() {
 }
 window.visualViewport?.addEventListener("resize", onKeyboard);
 window.visualViewport?.addEventListener("scroll", onKeyboard);
+
+function endButton() {
+  const below = document.body.scrollHeight - window.innerHeight - window.scrollY;
+  toEnd.hidden = here()[0] !== "pane" || below < 120;
+}
+toEnd.addEventListener("click", () => {
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  window.scrollTo({ top: document.body.scrollHeight, behavior: still ? "auto" : "smooth" });
+});
+window.addEventListener("scroll", endButton, { passive: true });
 
 // At the top of a pane's output, read more of it; back at its end, only
 // its last lines again.

@@ -26,7 +26,7 @@ use super::scrollback::{StyledRow, styled_row};
 use super::{
     BUTTON_RADIUS, BUTTON_WIDTH, ButtonStyle, CHEVRON_WIDTH, Canvas, DOT_SLOT, Dot, FIELD_GAP, FieldSpot, ListBar,
     Painter, Palette, ROW_INSET, ROW_RADIUS, Rect, Rgb, Thumb, band, button_width, centred_dot,
-    check, chevron_down, chevron_side, field_text, font_size, gutter_track, hint_at, hint_spots,
+    arrow, check, chevron_down, chevron_side, field_text, font_size, gutter_track, hint_at, hint_spots,
     hints_height, icon_sdf, mix, pane_bar_height, phys, physical, quit_button, rect_px, row_button,
     small_font_size, soft_rows, status_dot, suggestion_row, wrap_field_height,
 };
@@ -191,6 +191,9 @@ pub enum ChatHit {
     Scrollbar,
     /// A command of the `/` menu, by its place among those matching.
     Command(usize),
+    /// The button at the list's foot while it is scrolled up: goes to the
+    /// last item and follows new ones.
+    Bottom,
 }
 
 /// Where a chat's parts go, in output coordinates.
@@ -250,6 +253,9 @@ impl ChatLayout {
                 .map(|_| ChatHit::ShowScreen);
         }
         let (items, content) = stacked(view, parts.column.1);
+        if bottom_button(view, &parts, content).is_some_and(on) {
+            return Some(ChatHit::Bottom);
+        }
         let top = top_of(view, content, self.list.size.h);
         if thumb_of(&parts, content, top).is_some_and(|thumb| thumb.takes(pos)) {
             return Some(ChatHit::Scrollbar);
@@ -1114,6 +1120,18 @@ fn in_view(items: &[(i32, Rc<Laid>)], top: i32, h: i32) -> Range<usize> {
     from..to.max(from)
 }
 
+/// The button that goes to the list's end, centred at its foot, while
+/// more than a card row of it is below what shows.
+fn bottom_button(view: &ChatView, parts: &Parts, content: i32) -> Option<Rect> {
+    let list = parts.list;
+    let below = content - list.size.h - top_of(view, content, list.size.h);
+    let size = BUTTON_WIDTH;
+    (below > card_row() && list.size.h > size + 2 * PART_GAP).then(|| {
+        let x = parts.column.0 + (parts.column.1 - size) / 2;
+        rect(x, list.loc.y + list.size.h - size - PART_GAP, size, size)
+    })
+}
+
 /// The list's scrollbar in the room right of its items, while they don't
 /// all show.
 fn thumb_of(parts: &Parts, content: i32, top: i32) -> Option<Thumb> {
@@ -1833,6 +1851,16 @@ impl Painter {
                     ..thumb
                 };
                 self.thumb_in(&mut c, &thumb, scale, p);
+            }
+            if let Some(button) = bottom_button(view, &parts, content) {
+                let lit = view.hover == Some(ChatHit::Bottom);
+                let (x, y, w, h) = rect_px(here(button), scale);
+                let b = (scale as f32).round().max(1.0);
+                c.rounded(x, y, w, h, w / 2.0, p.border);
+                let fill = if lit { p.selected } else { p.element };
+                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, w / 2.0 - b, fill);
+                let s = 1.3 * scale as f32;
+                icon_sdf(&mut c, here(button), scale, p.text, |x, y| arrow(false, x, y, s));
             }
         }
         rule(&mut c, parts.list.loc.y + parts.list.size.h);
@@ -2762,6 +2790,12 @@ pub(super) mod tests {
             chat_layout(&v).hit(&v, middle(thumb.track)),
             Some(ChatHit::Scrollbar)
         );
+        // At the end, no button to go there; scrolled up, one at the foot.
+        assert_eq!(bottom_button(&v, &p, content), None);
+        v.top = 0.0;
+        let button = bottom_button(&v, &p, content).expect("a button to the end");
+        assert_eq!(button.loc.y + button.size.h + PART_GAP, p.list.loc.y + p.list.size.h);
+        assert_eq!(chat_layout(&v).hit(&v, middle(button)), Some(ChatHit::Bottom));
     }
 
     #[test]

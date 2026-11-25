@@ -1435,6 +1435,7 @@ impl Gerdr {
                 }
             }
             ChatHit::Send => self.chat_send(&pane_id),
+            ChatHit::Bottom => self.chat_scroll_to(&pane_id, None),
             ChatHit::Answer(reply) => self.chat_answer(&pane_id, reply),
             ChatHit::AskFold => {
                 if let Some(ask) = &chat.live.ask {
