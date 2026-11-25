@@ -58,6 +58,16 @@ pub enum Item {
         diff: Vec<DiffLine>,
         output: Option<ToolOut>,
     },
+    /// A plan the agent wrote (Claude's `ExitPlanMode`, or a file in its
+    /// plans folder): its markdown, shown in a card.
+    Plan {
+        id: String,
+        /// Its file, when it was written to one.
+        path: Option<String>,
+        text: String,
+        blocks: Arc<Vec<DocBlock>>,
+        output: Option<ToolOut>,
+    },
     /// A subagent's work, folded under one card in the place of the call
     /// that started it.
     Subagent {
@@ -81,6 +91,7 @@ impl Item {
             | Item::Thinking { id, .. }
             | Item::Tool { id, .. }
             | Item::Edit { id, .. }
+            | Item::Plan { id, .. }
             | Item::Subagent { id, .. }
             | Item::Note { id, .. } => id,
         }

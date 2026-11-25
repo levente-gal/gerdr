@@ -9733,9 +9733,10 @@ fn dump_ship_squash() {
 /// of several picks, the keys on Other; one pick of one question, a row
 /// hovered) and on its screen (check boxes, an edge after every row), and
 /// Claude Code's suggestion in the reply box, the agent's modes under it,
-/// side questions (`/btw`) answered and being answered, and the model's
-/// button right of the modes, hovered.
-const CHATS: [&str; 16] = [
+/// side questions (`/btw`) answered and being answered, a plan on its
+/// card, cut and whole, plan mode asking to go ahead with it, and the
+/// model's button right of the modes, hovered.
+const CHATS: [&str; 19] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9751,6 +9752,9 @@ const CHATS: [&str; 16] = [
     "chat_suggested",
     "chat_modes",
     "chat_side",
+    "chat_plan",
+    "chat_plan_open",
+    "chat_plan_ask",
     "chat_model",
 ];
 
@@ -9922,6 +9926,7 @@ fn chat_view(i: usize) -> super::ChatView {
                     .map(String::from)
                     .to_vec(),
                 state: SideState::Answered,
+                session: None,
             };
             let asked = Side::new("and the most it waits?", u64::MAX);
             super::ChatView {
@@ -9932,8 +9937,43 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
+        // A plan on its card, after the chat's last words: cut, and whole.
+        15 | 16 => {
+            let text = "# Retry the upload\n\nThe upload gives up on the first error. \
+                Retry it with a growing wait.\n\n## Steps\n\n\
+                1. Add `retry` to `upload.rs`\n2. Wait 200 ms, then double it\n\
+                3. Stop after 5 tries\n4. Log each retry at debug\n\n\
+                ## Verification\n\n- `cargo test upload`\n- Upload to a server that fails twice\n\
+                - Check the log\n- Check the wait doubles\n- Check it stops\n";
+            let mut items = (*v.items).clone();
+            items.push(crate::chat::Item::Plan {
+                id: "plan".into(),
+                path: Some("/home/u/.claude/plans/retry-upload.md".into()),
+                text: text.into(),
+                blocks: std::sync::Arc::new(crate::md_blocks::blocks(text)),
+                output: None,
+            });
+            let mut unfolded = v.unfolded.clone();
+            if i == 16 {
+                unfolded.insert("plan".into());
+            }
+            super::ChatView {
+                items: std::sync::Arc::new(items),
+                unfolded,
+                // At its end, where it is.
+                top: 10_000.0,
+                ..v
+            }
+        }
+        // Plan mode asks to go ahead: its plan as markdown on the card.
+        17 => super::ChatView {
+            status: AgentStatus::Blocked,
+            hints: Vec::new(),
+            ask: Some(super::agent_chat::tests::plan_ask()),
+            ..v
+        },
         // The model's button right of Claude's modes, hovered.
-        15 => super::ChatView {
+        18 => super::ChatView {
             status: AgentStatus::Idle,
             hints: crate::chat::footer(ChatFocus::List, true, false, true, true),
             modes: ["Auto", "Manual", "Edits", "Plan"].map(String::from).into(),
@@ -9959,7 +9999,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 16]; 4] = [
+const GOLDEN_CHATS: [[u64; 19]; 4] = [
     // Dark at 1
     [
         0xa5039d4ee1fb06ee, // chat_finding
@@ -9976,7 +10016,10 @@ const GOLDEN_CHATS: [[u64; 16]; 4] = [
         0xfcf05ca12ee002e6, // chat_question_ticks
         0x004ee553bdea6b96, // chat_suggested
         0xfe79e247979aad2d, // chat_modes
-        0x3bb4cda8d8f1a46b, // chat_side
+        0xe03e8d399611c068, // chat_side
+        0x6c4d3e75cd1fbbd3, // chat_plan
+        0x29f78ea279039845, // chat_plan_open
+        0xe7cbee2c7746c067, // chat_plan_ask
         0x1baa8146186136c6, // chat_model
     ],
     // Dark at 2
@@ -9995,7 +10038,10 @@ const GOLDEN_CHATS: [[u64; 16]; 4] = [
         0xa7b4647525da3658, // chat_question_ticks
         0x95c0a660d63e9eb1, // chat_suggested
         0xd21d7d5694e74060, // chat_modes
-        0x60f310cf03af302f, // chat_side
+        0xca0b573784b91770, // chat_side
+        0x2ca34c602eea2776, // chat_plan
+        0xb137c3c620610f92, // chat_plan_open
+        0x3d17e45cb1fc313a, // chat_plan_ask
         0x70646c8cb13e8898, // chat_model
     ],
     // Light at 1
@@ -10014,7 +10060,10 @@ const GOLDEN_CHATS: [[u64; 16]; 4] = [
         0xd69ec9cb4ee9dea1, // chat_question_ticks
         0x1a9b6c02649b4f80, // chat_suggested
         0xd5e5939be4fc8b21, // chat_modes
-        0x127bfb769349a783, // chat_side
+        0x6d48f599e60538e1, // chat_side
+        0x32a2e31d552691ef, // chat_plan
+        0xf89f6063d627b9c2, // chat_plan_open
+        0xfd65a0a88ee3c27e, // chat_plan_ask
         0x1f5a36a977d402d0, // chat_model
     ],
     // Light at 2
@@ -10033,7 +10082,10 @@ const GOLDEN_CHATS: [[u64; 16]; 4] = [
         0xb0e9a3d6bbb5692f, // chat_question_ticks
         0x3d7c424e61025c58, // chat_suggested
         0x7127f7ee025b5d03, // chat_modes
-        0x1ef6725ddb8a2095, // chat_side
+        0x0c1f45535e2220e5, // chat_side
+        0xca8f7ab03bda90dd, // chat_plan
+        0xf1c18370a8a4e7d3, // chat_plan_open
+        0xa086dc1a84e0d05c, // chat_plan_ask
         0x723a472ff593632d, // chat_model
     ],
 ];

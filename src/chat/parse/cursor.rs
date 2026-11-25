@@ -90,6 +90,14 @@ impl Reader {
     fn cursor_call(&mut self, part: &Value, id: String) {
         let call = part["toolCallId"].as_str().map_or(id, str::to_owned);
         let args = &part["args"];
+        // Plan mode hands its plan over; its file is named in the result.
+        if part["toolName"] == "CreatePlan"
+            && let Some(item) =
+                (args["plan"].as_str()).and_then(|plan| self.plan(call.clone(), None, plan))
+        {
+            self.push_call(call, None, item);
+            return;
+        }
         let text = |key: &str| args[key].as_str().unwrap_or("");
         let diff = match part["toolName"].as_str().unwrap_or("tool") {
             "StrReplace" => Some(change(text("old_string"), text("new_string"))),
@@ -155,6 +163,36 @@ mod tests {
         json!({ "role": "tool", "id": id,
             "content": [{ "type": "tool-result", "toolCallId": id, "toolName": name, "result": result }],
             "providerOptions": { "cursor": { "highLevelToolCallResult": { "output": output, "isError": error } } } })
+    }
+
+    #[test]
+    fn a_created_plan_shows_on_its_card() {
+        let plan = "# Merge\n\n1. fetch\n2. merge\n";
+        let items = read(&[
+            said(
+                "a1",
+                json!([call(
+                    "c1",
+                    "CreatePlan",
+                    json!({ "name": "Merge", "plan": plan, "todos": [] })
+                )]),
+            ),
+            result(
+                "c1",
+                "CreatePlan",
+                "Plan file created",
+                json!({ "success": {} }),
+                false,
+            ),
+        ]);
+        let Item::Plan {
+            id, text, output, ..
+        } = &items[0]
+        else {
+            panic!("{items:?}")
+        };
+        assert_eq!((id.as_str(), text.as_str()), ("c1", plan));
+        assert_eq!(output.as_ref().map(|o| o.failed), Some(false));
     }
 
     #[test]

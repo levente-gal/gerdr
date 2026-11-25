@@ -77,6 +77,9 @@ pub struct Reader {
     spawns: Vec<antigravity::Spawn>,
     /// The model the chat is on, as its lines last said (Claude Code's).
     model: Option<String>,
+    /// The last plan shown, trimmed: plan mode hands over the plan it just
+    /// wrote to its file, and it shows once.
+    plan: Option<String>,
 }
 
 /// A subagent's work: its item, read by a reader of its own.
@@ -109,6 +112,7 @@ impl Reader {
             last_entry: None,
             spawns: Vec::new(),
             model: None,
+            plan: None,
         }
     }
 
@@ -213,6 +217,16 @@ impl Reader {
         self.push(item);
     }
 
+    /// Plan `text` as its item; none when it is the plan shown last (handed
+    /// over the same as the file just written).
+    fn plan(&mut self, id: String, path: Option<String>, text: &str) -> Option<Item> {
+        if self.plan.as_deref() == Some(text.trim()) {
+            return None;
+        }
+        self.plan = Some(text.trim().to_owned());
+        Some(plan_item(id, path, text))
+    }
+
     /// The result of tool call `call`, given to its item; false when the
     /// call isn't known (made before reading began).
     fn fill(&mut self, call: &str, out: ToolOut) -> bool {
@@ -221,6 +235,7 @@ impl Reader {
         };
         if let Item::Tool { output, .. }
         | Item::Edit { output, .. }
+        | Item::Plan { output, .. }
         | Item::Subagent { output, .. } = &mut self.items[index]
         {
             *output = Some(out);
@@ -378,6 +393,7 @@ impl Reader {
         };
         if let Item::Tool { output, .. }
         | Item::Edit { output, .. }
+        | Item::Plan { output, .. }
         | Item::Subagent { output, .. } = &mut self.items[index]
         {
             *output = Some(out);
@@ -449,6 +465,15 @@ impl Reader {
             .or(input["notebook_path"].as_str())
             .map(str::to_owned);
         let text = |key: &str| input[key].as_str().unwrap_or("");
+        let plan = match (name, &path) {
+            ("ExitPlanMode", _) => input["plan"].as_str(),
+            ("Write", Some(path)) if is_plan_file(path) => Some(text("content")),
+            _ => None,
+        };
+        if let Some(item) = plan.and_then(|plan| self.plan(id.clone(), path.clone(), plan)) {
+            self.push_call(id, at, item);
+            return;
+        }
         let diff = match name {
             "Edit" => Some(change(text("old_string"), text("new_string"))),
             "MultiEdit" => Some(
@@ -582,6 +607,23 @@ fn texts(content: &Value) -> String {
             .join("\n"),
         _ => String::new(),
     }
+}
+
+/// Plan `text`, written to `path` or not, as its item.
+fn plan_item(id: String, path: Option<String>, text: &str) -> Item {
+    Item::Plan {
+        id,
+        path,
+        text: text.to_owned(),
+        blocks: Arc::new(md_blocks::blocks(text)),
+        output: None,
+    }
+}
+
+/// Whether `path` is a plan Claude's plan mode wrote: a markdown file in
+/// its plans folder.
+fn is_plan_file(path: &str) -> bool {
+    path.contains("/.claude/plans/") && path.ends_with(".md")
 }
 
 /// `old` replaced by `new`, as lines taken out and put in.
@@ -854,6 +896,57 @@ mod tests {
         assert_eq!(diff.len(), MAX_LINES + 1);
         assert!(diff[..MAX_LINES].iter().all(|l| l.side == DiffSide::Added));
         assert_eq!(diff[MAX_LINES].text, "\u{2026} 5 more lines");
+    }
+
+    #[test]
+    fn a_plan_is_its_markdown_once() {
+        let plan = "# Plan\n\n- one\n- two\n";
+        let file = "/h/.claude/plans/x.md";
+        let reader = read(&[
+            call(
+                "a1",
+                "t1",
+                "Write",
+                serde_json::json!({ "file_path": file, "content": plan }),
+            ),
+            result("u1", "t1", "written", false),
+            // Plan mode hands over what it just wrote: shown once.
+            call(
+                "a2",
+                "t2",
+                "ExitPlanMode",
+                serde_json::json!({ "plan": plan }),
+            ),
+            call(
+                "a3",
+                "t3",
+                "ExitPlanMode",
+                serde_json::json!({ "plan": "# Other" }),
+            ),
+            call(
+                "a4",
+                "t4",
+                "Edit",
+                serde_json::json!({ "file_path": file, "old_string": "one", "new_string": "1" }),
+            ),
+        ]);
+        let items = reader.items();
+        let Item::Plan {
+            path,
+            blocks,
+            output,
+            ..
+        } = &items[0]
+        else {
+            panic!("{:?}", items[0])
+        };
+        assert_eq!(path.as_deref(), Some(file));
+        assert_eq!(**blocks, md_blocks::blocks(plan));
+        assert_eq!(output.as_ref().map(|o| o.text.as_str()), Some("written"));
+        assert!(matches!(&items[1], Item::Tool { name, .. } if name == "ExitPlanMode"));
+        assert!(matches!(&items[2], Item::Plan { path: None, text, .. } if text == "# Other"));
+        // A plan changed is a change.
+        assert!(matches!(&items[3], Item::Edit { .. }));
     }
 
     #[test]

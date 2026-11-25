@@ -34,7 +34,7 @@ use super::{
 use crate::{
     ChatRows,
     chat::{
-        ChatFocus, DiffSide, Item, Reading, ToolOut,
+        ChatFocus, DiffSide, Item, Reading, ToolOut, btw,
         commands::Slash,
         live::{AskReply, PendingAsk, Question, Running},
         menu::{self, Menu},
@@ -544,6 +544,8 @@ const BUBBLE_SHARE: i32 = 75;
 const EDIT_PEEK: usize = 8;
 /// How many lines of the prompt a subagent was given show while folded.
 const PROMPT_PEEK: usize = 3;
+/// How many lines of a plan show while its card is folded.
+const PLAN_PEEK: usize = 12;
 /// A card's head row: its fold mark, name, gist and state.
 fn card_row() -> i32 {
     row_button()
@@ -611,6 +613,38 @@ const OTHER_HINT: &str = "Other…";
 /// run.
 pub fn ask_key(ask: &str) -> String {
     format!("{ask}\u{0}ask")
+}
+
+/// Whether `ask` is plan mode asking to go ahead with its plan: its input
+/// is the plan's markdown.
+pub fn is_plan(ask: &PendingAsk) -> bool {
+    ask.tool == "ExitPlanMode"
+}
+
+/// Whether `ask`'s card shows what it would run, as `unfolded` has it: a
+/// plan shows until folded, as it is what the answer is about; other input
+/// once unfolded.
+pub fn ask_open(ask: &PendingAsk, unfolded: &HashSet<String>) -> bool {
+    unfolded.contains(&ask_key(&ask.ask)) != is_plan(ask)
+}
+
+/// Plan `md` as blocks, parsed once while it stays the same (the ask's
+/// card is laid out on every paint).
+fn plan_blocks(md: &str) -> Arc<Vec<DocBlock>> {
+    thread_local! {
+        static KEPT: RefCell<Option<(String, Arc<Vec<DocBlock>>)>> = const { RefCell::new(None) };
+    }
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        match kept.as_ref().filter(|(said, _)| said == md) {
+            Some((_, blocks)) => blocks.clone(),
+            None => {
+                let blocks = Arc::new(crate::md_blocks::blocks(md));
+                *kept = Some((md.to_owned(), blocks.clone()));
+                blocks
+            }
+        }
+    })
 }
 
 /// Its keys under a menu: its choices are buttons of their own. The tab
@@ -760,7 +794,7 @@ fn parts(view: &ChatView) -> Parts {
         let room = (end - list_top - 3 * card_row() - frame).max(0);
         if let Some(card) = view.card.as_ref().filter(|_| laid.h > room) {
             laid = lay_question(view, &ask.questions, card, inner, false);
-        } else if view.card.is_none() && view.unfolded.contains(&ask_key(&ask.ask)) {
+        } else if view.card.is_none() && ask_open(ask, &view.unfolded) {
             let room = (end - list_top - 3 * card_row() - frame - laid.h - PART_GAP).max(0);
             let lines = (room / small_line()) as usize;
             laid = lay_ask(view, ask, inner, lines.min(ASK_LINES));
@@ -1331,12 +1365,12 @@ const WORKING: &str = "working";
 /// would run, then what the agent waits for.
 fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
     let mut l = Laid::default();
-    let open = view.unfolded.contains(&ask_key(&ask.ask));
+    let open = ask_open(ask, &view.unfolded);
     l.head(Head {
         x: 0,
         w,
         open,
-        name: &ask.tool,
+        name: if is_plan(ask) { "Plan" } else { &ask.tool },
         bold: true,
         gist: &short(&ask.gist, view.cwd.as_deref()),
         tail: Vec::new(),
@@ -1344,7 +1378,34 @@ fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
         path: false,
         mono: true,
     });
-    if open {
+    if open && is_plan(ask) {
+        // The plan as markdown, as much as `lines` small lines' room
+        // holds: the whole of it is on its card in the chat.
+        let (ix, iw) = (CHEVRON_WIDTH, (w - CHEVRON_WIDTH).max(1));
+        let room = lines as i32 * small_line();
+        let (mut pieces, mut h) = doc_layout::stack_of(&plan_blocks(&ask.input), iw);
+        let mut fit: Vec<i32> = (pieces.iter())
+            .filter(|(r, piece)| {
+                matches!(piece, DocPiece::Text { .. } | DocPiece::CodeLine(_))
+                    && r.loc.y + r.size.h <= room
+            })
+            .map(|(r, _)| r.loc.y)
+            .collect();
+        fit.dedup();
+        let more = peek(&mut pieces, &mut h, fit.len());
+        let top = l.below();
+        l.doc(pieces, (ix, top));
+        if more > 0 {
+            let text = match more {
+                1 => "1 more line in the chat".to_owned(),
+                n => format!("{n} more lines in the chat"),
+            };
+            l.put(
+                rect(ix, l.below(), iw, small_line()),
+                label(&text, Face::Ui, Mark::Muted),
+            );
+        }
+    } else if open {
         let (ix, iw) = (CHEVRON_WIDTH, (w - CHEVRON_WIDTH).max(1));
         let all: Vec<&str> = ask.input.lines().collect();
         let shown = all.len().min(lines);
@@ -1486,6 +1547,16 @@ fn bubble(p: &Palette) -> Rgb {
     mix(p.terminal_background, p.text, BUBBLE_TINT)
 }
 
+/// A frame on the chat's ground at `(x, y, w, h)` px: the waiting panel's,
+/// a side question's.
+fn framed(c: &mut Canvas, (x, y, w, h): (f32, f32, f32, f32), scale: f64, p: &Palette) {
+    let radius = ROW_RADIUS * scale as f32;
+    let line = (scale as f32).round().max(1.0);
+    c.rounded(x, y, w, h, radius, p.border_variant);
+    let (x, y, w, h) = (x + line, y + line, w - 2.0 * line, h - 2.0 * line);
+    c.rounded(x, y, w, h, radius, p.terminal_background);
+}
+
 /// How much of the words' colour tints the user's bubble.
 const BUBBLE_TINT: f32 = 0.08;
 
@@ -1494,6 +1565,8 @@ const BUBBLE_TINT: f32 = 0.08;
 enum Bit {
     /// The ground under the user's words.
     Bubble,
+    /// A framed card's ground: a side question's, a plan's.
+    Card,
     /// A piece of markdown or code, as a file's page paints it.
     Doc(DocPiece),
     /// A card's fold mark: open or not.
@@ -1593,6 +1666,34 @@ fn took(ms: u64) -> Option<String> {
 /// `gist` shorter for a card's row, in the agent's folder `cwd`.
 fn short(gist: &str, cwd: Option<&Path>) -> String {
     rows::short_gist(gist, cwd, crate::home_dir().as_deref())
+}
+
+/// The tops of `pieces`' lines of words and code, top first.
+fn line_tops(pieces: &[(Rect, DocPiece)]) -> Vec<i32> {
+    let mut tops: Vec<i32> = (pieces.iter())
+        .filter(|(_, piece)| matches!(piece, DocPiece::Text { .. } | DocPiece::CodeLine(_)))
+        .map(|(r, _)| r.loc.y)
+        .collect();
+    tops.dedup();
+    tops
+}
+
+/// `pieces` cut to their first `n` lines, `h` their height then: how many
+/// lines were cut. A quote's bar or a code block's ground ends at the cut.
+fn peek(pieces: &mut Vec<(Rect, DocPiece)>, h: &mut i32, n: usize) -> usize {
+    let tops = line_tops(pieces);
+    let Some(&cut) = tops.get(n) else {
+        return 0;
+    };
+    pieces.retain(|(r, _)| r.loc.y < cut);
+    for (r, _) in pieces.iter_mut() {
+        r.size.h = r.size.h.min(cut - r.loc.y);
+    }
+    *h = (pieces.iter())
+        .map(|(r, _)| r.loc.y + r.size.h)
+        .max()
+        .unwrap_or(0);
+    tops.len() - n
 }
 
 /// `text`'s paragraphs, split at its blank lines.
@@ -1740,22 +1841,10 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
             let (mut pieces, mut h) = doc_layout::stack_of(&blocks, inner);
             // A subagent's prompt is long and said already by its card's
             // title: its first lines, unfolded on asking.
-            let mut more = 0;
-            if nest > 0 && !open {
-                let mut tops: Vec<i32> = (pieces.iter())
-                    .filter(|(_, piece)| matches!(piece, DocPiece::Text { .. }))
-                    .map(|(r, _)| r.loc.y)
-                    .collect();
-                tops.dedup();
-                if let Some(&cut) = tops.get(PROMPT_PEEK) {
-                    more = tops.len() - PROMPT_PEEK;
-                    pieces.retain(|(r, _)| r.loc.y < cut);
-                    h = (pieces.iter())
-                        .map(|(r, _)| r.loc.y + r.size.h)
-                        .max()
-                        .unwrap_or(0);
-                }
-            }
+            let more = match nest > 0 && !open {
+                true => peek(&mut pieces, &mut h, PROMPT_PEEK),
+                false => 0,
+            };
             let wide = (pieces.iter())
                 .filter_map(|(_, piece)| match piece {
                     DocPiece::Text { text, .. } => {
@@ -1781,9 +1870,60 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
                 l.spots.push((row, Spot::Fold));
             }
         }
+        // A side question: its question and answer framed apart, as the
+        // agent's chat won't keep them.
+        Item::Assistant { id, blocks, .. } if btw::is_side(id) => {
+            let (pieces, h) = doc_layout::stack_of(blocks, (cw - 2 * BUBBLE_PAD).max(1));
+            l.put(rect(x, 0, cw, h + 2 * BUBBLE_PAD), Bit::Card);
+            l.doc(pieces, (x + BUBBLE_PAD, BUBBLE_PAD));
+        }
         Item::Assistant { blocks, .. } => {
             let (pieces, _) = doc_layout::stack_of(blocks, cw);
             l.doc(pieces, (x, 0));
+        }
+        Item::Plan {
+            path,
+            blocks,
+            output,
+            ..
+        } => {
+            let gist = path.as_deref().map(|p| short(p, cwd)).unwrap_or_default();
+            l.head(Head {
+                x,
+                w: cw,
+                open,
+                name: "Plan",
+                bold: true,
+                gist: &gist,
+                tail: outcome(output),
+                running: output.is_none(),
+                path: path.is_some(),
+                mono: true,
+            });
+            // The plan on its card, as the agent's words read: its first
+            // lines, whole once unfolded.
+            let (mut pieces, mut h) = doc_layout::stack_of(blocks, (iw - 2 * BUBBLE_PAD).max(1));
+            let lines = line_tops(&pieces).len();
+            let more = match open {
+                true => 0,
+                false => peek(&mut pieces, &mut h, PLAN_PEEK),
+            };
+            let top = l.below();
+            l.put(rect(ix, top, iw, h + 2 * BUBBLE_PAD), Bit::Card);
+            l.doc(pieces, (ix + BUBBLE_PAD, top + BUBBLE_PAD));
+            let link = match (more, open && lines > PLAN_PEEK) {
+                (0, false) => None,
+                (0, true) => Some("Show less".to_owned()),
+                (1, _) => Some("Show whole plan (1 more line)".to_owned()),
+                (n, _) => Some(format!("Show whole plan ({n} more lines)")),
+            };
+            if let Some(text) = link {
+                let row = rect(ix, l.below(), iw, small_line());
+                let wide = width_in(&text, Face::Ui, font_size()).ceil() as i32;
+                l.put(row, label(&text, Face::Ui, Mark::Link));
+                l.spots
+                    .push((rect(ix, row.loc.y, wide.min(iw), small_line()), Spot::Fold));
+            }
         }
         Item::Thinking { text, .. } => {
             // Codex and OpenCode open theirs with a bold title: no stars.
@@ -2180,13 +2320,7 @@ impl Painter {
 
         // The waiting panel: the agent's screen rows and the keys to answer.
         if let Some(panel) = parts.waiting {
-            let (x, y, w, h) = rect_px(here(panel), scale);
-            let radius = ROW_RADIUS * scale as f32;
-            // Framed: its ground is the chat's.
-            let line = (scale as f32).round().max(1.0);
-            c.rounded(x, y, w, h, radius, p.border_variant);
-            let (x, y, w, h) = (x + line, y + line, w - 2.0 * line, h - 2.0 * line);
-            c.rounded(x, y, w, h, radius, p.terminal_background);
+            framed(&mut c, rect_px(here(panel), scale), scale, p);
             if let Some((at, laid)) = &parts.card {
                 let at = *at - r.loc;
                 for (spot, what) in &laid.spots {
@@ -2417,6 +2551,7 @@ impl Painter {
                 let (x, y, w, h) = rect_px(rect, scale);
                 c.rounded(x, y, w, h, ROW_RADIUS * s, bubble(p));
             }
+            Bit::Card => framed(c, rect_px(rect, scale), scale, p),
             Bit::Doc(piece) => self.doc_piece(c, rect, piece, scale, p),
             Bit::Fold(open) => icon_sdf(c, rect, scale, p.muted, |x, y| match open {
                 true => chevron_down(x, y, s),
@@ -3134,6 +3269,62 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_plan_shows_on_its_card_cut_until_unfolded() {
+        let text: String = (0..20).map(|i| format!("- step {i}\n")).collect();
+        let plan = Item::Plan {
+            id: "plan".into(),
+            path: Some("/h/.claude/plans/x.md".into()),
+            blocks: Arc::new(crate::md_blocks::blocks(&text)),
+            text,
+            output: None,
+        };
+        let lines = |l: &Laid| {
+            (l.bits.iter())
+                .filter(|(_, b)| matches!(b, Bit::Doc(DocPiece::Text { .. })))
+                .count()
+        };
+        let link = |l: &Laid| {
+            (l.bits.iter()).find_map(|(_, b)| match b {
+                Bit::Label {
+                    text,
+                    mark: Mark::Link,
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+        };
+        let card = |l: &Laid| {
+            (l.bits.iter())
+                .find_map(|(r, b)| (*b == Bit::Card).then_some(*r))
+                .expect("a card")
+        };
+        let folded = laid(&plan, 500, 0, &HashSet::new(), None);
+        assert_eq!(lines(&folded), PLAN_PEEK);
+        assert_eq!(
+            link(&folded).as_deref(),
+            Some("Show whole plan (8 more lines)")
+        );
+        // The head and the link fold it.
+        assert_eq!(
+            (folded.spots.iter())
+                .filter(|(_, s)| *s == Spot::Fold)
+                .count(),
+            2
+        );
+        // Every line shown is on the card.
+        let ground = card(&folded);
+        assert!(
+            (folded.bits.iter())
+                .filter(|(_, b)| matches!(b, Bit::Doc(_)))
+                .all(|(r, _)| r.loc.y + r.size.h <= ground.loc.y + ground.size.h)
+        );
+        let open = laid(&plan, 500, 0, &HashSet::from(["plan".to_owned()]), None);
+        assert_eq!(lines(&open), 20);
+        assert_eq!(link(&open).as_deref(), Some("Show less"));
+        assert!(card(&open).size.h > ground.size.h);
+    }
+
+    #[test]
     fn a_subagents_prompt_shows_its_first_lines_till_unfolded() {
         let text = (0..10)
             .map(|i| format!("Line {i}"))
@@ -3511,6 +3702,45 @@ pub(super) mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Plan mode asking to go ahead with a plan of 30 steps.
+    pub(in crate::chrome) fn plan_ask() -> PendingAsk {
+        let steps: String = (0..30).map(|i| format!("{}. step {i}\n", i + 1)).collect();
+        PendingAsk {
+            ask: "p1".into(),
+            tool: "ExitPlanMode".into(),
+            gist: String::new(),
+            input: format!("# Retry the upload\n\n{steps}"),
+            questions: Vec::new(),
+            since: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn a_plans_ask_shows_it_as_markdown_until_folded() {
+        let mut v = view();
+        v.ask = Some(plan_ask());
+        let text = |laid: &Laid| -> Vec<String> {
+            (laid.bits.iter())
+                .filter_map(|(_, b)| match b {
+                    Bit::Doc(DocPiece::Text { text, .. }) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let p = parts(&v);
+        let (_, laid) = p.card.as_ref().unwrap();
+        let shown = text(laid);
+        assert_eq!(shown.first().map(String::as_str), Some("Retry the upload"));
+        assert!(shown.len() > 3 && shown.len() < 31, "{shown:?}");
+        let more = format!("{} more lines in the chat", 31 - shown.len());
+        assert!(labels(laid).contains(&more), "{:?}", labels(laid));
+        // Folded, as other input shows unfolded.
+        v.unfolded.insert(ask_key("p1"));
+        let q = parts(&v);
+        assert!(text(&q.card.as_ref().unwrap().1).is_empty());
+        assert!(q.waiting.unwrap().size.h < p.waiting.unwrap().size.h);
     }
 
     #[test]

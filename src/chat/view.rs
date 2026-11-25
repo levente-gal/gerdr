@@ -162,7 +162,7 @@ const ASK_KEYS: &[Binding<(), AskKey>] = &[
 
 /// The footer's hints of the ask card's keys, its input shown (`open`) or
 /// not: Allow and Deny in their buttons' words (checklist K3).
-fn ask_footer(open: bool) -> Vec<(String, String)> {
+fn ask_footer(open: bool, what: &str) -> Vec<(String, String)> {
     let said = |hit: ChatHit| {
         (chrome::ASK_BUTTONS.iter())
             .find(|(h, _)| *h == hit)
@@ -171,8 +171,8 @@ fn ask_footer(open: bool) -> Vec<(String, String)> {
     };
     (key_table::hints(ASK_KEYS, &(), |k| match k {
         AskKey::Answer(reply) => said(ChatHit::Answer(*reply)),
-        AskKey::Input if open => "fold input".to_owned(),
-        AskKey::Input => "show input".to_owned(),
+        AskKey::Input if open => format!("fold {what}"),
+        AskKey::Input => format!("show {what}"),
     })
     .into_iter())
     .map(|(chord, said)| (chord.to_owned(), said))
@@ -662,7 +662,11 @@ fn chat_footer(chat: &PaneChat, modes: bool, models: bool) -> Vec<(String, Strin
     let mut hints = match (ask, card) {
         (_, Some(ask)) => card_footer(&chat.card, ask),
         (Some(ask), _) if questions.is_none() => {
-            ask_footer(chat.unfolded.contains(&chrome::ask_key(&ask.ask)))
+            let what = match chrome::is_plan(ask) {
+                true => "plan",
+                false => "input",
+            };
+            ask_footer(chrome::ask_open(ask, &chat.unfolded), what)
         }
         _ => Vec::new(),
     };
@@ -843,9 +847,10 @@ fn chat_key(
 /// tool's input and output, an edit's change.
 fn item_text(item: &Item) -> String {
     match item {
-        Item::User { text, .. } | Item::Thinking { text, .. } | Item::Note { text, .. } => {
-            text.clone()
-        }
+        Item::User { text, .. }
+        | Item::Thinking { text, .. }
+        | Item::Note { text, .. }
+        | Item::Plan { text, .. } => text.clone(),
         Item::Assistant { blocks, .. } => blocks_text(blocks),
         Item::Tool {
             name,
@@ -1277,6 +1282,20 @@ impl Gerdr {
             let turn = turns.entry(agent.pane_id.clone()).or_default();
             turn.note(agent.agent_status, now);
         }
+        // Side questions asked before `/clear` or `/new` go with that session.
+        let sessions: Vec<(String, Option<AgentSession>)> = (self.session.agents.iter())
+            .map(|a| (a.pane_id.clone(), self.with_live_session(a).agent_session))
+            .collect();
+        let mut left = Vec::new();
+        for (pane_id, sides) in &mut self.chats.sides {
+            let now = (sessions.iter()).find(|(id, _)| id == pane_id);
+            if btw::drop_left(sides, now.and_then(|(_, s)| s.as_ref())) {
+                left.push(pane_id.clone());
+            }
+        }
+        for pane_id in left {
+            self.chat_put_sides(&pane_id);
+        }
         // What is kept of chats gone with their panes.
         let kept: HashSet<String> = chats_mut(&mut self.workspaces)
             .map(|(id, _)| id.to_owned())
@@ -1692,7 +1711,9 @@ impl Gerdr {
     /// Follow side question `question`, just sent to pane `pane_id`'s agent,
     /// on a thread of its own; its rows show in the chat meanwhile.
     fn ask_side(&mut self, pane_id: &str, question: &str) {
-        let side = Side::new(question, crate::ai_work::now_ms());
+        let mut side = Side::new(question, crate::ai_work::now_ms());
+        side.session =
+            (self.chat_agent(pane_id)).and_then(|a| self.with_live_session(a).agent_session);
         let list = self.chats.sides.entry(pane_id.to_owned()).or_default();
         list.push(side.clone());
         let n = list.len() - 1;
@@ -2019,16 +2040,16 @@ impl Gerdr {
         self.chats.read_at.remove(pane_id);
     }
 
-    /// Open the file edit `i` of pane `pane_id`'s chat changed, in the
+    /// Open the file edit or plan `i` of pane `pane_id`'s chat wrote, in the
     /// workspace's Zed.
     fn chat_open_path(&mut self, pane_id: &str, i: usize) {
         let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
             return;
         };
         let shown = rows(&chat.items, &chat.unfolded);
-        let Some(Item::Edit { path, .. }) = shown.get(i).and_then(|row| row.item(&chat.items))
-        else {
-            return;
+        let path = match shown.get(i).and_then(|row| row.item(&chat.items)) {
+            Some(Item::Edit { path, .. } | Item::Plan { path: Some(path), .. }) => path,
+            _ => return,
         };
         let mut file = PathBuf::from(path);
         if file.is_relative()
@@ -2854,8 +2875,9 @@ mod tests {
         ]
         .map(|(k, s)| (k.to_owned(), s.to_owned()))
         .into();
-        assert_eq!(ask_footer(false), hints);
-        assert_eq!(ask_footer(true)[2].1, "fold input");
+        assert_eq!(ask_footer(false, "input"), hints);
+        assert_eq!(ask_footer(true, "input")[2].1, "fold input");
+        assert_eq!(ask_footer(true, "plan")[2].1, "fold plan");
         // Their chords parse and mean nothing else in the chat (K1).
         key_table::check(ASK_KEYS, &[()]);
         let others: Vec<&str> = (LIST_KEYS.iter().map(|b| b.chord))

@@ -14,7 +14,8 @@ use std::{
 use serde::Serialize;
 
 use super::Item;
-use crate::md_blocks::{self, DocBlock};
+use crate::herdr::AgentSession;
+use crate::md_blocks::{self, DocBlock, Inline, Styled};
 
 /// A side question and what came of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +26,9 @@ pub struct Side {
     /// The answer's lines as the agent drew them, read so far.
     pub lines: Vec<String>,
     pub state: SideState,
+    /// The agent's session it was asked in, as gerdr knew it: a new one
+    /// (`/clear`, `/new`, `/resume`) leaves it behind.
+    pub session: Option<AgentSession>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -45,6 +49,7 @@ impl Side {
             at,
             lines: Vec::new(),
             state: SideState::Asked,
+            session: None,
         }
     }
 
@@ -356,10 +361,8 @@ impl Follow {
 /// The id prefix of a side question's rows among a chat's items.
 const ID: &str = "side:";
 
-/// `items` with the rows of `sides` in their places (instead of those
-/// they had): each before the first item said after it was asked. Its
-/// question as the user's words, its answer as the agent's under a note
-/// that the agent's chat won't keep it.
+/// `items` with the cards of `sides` in their places (instead of those
+/// they had): each before the first item said after it was asked.
 pub fn with_sides(items: &Arc<Vec<Item>>, sides: &[Side]) -> Arc<Vec<Item>> {
     let had = items.iter().any(|item| item.id().starts_with(ID));
     if sides.is_empty() && !had {
@@ -382,33 +385,50 @@ pub fn with_sides(items: &Arc<Vec<Item>>, sides: &[Side]) -> Arc<Vec<Item>> {
     Arc::new(out)
 }
 
-fn side_items(n: usize, side: &Side) -> Vec<Item> {
-    let mut items = vec![Item::User {
-        id: format!("{ID}{n}:q"),
-        at: Some(side.at),
-        text: format!("/btw {}", side.question),
-    }];
-    let note = |text: &str| Item::Note {
-        id: format!("{ID}{n}:n"),
-        text: text.to_owned(),
+/// Drop the side questions asked in another session than `now`, the one
+/// the agent holds; whether any went. None goes while one is still being
+/// asked or read: its follower writes it back by its place in `sides`.
+pub fn drop_left(sides: &mut Vec<Side>, now: Option<&AgentSession>) -> bool {
+    let Some(now) = now else {
+        return false;
     };
+    if sides.iter().any(Side::going) {
+        return false;
+    }
+    let before = sides.len();
+    sides.retain(|side| side.session.as_ref().is_none_or(|s| s == now));
+    sides.len() != before
+}
+
+/// Whether chat item `id` is a side question's card.
+pub fn is_side(id: &str) -> bool {
+    id.starts_with(ID)
+}
+
+/// A side question's card: one item, its question and its answer under a
+/// note that the agent's chat won't keep them.
+fn side_items(n: usize, side: &Side) -> Vec<Item> {
+    let mut question = Styled::default();
+    question.push(&side.question, Some(&Inline::Bold));
+    let mut blocks = vec![
+        DocBlock::Note("Side question · not kept in the agent's chat".into()),
+        DocBlock::Para(question),
+    ];
     if !side.lines.is_empty() {
-        let mut blocks = vec![DocBlock::Note("Side answer · the agent's chat doesn't keep it".into())];
         blocks.extend(md_blocks::blocks(&answer_md(&side.lines)));
-        items.push(Item::Assistant {
-            id: format!("{ID}{n}:a"),
-            at: Some(side.at),
-            blocks: Arc::new(blocks),
-        });
     }
     match &side.state {
         SideState::Asked | SideState::Answering if side.lines.is_empty() => {
-            items.push(note("answering on the side"))
+            blocks.push(DocBlock::Note("answering".into()))
         }
-        SideState::Failed(why) => items.push(note(&format!("Side question: {why}"))),
+        SideState::Failed(why) => blocks.push(DocBlock::Note(format!("Failed: {why}"))),
         _ => {}
     }
-    items
+    vec![Item::Assistant {
+        id: format!("{ID}{n}"),
+        at: Some(side.at),
+        blocks: Arc::new(blocks),
+    }]
 }
 
 /// The answer's lines as markdown: each keeps its own line, as drawn, but
@@ -420,6 +440,9 @@ pub fn answer_md(lines: &[String]) -> String {
     let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
     let mut out = String::new();
     let mut prev: Option<&str> = None;
+    // The row before is a list item, or the rest of one: the agent wraps
+    // an item's words onto rows set in under its first.
+    let mut item = false;
     for line in lines {
         let first = line.split_whitespace().next().unwrap_or("");
         let listed = first.starts_with(['-', '*', '•', '#', '>', '|'])
@@ -427,14 +450,16 @@ pub fn answer_md(lines: &[String]) -> String {
         let wrapped = prev.is_some_and(|p| {
             !p.is_empty() && p.chars().count() + 1 + first.chars().count() > width
         });
-        if wrapped && width >= WRAPS && !first.is_empty() && !listed && !line.starts_with(' ') {
+        let set_in = line.starts_with(' ');
+        if wrapped && width >= WRAPS && !first.is_empty() && !listed && (!set_in || item) {
             out.push(' ');
-            out.push_str(line);
+            out.push_str(line.trim_start());
         } else {
             if prev.is_some() {
                 out.push_str("  \n");
             }
             out.push_str(line);
+            item = listed;
         }
         prev = Some(line);
     }
@@ -583,6 +608,34 @@ mod tests {
     }
 
     #[test]
+    fn a_new_session_leaves_its_side_questions_behind() {
+        let session = |v: &str| AgentSession {
+            source: "herdr".into(),
+            agent: "claude".into(),
+            kind: "id".into(),
+            value: v.into(),
+        };
+        let asked = |s: Option<&str>, state: SideState| Side {
+            session: s.map(session),
+            state,
+            ..Side::new("q", 1)
+        };
+        let mut sides = vec![
+            asked(Some("a"), SideState::Answered),
+            asked(None, SideState::Answered),
+        ];
+        // Same session, or none known: kept.
+        assert!(!drop_left(&mut sides, Some(&session("a"))));
+        assert!(!drop_left(&mut sides, None));
+        // One still read holds them all back, until it is done.
+        sides.push(asked(Some("b"), SideState::Answering));
+        assert!(!drop_left(&mut sides, Some(&session("c"))));
+        sides[2].state = SideState::Answered;
+        assert!(drop_left(&mut sides, Some(&session("c"))));
+        assert_eq!(sides, vec![asked(None, SideState::Answered)]);
+    }
+
+    #[test]
     fn scrolled_windows_join_where_they_overlap() {
         let mut read = lines(&["a", "b", "c", "d"]);
         assert!(merge(&mut read, &lines(&["c", "d", "e", "f"])));
@@ -689,6 +742,17 @@ mod tests {
             "On a clear day, the sky looks blue. Sunlight contains all colours, and \
              air molecules scatter blue light more.  \n  \n- one item  \n- another"
         );
+        // An item's words wrapped onto rows set in under it: one item.
+        let item = lines(&[
+            "- Not restarted: the old parser still runs. It breaks only when an",
+            "  answer contains the command word.",
+            "- next",
+        ]);
+        assert_eq!(
+            answer_md(&item),
+            "- Not restarted: the old parser still runs. It breaks only when an \
+             answer contains the command word.  \n- next"
+        );
         // Short rows are its own lines, as a list of words is.
         assert_eq!(answer_md(&lines(&["twenty-two", "twenty-three"])), "twenty-two  \ntwenty-three");
     }
@@ -707,12 +771,12 @@ mod tests {
         let mut side = Side::new("why", 20);
         let one = with_sides(&items, std::slice::from_ref(&side));
         let ids: Vec<&str> = one.iter().map(Item::id).collect();
-        assert_eq!(ids, ["u1", "side:0:q", "side:0:n", "u2"]);
+        assert_eq!(ids, ["u1", "side:0", "u2"]);
         side.lines = lines(&["because"]);
         side.state = SideState::Answered;
         let two = with_sides(&one, &[side]);
         let ids: Vec<&str> = two.iter().map(Item::id).collect();
-        assert_eq!(ids, ["u1", "side:0:q", "side:0:a", "u2"]);
+        assert_eq!(ids, ["u1", "side:0", "u2"]);
         // None: the chat as it was, the same list when it had none.
         assert!(Arc::ptr_eq(&with_sides(&items, &[]), &items));
         assert_eq!(with_sides(&two, &[]).len(), 2);

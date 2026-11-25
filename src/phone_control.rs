@@ -319,9 +319,12 @@ impl Gerdr {
             Request::Cards { features } => self.phone_cards(&features),
             Request::Ask { pane, cursor, .. } => {
                 let asked = self.phone_ask(&pane).map(|a| {
+                    // A plan reads as its markdown, rendered here.
+                    let plan =
+                        crate::chrome::is_plan(&a).then(|| crate::md_preview::render(&a.input));
                     json!({
                         "ask": a.ask, "tool": a.tool, "gist": a.gist, "input": a.input,
-                        "questions": a.questions,
+                        "questions": a.questions, "plan": plan,
                     })
                 });
                 let sides = self.phone_sides(&pane);
