@@ -9728,9 +9728,11 @@ fn dump_ship_squash() {
 /// A pane shown as a chat: still reading it, none found, the chat with
 /// its cards (a folded and an unfolded tool, an unfolded edit, a thinking
 /// line), the same while the agent waits on the user, a reply being
-/// written, an item picked and another hovered, scrolled down, and the `/`
-/// menu over the reply box.
-const CHATS: [&str; 9] = [
+/// written, an item picked and another hovered, scrolled down, the `/`
+/// menu over the reply box, and Claude's questions on gerdr's card (the last
+/// of several picks, the keys on Other; one pick of one question, a row
+/// hovered) and on its screen (check boxes, an edge after every row).
+const CHATS: [&str; 12] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9740,11 +9742,15 @@ const CHATS: [&str; 9] = [
     "chat_scrolled",
     "chat_question",
     "chat_slash",
+    "chat_question_card",
+    "chat_question_radio",
+    "chat_question_ticks",
 ];
 
 fn chat_view(i: usize) -> super::ChatView {
-    use super::agent_chat::tests::{question, screen, view};
-    use super::{ChatHit, WaitKey};
+    use super::agent_chat::tests::{question, question_ask, screen, ticks, view};
+    use super::{CardHit, ChatHit, WaitKey};
+    use crate::chat::questions::CardView;
     use crate::chat::{ChatFocus, Reading};
     let v = view();
     match i {
@@ -9830,6 +9836,57 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
+        // Claude's questions on gerdr's card: the last, of several picks,
+        // two ticked and Other's words, its keys there.
+        9 => {
+            let ask = question_ask();
+            super::ChatView {
+                status: AgentStatus::Blocked,
+                hints: Vec::new(),
+                card: Some(CardView {
+                    at: 2,
+                    row: 3,
+                    picked: [0, 2, 3].into(),
+                    other: Line {
+                        text: "Kiwi".into(),
+                        caret: 4,
+                        anchor: 4,
+                        scroll: 0,
+                    },
+                    answered: vec![true, true, true],
+                }),
+                ask: Some(ask),
+                ..v
+            }
+        }
+        // One question of one pick, the second option picked, the third
+        // hovered.
+        10 => {
+            let mut ask = question_ask();
+            ask.questions.truncate(1);
+            super::ChatView {
+                status: AgentStatus::Blocked,
+                hints: Vec::new(),
+                card: Some(CardView {
+                    at: 0,
+                    row: 1,
+                    picked: [1].into(),
+                    other: Line::default(),
+                    answered: vec![true],
+                }),
+                ask: Some(ask),
+                hover: Some(ChatHit::Card(CardHit::Row(2))),
+                ..v
+            }
+        }
+        // The same read off Claude's screen: check boxes, an edge after
+        // every row, the first choice hovered.
+        11 => super::ChatView {
+            status: AgentStatus::Blocked,
+            waiting: Some(ticks()),
+            hover: Some(ChatHit::Key(WaitKey::Digit(1))),
+            ..v
+        },
         // A shorter pane, for the list to scroll.
         _ => super::ChatView {
             rect: super::Rect::new(v.rect.loc, (v.rect.size.w, 460).into()),
@@ -9847,7 +9904,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 9]; 4] = [
+const GOLDEN_CHATS: [[u64; 12]; 4] = [
     // Dark at 1
     [
         0xa5039d4ee1fb06ee, // chat_finding
@@ -9859,6 +9916,9 @@ const GOLDEN_CHATS: [[u64; 9]; 4] = [
         0x404446eb993dd555, // chat_scrolled
         0x7a8d1c5ea6d94c82, // chat_question
         0x350b10267bd544d0, // chat_slash
+        0xd28d8688f4b583f4, // chat_question_card
+        0xbb58aa96928e5cdd, // chat_question_radio
+        0x74d248249f57ac96, // chat_question_ticks
     ],
     // Dark at 2
     [
@@ -9871,6 +9931,9 @@ const GOLDEN_CHATS: [[u64; 9]; 4] = [
         0xbbb09541105aaf77, // chat_scrolled
         0xc168029e5d038bdb, // chat_question
         0x59de8e2f81514423, // chat_slash
+        0x881bdff4c098b111, // chat_question_card
+        0x1b2baad09a240539, // chat_question_radio
+        0xc6dbab8fbf15c52c, // chat_question_ticks
     ],
     // Light at 1
     [
@@ -9883,6 +9946,9 @@ const GOLDEN_CHATS: [[u64; 9]; 4] = [
         0xe23ae76ee4fa5bff, // chat_scrolled
         0x5daadb20df757b98, // chat_question
         0x014696fd5f206c34, // chat_slash
+        0x141adecc74831582, // chat_question_card
+        0x8fedb5bba4bc82de, // chat_question_radio
+        0xff5479389cc27c34, // chat_question_ticks
     ],
     // Light at 2
     [
@@ -9895,6 +9961,9 @@ const GOLDEN_CHATS: [[u64; 9]; 4] = [
         0x487f717d28fa8f37, // chat_scrolled
         0x03cdbdf97cec3cca, // chat_question
         0x1b47d4c333fafeda, // chat_slash
+        0xf3869cf450689ee5, // chat_question_card
+        0xb6c12b7f45fc9385, // chat_question_radio
+        0x19720e44cac7337d, // chat_question_ticks
     ],
 ];
 

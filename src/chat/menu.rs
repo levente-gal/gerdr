@@ -65,7 +65,9 @@ const WRAP_SLACK: usize = 4;
 /// from 1 up, one of them under the menu's arrow (❯), so a numbered list
 /// the agent wrote is no menu.
 pub fn menu(rows: &[(String, Styled)]) -> Option<Menu> {
-    let width = rows.iter().map(|(t, _)| t.chars().count()).max()?;
+    let width = (rows.iter())
+        .map(|(t, _)| t.trim_end_matches(is_edge).chars().count())
+        .max()?;
     let mut run: Vec<(usize, Numbered)> = Vec::new();
     for (i, (text, _)) in rows.iter().enumerate() {
         let Some(row) = numbered(text) else {
@@ -102,8 +104,8 @@ pub fn menu(rows: &[(String, Styled)]) -> Option<Menu> {
             };
             let under: Vec<&str> = (rows[at + 1..end].iter())
                 .map(|(text, _)| text.as_str())
-                .take_while(|text| indent(text) >= row.col && !text.trim().is_empty())
-                .map(|text| trimmed(text))
+                .take_while(|text| indent(text) >= row.col && !trimmed(text).is_empty())
+                .map(trimmed)
                 .collect();
             // Under a check box's own answer is the step on (Next, Submit),
             // which says nothing more of it.
@@ -194,8 +196,13 @@ fn numbered(text: &str) -> Option<Numbered> {
 
 /// `text` without the blanks and box edges (│) around it.
 fn trimmed(text: &str) -> &str {
-    let edge = |c: char| c.is_whitespace() || matches!(c, '│' | '┃' | '|' | '▏' | '▕');
-    text.trim_matches(edge)
+    text.trim_matches(is_edge)
+}
+
+/// A blank, or a box's edge (│): the screen draws one at the end of each
+/// row of a question, blank ones and its tabs' too.
+fn is_edge(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '│' | '┃' | '|' | '▏' | '▕')
 }
 
 fn indent(text: &str) -> usize {
@@ -204,7 +211,7 @@ fn indent(text: &str) -> usize {
 
 /// A row that is a line across: the menu's edge.
 fn is_rule(text: &str) -> bool {
-    let t = text.trim();
+    let t = trimmed(text);
     !t.is_empty() && t.chars().all(|c| matches!(c, '─' | '━' | '═' | '╌'))
 }
 
@@ -213,7 +220,7 @@ const TAB_MARKS: [char; 5] = ['☐', '☒', '☑', '✔', '✓'];
 
 /// A row of the questions' tabs: "←  ☒ What  ☐ How  ✔ Submit  →".
 fn is_tabs(text: &str) -> bool {
-    let t = text.trim();
+    let t = trimmed(text);
     (t.starts_with('←') || t.ends_with('→')) && t.contains(TAB_MARKS)
 }
 
@@ -235,7 +242,7 @@ fn tabs_of(text: &str, styles: &Styled) -> Vec<Tab> {
         }
     }
     for tab in &mut tabs {
-        tab.label = tab.label.trim().to_owned();
+        tab.label = trimmed(&tab.label).to_owned();
     }
     tabs.retain(|tab| !tab.label.is_empty());
     tabs
@@ -255,11 +262,12 @@ fn joined<'a>(rows: impl Iterator<Item = (&'a str, bool)>, width: usize) -> Vec<
     // How long the row before was, 0 after a blank one.
     let mut before = 0;
     for (text, bold) in rows {
-        let t = text.trim();
+        let t = trimmed(text);
         // The screen moved a word down when it didn't fit the row before.
         let first = t.split_whitespace().next().map_or(0, |w| w.chars().count());
         let wrapped = before > 0 && before + 1 + first + WRAP_SLACK > width;
-        before = text.trim_end().chars().count();
+        before = text.trim_end_matches(is_edge).chars().count();
+
         match out.last_mut() {
             _ if t.is_empty() => before = 0,
             Some((para, _)) if wrapped => {
@@ -413,6 +421,42 @@ mod tests {
             ]
         );
         assert!(m.choices[3].picked);
+    }
+
+    /// The edge at the end of every row of the question, blank ones and the
+    /// tabs' too (as the user's screen had it), is no word of it.
+    #[test]
+    fn a_questions_edges_are_no_words() {
+        let rows = [
+            "←  ☐ Langs  ☐ Fruits  ✔ Submit  →",
+            "",
+            "Which languages do you write? Pick all.",
+            "",
+            "  1. [ ] Rust",
+            "     Systems code",
+            "❯ 2. [ ] Go",
+            "     Services",
+            "  3. [ ] Type something",
+            "─────────────────",
+            "  4. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ];
+        let text: String = (rows.iter()).map(|row| format!("{row:<60}│\n")).collect();
+        let m = menu(&parse_ansi(&text)).expect("a menu");
+        let tabs: Vec<&str> = m.tabs.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(tabs, ["Langs", "Fruits", "Submit"]);
+        assert_eq!(
+            m.ask,
+            [("Which languages do you write? Pick all.".to_owned(), false)]
+        );
+        let kinds: Vec<ChoiceKind> = m.choices.iter().map(|c| c.kind).collect();
+        use ChoiceKind::*;
+        assert_eq!(kinds, [Pick, Pick, Free, Chat]);
+        assert_eq!(m.choices[0].detail, "Systems code");
+        assert_eq!(m.choices[3].detail, "");
+
+        assert!(m.choices.iter().all(|c| !c.label.contains('│')));
     }
 
     #[test]

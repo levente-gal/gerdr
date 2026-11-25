@@ -14,6 +14,7 @@ pub mod parse;
 pub mod rows;
 pub mod source;
 pub mod live;
+pub mod questions;
 pub mod tail;
 mod view;
 
@@ -178,6 +179,8 @@ pub struct PaneChat {
     pub waiting: Option<Vec<(String, crate::scrollback::Styled)>>,
     /// What its agent said live: the tools running, an ask (`live`).
     pub live: live::PaneLive,
+    /// The user's picks on the card of its ask's questions, till Submit.
+    pub card: questions::Card,
 }
 
 /// When an agent's turn began, as herdr's rounds saw its status.
