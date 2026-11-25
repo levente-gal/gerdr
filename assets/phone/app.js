@@ -647,7 +647,7 @@ async function pane(p, s, id) {
   const since = d.working == null ? null : turnAt(id, d.working);
   const working = since === null ? "" : `<div class="work-row small"><span class="sdot blink"></span>working
     <span class="clock" data-since="${since}"></span></div>`;
-  return { title: d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
+  return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
     bar: `${ask}<ul id="slash" hidden></ul><form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
@@ -980,6 +980,21 @@ document.addEventListener("click", (e) => {
 document.addEventListener("scroll", (e) => { if (e.target.matches?.("textarea")) shade(e.target); }, true);
 // The page's end stays clear of the bar as its box grows.
 new ResizeObserver(() => document.body.style.setProperty("--bar-h", `${bar.offsetHeight}px`)).observe(bar);
+// The bar sits on the keyboard, not behind it: iOS Safari and Android
+// Chrome keep the page's height under the keyboard and only show less of it.
+function onKeyboard() {
+  const vv = window.visualViewport;
+  const zoomed = vv.scale > 1.01;
+  const under = zoomed ? 0 : Math.max(0, innerHeight - vv.height - vv.offsetTop);
+  bar.style.bottom = `${under}px`;
+  // The head stays in sight too: the page pans under the keyboard.
+  document.querySelector("header").style.top = `${zoomed ? 0 : vv.offsetTop}px`;
+  bar.classList.toggle("on-keyboard", under > 0);
+  document.body.style.setProperty("--kb", `${under}px`);
+  document.body.style.setProperty("--seen-h", `${zoomed ? innerHeight : vv.height}px`);
+}
+window.visualViewport?.addEventListener("resize", onKeyboard);
+window.visualViewport?.addEventListener("scroll", onKeyboard);
 
 // At the top of a pane's output, read more of it; back at its end, only
 // its last lines again.

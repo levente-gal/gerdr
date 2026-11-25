@@ -459,6 +459,19 @@ impl AgentInfo {
             .or(self.agent.as_ref())
             .map_or("Agent", |s| s.as_str())
     }
+
+    /// Its title, as its sidebar card shows it: the one the agent gives,
+    /// else its terminal's.
+    pub fn shown_title(&self) -> Option<String> {
+        let titles = [
+            &self.title,
+            &self.terminal_title_stripped,
+            &self.terminal_title,
+        ];
+        (titles.into_iter().flatten())
+            .map(|t| crate::paths::tidy_title(t))
+            .find(|t| !t.is_empty())
+    }
 }
 
 /// A tab as `tab.list` reports it.
