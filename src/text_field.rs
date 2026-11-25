@@ -83,9 +83,14 @@ fn one_line(text: &str) -> String {
         .collect()
 }
 
-/// `text` as a multi-line field takes it pasted.
+/// `text` as a multi-line field takes it pasted: its last line breaks
+/// dropped, a space at its end kept (an image's path pasted into a chat
+/// comes with one, to type on after).
 fn many_lines(text: &str) -> String {
-    let text = text.trim_end().replace("\r\n", "\n").replace('\t', "    ");
+    let text = text
+        .trim_end_matches(['\r', '\n'])
+        .replace("\r\n", "\n")
+        .replace('\t', "    ");
     text.chars()
         .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
         .collect()
@@ -907,5 +912,8 @@ mod tests {
         let mut f = TextField::multiline("");
         pasting("a\tb\r\nc\n\n", |sym| press(&mut f, &none(), sym));
         assert_eq!(&*f, "a    b\nc");
+        let mut f = TextField::multiline("");
+        pasting("/tmp/a.png ", |sym| press(&mut f, &none(), sym));
+        assert_eq!(&*f, "/tmp/a.png ");
     }
 }
