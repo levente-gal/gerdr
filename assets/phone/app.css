@@ -326,7 +326,7 @@ body.with-bar main { padding-bottom: calc(var(--bar-h, 110px) + 20px); }
   width: 44px; height: 44px; padding: 0; border-radius: 50%; font-size: 20px; line-height: 1;
   color: var(--text); background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow);
 }
-body.with-bar #end { bottom: calc(var(--bar-h, 110px) + 12px); }
+body.with-bar #end { bottom: calc(var(--kb, 0px) + var(--bar-h, 110px) + 12px); }
 
 /* A stage's page, as the desktop has it, in words. */
 .page-head h2 { font-size: 20px; margin: 18px 0 2px; }
