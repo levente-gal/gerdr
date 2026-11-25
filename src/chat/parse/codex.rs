@@ -12,7 +12,9 @@
 
 use serde_json::Value;
 
-use super::{DiffLine, DiffSide, Item, MAX_LINES, Reader, ToolOut, cap, change, more, patch};
+use super::{
+    DiffLine, DiffSide, Item, MAX_LINES, Reader, ToolOut, cap, change, more, patch, plan_item,
+};
 use crate::{ai_work::usage::iso_ms, stats_panel::tool_gist};
 
 impl Reader {
@@ -48,7 +50,16 @@ impl Reader {
                 }
                 Some("assistant") => {
                     let text = parts(&p["content"]).concat();
-                    self.answer(&id.clone(), id, at, &text);
+                    // Plan mode's plan, in its block: on its own card.
+                    match proposed_plan(&text) {
+                        Some((before, plan, after)) => {
+                            self.answer(&id.clone(), id.clone(), at, before);
+                            self.push(plan_item(format!("{id}:plan"), None, plan));
+                            let rest = format!("{id}:after");
+                            self.answer(&rest.clone(), rest, at, after);
+                        }
+                        None => self.answer(&id.clone(), id, at, &text),
+                    }
                 }
                 // Developer and system messages are Codex's instructions.
                 _ => {}
@@ -294,6 +305,14 @@ impl Reader {
     }
 }
 
+/// `text` split around plan mode's `<proposed_plan>` block: what comes
+/// before, the plan, and what after.
+fn proposed_plan(text: &str) -> Option<(&str, &str, &str)> {
+    let (before, rest) = text.split_once("<proposed_plan>")?;
+    let (plan, after) = rest.split_once("</proposed_plan>")?;
+    Some((before, plan.trim(), after))
+}
+
 /// The text parts of message `content` (`input_text`, `output_text`); an
 /// image as "[image]".
 fn parts(content: &Value) -> Vec<&str> {
@@ -532,6 +551,28 @@ mod tests {
             text: "Fix the bug in [@a.rs](file:///w/a.rs) please".into(),
         };
         assert_eq!(items, [want]);
+    }
+
+    #[test]
+    fn a_proposed_plan_shows_on_its_card_between_the_words() {
+        let items = read(&[said(
+            "m1",
+            "Here it is.\n\n<proposed_plan>\n# Retry\n\n- wait\n</proposed_plan>\n\nSay go.",
+        )]);
+        let words = |i: usize| match &items[i] {
+            Item::Assistant { blocks, .. } => blocks.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(*words(0), crate::md_blocks::blocks("Here it is."));
+        let Item::Plan { id, text, path, .. } = &items[1] else {
+            panic!("{items:?}")
+        };
+        assert_eq!(
+            (id.as_str(), text.as_str(), path),
+            ("m1:plan", "# Retry\n\n- wait", &None)
+        );
+        assert_eq!(*words(2), crate::md_blocks::blocks("Say go."));
+        assert_eq!(items.len(), 3);
     }
 
     #[test]
