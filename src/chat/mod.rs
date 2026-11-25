@@ -207,6 +207,8 @@ pub struct PaneChat {
     /// The model its agent is on, as its chat last said or as last picked
     /// here (`model`).
     pub model: Option<String>,
+    /// How full its agent's context is, as its chat last said.
+    pub context: Option<crate::ai_work::context::Context>,
 }
 
 /// When an agent's turn began, as herdr's rounds saw its status.
@@ -260,6 +262,8 @@ pub enum Event {
         /// The model the agent is on, where its chat or config says
         /// (`model`).
         model: Option<String>,
+        /// How full its context is, where its chat says.
+        context: Option<crate::ai_work::context::Context>,
     },
     /// No chat found for the pane, and why.
     Missing { pane_id: String, why: String },

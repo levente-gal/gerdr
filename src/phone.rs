@@ -1368,6 +1368,14 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
         _ => None,
     };
     let cursor = agent_kind == Some(AgentKind::Cursor);
+    // How full its context is, as gerdr's chat head says it.
+    let context = (agent.as_ref())
+        .and_then(|agent| {
+            let homes = crate::ai_work::locate::Homes::here()?;
+            let source = crate::chat::source::find(agent, &homes).ok()?;
+            crate::ai_work::context::read(source.agent, &source.path)
+        })
+        .map(|context| context.said());
     if let Some(path) = &chat
         && (all || want > PANE_LINES)
     {
@@ -1378,7 +1386,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
                 let (modes, mode) = modes(&screen);
                 let [models, model, model_id] =
                     pane_models(agent_kind, transcript.as_deref(), &cursor);
-                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "models": models, "model": model, "model_id": model_id, "said": said });
+                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "models": models, "model": model, "model_id": model_id, "said": said, "context": context });
                 Reply::json(&reply)
             }
             Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
@@ -1401,7 +1409,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             let (ask, working, sides, cursor) = pane_ask(&project.id, pane, cursor);
             let (modes, mode) = modes(&text);
             let [models, model, model_id] = pane_models(agent_kind, transcript.as_deref(), &cursor);
-            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "models": models, "model": model, "model_id": model_id, "said": said });
+            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "models": models, "model": model, "model_id": model_id, "said": said, "context": context });
             Reply::json(&reply)
         }
         Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),

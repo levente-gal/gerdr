@@ -100,6 +100,9 @@ pub struct ChatView {
     /// agent whose model gerdr can switch (`chat::model`): the model it is
     /// on, else "Model".
     pub model: Option<String>,
+    /// How full its agent's context is, in words ("context 84k / 1M"),
+    /// where its chat says: in the head, before the status word.
+    pub context: Option<String>,
     /// The user's picks on the card of the ask's questions, while it asks
     /// some.
     pub card: Option<CardView>,
@@ -167,6 +170,7 @@ impl PartialEq for ChatView {
             && self.modes == other.modes
             && self.mode == other.mode
             && self.model == other.model
+            && self.context == other.context
             && self.card == other.card
     }
 }
@@ -2348,6 +2352,15 @@ impl Painter {
         let (dot, word) = standing(view);
         status_dot(&mut c, centred_dot(head_slot(head)), dot, scale, p);
         let (hx, hend) = phys(head, scale);
+        // How full its context is, before the word, while it leaves the
+        // label half the head.
+        let said = match &view.context {
+            Some(context) if word.is_empty() => context.clone(),
+            Some(context) => format!("{context} \u{b7} {word}"),
+            None => word.to_owned(),
+        };
+        let fits = self.text_width(&said, small_font_size(), scale) <= (hend - hx) / 2.0;
+        let word = if fits { said.as_str() } else { word };
         let pad = px(PAD) as f32;
         // While it works, its clock is composed after the word.
         let word_end = match head_clock(view, parts.head) {
@@ -2898,6 +2911,7 @@ pub(super) mod tests {
             modes: Vec::new(),
             mode: None,
             model: None,
+            context: None,
             card: None,
         }
     }

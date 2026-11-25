@@ -1018,8 +1018,10 @@ fn take_event<'a>(
             items,
             earlier,
             model,
+            context,
             ..
         } => {
+            chat.context = context;
             // Another chat in the pane (another agent, a new session): its
             // own model, not the last one's.
             if model.is_some() || chat.source.as_ref() != Some(&source) {
@@ -1036,10 +1038,12 @@ fn take_event<'a>(
         Event::Missing { why, .. } => {
             chat.reading = Reading::Missing(why);
             chat.model = None;
+            chat.context = None;
         }
         Event::Failed { error, .. } => {
             chat.reading = Reading::Failed(error);
             chat.model = None;
+            chat.context = None;
         }
     }
     true
@@ -2184,6 +2188,7 @@ impl Gerdr {
                     modes,
                     mode: self.chats.modes.get(pane_id).cloned(),
                     model,
+                    context: chat.context.map(|c| c.said()),
                 };
                 view.hover = pointer
                     .filter(|pos| view.rect.to_f64().contains(*pos))
@@ -2541,6 +2546,10 @@ mod tests {
             items: Arc::new(vec![user("u1", "hi")]),
             earlier: true,
             model: Some("Opus 5.5".into()),
+            context: Some(crate::ai_work::context::Context {
+                used: 84_000,
+                window: Some(1_000_000),
+            }),
         };
         assert!(take_event(
             [("w1:p1", &mut one), ("w1:p2", &mut two)],
@@ -2562,6 +2571,7 @@ mod tests {
         assert!(take_event([("w1:p1", &mut one)], missing));
         assert_eq!(one.reading, Reading::Missing("no chat".into()));
         assert_eq!(one.model, None);
+        assert_eq!(two.context.map(|c| c.said()).as_deref(), Some("context 84k / 1M"));
         let gone = Event::Failed {
             pane_id: "w1:p9".into(),
             error: "x".into(),

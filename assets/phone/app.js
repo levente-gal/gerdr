@@ -659,10 +659,12 @@ async function pane(p, s, id) {
   const now = d.model_id ? "" : `<option value="" selected disabled>${esc(d.model || "Model")}</option>`;
   const model = d.models?.length ? `<select class="model" aria-label="Model">${now}${d.models.map((m) =>
     `<option value="${esc(m.id)}"${m.id === d.model_id ? " selected" : ""}>${esc(m.name)}</option>`).join("")}</select>` : "";
-  const modes = group || model ? `<div class="modes-row">${group}${model}</div>` : "";
+  // How full its context is, as gerdr's chat head says it.
+  const context = d.context ? `<span class="context">${esc(d.context)}</span>` : "";
+  const modes = group || model || context ? `<div class="modes-row">${group}${context}${model}</div>` : "";
   return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
     said: d.said || [], ask, askId: a?.ask || "", asking: !!a?.questions?.length, suggestion: d.suggestion || "",
-    modes, modesKey: JSON.stringify([d.modes, d.mode, d.models, d.model, d.model_id]),
+    modes, modesKey: JSON.stringify([d.modes, d.mode, d.models, d.model, d.model_id, d.context]),
     sides: sideCard(id, d.sides),
     bar: `<div id="asked"></div><div id="sides"></div><button type="button" id="suggest" hidden></button><form id="say"><ul id="slash" hidden></ul><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button type="button" id="pic" aria-label="Add an image">Image</button><input type="file" id="picFile" accept="image/*" hidden>

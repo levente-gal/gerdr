@@ -694,12 +694,14 @@ impl Chat {
                 AgentKind::Cursor => super::model::cursor_now(),
                 _ => None,
             };
+            let context = crate::ai_work::context::read(self.source.agent, &self.source.path);
             out.push(Event::Items {
                 pane_id: pane_id.to_owned(),
                 source: self.source.clone(),
                 items,
                 earlier: self.from > 0,
                 model,
+                context,
             });
         }
     }

@@ -25,6 +25,20 @@ impl Context {
     pub fn nearly_full(&self) -> bool {
         self.window.is_some_and(|w| self.used * 5 >= w * 4)
     }
+
+    /// In words: "context 84k / 1M", with ", nearly full" when it is.
+    pub fn said(&self) -> String {
+        // "84k", "1M": a whole figure needs no ".0".
+        let short = |n| crate::stats_panel::tokens(n).replace(".0", "");
+        let mut said = match self.window {
+            Some(window) => format!("context {} / {}", short(self.used), short(window)),
+            None => format!("context {}", short(self.used)),
+        };
+        if self.nearly_full() {
+            said.push_str(", nearly full");
+        }
+        said
+    }
 }
 
 /// How much of a transcript's end is read: a turn's usage is near its end.
@@ -134,13 +148,18 @@ pub fn read_contexts(feature: &Feature, dir: &Path) -> BTreeMap<Stage, (u32, Con
             let claimed = thread::claimed(dir, &chat);
             let chat = thread::with_known_id(dir, &chat);
             let found = locate::find(&homes, &chat, &claimed).ok()??;
-            let context = match found.agent {
-                AgentKind::Cursor => cursor_context(&found.main)?,
-                agent => context(agent, &tail_of(&found.main)?)?,
-            };
-            Some((*stage, (run.n, context)))
+            Some((*stage, (run.n, read(found.agent, &found.main)?)))
         })
         .collect()
+}
+
+/// The context of `agent`'s chat kept at `path`: its transcript, or a
+/// Cursor chat's `store.db`. Reads the file.
+pub fn read(agent: AgentKind, path: &Path) -> Option<Context> {
+    match agent {
+        AgentKind::Cursor => cursor_context(path),
+        agent => context(agent, &tail_of(path)?),
+    }
 }
 
 /// The context of the Cursor chat whose `store.db` is `db`, as its latest

@@ -9782,7 +9782,10 @@ fn chat_view(i: usize) -> super::ChatView {
             hover: Some(ChatHit::ShowScreen),
             ..v
         },
-        2 => v,
+        2 => super::ChatView {
+            context: Some("context 84k / 1M".into()),
+            ..v
+        },
         3 => super::ChatView {
             status: AgentStatus::Blocked,
             waiting: Some(screen()),
@@ -10034,7 +10037,7 @@ const GOLDEN_CHATS: [[u64; 21]; 4] = [
     [
         0xa5039d4ee1fb06ee, // chat_finding
         0x4c9a3c6fa240b9e9, // chat_missing
-        0x9f85d649e034a3ad, // chat
+        0xd685197ee22a32f7, // chat
         0x3bb87a98112621ad, // chat_waiting
         0x828c73a35d6b1c0a, // chat_composer
         0x336344c70c851544, // chat_picked
@@ -10058,7 +10061,7 @@ const GOLDEN_CHATS: [[u64; 21]; 4] = [
     [
         0xd211836f5dcb7548, // chat_finding
         0x0c94100d5ab7460b, // chat_missing
-        0xd11591ee80ab6397, // chat
+        0x8a131dd56dac4a2c, // chat
         0x04cea78605830090, // chat_waiting
         0xee8c28267b0af3c8, // chat_composer
         0x6a515ed6af7ed950, // chat_picked
@@ -10082,7 +10085,7 @@ const GOLDEN_CHATS: [[u64; 21]; 4] = [
     [
         0xcfe875ed39718011, // chat_finding
         0x8599e48c1a3a84f1, // chat_missing
-        0xee98c0f4e9c9b8df, // chat
+        0x88b5f643cefe1777, // chat
         0x03b95c0b949c5aaa, // chat_waiting
         0xc9eb7c27910b0a3e, // chat_composer
         0xc4a1da2ac75e7e03, // chat_picked
@@ -10106,7 +10109,7 @@ const GOLDEN_CHATS: [[u64; 21]; 4] = [
     [
         0x6a839f3b4ab2b79c, // chat_finding
         0x50c48f549721099b, // chat_missing
-        0x9665dc98473271fb, // chat
+        0xa22119b71d62e4ee, // chat
         0x65f7f2fd63bbcb5d, // chat_waiting
         0x57f4e1b82e7ef3e0, // chat_composer
         0xc1031423a1b0c52c, // chat_picked

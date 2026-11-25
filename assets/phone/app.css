@@ -299,6 +299,7 @@ body.with-bar #note { bottom: calc(var(--kb, 0px) + var(--bar-h, calc(104px + en
 #bar .keys { display: flex; gap: 6px; margin-top: 8px; }
 /* The agent's modes: a segmented choice, the one it is in lit. */
 #bar .modes-row { display: flex; gap: 8px; margin-top: 8px; }
+#bar .modes-row .context { align-self: center; margin-right: auto; color: var(--quiet); font-size: 12px; white-space: nowrap; }
 #bar .modes { display: flex; flex: 1; min-width: 0; padding: 2px; border: 1px solid var(--line); border-radius: 10px; }
 #bar select.model { flex: 0 1 auto; max-width: 45%; min-height: 46px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--raised); color: inherit; font: inherit; text-overflow: ellipsis; }
