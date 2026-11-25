@@ -463,10 +463,11 @@ impl Reader {
         let input = &block["input"];
         let path = (input["file_path"].as_str())
             .or(input["notebook_path"].as_str())
+            .or(input["planFilePath"].as_str())
             .map(str::to_owned);
         let text = |key: &str| input[key].as_str().unwrap_or("");
         let plan = match (name, &path) {
-            ("ExitPlanMode", _) => input["plan"].as_str(),
+            (crate::chat::live::PLAN_TOOL, _) => input["plan"].as_str(),
             ("Write", Some(path)) if is_plan_file(path) => Some(text("content")),
             _ => None,
         };
@@ -921,7 +922,7 @@ mod tests {
                 "a3",
                 "t3",
                 "ExitPlanMode",
-                serde_json::json!({ "plan": "# Other" }),
+                serde_json::json!({ "plan": "# Other", "planFilePath": "/h/.claude/plans/y.md" }),
             ),
             call(
                 "a4",
@@ -944,7 +945,9 @@ mod tests {
         assert_eq!(**blocks, md_blocks::blocks(plan));
         assert_eq!(output.as_ref().map(|o| o.text.as_str()), Some("written"));
         assert!(matches!(&items[1], Item::Tool { name, .. } if name == "ExitPlanMode"));
-        assert!(matches!(&items[2], Item::Plan { path: None, text, .. } if text == "# Other"));
+        // Handed over, it names its file.
+        assert!(matches!(&items[2], Item::Plan { path: Some(p), text, .. }
+            if text == "# Other" && p == "/h/.claude/plans/y.md"));
         // A plan changed is a change.
         assert!(matches!(&items[3], Item::Edit { .. }));
     }

@@ -34,9 +34,13 @@ mod serve;
 /// How long an ask waits for an answer from the chat before the agent's TUI
 /// asks itself.
 pub const ASK_WAIT: Duration = Duration::from_secs(60);
-/// How long a question (Claude's AskUserQuestion) waits for its answer from
-/// a card: its TUI shows its own menu beside the wait, so it may wait long.
+/// How long a question (Claude's AskUserQuestion) or a plan waits for its
+/// answer from a card: its TUI shows its own menu beside the wait, so it may
+/// wait long, and a plan takes reading.
 pub const QUESTION_WAIT: Duration = Duration::from_secs(600);
+/// The tool Claude's plan mode asks to go ahead with its plan by: its input
+/// has the plan's markdown (`plan`) and file (`planFilePath`).
+pub const PLAN_TOOL: &str = "ExitPlanMode";
 /// How long after a phone last read an agent pane (it reads a shown one
 /// every 2 s) its asks still wait on the phone's card.
 pub const PHONE_SIGHT: Duration = Duration::from_secs(5);
@@ -133,9 +137,10 @@ pub struct QuestionOption {
     pub description: String,
 }
 
-/// How long an ask with `questions` waits for its answer from a card.
-pub fn ask_wait(questions: &[Question]) -> Duration {
-    if questions.is_empty() {
+/// How long an ask for `tool` with `questions` waits for its answer from a
+/// card.
+pub fn ask_wait(tool: &str, questions: &[Question]) -> Duration {
+    if questions.is_empty() && tool != PLAN_TOOL {
         ASK_WAIT
     } else {
         QUESTION_WAIT
@@ -331,7 +336,9 @@ pub fn from_env() -> Option<(PathBuf, String)> {
 pub fn send(socket: &Path, event: &LiveEvent) -> Option<Answer> {
     let mut stream = UnixStream::connect(socket).ok()?;
     let wait = match &event.what {
-        What::Ask { questions, .. } => Some(ask_wait(questions)),
+        What::Ask {
+            tool, questions, ..
+        } => Some(ask_wait(tool, questions)),
         _ => None,
     };
     let _ = stream.set_write_timeout(Some(SEND_WAIT));
@@ -590,6 +597,12 @@ mod tests {
         assert_eq!(events, vec![a, b]);
         assert!(!too_long);
         assert_eq!(buf, b"{\"pane\":");
+    }
+
+    #[test]
+    fn a_plan_waits_as_long_as_a_question() {
+        assert_eq!(ask_wait("Bash", &[]), ASK_WAIT);
+        assert_eq!(ask_wait(PLAN_TOOL, &[]), QUESTION_WAIT);
     }
 
     #[test]
