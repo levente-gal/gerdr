@@ -209,6 +209,16 @@ impl Reader {
         self.push(item);
     }
 
+    /// Plan `text` as its item; none when it is the plan shown last (handed
+    /// over the same as the file just written).
+    fn plan(&mut self, id: String, path: Option<String>, text: &str) -> Option<Item> {
+        if self.plan.as_deref() == Some(text.trim()) {
+            return None;
+        }
+        self.plan = Some(text.trim().to_owned());
+        Some(plan_item(id, path, text))
+    }
+
     /// The result of tool call `call`, given to its item; false when the
     /// call isn't known (made before reading began).
     fn fill(&mut self, call: &str, out: ToolOut) -> bool {
@@ -445,23 +455,12 @@ impl Reader {
             .map(str::to_owned);
         let text = |key: &str| input[key].as_str().unwrap_or("");
         let plan = match (name, &path) {
-            ("ExitPlanMode", _) => {
-                (input["plan"].as_str()).filter(|plan| self.plan.as_deref() != Some(plan.trim()))
-            }
+            ("ExitPlanMode", _) => input["plan"].as_str(),
             ("Write", Some(path)) if is_plan_file(path) => Some(text("content")),
             _ => None,
         };
-        if let Some(plan) = plan {
-            self.plan = Some(plan.trim().to_owned());
-            let item = Item::Plan {
-                id: id.clone(),
-                path,
-                text: plan.to_owned(),
-                blocks: Arc::new(md_blocks::blocks(plan)),
-                output: None,
-            };
-            self.calls.insert(id, (self.items.len(), at));
-            self.push(item);
+        if let Some(item) = plan.and_then(|plan| self.plan(id.clone(), path.clone(), plan)) {
+            self.push_call(id, at, item);
             return;
         }
         let diff = match name {
@@ -596,6 +595,17 @@ fn texts(content: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
+    }
+}
+
+/// Plan `text`, written to `path` or not, as its item.
+fn plan_item(id: String, path: Option<String>, text: &str) -> Item {
+    Item::Plan {
+        id,
+        path,
+        text: text.to_owned(),
+        blocks: Arc::new(md_blocks::blocks(text)),
+        output: None,
     }
 }
 

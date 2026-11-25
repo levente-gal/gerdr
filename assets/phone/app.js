@@ -642,9 +642,13 @@ async function pane(p, s, id) {
   const above = depth.more ? `<div class="above quiet small">Scroll up for earlier output</div>` : "";
   // A permission its agent asks for on gerdr's card, or its questions: answered here too.
   const a = d.ask;
-  const ask = !a ? "" : a.questions?.length ? quizCard(a) : `<div class="ask"><div class="what"><b>${esc(a.tool)}</b> <code>${esc(a.gist)}</code></div>
+  const answers = !a ? "" : `<div class="buttons"><button class="primary" data-answer="allow" data-ask="${esc(a.ask)}">Allow</button><button data-answer="deny" data-ask="${esc(a.ask)}">Deny</button></div>`;
+  // Plan mode's plan: rendered by gerdr (no raw HTML), shown whole, as it is what Allow approves.
+  const ask = !a ? "" : a.questions?.length ? quizCard(a)
+    : a.plan ? `<div class="ask"><div class="what"><b>Plan</b></div><div class="plan doc">${a.plan}</div>${answers}</div>`
+    : `<div class="ask"><div class="what"><b>${esc(a.tool)}</b> <code>${esc(a.gist)}</code></div>
       <details><summary class="quiet small">What it would run</summary><pre class="input">${esc(a.input)}</pre></details>
-      <div class="buttons"><button class="primary" data-answer="allow" data-ask="${esc(a.ask)}">Allow</button><button data-answer="deny" data-ask="${esc(a.ask)}">Deny</button></div></div>`;
+      ${answers}</div>`;
   // While it works, as on gerdr's chat: a row under its output, with its turn's clock.
   const since = d.working == null ? null : turnAt(id, d.working);
   const working = since === null ? "" : `<div class="work-row small"><span class="sdot blink"></span>working

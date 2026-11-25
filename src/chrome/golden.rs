@@ -9733,9 +9733,10 @@ fn dump_ship_squash() {
 /// of several picks, the keys on Other; one pick of one question, a row
 /// hovered) and on its screen (check boxes, an edge after every row), and
 /// Claude Code's suggestion in the reply box, the agent's modes under it,
-/// side questions (`/btw`) answered and being answered, and a plan on its
-/// card, cut and whole.
-const CHATS: [&str; 18] = [
+/// side questions (`/btw`) answered and being answered, a plan on its
+/// card, cut and whole, and plan mode asking to go ahead with it,
+/// and the user's words kept on top of a list scrolled up past them.
+const CHATS: [&str; 19] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9753,6 +9754,7 @@ const CHATS: [&str; 18] = [
     "chat_side",
     "chat_plan",
     "chat_plan_open",
+    "chat_plan_ask",
     "chat_pinned",
 ];
 
@@ -9924,6 +9926,7 @@ fn chat_view(i: usize) -> super::ChatView {
                     .map(String::from)
                     .to_vec(),
                 state: SideState::Answered,
+                session: None,
             };
             let asked = Side::new("and the most it waits?", u64::MAX);
             super::ChatView {
@@ -9962,9 +9965,16 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
+        // Plan mode asks to go ahead: its plan as markdown on the card.
+        17 => super::ChatView {
+            status: AgentStatus::Blocked,
+            hints: Vec::new(),
+            ask: Some(super::agent_chat::tests::plan_ask()),
+            ..v
+        },
         // Scrolled up past the user's words: the bar of them on top,
         // under the pointer.
-        17 => {
+        18 => {
             let mut items = (*v.items).clone();
             items.extend((0..6).map(|i| crate::chat::Item::Assistant {
                 id: format!("more{i}"),
@@ -9998,7 +10008,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 18]; 4] = [
+const GOLDEN_CHATS: [[u64; 19]; 4] = [
     // Dark at 1
     [
         0xa5039d4ee1fb06ee, // chat_finding
@@ -10018,6 +10028,7 @@ const GOLDEN_CHATS: [[u64; 18]; 4] = [
         0xe03e8d399611c068, // chat_side
         0x6c4d3e75cd1fbbd3, // chat_plan
         0x29f78ea279039845, // chat_plan_open
+        0xe7cbee2c7746c067, // chat_plan_ask
         0x46bfe697efbe6271, // chat_pinned
     ],
     // Dark at 2
@@ -10039,6 +10050,7 @@ const GOLDEN_CHATS: [[u64; 18]; 4] = [
         0xca0b573784b91770, // chat_side
         0x2ca34c602eea2776, // chat_plan
         0xb137c3c620610f92, // chat_plan_open
+        0x3d17e45cb1fc313a, // chat_plan_ask
         0xd0a47890d6ecabfe, // chat_pinned
     ],
     // Light at 1
@@ -10060,6 +10072,7 @@ const GOLDEN_CHATS: [[u64; 18]; 4] = [
         0x6d48f599e60538e1, // chat_side
         0x32a2e31d552691ef, // chat_plan
         0xf89f6063d627b9c2, // chat_plan_open
+        0xfd65a0a88ee3c27e, // chat_plan_ask
         0x3a9fb789f9a3a6e3, // chat_pinned
     ],
     // Light at 2
@@ -10081,6 +10094,7 @@ const GOLDEN_CHATS: [[u64; 18]; 4] = [
         0x0c1f45535e2220e5, // chat_side
         0xca8f7ab03bda90dd, // chat_plan
         0xf1c18370a8a4e7d3, // chat_plan_open
+        0xa086dc1a84e0d05c, // chat_plan_ask
         0x18b2695a30b259e4, // chat_pinned
     ],
 ];

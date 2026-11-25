@@ -82,14 +82,19 @@ fn what_of(payload: &Value, ask: &str) -> Option<What> {
         },
         "Stop" => What::TurnEnd,
         "PermissionRequest" => {
-            let mut shown = serde_json::to_string_pretty(input).unwrap_or_default();
+            let tool = text("tool_name")?;
+            // A plan reads as its markdown; other input as its JSON.
+            let mut shown = match input["plan"].as_str().filter(|_| tool == "ExitPlanMode") {
+                Some(plan) => plan.to_owned(),
+                None => serde_json::to_string_pretty(input).unwrap_or_default(),
+            };
             if let Some((cut, _)) = shown.char_indices().nth(MAX_ASK_INPUT) {
                 shown.truncate(cut);
                 shown.push('…');
             }
             What::Ask {
                 ask: ask.to_owned(),
-                tool: text("tool_name")?,
+                tool,
                 gist: tool_gist(input).unwrap_or_default(),
                 input: shown,
                 questions: questions_of(input),
@@ -262,6 +267,14 @@ mod tests {
             "{input}"
         );
         assert!(questions.is_empty());
+        // Plan mode's plan reads as its markdown.
+        let mut plan = fixture("PermissionRequest");
+        plan["tool_name"] = "ExitPlanMode".into();
+        plan["tool_input"] = serde_json::json!({ "plan": "# Plan\n\n- one" });
+        let Some(What::Ask { input, .. }) = what_of(&plan, "q2") else {
+            panic!("not an ask");
+        };
+        assert_eq!(input, "# Plan\n\n- one");
     }
 
     #[test]

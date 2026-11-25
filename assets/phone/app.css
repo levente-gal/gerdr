@@ -312,6 +312,9 @@ body.with-bar #note { bottom: calc(var(--kb, 0px) + var(--bar-h, calc(104px + en
 #bar .ask { border: 1px solid var(--accent); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
 #bar .ask .what { overflow-wrap: anywhere; }
 #bar .ask pre.input { max-height: 30vh; overflow: auto; font-size: 13px; margin: 6px 0 0; white-space: pre-wrap; }
+#bar .ask .plan { max-height: 45vh; overflow: auto; margin-top: 6px; }
+#bar .ask .plan > :first-child { margin-top: 0; }
+#bar .ask .plan > :last-child { margin-bottom: 0; }
 #bar .ask .buttons { display: flex; gap: 8px; margin-top: 8px; }
 #bar .ask .buttons button { flex: 1; min-height: 44px; }
 #bar .side { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px;
