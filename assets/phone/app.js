@@ -653,6 +653,7 @@ async function pane(p, s, id) {
   const modes = d.modes?.length ? `<div class="modes" role="group" aria-label="Agent mode">${d.modes.map((m) =>
     `<button type="button" data-mode="${esc(m)}" aria-pressed="${m === d.mode}">${esc(m)}</button>`).join("")}</div>` : "";
   return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
+    modes, modesKey: JSON.stringify([d.modes, d.mode]),
     bar: `${ask}<ul id="slash" hidden></ul><form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>${modes}
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
@@ -756,6 +757,13 @@ async function render(fresh, force, keepBottom) {
       bar.hidden = !v.bar;
       document.body.classList.toggle("with-bar", !!v.bar);
       barFor = hash;
+      bar.dataset.modes = v.modesKey || "";
+    }
+    // The rest of the bar keeps what is typed; the agent's modes follow its screen.
+    if (v.modesKey !== undefined && bar.dataset.modes !== v.modesKey) {
+      bar.querySelector(".modes")?.remove();
+      document.getElementById("say")?.insertAdjacentHTML("afterend", v.modes);
+      bar.dataset.modes = v.modesKey;
     }
     if (v.html !== shown && (fresh || force || !typing())) {
       const y = window.scrollY;
