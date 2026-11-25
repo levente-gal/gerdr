@@ -853,6 +853,7 @@ impl Gerdr {
         self.chats.scrolls.retain(|id, _| kept.contains(id));
         self.chats.read_at.retain(|id, _| kept.contains(id));
         self.chats_read_rows(&wanted);
+        self.live_show_held();
         self.live_release_hidden();
     }
 
@@ -1902,6 +1903,7 @@ mod tests {
             tool: "Bash".into(),
             gist: "ls".into(),
             input: "{}".into(),
+            questions: Vec::new(),
             since: Instant::now(),
         });
         let allow = Some(ChatDo::Answer(AskReply::Allow));

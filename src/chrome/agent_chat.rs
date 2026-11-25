@@ -2990,6 +2990,7 @@ pub(super) mod tests {
             tool: "Bash".into(),
             gist: "rm -rf target".into(),
             input: input.join("\n"),
+            questions: Vec::new(),
             since: std::time::Instant::now(),
         }
     }

@@ -10,8 +10,8 @@ use smithay::reexports::calloop::{
 };
 
 use super::{
-    ASK_WAIT, Answer, AskReply, Changed, HeldAsk, LiveEvent, PHONE_SIGHT, PendingAsk, SOURCE, What,
-    antigravity, claude, opencode,
+    Answer, Answers, AskReply, Changed, HeldAsk, LiveEvent, PHONE_SIGHT, PendingAsk, SOURCE, What,
+    antigravity, ask_wait, claude, opencode,
 };
 use crate::{
     Gerdr, ai_work::AgentKind, chat::view::chat_mut, herdr::AgentInfo, herdr::AgentSession,
@@ -37,6 +37,7 @@ impl Gerdr {
                 &Answer {
                     ask,
                     reply: AskReply::Pass,
+                    answers: None,
                 },
             );
         }
@@ -133,14 +134,19 @@ impl Gerdr {
                 tool,
                 gist,
                 input,
+                questions,
             } => {
                 let Some(mut stream) = stream else {
                     return;
                 };
+                // Questions wait out of sight too: their TUI shows its own
+                // menu beside the wait, and a card may show them later.
+                let question = !questions.is_empty();
                 // Nobody sees the chat, here or on a phone: the TUI asks, at once.
-                if !self.ask_in_sight(&pane) {
+                if !question && !self.ask_in_sight(&pane) {
                     let reply = AskReply::Pass;
-                    return super::answer(&mut stream, &Answer { ask, reply });
+                    let answers = None;
+                    return super::answer(&mut stream, &Answer { ask, reply, answers });
                 }
                 let claimed: Vec<String> = (self.chats.live.asks.values())
                     .filter_map(|held| held.call.clone())
@@ -150,6 +156,7 @@ impl Gerdr {
                     tool,
                     gist,
                     input,
+                    questions,
                     since: std::time::Instant::now(),
                 };
                 let mut call = None;
@@ -165,16 +172,18 @@ impl Gerdr {
                     call,
                     asked,
                 };
+                let wait = ask_wait(&held.asked.questions);
                 self.chats.live.asks.insert(ask.clone(), held);
-                // Looked at every `ASK_LOOK`: one that waited `ASK_WAIT`, or
-                // whose chat a panel came over, goes back to the TUI.
+                // Looked at every `ASK_LOOK`: one that waited `ask_wait`, or
+                // (no question) whose chat a panel came over, goes back to
+                // the TUI.
                 let since = std::time::Instant::now();
                 let timer = Timer::from_duration(ASK_LOOK);
                 let waited = self.loop_handle.insert_source(timer, move |_, _, state| {
                     let Some(pane) = state.chats.live.asks.get(&ask).map(|h| h.pane.clone()) else {
                         return TimeoutAction::Drop;
                     };
-                    if since.elapsed() < ASK_WAIT && state.ask_in_sight(&pane) {
+                    if since.elapsed() < wait && (question || state.ask_in_sight(&pane)) {
                         return TimeoutAction::ToDuration(ASK_LOOK);
                     }
                     state.live_answer(&ask, AskReply::Pass);
@@ -214,6 +223,16 @@ impl Gerdr {
     /// Answer ask `ask` with `reply`, if it still waits, and take its card
     /// away.
     pub(crate) fn live_answer(&mut self, ask: &str, reply: AskReply) {
+        self.live_reply(ask, reply, None);
+    }
+
+    /// Answer the questions of ask `ask` with `answers`, if it still waits,
+    /// and take its card away.
+    pub(crate) fn live_answers(&mut self, ask: &str, answers: Answers) {
+        self.live_reply(ask, AskReply::Allow, Some(answers));
+    }
+
+    fn live_reply(&mut self, ask: &str, reply: AskReply, answers: Option<Answers>) {
         let Some(mut held) = self.chats.live.asks.remove(ask) else {
             return;
         };
@@ -223,6 +242,7 @@ impl Gerdr {
             &Answer {
                 ask: ask.clone(),
                 reply,
+                answers,
             },
         );
         self.live_clear_card(&held.pane, &ask);
@@ -266,6 +286,22 @@ impl Gerdr {
         }
     }
 
+    /// Held questions show on their chat's card, a chat opened after they
+    /// came too (called as `chats_sync` ends).
+    pub(crate) fn live_show_held(&mut self) {
+        let held: Vec<(String, PendingAsk)> = (self.chats.live.asks.values())
+            .filter(|held| !held.asked.questions.is_empty())
+            .map(|held| (held.pane.clone(), held.asked.clone()))
+            .collect();
+        for (pane, asked) in held {
+            if let Some(chat) = chat_mut(&mut self.workspaces, &pane)
+                && chat.live.ask.is_none()
+            {
+                chat.live.ask = Some(asked);
+            }
+        }
+    }
+
     /// The asks of chats no longer in sight go back to their TUIs (called
     /// as `chats_sync` ends).
     pub(crate) fn live_release_hidden(&mut self) {
@@ -295,12 +331,18 @@ impl Gerdr {
             .map(|held| held.asked.clone())
     }
 
-    /// The phone answered ask `ask` of agent pane `pane` with `reply`:
-    /// whether it still waited.
-    pub(crate) fn phone_answer(&mut self, pane: &str, ask: &str, reply: AskReply) -> bool {
+    /// The phone answered ask `ask` of agent pane `pane` with `reply`, and
+    /// its questions with `answers`: whether it still waited.
+    pub(crate) fn phone_answer(
+        &mut self,
+        pane: &str,
+        ask: &str,
+        reply: AskReply,
+        answers: Option<Answers>,
+    ) -> bool {
         let waits = (self.chats.live.asks.get(ask)).is_some_and(|held| held.pane == pane);
         if waits {
-            self.live_answer(ask, reply);
+            self.live_reply(ask, reply, answers);
         }
         waits
     }
@@ -416,10 +458,10 @@ impl Gerdr {
 
 /// The asks of `asks` whose pane isn't `in_sight`: its chat flipped to its
 /// screen, closed, in a tab out of sight or under a panel, and no phone on
-/// it.
+/// it. Questions stay: their TUI asks beside them.
 fn hidden_asks(asks: &HashMap<String, HeldAsk>, in_sight: impl Fn(&str) -> bool) -> Vec<String> {
     (asks.iter())
-        .filter(|(_, held)| !in_sight(&held.pane))
+        .filter(|(_, held)| held.asked.questions.is_empty() && !in_sight(&held.pane))
         .map(|(ask, _)| ask.clone())
         .collect()
 }
@@ -491,6 +533,7 @@ mod tests {
                 tool: "Bash".into(),
                 gist: "ls".into(),
                 input: String::new(),
+                questions: Vec::new(),
                 since: std::time::Instant::now(),
             },
         };
