@@ -47,6 +47,10 @@ use crate::{
 const WAITING_ROWS: usize = 60;
 /// How often those rows are read again while its agent waits, at most.
 const WAITING_EVERY: Duration = Duration::from_secs(1);
+/// How many times, `WAITING_EVERY` apart, an idle Claude Code's screen is
+/// read for its suggestion before gerdr gives up until its next turn: it
+/// comes a few seconds after the turn, or never when it is turned off.
+pub(super) const SUGGEST_READS: u8 = 20;
 
 impl PaneChat {
     /// A chat asked for the first time: shown, following its bottom, with an
@@ -82,6 +86,8 @@ enum ListKey {
     Page(i8),
     Copy,
     Compose,
+    /// Fill the reply with what the agent suggests saying next.
+    Suggested,
 }
 
 /// A key of the chat's reply box.
@@ -92,6 +98,8 @@ enum ComposerKey {
     /// Back to the list, the reply kept as a draft.
     Back,
     Discard,
+    /// Fill the empty reply with what the agent suggests saying next.
+    Suggested,
 }
 
 /// A key of the `/` menu over the reply box, while it shows.
@@ -367,8 +375,10 @@ fn choice_keys(m: Option<&Menu>, n: u8) -> Option<Vec<WaitKey>> {
     )
 }
 
-/// The list's keys (`docs/ux-conventions.md`, the agent chat).
-const LIST_KEYS: &[Binding<(), ListKey>] = &[
+/// The list's keys (`docs/ux-conventions.md`, the agent chat). As the
+/// reply box's, they are offered by whether Left fills in a suggestion
+/// (`fillable`).
+const LIST_KEYS: &[Binding<bool, ListKey>] = &[
     Binding {
         chord: "J",
         does: |_| Some(ListKey::Next),
@@ -451,10 +461,17 @@ const LIST_KEYS: &[Binding<(), ListKey>] = &[
         footer: true,
         f1: "write a reply (or type it at once)",
     },
+    Binding {
+        chord: "Left",
+        does: |&fill| fill.then_some(ListKey::Suggested),
+        footer: true,
+        f1: "fill the reply with what the agent suggests saying next",
+    },
 ];
 
-/// The reply box's keys; the rest edit it as any text field.
-const COMPOSER_KEYS: &[Binding<(), ComposerKey>] = &[
+/// The reply box's keys; the rest edit it as any text field. Left fills
+/// in a suggestion only while the reply is empty (then it moves nothing).
+const COMPOSER_KEYS: &[Binding<bool, ComposerKey>] = &[
     Binding {
         chord: "Enter",
         does: |_| Some(ComposerKey::Send),
@@ -478,6 +495,12 @@ const COMPOSER_KEYS: &[Binding<(), ComposerKey>] = &[
         does: |_| Some(ComposerKey::Discard),
         footer: true,
         f1: "discard the draft",
+    },
+    Binding {
+        chord: "Left",
+        does: |&fill| fill.then_some(ComposerKey::Suggested),
+        footer: true,
+        f1: "",
     },
 ];
 
@@ -549,26 +572,33 @@ fn slash_sync(chat: &mut PaneChat, load: impl FnOnce() -> Vec<Command>) {
 /// K3: from the tables the keys are read with). Esc in the list does
 /// nothing, so it has none; Esc in the reply box says what becomes of the
 /// draft.
-pub(crate) fn footer(focus: ChatFocus, draft_empty: bool) -> Vec<(String, String)> {
+pub(crate) fn footer(
+    focus: ChatFocus,
+    draft_empty: bool,
+    suggested: bool,
+) -> Vec<(String, String)> {
+    let fill = draft_empty && suggested;
     match focus {
-        ChatFocus::List => key_table::joined(key_table::hints(LIST_KEYS, &(), |k| {
+        ChatFocus::List => key_table::joined(key_table::hints(LIST_KEYS, &fill, |k| {
             match k {
                 ListKey::Next | ListKey::Previous => "move",
                 ListKey::Fold => "fold",
                 ListKey::Copy => "copy",
                 ListKey::Compose => "reply",
+                ListKey::Suggested => "fill in",
                 ListKey::Top | ListKey::Bottom | ListKey::Page(_) => "scroll",
             }
             .to_owned()
         })),
         ChatFocus::Composer => {
-            let hints = key_table::hints(COMPOSER_KEYS, &(), |k| {
+            let hints = key_table::hints(COMPOSER_KEYS, &fill, |k| {
                 match k {
                     ComposerKey::Send => "send",
                     ComposerKey::Newline => "new line",
                     ComposerKey::Back if draft_empty => "back",
                     ComposerKey::Back => "keep draft",
                     ComposerKey::Discard => "discard",
+                    ComposerKey::Suggested => "fill in",
                 }
                 .to_owned()
             });
@@ -597,7 +627,11 @@ fn chat_footer(chat: &PaneChat) -> Vec<(String, String)> {
     };
     let rest = match chat.slash.as_ref().is_some_and(|s| s.open()) {
         true => slash_footer(),
-        false => footer(chat.focus, chat.draft.line().text.is_empty()),
+        false => footer(
+            chat.focus,
+            chat.draft.line().text.is_empty(),
+            chat.suggestion.is_some(),
+        ),
     };
     let taken = |chord: &str| card.is_some() && CARD_KEYS.iter().any(|b| b.chord == chord);
     hints.extend(rest.into_iter().filter(|(chord, _)| !taken(chord)));
@@ -629,15 +663,31 @@ fn composer_key(
     sym: Keysym,
     typed: Keysym,
 ) -> Option<ChatDo> {
-    match key_table::press(COMPOSER_KEYS, &(), mods, sym) {
+    match key_table::press(COMPOSER_KEYS, &fillable(chat), mods, sym) {
         Some(ComposerKey::Send) => return Some(ChatDo::Send),
         Some(ComposerKey::Newline) => _ = chat.draft.newline(),
         // Never saved nor thrown away (checklist K2).
         Some(ComposerKey::Back) => chat.focus = ChatFocus::List,
         Some(ComposerKey::Discard) => chat.draft.clear(),
+        Some(ComposerKey::Suggested) => fill_suggested(chat),
         None => _ = chat.draft.key(mods, sym, typed),
     }
     None
+}
+
+/// Whether Left fills `chat`'s reply with its agent's suggestion: one
+/// waits, and the reply is empty.
+fn fillable(chat: &PaneChat) -> bool {
+    chat.suggestion.is_some() && chat.draft.is_empty()
+}
+
+/// Fill `chat`'s reply with its agent's suggestion, the caret at its end,
+/// to send or change.
+fn fill_suggested(chat: &mut PaneChat) {
+    if let Some(text) = chat.suggestion.clone() {
+        chat.draft.set(&text);
+        chat.focus = ChatFocus::Composer;
+    }
 }
 
 /// Whether the key typed is a character, to write into the reply box.
@@ -697,7 +747,7 @@ fn chat_key(
     let shown = rows(&chat.items, &chat.unfolded);
     let n = shown.len();
     let last = n.checked_sub(1);
-    match key_table::press(LIST_KEYS, &(), mods, sym) {
+    match key_table::press(LIST_KEYS, &fillable(chat), mods, sym) {
         Some(ListKey::Next) => chat.picked = chat.picked.map_or(last, |i| Some((i + 1).min(n - 1))),
         Some(ListKey::Previous) => {
             chat.picked = chat.picked.map_or(last, |i| Some(i.saturating_sub(1)))
@@ -725,6 +775,7 @@ fn chat_key(
             return Some(ChatDo::Copy(texts.join("\n\n")));
         }
         Some(ListKey::Compose) => chat.focus = ChatFocus::Composer,
+        Some(ListKey::Suggested) => fill_suggested(chat),
         // Any character goes to the reply box, typed into it; a paste too.
         None if sym == text_field::PASTE || types(mods, typed) => {
             chat.focus = ChatFocus::Composer;
@@ -930,6 +981,19 @@ fn screen_rows(herdr: &mut Herdr, pane_id: &str) -> Result<ChatRows, String> {
         crate::scrollback::parse_ansi(&text),
         WAITING_ROWS,
     ))
+}
+
+/// What Claude Code suggests saying next, as its screen shows it: the
+/// last `❯` line, its reply box, holding dim text only (what the user
+/// types there is plain).
+fn suggestion(rows: &[(String, crate::scrollback::Styled)]) -> Option<String> {
+    let (text, styles) = rows.iter().rev().find(|(text, _)| text.starts_with('❯'))?;
+    let chars: Vec<char> = text.chars().collect();
+    let start = (chars.iter()).take_while(|c| **c == '❯' || c.is_whitespace()).count();
+    let dim = |i: usize| (styles.iter()).any(|(at, style)| at.contains(&i) && style.dim);
+    let words: String = chars[start..].iter().collect::<String>().trim_end().to_owned();
+    let ghost = (start..chars.len()).all(|i| chars[i].is_whitespace() || dim(i));
+    (ghost && !words.is_empty()).then_some(words)
 }
 
 /// How a chat's list scrolls: in pixels, from its top to as far as its
@@ -1199,21 +1263,35 @@ impl Gerdr {
     }
 
     /// Read the screens of the chats in `wanted` whose agent waits on the
-    /// user, once a `WAITING_EVERY` at most; the others show none.
+    /// user, once a `WAITING_EVERY` at most; the others show none. Those of
+    /// idle Claude Codes are read too, until their suggestion shows or
+    /// `SUGGEST_READS` found none; it goes as the agent works again.
     fn chats_read_rows(&mut self, wanted: &[AgentInfo]) {
         let blocked: HashSet<&str> = (wanted.iter())
             .filter(|a| a.agent_status == AgentStatus::Blocked)
             .map(|a| a.pane_id.as_str())
             .collect();
+        let idle: HashSet<&str> = (wanted.iter())
+            .filter(|a| matches!(a.agent_status, AgentStatus::Idle | AgentStatus::Done))
+            .filter(|a| super::source::kind(a) == Some(crate::ai_work::AgentKind::Claude))
+            .map(|a| a.pane_id.as_str())
+            .collect();
+        let mut suggesting = Vec::new();
         for (pane_id, chat) in chats_mut(&mut self.workspaces) {
             if !blocked.contains(pane_id) {
                 chat.waiting = None;
+            }
+            if !idle.contains(pane_id) {
+                (chat.suggestion, chat.suggest_reads) = (None, 0);
+            } else if chat.suggestion.is_none() && chat.suggest_reads < SUGGEST_READS {
+                suggesting.push(pane_id.to_owned());
             }
         }
         self.chats
             .waiting
             .retain(|id, _| blocked.contains(id.as_str()));
         let due: Vec<String> = (blocked.into_iter())
+            .chain(suggesting.iter().map(String::as_str))
             .filter(|id| !self.chats.reading.contains(*id))
             .filter(|id| {
                 (self.chats.read_at.get(*id)).is_none_or(|at| at.elapsed() >= WAITING_EVERY)
@@ -1267,16 +1345,28 @@ impl Gerdr {
         self.chats.rows_tx.clone()
     }
 
-    /// Pane `pane_id`'s screen rows as read, for its waiting panel.
+    /// Pane `pane_id`'s screen rows as read, for its waiting panel, or for
+    /// the suggestion of its idle agent.
     fn take_rows(&mut self, pane_id: String, rows: Result<ChatRows, String>) {
         self.chats.reading.remove(&pane_id);
-        // Too late: its agent waits no more, or its chat is gone.
-        if !(self.chat_agent(&pane_id)).is_some_and(|a| a.agent_status == AgentStatus::Blocked) {
-            return;
-        }
+        let status = self.chat_agent(&pane_id).map(|a| a.agent_status);
         let Some(chat) = chat_mut(&mut self.workspaces, &pane_id) else {
             return;
         };
+        if let Some(AgentStatus::Idle | AgentStatus::Done) = status {
+            // A failed read counts too, so a pane herdr can't read isn't
+            // asked again every second for ever.
+            chat.suggest_reads = chat.suggest_reads.saturating_add(1);
+            match rows {
+                Ok(rows) => chat.suggestion = suggestion(&rows),
+                Err(err) => tracing::warn!("the suggestion in pane {pane_id}: {err}"),
+            }
+            return;
+        }
+        // Too late: its agent waits no more.
+        if status != Some(AgentStatus::Blocked) {
+            return;
+        }
         match rows {
             Ok(rows) if chat.waiting.as_ref() != Some(&rows) => {
                 self.chats.waiting.insert(pane_id, Arc::new(rows.clone()));
@@ -1418,6 +1508,8 @@ impl Gerdr {
                 if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
                     chat.draft.clear();
                     chat.stick = true;
+                    // Spent: none is read again until the turn it starts.
+                    (chat.suggestion, chat.suggest_reads) = (None, SUGGEST_READS);
                 }
             }
             Err(why) => {
@@ -1594,6 +1686,7 @@ impl Gerdr {
                     focused: focused == Some(id),
                     draft: chat.draft.line(),
                     waiting: self.chats.waiting.get(pane_id).cloned(),
+                    suggestion: chat.suggestion.clone(),
                     hints: chat_footer(chat),
                     slash: (chat.slash.as_ref())
                         .filter(|slash| slash.open())
@@ -2073,7 +2166,7 @@ mod tests {
     fn footer_of(chat: &PaneChat) -> Vec<(String, String)> {
         match chat.slash.as_ref().is_some_and(|s| s.open()) {
             true => slash_footer(),
-            false => footer(chat.focus, chat.draft.is_empty()),
+            false => footer(chat.focus, chat.draft.is_empty(), chat.suggestion.is_some()),
         }
     }
 
@@ -2151,6 +2244,47 @@ mod tests {
         assert_eq!(got, rows(&["b", "c"]));
         assert_eq!(wait_key_name(WaitKey::Esc), "esc");
         assert_eq!(wait_key_name(WaitKey::Digit(2)), "2");
+    }
+
+    #[test]
+    fn a_suggestion_is_the_dim_text_of_the_reply_line_only() {
+        let read = |ansi: &str| suggestion(&crate::scrollback::parse_ansi(ansi));
+        // As Claude Code 2.1.332 drew it under herdr: the chat's own `❯`
+        // lines above, then its reply box.
+        let rule = "\x1b[0m\x1b[38;2;138;138;138m────\x1b[0m\r\n";
+        let screen = format!(
+            "❯ Create hello.txt\r\n● Done.\r\n{rule}❯\u{a0}\x1b[0m\x1b[2mcommit this\x1b[0m\r\n{rule}  \x1b[0m\x1b[38;2;150;108;30m⏵⏵ auto mode on\x1b[0m\n"
+        );
+        assert_eq!(read(&screen).as_deref(), Some("commit this"));
+        // Typed by the user: plain. Nothing in the box: none.
+        assert_eq!(read("❯\u{a0}com\r\n"), None);
+        assert_eq!(read("❯\u{a0}\r\n"), None);
+        assert_eq!(read("❯ \x1b[2mcom\x1b[0mmit\r\n"), None);
+    }
+
+    #[test]
+    fn left_fills_the_empty_reply_with_the_suggestion() {
+        let mut chat = with_items(vec![user("u1", "one")]);
+        // None waits: Left does nothing and isn't hinted.
+        assert_eq!(press(&mut chat, "Left", '\0'), None);
+        assert_eq!((&*chat.draft, chat.focus), ("", ChatFocus::List));
+        assert!(!footer_of(&chat).iter().any(|(k, _)| k == "Left"));
+        chat.suggestion = Some("commit this".into());
+        assert!(footer_of(&chat).contains(&("Left".into(), "fill in".into())));
+        // From the list it fills the reply and goes there, to send or change.
+        press(&mut chat, "Left", '\0');
+        assert_eq!((&*chat.draft, chat.focus), ("commit this", ChatFocus::Composer));
+        assert_eq!(press(&mut chat, "Enter", '\r'), Some(ChatDo::Send));
+        // In a reply written, Left moves the caret as ever.
+        chat.draft.set("ab");
+        press(&mut chat, "Left", '\0');
+        chat.draft.key(&ModifiersState::default(), Keysym::x, Keysym::x);
+        assert_eq!(chat.draft, "axb");
+        assert!(!footer_of(&chat).iter().any(|(k, _)| k == "Left"));
+        // The empty reply box takes it too.
+        chat.draft.clear();
+        press(&mut chat, "Left", '\0');
+        assert_eq!(chat.draft, "commit this");
     }
 
     #[test]

@@ -9731,8 +9731,9 @@ fn dump_ship_squash() {
 /// written, an item picked and another hovered, scrolled down, the `/`
 /// menu over the reply box, and Claude's questions on gerdr's card (the last
 /// of several picks, the keys on Other; one pick of one question, a row
-/// hovered) and on its screen (check boxes, an edge after every row).
-const CHATS: [&str; 12] = [
+/// hovered) and on its screen (check boxes, an edge after every row), and
+/// Claude Code's suggestion in the reply box.
+const CHATS: [&str; 13] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9745,6 +9746,7 @@ const CHATS: [&str; 12] = [
     "chat_question_card",
     "chat_question_radio",
     "chat_question_ticks",
+    "chat_suggested",
 ];
 
 fn chat_view(i: usize) -> super::ChatView {
@@ -9780,7 +9782,7 @@ fn chat_view(i: usize) -> super::ChatView {
             super::ChatView {
                 status: AgentStatus::Idle,
                 focus: ChatFocus::Composer,
-                hints: crate::chat::footer(ChatFocus::Composer, false),
+                hints: crate::chat::footer(ChatFocus::Composer, false, false),
                 draft: Line {
                     text: text.into(),
                     caret: text.len(),
@@ -9887,6 +9889,14 @@ fn chat_view(i: usize) -> super::ChatView {
             hover: Some(ChatHit::Key(WaitKey::Digit(1))),
             ..v
         },
+        // Claude Code's suggestion in the empty reply box, Left to fill in.
+        12 => super::ChatView {
+            status: AgentStatus::Idle,
+            focus: ChatFocus::Composer,
+            suggestion: Some("commit this and run the tests".into()),
+            hints: crate::chat::footer(ChatFocus::Composer, true, true),
+            ..v
+        },
         // A shorter pane, for the list to scroll.
         _ => super::ChatView {
             rect: super::Rect::new(v.rect.loc, (v.rect.size.w, 460).into()),
@@ -9904,7 +9914,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 12]; 4] = [
+const GOLDEN_CHATS: [[u64; 13]; 4] = [
     // Dark at 1
     [
         0xa5039d4ee1fb06ee, // chat_finding
@@ -9919,6 +9929,7 @@ const GOLDEN_CHATS: [[u64; 12]; 4] = [
         0x39bbfca0980f3e32, // chat_question_card
         0x257d5a14188fedb4, // chat_question_radio
         0x74d248249f57ac96, // chat_question_ticks
+        0x004ee553bdea6b96, // chat_suggested
     ],
     // Dark at 2
     [
@@ -9934,6 +9945,7 @@ const GOLDEN_CHATS: [[u64; 12]; 4] = [
         0xdaa0f93fe2c594e3, // chat_question_card
         0x91811a3578493260, // chat_question_radio
         0xc6dbab8fbf15c52c, // chat_question_ticks
+        0x95c0a660d63e9eb1, // chat_suggested
     ],
     // Light at 1
     [
@@ -9949,6 +9961,7 @@ const GOLDEN_CHATS: [[u64; 12]; 4] = [
         0xd822691fee231a2f, // chat_question_card
         0x559bcff84f28c18b, // chat_question_radio
         0xff5479389cc27c34, // chat_question_ticks
+        0x1a9b6c02649b4f80, // chat_suggested
     ],
     // Light at 2
     [
@@ -9964,6 +9977,7 @@ const GOLDEN_CHATS: [[u64; 12]; 4] = [
         0x156d84ec9533e8b3, // chat_question_card
         0xa4a8cb1aba5716f4, // chat_question_radio
         0x19720e44cac7337d, // chat_question_ticks
+        0x3d7c424e61025c58, // chat_suggested
     ],
 ];
 
