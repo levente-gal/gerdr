@@ -111,9 +111,18 @@ fn is_rule(row: &str) -> bool {
 /// shortcut: columns are counted in chars; a wide char left of a floating
 /// panel shifts its rows. Count cells if that shows.
 pub fn panel(rows: &[&str]) -> Option<Panel> {
-    let q = rows.iter().rposition(|row| row.contains("/btw "))?;
+    // A `/btw` row is the panel's own when nothing but its frame is left
+    // of it, or a gap (OpenCode's over the chat); an answer that says
+    // `/btw` has it mid-text, or right of the panel's column.
+    let asks = |row: &&str| {
+        let at = row.find("/btw ")?;
+        let before = &row[..at];
+        let own = before.trim().chars().all(|c| "┃│".contains(c)) || before.ends_with("  ");
+        own.then(|| before.chars().count())
+    };
+    let col = rows.iter().filter_map(asks).min()?;
+    let q = rows.iter().rposition(|row| asks(row) == Some(col))?;
     let at = rows[q].find("/btw ")?;
-    let col = rows[q][..at].chars().count();
     let asked = rows[q][at + 5..].trim();
     let question = asked.strip_suffix("esc").unwrap_or(asked);
     let footer = (q + 1..rows.len()).find(|&i| FOOTERS.iter().any(|f| rows[i].contains(f)));
@@ -494,6 +503,24 @@ mod tests {
 
     fn lines(of: &[&str]) -> Vec<String> {
         of.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_answer_that_says_btw_is_no_question_row() {
+        let screen = "  /btw is this working now?
+  /btw does this work?
+
+    It came as a /btw side question.
+
+    /btw shows it on the side.
+
+  ⇧←/→ to browse · c to copy · f to fork · x to clear history · Esc to close";
+        let p = panel(&rows(screen)).expect("claude");
+        assert_eq!(p.question, "does this work?");
+        assert_eq!(
+            p.lines,
+            lines(&["It came as a /btw side question.", "", "/btw shows it on the side."])
+        );
     }
 
     #[test]
