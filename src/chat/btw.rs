@@ -14,6 +14,7 @@ use std::{
 use serde::Serialize;
 
 use super::Item;
+use crate::herdr::AgentSession;
 use crate::md_blocks::{self, DocBlock, Inline, Styled};
 
 /// A side question and what came of it.
@@ -25,6 +26,9 @@ pub struct Side {
     /// The answer's lines as the agent drew them, read so far.
     pub lines: Vec<String>,
     pub state: SideState,
+    /// The agent's session it was asked in, as gerdr knew it: a new one
+    /// (`/clear`, `/new`, `/resume`) leaves it behind.
+    pub session: Option<AgentSession>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -45,6 +49,7 @@ impl Side {
             at,
             lines: Vec::new(),
             state: SideState::Asked,
+            session: None,
         }
     }
 
@@ -380,6 +385,21 @@ pub fn with_sides(items: &Arc<Vec<Item>>, sides: &[Side]) -> Arc<Vec<Item>> {
     Arc::new(out)
 }
 
+/// Drop the side questions asked in another session than `now`, the one
+/// the agent holds; whether any went. None goes while one is still being
+/// asked or read: its follower writes it back by its place in `sides`.
+pub fn drop_left(sides: &mut Vec<Side>, now: Option<&AgentSession>) -> bool {
+    let Some(now) = now else {
+        return false;
+    };
+    if sides.iter().any(Side::going) {
+        return false;
+    }
+    let before = sides.len();
+    sides.retain(|side| side.session.as_ref().is_none_or(|s| s == now));
+    sides.len() != before
+}
+
 /// Whether chat item `id` is a side question's card.
 pub fn is_side(id: &str) -> bool {
     id.starts_with(ID)
@@ -585,6 +605,34 @@ mod tests {
         assert_eq!(question("/btw"), None);
         assert_eq!(question("/btwx y"), None);
         assert_eq!(question("hi /btw y"), None);
+    }
+
+    #[test]
+    fn a_new_session_leaves_its_side_questions_behind() {
+        let session = |v: &str| AgentSession {
+            source: "herdr".into(),
+            agent: "claude".into(),
+            kind: "id".into(),
+            value: v.into(),
+        };
+        let asked = |s: Option<&str>, state: SideState| Side {
+            session: s.map(session),
+            state,
+            ..Side::new("q", 1)
+        };
+        let mut sides = vec![
+            asked(Some("a"), SideState::Answered),
+            asked(None, SideState::Answered),
+        ];
+        // Same session, or none known: kept.
+        assert!(!drop_left(&mut sides, Some(&session("a"))));
+        assert!(!drop_left(&mut sides, None));
+        // One still read holds them all back, until it is done.
+        sides.push(asked(Some("b"), SideState::Answering));
+        assert!(!drop_left(&mut sides, Some(&session("c"))));
+        sides[2].state = SideState::Answered;
+        assert!(drop_left(&mut sides, Some(&session("c"))));
+        assert_eq!(sides, vec![asked(None, SideState::Answered)]);
     }
 
     #[test]

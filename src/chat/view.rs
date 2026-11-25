@@ -1249,6 +1249,20 @@ impl Gerdr {
             let turn = turns.entry(agent.pane_id.clone()).or_default();
             turn.note(agent.agent_status, now);
         }
+        // Side questions asked before `/clear` or `/new` go with that session.
+        let sessions: Vec<(String, Option<AgentSession>)> = (self.session.agents.iter())
+            .map(|a| (a.pane_id.clone(), self.with_live_session(a).agent_session))
+            .collect();
+        let mut left = Vec::new();
+        for (pane_id, sides) in &mut self.chats.sides {
+            let now = (sessions.iter()).find(|(id, _)| id == pane_id);
+            if btw::drop_left(sides, now.and_then(|(_, s)| s.as_ref())) {
+                left.push(pane_id.clone());
+            }
+        }
+        for pane_id in left {
+            self.chat_put_sides(&pane_id);
+        }
         // What is kept of chats gone with their panes.
         let kept: HashSet<String> = chats_mut(&mut self.workspaces)
             .map(|(id, _)| id.to_owned())
@@ -1663,7 +1677,9 @@ impl Gerdr {
     /// Follow side question `question`, just sent to pane `pane_id`'s agent,
     /// on a thread of its own; its rows show in the chat meanwhile.
     fn ask_side(&mut self, pane_id: &str, question: &str) {
-        let side = Side::new(question, crate::ai_work::now_ms());
+        let mut side = Side::new(question, crate::ai_work::now_ms());
+        side.session =
+            (self.chat_agent(pane_id)).and_then(|a| self.with_live_session(a).agent_session);
         let list = self.chats.sides.entry(pane_id.to_owned()).or_default();
         list.push(side.clone());
         let n = list.len() - 1;

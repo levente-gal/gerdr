@@ -9924,6 +9924,7 @@ fn chat_view(i: usize) -> super::ChatView {
                     .map(String::from)
                     .to_vec(),
                 state: SideState::Answered,
+                session: None,
             };
             let asked = Side::new("and the most it waits?", u64::MAX);
             super::ChatView {
