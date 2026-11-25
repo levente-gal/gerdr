@@ -68,6 +68,9 @@ pub struct ChatView {
     pub focused: bool,
     pub draft: Line,
     pub waiting: Option<Arc<Vec<(String, crate::scrollback::Styled)>>>,
+    /// What its agent suggests saying next: the empty reply box shows it
+    /// in place of its placeholder.
+    pub suggestion: Option<String>,
     /// The footer's key hints, from the chat's key tables (`chat::footer`).
     pub hints: Vec<(String, String)>,
     /// Its transcript holds messages before those read: whether they are
@@ -143,6 +146,7 @@ impl PartialEq for ChatView {
             && self.focused == other.focused
             && self.draft == other.draft
             && rows(&self.waiting, &other.waiting)
+            && self.suggestion == other.suggestion
             && self.hints == other.hints
             && self.earlier == other.earlier
             && self.hover == other.hover
@@ -1994,7 +1998,8 @@ impl Painter {
         // The reply box and Send, dimmed while there is nothing to send or
         // the agent is paused.
         let focused = view.focused && view.focus == ChatFocus::Composer;
-        let hint = format!("Reply to {}…", agent_name(&view.label));
+        let hint = (view.suggestion.clone())
+            .unwrap_or_else(|| format!("Reply to {}…", agent_name(&view.label)));
         let composer = here(parts.composer);
         self.wrap_field(&mut c, &view.draft, &hint, composer, focused, scale, p);
         let style = match view.paused || view.draft.text.trim().is_empty() {
@@ -2285,7 +2290,8 @@ pub(super) mod tests {
             focused: true,
             draft: Line::default(),
             waiting: None,
-            hints: crate::chat::footer(ChatFocus::List, true, false),
+            suggestion: None,
+            hints: crate::chat::footer(ChatFocus::List, true, false, false),
             earlier: None,
             hover: None,
             running: Vec::new(),
@@ -2952,11 +2958,11 @@ pub(super) mod tests {
         };
         assert_eq!(keys(&v), ["J / K", "Space", "Y", "I"]);
         v.focus = ChatFocus::Composer;
-        v.hints = crate::chat::footer(ChatFocus::Composer, true, false);
+        v.hints = crate::chat::footer(ChatFocus::Composer, true, false, false);
         assert_eq!(chat_hints(&v)[2], ("Esc", "back"));
         assert!(!keys(&v).iter().any(|k| k == crate::text_field::DISCARD_KEY));
         v.draft.text = "half a reply".into();
-        v.hints = crate::chat::footer(ChatFocus::Composer, false, false);
+        v.hints = crate::chat::footer(ChatFocus::Composer, false, false, false);
         assert_eq!(chat_hints(&v)[2], ("Esc", "keep draft"));
         assert!(keys(&v).iter().any(|k| k == crate::text_field::DISCARD_KEY));
         let spots = hint_spots(&chat_hints(&v), parts(&v).hints);

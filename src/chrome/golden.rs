@@ -9729,8 +9729,9 @@ fn dump_ship_squash() {
 /// its cards (a folded and an unfolded tool, an unfolded edit, a thinking
 /// line), the same while the agent waits on the user, a reply being
 /// written, an item picked and another hovered, scrolled down, the `/`
-/// menu over the reply box, and the agent's modes under it.
-const CHATS: [&str; 10] = [
+/// menu over the reply box, Claude Code's suggestion in it, and the agent's
+/// modes under it.
+const CHATS: [&str; 11] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9740,6 +9741,7 @@ const CHATS: [&str; 10] = [
     "chat_scrolled",
     "chat_question",
     "chat_slash",
+    "chat_suggested",
     "chat_modes",
 ];
 
@@ -9775,7 +9777,7 @@ fn chat_view(i: usize) -> super::ChatView {
             super::ChatView {
                 status: AgentStatus::Idle,
                 focus: ChatFocus::Composer,
-                hints: crate::chat::footer(ChatFocus::Composer, false, false),
+                hints: crate::chat::footer(ChatFocus::Composer, false, false, false),
                 draft: Line {
                     text: text.into(),
                     caret: text.len(),
@@ -9831,10 +9833,18 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
-        // Claude's modes, in plan mode, another one hovered.
+        // Claude Code's suggestion in the empty reply box, Left to fill in.
         9 => super::ChatView {
             status: AgentStatus::Idle,
-            hints: crate::chat::footer(ChatFocus::List, true, true),
+            focus: ChatFocus::Composer,
+            suggestion: Some("commit this and run the tests".into()),
+            hints: crate::chat::footer(ChatFocus::Composer, true, true, false),
+            ..v
+        },
+        // Claude's modes, in plan mode, another one hovered.
+        10 => super::ChatView {
+            status: AgentStatus::Idle,
+            hints: crate::chat::footer(ChatFocus::List, true, false, true),
             modes: ["Auto", "Manual", "Edits", "Plan"].map(String::from).into(),
             mode: Some("Plan".into()),
             hover: Some(ChatHit::Mode(0)),
@@ -9857,7 +9867,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 10]; 4] = [
+const GOLDEN_CHATS: [[u64; 11]; 4] = [
     // Dark at 1
     [
         0xa5039d4ee1fb06ee, // chat_finding
@@ -9869,6 +9879,7 @@ const GOLDEN_CHATS: [[u64; 10]; 4] = [
         0x404446eb993dd555, // chat_scrolled
         0x7a8d1c5ea6d94c82, // chat_question
         0x350b10267bd544d0, // chat_slash
+        0x004ee553bdea6b96, // chat_suggested
         0xfe79e247979aad2d, // chat_modes
     ],
     // Dark at 2
@@ -9882,6 +9893,7 @@ const GOLDEN_CHATS: [[u64; 10]; 4] = [
         0xbbb09541105aaf77, // chat_scrolled
         0xc168029e5d038bdb, // chat_question
         0x59de8e2f81514423, // chat_slash
+        0x95c0a660d63e9eb1, // chat_suggested
         0xd21d7d5694e74060, // chat_modes
     ],
     // Light at 1
@@ -9895,6 +9907,7 @@ const GOLDEN_CHATS: [[u64; 10]; 4] = [
         0xe23ae76ee4fa5bff, // chat_scrolled
         0x5daadb20df757b98, // chat_question
         0x014696fd5f206c34, // chat_slash
+        0x1a9b6c02649b4f80, // chat_suggested
         0xd5e5939be4fc8b21, // chat_modes
     ],
     // Light at 2
@@ -9908,6 +9921,7 @@ const GOLDEN_CHATS: [[u64; 10]; 4] = [
         0x487f717d28fa8f37, // chat_scrolled
         0x03cdbdf97cec3cca, // chat_question
         0x1b47d4c333fafeda, // chat_slash
+        0x3d7c424e61025c58, // chat_suggested
         0x7127f7ee025b5d03, // chat_modes
     ],
 ];
