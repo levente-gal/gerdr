@@ -24,6 +24,7 @@ use smithay::{
 
 use super::{
     ChatFocus, Event, Item, PaneChat, Reading,
+    btw::{self, Follow, Side, SideState},
     commands::{self, Command, Slash},
     live::AskReply,
     rows::{rows, unread},
@@ -46,6 +47,13 @@ use crate::{
 const WAITING_ROWS: usize = 60;
 /// How often those rows are read again while its agent waits, at most.
 const WAITING_EVERY: Duration = Duration::from_secs(1);
+/// How many of a pane's last rows are read for a side question's panel:
+/// Cursor draws its answer into the chat, as long as it is.
+const SIDE_ROWS: usize = 200;
+/// How often they are read while a side question is followed.
+const SIDE_EVERY: Duration = Duration::from_millis(300);
+/// How many reads in a row may fail before it gives up.
+const SIDE_MISSES: u32 = 10;
 
 impl PaneChat {
     /// A chat asked for the first time: shown, following its bottom, with an
@@ -671,19 +679,67 @@ fn last_rows(mut rows: ChatRows, n: usize) -> ChatRows {
     rows.split_off(cut)
 }
 
-/// Pane `pane_id`'s last screen rows with their colours, read from herdr
-/// off the UI thread.
-fn screen_rows(herdr: &mut Herdr, pane_id: &str) -> Result<ChatRows, String> {
-    let text = herdr.pane_styled(pane_id, WAITING_ROWS)?;
+/// Pane `pane_id`'s last `n` screen rows with their colours, read from
+/// herdr off the UI thread.
+fn screen_rows(herdr: &mut Herdr, pane_id: &str, n: usize) -> Result<ChatRows, String> {
+    let text = herdr.pane_styled(pane_id, n)?;
     // An app on the alternate screen has no scrollback: its screen, plainly.
     let text = match text.trim().is_empty() {
-        true => herdr.pane_screen_styled(pane_id, WAITING_ROWS)?,
+        true => herdr.pane_screen_styled(pane_id, n)?,
         false => text,
     };
-    Ok(last_rows(
-        crate::scrollback::parse_ansi(&text),
-        WAITING_ROWS,
-    ))
+    Ok(last_rows(crate::scrollback::parse_ansi(&text), n))
+}
+
+/// Follow side question `follow` asked of pane `pane_id`'s agent on its
+/// screen (`btw::Follow`), on the thread it runs on, until it is answered
+/// or fails; each change goes to `tx` as side `n` of the pane.
+fn follow_side(
+    herdr: &mut Herdr,
+    pane_id: &str,
+    n: usize,
+    mut follow: Follow,
+    tx: &channel::Sender<(String, usize, Side)>,
+) {
+    let mut misses = 0;
+    loop {
+        std::thread::sleep(SIDE_EVERY);
+        let was = follow.side.clone();
+        let step = match screen_rows(herdr, pane_id, SIDE_ROWS) {
+            Ok(rows) => {
+                misses = 0;
+                let rows: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
+                follow.took(btw::panel(&rows), Instant::now())
+            }
+            Err(err) => {
+                misses += 1;
+                if misses < SIDE_MISSES {
+                    continue;
+                }
+                follow.side.state = SideState::Failed(format!("couldn't read its pane: {err}"));
+                btw::Step::Done
+            }
+        };
+        let keys: &[&str] = match &step {
+            btw::Step::Press(keys) => keys,
+            btw::Step::Close(key) => std::slice::from_ref(key),
+            btw::Step::Wait | btw::Step::Done => &[],
+        };
+        // Read again on the next round: a key herdr refused shows the
+        // same panel, and its answer is kept as read.
+        if !keys.is_empty()
+            && let Err(err) = herdr.send_keys(pane_id, keys)
+        {
+            tracing::warn!("pressing {keys:?} for a side question in pane {pane_id}: {err}");
+        }
+        // The loop is gone only as gerdr quits.
+        if follow.side != was && tx.send((pane_id.to_owned(), n, follow.side.clone())).is_err() {
+            return;
+        }
+        if matches!(step, btw::Step::Close(_) | btw::Step::Done) {
+            return;
+        }
+    }
 }
 
 /// How a chat's list scrolls: in pixels, from its top to as far as its
@@ -842,6 +898,7 @@ impl Gerdr {
         let agents = &self.session.agents;
         let turns = &mut self.chats.turns;
         turns.retain(|id, _| agents.iter().any(|a| a.pane_id == *id));
+        (self.chats.sides).retain(|id, _| agents.iter().any(|a| a.pane_id == *id));
         for agent in agents {
             let turn = turns.entry(agent.pane_id.clone()).or_default();
             turn.note(agent.agent_status, now);
@@ -890,6 +947,9 @@ impl Gerdr {
         let place = items_of.as_deref().and_then(|p| self.chat_place_of(p));
         // A pane closed meanwhile: nothing waits for it.
         take_event(chats_mut(&mut self.workspaces), event);
+        if let Some(pane_id) = &items_of {
+            self.chat_put_sides(pane_id);
+        }
         if let (Some(pane_id), Some(place)) = (items_of, place) {
             self.chat_keep_place(&pane_id, place);
         }
@@ -992,7 +1052,7 @@ impl Gerdr {
         let spawned = std::thread::Builder::new()
             .name("chat rows".into())
             .spawn(move || {
-                let rows = screen_rows(&mut Herdr::on_socket(socket), &id);
+                let rows = screen_rows(&mut Herdr::on_socket(socket), &id, WAITING_ROWS);
                 // The loop is gone only as gerdr quits.
                 let _ = tx.send((id, rows));
             });
@@ -1158,7 +1218,7 @@ impl Gerdr {
         if line.is_empty() {
             return;
         }
-        match self.send_to_agent(pane_id, &line) {
+        match self.send_line(pane_id, &line) {
             Ok(()) => {
                 if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
                     chat.draft.clear();
@@ -1170,6 +1230,111 @@ impl Gerdr {
                 self.show_error(format!("Couldn't send the reply: {why}"));
             }
         }
+    }
+
+    /// Send `line` to pane `pane_id`'s agent, from its chat or the phone: a
+    /// side question (`/btw …`) to an agent that takes them is followed for
+    /// its answer. Nothing goes while its side panel shows: that would take
+    /// the keys (Cursor's closes on any).
+    pub(crate) fn send_line(&mut self, pane_id: &str, line: &str) -> Result<(), String> {
+        let sides = self.chats.sides.get(pane_id).map(Vec::as_slice).unwrap_or_default();
+        if (sides.iter()).any(|side| side.state == SideState::Answering) {
+            return Err("its agent is still answering a side question".into());
+        }
+        let offered = (self.session.agents.iter())
+            .find(|a| a.pane_id == pane_id)
+            .and_then(super::source::kind)
+            .is_some_and(super::commands::asks_aside);
+        let question = btw::question(line).filter(|_| offered);
+        self.send_to_agent(pane_id, line)?;
+        if let Some(question) = question {
+            self.ask_side(pane_id, question);
+        }
+        Ok(())
+    }
+
+    /// Follow side question `question`, just sent to pane `pane_id`'s agent,
+    /// on a thread of its own; its rows show in the chat meanwhile.
+    fn ask_side(&mut self, pane_id: &str, question: &str) {
+        let side = Side::new(question, crate::ai_work::now_ms());
+        let list = self.chats.sides.entry(pane_id.to_owned()).or_default();
+        list.push(side.clone());
+        let n = list.len() - 1;
+        let socket = (self.session.herdr.as_ref()).map(|h| h.socket().to_path_buf());
+        let tx = self.sides_sender();
+        let started = match (socket, tx) {
+            (Some(socket), Some(tx)) => {
+                let id = pane_id.to_owned();
+                let follow = Follow::new(side, Instant::now());
+                std::thread::Builder::new()
+                    .name("side question".into())
+                    .spawn(move || follow_side(&mut Herdr::on_socket(socket), &id, n, follow, &tx))
+                    .map(drop)
+                    .map_err(|err| err.to_string())
+            }
+            _ => Err("herdr isn't connected".into()),
+        };
+        if let Err(why) = started {
+            tracing::warn!("following a side question in pane {pane_id}: {why}");
+            let side = &mut self.chats.sides.get_mut(pane_id).expect("just pushed")[n];
+            side.state = SideState::Failed(format!("gerdr couldn't read it: {why}"));
+        }
+        self.chat_put_sides(pane_id);
+    }
+
+    /// Where followed side questions come back; set up the first time.
+    fn sides_sender(&mut self) -> Option<channel::Sender<(String, usize, Side)>> {
+        if self.chats.sides_tx.is_none() {
+            let (tx, rx) = channel::channel();
+            let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
+                if let channel::Event::Msg((pane_id, n, side)) = event {
+                    state.take_side(pane_id, n, side);
+                }
+            });
+            if let Err(err) = inserted {
+                tracing::warn!("agent side questions: {err}");
+                return None;
+            }
+            self.chats.sides_tx = Some(tx);
+        }
+        self.chats.sides_tx.clone()
+    }
+
+    /// Side question `n` of pane `pane_id` as followed now.
+    fn take_side(&mut self, pane_id: String, n: usize, side: Side) {
+        // Its chat says why too (checklist E7).
+        if let SideState::Failed(why) = &side.state {
+            tracing::warn!("the side question in pane {pane_id}: {why}");
+        }
+        // Too late: its pane's agent is gone.
+        let Some(slot) = self.chats.sides.get_mut(&pane_id).and_then(|l| l.get_mut(n)) else {
+            return;
+        };
+        *slot = side;
+        self.chat_put_sides(&pane_id);
+    }
+
+    /// Pane `pane_id`'s chat with its side questions' rows as they stand.
+    fn chat_put_sides(&mut self, pane_id: &str) {
+        let sides = self.chats.sides.get(pane_id).map(Vec::as_slice).unwrap_or_default();
+        if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
+            chat.items = btw::with_sides(&chat.items, sides);
+        }
+    }
+
+    /// The side questions asked of pane `pane_id`'s agent this run, for
+    /// the phone's card: each answer as HTML.
+    pub(crate) fn phone_sides(&self, pane_id: &str) -> serde_json::Value {
+        let sides = self.chats.sides.get(pane_id).map(Vec::as_slice).unwrap_or_default();
+        (sides.iter())
+            .map(|side| {
+                let html = crate::md_preview::render(&btw::answer_md(&side.lines));
+                let mut entry = serde_json::to_value(&side.state).unwrap_or_default();
+                entry["question"] = side.question.clone().into();
+                entry["html"] = html.into();
+                entry
+            })
+            .collect()
     }
 
     /// Type `line` into herdr pane `pane_id`, then Enter, if its agent is in

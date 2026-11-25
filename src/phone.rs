@@ -469,15 +469,20 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
 
 /// The permission the agent in `pane` of `project` asks for on gerdr's card,
 /// if it waits on one; gerdr holds its asks for the phone while it reads
-/// the pane. And how long its turn has run, in seconds, while it works.
-/// None without a gerdr to ask.
-fn pane_ask(project: &str, pane: &str) -> (Value, Value) {
+/// the pane. And how long its turn has run, in seconds, while it works,
+/// and the side questions asked of it this run. None without a gerdr to
+/// ask.
+fn pane_ask(project: &str, pane: &str) -> (Value, Value, Value) {
     let request = json!({ "op": "ask", "project": project, "pane": pane });
     match gerdr(Some(project), &request) {
-        Ok(answer) => (answer["ask"].clone(), answer["working"].clone()),
+        Ok(answer) => (
+            answer["ask"].clone(),
+            answer["working"].clone(),
+            answer["sides"].clone(),
+        ),
         Err(why) => {
             tracing::debug!("phone: the ask of pane {pane}: {why}");
-            (Value::Null, Value::Null)
+            (Value::Null, Value::Null, Value::Null)
         }
     }
 }
@@ -560,6 +565,18 @@ fn agent_input(project: &str, slug: &str, pane: &str, line: &str, key: &str) -> 
         Ok((project, _)) => project,
         Err(reply) => return reply,
     };
+    // A side question goes through gerdr, which follows its answer; with
+    // no gerdr to ask, plainly, its panel showing on the pane's screen.
+    if crate::chat::btw::question(line).is_some() {
+        let request = json!({ "op": "side", "project": project.id, "pane": pane, "text": line });
+        match gerdr(Some(&project.id), &request) {
+            Ok(answer) if answer["error"].is_string() => {
+                return Reply::error(409, answer["error"].as_str().unwrap_or_default());
+            }
+            Ok(_) => return Reply::json(&json!({ "said": [] })),
+            Err(why) => tracing::warn!("phone: a side question through gerdr: {why}"),
+        }
+    }
     let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
     let sent = if !line.trim().is_empty() {
         // A line break would go as Enter: one line it is.
@@ -1168,8 +1185,8 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
         return match herdr.pane_read(pane, "visible", PANE_LINES) {
             Ok(screen) => {
                 let text = chat_and_screen(path, &screen);
-                let (ask, working) = pane_ask(&project.id, pane);
-                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working });
+                let (ask, working, sides) = pane_ask(&project.id, pane);
+                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "sides": sides });
                 Reply::json(&reply)
             }
             Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
@@ -1189,8 +1206,8 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             // The rows above its screen, wrapped: at worst one more read, of all.
             let more = chat.is_some()
                 || (!all && rows.is_some_and(|rows| rows > text.lines().count() as u64));
-            let (ask, working) = pane_ask(&project.id, pane);
-            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working });
+            let (ask, working, sides) = pane_ask(&project.id, pane);
+            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "sides": sides });
             Reply::json(&reply)
         }
         Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),

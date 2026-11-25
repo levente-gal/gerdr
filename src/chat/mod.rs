@@ -8,6 +8,7 @@ use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 use crate::{ai_work::AgentKind, md_blocks::DocBlock, text_field::TextField};
 
+pub mod btw;
 pub mod commands;
 pub mod menu;
 pub mod parse;

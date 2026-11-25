@@ -235,6 +235,20 @@ const ANTIGRAVITY: &[(&str, &str)] = &[
     ("voice", "Talk or dictate"),
 ];
 
+/// Whether agent `kind` takes side questions: a `/btw` of its own.
+pub fn asks_aside(kind: AgentKind) -> bool {
+    let builtin = match kind {
+        AgentKind::Claude => CLAUDE,
+        AgentKind::OpenCode => OPENCODE,
+        AgentKind::Cursor => CURSOR,
+        AgentKind::Codex => CODEX,
+        AgentKind::Pi => PI,
+        AgentKind::Antigravity => ANTIGRAVITY,
+        AgentKind::T3 | AgentKind::Unknown => &[],
+    };
+    builtin.iter().any(|(name, _)| *name == "btw")
+}
+
 /// The commands agent `kind` takes in folder `cwd`, by name: the project's
 /// before the home's, those on disk before the built-ins. Unreadable files
 /// are left out.
@@ -609,6 +623,17 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn side_questions_go_to_the_agents_with_a_btw() {
+        use AgentKind::*;
+        for kind in [Claude, OpenCode, Cursor, Antigravity] {
+            assert!(asks_aside(kind), "{kind:?}");
+        }
+        for kind in [Codex, Pi, T3, Unknown] {
+            assert!(!asks_aside(kind), "{kind:?}");
+        }
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gerdr-cmds-{name}-{}", std::process::id()));

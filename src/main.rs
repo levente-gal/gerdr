@@ -395,6 +395,11 @@ pub struct Chats {
     /// When each agent's turn began, by pane: for the chats' and the
     /// phone's working rows.
     pub turns: HashMap<String, chat::Turn>,
+    /// The side questions asked of each pane's agent this run, as followed
+    /// (`chat::btw`): kept for the chat's rows and the phone's card.
+    pub sides: HashMap<String, Vec<chat::btw::Side>>,
+    /// Where those followed come back; set up the first time.
+    pub sides_tx: Option<channel::Sender<(String, usize, chat::btw::Side)>>,
 }
 
 /// A process we started for a tab whose window hasn't shown up yet.

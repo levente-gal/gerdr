@@ -310,6 +310,16 @@ body.with-bar #note { bottom: calc(var(--kb, 0px) + var(--bar-h, calc(104px + en
 #bar .ask pre.input { max-height: 30vh; overflow: auto; font-size: 13px; margin: 6px 0 0; white-space: pre-wrap; }
 #bar .ask .buttons { display: flex; gap: 8px; margin-top: 8px; }
 #bar .ask .buttons button { flex: 1; min-height: 44px; }
+#bar .side { border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px;
+  max-height: calc(var(--seen-h, 100vh) * .4); overflow: auto; }
+#bar .side .question { overflow-wrap: anywhere; }
+#bar .side .answer { overflow-wrap: anywhere; }
+#bar .side .answer > :first-child { margin-top: 6px; }
+#bar .side .answer > :last-child { margin-bottom: 0; }
+#bar .side details { margin-top: 8px; }
+#bar .side details .question { margin-top: 8px; }
+#bar .side .buttons { display: flex; justify-content: flex-end; margin-top: 8px; }
+#bar .side .buttons button { min-height: 44px; padding: 0 16px; }
 #bar .keys button { flex: 1; min-width: 0; padding: 6px 0; min-height: 44px; }
 #bar #slash {
   list-style: none; margin: 0 0 8px; padding: 4px; max-height: calc(var(--seen-h, 100vh) * .4); overflow: auto;

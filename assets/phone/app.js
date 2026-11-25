@@ -650,10 +650,32 @@ async function pane(p, s, id) {
   const working = since === null ? "" : `<div class="work-row small"><span class="sdot blink"></span>working
     <span class="clock" data-since="${since}"></span></div>`;
   return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
-    bar: `${ask}<ul id="slash" hidden></ul><form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
+    sides: sideCard(id, d.sides),
+    bar: `${ask}<div id="sides"></div><ul id="slash" hidden></ul><form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
         ${s ? `<button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button>` : ""}</div>` };
+}
+
+// The side questions (`/btw …`) asked of the agent this run, as gerdr
+// keeps them: its own chat doesn't. The last shows on a card until hidden,
+// the earlier ones folded under it; a new one shows the card again.
+let sidesHidden = { pane: "", n: 0 };
+function sideCard(id, sides) {
+  const hidden = sidesHidden.pane === id ? sidesHidden.n : 0;
+  if (!sides?.length || sides.length <= hidden) return "";
+  const one = (x) => {
+    const going = x.state === "asked" || x.state === "answering";
+    const answer = x.state === "failed" ? `<p class="quiet small">No side answer: ${esc(x.why)}</p>`
+      : x.html.trim() ? `<div class="answer">${x.html}</div>`
+      : going ? `<p class="quiet small">answering on the side</p>` : "";
+    return `<div class="question"><b>/btw</b> ${esc(x.question)}</div>${answer}`;
+  };
+  const earlier = sides.slice(0, -1).reverse();
+  const n = earlier.length;
+  const fold = n ? `<details><summary class="quiet small">${n} earlier side question${n === 1 ? "" : "s"}</summary>${earlier.map(one).join("")}</details>` : "";
+  return `<div class="side">${one(sides[n])}${fold}
+    <div class="buttons"><button data-hide-sides="${sides.length}">Hide</button></div></div>`;
 }
 
 // When the working agent's turn began, in this phone's time: kept across
@@ -753,6 +775,15 @@ async function render(fresh, force, keepBottom) {
       bar.hidden = !v.bar;
       document.body.classList.toggle("with-bar", !!v.bar);
       barFor = hash;
+    }
+    // The side card changes as its answer comes: its folds stay as they were.
+    const sidesEl = document.getElementById("sides");
+    if (sidesEl && v.sides !== undefined && sidesEl.dataset.html !== v.sides) {
+      const open = sidesEl.querySelector("details")?.open;
+      sidesEl.innerHTML = v.sides;
+      sidesEl.dataset.html = v.sides;
+      const fold = sidesEl.querySelector("details");
+      if (fold && open) fold.open = true;
     }
     if (v.html !== shown && (fresh || force || !typing())) {
       const y = window.scrollY;
@@ -855,9 +886,14 @@ document.addEventListener("pointerdown", (e) => {
 });
 
 document.addEventListener("click", async (e) => {
-  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push], button[data-answer]");
+  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push], button[data-answer], button[data-hide-sides]");
   if (!b || b.disabled) return;
   const [, p, s, pane] = here();
+  if (b.dataset.hideSides) {
+    sidesHidden = { pane, n: Number(b.dataset.hideSides) };
+    document.getElementById("sides").innerHTML = "";
+    return;
+  }
   // The feature's page names its stage where the address does.
   const stage = here()[0] === "f" && here()[3] !== undefined ? Number(here()[3]) : undefined;
   b.disabled = true;

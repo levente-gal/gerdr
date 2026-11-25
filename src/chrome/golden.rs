@@ -9728,9 +9728,10 @@ fn dump_ship_squash() {
 /// A pane shown as a chat: still reading it, none found, the chat with
 /// its cards (a folded and an unfolded tool, an unfolded edit, a thinking
 /// line), the same while the agent waits on the user, a reply being
-/// written, an item picked and another hovered, scrolled down, and the `/`
-/// menu over the reply box.
-const CHATS: [&str; 9] = [
+/// written, an item picked and another hovered, scrolled down, the `/`
+/// menu over the reply box, and side questions (`/btw`) answered and
+/// being answered.
+const CHATS: [&str; 10] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9740,6 +9741,7 @@ const CHATS: [&str; 9] = [
     "chat_scrolled",
     "chat_question",
     "chat_slash",
+    "chat_side",
 ];
 
 fn chat_view(i: usize) -> super::ChatView {
@@ -9830,6 +9832,27 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
+        // A side question answered, after the chat's last words, and
+        // another the agent answers yet.
+        9 => {
+            use crate::chat::btw::{Side, SideState, with_sides};
+            let answered = Side {
+                question: "what does the retry wait between tries?".into(),
+                at: u64::MAX - 1,
+                lines: ["It doubles each time, from 200 ms:", "", "- 200 ms", "- 400 ms", "- 800 ms"]
+                    .map(String::from)
+                    .to_vec(),
+                state: SideState::Answered,
+            };
+            let asked = Side::new("and the most it waits?", u64::MAX);
+            super::ChatView {
+                status: AgentStatus::Working,
+                items: with_sides(&v.items, &[answered, asked]),
+                // At its end, where they are.
+                top: 10_000.0,
+                ..v
+            }
+        }
         // A shorter pane, for the list to scroll.
         _ => super::ChatView {
             rect: super::Rect::new(v.rect.loc, (v.rect.size.w, 460).into()),
@@ -9847,7 +9870,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 9]; 4] = [
+const GOLDEN_CHATS: [[u64; 10]; 4] = [
     // Dark at 1
     [
         0xa5039d4ee1fb06ee, // chat_finding
@@ -9859,6 +9882,7 @@ const GOLDEN_CHATS: [[u64; 9]; 4] = [
         0x404446eb993dd555, // chat_scrolled
         0x7a8d1c5ea6d94c82, // chat_question
         0x350b10267bd544d0, // chat_slash
+        0x3bb4cda8d8f1a46b, // chat_side
     ],
     // Dark at 2
     [
@@ -9871,6 +9895,7 @@ const GOLDEN_CHATS: [[u64; 9]; 4] = [
         0xbbb09541105aaf77, // chat_scrolled
         0xc168029e5d038bdb, // chat_question
         0x59de8e2f81514423, // chat_slash
+        0x60f310cf03af302f, // chat_side
     ],
     // Light at 1
     [
@@ -9883,6 +9908,7 @@ const GOLDEN_CHATS: [[u64; 9]; 4] = [
         0xe23ae76ee4fa5bff, // chat_scrolled
         0x5daadb20df757b98, // chat_question
         0x014696fd5f206c34, // chat_slash
+        0x127bfb769349a783, // chat_side
     ],
     // Light at 2
     [
@@ -9895,6 +9921,7 @@ const GOLDEN_CHATS: [[u64; 9]; 4] = [
         0x487f717d28fa8f37, // chat_scrolled
         0x03cdbdf97cec3cca, // chat_question
         0x1b47d4c333fafeda, // chat_slash
+        0x1ef6725ddb8a2095, // chat_side
     ],
 ];
 

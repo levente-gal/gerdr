@@ -93,6 +93,14 @@ pub enum Request {
     /// agent asks for, if it waits on one (see `chat::live`). Its asks wait
     /// on the phone's card while it shows the pane.
     Ask { project: String, pane: String },
+    /// Send `text` to agent pane `pane` as the chat would: a side question
+    /// (`/btw …`) is followed for its answer, which the `ask` op then
+    /// lists.
+    Side {
+        project: String,
+        pane: String,
+        text: String,
+    },
     /// Answer ask `ask` of agent pane `pane`: allow or deny it.
     Answer {
         project: String,
@@ -303,8 +311,13 @@ impl Gerdr {
                 let asked = self.phone_ask(&pane).map(
                     |a| json!({ "ask": a.ask, "tool": a.tool, "gist": a.gist, "input": a.input }),
                 );
-                json!({ "ask": asked, "working": self.turn_took(&pane) })
+                let sides = self.phone_sides(&pane);
+                json!({ "ask": asked, "working": self.turn_took(&pane), "sides": sides })
             }
+            Request::Side { pane, text, .. } => match self.send_line(&pane, &text) {
+                Ok(()) => json!({ "ok": true }),
+                Err(why) => json!({ "error": format!("Couldn't send it: {why}") }),
+            },
             Request::Answer {
                 pane, ask, reply, ..
             } => match self.phone_answer(&pane, &ask, reply) {
@@ -407,6 +420,10 @@ mod tests {
             serde_json::from_str(r#"{"op":"ask","project":"p","slug":"s","pane":"w1:p2"}"#)
                 .expect("ask");
         assert!(matches!(ask, Request::Ask { pane, .. } if pane == "w1:p2"));
+        let side: Request =
+            serde_json::from_str(r#"{"op":"side","project":"p","pane":"w1:p2","text":"/btw why"}"#)
+                .expect("side");
+        assert!(matches!(side, Request::Side { text, .. } if text == "/btw why"));
         let answer: Request = serde_json::from_str(
             r#"{"op":"answer","project":"p","slug":"s","pane":"w1:p2","ask":"q1","reply":"deny"}"#,
         )
