@@ -666,7 +666,7 @@ function sideCard(id, sides) {
   if (!sides?.length || sides.length <= hidden) return "";
   const one = (x) => {
     const going = x.state === "asked" || x.state === "answering";
-    const answer = x.state === "failed" ? `<p class="quiet small">No side answer: ${esc(x.why)}</p>`
+    const answer = x.state === "failed" ? `<p class="quiet small">Side question: ${esc(x.why)}</p>`
       : x.html.trim() ? `<div class="answer">${x.html}</div>`
       : going ? `<p class="quiet small">answering on the side</p>` : "";
     return `<div class="question"><b>/btw</b> ${esc(x.question)}</div>${answer}`;

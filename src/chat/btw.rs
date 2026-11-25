@@ -366,7 +366,7 @@ fn side_items(n: usize, side: &Side) -> Vec<Item> {
         SideState::Asked | SideState::Answering if side.lines.is_empty() => {
             items.push(note("answering on the side"))
         }
-        SideState::Failed(why) => items.push(note(&format!("No side answer: {why}"))),
+        SideState::Failed(why) => items.push(note(&format!("Side question: {why}"))),
         _ => {}
     }
     items

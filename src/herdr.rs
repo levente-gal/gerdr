@@ -648,8 +648,13 @@ pub enum LineCheck {
 /// Whether `line` still sits in the input box at the end of `screen`, as
 /// Cursor leaves one whose Enter it read along with it while busy: long ones
 /// as `[Pasted text #1 +1 lines]` behind its `→`. One the agent just answered
-/// may match too, which costs an Enter on an empty box.
+/// may match too, which costs an Enter on an empty box. A side question's
+/// panel (`/btw`) shows the line too, taken: Enter would close it.
 fn line_left_in_box(screen: &str, line: &str) -> bool {
+    let rows: Vec<&str> = screen.lines().collect();
+    if crate::chat::btw::panel(&rows).is_some() {
+        return false;
+    }
     let tail: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = &tail[tail.len().saturating_sub(LINE_BOX)..];
     if tail
@@ -1818,6 +1823,9 @@ mod tests {
         let far = format!("/summarize\n{}", "row\n".repeat(LINE_BOX));
         assert!(!line_left_in_box(&far, "/summarize"));
         assert!(!line_left_in_box("anything", ""));
+        // Antigravity's side panel says the question: it took it.
+        let side = " ┃ /btw list the numbers\n ┃\n ┃ ⣾  Working... (Enter/Esc to cancel)\n────\n>\n";
+        assert!(!line_left_in_box(side, "/btw list the numbers"));
     }
 
     #[test]
