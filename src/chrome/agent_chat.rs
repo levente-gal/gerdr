@@ -521,6 +521,8 @@ fn card_row() -> i32 {
     row_button()
 }
 const CARD_GAP: i32 = 8;
+/// How far an option's description is pulled up into its label's row.
+const NOTE_PULL: i32 = 6;
 /// Room around the user's words on their ground.
 const BUBBLE_PAD: i32 = 8;
 /// How far a subagent's items are in from its card.
@@ -1034,10 +1036,11 @@ fn lay_question(view: &ChatView, qs: &[Question], card: &CardView, w: i32, more:
                 l.spots.push((field, Spot::Card(CardHit::Other)));
             }
         }
-        y += row_h;
-        if let Some(option) = option.filter(|o| more && !o.description.is_empty()) {
+        let described = option.filter(|o| more && !o.description.is_empty());
+        // A description sits up against its label, in the row's slack below it.
+        y += row_h - if described.is_some() { NOTE_PULL } else { 0 };
+        if let Some(option) = described {
             let note = DocBlock::Note(option.description.clone());
-
             let (pieces, h) = doc_layout::stack_of(&[note], tw);
             let at = Point::from((tx, y));
             bits.extend(
