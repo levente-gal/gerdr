@@ -172,7 +172,7 @@ impl Gerdr {
                     call,
                     asked,
                 };
-                let wait = ask_wait(&held.asked.questions);
+                let wait = ask_wait(&held.asked.tool, &held.asked.questions);
                 self.chats.live.asks.insert(ask.clone(), held);
                 // Looked at every `ASK_LOOK`: one that waited `ask_wait`, or
                 // (no question) whose chat a panel came over, goes back to

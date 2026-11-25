@@ -618,7 +618,7 @@ pub fn ask_key(ask: &str) -> String {
 /// Whether `ask` is plan mode asking to go ahead with its plan: its input
 /// is the plan's markdown.
 pub fn is_plan(ask: &PendingAsk) -> bool {
-    ask.tool == "ExitPlanMode"
+    ask.tool == crate::chat::live::PLAN_TOOL
 }
 
 /// Whether `ask`'s card shows what it would run, as `unfolded` has it: a
@@ -1366,13 +1366,18 @@ const WORKING: &str = "working";
 fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
     let mut l = Laid::default();
     let open = ask_open(ask, &view.unfolded);
+    // A plan's gist is its first line, which its markdown shows.
+    let gist = match is_plan(ask) {
+        true => String::new(),
+        false => short(&ask.gist, view.cwd.as_deref()),
+    };
     l.head(Head {
         x: 0,
         w,
         open,
         name: if is_plan(ask) { "Plan" } else { &ask.tool },
         bold: true,
-        gist: &short(&ask.gist, view.cwd.as_deref()),
+        gist: &gist,
         tail: Vec::new(),
         running: false,
         path: false,
