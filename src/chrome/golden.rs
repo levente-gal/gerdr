@@ -9924,11 +9924,11 @@ const GOLDEN_CHATS: [[u64; 13]; 4] = [
         0x828c73a35d6b1c0a, // chat_composer
         0x336344c70c851544, // chat_picked
         0x404446eb993dd555, // chat_scrolled
-        0x7a8d1c5ea6d94c82, // chat_question
+        0x2954caea8b68d52e, // chat_question
         0x350b10267bd544d0, // chat_slash
         0x39bbfca0980f3e32, // chat_question_card
         0x257d5a14188fedb4, // chat_question_radio
-        0x74d248249f57ac96, // chat_question_ticks
+        0xfcf05ca12ee002e6, // chat_question_ticks
         0x004ee553bdea6b96, // chat_suggested
     ],
     // Dark at 2
@@ -9940,11 +9940,11 @@ const GOLDEN_CHATS: [[u64; 13]; 4] = [
         0xee8c28267b0af3c8, // chat_composer
         0x6a515ed6af7ed950, // chat_picked
         0xbbb09541105aaf77, // chat_scrolled
-        0xc168029e5d038bdb, // chat_question
+        0xbd7b808017ba7eaf, // chat_question
         0x59de8e2f81514423, // chat_slash
         0xdaa0f93fe2c594e3, // chat_question_card
         0x91811a3578493260, // chat_question_radio
-        0xc6dbab8fbf15c52c, // chat_question_ticks
+        0xa7b4647525da3658, // chat_question_ticks
         0x95c0a660d63e9eb1, // chat_suggested
     ],
     // Light at 1
@@ -9956,11 +9956,11 @@ const GOLDEN_CHATS: [[u64; 13]; 4] = [
         0xc9eb7c27910b0a3e, // chat_composer
         0xc4a1da2ac75e7e03, // chat_picked
         0xe23ae76ee4fa5bff, // chat_scrolled
-        0x5daadb20df757b98, // chat_question
+        0xfe3c94d97c6ef24d, // chat_question
         0x014696fd5f206c34, // chat_slash
         0xd822691fee231a2f, // chat_question_card
         0x559bcff84f28c18b, // chat_question_radio
-        0xff5479389cc27c34, // chat_question_ticks
+        0xd69ec9cb4ee9dea1, // chat_question_ticks
         0x1a9b6c02649b4f80, // chat_suggested
     ],
     // Light at 2
@@ -9972,11 +9972,11 @@ const GOLDEN_CHATS: [[u64; 13]; 4] = [
         0x57f4e1b82e7ef3e0, // chat_composer
         0xc1031423a1b0c52c, // chat_picked
         0x487f717d28fa8f37, // chat_scrolled
-        0x03cdbdf97cec3cca, // chat_question
+        0xb73ddd6736a93ef0, // chat_question
         0x1b47d4c333fafeda, // chat_slash
         0x156d84ec9533e8b3, // chat_question_card
         0xa4a8cb1aba5716f4, // chat_question_radio
-        0x19720e44cac7337d, // chat_question_ticks
+        0xb0e9a3d6bbb5692f, // chat_question_ticks
         0x3d7c424e61025c58, // chat_suggested
     ],
 ];

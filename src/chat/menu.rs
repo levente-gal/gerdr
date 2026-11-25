@@ -20,7 +20,7 @@ pub struct Menu {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tab {
     pub label: String,
-    /// Answered (☒), or a step that is no question (✔ Submit).
+    /// Answered (☒). A step that is no question (✔ Submit) never is.
     pub done: bool,
     /// The one asked now: drawn on a ground of its own.
     pub current: bool,
@@ -231,7 +231,7 @@ fn tabs_of(text: &str, styles: &Styled) -> Vec<Tab> {
         if TAB_MARKS.contains(&c) {
             tabs.push(Tab {
                 label: String::new(),
-                done: c != '☐',
+                done: matches!(c, '☒' | '☑'),
                 current: grounded(i),
             });
         } else if let Some(tab) = tabs.last_mut()
@@ -325,7 +325,7 @@ mod tests {
             [
                 ("What grows", true, false),
                 ("GUI control", false, true),
-                ("Submit", true, false)
+                ("Submit", false, false)
             ]
         );
         assert_eq!(m.ask.len(), 1, "{:?}", m.ask);
