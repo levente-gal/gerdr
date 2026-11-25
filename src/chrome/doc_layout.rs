@@ -127,6 +127,15 @@ fn doc_lines(text: &Styled, width: i32, measure: impl Fn(&Styled) -> f32) -> Vec
         let wide = measure(&word);
         if !line.text.is_empty() {
             let gap = text.at(last).filter(|on| text.at(at) == Some(*on));
+            // A space inside a run is in its face: a code span's is wider.
+            let space = match gap {
+                None => space,
+                Some(_) => {
+                    let mut spaced = Styled::default();
+                    spaced.push(" ", gap);
+                    measure(&spaced)
+                }
+            };
             let about = used + space + wide;
             if about < width - DOC_WIDTH_SLACK {
                 line.push(" ", gap);
@@ -530,6 +539,16 @@ mod tests {
             text: text.into(),
             runs: runs.to_vec(),
         }
+    }
+
+    /// A line of code spans is no wider than its place: their spaces are
+    /// measured in the monospace font.
+    #[test]
+    fn spaces_inside_code_count_at_their_own_width() {
+        // 20 words and 19 spaces, two units each: 78 wide.
+        let line = format!("`{}`", ["a"; 20].join(" "));
+        assert_eq!(styled_lines(&line, 78).len(), 1);
+        assert_eq!(styled_lines(&line, 70).len(), 2);
     }
 
     #[test]

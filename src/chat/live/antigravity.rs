@@ -40,12 +40,11 @@ const GIST_KEYS: [&str; 8] = [
 ];
 
 /// `gerdr agy-hook`: read the hook's input from stdin and tell gerdr.
-/// Prints `{}` (Antigravity wants an object, and gerdr changes nothing),
-/// and never fails the hook.
+/// Prints nothing, and never fails the hook: Antigravity reads `{}` from a
+/// `PreToolUse` hook as an empty `decision` and denies the call.
 pub fn run_hook() {
     let mut input = Vec::new();
     let _ = std::io::stdin().take(MAX_INPUT).read_to_end(&mut input);
-    println!("{{}}");
     let Some((socket, pane)) = super::from_env() else {
         return;
     };
@@ -69,6 +68,11 @@ pub fn run_hook() {
 /// the chat does.
 fn what_of(payload: &Value, tail: impl Fn(&Path) -> Option<String>) -> Option<What> {
     let text = |key: &str| payload[key].as_str().filter(|t| !t.is_empty());
+    // A subagent runs the pane's hooks too, with no user input of its own:
+    // its steps show in its card, and its session isn't the pane's.
+    if payload["lastUserInput"] == "" {
+        return None;
+    }
     let call = &payload["toolCall"];
     let id = || {
         let lines = tail(Path::new(text("transcriptPath")?))?;
@@ -99,6 +103,8 @@ fn what_of(payload: &Value, tail: impl Fn(&Path) -> Option<String>) -> Option<Wh
             call: id(),
             failed: text("error").is_some(),
         },
+        // Not idle: it waits on its subagents, and goes on when they answer.
+        "Stop" if payload["fullyIdle"] == false => return None,
         "Stop" => What::TurnEnd,
         _ => return None,
     })
@@ -193,6 +199,7 @@ mod tests {
             "cwd": "/w",
             "toolCall": {"id": "toolu_01", "name": "run_command", "args": {"CommandLine": "cargo test", "Cwd": "/w"}},
             "stepIdx": 3,
+            "lastUserInput": "fix the tests",
         })
     }
 
@@ -226,6 +233,14 @@ mod tests {
         failed["error"] = "exit status 1".into();
         assert_eq!(what(&failed), end(true));
         assert_eq!(what(&payload("Stop")), Some(What::TurnEnd));
+        let mut waiting = payload("Stop");
+        waiting["fullyIdle"] = false.into();
+        assert_eq!(what(&waiting), None, "waits on its subagents");
+        for hook in ["PreInvocation", "PreToolUse", "Stop"] {
+            let mut subagent = payload(hook);
+            subagent["lastUserInput"] = "".into();
+            assert_eq!(what(&subagent), None, "a subagent's {hook}");
+        }
         assert_eq!(what(&payload("SessionStart")), None);
         // No transcript to say the chat's id: the hook's own.
         let own = what_of(&payload("PreToolUse"), |_| None);

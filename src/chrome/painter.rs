@@ -1049,8 +1049,9 @@ impl Painter {
         color: Rgb,
     ) {
         let px = |v: i32| (v as f64 * scale).round() as i32;
+        // Wider than its place: from its start, cut short at its end.
         let x = px(rect.loc.x) as f32
-            + (px(rect.size.w) as f32 - self.text_width(text, size, scale)) / 2.0;
+            + ((px(rect.size.w) as f32 - self.text_width(text, size, scale)) / 2.0).max(0.0);
         let band = (px(rect.loc.y), px(rect.size.h));
         self.text(
             c,

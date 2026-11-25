@@ -132,11 +132,18 @@ impl Reader {
             _ => None,
         };
         if name == "invoke_subagent" {
-            let asked = (args["Subagents"].as_array().into_iter().flatten())
+            // One subagent per call (`{TypeName, Role, Prompt}`, agy 1.5);
+            // or a `Subagents` list of them.
+            let asked = (args["Subagents"].as_array())
+                .map_or(std::slice::from_ref(args), Vec::as_slice)
+                .iter()
                 .map(|entry| {
                     let prompt = said(entry, "Prompt");
                     let line = prompt.lines().map(str::trim).find(|l| !l.is_empty());
-                    let title = line.or(entry["TypeName"].as_str()).unwrap_or("Subagent");
+                    let title = (entry["Role"].as_str().filter(|r| !r.is_empty()))
+                        .or(line)
+                        .or(entry["TypeName"].as_str())
+                        .unwrap_or("Subagent");
                     let title = title.to_owned();
                     (prompt, title)
                 })
@@ -206,9 +213,12 @@ impl Reader {
             return false;
         }
         let first = serde_json::from_str::<Value>(first).unwrap_or_default();
-        let input = match first["type"] == "USER_INPUT" {
-            true => request(first["content"].as_str().unwrap_or_default()),
-            false => "",
+        let content = first["content"].as_str().unwrap_or_default();
+        let input = match first["type"].as_str() {
+            Some("USER_INPUT") => request(content),
+            // agy 1.5 hands a subagent its prompt as its parent's message.
+            Some("SYSTEM_MESSAGE") => content,
+            _ => "",
         };
         let found = self.spawns.iter().enumerate().find_map(|(s, spawn)| {
             let named = spawn.named.as_ref()?;
@@ -570,7 +580,14 @@ mod tests {
         assert_eq!(reader.unfound_subagents(), 2);
         let first = |text: &str| input(0, text).to_string();
         assert!(!reader.take_subagent("other", &first("Write c")));
-        assert!(reader.take_subagent(KID2, &first("Read b")));
+        // agy 1.5 gives its prompt as the parent's message.
+        let message = step(
+            0,
+            "SYSTEM_MESSAGE",
+            "SYSTEM",
+            json!({"content": "<SYSTEM_MESSAGE>\n[Message] sender=x content=Read b\n</SYSTEM_MESSAGE>"}),
+        );
+        assert!(reader.take_subagent(KID2, &message.to_string()));
         assert!(reader.take_subagent(KID, &first("Read a")));
         assert_eq!(reader.unfound_subagents(), 0);
         let [Item::Subagent { title, items, .. }] = reader.items() else {
@@ -586,6 +603,47 @@ mod tests {
             .collect();
         assert_eq!(cards, ["Read a", "Read b"]);
         assert_eq!(reader.subagents(), [KID, KID2]);
+    }
+
+    /// agy 1.5's shape: one subagent per call, each call its own result.
+    #[test]
+    fn calls_of_one_subagent_each_get_their_own_card() {
+        let call = |role: &str, file: &str| {
+            json!({"name": "invoke_subagent",
+                   "args": {"Prompt": format!("Read {file}"), "Role": role, "TypeName": "research"}})
+        };
+        let made = |kid: &str| {
+            format!("Created the following subagent:\n{{\n  \"conversationId\":  \"{kid}\"\n}}\n")
+        };
+        let mut reader = Reader::new(AgentKind::Antigravity);
+        reader.feed(&lines(&[
+            step(
+                1,
+                "PLANNER_RESPONSE",
+                "MODEL",
+                json!({"tool_calls": [call("File A Reader", "a.txt"), call("File B Reader", "b.txt")]}),
+            ),
+            result(2, &made(KID)),
+            result(3, &made(KID2)),
+        ]));
+        assert_eq!(reader.named_subagents(), [KID, KID2]);
+        for kid in [KID2, KID] {
+            assert!(reader.take_subagent(kid, ""));
+            reader.feed_subagent(kid, "", &lines(&[input(0, "Read it")]));
+        }
+        let titles: Vec<(&str, &str)> = (reader.items().iter())
+            .map(|item| match item {
+                Item::Subagent { id, title, .. } => (id.as_str(), title.as_str()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                ("agent:step1.0", "File A Reader"),
+                ("agent:step1.1", "File B Reader")
+            ]
+        );
     }
 
     #[test]
