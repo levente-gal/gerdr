@@ -681,21 +681,6 @@ fn workspace_agent_label(agent: &AgentInfo, workspace: Option<&str>) -> String {
     }
 }
 
-/// The agent's title, as its sidebar card shows it: the one the agent
-/// gives, else its terminal's.
-fn agent_title(agent: &AgentInfo) -> Option<String> {
-    let titles = [
-        &agent.title,
-        &agent.terminal_title_stripped,
-        &agent.terminal_title,
-    ];
-    let mut titles = titles
-        .into_iter()
-        .flatten()
-        .map(|t| crate::paths::tidy_title(t));
-    titles.find(|t| !t.is_empty())
-}
-
 /// The agent in `pane` of `project` the phone may read and type to, and
 /// what to call it: one of feature `slug`'s agents; with no `slug`, any
 /// agent herdr runs in the project's session. Never a plain shell.
@@ -754,7 +739,7 @@ fn all_features() -> Value {
                 json!({
                     "pane": a.pane_id,
                     "label": workspace_agent_label(a, ws),
-                    "title": agent_title(a),
+                    "title": a.shown_title(),
                     "status": status_word(a.agent_status),
                 })
             })
@@ -1164,6 +1149,10 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
         Err(reply) => return reply,
     };
     let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
+    // Its title, for the page's head.
+    let title = (herdr.agent_list().ok())
+        .and_then(|agents| agents.into_iter().find(|a| a.pane_id == pane))
+        .and_then(|a| a.shown_title());
     let all = lines == "all";
     let want = lines
         .parse()
@@ -1180,7 +1169,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             Ok(screen) => {
                 let text = chat_and_screen(path, &screen);
                 let (ask, working) = pane_ask(&project.id, pane);
-                let reply = json!({ "label": label, "text": text, "more": false, "ask": ask, "working": working });
+                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working });
                 Reply::json(&reply)
             }
             Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
@@ -1201,7 +1190,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             let more = chat.is_some()
                 || (!all && rows.is_some_and(|rows| rows > text.lines().count() as u64));
             let (ask, working) = pane_ask(&project.id, pane);
-            let reply = json!({ "label": label, "text": text, "more": more, "ask": ask, "working": working });
+            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working });
             Reply::json(&reply)
         }
         Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
@@ -1347,10 +1336,10 @@ mod tests {
             serde_json::from_value(a).expect("agent")
         };
         let both = agent(json!({ "title": "Fix login", "terminal_title": "✳ Claude Code" }));
-        assert_eq!(agent_title(&both).as_deref(), Some("Fix login"));
+        assert_eq!(both.shown_title().as_deref(), Some("Fix login"));
         let term = agent(json!({ "title": "", "terminal_title": "✳ Bulk edit" }));
-        assert_eq!(agent_title(&term).as_deref(), Some("Bulk edit"));
-        assert_eq!(agent_title(&agent(json!({}))), None);
+        assert_eq!(term.shown_title().as_deref(), Some("Bulk edit"));
+        assert_eq!(agent(json!({})).shown_title(), None);
     }
 
     #[test]

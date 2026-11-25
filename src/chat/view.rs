@@ -1295,9 +1295,13 @@ impl Gerdr {
                 let pane_id = &pane.herdr.as_ref()?.pane_id;
                 let agent = self.chat_agent(pane_id)?;
                 let chat = pane.chat.as_ref()?;
-                // The agent and its folder; herdr named no chat when it was
-                // found by folder and time: it may be the wrong one.
+                // The agent, its title, then its folder (cut first when
+                // narrow); herdr named no chat when it was found by folder
+                // and time: it may be the wrong one.
                 let mut label = agent.label().to_owned();
+                if let Some(title) = agent.shown_title() {
+                    label = format!("{label} · {title}");
+                }
                 if let Some(name) = (agent.cwd.as_deref())
                     .and_then(|cwd| cwd.file_name())
                     .and_then(|name| name.to_str())
