@@ -656,7 +656,7 @@ async function pane(p, s, id) {
     ask, askId: a?.ask || "", asking: !!a?.questions?.length, suggestion: d.suggestion || "",
     modes, modesKey: JSON.stringify([d.modes, d.mode]),
     sides: sideCard(id, d.sides),
-    bar: `<div id="asked"></div><div id="sides"></div><ul id="slash" hidden></ul><button type="button" id="suggest" hidden></button><form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
+    bar: `<div id="asked"></div><div id="sides"></div><button type="button" id="suggest" hidden></button><form id="say"><ul id="slash" hidden></ul><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>${modes}
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
         ${s ? `<button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button>` : ""}</div>` };

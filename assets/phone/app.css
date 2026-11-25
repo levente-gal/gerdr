@@ -342,7 +342,11 @@ body.with-bar #note { bottom: calc(var(--kb, 0px) + var(--bar-h, calc(104px + en
 #bar .quiz .opt small { color: var(--quiet); font-size: 13px; }
 #bar .quiz .opt input:not([type=text]) { width: 22px; height: 22px; flex: none; margin: 0; padding: 0; accent-color: var(--accent); }
 #bar .quiz .opt input[type=text] { flex: 1; min-width: 0; padding: 7px 10px; }
+/* The `/` menu floats over what is above the box: the bar keeps its height,
+   so the box never moves under the caret as the menu comes and goes. */
+#bar form { position: relative; }
 #bar #slash {
+  position: absolute; left: 0; right: 0; bottom: 100%; z-index: 1; background: var(--bg); box-shadow: var(--shadow);
   list-style: none; margin: 0 0 8px; padding: 4px; max-height: calc(var(--seen-h, 100vh) * .4); overflow: auto;
   border: 1px solid var(--line-soft); border-radius: 10px;
 }
