@@ -1213,7 +1213,7 @@ mod tests {
         let agent = |dot| SwitcherRow {
             icon: ItemIcon::Agent(
                 Badge {
-                    icon: AgentIcon::Gemini,
+                    icon: AgentIcon::Antigravity,
                     dot,
                 },
                 AgentStatus::Working,

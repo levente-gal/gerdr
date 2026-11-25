@@ -15,7 +15,7 @@ they come back when it starts again.
 
 ## What's in it
 
-- **Agents.** Claude Code, Codex, Gemini, cursor-agent, opencode and other
+- **Agents.** Claude Code, Codex, cursor-agent, opencode and other
   agent CLIs on your `PATH` start from a workspace's AI button. Each runs in
   its own tab. Running agents, Cursor chats and T3 Code threads show as
   sidebar cards, with a dot that says when one needs you. Any agent's pane

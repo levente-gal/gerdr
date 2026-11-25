@@ -56,7 +56,6 @@ const KNOWN: &[(&str, &str)] = &[
     ("claude", "Claude Code"),
     (T3, "T3 Code"),
     ("codex", "Codex"),
-    ("gemini", "Gemini CLI"),
     ("cursor-agent", "Cursor"),
     ("opencode", "OpenCode"),
     ("copilot", "Copilot"),

@@ -1134,7 +1134,7 @@ mod tests {
              --add-dir '/d/my feature' --add-dir /e"
         );
         assert_eq!(allowed_into(&own, &dirs).matches("CLAUDE_MD=").count(), 1);
-        for base in ["opencode", "aider --yes", "gemini"] {
+        for base in ["opencode", "aider --yes", "agy"] {
             assert_eq!(allowed_into(base, &dirs), base);
         }
         assert_eq!(allowed_into(" claude ", &[]), "claude");

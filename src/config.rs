@@ -31,7 +31,7 @@
 //!
 //! [agents]
 //! # The agent CLIs the AI button of a workspace starts in a new tab: the
-//! # known ones on PATH (claude, codex, gemini, cursor-agent, opencode…),
+//! # known ones on PATH (claude, codex, cursor-agent, opencode…),
 //! # each run by its own command unless given another here ("" hides it),
 //! # and the ones added here, by name. T3 Code, once it ran here, starts
 //! # a new thread in its app in a web pane; t3 = "" hides it.
@@ -1163,7 +1163,7 @@ const TEMPLATE: &str = "\
 #
 # [agents]
 # # The agent CLIs the AI button of a workspace starts in a new tab: the
-# # known ones on PATH (claude, codex, gemini, cursor-agent, opencode…),
+# # known ones on PATH (claude, codex, cursor-agent, opencode…),
 # # each run by its own command unless given another here (\"\" hides it),
 # # and the ones added here, by name. Each runs in a new terminal tab of
 # # the workspace, in its folder, as typed at its shell. T3 Code, once it

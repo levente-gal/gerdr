@@ -125,7 +125,6 @@ fn many_agents() -> Vec<Vec<AgentView>> {
     let rows = [
         (Claude, "claude", AgentStatus::Working, None),
         (Codex, "codex", AgentStatus::Done, None),
-        (Gemini, "gemini", AgentStatus::Idle, None),
         (Cursor, "cursor", AgentStatus::Working, None),
         (OpenCode, "opencode", AgentStatus::Blocked, None),
         (Copilot, "copilot", AgentStatus::Idle, None),

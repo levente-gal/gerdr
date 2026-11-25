@@ -12,7 +12,6 @@ use crate::herdr::AgentInfo;
 pub enum AgentIcon {
     Claude,
     Codex,
-    Gemini,
     Cursor,
     OpenCode,
     Copilot,
@@ -34,10 +33,9 @@ pub enum AgentIcon {
 }
 
 /// The logos, in `AgentIcon`'s order, as `assets/agents` has them.
-const LOGOS: [&[u8]; 16] = [
+const LOGOS: [&[u8]; 15] = [
     include_bytes!("../assets/agents/claude.svg"),
     include_bytes!("../assets/agents/codex.svg"),
-    include_bytes!("../assets/agents/gemini.svg"),
     include_bytes!("../assets/agents/cursor.svg"),
     include_bytes!("../assets/agents/opencode.svg"),
     include_bytes!("../assets/agents/githubcopilot.svg"),
@@ -65,7 +63,6 @@ impl AgentIcon {
         match id.as_str() {
             "claude" | "claudecode" => Self::Claude,
             "codex" | "openaicodex" | "codexcli" => Self::Codex,
-            "gemini" | "geminicli" => Self::Gemini,
             "cursor" | "cursoragent" | "cursorcli" => Self::Cursor,
             "opencode" => Self::OpenCode,
             "copilot" | "githubcopilot" | "copilotcli" => Self::Copilot,
@@ -116,7 +113,6 @@ mod tests {
         [
             Claude,
             Codex,
-            Gemini,
             Cursor,
             OpenCode,
             Copilot,
@@ -141,8 +137,6 @@ mod tests {
             ("claude", Claude),
             ("Claude Code", Claude),
             ("codex", Codex),
-            ("gemini", Gemini),
-            ("Gemini CLI", Gemini),
             ("cursor", Cursor),
             ("cursor-agent", Cursor),
             ("opencode", OpenCode),
