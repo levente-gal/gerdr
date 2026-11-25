@@ -305,7 +305,7 @@ impl Gerdr {
         waits
     }
 
-    /// `agent` with the session heard live, when herdr names none.
+    /// `agent` with the session heard live, over herdr's.
     pub(crate) fn with_live_session(&self, agent: &AgentInfo) -> AgentInfo {
         let mut agent = agent.clone();
         if let Some(heard) = live_session(&agent, self.chats.live.sessions.get(&agent.pane_id)) {
@@ -425,16 +425,15 @@ fn hidden_asks(asks: &HashMap<String, HeldAsk>, in_sight: impl Fn(&str) -> bool)
 }
 
 /// The session heard live for `agent`'s pane, `heard`, if it is that
-/// agent's and herdr names none of that agent's: herdr may hold one left from
-/// an earlier agent in the pane.
+/// agent's: it beats herdr's, which may be left from an earlier agent in the
+/// pane, or (Antigravity's hook) a subagent's.
 fn live_session<'a>(
     agent: &AgentInfo,
     heard: Option<&'a AgentSession>,
 ) -> Option<&'a AgentSession> {
     let kind = |name: &str| AgentKind::of(name);
     let running = kind(agent.agent.as_deref()?);
-    let herdrs = (agent.agent_session.as_ref()).is_some_and(|s| kind(&s.agent) == running);
-    heard.filter(|s| !herdrs && kind(&s.agent) == running)
+    heard.filter(|s| kind(&s.agent) == running)
 }
 
 #[cfg(test)]
@@ -448,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn a_session_heard_beats_herdrs_only_when_herdrs_is_another_agents() {
+    fn a_session_heard_beats_herdrs_when_it_is_the_running_agents() {
         let heard = |agent: &str| AgentSession {
             source: SOURCE.into(),
             agent: agent.into(),
@@ -463,9 +462,13 @@ mod tests {
             live_session(&claude, Some(&heard("claude"))),
             Some(&heard("claude"))
         );
-        // herdr names Claude's own: herdr's stays.
+        // herdr names one of Claude's: the heard one still wins (herdr's
+        // Antigravity hook names subagents' too).
         let named = crate::chat::source::tests::agent("claude", "path", "/h.jsonl");
-        assert_eq!(live_session(&named, Some(&heard("claude"))), None);
+        assert_eq!(
+            live_session(&named, Some(&heard("claude"))),
+            Some(&heard("claude"))
+        );
         // A session heard from another agent than the one running: not it.
         assert_eq!(live_session(&claude, Some(&heard("cursor"))), None);
         let mut none = claude.clone();
