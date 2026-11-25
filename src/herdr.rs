@@ -1223,6 +1223,16 @@ impl Herdr {
         self.send_line(pane_id, line)
     }
 
+    /// Type `text` into pane `pane_id`, nothing pressed after it: letters
+    /// for an agent's menu's search.
+    pub fn send_text(&mut self, pane_id: &str, text: &str) -> Result<(), String> {
+        self.call(
+            "pane.send_input",
+            json!({"pane_id": pane_id, "text": text, "keys": []}),
+        )
+        .map(drop)
+    }
+
     /// Press `keys` in pane `pane_id`, as typed on its terminal: `ctrl+c`
     /// interrupts what runs in it. herdr checks every key before sending
     /// any, and refuses one it doesn't know (`invalid_key`).

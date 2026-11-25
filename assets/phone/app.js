@@ -658,18 +658,64 @@ async function pane(p, s, id) {
   const group = d.modes?.length ? `<div class="modes" role="group" aria-label="Agent mode">${d.modes.map((m) =>
     `<button type="button" data-mode="${esc(m)}" aria-pressed="${m === d.mode}">${esc(m)}</button>`).join("")}</div>` : "";
   const now = d.model_id ? "" : `<option value="" selected disabled>${esc(d.model || "Model")}</option>`;
+  // An agent picking its model in a menu of its own: a button opening it, named for
+  // the model its screen says it is on; the menu then shows over the reply box.
+  const opener = d.menu ? `<button type="button" class="model" data-model-menu aria-label="Model">${esc(d.model || "Model")}</button>` : "";
   const model = d.models?.length ? `<select class="model" aria-label="Model">${now}${d.models.map((m) =>
-    `<option value="${esc(m.id)}"${m.id === d.model_id ? " selected" : ""}>${esc(m.name)}</option>`).join("")}</select>` : "";
+    `<option value="${esc(m.id)}"${m.id === d.model_id ? " selected" : ""}>${esc(m.name)}</option>`).join("")}</select>` : opener;
   const modes = group || model ? `<div class="modes-row">${group}${model}</div>` : "";
   return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
     said: d.said || [], ask, askId: a?.ask || "", asking: !!a?.questions?.length, suggestion: d.suggestion || "",
-    modes, modesKey: JSON.stringify([d.modes, d.mode, d.models, d.model, d.model_id]),
+    modes, modesKey: JSON.stringify([d.modes, d.mode, d.models, d.model, d.model_id, d.menu]),
+    picker: d.picker || null, pickerKey: JSON.stringify(d.picker || null),
     sides: sideCard(id, d.sides),
-    bar: `<div id="asked"></div><div id="sides"></div><button type="button" id="suggest" hidden></button><form id="say"><ul id="slash" hidden></ul><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
+    bar: `<div id="picker"></div><div id="asked"></div><div id="sides"></div><button type="button" id="suggest" hidden></button><form id="say"><ul id="slash" hidden></ul><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>${modes}
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
         ${s ? `<button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button>` : ""}</div>` };
 }
+
+// The agent's own model menu (Codex, OpenCode, pi, Antigravity), as gerdr reads it
+// off its screen: its rows to tap, its search typed into it, its effort moved.
+// The search box is drawn once per menu, so what is typed holds across reads.
+let menuSent = "";
+function pickerShow(el, m) {
+  if (!m) { el.innerHTML = ""; menuSent = ""; return; }
+  if (!el.firstChild) {
+    menuSent = "";
+    el.innerHTML = `<div class="picker"><div class="what"></div>
+      ${m.search ? `<input type="search" class="menu-search" placeholder="Search" aria-label="Search the models" autocomplete="off">` : ""}
+      <div class="opts" role="list"></div><div class="buttons"></div></div>`;
+  }
+  const [title, ...more] = m.ask;
+  el.querySelector(".what").innerHTML = `<b>${esc(title || "Model")}</b>${more.map((t) => `<div class="quiet small">${esc(t)}</div>`).join("")}`;
+  el.querySelector(".opts").innerHTML = m.rows.length ? m.rows.map((r) => `<button type="button" class="opt${r.at ? " at" : ""}" data-menu-pick="${esc(r.label)}"${r.at ? ` aria-current="true"` : ""}>
+    <span><b>${esc(r.label)}</b>${r.detail ? `<small>${esc(r.detail)}</small>` : ""}</span></button>`).join("")
+    : `<div class="quiet small">No models match</div>`;
+  el.querySelector(".at")?.scrollIntoView({ block: "nearest" });
+  el.querySelector(".buttons").innerHTML = (m.sideways ? `<button type="button" data-key="Left" aria-label="Less effort">←</button><button type="button" data-key="Right" aria-label="More effort">→</button>` : "")
+    + `<button type="button" data-key="esc">Close</button>`;
+}
+
+// Letters typed in the menu's search go to the agent's own, a moment after the
+// last: those taken back first, then those new.
+let menuTimer;
+document.addEventListener("input", (e) => {
+  if (!e.target.matches?.(".menu-search")) return;
+  clearTimeout(menuTimer);
+  menuTimer = setTimeout(async () => {
+    const want = e.target.value;
+    let same = 0;
+    while (same < want.length && same < menuSent.length && want[same] === menuSent[same]) same++;
+    const erase = [...menuSent.slice(same)].length, type = want.slice(same);
+    if (!erase && !type) return;
+    menuSent = want;
+    const [, p, s, pane] = here();
+    const a = await post("/api/agent", { p, s, pane, type, erase });
+    if (a.error) say([{ text: a.error }], true);
+    render(false, true);
+  }, 400);
+});
 
 // The side questions (`/btw …`) asked of the agent this run, as gerdr
 // keeps them: its own chat doesn't. The last shows on a card until hidden,
@@ -869,6 +915,14 @@ async function render(fresh, force, keepBottom) {
       document.getElementById("say")?.insertAdjacentHTML("afterend", v.modes);
       bar.dataset.modes = v.modesKey;
     }
+    // The agent's model menu shows while its screen does; its keys and
+    // replies would land in it.
+    const picking = v.pane && document.getElementById("picker");
+    if (picking && v.pickerKey !== undefined && picking.dataset.key !== v.pickerKey) {
+      pickerShow(picking, v.picker);
+      picking.dataset.key = v.pickerKey;
+      bar.classList.toggle("picking", !!v.picker);
+    }
     // An ask comes and goes between reads; its card stays while it waits,
     // with what was picked on it. Keys and replies would land in its menu.
     const asked = v.pane && document.getElementById("asked");
@@ -1015,7 +1069,7 @@ document.addEventListener("change", async (e) => {
 });
 
 document.addEventListener("click", async (e) => {
-  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push], button[data-answer], button[data-mode], button[data-hide-sides]");
+  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push], button[data-answer], button[data-mode], button[data-hide-sides], button[data-menu-pick], button[data-model-menu]");
   if (!b || b.disabled) return;
   const [, p, s, pane] = here();
   if (b.dataset.hideSides) {
@@ -1062,6 +1116,15 @@ document.addEventListener("click", async (e) => {
       const a = await post("/api/answer", { p, s, pane, ask: b.dataset.ask, reply: b.dataset.answer, answers });
       if (a.error) say([{ text: a.error }], true);
       setTimeout(() => render(false, true), 400);
+    } else if (b.dataset.menuPick !== undefined) {
+      const a = await post("/api/agent", { p, s, pane, pick: b.dataset.menuPick });
+      if (a.error) say([{ text: a.error }], true);
+      setTimeout(() => render(false, true), 400);
+    } else if (b.dataset.modelMenu !== undefined) {
+      // Its own /model opens the menu, which then shows here as its screen does.
+      const a = await post("/api/agent", { p, s, pane, text: "/model" });
+      if (a.error) say([{ text: a.error }], true);
+      setTimeout(() => render(false, true), 800);
     } else if (b.dataset.key) {
       if (b.dataset.key === "close" &&
           !(await sheetAsk({ title: `Close ${titleEl.textContent}?`, body: "Its tab closes, as on the desktop.", go: "Close" }))) return;

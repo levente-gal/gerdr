@@ -1,0 +1,40 @@
+[2m╭───────────────────────────────────────────────────────────────╮[0m
+[2m│ [0;1m[38;2;99;168;248m✨ Update available![0m [1m0.171.0 -> 0.172.0[0;2m                       │[0m
+[2m│ [0mSee [4m[38;2;99;168;248m]8;;https://github.com/openai/codex\https://github.com/openai/codex[0m]8;;\ for installation options.[2m │[0m
+[2m│                                                               │[0m
+[2m│ [0mSee full release notes:[2m                                       │[0m
+[2m│ [0;4m[38;2;99;168;248m]8;;https://github.com/openai/codex/releases/latest\https://github.com/openai/codex/releases/latest[0;2m]8;;\               │[0m
+[2m╰───────────────────────────────────────────────────────────────╯[0m
+
+
+  [38;2;99;168;248m>_ [1m[39mOpenAI Codex[0;2m (v0.171.0)[0m
+     [2m~/Personal/gerdr[0m
+
+[2m• [0mModel changed to gpt-6.2-astra ultra for this conversation
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  [1mSelect Model and Effort[0m
+
+
+  1. GPT-6.2-Sol              [2mFast, go-to model for coding and everyday work.[0m
+  2. GPT-6.2-Astra (current)  [2mOur most capable model for complex coding and professional work.[0m
+[1;7m› 3. GPT-6.1 Terra            [0;7mEfficient model that excels at visual understanding and computer use.[1m
+[0m  4. GPT-6.1-Sol              [2mPrevious generation model for coding and everyday work.[0m
+  5. GPT-6-Astra              [2mPrevious generation model for complex coding and professional work.[0m
+  6. GPT-6-Sol                [2mLegacy model for coding and everyday work.[0m
+  7. GPT-6-Luna               [2mFast and affordable model for easier tasks.[0m
+  8. GPT-5.6-Sol              [2mLegacy model for coding and everyday work.[0m
+[38;2;99;168;248m↓[39m
+  [1menter[0;2m select · [0;1mesc[0;2m back

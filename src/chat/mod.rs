@@ -13,6 +13,7 @@ pub mod commands;
 pub mod menu;
 pub mod mode;
 pub mod model;
+pub mod model_menu;
 pub mod parse;
 pub mod rows;
 pub mod source;
@@ -22,8 +23,8 @@ pub mod tail;
 mod view;
 
 #[cfg(test)]
-pub(crate) use view::{footer, slash_footer};
-pub(crate) use view::{suggestion, suggests};
+pub(crate) use view::{footer, picker_footer, slash_footer};
+pub(crate) use view::{screen_rows, suggestion, suggests};
 
 /// One thing said or done in a chat, in order.
 #[derive(Clone, Debug, PartialEq)]
@@ -204,8 +205,11 @@ pub struct PaneChat {
     /// The user's picks on the card of its ask's questions, till Submit.
     pub card: questions::Card,
     /// The model its agent is on, as its chat last said or as last picked
-    /// here (`model`).
+    /// here (`model`), or as its screen says (`model_menu::now`).
     pub model: Option<String>,
+    /// The agent's own model menu while its screen shows it
+    /// (`model_menu`): the chat shows it, and its keys go to it.
+    pub picker: Option<Arc<menu::Menu>>,
 }
 
 /// When an agent's turn began, as herdr's rounds saw its status.

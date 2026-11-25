@@ -310,6 +310,24 @@ body.with-bar #note { bottom: calc(var(--kb, 0px) + var(--bar-h, calc(104px + en
 #bar .modes { display: flex; flex: 1; min-width: 0; padding: 2px; border: 1px solid var(--line); border-radius: 10px; }
 #bar select.model { flex: 0 1 auto; max-width: 45%; min-height: 46px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--raised); color: inherit; font: inherit; text-overflow: ellipsis; }
+#bar button.model { flex: 0 1 auto; max-width: 45%; min-height: 46px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--raised); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* An agent's own model menu, read off its screen: its rows to tap. Replies
+   would land in it: the reply box waits until it closes. */
+#bar.picking #say, #bar.picking #slash { display: none; }
+#bar .picker { border: 1px solid var(--accent); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+#bar .picker .menu-search { width: 100%; box-sizing: border-box; margin: 8px 0 4px; padding: 7px 10px; }
+#bar .picker .opts { max-height: calc(var(--seen-h, 100vh) * .4); overflow: auto; margin-top: 4px; }
+#bar .picker .opt { display: flex; width: 100%; min-height: 44px; padding: 6px 8px; text-align: left; border: 0;
+  border-top: 1px solid var(--line-soft); border-radius: 0; background: transparent; color: inherit; font: inherit; }
+#bar .picker .opt:first-child { border-top: 0; }
+#bar .picker .opt.at { border-radius: 8px; background: color-mix(in srgb, var(--accent) var(--tint), var(--card)); }
+#bar .picker .opt span { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+#bar .picker .opt b { font-weight: 550; }
+#bar .picker .opt.at b { font-weight: 650; }
+#bar .picker .opt small { color: var(--quiet); font-size: 13px; }
+#bar .picker .buttons { display: flex; gap: 8px; margin-top: 8px; }
+#bar .picker .buttons button { flex: 1; min-height: 44px; }
 #bar .modes button { flex: 1; min-width: 0; min-height: 40px; padding: 4px 0; border: 1px solid transparent; background: transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #bar .modes button[aria-pressed="true"] { border-color: var(--accent); background: var(--raised); font-weight: 650; }
 #bar .ask { border: 1px solid var(--accent); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
