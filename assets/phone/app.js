@@ -649,9 +649,12 @@ async function pane(p, s, id) {
   const since = d.working == null ? null : turnAt(id, d.working);
   const working = since === null ? "" : `<div class="work-row small"><span class="sdot blink"></span>working
     <span class="clock" data-since="${since}"></span></div>`;
+  // Its modes under the reply box, as on gerdr's chat: the one its screen shows lit.
+  const modes = d.modes?.length ? `<div class="modes" role="group" aria-label="Agent mode">${d.modes.map((m) =>
+    `<button type="button" data-mode="${esc(m)}" aria-pressed="${m === d.mode}">${esc(m)}</button>`).join("")}</div>` : "";
   return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
     bar: `${ask}<ul id="slash" hidden></ul><form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
-      <button>Send</button></form>
+      <button>Send</button></form>${modes}
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
         ${s ? `<button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button>` : ""}</div>` };
 }
@@ -855,7 +858,7 @@ document.addEventListener("pointerdown", (e) => {
 });
 
 document.addEventListener("click", async (e) => {
-  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push], button[data-answer]");
+  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push], button[data-answer], button[data-mode]");
   if (!b || b.disabled) return;
   const [, p, s, pane] = here();
   // The feature's page names its stage where the address does.
@@ -885,6 +888,12 @@ document.addEventListener("click", async (e) => {
       const box = document.getElementById("backText");
       if (!box.value.trim() && b.dataset.lines === "0") { say([{ text: "Say what should change" }], true); return; }
       if (await ask("/api/send-back", { p, s, text: box.value })) { box.value = ""; fit(box); }
+    } else if (b.dataset.mode) {
+      if (b.getAttribute("aria-pressed") === "true") return;
+      const from = document.querySelector('.modes [aria-pressed="true"]')?.dataset.mode || "";
+      const a = await post("/api/agent", { p, s, pane, mode: b.dataset.mode, from });
+      if (a.error) say([{ text: a.error }], true);
+      render(false, true);
     } else if (b.dataset.answer) {
       const a = await post("/api/answer", { p, s, pane, ask: b.dataset.ask, reply: b.dataset.answer });
       if (a.error) say([{ text: a.error }], true);

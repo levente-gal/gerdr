@@ -366,6 +366,10 @@ pub struct Pane {
 /// reads them.
 pub type ChatRows = Vec<(String, scrollback::Styled)>;
 
+/// A mode switch of an agent pane come back: its pane, the mode wanted,
+/// and how it went (`chat::mode::switch`).
+pub type ModeSwitched = (String, String, Result<(), String>);
+
 /// What reads the chats panes show in their place (see `chat`), by herdr
 /// pane. Their items, scroll and draft are each pane's own (`Pane::chat`).
 #[derive(Default)]
@@ -395,6 +399,12 @@ pub struct Chats {
     /// When each agent's turn began, by pane: for the chats' and the
     /// phone's working rows.
     pub turns: HashMap<String, chat::Turn>,
+    /// The mode each agent's screen last said it is in (`chat::mode`), by
+    /// pane, and the panes whose agent is being switched to another.
+    pub modes: HashMap<String, String>,
+    pub switching: HashSet<String>,
+    /// Where those switches come back to, as (pane, mode, how it went).
+    pub mode_tx: Option<channel::Sender<ModeSwitched>>,
 }
 
 /// A process we started for a tab whose window hasn't shown up yet.

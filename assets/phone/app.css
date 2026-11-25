@@ -305,6 +305,10 @@ body.with-bar #note { bottom: calc(var(--kb, 0px) + var(--bar-h, calc(104px + en
 #bar.on-keyboard { padding-bottom: 8px; }
 #bar form { display: flex; gap: 8px; align-items: flex-end; }
 #bar .keys { display: flex; gap: 6px; margin-top: 8px; }
+/* The agent's modes: a segmented choice, the one it is in lit. */
+#bar .modes { display: flex; margin-top: 8px; padding: 2px; border: 1px solid var(--line); border-radius: 10px; }
+#bar .modes button { flex: 1; min-width: 0; min-height: 40px; padding: 4px 0; border: 1px solid transparent; background: transparent; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#bar .modes button[aria-pressed="true"] { border-color: var(--accent); background: var(--raised); font-weight: 650; }
 #bar .ask { border: 1px solid var(--accent); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
 #bar .ask .what { overflow-wrap: anywhere; }
 #bar .ask pre.input { max-height: 30vh; overflow: auto; font-size: 13px; margin: 6px 0 0; white-space: pre-wrap; }

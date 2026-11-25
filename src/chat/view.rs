@@ -26,7 +26,7 @@ use super::{
     ChatFocus, Event, Item, PaneChat, Reading,
     commands::{self, Command, Slash},
     live::AskReply,
-    mode::{self, Goal, Step as ModeStep},
+    mode,
     rows::{rows, unread},
     tail::Tail,
 };
@@ -51,8 +51,6 @@ const WAITING_EVERY: Duration = Duration::from_secs(1);
 /// How often a chat's screen is read for its agent's mode otherwise: the
 /// agent changes it by itself too (Claude leaving plan mode).
 const MODE_EVERY: Duration = Duration::from_secs(3);
-/// How soon after a press of the mode key the screen is read for it.
-const MODE_READ_AFTER: Duration = Duration::from_millis(150);
 
 impl PaneChat {
     /// A chat asked for the first time: shown, following its bottom, with an
@@ -876,6 +874,8 @@ impl Gerdr {
             .collect();
         self.chats.scrolls.retain(|id, _| kept.contains(id));
         self.chats.read_at.retain(|id, _| kept.contains(id));
+        let agents = &self.session.agents;
+        (self.chats.modes).retain(|id, _| agents.iter().any(|a| a.pane_id == *id));
         self.chats_read_rows(&wanted);
         self.live_release_hidden();
     }
@@ -1064,16 +1064,8 @@ impl Gerdr {
         if agent.agent_status != AgentStatus::Blocked {
             match (super::source::kind(agent), &rows) {
                 (Some(kind), Ok(rows)) => self.chat_take_mode(&pane_id, kind, rows),
-                // A mode being switched to stops; a read now and then is
-                // tried again on its own.
-                (_, Err(err)) => {
-                    let goal = chat_mut(&mut self.workspaces, &pane_id)
-                        .and_then(|chat| chat.mode_goal.as_ref())
-                        .map(|goal| goal.want.clone());
-                    if let Some(want) = goal {
-                        self.chat_mode_failed(&pane_id, &want, &format!("its screen: {err}"));
-                    }
-                }
+                // Tried again on herdr's next round.
+                (_, Err(err)) => tracing::debug!("the mode of pane {pane_id}: {err}"),
                 (None, Ok(_)) => {}
             }
             // Too late for the waiting panel: its agent waits no more.
@@ -1237,91 +1229,115 @@ impl Gerdr {
     }
 
     /// The mode pane `pane_id`'s agent of `kind` is in, as its screen
-    /// `rows` say, and the next step to the one picked in its chat.
+    /// `rows` say; one that doesn't say keeps the last it said.
     fn chat_take_mode(&mut self, pane_id: &str, kind: AgentKind, rows: &ChatRows) {
         let texts: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
-        let now = mode::shown(kind, &texts);
-        let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
-            return;
-        };
-        if now.is_some() {
-            chat.mode = now.clone();
-        }
-        let Some(goal) = chat.mode_goal.as_mut() else {
-            return;
-        };
-        let want = goal.want.clone();
-        let step = goal.step(now.as_deref(), Instant::now());
-        if matches!(step, ModeStep::Done | ModeStep::GiveUp | ModeStep::NotThere) {
-            chat.mode_goal = None;
-        }
-        let stayed = chat.mode.clone();
-        match step {
-            ModeStep::Done => {}
-            ModeStep::Wait => self.read_rows(pane_id.to_owned(), MODE_READ_AFTER),
-            ModeStep::Press => {
-                if let Err(why) = self.press_mode_key(pane_id) {
-                    self.chat_mode_failed(pane_id, &want, &why);
-                }
-            }
-            ModeStep::GiveUp => {
-                let why = match stayed {
-                    Some(stayed) => format!("it stayed in {stayed}"),
-                    None => "its screen doesn't show its mode".to_owned(),
-                };
-                self.chat_mode_failed(pane_id, &want, &why);
-            }
-            ModeStep::NotThere => {
-                let why = "it doesn't offer it here, so it stays as it was";
-                self.chat_mode_failed(pane_id, &want, why);
-            }
+        if let Some(now) = mode::shown(kind, &texts) {
+            self.chats.modes.insert(pane_id.to_owned(), now);
         }
     }
 
-    /// Switch pane `pane_id`'s agent to mode `want`, picked in its chat: a
-    /// press of its mode key at a time, till its screen shows it.
+    /// Switch pane `pane_id`'s agent to mode `want`, picked in its chat:
+    /// on a thread, a press of its mode key at a time till its screen shows
+    /// it (`mode::switch`). One switch per pane at a time.
     fn chat_pick_mode(&mut self, pane_id: &str, want: &str) {
-        let kind = self.chat_agent(pane_id).and_then(super::source::kind);
-        let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
+        let Some(kind) = self.chat_agent(pane_id).and_then(super::source::kind) else {
             return;
         };
-        if chat.mode.as_deref() == Some(want) {
-            chat.mode_goal = None;
+        if self.chats.switching.contains(pane_id)
+            || self.chats.modes.get(pane_id).is_some_and(|now| now == want)
+        {
             return;
         }
-        let from = chat.mode.clone();
-        let n = kind.map_or(0, |kind| mode::modes(kind).len());
-        match self.press_mode_key(pane_id) {
-            Ok(()) => {
-                if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
-                    chat.mode_goal = Some(Goal::new(want, from.as_deref(), n, Instant::now()));
+        if let Err(why) = self.mode_key_goes(pane_id) {
+            return self.chat_mode_failed(pane_id, want, &why);
+        }
+        let (Some(socket), Some(tx)) = (
+            (self.session.herdr.as_ref()).map(|h| h.socket().to_path_buf()),
+            self.mode_sender(),
+        ) else {
+            return self.chat_mode_failed(pane_id, want, "herdr isn't connected");
+        };
+        let was = self.chats.modes.get(pane_id).cloned();
+        let (pane, wanted) = (pane_id.to_owned(), want.to_owned());
+        let spawned = std::thread::Builder::new()
+            .name("chat mode".into())
+            .spawn(move || {
+                let mut herdr = Herdr::on_socket(socket);
+                let mut agent = mode::InPane {
+                    herdr: &mut herdr,
+                    pane: &pane,
+                    kind,
+                };
+                let n = mode::modes(kind).len();
+                let went = mode::switch(&mut agent, n, was.as_deref(), &wanted, mode::READ_EVERY);
+                // The loop is gone only as gerdr quits.
+                let _ = tx.send((pane, wanted, went));
+            });
+        match spawned {
+            Ok(_) => _ = self.chats.switching.insert(pane_id.to_owned()),
+            Err(err) => self.chat_mode_failed(pane_id, want, &err.to_string()),
+        }
+    }
+
+    /// Where the mode switches come back; set up the first time.
+    fn mode_sender(&mut self) -> Option<channel::Sender<crate::ModeSwitched>> {
+        if self.chats.mode_tx.is_none() {
+            let (tx, rx) = channel::channel();
+            let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
+                if let channel::Event::Msg((pane_id, want, went)) = event {
+                    state.mode_switched(pane_id, want, went);
                 }
+            });
+            if let Err(err) = inserted {
+                tracing::warn!("agent chats' mode switches: {err}");
+                return None;
             }
-            Err(why) => self.chat_mode_failed(pane_id, want, &why),
+            self.chats.mode_tx = Some(tx);
+        }
+        self.chats.mode_tx.clone()
+    }
+
+    /// Pane `pane_id`'s agent was switched to `want`, or `went` says why not.
+    fn mode_switched(&mut self, pane_id: String, want: String, went: Result<(), String>) {
+        self.chats.switching.remove(&pane_id);
+        match went {
+            Ok(()) => _ = self.chats.modes.insert(pane_id, want),
+            Err(why) => {
+                self.chat_mode_failed(&pane_id, &want, &why);
+                // What it is in now.
+                self.read_rows(pane_id, Duration::ZERO);
+            }
         }
     }
 
     /// Step pane `pane_id`'s agent to its next mode, as its own key does;
     /// nothing for an agent without modes, where the key means another
-    /// thing (pi's thinking level).
+    /// thing (pi's thinking level), or while one is being switched.
     fn chat_next_mode(&mut self, pane_id: &str) {
         let kind = self.chat_agent(pane_id).and_then(super::source::kind);
-        if kind.is_none_or(|kind| mode::modes(kind).is_empty()) {
+        if kind.is_none_or(|kind| mode::modes(kind).is_empty())
+            || self.chats.switching.contains(pane_id)
+        {
             return;
         }
-        if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
-            chat.mode_goal = None;
-        }
-        if let Err(why) = self.press_mode_key(pane_id) {
-            tracing::warn!("the next mode of the agent in pane {pane_id}: {why}");
-            self.show_error(format!("Couldn't switch the agent's mode: {why}"));
+        let pressed = self.mode_key_goes(pane_id).and_then(|()| {
+            let herdr = (self.session.herdr.as_mut()).ok_or("herdr isn't connected")?;
+            herdr.send_keys(pane_id, &[mode::NEXT_KEY])
+        });
+        match pressed {
+            Ok(()) => self.read_rows(pane_id.to_owned(), mode::READ_EVERY),
+            Err(why) => {
+                tracing::warn!("the next mode of the agent in pane {pane_id}: {why}");
+                self.show_error(format!("Couldn't switch the agent's mode: {why}"));
+            }
         }
     }
 
-    /// Press the mode key in pane `pane_id`, if its agent is in front and
-    /// waits on nothing (the key would answer its menu), then read its
-    /// screen for the mode it went to.
-    fn press_mode_key(&mut self, pane_id: &str) -> Result<(), String> {
+    /// Whether the mode key would reach pane `pane_id`'s agent: it is in
+    /// front, not paused, and waits on nothing (the key would answer its
+    /// menu).
+    fn mode_key_goes(&mut self, pane_id: &str) -> Result<(), String> {
         if self.pane_paused(pane_id) {
             return Err("the agent is paused; resume it first".into());
         }
@@ -1329,17 +1345,11 @@ impl Gerdr {
             return Err("the agent waits on an answer first".into());
         }
         let herdr = (self.session.herdr.as_mut()).ok_or("herdr isn't connected")?;
-        agent_in_front(&herdr.process_info(pane_id))?;
-        herdr.send_keys(pane_id, &[mode::NEXT_KEY])?;
-        self.read_rows(pane_id.to_owned(), MODE_READ_AFTER);
-        Ok(())
+        agent_in_front(&herdr.process_info(pane_id))
     }
 
     /// Switching pane `pane_id`'s agent to mode `want` failed for `why`.
     fn chat_mode_failed(&mut self, pane_id: &str, want: &str, why: &str) {
-        if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
-            chat.mode_goal = None;
-        }
         tracing::warn!("switching the agent in pane {pane_id} to {want}: {why}");
         self.show_error(format!("Couldn't switch the agent to {want}: {why}"));
     }
@@ -1474,7 +1484,9 @@ impl Gerdr {
                 }
                 let modes = (super::source::kind(agent))
                     .filter(|kind| !mode::modes(*kind).is_empty())
-                    .map_or_else(Vec::new, |kind| mode::offered(kind, chat.mode.as_deref()));
+                    .map_or_else(Vec::new, |kind| {
+                        mode::offered(kind, self.chats.modes.get(pane_id).map(String::as_str))
+                    });
                 let mut view = ChatView {
                     rect: tab.window_rect(id, rect),
                     label,
@@ -1515,7 +1527,7 @@ impl Gerdr {
                     ask: chat.live.ask.clone(),
                     since: (self.chats.turns.get(pane_id)).and_then(|t| t.since(&chat.items)),
                     modes,
-                    mode: chat.mode.clone(),
+                    mode: self.chats.modes.get(pane_id).cloned(),
                 };
                 view.hover = pointer
                     .filter(|pos| view.rect.to_f64().contains(*pos))

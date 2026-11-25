@@ -23,6 +23,7 @@ use resvg::{tiny_skia, usvg};
 use serde_json::{Value, json};
 
 use crate::{
+    chat::mode,
     feature::{Feature, Stage, Status, layout, setup, store},
     feature_agents::{self, Gate},
     feature_workspace::feature_on,
@@ -449,6 +450,10 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
         "/api/answer" => "answer",
         "/api/agent" => {
             let (pane, line, key) = (text("pane"), text("text"), text("key"));
+            let mode = text("mode");
+            if !mode.is_empty() {
+                return agent_mode(&project, &slug, &pane, &mode, &text("from"));
+            }
             return agent_input(&project, &slug, &pane, &line, &key);
         }
         _ => return Reply::error(404, "Nothing here"),
@@ -582,6 +587,39 @@ fn agent_input(project: &str, slug: &str, pane: &str, line: &str, key: &str) -> 
     match sent {
         Ok(()) => Reply::json(&json!({ "said": [] })),
         Err(err) => Reply::error(502, &format!("Couldn't reach the agent: {err}")),
+    }
+}
+
+/// Switch the agent in `pane` to mode `want`, as the desktop chat does
+/// (`chat::mode::switch`); `from` is the mode the phone showed. Answers
+/// once its screen shows it, or why not.
+fn agent_mode(project: &str, slug: &str, pane: &str, want: &str, from: &str) -> Reply {
+    let project = match agent_of(project, slug, pane) {
+        Ok((project, _)) => project,
+        Err(reply) => return reply,
+    };
+    let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
+    let agent = match herdr.agent_list() {
+        Ok(agents) => agents.into_iter().find(|a| a.pane_id == pane),
+        Err(err) => return Reply::error(502, &format!("Couldn't reach the agent: {err}")),
+    };
+    let Some(kind) = agent.as_ref().and_then(crate::chat::source::kind) else {
+        return Reply::error(404, "No agent runs there any more");
+    };
+    // The key would answer its menu.
+    let waits = agent.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Blocked);
+    let went = match waits {
+        true => Err("the agent waits on an answer first".to_owned()),
+        false => {
+            let mut agent = mode::InPane { herdr: &mut herdr, pane, kind };
+            let n = mode::modes(kind).len();
+            let was = Some(from).filter(|f| !f.is_empty());
+            mode::switch(&mut agent, n, was, want, mode::READ_EVERY)
+        }
+    };
+    match went {
+        Ok(()) => Reply::json(&json!({ "said": [] })),
+        Err(why) => Reply::error(409, &format!("Couldn't switch the agent to {want}: {why}")),
     }
 }
 
@@ -1149,10 +1187,20 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
         Err(reply) => return reply,
     };
     let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
-    // Its title, for the page's head.
-    let title = (herdr.agent_list().ok())
-        .and_then(|agents| agents.into_iter().find(|a| a.pane_id == pane))
-        .and_then(|a| a.shown_title());
+    // Its title, for the page's head, and its modes.
+    let agent = (herdr.agent_list().ok())
+        .and_then(|agents| agents.into_iter().find(|a| a.pane_id == pane));
+    let title = agent.as_ref().and_then(|a| a.shown_title());
+    let kind = (agent.as_ref().and_then(crate::chat::source::kind))
+        .filter(|kind| !mode::modes(*kind).is_empty());
+    // The modes it offers and the one `screen` (its last rows) shows.
+    let modes = |screen: &str| match kind {
+        Some(kind) => {
+            let now = mode::shown_in(kind, screen);
+            (json!(mode::offered(kind, now.as_deref())), json!(now))
+        }
+        None => (json!([]), Value::Null),
+    };
     let all = lines == "all";
     let want = lines
         .parse()
@@ -1169,7 +1217,8 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             Ok(screen) => {
                 let text = chat_and_screen(path, &screen);
                 let (ask, working) = pane_ask(&project.id, pane);
-                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working });
+                let (modes, mode) = modes(&screen);
+                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "modes": modes, "mode": mode });
                 Reply::json(&reply)
             }
             Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
@@ -1190,7 +1239,8 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             let more = chat.is_some()
                 || (!all && rows.is_some_and(|rows| rows > text.lines().count() as u64));
             let (ask, working) = pane_ask(&project.id, pane);
-            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working });
+            let (modes, mode) = modes(&text);
+            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "modes": modes, "mode": mode });
             Reply::json(&reply)
         }
         Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),

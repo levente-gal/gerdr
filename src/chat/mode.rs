@@ -1,11 +1,12 @@
 //! An agent's modes: Claude Code's plan mode and its permission modes,
 //! OpenCode's Build and Plan agents, Cursor's and Codex's Plan, and so on.
 //! Which ones it has, which one its screen shows, and stepping it to the
-//! one picked in the chat with the key each of these CLIs steps with.
+//! one picked in the chat or on the phone with the key each of these
+//! CLIs steps with.
 
 use std::time::{Duration, Instant};
 
-use crate::ai_work::AgentKind;
+use crate::{ai_work::AgentKind, herdr::Herdr};
 
 /// The key every agent CLI here goes to its next mode with, as herdr names
 /// it (`pane.send_keys`).
@@ -13,6 +14,11 @@ pub const NEXT_KEY: &str = "shift+tab";
 
 /// How long a press may take to show on the agent's screen.
 const PRESS_TAKES: Duration = Duration::from_secs(2);
+/// How often the screen is read for the mode while switching: a press
+/// showed within 150 ms in each agent tried.
+pub const READ_EVERY: Duration = Duration::from_millis(150);
+/// How many of a pane's last rows are read for its mode.
+const SCREEN_ROWS: usize = 40;
 
 // shortcut: the modes and their words on screen are as the CLIs were here
 // (Claude Code 2.1.332, OpenCode 2.3.0, Cursor 2026.11.22, Codex 0.171.0,
@@ -86,6 +92,90 @@ pub fn shown(kind: AgentKind, rows: &[&str]) -> Option<String> {
     Some(word)
 }
 
+/// The mode agent `kind` shows on `ansi`, a pane's text with its escape
+/// sequences as herdr reads it.
+pub fn shown_in(kind: AgentKind, ansi: &str) -> Option<String> {
+    let rows = crate::scrollback::parse_ansi(ansi);
+    let texts: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
+    shown(kind, &texts)
+}
+
+/// The mode agent `kind` in herdr pane `pane` shows now.
+pub fn read(herdr: &mut Herdr, pane: &str, kind: AgentKind) -> Result<Option<String>, String> {
+    let text = herdr.pane_styled(pane, SCREEN_ROWS)?;
+    // An app on the alternate screen has no scrollback: its screen.
+    let text = match text.trim().is_empty() {
+        true => herdr.pane_screen_styled(pane, SCREEN_ROWS)?,
+        false => text,
+    };
+    Ok(shown_in(kind, &text))
+}
+
+/// An agent to switch the mode of: what it is in, and its mode key.
+pub trait Switched {
+    fn shown(&mut self) -> Result<Option<String>, String>;
+    fn press(&mut self) -> Result<(), String>;
+}
+
+/// Agent `kind` in herdr pane `pane`.
+pub struct InPane<'a> {
+    pub herdr: &'a mut Herdr,
+    pub pane: &'a str,
+    pub kind: AgentKind,
+}
+
+impl Switched for InPane<'_> {
+    fn shown(&mut self) -> Result<Option<String>, String> {
+        read(self.herdr, self.pane, self.kind)
+    }
+
+    fn press(&mut self) -> Result<(), String> {
+        self.herdr.send_keys(self.pane, &[NEXT_KEY])
+    }
+}
+
+/// Switch `agent`, of `n` modes, to mode `want`: a press of its mode key at
+/// a time, each once the last one showed (read `every` so often), till its
+/// screen shows `want`. It begins from the mode its screen shows, else from
+/// `was`, the one shown to the user. Blocks till then; why not, if it
+/// doesn't get there.
+pub fn switch(
+    agent: &mut impl Switched,
+    n: usize,
+    was: Option<&str>,
+    want: &str,
+    every: Duration,
+) -> Result<(), String> {
+    let from = agent.shown()?.or_else(|| was.map(str::to_owned));
+    if from.as_deref() == Some(want) {
+        return Ok(());
+    }
+    agent.press()?;
+    let mut goal = Goal::new(want, from.as_deref(), n, Instant::now());
+    let mut last = from;
+    loop {
+        std::thread::sleep(every);
+        let now = agent.shown()?;
+        if now.is_some() {
+            last.clone_from(&now);
+        }
+        match goal.step(now.as_deref(), Instant::now()) {
+            Step::Done => return Ok(()),
+            Step::Wait => {}
+            Step::Press => agent.press()?,
+            Step::GiveUp => {
+                return Err(match last {
+                    Some(last) => format!("it stayed in {last}"),
+                    None => "its screen doesn't show its mode".to_owned(),
+                });
+            }
+            Step::NotThere => {
+                return Err("it doesn't offer it here, so it stays as it was".to_owned());
+            }
+        }
+    }
+}
+
 /// The modes a chat offers: its agent's, and the one its screen shows when
 /// that is none of them, last.
 pub fn offered(kind: AgentKind, now: Option<&str>) -> Vec<String> {
@@ -96,10 +186,10 @@ pub fn offered(kind: AgentKind, now: Option<&str>) -> Vec<String> {
     all
 }
 
-/// A mode picked in a chat, while gerdr steps its agent there: one press of
+/// A mode picked, while gerdr steps its agent there: one press of
 /// `NEXT_KEY` at a time, each once the last one showed.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Goal {
+struct Goal {
     pub want: String,
     /// The mode it began from: back there, it went round without it.
     start: Option<String>,
@@ -112,7 +202,7 @@ pub struct Goal {
 
 /// What stepping to a goal does next, as the screen now shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Step {
+enum Step {
     Done,
     Press,
     /// Read the screen again: the last press hasn't shown yet.
@@ -128,7 +218,7 @@ impl Goal {
     /// Going to `want` from `now`, the first press just sent at `at`. It
     /// may go round the agent's `n` modes once, and some more of the user's
     /// own (OpenCode's agents).
-    pub fn new(want: &str, now: Option<&str>, n: usize, at: Instant) -> Self {
+    fn new(want: &str, now: Option<&str>, n: usize, at: Instant) -> Self {
         Self {
             want: want.to_owned(),
             start: now.map(str::to_owned),
@@ -139,7 +229,7 @@ impl Goal {
     }
 
     /// The screen shows mode `now` (none: it doesn't say) at `at`.
-    pub fn step(&mut self, now: Option<&str>, at: Instant) -> Step {
+    fn step(&mut self, now: Option<&str>, at: Instant) -> Step {
         if now == Some(self.want.as_str()) {
             return Step::Done;
         }
@@ -203,6 +293,56 @@ mod tests {
 
         assert_eq!(shows(AgentKind::Pi, "anything"), None);
         assert!(modes(AgentKind::Pi).is_empty());
+    }
+
+    /// An agent going round `modes` on each press, its screen showing the
+    /// new one a read after the press.
+    struct Fake {
+        modes: Vec<&'static str>,
+        at: usize,
+        pressed: usize,
+        lag: bool,
+    }
+
+    impl Switched for Fake {
+        fn shown(&mut self) -> Result<Option<String>, String> {
+            let at = match std::mem::take(&mut self.lag) {
+                true => self.at + self.modes.len() - 1,
+                false => self.at,
+            };
+            Ok(Some(self.modes[at % self.modes.len()].to_owned()))
+        }
+
+        fn press(&mut self) -> Result<(), String> {
+            self.at += 1;
+            self.pressed += 1;
+            self.lag = true;
+            Ok(())
+        }
+    }
+
+    fn fake(modes: &[&'static str]) -> Fake {
+        Fake {
+            modes: modes.to_vec(),
+            at: 0,
+            pressed: 0,
+            lag: false,
+        }
+    }
+
+    #[test]
+    fn switching_presses_till_the_mode_shows_or_says_why_not() {
+        let mut cursor = fake(&["Agent", "Plan", "Debug", "Ask"]);
+        assert_eq!(switch(&mut cursor, 4, None, "Ask", Duration::ZERO), Ok(()));
+        assert_eq!((cursor.pressed, cursor.at), (3, 3));
+        // Already there: no press.
+        assert_eq!(switch(&mut cursor, 4, None, "Ask", Duration::ZERO), Ok(()));
+        assert_eq!(cursor.pressed, 3);
+        // Claude without Auto: round once, and back where it was.
+        let mut claude = fake(&["Manual", "Edits", "Plan"]);
+        let not = switch(&mut claude, 4, None, "Auto", Duration::ZERO);
+        assert!(not.unwrap_err().contains("doesn't offer it"));
+        assert_eq!(claude.at % 3, 0);
     }
 
     #[test]
