@@ -1132,6 +1132,16 @@ fn bottom_button(view: &ChatView, parts: &Parts, content: i32) -> Option<Rect> {
     })
 }
 
+/// Where `view`'s button to the list's end is, while it shows.
+pub fn chat_bottom_button(view: &ChatView) -> Option<Rect> {
+    if message(view).is_some() {
+        return None;
+    }
+    let parts = parts(view);
+    let (_, content) = stacked(view, parts.column.1);
+    bottom_button(view, &parts, content)
+}
+
 /// The list's scrollbar in the room right of its items, while they don't
 /// all show.
 fn thumb_of(parts: &Parts, content: i32, top: i32) -> Option<Thumb> {
@@ -2796,6 +2806,7 @@ pub(super) mod tests {
         let button = bottom_button(&v, &p, content).expect("a button to the end");
         assert_eq!(button.loc.y + button.size.h + PART_GAP, p.list.loc.y + p.list.size.h);
         assert_eq!(chat_layout(&v).hit(&v, middle(button)), Some(ChatHit::Bottom));
+        assert_eq!(chat_bottom_button(&v), Some(button), "its tooltip's place");
     }
 
     #[test]

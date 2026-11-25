@@ -1304,7 +1304,7 @@ impl Gerdr {
         } else if let Some(view) = &regions.strip {
             self.tab_strip_motion(view, pos)
         } else {
-            self.pane_bar_motion(pos)
+            self.pane_bar_motion(pos).or_else(|| self.chat_tip(pos))
         };
         // So do the buttons of a terminal pane's bar.
         let free = !covered && self.mouse.drag.is_none() && self.mouse.reorder.is_none();

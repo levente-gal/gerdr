@@ -1367,6 +1367,14 @@ impl Gerdr {
         (self.chat_places().into_iter()).find(|(_, _, view)| view.rect.to_f64().contains(pos))
     }
 
+    /// The tooltip of a chat's part under `pos`: its button to the end's.
+    pub(crate) fn chat_tip(&self, pos: Point<f64, Logical>) -> Option<crate::tooltip::Tooltip> {
+        let (_, _, view) = self.chat_place_at(pos)?;
+        let button = chrome::chat_bottom_button(&view)?;
+        (button.to_f64().contains(pos))
+            .then(|| crate::tooltip::Tooltip::new("Go to the end", button).key("Shift+G"))
+    }
+
     /// `button` went down at `pos` over a chat: its pane takes the focus, and
     /// a left press (only: checklist O2) does what is under it. Whether a
     /// chat was there. A press in the reply box gives it the keys; the caret
