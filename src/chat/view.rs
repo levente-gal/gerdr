@@ -2140,7 +2140,7 @@ impl Gerdr {
         };
         let keys = screen_rows(herdr, pane_id, WAITING_ROWS).and_then(|rows| {
             let now = model_menu::read(kind, &rows).ok_or("the agent's menu closed")?;
-            model_menu::keys_to(&now, &label).ok_or_else(|| "the agent's menu moved".to_owned())
+            model_menu::keys_to(&now, &label).ok_or_else(|| "the agent's menu doesn't show it".to_owned())
         });
         if let Err(why) = keys.and_then(|keys| herdr.send_keys(pane_id, &keys)) {
             tracing::warn!("picking {label} in pane {pane_id}'s model menu: {why}");

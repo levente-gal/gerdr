@@ -763,7 +763,7 @@ fn agent_menu(project: &str, slug: &str, pane: &str, row: &str, typed: &str, era
         }
         false => crate::chat::screen_rows(&mut herdr, pane, MENU_ROWS).and_then(|rows| {
             let now = model_menu::read(kind, &rows).ok_or("the agent's menu closed")?;
-            let keys = model_menu::keys_to(&now, row).ok_or("the agent's menu moved")?;
+            let keys = model_menu::keys_to(&now, row).ok_or("the agent's menu doesn't show it")?;
             herdr.send_keys(pane, &keys)
         }),
     };

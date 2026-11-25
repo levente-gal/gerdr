@@ -174,18 +174,26 @@ fn opencode(rows: &[(String, Styled)]) -> Option<Menu> {
 /// and its keys ("Enter to select").
 fn pi(rows: &[(String, Styled)]) -> Option<Menu> {
     let keys = (rows.iter()).rposition(|(t, _)| t.contains("Enter to select"))?;
-    let count = rows[..keys].iter().rposition(|(t, _)| {
-        let t = t.trim();
-        t.starts_with('(') && t.ends_with(')') && t.contains('/')
-    })?;
-    let field = (rows[..count].iter()).rposition(|(t, _)| t.trim_start().starts_with('>'))?;
+    let field = (rows[..keys].iter()).rposition(|(t, _)| t.trim_start().starts_with('>'))?;
+    // The models end at a blank row, its count ("(3/65)", only while they
+    // don't all fit) or what it says of the one under the arrow.
+    let start = (rows[field + 1..keys].iter())
+        .position(|(t, _)| !t.trim().is_empty())
+        .map_or(keys, |at| field + 1 + at);
+    let count = start
+        + (rows[start..keys].iter())
+            .position(|(t, _)| {
+                let t = t.trim();
+                t.is_empty() || t.starts_with('(') || t.starts_with("Model Name:")
+            })
+            .unwrap_or(keys - start);
     let search = rows[field]
         .0
         .trim()
         .trim_start_matches('>')
         .trim()
         .to_owned();
-    let choices = (rows[field + 1..count].iter())
+    let choices = (rows[start..count].iter())
         .map(|(t, _)| t.trim())
         .filter(|t| !t.is_empty())
         .map(|t| {
@@ -427,6 +435,13 @@ mod tests {
         let m = read(AgentKind::Pi, &rows).expect("a menu searched");
         assert_eq!(m.ask[1].0, "Search: son");
         assert_eq!(picked(&m), "claude-sonnet-4-5 (Claude Sonnet 4.5 (latest))");
+
+        // All fit: no count under them.
+        let rows = screen(include_str!("fixtures/model_menu/pi-few.ansi"));
+        let m = read(AgentKind::Pi, &rows).expect("a menu of a few");
+        assert_eq!(m.choices.len(), 8);
+        assert_eq!(picked(&m), "claude-opus-5-5");
+        assert_eq!(m.ask[1].0, "Search: opus-5-5");
 
         let idle = screen(include_str!("fixtures/model_menu/pi-idle.ansi"));
         assert_eq!(read(AgentKind::Pi, &idle), None);
