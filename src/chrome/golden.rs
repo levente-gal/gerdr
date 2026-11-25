@@ -9995,9 +9995,9 @@ const GOLDEN_CHATS: [[u64; 17]; 4] = [
         0xfcf05ca12ee002e6, // chat_question_ticks
         0x004ee553bdea6b96, // chat_suggested
         0xfe79e247979aad2d, // chat_modes
-        0x3bb4cda8d8f1a46b, // chat_side
-        0xfcf2e2b43086c91b, // chat_plan
-        0x728d35f8c69b0e4d, // chat_plan_open
+        0xe03e8d399611c068, // chat_side
+        0x6c4d3e75cd1fbbd3, // chat_plan
+        0x29f78ea279039845, // chat_plan_open
     ],
     // Dark at 2
     [
@@ -10015,9 +10015,9 @@ const GOLDEN_CHATS: [[u64; 17]; 4] = [
         0xa7b4647525da3658, // chat_question_ticks
         0x95c0a660d63e9eb1, // chat_suggested
         0xd21d7d5694e74060, // chat_modes
-        0x60f310cf03af302f, // chat_side
-        0xdd91b7998982f16e, // chat_plan
-        0x39fcbc20f1677aca, // chat_plan_open
+        0xca0b573784b91770, // chat_side
+        0x2ca34c602eea2776, // chat_plan
+        0xb137c3c620610f92, // chat_plan_open
     ],
     // Light at 1
     [
@@ -10035,9 +10035,9 @@ const GOLDEN_CHATS: [[u64; 17]; 4] = [
         0xd69ec9cb4ee9dea1, // chat_question_ticks
         0x1a9b6c02649b4f80, // chat_suggested
         0xd5e5939be4fc8b21, // chat_modes
-        0x127bfb769349a783, // chat_side
-        0x7ae488d80e2d3ad7, // chat_plan
-        0x0a55dd6ad28e83ea, // chat_plan_open
+        0x6d48f599e60538e1, // chat_side
+        0x32a2e31d552691ef, // chat_plan
+        0xf89f6063d627b9c2, // chat_plan_open
     ],
     // Light at 2
     [
@@ -10055,9 +10055,9 @@ const GOLDEN_CHATS: [[u64; 17]; 4] = [
         0xb0e9a3d6bbb5692f, // chat_question_ticks
         0x3d7c424e61025c58, // chat_suggested
         0x7127f7ee025b5d03, // chat_modes
-        0x1ef6725ddb8a2095, // chat_side
-        0xb7243ef9f6c5085d, // chat_plan
-        0xd7e3f5f81650ee63, // chat_plan_open
+        0x0c1f45535e2220e5, // chat_side
+        0xca8f7ab03bda90dd, // chat_plan
+        0xf1c18370a8a4e7d3, // chat_plan_open
     ],
 ];
 

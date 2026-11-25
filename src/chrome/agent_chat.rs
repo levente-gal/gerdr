@@ -34,7 +34,7 @@ use super::{
 use crate::{
     ChatRows,
     chat::{
-        ChatFocus, DiffSide, Item, Reading, ToolOut,
+        ChatFocus, DiffSide, Item, Reading, ToolOut, btw,
         commands::Slash,
         live::{AskReply, PendingAsk, Question, Running},
         menu::{self, Menu},
@@ -1460,6 +1460,16 @@ fn bubble(p: &Palette) -> Rgb {
     mix(p.terminal_background, p.text, BUBBLE_TINT)
 }
 
+/// A frame on the chat's ground at `(x, y, w, h)` px: the waiting panel's,
+/// a side question's.
+fn framed(c: &mut Canvas, (x, y, w, h): (f32, f32, f32, f32), scale: f64, p: &Palette) {
+    let radius = ROW_RADIUS * scale as f32;
+    let line = (scale as f32).round().max(1.0);
+    c.rounded(x, y, w, h, radius, p.border_variant);
+    let (x, y, w, h) = (x + line, y + line, w - 2.0 * line, h - 2.0 * line);
+    c.rounded(x, y, w, h, radius, p.terminal_background);
+}
+
 /// How much of the words' colour tints the user's bubble.
 const BUBBLE_TINT: f32 = 0.08;
 
@@ -1468,7 +1478,7 @@ const BUBBLE_TINT: f32 = 0.08;
 enum Bit {
     /// The ground under the user's words.
     Bubble,
-    /// A framed card's ground: a plan's.
+    /// A framed card's ground: a side question's, a plan's.
     Card,
     /// A piece of markdown or code, as a file's page paints it.
     Doc(DocPiece),
@@ -1772,6 +1782,13 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
                 l.put(row, label(&text, Face::Ui, Mark::Link));
                 l.spots.push((row, Spot::Fold));
             }
+        }
+        // A side question: its question and answer framed apart, as the
+        // agent's chat won't keep them.
+        Item::Assistant { id, blocks, .. } if btw::is_side(id) => {
+            let (pieces, h) = doc_layout::stack_of(blocks, (cw - 2 * BUBBLE_PAD).max(1));
+            l.put(rect(x, 0, cw, h + 2 * BUBBLE_PAD), Bit::Card);
+            l.doc(pieces, (x + BUBBLE_PAD, BUBBLE_PAD));
         }
         Item::Assistant { blocks, .. } => {
             let (pieces, _) = doc_layout::stack_of(blocks, cw);
@@ -2216,13 +2233,7 @@ impl Painter {
 
         // The waiting panel: the agent's screen rows and the keys to answer.
         if let Some(panel) = parts.waiting {
-            let (x, y, w, h) = rect_px(here(panel), scale);
-            let radius = ROW_RADIUS * scale as f32;
-            // Framed: its ground is the chat's.
-            let line = (scale as f32).round().max(1.0);
-            c.rounded(x, y, w, h, radius, p.border_variant);
-            let (x, y, w, h) = (x + line, y + line, w - 2.0 * line, h - 2.0 * line);
-            c.rounded(x, y, w, h, radius, p.terminal_background);
+            framed(&mut c, rect_px(here(panel), scale), scale, p);
             if let Some((at, laid)) = &parts.card {
                 let at = *at - r.loc;
                 for (spot, what) in &laid.spots {
@@ -2441,13 +2452,7 @@ impl Painter {
                 let (x, y, w, h) = rect_px(rect, scale);
                 c.rounded(x, y, w, h, ROW_RADIUS * s, bubble(p));
             }
-            Bit::Card => {
-                let (x, y, w, h) = rect_px(rect, scale);
-                let line = s.round().max(1.0);
-                c.rounded(x, y, w, h, ROW_RADIUS * s, p.border_variant);
-                let (x, y, w, h) = (x + line, y + line, w - 2.0 * line, h - 2.0 * line);
-                c.rounded(x, y, w, h, ROW_RADIUS * s - line, p.terminal_background);
-            }
+            Bit::Card => framed(c, rect_px(rect, scale), scale, p),
             Bit::Doc(piece) => self.doc_piece(c, rect, piece, scale, p),
             Bit::Fold(open) => icon_sdf(c, rect, scale, p.muted, |x, y| match open {
                 true => chevron_down(x, y, s),
