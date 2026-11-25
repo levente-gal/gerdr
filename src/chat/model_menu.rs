@@ -97,16 +97,14 @@ pub fn now(kind: AgentKind, rows: &[&str]) -> Option<String> {
             let (_, model) = right.strip_prefix('(')?.split_once(") ")?;
             Some(model.split(" • ").next().unwrap_or(model))
         })?,
-        // "auto · model · effort" at the right of its last row; its
-        // default mode leaves the mode out.
+        // "auto · model · effort" at the right of its last row: its
+        // default mode leaves the mode out, a model without efforts the
+        // effort.
         AgentKind::Antigravity => rows.iter().take(2).find_map(|row| {
             let right = row.rsplit("  ").next()?.trim();
-            let parts: Vec<&str> = right.split(" · ").collect();
-            match parts.len() {
-                3 => Some(parts[1]),
-                2 => Some(parts[0]),
-                _ => None,
-            }
+            let mut parts = right.split(" · ").peekable();
+            parts.next_if(|p| ["auto", "plan", "accept-edits"].contains(p));
+            parts.next().filter(|_| right.contains(" · "))
         })?,
         _ => return None,
     };
@@ -485,9 +483,8 @@ mod tests {
 
     #[test]
     fn a_menu_on_the_plain_screen_shows_and_none_when_idle() {
-        let plain = |ansi: &str| -> String {
-            screen(ansi).into_iter().map(|(t, _)| t + "\n").collect()
-        };
+        let plain =
+            |ansi: &str| -> String { screen(ansi).into_iter().map(|(t, _)| t + "\n").collect() };
         for ansi in [
             include_str!("fixtures/model_menu/codex.ansi"),
             include_str!("fixtures/model_menu/oc.ansi"),
@@ -552,6 +549,13 @@ mod tests {
             now(AgentKind::Antigravity, &["  Gemini 4 Hydrogen · high"]).as_deref(),
             Some("Gemini 4 Hydrogen")
         );
+        // A model without efforts; another mode.
+        let agy = |row: &str| now(AgentKind::Antigravity, &[row]);
+        let sonnet = "? for shortcuts      auto · Claude Sonnet 4.6 (Thinking)";
+        assert_eq!(agy(sonnet).as_deref(), Some("Claude Sonnet 4.6 (Thinking)"));
+        let plan = "  plan · GPT-OSS 120B (Medium) · low";
+        assert_eq!(agy(plan).as_deref(), Some("GPT-OSS 120B (Medium)"));
+        assert_eq!(agy("? for shortcuts"), None);
         assert_eq!(now(AgentKind::Claude, &["anything"]), None);
     }
 }
