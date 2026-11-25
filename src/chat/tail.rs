@@ -299,6 +299,9 @@ impl Chats {
         match guessed {
             Some(Ok(Some(source))) => Ok(source),
             Some(Err(why)) => Err(why),
+            // Its run is known, its chat isn't written yet: the agent writes
+            // it with its first message.
+            Some(Ok(None)) => Err(source::NOT_YET.into()),
             _ if missing => Err(source::missing_integration(target)),
             _ => found,
         }

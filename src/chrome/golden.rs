@@ -9737,7 +9737,7 @@ fn dump_ship_squash() {
 /// card, cut and whole, plan mode asking to go ahead with it, and the
 /// model's button right of the modes, hovered, and the user's words kept
 /// on top of a list scrolled up past them.
-const CHATS: [&str; 20] = [
+const CHATS: [&str; 21] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9758,6 +9758,7 @@ const CHATS: [&str; 20] = [
     "chat_plan_ask",
     "chat_model",
     "chat_pinned",
+    "chat_start",
 ];
 
 fn chat_view(i: usize) -> super::ChatView {
@@ -10003,6 +10004,14 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
+        // Before the agent's first message, its link under the pointer.
+        20 => super::ChatView {
+            status: AgentStatus::Idle,
+            reading: Reading::Missing(crate::chat::source::NOT_YET.into()),
+            items: std::sync::Arc::new(Vec::new()),
+            hover: Some(ChatHit::ShowScreen),
+            ..v
+        },
         // A shorter pane, for the list to scroll.
         _ => super::ChatView {
             rect: super::Rect::new(v.rect.loc, (v.rect.size.w, 460).into()),
@@ -10020,7 +10029,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 20]; 4] = [
+const GOLDEN_CHATS: [[u64; 21]; 4] = [
     // Dark at 1
     [
         0xa5039d4ee1fb06ee, // chat_finding
@@ -10040,9 +10049,10 @@ const GOLDEN_CHATS: [[u64; 20]; 4] = [
         0xe03e8d399611c068, // chat_side
         0x6c4d3e75cd1fbbd3, // chat_plan
         0x29f78ea279039845, // chat_plan_open
-        0xe7cbee2c7746c067, // chat_plan_ask
+        0x7fa3380865f1c3fe, // chat_plan_ask
         0x1baa8146186136c6, // chat_model
         0x46bfe697efbe6271, // chat_pinned
+        0xf8361e53ade0856d, // chat_start
     ],
     // Dark at 2
     [
@@ -10063,9 +10073,10 @@ const GOLDEN_CHATS: [[u64; 20]; 4] = [
         0xca0b573784b91770, // chat_side
         0x2ca34c602eea2776, // chat_plan
         0xb137c3c620610f92, // chat_plan_open
-        0x3d17e45cb1fc313a, // chat_plan_ask
+        0x353dd5c5c50b6459, // chat_plan_ask
         0x70646c8cb13e8898, // chat_model
         0xd0a47890d6ecabfe, // chat_pinned
+        0xec72373387a755bb, // chat_start
     ],
     // Light at 1
     [
@@ -10086,9 +10097,10 @@ const GOLDEN_CHATS: [[u64; 20]; 4] = [
         0x6d48f599e60538e1, // chat_side
         0x32a2e31d552691ef, // chat_plan
         0xf89f6063d627b9c2, // chat_plan_open
-        0xfd65a0a88ee3c27e, // chat_plan_ask
+        0xb2c9504611643734, // chat_plan_ask
         0x1f5a36a977d402d0, // chat_model
         0x3a9fb789f9a3a6e3, // chat_pinned
+        0xa88f205ffb3c31fe, // chat_start
     ],
     // Light at 2
     [
@@ -10109,9 +10121,10 @@ const GOLDEN_CHATS: [[u64; 20]; 4] = [
         0x0c1f45535e2220e5, // chat_side
         0xca8f7ab03bda90dd, // chat_plan
         0xf1c18370a8a4e7d3, // chat_plan_open
-        0xa086dc1a84e0d05c, // chat_plan_ask
+        0xfe702f7546c95cac, // chat_plan_ask
         0x723a472ff593632d, // chat_model
         0x18b2695a30b259e4, // chat_pinned
+        0x5a6516ea634632f6, // chat_start
     ],
 ];
 

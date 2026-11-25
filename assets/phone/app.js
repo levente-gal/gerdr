@@ -8,7 +8,6 @@ const titleEl = document.getElementById("title");
 const back = document.getElementById("back");
 const seen = document.getElementById("seen");
 const work = document.getElementById("work");
-const sweep = document.getElementById("sweep");
 const offline = document.getElementById("offline");
 const note = document.getElementById("note");
 const bar = document.getElementById("bar");
@@ -847,11 +846,10 @@ async function render(fresh, force, keepBottom) {
     if (hash !== location.hash || read !== reads) return;
     titleEl.textContent = v.title;
     // A working agent's page: its clock in the head, in place of when it
-    // was read, and the sweep along the head's edge, as on gerdr's chat.
+    // was read, as on gerdr's chat.
     const working = v.since != null;
     work.hidden = !working;
     seen.hidden = working;
-    sweep.hidden = !working;
     if (working) work.querySelector(".clock").dataset.since = v.since;
     else delete work.querySelector(".clock").dataset.since;
     tickClocks();

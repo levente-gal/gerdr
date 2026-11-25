@@ -179,6 +179,23 @@ fn ask_footer(open: bool, what: &str) -> Vec<(String, String)> {
     .collect()
 }
 
+/// Open `chat`'s last plan card in the list and pick it, folding its plan
+/// ask's peek: the list has the room the waiting panel lacks. The card's
+/// row, to scroll to; `None` and nothing changed without one.
+fn show_plan(chat: &mut PaneChat) -> Option<usize> {
+    let shown = rows(&chat.items, &chat.unfolded);
+    let i = (shown.iter()).rposition(|row| matches!(row.item(&chat.items), Some(Item::Plan { .. })))?;
+    if let Some(id) = shown[i].fold_key(&chat.items) {
+        chat.unfolded.insert(id);
+    }
+    if let Some(ask) = &chat.live.ask {
+        chat.unfolded.insert(chrome::ask_key(&ask.ask));
+    }
+    chat.picked = Some(i);
+    chat.focus = ChatFocus::List;
+    Some(i)
+}
+
 /// A key of the questions' card, while it has the keys (the list's place).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CardKey {
@@ -2305,6 +2322,12 @@ impl Gerdr {
                     }
                 }
             }
+            ChatHit::AskPlan => {
+                if let Some(i) = show_plan(chat) {
+                    let to = chrome::chat_item_span(&view, i).map_or(0, |(y, _)| y);
+                    self.chat_scroll_to(&pane_id, Some(f64::from(to)));
+                }
+            }
             ChatHit::ShowScreen => self.toggle_pane_chat(id),
             ChatHit::Scrollbar => {
                 self.chats.bar_drag = Some(pane_id);
@@ -2849,6 +2872,29 @@ mod tests {
         {
             assert!(crate::keys::hint_key(chord).is_some(), "{chord}");
         }
+    }
+
+    #[test]
+    fn show_whole_plan_opens_its_card_in_the_list() {
+        let mut chat = with_items(vec![user("u1", "one")]);
+        assert_eq!(show_plan(&mut chat), None);
+        assert!(chat.unfolded.is_empty());
+        let plan = crate::chat::parse::plan_item("p".into(), None, "# Plan\n\nDo it.");
+        let mut chat = with_items(vec![user("u1", "one"), plan, user("u2", "two")]);
+        chat.live.ask = Some(crate::chat::live::PendingAsk {
+            ask: "a1".into(),
+            tool: crate::chat::live::PLAN_TOOL.into(),
+            gist: String::new(),
+            input: "# Plan\n\nDo it.".into(),
+            questions: Vec::new(),
+            since: Instant::now(),
+        });
+        chat.focus = ChatFocus::Composer;
+        assert_eq!(show_plan(&mut chat), Some(1));
+        assert!(chat.unfolded.contains("p"));
+        // The panel's peek folds: the card shows the plan.
+        assert!(!chrome::ask_open(chat.live.ask.as_ref().unwrap(), &chat.unfolded));
+        assert_eq!((chat.picked, chat.focus), (Some(1), ChatFocus::List));
     }
 
     #[test]
