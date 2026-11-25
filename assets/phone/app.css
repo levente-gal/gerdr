@@ -311,6 +311,23 @@ body.with-bar #note { bottom: calc(var(--kb, 0px) + var(--bar-h, calc(104px + en
 #bar .ask .buttons { display: flex; gap: 8px; margin-top: 8px; }
 #bar .ask .buttons button { flex: 1; min-height: 44px; }
 #bar .keys button { flex: 1; min-width: 0; padding: 6px 0; min-height: 44px; }
+/* Claude's questions, one at a time: a tab for each, its options as rows.
+   Keys and replies would land in its menu: they wait until it is answered. */
+#bar.asking #say, #bar.asking .keys, #bar.asking #slash { display: none; }
+#bar .quiz .buttons button[data-answer=pass] { flex: none; }
+#bar .quiz .tabs { margin: 0 0 8px; }
+#bar .quiz .tabs .chip { min-height: 36px; border: 0; padding: 4px 12px; font-size: 13px; font-weight: 550; }
+#bar .quiz .tabs .chip[aria-current] { color: var(--accent); background: color-mix(in srgb, var(--accent) var(--tint), var(--card)); }
+#bar .quiz .tabs .chip.done::before { content: "✓"; }
+#bar .quiz .q > p { margin: 0 0 4px; font-weight: 650; overflow-wrap: anywhere; }
+#bar .quiz .opts { max-height: calc(var(--seen-h, 100vh) * .45); overflow: auto; }
+#bar .quiz .opt { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 6px 2px; border-top: 1px solid var(--line-soft); }
+#bar .quiz .opt:first-child { border-top: 0; }
+#bar .quiz .opt span { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+#bar .quiz .opt b { font-weight: 600; }
+#bar .quiz .opt small { color: var(--quiet); font-size: 13px; }
+#bar .quiz .opt input:not([type=text]) { width: 22px; height: 22px; flex: none; margin: 0; padding: 0; accent-color: var(--accent); }
+#bar .quiz .opt input[type=text] { flex: 1; min-width: 0; padding: 7px 10px; }
 #bar #slash {
   list-style: none; margin: 0 0 8px; padding: 4px; max-height: calc(var(--seen-h, 100vh) * .4); overflow: auto;
   border: 1px solid var(--line-soft); border-radius: 10px;

@@ -640,21 +640,95 @@ async function pane(p, s, id) {
     .replace(/([─━═▀▄])\1{29,}/g, (_, c) => c.repeat(30));
   const text = readable(new AnsiUp().ansi_to_html(raw));
   const above = depth.more ? `<div class="above quiet small">Scroll up for earlier output</div>` : "";
-  // A permission its agent asks for on gerdr's card: answered here too.
+  // A permission its agent asks for on gerdr's card, or its questions: answered here too.
   const a = d.ask;
-  const ask = a ? `<div class="ask"><div class="what"><b>${esc(a.tool)}</b> <code>${esc(a.gist)}</code></div>
+  const ask = !a ? "" : a.questions?.length ? quizCard(a) : `<div class="ask"><div class="what"><b>${esc(a.tool)}</b> <code>${esc(a.gist)}</code></div>
       <details><summary class="quiet small">What it would run</summary><pre class="input">${esc(a.input)}</pre></details>
-      <div class="buttons"><button class="primary" data-answer="allow" data-ask="${esc(a.ask)}">Allow</button><button data-answer="deny" data-ask="${esc(a.ask)}">Deny</button></div></div>` : "";
+      <div class="buttons"><button class="primary" data-answer="allow" data-ask="${esc(a.ask)}">Allow</button><button data-answer="deny" data-ask="${esc(a.ask)}">Deny</button></div></div>`;
   // While it works, as on gerdr's chat: a row under its output, with its turn's clock.
   const since = d.working == null ? null : turnAt(id, d.working);
   const working = since === null ? "" : `<div class="work-row small"><span class="sdot blink"></span>working
     <span class="clock" data-since="${since}"></span></div>`;
   return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
-    bar: `${ask}<ul id="slash" hidden></ul><form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
+    ask, askId: a?.ask || "", asking: !!a?.questions?.length,
+    bar: `<div id="asked"></div><ul id="slash" hidden></ul><form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
         ${s ? `<button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button>` : ""}</div>` };
 }
+
+// Claude's questions, one at a time: a tab for each, its options as rows,
+// and an Other row to type in. The card is drawn once per ask (see
+// render), so what is picked and typed on it holds across reads.
+function quizCard(a) {
+  const qs = a.questions;
+  const last = qs.length - 1;
+  const tabs = last ? `<div class="chips tabs">${qs.map((q, i) => `<button type="button" class="chip" data-qtab="${i}"${i ? "" : ` aria-current="true"`}>
+    ${esc(q.header || `Question ${i + 1}`)}</button>`).join("")}</div>` : "";
+  const each = qs.map((q, i) => {
+    const t = q.multi ? "checkbox" : "radio";
+    const row = (o) => `<label class="opt"><input type="${t}" name="q${i}" value="${esc(o.label)}">
+      <span><b>${esc(o.label)}</b>${o.description ? `<small>${esc(o.description)}</small>` : ""}</span></label>`;
+    return `<div class="q" data-question="${esc(q.question)}"${i ? " hidden" : ""}><p>${esc(q.question)}</p>
+      <div class="opts" role="group" aria-label="${esc(q.question)}">${q.options.map(row).join("")}
+        <label class="opt"><input type="${t}" name="q${i}" data-other aria-label="Other"><input type="text" class="other"
+          placeholder="Other" aria-label="Other answer" autocomplete="off" enterkeyhint="${i === last ? "done" : "next"}"></label></div></div>`;
+  }).join("");
+  return `<div class="ask quiz" data-at="0">${tabs}${each}<div class="buttons">
+    <button data-answer="pass" data-ask="${esc(a.ask)}">Answer in terminal</button>
+    <button class="primary" data-qnext${last ? "" : " hidden"}>Next</button>
+    <button class="primary" data-answer="allow" data-ask="${esc(a.ask)}"${last ? " hidden" : ""} disabled>Submit</button></div></div>`;
+}
+// A question's answer as Claude takes it: the picked labels joined by ", ",
+// what was typed for Other in its place and never the word.
+const quizAnswer = (q) => [...q.querySelectorAll("input:checked")]
+  .map((x) => x.dataset.other === undefined ? x.value : x.nextElementSibling.value.trim()).filter(Boolean).join(", ");
+const quizAnswers = (card) => Object.fromEntries([...card.querySelectorAll(".q")].map((q) => [q.dataset.question, quizAnswer(q)]));
+// Question `at` shows; the tabs mark it and those answered, and Submit,
+// on the last, waits for every answer.
+function quizShow(card, at) {
+  const qs = [...card.querySelectorAll(".q")];
+  card.dataset.at = at;
+  qs.forEach((q, i) => { q.hidden = i !== at; });
+  card.querySelectorAll("[data-qtab]").forEach((t, i) => {
+    t.classList.toggle("done", !!quizAnswer(qs[i]));
+    t.toggleAttribute("aria-current", i === at);
+  });
+  card.querySelector("[data-qnext]").hidden = at === qs.length - 1;
+  const submit = card.querySelector("[data-answer=allow]");
+  submit.hidden = at !== qs.length - 1;
+  submit.disabled = !qs.every(quizAnswer);
+}
+document.addEventListener("change", (e) => {
+  const card = e.target.closest?.(".quiz");
+  if (!card || e.target.type === "text") return;
+  const at = Number(card.dataset.at);
+  const other = e.target.dataset.other !== undefined;
+  if (other && e.target.checked) e.target.nextElementSibling.focus();
+  quizShow(card, at);
+  // A single pick is the answer: the next question shows, once the pick has.
+  if (e.target.type === "radio" && !other && at < card.querySelectorAll(".q").length - 1) {
+    setTimeout(() => { if (Number(card.dataset.at) === at) quizShow(card, at + 1); }, 250);
+  }
+});
+// Typing in Other picks it.
+document.addEventListener("input", (e) => {
+  if (!e.target.matches?.(".quiz input.other")) return;
+  if (e.target.value.trim()) e.target.previousElementSibling.checked = true;
+  const card = e.target.closest(".quiz");
+  quizShow(card, Number(card.dataset.at));
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || !e.target.matches?.(".quiz input.other")) return;
+  e.preventDefault();
+  e.target.closest(".quiz").querySelector(".buttons .primary:not([hidden])").click();
+});
+document.addEventListener("click", (e) => {
+  const b = e.target.closest?.("[data-qtab], [data-qnext]");
+  if (!b) return;
+  const card = b.closest(".quiz");
+  quizShow(card, b.dataset.qtab !== undefined ? Number(b.dataset.qtab) : Number(card.dataset.at) + 1);
+});
 
 // When the working agent's turn began, in this phone's time: kept across
 // reads, so the page stays the same while its clock ticks.
@@ -753,6 +827,14 @@ async function render(fresh, force, keepBottom) {
       bar.hidden = !v.bar;
       document.body.classList.toggle("with-bar", !!v.bar);
       barFor = hash;
+    }
+    // An ask comes and goes between reads; its card stays while it waits,
+    // with what was picked on it. Keys and replies would land in its menu.
+    const asked = v.pane && document.getElementById("asked");
+    if (asked && asked.dataset.ask !== v.askId) {
+      asked.innerHTML = v.ask;
+      asked.dataset.ask = v.askId;
+      bar.classList.toggle("asking", v.asking);
     }
     if (v.html !== shown && (fresh || force || !typing())) {
       const y = window.scrollY;
@@ -886,7 +968,9 @@ document.addEventListener("click", async (e) => {
       if (!box.value.trim() && b.dataset.lines === "0") { say([{ text: "Say what should change" }], true); return; }
       if (await ask("/api/send-back", { p, s, text: box.value })) { box.value = ""; fit(box); }
     } else if (b.dataset.answer) {
-      const a = await post("/api/answer", { p, s, pane, ask: b.dataset.ask, reply: b.dataset.answer });
+      const quiz = b.dataset.answer === "allow" && b.closest(".quiz");
+      const answers = quiz ? quizAnswers(quiz) : undefined;
+      const a = await post("/api/answer", { p, s, pane, ask: b.dataset.ask, reply: b.dataset.answer, answers });
       if (a.error) say([{ text: a.error }], true);
       setTimeout(() => render(false, true), 400);
     } else if (b.dataset.key) {
@@ -899,6 +983,8 @@ document.addEventListener("click", async (e) => {
     }
   } finally {
     b.disabled = false;
+    const quiz = b.closest(".quiz");
+    if (quiz) quizShow(quiz, Number(quiz.dataset.at));
   }
 });
 
