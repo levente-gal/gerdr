@@ -822,9 +822,10 @@ fn chat_key(
 /// tool's input and output, an edit's change.
 fn item_text(item: &Item) -> String {
     match item {
-        Item::User { text, .. } | Item::Thinking { text, .. } | Item::Note { text, .. } => {
-            text.clone()
-        }
+        Item::User { text, .. }
+        | Item::Thinking { text, .. }
+        | Item::Note { text, .. }
+        | Item::Plan { text, .. } => text.clone(),
         Item::Assistant { blocks, .. } => blocks_text(blocks),
         Item::Tool {
             name,
@@ -1933,16 +1934,16 @@ impl Gerdr {
         self.chats.read_at.remove(pane_id);
     }
 
-    /// Open the file edit `i` of pane `pane_id`'s chat changed, in the
+    /// Open the file edit or plan `i` of pane `pane_id`'s chat wrote, in the
     /// workspace's Zed.
     fn chat_open_path(&mut self, pane_id: &str, i: usize) {
         let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
             return;
         };
         let shown = rows(&chat.items, &chat.unfolded);
-        let Some(Item::Edit { path, .. }) = shown.get(i).and_then(|row| row.item(&chat.items))
-        else {
-            return;
+        let path = match shown.get(i).and_then(|row| row.item(&chat.items)) {
+            Some(Item::Edit { path, .. } | Item::Plan { path: Some(path), .. }) => path,
+            _ => return,
         };
         let mut file = PathBuf::from(path);
         if file.is_relative()

@@ -533,6 +533,8 @@ const BUBBLE_SHARE: i32 = 75;
 const EDIT_PEEK: usize = 8;
 /// How many lines of the prompt a subagent was given show while folded.
 const PROMPT_PEEK: usize = 3;
+/// How many lines of a plan show while its card is folded.
+const PLAN_PEEK: usize = 12;
 /// A card's head row: its fold mark, name, gist and state.
 fn card_row() -> i32 {
     row_button()
@@ -1466,6 +1468,8 @@ const BUBBLE_TINT: f32 = 0.08;
 enum Bit {
     /// The ground under the user's words.
     Bubble,
+    /// A framed card's ground: a plan's.
+    Card,
     /// A piece of markdown or code, as a file's page paints it.
     Doc(DocPiece),
     /// A card's fold mark: open or not.
@@ -1565,6 +1569,34 @@ fn took(ms: u64) -> Option<String> {
 /// `gist` shorter for a card's row, in the agent's folder `cwd`.
 fn short(gist: &str, cwd: Option<&Path>) -> String {
     rows::short_gist(gist, cwd, crate::home_dir().as_deref())
+}
+
+/// The tops of `pieces`' lines of words and code, top first.
+fn line_tops(pieces: &[(Rect, DocPiece)]) -> Vec<i32> {
+    let mut tops: Vec<i32> = (pieces.iter())
+        .filter(|(_, piece)| matches!(piece, DocPiece::Text { .. } | DocPiece::CodeLine(_)))
+        .map(|(r, _)| r.loc.y)
+        .collect();
+    tops.dedup();
+    tops
+}
+
+/// `pieces` cut to their first `n` lines, `h` their height then: how many
+/// lines were cut. A quote's bar or a code block's ground ends at the cut.
+fn peek(pieces: &mut Vec<(Rect, DocPiece)>, h: &mut i32, n: usize) -> usize {
+    let tops = line_tops(pieces);
+    let Some(&cut) = tops.get(n) else {
+        return 0;
+    };
+    pieces.retain(|(r, _)| r.loc.y < cut);
+    for (r, _) in pieces.iter_mut() {
+        r.size.h = r.size.h.min(cut - r.loc.y);
+    }
+    *h = (pieces.iter())
+        .map(|(r, _)| r.loc.y + r.size.h)
+        .max()
+        .unwrap_or(0);
+    tops.len() - n
 }
 
 /// `text`'s paragraphs, split at its blank lines.
@@ -1712,22 +1744,10 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
             let (mut pieces, mut h) = doc_layout::stack_of(&blocks, inner);
             // A subagent's prompt is long and said already by its card's
             // title: its first lines, unfolded on asking.
-            let mut more = 0;
-            if nest > 0 && !open {
-                let mut tops: Vec<i32> = (pieces.iter())
-                    .filter(|(_, piece)| matches!(piece, DocPiece::Text { .. }))
-                    .map(|(r, _)| r.loc.y)
-                    .collect();
-                tops.dedup();
-                if let Some(&cut) = tops.get(PROMPT_PEEK) {
-                    more = tops.len() - PROMPT_PEEK;
-                    pieces.retain(|(r, _)| r.loc.y < cut);
-                    h = (pieces.iter())
-                        .map(|(r, _)| r.loc.y + r.size.h)
-                        .max()
-                        .unwrap_or(0);
-                }
-            }
+            let more = match nest > 0 && !open {
+                true => peek(&mut pieces, &mut h, PROMPT_PEEK),
+                false => 0,
+            };
             let wide = (pieces.iter())
                 .filter_map(|(_, piece)| match piece {
                     DocPiece::Text { text, .. } => {
@@ -1756,6 +1776,50 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
         Item::Assistant { blocks, .. } => {
             let (pieces, _) = doc_layout::stack_of(blocks, cw);
             l.doc(pieces, (x, 0));
+        }
+        Item::Plan {
+            path,
+            blocks,
+            output,
+            ..
+        } => {
+            let gist = path.as_deref().map(|p| short(p, cwd)).unwrap_or_default();
+            l.head(Head {
+                x,
+                w: cw,
+                open,
+                name: "Plan",
+                bold: true,
+                gist: &gist,
+                tail: outcome(output),
+                running: output.is_none(),
+                path: path.is_some(),
+                mono: true,
+            });
+            // The plan on its card, as the agent's words read: its first
+            // lines, whole once unfolded.
+            let (mut pieces, mut h) = doc_layout::stack_of(blocks, (iw - 2 * BUBBLE_PAD).max(1));
+            let lines = line_tops(&pieces).len();
+            let more = match open {
+                true => 0,
+                false => peek(&mut pieces, &mut h, PLAN_PEEK),
+            };
+            let top = l.below();
+            l.put(rect(ix, top, iw, h + 2 * BUBBLE_PAD), Bit::Card);
+            l.doc(pieces, (ix + BUBBLE_PAD, top + BUBBLE_PAD));
+            let link = match (more, open && lines > PLAN_PEEK) {
+                (0, false) => None,
+                (0, true) => Some("Show less".to_owned()),
+                (1, _) => Some("Show whole plan (1 more line)".to_owned()),
+                (n, _) => Some(format!("Show whole plan ({n} more lines)")),
+            };
+            if let Some(text) = link {
+                let row = rect(ix, l.below(), iw, small_line());
+                let wide = width_in(&text, Face::Ui, font_size()).ceil() as i32;
+                l.put(row, label(&text, Face::Ui, Mark::Link));
+                l.spots
+                    .push((rect(ix, row.loc.y, wide.min(iw), small_line()), Spot::Fold));
+            }
         }
         Item::Thinking { text, .. } => {
             // Codex and OpenCode open theirs with a bold title: no stars.
@@ -2376,6 +2440,13 @@ impl Painter {
             Bit::Bubble => {
                 let (x, y, w, h) = rect_px(rect, scale);
                 c.rounded(x, y, w, h, ROW_RADIUS * s, bubble(p));
+            }
+            Bit::Card => {
+                let (x, y, w, h) = rect_px(rect, scale);
+                let line = s.round().max(1.0);
+                c.rounded(x, y, w, h, ROW_RADIUS * s, p.border_variant);
+                let (x, y, w, h) = (x + line, y + line, w - 2.0 * line, h - 2.0 * line);
+                c.rounded(x, y, w, h, ROW_RADIUS * s - line, p.terminal_background);
             }
             Bit::Doc(piece) => self.doc_piece(c, rect, piece, scale, p),
             Bit::Fold(open) => icon_sdf(c, rect, scale, p.muted, |x, y| match open {
@@ -3066,6 +3137,62 @@ pub(super) mod tests {
         assert!(path);
         let open = laid(&edit, 500, 0, &HashSet::from(["big".to_owned()]), cwd);
         assert_eq!(lines(&open), 20);
+    }
+
+    #[test]
+    fn a_plan_shows_on_its_card_cut_until_unfolded() {
+        let text: String = (0..20).map(|i| format!("- step {i}\n")).collect();
+        let plan = Item::Plan {
+            id: "plan".into(),
+            path: Some("/h/.claude/plans/x.md".into()),
+            blocks: Arc::new(crate::md_blocks::blocks(&text)),
+            text,
+            output: None,
+        };
+        let lines = |l: &Laid| {
+            (l.bits.iter())
+                .filter(|(_, b)| matches!(b, Bit::Doc(DocPiece::Text { .. })))
+                .count()
+        };
+        let link = |l: &Laid| {
+            (l.bits.iter()).find_map(|(_, b)| match b {
+                Bit::Label {
+                    text,
+                    mark: Mark::Link,
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+        };
+        let card = |l: &Laid| {
+            (l.bits.iter())
+                .find_map(|(r, b)| (*b == Bit::Card).then_some(*r))
+                .expect("a card")
+        };
+        let folded = laid(&plan, 500, 0, &HashSet::new(), None);
+        assert_eq!(lines(&folded), PLAN_PEEK);
+        assert_eq!(
+            link(&folded).as_deref(),
+            Some("Show whole plan (8 more lines)")
+        );
+        // The head and the link fold it.
+        assert_eq!(
+            (folded.spots.iter())
+                .filter(|(_, s)| *s == Spot::Fold)
+                .count(),
+            2
+        );
+        // Every line shown is on the card.
+        let ground = card(&folded);
+        assert!(
+            (folded.bits.iter())
+                .filter(|(_, b)| matches!(b, Bit::Doc(_)))
+                .all(|(r, _)| r.loc.y + r.size.h <= ground.loc.y + ground.size.h)
+        );
+        let open = laid(&plan, 500, 0, &HashSet::from(["plan".to_owned()]), None);
+        assert_eq!(lines(&open), 20);
+        assert_eq!(link(&open).as_deref(), Some("Show less"));
+        assert!(card(&open).size.h > ground.size.h);
     }
 
     #[test]

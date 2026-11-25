@@ -312,6 +312,7 @@ fn prefixed(items: &[Item], child: &str) -> Vec<Item> {
         | Item::Thinking { id, .. }
         | Item::Tool { id, .. }
         | Item::Edit { id, .. }
+        | Item::Plan { id, .. }
         | Item::Subagent { id, .. }
         | Item::Note { id, .. }) = item;
         *id = format!("{child}:{id}");

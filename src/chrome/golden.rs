@@ -9733,8 +9733,9 @@ fn dump_ship_squash() {
 /// of several picks, the keys on Other; one pick of one question, a row
 /// hovered) and on its screen (check boxes, an edge after every row), and
 /// Claude Code's suggestion in the reply box, the agent's modes under it,
-/// and side questions (`/btw`) answered and being answered.
-const CHATS: [&str; 15] = [
+/// side questions (`/btw`) answered and being answered, and a plan on its
+/// card, cut and whole.
+const CHATS: [&str; 17] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9750,6 +9751,8 @@ const CHATS: [&str; 15] = [
     "chat_suggested",
     "chat_modes",
     "chat_side",
+    "chat_plan",
+    "chat_plan_open",
 ];
 
 fn chat_view(i: usize) -> super::ChatView {
@@ -9930,6 +9933,34 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
+        // A plan on its card, after the chat's last words: cut, and whole.
+        15 | 16 => {
+            let text = "# Retry the upload\n\nThe upload gives up on the first error. \
+                Retry it with a growing wait.\n\n## Steps\n\n\
+                1. Add `retry` to `upload.rs`\n2. Wait 200 ms, then double it\n\
+                3. Stop after 5 tries\n4. Log each retry at debug\n\n\
+                ## Verification\n\n- `cargo test upload`\n- Upload to a server that fails twice\n\
+                - Check the log\n- Check the wait doubles\n- Check it stops\n";
+            let mut items = (*v.items).clone();
+            items.push(crate::chat::Item::Plan {
+                id: "plan".into(),
+                path: Some("/home/u/.claude/plans/retry-upload.md".into()),
+                text: text.into(),
+                blocks: std::sync::Arc::new(crate::md_blocks::blocks(text)),
+                output: None,
+            });
+            let mut unfolded = v.unfolded.clone();
+            if i == 16 {
+                unfolded.insert("plan".into());
+            }
+            super::ChatView {
+                items: std::sync::Arc::new(items),
+                unfolded,
+                // At its end, where it is.
+                top: 10_000.0,
+                ..v
+            }
+        }
         // A shorter pane, for the list to scroll.
         _ => super::ChatView {
             rect: super::Rect::new(v.rect.loc, (v.rect.size.w, 460).into()),
@@ -9947,7 +9978,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 15]; 4] = [
+const GOLDEN_CHATS: [[u64; 17]; 4] = [
     // Dark at 1
     [
         0xa5039d4ee1fb06ee, // chat_finding
@@ -9965,6 +9996,8 @@ const GOLDEN_CHATS: [[u64; 15]; 4] = [
         0x004ee553bdea6b96, // chat_suggested
         0xfe79e247979aad2d, // chat_modes
         0x3bb4cda8d8f1a46b, // chat_side
+        0xfcf2e2b43086c91b, // chat_plan
+        0x728d35f8c69b0e4d, // chat_plan_open
     ],
     // Dark at 2
     [
@@ -9983,6 +10016,8 @@ const GOLDEN_CHATS: [[u64; 15]; 4] = [
         0x95c0a660d63e9eb1, // chat_suggested
         0xd21d7d5694e74060, // chat_modes
         0x60f310cf03af302f, // chat_side
+        0xdd91b7998982f16e, // chat_plan
+        0x39fcbc20f1677aca, // chat_plan_open
     ],
     // Light at 1
     [
@@ -10001,6 +10036,8 @@ const GOLDEN_CHATS: [[u64; 15]; 4] = [
         0x1a9b6c02649b4f80, // chat_suggested
         0xd5e5939be4fc8b21, // chat_modes
         0x127bfb769349a783, // chat_side
+        0x7ae488d80e2d3ad7, // chat_plan
+        0x0a55dd6ad28e83ea, // chat_plan_open
     ],
     // Light at 2
     [
@@ -10019,6 +10056,8 @@ const GOLDEN_CHATS: [[u64; 15]; 4] = [
         0x3d7c424e61025c58, // chat_suggested
         0x7127f7ee025b5d03, // chat_modes
         0x1ef6725ddb8a2095, // chat_side
+        0xb7243ef9f6c5085d, // chat_plan
+        0xd7e3f5f81650ee63, // chat_plan_open
     ],
 ];
 
