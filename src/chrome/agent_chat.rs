@@ -604,6 +604,38 @@ pub fn ask_key(ask: &str) -> String {
     format!("{ask}\u{0}ask")
 }
 
+/// Whether `ask` is plan mode asking to go ahead with its plan: its input
+/// is the plan's markdown.
+pub fn is_plan(ask: &PendingAsk) -> bool {
+    ask.tool == "ExitPlanMode"
+}
+
+/// Whether `ask`'s card shows what it would run, as `unfolded` has it: a
+/// plan shows until folded, as it is what the answer is about; other input
+/// once unfolded.
+pub fn ask_open(ask: &PendingAsk, unfolded: &HashSet<String>) -> bool {
+    unfolded.contains(&ask_key(&ask.ask)) != is_plan(ask)
+}
+
+/// Plan `md` as blocks, parsed once while it stays the same (the ask's
+/// card is laid out on every paint).
+fn plan_blocks(md: &str) -> Arc<Vec<DocBlock>> {
+    thread_local! {
+        static KEPT: RefCell<Option<(String, Arc<Vec<DocBlock>>)>> = const { RefCell::new(None) };
+    }
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        match kept.as_ref().filter(|(said, _)| said == md) {
+            Some((_, blocks)) => blocks.clone(),
+            None => {
+                let blocks = Arc::new(crate::md_blocks::blocks(md));
+                *kept = Some((md.to_owned(), blocks.clone()));
+                blocks
+            }
+        }
+    })
+}
+
 /// Its keys under a menu: its choices are buttons of their own. The tab
 /// keys go when it asks one question.
 const MENU_KEYS: [WaitKey; 6] = [
@@ -740,7 +772,7 @@ fn parts(view: &ChatView) -> Parts {
         let room = (end - list_top - 3 * card_row() - frame).max(0);
         if let Some(card) = view.card.as_ref().filter(|_| laid.h > room) {
             laid = lay_question(view, &ask.questions, card, inner, false);
-        } else if view.card.is_none() && view.unfolded.contains(&ask_key(&ask.ask)) {
+        } else if view.card.is_none() && ask_open(ask, &view.unfolded) {
             let room = (end - list_top - 3 * card_row() - frame - laid.h - PART_GAP).max(0);
             let lines = (room / small_line()) as usize;
             laid = lay_ask(view, ask, inner, lines.min(ASK_LINES));
@@ -1310,12 +1342,12 @@ const WORKING: &str = "working";
 /// would run, then what the agent waits for.
 fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
     let mut l = Laid::default();
-    let open = view.unfolded.contains(&ask_key(&ask.ask));
+    let open = ask_open(ask, &view.unfolded);
     l.head(Head {
         x: 0,
         w,
         open,
-        name: &ask.tool,
+        name: if is_plan(ask) { "Plan" } else { &ask.tool },
         bold: true,
         gist: &short(&ask.gist, view.cwd.as_deref()),
         tail: Vec::new(),
@@ -1323,7 +1355,34 @@ fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
         path: false,
         mono: true,
     });
-    if open {
+    if open && is_plan(ask) {
+        // The plan as markdown, as much as `lines` small lines' room
+        // holds: the whole of it is on its card in the chat.
+        let (ix, iw) = (CHEVRON_WIDTH, (w - CHEVRON_WIDTH).max(1));
+        let room = lines as i32 * small_line();
+        let (mut pieces, mut h) = doc_layout::stack_of(&plan_blocks(&ask.input), iw);
+        let mut fit: Vec<i32> = (pieces.iter())
+            .filter(|(r, piece)| {
+                matches!(piece, DocPiece::Text { .. } | DocPiece::CodeLine(_))
+                    && r.loc.y + r.size.h <= room
+            })
+            .map(|(r, _)| r.loc.y)
+            .collect();
+        fit.dedup();
+        let more = peek(&mut pieces, &mut h, fit.len());
+        let top = l.below();
+        l.doc(pieces, (ix, top));
+        if more > 0 {
+            let text = match more {
+                1 => "1 more line in the chat".to_owned(),
+                n => format!("{n} more lines in the chat"),
+            };
+            l.put(
+                rect(ix, l.below(), iw, small_line()),
+                label(&text, Face::Ui, Mark::Muted),
+            );
+        }
+    } else if open {
         let (ix, iw) = (CHEVRON_WIDTH, (w - CHEVRON_WIDTH).max(1));
         let all: Vec<&str> = ask.input.lines().collect();
         let shown = all.len().min(lines);
@@ -3578,6 +3637,45 @@ pub(super) mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Plan mode asking to go ahead with a plan of 30 steps.
+    pub(in crate::chrome) fn plan_ask() -> PendingAsk {
+        let steps: String = (0..30).map(|i| format!("{}. step {i}\n", i + 1)).collect();
+        PendingAsk {
+            ask: "p1".into(),
+            tool: "ExitPlanMode".into(),
+            gist: String::new(),
+            input: format!("# Retry the upload\n\n{steps}"),
+            questions: Vec::new(),
+            since: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn a_plans_ask_shows_it_as_markdown_until_folded() {
+        let mut v = view();
+        v.ask = Some(plan_ask());
+        let text = |laid: &Laid| -> Vec<String> {
+            (laid.bits.iter())
+                .filter_map(|(_, b)| match b {
+                    Bit::Doc(DocPiece::Text { text, .. }) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let p = parts(&v);
+        let (_, laid) = p.card.as_ref().unwrap();
+        let shown = text(laid);
+        assert_eq!(shown.first().map(String::as_str), Some("Retry the upload"));
+        assert!(shown.len() > 3 && shown.len() < 31, "{shown:?}");
+        let more = format!("{} more lines in the chat", 31 - shown.len());
+        assert!(labels(laid).contains(&more), "{:?}", labels(laid));
+        // Folded, as other input shows unfolded.
+        v.unfolded.insert(ask_key("p1"));
+        let q = parts(&v);
+        assert!(text(&q.card.as_ref().unwrap().1).is_empty());
+        assert!(q.waiting.unwrap().size.h < p.waiting.unwrap().size.h);
     }
 
     #[test]

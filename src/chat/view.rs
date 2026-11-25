@@ -161,7 +161,7 @@ const ASK_KEYS: &[Binding<(), AskKey>] = &[
 
 /// The footer's hints of the ask card's keys, its input shown (`open`) or
 /// not: Allow and Deny in their buttons' words (checklist K3).
-fn ask_footer(open: bool) -> Vec<(String, String)> {
+fn ask_footer(open: bool, what: &str) -> Vec<(String, String)> {
     let said = |hit: ChatHit| {
         (chrome::ASK_BUTTONS.iter())
             .find(|(h, _)| *h == hit)
@@ -170,8 +170,8 @@ fn ask_footer(open: bool) -> Vec<(String, String)> {
     };
     (key_table::hints(ASK_KEYS, &(), |k| match k {
         AskKey::Answer(reply) => said(ChatHit::Answer(*reply)),
-        AskKey::Input if open => "fold input".to_owned(),
-        AskKey::Input => "show input".to_owned(),
+        AskKey::Input if open => format!("fold {what}"),
+        AskKey::Input => format!("show {what}"),
     })
     .into_iter())
     .map(|(chord, said)| (chord.to_owned(), said))
@@ -647,7 +647,11 @@ fn chat_footer(chat: &PaneChat, modes: bool) -> Vec<(String, String)> {
     let mut hints = match (ask, card) {
         (_, Some(ask)) => card_footer(&chat.card, ask),
         (Some(ask), _) if questions.is_none() => {
-            ask_footer(chat.unfolded.contains(&chrome::ask_key(&ask.ask)))
+            let what = match chrome::is_plan(ask) {
+                true => "plan",
+                false => "input",
+            };
+            ask_footer(chrome::ask_open(ask, &chat.unfolded), what)
         }
         _ => Vec::new(),
     };
@@ -2713,8 +2717,9 @@ mod tests {
         ]
         .map(|(k, s)| (k.to_owned(), s.to_owned()))
         .into();
-        assert_eq!(ask_footer(false), hints);
-        assert_eq!(ask_footer(true)[2].1, "fold input");
+        assert_eq!(ask_footer(false, "input"), hints);
+        assert_eq!(ask_footer(true, "input")[2].1, "fold input");
+        assert_eq!(ask_footer(true, "plan")[2].1, "fold plan");
         // Their chords parse and mean nothing else in the chat (K1).
         key_table::check(ASK_KEYS, &[()]);
         let others: Vec<&str> = (LIST_KEYS.iter().map(|b| b.chord))
