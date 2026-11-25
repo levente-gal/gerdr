@@ -41,6 +41,21 @@ pub fn read(kind: AgentKind, rows: &[(String, Styled)]) -> Option<Menu> {
     Some(m)
 }
 
+/// Whether `screen` (as herdr reads it, plain or with its escapes) shows
+/// any agent's model menu: the line that opened it was taken, and an Enter
+/// now would pick a model.
+pub fn shows(screen: &str) -> bool {
+    let rows = crate::scrollback::parse_ansi(screen);
+    [
+        AgentKind::Codex,
+        AgentKind::OpenCode,
+        AgentKind::Pi,
+        AgentKind::Antigravity,
+    ]
+    .into_iter()
+    .any(|kind| read(kind, &rows).is_some())
+}
+
 /// The keys that pick the row labelled `label` in menu `m`, as herdr names
 /// them: the arrow moved onto it, then Enter. None when it shows no such
 /// row, or no arrow.
@@ -466,6 +481,29 @@ mod tests {
 
         let idle = screen(include_str!("fixtures/model_menu/agy-idle.ansi"));
         assert_eq!(read(AgentKind::Antigravity, &idle), None);
+    }
+
+    #[test]
+    fn a_menu_on_the_plain_screen_shows_and_none_when_idle() {
+        let plain = |ansi: &str| -> String {
+            screen(ansi).into_iter().map(|(t, _)| t + "\n").collect()
+        };
+        for ansi in [
+            include_str!("fixtures/model_menu/codex.ansi"),
+            include_str!("fixtures/model_menu/oc.ansi"),
+            include_str!("fixtures/model_menu/pi-few.ansi"),
+            include_str!("fixtures/model_menu/agy-search.ansi"),
+        ] {
+            assert!(shows(&plain(ansi)));
+        }
+        for ansi in [
+            include_str!("fixtures/model_menu/codex-idle.ansi"),
+            include_str!("fixtures/model_menu/oc-idle.ansi"),
+            include_str!("fixtures/model_menu/pi-idle.ansi"),
+            include_str!("fixtures/model_menu/agy-idle.ansi"),
+        ] {
+            assert!(!shows(&plain(ansi)));
+        }
     }
 
     #[test]
