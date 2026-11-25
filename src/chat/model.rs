@@ -78,7 +78,9 @@ pub fn of_line(line: &Value) -> Option<String> {
     // "Set model to `Opus 5.5` and saved as…" (2.1.3xx); "Set model to
     // <bold>opus</bold>" before.
     let text = msg["content"].as_str().or(line["content"].as_str())?;
-    let out = text.split_once("<local-command-stdout>Set model to ")?.1;
+    // A switch turned down says the model kept: "Kept model as `Opus 5.5`".
+    let (_, out) = (text.split_once("<local-command-stdout>Set model to "))
+        .or_else(|| text.split_once("<local-command-stdout>Kept model as "))?;
     let out = out.split("</local-command-stdout>").next()?;
     let set = match out.strip_prefix('`') {
         Some(quoted) => quoted.split('`').next()?.to_owned(),
@@ -176,6 +178,11 @@ mod tests {
             set("`Sonnet 5.5` and saved as your default for new sessions"),
         ];
         assert_eq!(last_in(&tail(&now)).as_deref(), Some("Sonnet 5.5"));
+        let kept = [
+            set("`Sonnet 5.5` and saved as your default for new sessions"),
+            json!({ "type": "user", "message": { "content": "<local-command-stdout>Kept model as `Opus 5.5`</local-command-stdout>" } }),
+        ];
+        assert_eq!(last_in(&tail(&kept)).as_deref(), Some("Opus 5.5"));
         let older = [set("\u{1b}[1mopus\u{1b}[22m")];
         assert_eq!(last_in(&tail(&older)).as_deref(), Some("Opus"));
         assert_eq!(last_in(b"{\"type\":\"user\"}\n"), None);

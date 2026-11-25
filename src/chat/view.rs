@@ -998,7 +998,9 @@ fn take_event<'a>(
             model,
             ..
         } => {
-            if model.is_some() {
+            // Another chat in the pane (another agent, a new session): its
+            // own model, not the last one's.
+            if model.is_some() || chat.source.as_ref() != Some(&source) {
                 chat.model = model;
             }
             let n = rows(&items, &chat.unfolded).len();
@@ -1009,8 +1011,14 @@ fn take_event<'a>(
             chat.source = Some(source);
             chat.reading = Reading::Read;
         }
-        Event::Missing { why, .. } => chat.reading = Reading::Missing(why),
-        Event::Failed { error, .. } => chat.reading = Reading::Failed(error),
+        Event::Missing { why, .. } => {
+            chat.reading = Reading::Missing(why);
+            chat.model = None;
+        }
+        Event::Failed { error, .. } => {
+            chat.reading = Reading::Failed(error);
+            chat.model = None;
+        }
     }
     true
 }
@@ -2491,12 +2499,16 @@ mod tests {
         assert_eq!(two.model.as_deref(), Some("Opus 5.5"));
         assert_eq!(two.source, Some(source));
         assert_eq!(one.reading, Reading::Finding);
+        // Another agent in the pane, its chat not written yet: the last
+        // one's model goes.
+        one.model = Some("Haiku 5.5".into());
         let missing = Event::Missing {
             pane_id: "w1:p1".into(),
             why: "no chat".into(),
         };
         assert!(take_event([("w1:p1", &mut one)], missing));
         assert_eq!(one.reading, Reading::Missing("no chat".into()));
+        assert_eq!(one.model, None);
         let gone = Event::Failed {
             pane_id: "w1:p9".into(),
             error: "x".into(),
