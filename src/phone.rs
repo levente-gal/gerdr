@@ -44,6 +44,9 @@ const PANE_LINES: usize = 400;
 /// The most lines herdr reads with their colours; past that, all of the
 /// pane's scrollback is read, plain.
 const PANE_STYLED_MAX: usize = 1000;
+/// How many of an idle Claude Code's last screen rows hold its reply box,
+/// and the suggestion in it, below whatever it shows under the box.
+const SUGGEST_ROWS: usize = 30;
 /// How many lines of a setup log are sent: its end, where it failed.
 const LOG_LINES: usize = 400;
 /// How many history events a feature's page gets, latest first.
@@ -1140,16 +1143,31 @@ fn commands(project: &str, slug: &str, pane: &str) -> Reply {
     Reply::json(&Value::Array(listed))
 }
 
+/// What the idle Claude Code in `pane` suggests saying next, read off the
+/// bottom of its screen as gerdr's chat reads it.
+fn pane_suggestion(herdr: &mut Herdr, pane: &str) -> Option<String> {
+    match herdr.pane_screen_styled(pane, SUGGEST_ROWS) {
+        Ok(text) => crate::chat::suggestion(&crate::scrollback::parse_ansi(&text)),
+        Err(why) => {
+            tracing::debug!("phone: the suggestion in pane {pane}: {why}");
+            None
+        }
+    }
+}
+
 fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     let (project, label) = match agent_of(project, slug, pane) {
         Ok(found) => found,
         Err(reply) => return reply,
     };
     let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
-    // Its title, for the page's head.
-    let title = (herdr.agent_list().ok())
-        .and_then(|agents| agents.into_iter().find(|a| a.pane_id == pane))
-        .and_then(|a| a.shown_title());
+    // Its title, for the page's head, and what it suggests saying next.
+    let agent = (herdr.agent_list().ok())
+        .and_then(|agents| agents.into_iter().find(|a| a.pane_id == pane));
+    let title = agent.as_ref().and_then(|a| a.shown_title());
+    let suggestion = (agent.as_ref())
+        .filter(|a| crate::chat::suggests(a))
+        .and_then(|_| pane_suggestion(&mut herdr, pane));
     let all = lines == "all";
     let want = lines
         .parse()
@@ -1166,7 +1184,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             Ok(screen) => {
                 let text = chat_and_screen(path, &screen);
                 let (ask, working) = pane_ask(&project.id, pane);
-                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working });
+                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "suggestion": suggestion });
                 Reply::json(&reply)
             }
             Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
@@ -1187,7 +1205,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             let more = chat.is_some()
                 || (!all && rows.is_some_and(|rows| rows > text.lines().count() as u64));
             let (ask, working) = pane_ask(&project.id, pane);
-            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working });
+            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "suggestion": suggestion });
             Reply::json(&reply)
         }
         Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),

@@ -650,8 +650,8 @@ async function pane(p, s, id) {
   const working = since === null ? "" : `<div class="work-row small"><span class="sdot blink"></span>working
     <span class="clock" data-since="${since}"></span></div>`;
   return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
-    ask, askId: a?.ask || "", asking: !!a?.questions?.length,
-    bar: `<div id="asked"></div><ul id="slash" hidden></ul><form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
+    ask, askId: a?.ask || "", asking: !!a?.questions?.length, suggestion: d.suggestion || "",
+    bar: `<div id="asked"></div><ul id="slash" hidden></ul><button type="button" id="suggest" hidden></button><form id="say"><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
         ${s ? `<button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button>` : ""}</div>` };
@@ -836,6 +836,13 @@ async function render(fresh, force, keepBottom) {
       asked.dataset.ask = v.askId;
       bar.classList.toggle("asking", v.asking);
     }
+    const sug = v.pane && document.getElementById("suggest");
+    if (sug && sug.dataset.text !== v.suggestion) {
+      sug.dataset.text = v.suggestion;
+      sug.textContent = v.suggestion;
+      sug.setAttribute("aria-label", `Fill in: ${v.suggestion}`);
+      suggestShow();
+    }
     if (v.html !== shown && (fresh || force || !typing())) {
       const y = window.scrollY;
       const open = foldsOpen();
@@ -1001,7 +1008,14 @@ document.addEventListener("submit", async (e) => {
   document.getElementById("slash").hidden = true;
   const a = await post("/api/agent", { p, s, pane, text: line.value });
   if (a.error) say([{ text: a.error }], true);
-  else { line.value = ""; fit(line); }
+  else {
+    line.value = "";
+    fit(line);
+    // Spent: the next read brings the agent's next one.
+    const sug = document.getElementById("suggest");
+    if (sug) sug.dataset.text = "";
+    suggestShow();
+  }
   setTimeout(() => render(false, true), 600);
 });
 
@@ -1054,7 +1068,24 @@ async function slashMenu(box) {
     ${c.about ? `<span class="about small quiet">${esc(c.about)}</span>` : ""}</button></li>`).join("");
   menu.hidden = !shown.length;
 }
-document.addEventListener("input", (e) => { if (e.target.id === "line") slashMenu(e.target); });
+document.addEventListener("input", (e) => { if (e.target.id === "line") { slashMenu(e.target); suggestShow(); } });
+
+// What Claude Code suggests saying next, as on gerdr's chat: over the empty
+// reply box; a tap fills it in, to send or change.
+function suggestShow() {
+  const b = document.getElementById("suggest");
+  const line = document.getElementById("line");
+  if (b && line) b.hidden = !b.dataset.text || !!line.value;
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest?.("#suggest");
+  if (!b) return;
+  const line = document.getElementById("line");
+  line.value = b.dataset.text;
+  fit(line);
+  line.focus();
+  suggestShow();
+});
 // A tap on a command keeps the keyboard up.
 document.addEventListener("pointerdown", (e) => { if (e.target.closest?.("[data-command]")) e.preventDefault(); });
 document.addEventListener("click", (e) => {

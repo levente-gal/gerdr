@@ -337,6 +337,12 @@ body.with-bar #note { bottom: calc(var(--kb, 0px) + var(--bar-h, calc(104px + en
   background: transparent; border: 0; border-radius: 8px; overflow-wrap: anywhere;
 }
 #bar #slash .about { display: block; }
+#bar #suggest {
+  display: block; width: 100%; min-height: 44px; margin: 0 0 8px; padding: 6px 12px; text-align: left;
+  color: var(--quiet); background: transparent; border: 1px dashed var(--line-soft); border-radius: 10px;
+  overflow-wrap: anywhere;
+}
+#bar #suggest[hidden], #bar.asking #suggest { display: none; }
 body.with-bar main { padding-bottom: calc(var(--bar-h, 110px) + 20px); }
 #end {
   position: fixed; z-index: 2; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); transform: translateX(-50%);

@@ -983,10 +983,17 @@ fn screen_rows(herdr: &mut Herdr, pane_id: &str) -> Result<ChatRows, String> {
     ))
 }
 
+/// Whether `agent`'s screen may show what it suggests saying next: a
+/// Claude Code whose turn ended.
+pub(crate) fn suggests(agent: &AgentInfo) -> bool {
+    matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done)
+        && super::source::kind(agent) == Some(crate::ai_work::AgentKind::Claude)
+}
+
 /// What Claude Code suggests saying next, as its screen shows it: the
 /// last `❯` line, its reply box, holding dim text only (what the user
 /// types there is plain).
-fn suggestion(rows: &[(String, crate::scrollback::Styled)]) -> Option<String> {
+pub(crate) fn suggestion(rows: &[(String, crate::scrollback::Styled)]) -> Option<String> {
     let (text, styles) = rows.iter().rev().find(|(text, _)| text.starts_with('❯'))?;
     let chars: Vec<char> = text.chars().collect();
     let start = (chars.iter()).take_while(|c| **c == '❯' || c.is_whitespace()).count();
@@ -1272,8 +1279,7 @@ impl Gerdr {
             .map(|a| a.pane_id.as_str())
             .collect();
         let idle: HashSet<&str> = (wanted.iter())
-            .filter(|a| matches!(a.agent_status, AgentStatus::Idle | AgentStatus::Done))
-            .filter(|a| super::source::kind(a) == Some(crate::ai_work::AgentKind::Claude))
+            .filter(|a| suggests(a))
             .map(|a| a.pane_id.as_str())
             .collect();
         let mut suggesting = Vec::new();

@@ -20,6 +20,7 @@ mod view;
 
 #[cfg(test)]
 pub(crate) use view::{footer, slash_footer};
+pub(crate) use view::{suggestion, suggests};
 
 /// One thing said or done in a chat, in order.
 #[derive(Clone, Debug, PartialEq)]
