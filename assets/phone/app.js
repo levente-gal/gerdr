@@ -981,8 +981,14 @@ document.addEventListener("click", (e) => {
   document.getElementById("slash").hidden = true;
 });
 document.addEventListener("scroll", (e) => { if (e.target.matches?.("textarea")) shade(e.target); }, true);
-// The page's end stays clear of the bar as its box grows.
-new ResizeObserver(() => document.body.style.setProperty("--bar-h", `${bar.offsetHeight}px`)).observe(bar);
+// The page's end stays clear of the bar as its box grows. A pane's page
+// at its end stays there: the bar is measured only after it first shows.
+new ResizeObserver(() => {
+  const atEnd = window.innerHeight + window.scrollY >= document.body.scrollHeight - 40;
+  document.body.style.setProperty("--bar-h", `${bar.offsetHeight}px`);
+  if (atEnd && here()[0] === "pane") window.scrollTo(0, document.body.scrollHeight);
+  endButton();
+}).observe(bar);
 // The bar sits on the keyboard, not behind it: iOS Safari and Android
 // Chrome keep the page's height under the keyboard and only show less of it.
 function onKeyboard() {
