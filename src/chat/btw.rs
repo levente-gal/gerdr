@@ -80,11 +80,15 @@ pub struct Panel {
 /// OpenCode's how to copy.
 const FOOTERS: [&str; 3] = ["to close", "to dismiss", "copy c"];
 
-/// What an agent draws while it answers, in the answer's place.
+/// What an agent draws while it answers, in the answer's place or under
+/// what it has so far: a braille spinner (Cursor, Antigravity), or Claude's
+/// star with a word that goes on (`✽ Answering…`), which a bullet doesn't.
 fn spinner(line: &str) -> bool {
-    line.chars().next().is_some_and(|c| {
-        ('\u{2800}'..='\u{28ff}').contains(&c) || "✻✽✶✢✳·*".contains(c)
-    })
+    let Some(c) = line.chars().next() else {
+        return false;
+    };
+    let goes_on = line.ends_with('…') || line.ends_with("...") || line.contains("... (");
+    ('\u{2800}'..='\u{28ff}').contains(&c) || ("✻✽✶✢✳·*".contains(c) && goes_on)
 }
 
 fn is_rule(row: &str) -> bool {
@@ -117,7 +121,8 @@ pub fn panel(rows: &[&str]) -> Option<Panel> {
         })
         .collect();
     trimmed(&mut lines);
-    let working = lines.first().is_some_and(|line| spinner(line));
+    // Antigravity draws the answer as it comes, its spinner under it.
+    let working = [lines.first(), lines.last()].into_iter().flatten().any(|l| spinner(l));
     let footer = footer.map(|i| rows[i]);
     if footer.is_none() && !working {
         return None;
@@ -187,6 +192,9 @@ pub enum Step {
 /// How many reads in a row must show the same answer before it counts as
 /// whole: Cursor draws it as it comes.
 const STILL: u8 = 3;
+/// How many reads in a row must miss a panel seen before it counts as
+/// closed: a frame drawn halfway reads as none.
+const GONE: u8 = 3;
 /// How long its panel may take to show, at most: OpenCode shows none
 /// until it has answered.
 pub const SHOW_WAIT: Duration = Duration::from_secs(120);
@@ -203,6 +211,8 @@ pub struct Follow {
     /// Reads in a row that changed nothing.
     still: u8,
     seen: bool,
+    /// Reads in a row that found no panel since one was seen.
+    gone: u8,
     tabbed: bool,
     scrolling: bool,
 }
@@ -214,6 +224,7 @@ impl Follow {
             since: now,
             still: 0,
             seen: false,
+            gone: 0,
             tabbed: false,
             scrolling: false,
         }
@@ -252,6 +263,12 @@ impl Follow {
     /// What `panel`, as read from the pane now (none showing), says.
     pub fn took(&mut self, panel: Option<Panel>, now: Instant) -> Step {
         let Some(panel) = panel.filter(|p| self.ours(p)) else {
+            if self.seen {
+                self.gone += 1;
+                if self.gone < GONE {
+                    return Step::Wait;
+                }
+            }
             return match self.seen {
                 // Closed in the pane: what was read stays.
                 true if !self.side.lines.is_empty() => self.end(SideState::Answered),
@@ -263,6 +280,7 @@ impl Follow {
             };
         };
         self.seen = true;
+        self.gone = 0;
         self.side.state = SideState::Answering;
         if now - self.since >= FOLLOW_MOST {
             self.side.state = SideState::Answered;
@@ -372,10 +390,38 @@ fn side_items(n: usize, side: &Side) -> Vec<Item> {
     items
 }
 
-/// The answer's lines as markdown: each keeps its own line, as drawn.
+/// The answer's lines as markdown: each keeps its own line, as drawn, but
+/// for those the agent wrapped to its panel's width, joined again: a row
+/// so full that the next one's first word wouldn't have fit on it.
+/// shortcut: the widest row stands for the wrap width; a reply of short
+/// rows only (under `WRAPS`) is taken as unwrapped.
 pub fn answer_md(lines: &[String]) -> String {
-    lines.join("  \n")
+    let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let mut out = String::new();
+    let mut prev: Option<&str> = None;
+    for line in lines {
+        let first = line.split_whitespace().next().unwrap_or("");
+        let listed = first.starts_with(['-', '*', '•', '#', '>', '|'])
+            || first.trim_end_matches(['.', ')']).parse::<u32>().is_ok();
+        let wrapped = prev.is_some_and(|p| {
+            !p.is_empty() && p.chars().count() + 1 + first.chars().count() > width
+        });
+        if wrapped && width >= WRAPS && !first.is_empty() && !listed && !line.starts_with(' ') {
+            out.push(' ');
+            out.push_str(line);
+        } else {
+            if prev.is_some() {
+                out.push_str("  \n");
+            }
+            out.push_str(line);
+        }
+        prev = Some(line);
+    }
+    out
 }
+
+/// The least wrap width rows are joined at.
+const WRAPS: usize = 40;
 
 #[cfg(test)]
 mod tests {
@@ -467,6 +513,12 @@ mod tests {
     fn a_spinner_is_no_answer_and_claudes_last_question_is_the_one() {
         assert!(panel(&rows(CLAUDE_LOADING)).expect("loading").working);
         assert!(panel(&rows(ANTIGRAVITY_LOADING)).expect("loading").working);
+        // Antigravity's answer as it comes, its spinner under it.
+        let coming = " ┃ /btw name rivers\n ┃\n ┃   Danube\n ┃   Rhine\n ┃ ⣯  Generating... (Enter/Esc to cancel)\n────\n>";
+        assert!(panel(&rows(coming)).expect("coming").working);
+        // A bullet is no spinner.
+        assert!(!spinner("* one"));
+        assert!(!spinner("· two"));
         let p = panel(&rows(CLAUDE_LONG)).expect("long");
         assert_eq!(p.question, "list the numbers");
         // Its scroll mark is no part of the answer.
@@ -549,6 +601,10 @@ mod tests {
         let t = Instant::now();
         let mut f = Follow::new(Side::new("what is 2+2? answer in two short paragraphs", 1), t);
         assert_eq!(take(&mut f, CLAUDE_DONE, t), Step::Wait);
+        // A read that misses it once is no close.
+        for _ in 1..GONE {
+            assert_eq!(f.took(None, t), Step::Wait);
+        }
         assert_eq!(f.took(None, t), Step::Done);
         assert_eq!(f.side.state, SideState::Answered);
 
@@ -572,6 +628,24 @@ mod tests {
         let p = panel(&rows(screen)).expect("panel");
         assert!(f.ours(&p));
         assert_eq!(f.answer(&p), lines(&["Light scatters."]));
+    }
+
+    #[test]
+    fn rows_the_agent_wrapped_are_joined_again() {
+        let wrapped = lines(&[
+            "On a clear day, the sky looks blue. Sunlight contains all colours, and",
+            "air molecules scatter blue light more.",
+            "",
+            "- one item",
+            "- another",
+        ]);
+        assert_eq!(
+            answer_md(&wrapped),
+            "On a clear day, the sky looks blue. Sunlight contains all colours, and \
+             air molecules scatter blue light more.  \n  \n- one item  \n- another"
+        );
+        // Short rows are its own lines, as a list of words is.
+        assert_eq!(answer_md(&lines(&["twenty-two", "twenty-three"])), "twenty-two  \ntwenty-three");
     }
 
     fn user(id: &str, at: u64) -> Item {
