@@ -23,8 +23,8 @@ pub struct Command {
 }
 
 // shortcut: built-ins are hard-coded as the CLIs were here (Claude Code
-// 2.1.331, OpenCode 2.3.0, Cursor 2026.11.22, Codex 0.171.0); refresh them
-// when the agents change.
+// 2.1.331, OpenCode 2.3.0, Cursor 2026.11.22, Codex 0.171.0, pi 1.6.0,
+// Antigravity CLI 1.5.15); refresh them when the agents change.
 const CLAUDE: &[(&str, &str)] = &[
     ("add-dir", "Add a working folder"),
     ("agents", "Manage agent configurations"),
@@ -158,6 +158,83 @@ const CODEX: &[(&str, &str)] = &[
     ("usage", "Show usage"),
 ];
 
+const PI: &[(&str, &str)] = &[
+    ("bug", "Write a bug report"),
+    ("changelog", "Show the changelog"),
+    ("clone", "Copy the session"),
+    ("compact", "Compact the context"),
+    ("copy", "Copy the last answer"),
+    ("export", "Export the session"),
+    ("fork", "Start a session from an earlier message"),
+    ("hotkeys", "Show the shortcuts"),
+    ("import", "Import a session"),
+    ("llama", "Manage llama.cpp models"),
+    ("login", "Sign in to a provider"),
+    ("logout", "Sign out of a provider"),
+    ("mcp", "Manage MCP servers"),
+    ("model", "Pick the model"),
+    ("name", "Name the session"),
+    ("new", "Start a new session"),
+    ("quit", "Quit"),
+    ("reload", "Reload extensions, skills and templates"),
+    ("resume", "Resume a session"),
+    ("scoped-models", "Pick the models to cycle"),
+    ("session", "Show the session"),
+    ("settings", "Open the settings"),
+    ("share", "Share the session"),
+    ("thinking", "Set the thinking level"),
+    ("tree", "Go through the session tree"),
+    ("trust", "Trust this project"),
+];
+
+const ANTIGRAVITY: &[(&str, &str)] = &[
+    ("add-dir", "Add a working folder"),
+    ("agents", "Open the agent manager"),
+    ("artifact", "Review the artifacts"),
+    ("boost", "Reason deeper with more agents"),
+    ("browser", "Hand a task to the browser agent"),
+    ("btw", "Ask on the side"),
+    ("changelog", "Show the release notes"),
+    ("clear", "Start a new conversation"),
+    ("codesearch", "Search the code"),
+    ("compact", "Compact the conversation"),
+    ("config", "Open the settings"),
+    ("context", "Show the context use"),
+    ("copy", "Copy the last answer"),
+    ("credits", "Show the credits left"),
+    ("diff", "Show the changes"),
+    ("effort", "Set the reasoning effort"),
+    ("exit", "Quit"),
+    ("feedback", "Send feedback"),
+    ("fork", "Fork the conversation"),
+    ("goal", "Work until the goal is met"),
+    ("grill-me", "Ask me questions first"),
+    ("help", "Show commands and shortcuts"),
+    ("hooks", "Show the hooks"),
+    ("keybindings", "Edit the shortcuts"),
+    ("learn", "Keep corrections as rules or skills"),
+    ("logout", "Sign out"),
+    ("mcp", "Manage MCP servers"),
+    ("model", "Pick the model"),
+    ("open", "Open a file in the editor"),
+    ("permissions", "Set what it may do"),
+    ("plan", "Plan first"),
+    ("plugin", "Manage plugins"),
+    ("remote-control", "Turn remote control on or off"),
+    ("rename", "Rename the conversation"),
+    ("resume", "Resume a conversation"),
+    ("rewind", "Go back to an earlier message"),
+    ("schedule", "Wake the agent later"),
+    ("skills", "List skills"),
+    ("statusline", "Edit the status bar"),
+    ("swarm", "Run a swarm of agents"),
+    ("tasks", "Show background tasks"),
+    ("teamwork", "Run a team of agents"),
+    ("title", "Set the window title"),
+    ("usage", "Show usage"),
+    ("voice", "Talk or dictate"),
+];
+
 /// The commands agent `kind` takes in folder `cwd`, by name: the project's
 /// before the home's, those on disk before the built-ins. Unreadable files
 /// are left out.
@@ -207,11 +284,42 @@ pub fn list(kind: AgentKind, cwd: &Path, homes: &Homes, config: &Path) -> Vec<Co
             }
             CODEX
         }
-        // shortcut: no list for Pi and Antigravity yet; add theirs when
-        // someone uses them here.
-        AgentKind::Pi | AgentKind::Antigravity | AgentKind::T3 | AgentKind::Unknown => {
-            return Vec::new();
+        AgentKind::Pi => {
+            // shortcut: commands that extensions add are left out (they are
+            // code); add them if pi ever lists them on disk.
+            let agent = homes.pi.parent().unwrap_or(Path::new("/"));
+            let home = homes.cursor.parent();
+            for dir in [cwd.join(".pi/prompts"), agent.join("prompts")] {
+                pi_prompts(&dir, &mut found);
+            }
+            let mut dirs = vec![cwd.join(".pi/skills"), cwd.join(".agents/skills")];
+            dirs.push(agent.join("skills"));
+            dirs.extend(home.map(|home| home.join(".agents/skills")));
+            for dir in dirs {
+                named_skills(&dir, "skill:", &mut found);
+            }
+            PI
         }
+        AgentKind::Antigravity => {
+            // shortcut: every plugin's skills show, enabled or not.
+            let cli = &homes.antigravity;
+            let gemini = cli.parent().unwrap_or(Path::new("/"));
+            let mut dirs = vec![cwd.join(".agents/skills"), cwd.join(".agent/skills")];
+            dirs.push(gemini.join("config/skills"));
+            dirs.push(cli.join("skills"));
+            dirs.push(gemini.join("skills"));
+            for plugins in [cwd.join(".agents/plugins"), gemini.join("config/plugins")] {
+                dirs.extend(sub_dirs(&plugins).into_iter().map(|(_, p)| p.join("skills")));
+            }
+            dirs.push(cli.join("builtin/skills"));
+            let builtin = sub_dirs(&cli.join("builtin/plugins"));
+            dirs.extend(builtin.into_iter().map(|(_, p)| p.join("skills")));
+            for dir in dirs {
+                named_skills(&dir, "", &mut found);
+            }
+            ANTIGRAVITY
+        }
+        AgentKind::T3 | AgentKind::Unknown => return Vec::new(),
     };
     found.extend(builtin.iter().map(|(name, about)| Command {
         name: (*name).to_owned(),
@@ -359,6 +467,38 @@ fn skills(dir: &Path, prefix: &str, found: &mut Vec<Command>) {
         if path.is_file() {
             found.push(read_md(&path, format!("{prefix}{name}")));
         }
+    }
+}
+
+/// The skills in `dir` named as their front matter says (else by folder),
+/// as `<prefix><name>`; those with `disable-slash-command` left out.
+fn named_skills(dir: &Path, prefix: &str, found: &mut Vec<Command>) {
+    for (folder, sub) in sub_dirs(dir) {
+        let path = sub.join("SKILL.md");
+        let front = front_matter(&fs::read_to_string(&path).unwrap_or_default());
+        let hidden = front.get("disable-slash-command").and_then(|v| v.as_bool());
+        if !path.is_file() || hidden == Some(true) {
+            continue;
+        }
+        let name = front.get("name").and_then(|v| v.as_str()).unwrap_or(&folder);
+        found.push(read_md(&path, format!("{prefix}{name}")));
+    }
+}
+
+/// pi's prompt templates in `dir`: with no `description`, the first line
+/// after the front matter says what they do.
+fn pi_prompts(dir: &Path, found: &mut Vec<Command>) {
+    for (name, path) in md_files(dir) {
+        let mut command = read_md(&path, name);
+        if command.about.is_empty() {
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            let body = (text.strip_prefix("---"))
+                .and_then(|rest| rest.split_once("\n---"))
+                .map_or(text.as_str(), |(_, body)| body);
+            let first = body.lines().map(str::trim).find(|l| !l.is_empty());
+            command.about = one_line(first.unwrap_or(""));
+        }
+        found.push(command);
     }
 }
 
@@ -580,6 +720,37 @@ mod tests {
             about: String::new(),
             hint: String::new(),
         }
+    }
+
+    #[test]
+    fn pi_and_antigravity_read_their_own_places() {
+        let tmp = scratch("pi-agy");
+        let (home, cwd) = (tmp.join("home"), tmp.join("work"));
+        let homes = Homes::under(&home);
+        let agent = home.join(".pi/agent");
+        let review = "---\nargument-hint: \"[focus]\"\n---\n\nReview it\n";
+        write(&agent.join("prompts/review.md"), review);
+        write(&cwd.join(".pi/prompts/ship.md"), "---\ndescription: Ship\n---\n");
+        write(&home.join(".agents/skills/pdf/SKILL.md"), "---\nname: pdf-tools\n---\n");
+        let pi = list(AgentKind::Pi, &cwd, &homes, &tmp);
+        let review = find(&pi, "review");
+        assert_eq!((review.about.as_str(), review.hint.as_str()), ("Review it", "[focus]"));
+        assert_eq!(find(&pi, "ship").about, "Ship");
+        assert!(names(&pi).contains(&"skill:pdf-tools"));
+        assert!(names(&pi).contains(&"tree"));
+
+        let cli = home.join(".gemini/antigravity-cli");
+        let guide = "---\nname: antigravity-guide\ndescription: Ask\n---\n";
+        write(&cli.join("builtin/skills/guide/SKILL.md"), guide);
+        write(&cli.join("builtin/skills/pane/SKILL.md"), "---\ndisable-slash-command: true\n---\n");
+        write(&home.join(".gemini/config/plugins/dart/skills/test/SKILL.md"), "");
+        write(&cwd.join(".agents/skills/deploy/SKILL.md"), "---\ndescription: Deploy\n---\n");
+        let agy = list(AgentKind::Antigravity, &cwd, &homes, &tmp);
+        assert_eq!(find(&agy, "antigravity-guide").about, "Ask");
+        assert_eq!(find(&agy, "deploy").about, "Deploy");
+        assert!(names(&agy).contains(&"test"));
+        assert!(!names(&agy).contains(&"pane"));
+        assert!(names(&agy).contains(&"rewind"));
     }
 
     #[test]
