@@ -1210,6 +1210,24 @@ fn pane_suggestion(herdr: &mut Herdr, pane: &str) -> Option<String> {
     }
 }
 
+/// How many of the user's last words the agent page is given.
+const SAID: usize = 30;
+
+/// What the user said in `agent`'s chat, as its transcript has it; nothing
+/// when it can't be found or read (the page then pins none).
+// shortcut: reads the transcript's end on each poll; cache by its file's stamp if the phone server shows load.
+fn pane_said(agent: &AgentInfo) -> Vec<String> {
+    let homes = crate::ai_work::locate::Homes::here();
+    let found = homes
+        .ok_or_else(|| "no home folder".to_owned())
+        .and_then(|homes| crate::chat::source::find(agent, &homes))
+        .and_then(crate::chat::tail::said);
+    found.unwrap_or_else(|why| {
+        tracing::debug!("phone: the user's words in pane {}: {why}", agent.pane_id);
+        Vec::new()
+    })
+}
+
 fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     let (project, label) = match agent_of(project, slug, pane) {
         Ok(found) => found,
@@ -1233,6 +1251,11 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
         }
         None => (json!([]), Value::Null),
     };
+    // The user's last words in its chat: the page keeps the last of them
+    // scrolled past on top.
+    let said = agent.as_ref().map_or(Value::Array(Vec::new()), |agent| {
+        json!(pane_said(agent).into_iter().rev().take(SAID).rev().collect::<Vec<_>>())
+    });
     let all = lines == "all";
     let want = lines
         .parse()
@@ -1250,7 +1273,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
                 let text = chat_and_screen(path, &screen);
                 let (ask, working, sides) = pane_ask(&project.id, pane);
                 let (modes, mode) = modes(&screen);
-                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode });
+                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "said": said });
                 Reply::json(&reply)
             }
             Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
@@ -1272,7 +1295,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
                 || (!all && rows.is_some_and(|rows| rows > text.lines().count() as u64));
             let (ask, working, sides) = pane_ask(&project.id, pane);
             let (modes, mode) = modes(&text);
-            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode });
+            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "said": said });
             Reply::json(&reply)
         }
         Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),

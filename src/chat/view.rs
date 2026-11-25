@@ -2084,6 +2084,9 @@ impl Gerdr {
             let tip = format!("Switch the agent to {}, or to its next mode with", view.modes[i]);
             return Some(crate::tooltip::Tooltip::new(&tip, rect).key(MODE_KEYS[0].chord));
         }
+        if let Some(bar) = chrome::chat_pinned(&view).filter(|bar| bar.to_f64().contains(pos)) {
+            return Some(crate::tooltip::Tooltip::new("Go to your message", bar));
+        }
         let button = chrome::chat_bottom_button(&view)?;
         (button.to_f64().contains(pos))
             .then(|| crate::tooltip::Tooltip::new("Go to the end", button).key("Shift+G"))
@@ -2158,6 +2161,12 @@ impl Gerdr {
             }
             ChatHit::Send => self.chat_send(&pane_id),
             ChatHit::Bottom => self.chat_scroll_to(&pane_id, None),
+            ChatHit::Pinned(i) => {
+                chat.picked = Some(i);
+                chat.focus = ChatFocus::List;
+                let to = chrome::chat_item_span(&view, i).map_or(0, |(y, _)| y);
+                self.chat_scroll_to(&pane_id, Some(f64::from(to)));
+            }
             ChatHit::Mode(i) => {
                 if let Some(want) = view.modes.get(i) {
                     self.chat_pick_mode(&pane_id, want);

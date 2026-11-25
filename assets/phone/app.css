@@ -368,6 +368,17 @@ body.with-bar main { padding-bottom: calc(var(--bar-h, 110px) + 20px); }
   color: var(--text); background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow);
 }
 body.with-bar #end { bottom: calc(var(--kb, 0px) + var(--bar-h, 110px) + 12px); }
+/* On an agent's page scrolled up, the user's last words scrolled past stay
+   under the head, three lines at most; a tap goes to them. */
+#said {
+  position: fixed; z-index: 1; left: 0; right: 0; top: 0; margin: 0;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+  padding: 8px calc(16px + env(safe-area-inset-right)) 8px calc(16px + env(safe-area-inset-left));
+  font: inherit; font-size: 15px; text-align: left; white-space: pre-line; overflow-wrap: anywhere;
+  color: var(--text); background: color-mix(in srgb, var(--accent) var(--tint), var(--card));
+  border: 0; border-bottom: 1px solid var(--line); border-radius: 0; box-shadow: var(--shadow);
+}
+#said[hidden] { display: none; }
 
 /* A stage's page, as the desktop has it, in words. */
 .page-head h2 { font-size: 20px; margin: 18px 0 2px; }

@@ -653,7 +653,7 @@ async function pane(p, s, id) {
   const modes = d.modes?.length ? `<div class="modes" role="group" aria-label="Agent mode">${d.modes.map((m) =>
     `<button type="button" data-mode="${esc(m)}" aria-pressed="${m === d.mode}">${esc(m)}</button>`).join("")}</div>` : "";
   return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
-    ask, askId: a?.ask || "", asking: !!a?.questions?.length, suggestion: d.suggestion || "",
+    said: d.said || [], ask, askId: a?.ask || "", asking: !!a?.questions?.length, suggestion: d.suggestion || "",
     modes, modesKey: JSON.stringify([d.modes, d.mode]),
     sides: sideCard(id, d.sides),
     bar: `<div id="asked"></div><div id="sides"></div><button type="button" id="suggest" hidden></button><form id="say"><ul id="slash" hidden></ul><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
@@ -920,6 +920,12 @@ async function render(fresh, force, keepBottom) {
       else if (!fresh) window.scrollTo(0, y);
     }
     if (fresh && !v.pane) window.scrollTo(0, 0);
+    // Where the user's words are in the output, found again as it changes.
+    const saidNow = v.pane ? `${shown}\0${JSON.stringify(v.said)}` : "";
+    if (saidNow !== saidKey) {
+      saidKey = saidNow;
+      findSaid(v.pane ? v.said : []);
+    }
     endButton();
   } catch (e) {
     if (hash !== location.hash || read !== reads) return;
@@ -1177,7 +1183,73 @@ window.visualViewport?.addEventListener("scroll", onKeyboard);
 function endButton() {
   const below = document.body.scrollHeight - window.innerHeight - window.scrollY;
   toEnd.hidden = here()[0] !== "pane" || below < 120;
+  saidBar(below);
 }
+
+// The user's words in a pane's output, oldest first, each by a range on
+// its first letter: the last one scrolled under the head shows on top
+// (#said) while the page is scrolled up from its end, as Claude Code does.
+let saids = [];
+let saidKey = "";
+const saidEl = document.getElementById("said");
+const headEl = document.querySelector("header");
+
+// Each of `said` (what the transcript says the user wrote) is found by its
+// first words, newest first, each before the one found after it.
+function findSaid(said) {
+  saids = [];
+  const term = main.querySelector(".term");
+  if (!term || !said.length) return;
+  const nodes = [];
+  let all = "";
+  const walk = document.createTreeWalker(term, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) { nodes.push([n, all.length]); all += n.data; }
+  let bound = all.length;
+  for (const text of [...said].reverse()) {
+    if (bound < 0) break;
+    // A TUI wraps and pads lines: only the first words of its first line.
+    const first = text.split("\n").map((l) => l.trim()).find(Boolean) || "";
+    const needle = first.split("  ")[0].slice(0, 24);
+    if (needle.length < 3) continue;
+    const at = all.lastIndexOf(needle, bound);
+    if (at < 0) continue;
+    bound = at - 1;
+    const [node, from] = nodes.findLast(([, from]) => from <= at);
+    const range = document.createRange();
+    range.setStart(node, at - from);
+    range.setEnd(node, Math.min(node.data.length, at - from + 1));
+    saids.unshift({ range, text: text.trim() });
+  }
+}
+
+function saidBar(below) {
+  const head = headEl.getBoundingClientRect().bottom;
+  let last = null;
+  let next = null;
+  if (here()[0] === "pane" && below >= 120) {
+    for (const s of saids) {
+      const top = s.range.getBoundingClientRect().top;
+      if (top >= head) { next = top; break; }
+      last = s;
+    }
+  }
+  saidEl.said = last;
+  if (last) {
+    saidEl.style.top = `${head}px`;
+    if (saidEl.textContent !== last.text) saidEl.textContent = last.text;
+    saidEl.hidden = false;
+  }
+  // Not over the user's next words, starting under it.
+  saidEl.hidden = !last || (next !== null && next < saidEl.getBoundingClientRect().bottom);
+}
+saidEl.addEventListener("click", () => {
+  const s = saidEl.said;
+  if (!s) return;
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const head = headEl.getBoundingClientRect().bottom;
+  const top = s.range.getBoundingClientRect().top + window.scrollY - head - 8;
+  window.scrollTo({ top, behavior: still ? "auto" : "smooth" });
+});
 toEnd.addEventListener("click", () => {
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
   window.scrollTo({ top: document.body.scrollHeight, behavior: still ? "auto" : "smooth" });
@@ -1202,6 +1274,8 @@ window.addEventListener("hashchange", () => {
   document.body.classList.remove("with-bar");
   barFor = null;
   depth.pane = "";
+  saids = [];
+  saidKey = "";
   render(true);
 });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) render(false); });

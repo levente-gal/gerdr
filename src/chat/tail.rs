@@ -613,6 +613,27 @@ fn in_database(kind: AgentKind) -> bool {
     matches!(kind, AgentKind::OpenCode | AgentKind::Cursor)
 }
 
+/// What the user said in `source`'s chat, oldest first, as the end of it
+/// (`CHAT_TAIL`) holds: read once, for the phone's agent page.
+pub fn said(source: Source) -> Result<Vec<String>, String> {
+    let mut chat = Chat::new(source);
+    let items = match in_database(chat.source.agent) {
+        true => {
+            chat.read_rows()?;
+            chat.snapshot
+        }
+        false => {
+            chat.read().map_err(|err| err.to_string())?;
+            chat.reader.items().to_vec()
+        }
+    };
+    let said = items.into_iter().filter_map(|item| match item {
+        Item::User { text, .. } => Some(text),
+        _ => None,
+    });
+    Ok(said.collect())
+}
+
 impl Chat {
     fn new(source: Source) -> Self {
         Self {

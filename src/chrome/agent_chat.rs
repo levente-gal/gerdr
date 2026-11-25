@@ -211,6 +211,9 @@ pub enum ChatHit {
     /// The button at the list's foot while it is scrolled up: goes to the
     /// last item and follows new ones.
     Bottom,
+    /// The bar at the list's top while it is scrolled up past the user's
+    /// words: row `n`, the last of them. Goes to it.
+    Pinned(usize),
     /// One of the agent's modes under the reply box, by its place in
     /// `ChatView::modes`: switches the agent to it.
     Mode(usize),
@@ -297,6 +300,9 @@ impl ChatLayout {
         let (items, content) = stacked(view, parts.column.1);
         if bottom_button(view, &parts, content).is_some_and(on) {
             return Some(ChatHit::Bottom);
+        }
+        if let Some((i, ..)) = pinned(view, &parts, &items, content).filter(|(_, bar, _)| on(*bar)) {
+            return Some(ChatHit::Pinned(i));
         }
         let top = top_of(view, content, self.list.size.h);
         if thumb_of(&parts, content, top).is_some_and(|thumb| thumb.takes(pos)) {
@@ -1392,6 +1398,57 @@ fn bottom_button(view: &ChatView, parts: &Parts, content: i32) -> Option<Rect> {
     })
 }
 
+/// The bar at the list's top while it is scrolled up from its end past
+/// the user's words: the last of their rows above what shows, where the bar
+/// goes, and its layout. A subagent's prompt isn't the user's.
+fn pinned(
+    view: &ChatView,
+    parts: &Parts,
+    items: &[(i32, Rc<Laid>)],
+    content: i32,
+) -> Option<(usize, Rect, Laid)> {
+    let list = parts.list;
+    let top = top_of(view, content, list.size.h);
+    if content - list.size.h - top <= card_row() {
+        return None;
+    }
+    let rows = rows::rows(&view.items, &view.unfolded);
+    let mut said = (rows.iter().enumerate().take(items.len())).filter_map(|(i, row)| match row {
+        Row::Item(j) => match &view.items[*j] {
+            Item::User { text, .. } => Some((i, text)),
+            _ => None,
+        },
+        _ => None,
+    });
+    // The last above what shows, and the one after it.
+    let mut last = None;
+    let next = said.find(|&(i, text)| {
+        let above = items[i].0 < top;
+        if above {
+            last = Some((i, text));
+        }
+        !above
+    });
+    let (i, text) = last?;
+    let laid = lay_pinned(text, parts.column.1);
+    let bar = rect(parts.column.0, list.loc.y + PART_GAP / 2, parts.column.1, laid.h);
+    // Over half the list, it would hide what it is there to help read; and
+    // it would hide the user's next words starting under it.
+    let under = next.is_some_and(|(n, _)| items[n].0 < top + bar.size.h + PART_GAP);
+    (bar.size.h + PART_GAP <= list.size.h / 2 && !under).then_some((i, bar, laid))
+}
+
+/// Where `view`'s bar of the user's words at the list's top is, while it
+/// shows.
+pub fn chat_pinned(view: &ChatView) -> Option<Rect> {
+    if message(view).is_some() {
+        return None;
+    }
+    let parts = parts(view);
+    let (items, content) = stacked(view, parts.column.1);
+    pinned(view, &parts, &items, content).map(|(_, bar, _)| bar)
+}
+
 /// Where `view`'s button to the list's end is, while it shows.
 pub fn chat_bottom_button(view: &ChatView) -> Option<Rect> {
     if message(view).is_some() {
@@ -1728,6 +1785,25 @@ impl Laid {
 /// all"), beside its id for it being unfolded.
 pub fn whole_key(id: &str) -> String {
     format!("{id}\u{0}whole")
+}
+
+/// The user's words `text` on the bar at the list's top, `w` wide: their
+/// first `PROMPT_PEEK` lines, an ellipsis ending them when there is more.
+fn lay_pinned(text: &str, w: i32) -> Laid {
+    let blocks: Vec<DocBlock> = paragraphs(text).map(|p| DocBlock::Para(p.into())).collect();
+    let (mut pieces, mut h) = doc_layout::stack_of(&blocks, (w - 2 * BUBBLE_PAD).max(1));
+    let more = peek(&mut pieces, &mut h, PROMPT_PEEK);
+    if more > 0
+        && let Some((_, DocPiece::Text { text, .. })) = (pieces.iter_mut())
+            .rev()
+            .find(|(_, piece)| matches!(piece, DocPiece::Text { .. }))
+    {
+        text.push('…');
+    }
+    let mut l = Laid::default();
+    l.put(rect(0, 0, w, h + 2 * BUBBLE_PAD), Bit::Bubble);
+    l.doc(pieces, (BUBBLE_PAD, BUBBLE_PAD));
+    l
 }
 
 /// `item` laid out for a column `w` wide, in `nest` from its left, as
@@ -2208,6 +2284,25 @@ impl Painter {
                     self.chat_item(c, view, (i, laid), at, parts.column.1, scale, p);
                 }
             });
+            if let Some((_, bar, laid)) = pinned(view, &parts, &items, content) {
+                // A ground across the list, so no item shows beside it.
+                let at = parts.list.loc;
+                let strip = rect(at.x, at.y, parts.list.size.w, bar.size.h + PART_GAP);
+                let (x, y, w, h) = rect_px(here(strip), scale);
+                c.fill(x as i32, y as i32, w as i32, h as i32, p.terminal_background);
+                rule(&mut c, strip.loc.y + strip.size.h - 1);
+                let lit = matches!(view.hover, Some(ChatHit::Pinned(_)));
+                for (rect, bit) in &laid.bits {
+                    let rect = here(Rectangle::new(rect.loc + bar.loc, rect.size));
+                    match bit {
+                        Bit::Bubble if lit => {
+                            let (x, y, w, h) = rect_px(rect, scale);
+                            c.rounded(x, y, w, h, ROW_RADIUS * scale as f32, p.selected);
+                        }
+                        bit => self.chat_bit(&mut c, rect, bit, scale, p),
+                    }
+                }
+            }
             if let Some(thumb) = thumb_of(&parts, content, top) {
                 let thumb = Thumb {
                     track: here(thumb.track),
@@ -3383,6 +3478,56 @@ pub(super) mod tests {
             Some(ChatHit::Bottom)
         );
         assert_eq!(chat_bottom_button(&v), Some(button), "its tooltip's place");
+    }
+
+    #[test]
+    fn the_last_words_scrolled_past_stay_on_top() {
+        let mut v = view();
+        let answer = |i: usize| Item::Assistant {
+            id: format!("a{i}"),
+            at: None,
+            blocks: Arc::new(vec![DocBlock::Para("an answer".into())]),
+        };
+        let said = |id: &str, text: String| Item::User {
+            id: id.into(),
+            at: None,
+            text,
+        };
+        let long = (0..12).map(|i| format!("line {i}")).collect::<Vec<_>>();
+        let mut all = vec![said("u0", long.join("\n\n"))];
+        all.extend((0..80).map(answer));
+        all.push(said("u1", "the last".into()));
+        all.extend((100..140).map(answer));
+        v.items = Arc::new(all);
+        let p = parts(&v);
+        let (items, content) = stacked(&v, p.column.1);
+        // At the top and at the end, none.
+        assert!(pinned(&v, &p, &items, content).is_none());
+        v.top = f64::MAX;
+        assert!(pinned(&v, &p, &items, content).is_none());
+        // Among the answers to the first words: their first three lines.
+        v.top = f64::from(items[40].0);
+        let (i, bar, laid) = pinned(&v, &p, &items, content).expect("a bar");
+        assert_eq!(i, 0);
+        assert_eq!(bar.loc.y, p.list.loc.y + PART_GAP / 2);
+        let texts: Vec<&str> = (laid.bits.iter())
+            .filter_map(|(_, bit)| match bit {
+                Bit::Doc(DocPiece::Text { text, .. }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, ["line 0", "line 1", "line 2…"]);
+        assert_eq!(
+            chat_layout(&v).hit(&v, middle(bar)),
+            Some(ChatHit::Pinned(0))
+        );
+        assert_eq!(chat_pinned(&v), Some(bar), "its tooltip's place");
+        // Past the last words, those.
+        v.top = f64::from(items[82].0);
+        assert_eq!(pinned(&v, &p, &items, content).map(|(i, ..)| i), Some(81));
+        // Gone to the last words: they show, uncovered.
+        v.top = f64::from(items[81].0);
+        assert!(pinned(&v, &p, &items, content).is_none());
     }
 
     #[test]
