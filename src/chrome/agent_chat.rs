@@ -1026,7 +1026,15 @@ fn lay_question(view: &ChatView, qs: &[Question], card: &CardView, w: i32, more:
         )];
         match option {
             Some(option) => {
-                let text = label(&option.label, Face::Ui, Mark::Text);
+                // Bold at the page's size: its description under it is a
+                // page note.
+                let text = Bit::Label {
+                    text: option.label.clone(),
+                    face: Face::Bold,
+                    size: Font::Body.size(),
+                    mark: Mark::Text,
+                    centred: false,
+                };
                 bits.push((rect(tx, y, tw, row_h), text));
             }
             None => {

@@ -14,7 +14,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde_json::json;
 use smithay::{
     desktop::Window,
     input::keyboard::{Keysym, ModifiersState},
@@ -1483,15 +1482,9 @@ impl Gerdr {
         };
         for key in keys {
             let name = wait_key_name(key);
-            let sent = match key {
-                WaitKey::Digit(_) => herdr
-                    .call(
-                        "pane.send_input",
-                        json!({ "pane_id": pane_id, "text": name, "keys": [] }),
-                    )
-                    .map(drop),
-                _ => herdr.send_keys(pane_id, &[&name]),
-            };
+            // A digit goes as a key press: as text, Claude types it into its
+            // menu's own-answer row (probed with 2.1.332).
+            let sent = herdr.send_keys(pane_id, &[&name]);
             if let Err(err) = sent {
                 tracing::warn!("pressing {name} in pane {pane_id}: {err}");
                 return self

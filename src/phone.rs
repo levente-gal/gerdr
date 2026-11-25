@@ -567,15 +567,12 @@ fn agent_input(project: &str, slug: &str, pane: &str, line: &str, key: &str) -> 
         herdr.send_agent_line(pane, &line)
     } else if key == "close" && !slug.is_empty() {
         herdr.pane_close(pane)
-    } else if AGENT_KEYS.contains(&key) {
+    } else if AGENT_KEYS.contains(&key)
+        || (key.len() == 1 && key.bytes().all(|b| b.is_ascii_digit()))
+    {
+        // A digit goes as a key press: as text, Claude types it into its
+        // menu's own-answer row.
         herdr.send_keys(pane, &[key])
-    } else if key.len() == 1 && key.bytes().all(|b| b.is_ascii_digit()) {
-        herdr
-            .call(
-                "pane.send_input",
-                json!({ "pane_id": pane, "text": key, "keys": [] }),
-            )
-            .map(drop)
     } else {
         return Reply::error(400, "Nothing to send");
     };
