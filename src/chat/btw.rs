@@ -76,9 +76,17 @@ pub struct Panel {
     pub cut: bool,
 }
 
-/// What ends each agent's panel: its footer says how to close it, and
-/// OpenCode's how to copy.
-const FOOTERS: [&str; 3] = ["to close", "to dismiss", "copy c"];
+/// What starts each agent's footer: how to close it, OpenCode's how to
+/// copy, and Antigravity's how to see more, a row above its close on a
+/// narrow pane.
+const FOOTERS: [&str; 6] = [
+    "to close",
+    "to dismiss",
+    "copy c",
+    "to scroll",
+    "Tab to expand",
+    "Tab to collapse",
+];
 
 /// What an agent draws while it answers, in the answer's place or under
 /// what it has so far: a braille spinner (Cursor, Antigravity), or Claude's
@@ -123,7 +131,11 @@ pub fn panel(rows: &[&str]) -> Option<Panel> {
     trimmed(&mut lines);
     // Antigravity draws the answer as it comes, its spinner under it.
     let working = [lines.first(), lines.last()].into_iter().flatten().any(|l| spinner(l));
-    let footer = footer.map(|i| rows[i]);
+    // Its rows down to the panel's end: a narrow pane wraps it.
+    let footer = footer.map(|i| {
+        let rest = rows[i..].iter().take(3).take_while(|row| !is_rule(row));
+        rest.copied().collect::<Vec<_>>().join(" ")
+    });
     if footer.is_none() && !working {
         return None;
     }
@@ -131,8 +143,8 @@ pub fn panel(rows: &[&str]) -> Option<Panel> {
         question: words(question),
         lines,
         working,
-        scrolls: footer.is_some_and(|f| f.contains("scroll")),
-        cut: footer.is_some_and(|f| f.contains("Tab to expand")),
+        scrolls: footer.as_ref().is_some_and(|f| f.contains("scroll")),
+        cut: footer.as_ref().is_some_and(|f| f.contains("Tab to expand")),
     })
 }
 
@@ -507,6 +519,12 @@ mod tests {
         assert_eq!(p.question, "list the numbers");
         assert_eq!(p.lines, lines(&["one", "two"]));
         assert!(p.cut);
+
+        // Its footer wrapped on a narrow pane, after a Tab.
+        let narrow = " ┃ /btw list the numbers\n ┃\n ┃   one\n ┃   two\n ┃ ↑/↓ to scroll (1-31 of 40) — Tab to collapse · ←/→ to navigate ·\n ┃ Enter/Esc to dismiss\n────\n>";
+        let p = panel(&rows(narrow)).expect("narrow");
+        assert_eq!(p.lines, lines(&["one", "two"]));
+        assert!(p.scrolls && !p.cut);
     }
 
     #[test]
