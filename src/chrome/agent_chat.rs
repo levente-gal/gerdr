@@ -19,7 +19,7 @@ use smithay::{
 };
 
 use super::doc_layout::{self, DocPiece, width_in};
-use super::features::{Font, small_line};
+use super::features::{Font, body_line, small_line};
 use super::glyphs::Face;
 use super::repos::{DIFF_BAR, DIFF_INSET, DIFF_TINT};
 use super::scrollback::{StyledRow, styled_row};
@@ -40,6 +40,7 @@ use crate::{
         menu::{self, Menu},
         questions::CardView,
         rows::{self, Row, Summary},
+        source::NOT_YET,
     },
     herdr::AgentStatus,
     md_blocks::DocBlock,
@@ -99,6 +100,9 @@ pub struct ChatView {
     /// agent whose model gerdr can switch (`chat::model`): the model it is
     /// on, else "Model".
     pub model: Option<String>,
+    /// How full its agent's context is, in words ("context 84k / 1M"),
+    /// where its chat says: in the head, before the status word.
+    pub context: Option<String>,
     /// The user's picks on the card of the ask's questions, while it asks
     /// some.
     pub card: Option<CardView>,
@@ -170,6 +174,7 @@ impl PartialEq for ChatView {
             && self.modes == other.modes
             && self.mode == other.mode
             && self.model == other.model
+            && self.context == other.context
             && self.card == other.card
             && self.picker == other.picker
     }
@@ -217,6 +222,9 @@ pub enum ChatHit {
     Answer(AskReply),
     /// The ask's head row: shows or folds what it would run.
     AskFold,
+    /// "Show whole plan" under a plan ask's peek: opens the plan's card in
+    /// the list instead.
+    AskPlan,
     /// The list's scrollbar.
     Scrollbar,
     /// A command of the `/` menu, by its place among those matching.
@@ -295,6 +303,7 @@ impl ChatLayout {
         {
             return Some(match spot {
                 Spot::Card(hit) => ChatHit::Card(*hit),
+                Spot::Plan => ChatHit::AskPlan,
                 _ => ChatHit::AskFold,
             });
         }
@@ -347,6 +356,7 @@ impl ChatLayout {
             Some(Spot::ShowAll) => ChatHit::ShowAll(i),
             Some(Spot::Key(key)) => ChatHit::Key(key),
             Some(Spot::Card(hit)) => ChatHit::Card(hit),
+            Some(Spot::Plan) => ChatHit::AskPlan,
             None => ChatHit::Item(i),
         })
     }
@@ -484,14 +494,6 @@ pub fn chat_clocks(view: &ChatView, now: u64) -> Vec<(String, Rect, f32)> {
     head.into_iter().chain(rows).collect()
 }
 
-/// Where the line sweeping under the head goes while its agent works
-/// (output coordinates): along the head's bottom edge.
-pub fn chat_sweep(view: &ChatView) -> Option<Rect> {
-    let head = parts(view).head;
-    let h = super::features::SWEEP_H;
-    works(view).then(|| rect(head.loc.x, head.loc.y + head.size.h - h, head.size.w, h))
-}
-
 /// Where the rows in sight of `view`'s list hold `bit` (output
 /// coordinates); none while the list shows a message instead.
 fn in_sight(view: &ChatView, parts: &Parts, bit: &Bit) -> Vec<Rect> {
@@ -597,7 +599,7 @@ const ASK_LINES: usize = 12;
 pub const ASK_BUTTONS: [(ChatHit, &str); 3] = [
     (ChatHit::Answer(AskReply::Allow), "Allow"),
     (ChatHit::Answer(AskReply::Deny), "Deny"),
-    (ChatHit::ShowScreen, "Show screen"),
+    (ChatHit::ShowScreen, SHOW_SCREEN),
 ];
 
 /// The questions' card's buttons, as they say them: Next, or Submit on the
@@ -632,7 +634,7 @@ pub fn ask_key(ask: &str) -> String {
 /// Whether `ask` is plan mode asking to go ahead with its plan: its input
 /// is the plan's markdown.
 pub fn is_plan(ask: &PendingAsk) -> bool {
-    ask.tool == "ExitPlanMode"
+    ask.tool == crate::chat::live::PLAN_TOOL
 }
 
 /// Whether `ask`'s card shows what it would run, as `unfolded` has it: a
@@ -1265,53 +1267,102 @@ fn agent_name(label: &str) -> &str {
     }
 }
 
-/// What the list says in its items' place, and whether "Show screen" goes
-/// under it; none while it shows items.
-fn message(view: &ChatView) -> Option<(&str, bool)> {
+/// What the list says in its items' place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Say<'a> {
+    /// What goes on, centred: "Reading the chat…".
+    Note(&'a str),
+    /// Why there is no chat, centred, with "Show screen" under it.
+    Problem(&'a str),
+    /// Nothing said yet: where to start, at the list's top, with a link to
+    /// the screen.
+    Start,
+}
+
+/// What the list says in its items' place; none while it shows items.
+fn message(view: &ChatView) -> Option<Say<'_>> {
     match &view.reading {
-        Reading::Missing(why) | Reading::Failed(why) => Some((why, true)),
+        Reading::Failed(why) => Some(Say::Problem(why)),
+        Reading::Missing(why) if why != NOT_YET => Some(Say::Problem(why)),
         _ if !view.running.is_empty() || works(view) => None,
-        Reading::Finding if view.items.is_empty() => Some(("Reading the chat…", false)),
-        Reading::Read if view.items.is_empty() => Some(("Nothing said yet", false)),
+        // The agent writes its chat with its first message.
+        Reading::Missing(_) => Some(Say::Start),
+        Reading::Finding if view.items.is_empty() => Some(Say::Note("Reading the chat…")),
+        Reading::Read if view.items.is_empty() => Some(Say::Start),
         _ => None,
     }
 }
 
-/// The list's message laid out: its lines centred in the `list`, wrapped
-/// to three at most, and "Show screen" under them.
+/// What the list says before the agent's first message.
+const START: &str = "Type your message below";
+const START_NOTE: &str = "A placeholder until the agent's first message";
+const SHOW_SCREEN: &str = "Show screen";
+
+/// The list's message laid out: its lines (wrapped to three at most) and
+/// "Show screen" under them, centred in the `list`; a start's at its top,
+/// its first line the larger one.
 struct Message {
     lines: Vec<(String, Rect)>,
     screen: Option<Rect>,
+    start: bool,
 }
 
 /// How many lines a message takes at most.
 const MESSAGE_LINES: usize = 3;
 
 fn message_layout(view: &ChatView, list: Rect) -> Option<Message> {
-    let (text, screen) = message(view)?;
+    let say = message(view)?;
     let room = (list.size.w - 2 * PAD).max(1);
-    let rows = soft_rows(text, room as f32);
-    let n = rows.len().min(MESSAGE_LINES);
+    let row = |y: i32, h: i32| Rectangle::new((list.loc.x + PAD, y).into(), (room, h).into());
+    let centred = |y: i32, w: i32, h: i32| {
+        Rectangle::new(
+            (list.loc.x + (list.size.w - w) / 2, y).into(),
+            (w, h).into(),
+        )
+    };
+    let wrapped = |text: &str, mut y: i32, lines: &mut Vec<(String, Rect)>| {
+        let rows = soft_rows(text, room as f32);
+        let n = rows.len().min(MESSAGE_LINES);
+        for (i, at) in rows.iter().take(n).enumerate() {
+            // The last line shown takes the rest, cut short as it is painted.
+            let end = if i + 1 == n { text.len() } else { at.end };
+            lines.push((text[at.start..end].trim().to_owned(), row(y, small_line())));
+            y += small_line();
+        }
+        y
+    };
+    let mut lines = Vec::new();
+    let (text, screen) = match say {
+        Say::Start => {
+            let top = list.loc.y + 2 * PART_GAP;
+            lines.push((START.to_owned(), row(top, body_line())));
+            let y = wrapped(START_NOTE, top + body_line(), &mut lines);
+            let w = button_width(SHOW_SCREEN);
+            let link = centred(y + PART_GAP / 2, w, card_row());
+            return Some(Message {
+                lines,
+                screen: Some(link),
+                start: true,
+            });
+        }
+        Say::Note(text) => (text, false),
+        Say::Problem(text) => (text, true),
+    };
+    let n = soft_rows(text, room as f32).len().min(MESSAGE_LINES);
     let button = if screen {
         PART_GAP * 2 + quit_button()
     } else {
         0
     };
-    let mut y = list.loc.y + (list.size.h - n as i32 * small_line() - button) / 2;
-    let mut lines = Vec::new();
-    for (i, row) in rows.iter().take(n).enumerate() {
-        // The last line shown takes the rest, cut short as it is painted.
-        let end = if i + 1 == n { text.len() } else { row.end };
-        let rect = Rectangle::new((list.loc.x + PAD, y).into(), (room, small_line()).into());
-        lines.push((text[row.start..end].trim().to_owned(), rect));
-        y += small_line();
-    }
-    let screen = screen.then(|| {
-        let w = button_width("Show screen");
-        let x = list.loc.x + (list.size.w - w) / 2;
-        Rectangle::new((x, y + PART_GAP * 2).into(), (w, quit_button()).into())
-    });
-    Some(Message { lines, screen })
+    let y = list.loc.y + (list.size.h - n as i32 * small_line() - button) / 2;
+    let y = wrapped(text, y, &mut lines);
+    let screen =
+        screen.then(|| centred(y + PART_GAP * 2, button_width(SHOW_SCREEN), quit_button()));
+    Some(Message {
+        lines,
+        screen,
+        start: false,
+    })
 }
 
 /// The items laid out for a column `w` wide: each one's top in the list
@@ -1425,13 +1476,18 @@ const WORKING: &str = "working";
 fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
     let mut l = Laid::default();
     let open = ask_open(ask, &view.unfolded);
+    // A plan's gist is its first line, which its markdown shows.
+    let gist = match is_plan(ask) {
+        true => String::new(),
+        false => short(&ask.gist, view.cwd.as_deref()),
+    };
     l.head(Head {
         x: 0,
         w,
         open,
         name: if is_plan(ask) { "Plan" } else { &ask.tool },
         bold: true,
-        gist: &short(&ask.gist, view.cwd.as_deref()),
+        gist: &gist,
         tail: Vec::new(),
         running: false,
         path: false,
@@ -1456,13 +1512,14 @@ fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
         l.doc(pieces, (ix, top));
         if more > 0 {
             let text = match more {
-                1 => "1 more line in the chat".to_owned(),
-                n => format!("{n} more lines in the chat"),
+                1 => "Show whole plan (1 more line)".to_owned(),
+                n => format!("Show whole plan ({n} more lines)"),
             };
-            l.put(
-                rect(ix, l.below(), iw, small_line()),
-                label(&text, Face::Ui, Mark::Muted),
-            );
+            let row = rect(ix, l.below(), iw, small_line());
+            let wide = width_in(&text, Face::Ui, font_size()).ceil() as i32;
+            l.put(row, label(&text, Face::Ui, Mark::Link));
+            l.spots
+                .push((rect(ix, row.loc.y, wide.min(iw), small_line()), Spot::Plan));
         }
     } else if open {
         let (ix, iw) = (CHEVRON_WIDTH, (w - CHEVRON_WIDTH).max(1));
@@ -1626,6 +1683,8 @@ enum Spot {
     Key(WaitKey),
     /// A part of the questions' card.
     Card(CardHit),
+    /// A plan ask's "Show whole plan".
+    Plan,
 }
 
 /// A colour of a card's words.
@@ -2346,6 +2405,15 @@ impl Painter {
         let (dot, word) = standing(view);
         status_dot(&mut c, centred_dot(head_slot(head)), dot, scale, p);
         let (hx, hend) = phys(head, scale);
+        // How full its context is, before the word, while it leaves the
+        // label half the head.
+        let said = match &view.context {
+            Some(context) if word.is_empty() => context.clone(),
+            Some(context) => format!("{context} \u{b7} {word}"),
+            None => word.to_owned(),
+        };
+        let fits = self.text_width(&said, small_font_size(), scale) <= (hend - hx) / 2.0;
+        let word = if fits { said.as_str() } else { word };
         let pad = px(PAD) as f32;
         // While it works, its clock is composed after the word.
         let word_end = match head_clock(view, parts.head) {
@@ -2381,21 +2449,41 @@ impl Painter {
         // The list, or what it says in its place.
         let list = here(parts.list);
         if let Some(message) = message_layout(view, parts.list) {
-            for (text, rect) in &message.lines {
-                self.centered(&mut c, text, font_size(), here(*rect), scale, p.muted);
+            for (i, (text, rect)) in message.lines.iter().enumerate() {
+                let (size, color) = match (message.start, i) {
+                    (true, 0) => (font_size(), p.text),
+                    (true, _) => (small_font_size(), p.muted),
+                    (false, _) => (font_size(), p.muted),
+                };
+                self.centered(&mut c, text, size, here(*rect), scale, color);
             }
-            if let Some(button) = message.screen {
-                let lit = view.hover == Some(ChatHit::ShowScreen);
-                let style = ButtonStyle::Plain;
-                self.button(
-                    &mut c,
-                    "Show screen",
-                    here(button),
-                    (lit, false),
-                    style,
-                    scale,
-                    p,
-                );
+            let lit = view.hover == Some(ChatHit::ShowScreen);
+            match message.screen {
+                // A link, lit like the "Earlier messages" row.
+                Some(link) if message.start => {
+                    let hover = if lit { 1.0 } else { 0.0 };
+                    self.row_highlight(&mut c, here(link), (false, hover), scale, p);
+                    self.centered(
+                        &mut c,
+                        SHOW_SCREEN,
+                        font_size(),
+                        here(link),
+                        scale,
+                        p.accent,
+                    );
+                }
+                Some(button) => {
+                    self.button(
+                        &mut c,
+                        SHOW_SCREEN,
+                        here(button),
+                        (lit, false),
+                        ButtonStyle::Plain,
+                        scale,
+                        p,
+                    );
+                }
+                None => {}
             }
         } else {
             let (items, content) = stacked(view, parts.column.1);
@@ -2876,6 +2964,7 @@ pub(super) mod tests {
             modes: Vec::new(),
             mode: None,
             model: None,
+            context: None,
             card: None,
             picker: None,
         }
@@ -3768,15 +3857,32 @@ pub(super) mod tests {
         // While it works, its working row shows instead.
         assert_eq!(message(&v), None);
         v.status = AgentStatus::Idle;
-        assert_eq!(message(&v), Some(("Reading the chat…", false)));
+        assert_eq!(message(&v), Some(Say::Note("Reading the chat…")));
         v.reading = Reading::Read;
-        assert_eq!(message(&v), Some(("Nothing said yet", false)));
+        assert_eq!(message(&v), Some(Say::Start));
         let layout = chat_layout(&v);
         assert_eq!(layout.content, 0);
         assert!(chat_thumb(&v).is_none());
+        // Before the agent's first message: where to start, at the top, with
+        // a link to the screen under it.
+        v.reading = Reading::Missing(NOT_YET.into());
+        assert_eq!(message(&v), Some(Say::Start));
+        let list = parts(&v).list;
+        let m = message_layout(&v, list).unwrap();
+        assert!(m.start);
+        assert_eq!(m.lines[0].0, START);
+        assert_eq!(m.lines[1].0, START_NOTE);
+        let link = m.screen.expect("Show screen");
+        assert!(link.loc.y < list.loc.y + list.size.h / 3);
+        assert_eq!(
+            chat_layout(&v).hit(&v, middle(link)),
+            Some(ChatHit::ShowScreen)
+        );
         let why = "Couldn't find this agent's chat. Its screen still works.";
         v.reading = Reading::Missing(why.into());
+        assert_eq!(message(&v), Some(Say::Problem(why)));
         let m = message_layout(&v, parts(&v).list).unwrap();
+        assert!(!m.start);
         assert_eq!(m.lines.len(), 1);
         assert_eq!(m.lines[0].0, why);
         let button = m.screen.expect("Show screen");
@@ -3876,7 +3982,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn the_working_row_spinner_sweep_and_clocks_show_only_while_it_works() {
+    fn the_working_row_spinner_and_clocks_show_only_while_it_works() {
         let mut v = view();
         v.top = 1e9;
         let w = parts(&v).column.1;
@@ -3894,8 +4000,6 @@ pub(super) mod tests {
         assert!(clocks.iter().all(|(text, ..)| text == "1m 12s"));
         assert!(inside(parts(&v).head, clocks[0].1));
         assert!(inside(row, clocks[1].1));
-        let sweep = chat_sweep(&v).expect("a sweep");
-        assert!(inside(parts(&v).head, sweep));
         // A press on the row picks nothing.
         assert_eq!(chat_layout(&v).hit(&v, middle(row)), None);
         // In a short pane scrolled up, the row is out of view: only the
@@ -3915,7 +4019,6 @@ pub(super) mod tests {
                 .is_some_and(|(_, l)| l.bits.iter().any(|(_, b)| *b == Bit::Spinner));
             !row && chat_spinners(v).is_empty()
                 && chat_clocks(v, 73_000).is_empty()
-                && chat_sweep(v).is_none()
         };
         for status in [AgentStatus::Idle, AgentStatus::Blocked, AgentStatus::Done] {
             assert!(still(&ChatView { status, ..view() }), "{status:?}");
@@ -3928,7 +4031,7 @@ pub(super) mod tests {
             ask: Some(ask()),
             ..view()
         }));
-        // No turn start known: the row and sweep, no clocks.
+        // No turn start known: the row, no clocks.
         v.since = None;
         assert!(chat_clocks(&v, 73_000).is_empty());
         assert_eq!(chat_spinners(&v).len(), 1);
@@ -3985,8 +4088,13 @@ pub(super) mod tests {
         let shown = text(laid);
         assert_eq!(shown.first().map(String::as_str), Some("Retry the upload"));
         assert!(shown.len() > 3 && shown.len() < 31, "{shown:?}");
-        let more = format!("{} more lines in the chat", 31 - shown.len());
+        let more = format!("Show whole plan ({} more lines)", 31 - shown.len());
         assert!(labels(laid).contains(&more), "{:?}", labels(laid));
+        // The link opens the plan's card in the list.
+        let (at, _) = p.card.as_ref().unwrap();
+        let (r, _) = (laid.spots.iter()).find(|(_, s)| *s == Spot::Plan).unwrap();
+        let on = Point::from(((at.x + r.loc.x + 2) as f64, (at.y + r.loc.y + 2) as f64));
+        assert_eq!(chat_layout(&v).hit(&v, on), Some(ChatHit::AskPlan));
         // Folded, as other input shows unfolded.
         v.unfolded.insert(ask_key("p1"));
         let q = parts(&v);

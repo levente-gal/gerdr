@@ -8,7 +8,6 @@ const titleEl = document.getElementById("title");
 const back = document.getElementById("back");
 const seen = document.getElementById("seen");
 const work = document.getElementById("work");
-const sweep = document.getElementById("sweep");
 const offline = document.getElementById("offline");
 const note = document.getElementById("note");
 const bar = document.getElementById("bar");
@@ -663,13 +662,16 @@ async function pane(p, s, id) {
   const opener = d.menu ? `<button type="button" class="model" data-model-menu aria-label="Model">${esc(d.model || "Model")}</button>` : "";
   const model = d.models?.length ? `<select class="model" aria-label="Model">${now}${d.models.map((m) =>
     `<option value="${esc(m.id)}"${m.id === d.model_id ? " selected" : ""}>${esc(m.name)}</option>`).join("")}</select>` : opener;
-  const modes = group || model ? `<div class="modes-row">${group}${model}</div>` : "";
+  // How full its context is, as gerdr's chat head says it.
+  const context = d.context ? `<span class="context">${esc(d.context)}</span>` : "";
+  const modes = group || model || context ? `<div class="modes-row">${group}${context}${model}</div>` : "";
   return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
     said: d.said || [], ask, askId: a?.ask || "", asking: !!a?.questions?.length, suggestion: d.suggestion || "",
-    modes, modesKey: JSON.stringify([d.modes, d.mode, d.models, d.model, d.model_id, d.menu]),
+    modes, modesKey: JSON.stringify([d.modes, d.mode, d.models, d.model, d.model_id, d.menu, d.context]),
     picker: d.picker || null, pickerKey: JSON.stringify(d.picker || null),
     sides: sideCard(id, d.sides),
     bar: `<div id="picker"></div><div id="asked"></div><div id="sides"></div><button type="button" id="suggest" hidden></button><form id="say"><ul id="slash" hidden></ul><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
+      <button type="button" id="pic" aria-label="Add an image">Image</button><input type="file" id="picFile" accept="image/*" hidden>
       <button>Send</button></form>${modes}
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
         ${s ? `<button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button>` : ""}</div>` };
@@ -892,11 +894,10 @@ async function render(fresh, force, keepBottom) {
     if (hash !== location.hash || read !== reads) return;
     titleEl.textContent = v.title;
     // A working agent's page: its clock in the head, in place of when it
-    // was read, and the sweep along the head's edge, as on gerdr's chat.
+    // was read, as on gerdr's chat.
     const working = v.since != null;
     work.hidden = !working;
     seen.hidden = working;
-    sweep.hidden = !working;
     if (working) work.querySelector(".clock").dataset.since = v.since;
     else delete work.querySelector(".clock").dataset.since;
     tickClocks();
@@ -1162,6 +1163,56 @@ document.addEventListener("submit", async (e) => {
     suggestShow();
   }
   setTimeout(() => render(false, true), 600);
+});
+
+// An image for the agent: scaled down to a JPEG here, saved by gerdr,
+// and its path put into the reply box, which the agent reads it from.
+const PIC_SIDE = 2048;
+const PIC_MOST = 8 * 1024 * 1024;
+async function addPicture(file) {
+  const line = document.getElementById("line");
+  if (!line || !file?.type.startsWith("image/")) return;
+  let blob;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, PIC_SIDE / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+    [canvas.width, canvas.height] = [Math.round(bitmap.width * scale), Math.round(bitmap.height * scale)];
+    canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    blob = await new Promise((done) => canvas.toBlob(done, "image/jpeg", 0.85));
+  } catch {}
+  if (!blob) return say([{ text: "Couldn't read the image" }], true);
+  if (blob.size > PIC_MOST) return say([{ text: "The image is too big to send, over 8 MB" }], true);
+  let a;
+  try {
+    const res = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "image/jpeg", "X-Gerdr": "phone" }, body: blob });
+    a = await res.json().catch(() => ({ error: `Bad answer (${res.status})` }));
+  } catch {
+    a = { error: "Can't reach gerdr" };
+  }
+  if (a.error) return say([{ text: a.error }], true);
+  const at = line.selectionStart ?? line.value.length;
+  const before = line.value.slice(0, at);
+  const put = `${before && !/\s$/.test(before) ? " " : ""}${a.path} `;
+  line.value = before + put + line.value.slice(at);
+  line.selectionStart = line.selectionEnd = at + put.length;
+  fit(line);
+  line.focus();
+}
+document.addEventListener("click", (e) => {
+  if (e.target.id === "pic") document.getElementById("picFile")?.click();
+});
+document.addEventListener("change", (e) => {
+  if (e.target.id !== "picFile") return;
+  addPicture(e.target.files?.[0]);
+  e.target.value = "";
+});
+document.addEventListener("paste", (e) => {
+  if (e.target.id !== "line") return;
+  const file = [...(e.clipboardData?.files || [])].find((f) => f.type.startsWith("image/"));
+  if (!file) return;
+  e.preventDefault();
+  addPicture(file);
 });
 
 // A box grows with what is written in it, up to five rows, then scrolls:

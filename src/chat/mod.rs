@@ -10,6 +10,7 @@ use crate::{ai_work::AgentKind, md_blocks::DocBlock, text_field::TextField};
 
 pub mod btw;
 pub mod commands;
+pub mod images;
 pub mod menu;
 pub mod mode;
 pub mod model;
@@ -210,6 +211,8 @@ pub struct PaneChat {
     /// The agent's own model menu while its screen shows it
     /// (`model_menu`): the chat shows it, and its keys go to it.
     pub picker: Option<Arc<menu::Menu>>,
+    /// How full its agent's context is, as its chat last said.
+    pub context: Option<crate::ai_work::context::Context>,
 }
 
 /// When an agent's turn began, as herdr's rounds saw its status.
@@ -263,6 +266,8 @@ pub enum Event {
         /// The model the agent is on, where its chat or config says
         /// (`model`).
         model: Option<String>,
+        /// How full its context is, where its chat says.
+        context: Option<crate::ai_work::context::Context>,
     },
     /// No chat found for the pane, and why.
     Missing { pane_id: String, why: String },

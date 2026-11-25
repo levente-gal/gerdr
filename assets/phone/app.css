@@ -67,13 +67,6 @@ header h1 {
 #work { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-size: 12px; white-space: nowrap; }
 #work[hidden] { display: none; }
 #work .clock { font-variant-numeric: tabular-nums; }
-/* While an agent works: a stretch of line sweeping along the head's edge. */
-#sweep { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; }
-#sweep::before {
-  content: ""; position: absolute; top: 0; bottom: 0; left: -30%; width: 30%;
-  background: var(--accent); animation: sweep 1.6s linear infinite;
-}
-@keyframes sweep { to { left: 100%; } }
 #offline { background: var(--bad); color: var(--on-accent); padding: 8px 16px; font-size: 14px; }
 main { padding: 8px 16px 32px; max-width: 760px; margin: 0 auto; }
 h2 {
@@ -94,8 +87,7 @@ main > h2:first-child { margin-top: 12px; }
 }
 .blink { animation: blink 1.6s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) {
-  .blink, .node.pulse .disc, #sweep::before { animation: none !important; }
-  #sweep::before { left: 0; }
+  .blink, .node.pulse .disc { animation: none !important; }
 }
 
 /* A feature's card: the sidebar's, with its tone down its left edge. */
@@ -307,6 +299,7 @@ body.with-bar #note { bottom: calc(var(--kb, 0px) + var(--bar-h, calc(104px + en
 #bar .keys { display: flex; gap: 6px; margin-top: 8px; }
 /* The agent's modes: a segmented choice, the one it is in lit. */
 #bar .modes-row { display: flex; gap: 8px; margin-top: 8px; }
+#bar .modes-row .context { align-self: center; margin-right: auto; color: var(--quiet); font-size: 12px; white-space: nowrap; }
 #bar .modes { display: flex; flex: 1; min-width: 0; padding: 2px; border: 1px solid var(--line); border-radius: 10px; }
 #bar select.model { flex: 0 1 auto; max-width: 45%; min-height: 46px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--raised); color: inherit; font: inherit; text-overflow: ellipsis; }

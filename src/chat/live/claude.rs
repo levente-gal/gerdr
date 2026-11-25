@@ -84,7 +84,7 @@ fn what_of(payload: &Value, ask: &str) -> Option<What> {
         "PermissionRequest" => {
             let tool = text("tool_name")?;
             // A plan reads as its markdown; other input as its JSON.
-            let mut shown = match input["plan"].as_str().filter(|_| tool == "ExitPlanMode") {
+            let mut shown = match input["plan"].as_str().filter(|_| tool == super::PLAN_TOOL) {
                 Some(plan) => plan.to_owned(),
                 None => serde_json::to_string_pretty(input).unwrap_or_default(),
             };
@@ -128,7 +128,8 @@ fn questions_of(input: &Value) -> Vec<Question> {
 /// What the hook prints for the chat's `answer` to an ask for a tool run
 /// with `input`: nothing for `Pass`, so Claude's TUI asks as it always
 /// does. A question's answers go in as the tool's input, its questions
-/// kept.
+/// kept; any other allow gives the input back as it was, as Claude runs
+/// `ExitPlanMode` only with one (a bare allow leaves its menu up).
 fn decision(answer: Answer, input: &Value) -> Option<String> {
     let decision = match (answer.reply, answer.answers) {
         (AskReply::Allow, Some(answers)) => {
@@ -136,7 +137,7 @@ fn decision(answer: Answer, input: &Value) -> Option<String> {
             input["answers"] = json!(answers);
             json!({ "behavior": "allow", "updatedInput": input })
         }
-        (AskReply::Allow, None) => json!({ "behavior": "allow" }),
+        (AskReply::Allow, None) => json!({ "behavior": "allow", "updatedInput": input }),
         (AskReply::Deny, _) => {
             json!({ "behavior": "deny", "message": "Denied from gerdr's chat" })
         }
@@ -326,7 +327,8 @@ mod tests {
         let out: Value =
             serde_json::from_str(&decision(reply(AskReply::Allow), &input).unwrap()).unwrap();
         let allow = json!({"hookSpecificOutput": {
-            "hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}
+            "hookEventName": "PermissionRequest",
+            "decision": {"behavior": "allow", "updatedInput": {"command": "ls"}}
         }});
         assert_eq!(out, allow);
         let out = decision(reply(AskReply::Deny), &input).unwrap();

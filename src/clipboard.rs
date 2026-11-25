@@ -43,6 +43,10 @@ use crate::{Gerdr, input::Overlay};
 /// Mime types announced by a host offer.
 type OfferMimes = Mutex<Vec<String>>;
 
+/// What a paste brings back to the event loop: the overlay it is for, and
+/// the text to type into it or why an image couldn't be pasted.
+pub type Pasted = (Overlay, Result<String, String>);
+
 /// The text mime types gerdr pastes, the most wanted first.
 const TEXT_MIMES: [&str; 4] = [
     "text/plain;charset=utf-8",
@@ -53,6 +57,25 @@ const TEXT_MIMES: [&str; 4] = [
 
 /// The most of the clipboard gerdr reads for a paste.
 const PASTE_LIMIT: u64 = 64 * 1024;
+
+/// The most of an image gerdr reads for a paste into a chat.
+const IMAGE_LIMIT: u64 = 20 * 1024 * 1024;
+
+/// The mime types a paste into overlay `into` asks for, the most wanted
+/// first: text, and an image too in an agent's chat (see `chat::images`).
+fn paste_mimes(into: Overlay) -> impl Iterator<Item = &'static str> {
+    let images = into == Overlay::Chat;
+    TEXT_MIMES.into_iter().chain(
+        crate::chat::images::MIMES
+            .into_iter()
+            .filter(move |_| images),
+    )
+}
+
+/// Whether `mime` is one of an image.
+fn is_image(mime: &str) -> bool {
+    mime.starts_with("image/")
+}
 
 pub struct HostClipboard {
     conn: Connection,
@@ -177,7 +200,8 @@ impl Gerdr {
     /// Read the clipboard's text off the event loop (its owner may be one of
     /// our clients, which needs the loop to answer), for `paste_text` into
     /// overlay `into`: not into one opened later, when the owner is slow.
-    /// Nothing comes back when the owner writes nothing.
+    /// Nothing comes back when the owner writes nothing. An image pasted
+    /// into a chat is saved to a file, and its path is what is typed.
     pub fn paste_clipboard(&mut self, into: Overlay) {
         let Some(tx) = self.paste_sender() else {
             return;
@@ -186,52 +210,72 @@ impl Gerdr {
             Ok(pipe) => pipe,
             Err(err) => return tracing::warn!("paste: {err}"),
         };
-        if !self.request_clipboard(writer.into()) {
+        let Some(mime) = self.request_clipboard(into, writer.into()) else {
             return;
-        }
+        };
+        let image = is_image(mime);
         std::thread::spawn(move || {
+            let limit = if image { IMAGE_LIMIT } else { PASTE_LIMIT };
             let mut bytes = Vec::new();
-            match (&mut reader).take(PASTE_LIMIT).read_to_end(&mut bytes) {
+            // One byte past the limit tells an image too big from one that fits.
+            match (&mut reader)
+                .take(limit + u64::from(image))
+                .read_to_end(&mut bytes)
+            {
                 Ok(_) if bytes.is_empty() => {}
+                Ok(_) if image && bytes.len() as u64 > limit => {
+                    let most = IMAGE_LIMIT / 1024 / 1024;
+                    let _ = tx.send((into, Err(format!("it is over {most} MB"))));
+                }
+                Ok(_) if image => {
+                    // Spaced off what is around it; a send drops spare spaces.
+                    let saved = crate::chat::images::save(&bytes);
+                    let _ = tx.send((into, saved.map(|path| format!(" {} ", path.display()))));
+                }
                 Ok(_) => {
                     let text = String::from_utf8_lossy(&bytes).into_owned();
-                    let _ = tx.send((into, text));
+                    let _ = tx.send((into, Ok(text)));
                 }
+                Err(err) if image => _ = tx.send((into, Err(err.to_string()))),
                 Err(err) => tracing::debug!("paste: {err}"),
             }
         });
     }
 
     /// Ask whoever owns the clipboard (one of our clients or, through its
-    /// mirror, the host) to write its text into `fd`. False if no one has text.
-    fn request_clipboard(&mut self, fd: OwnedFd) -> bool {
-        for mime in TEXT_MIMES {
-            let Ok(dup) = fd.try_clone() else {
-                return false;
-            };
+    /// mirror, the host) to write what overlay `into` takes into `fd`; the
+    /// mime type asked for. None if no one has any.
+    fn request_clipboard(&mut self, into: Overlay, fd: OwnedFd) -> Option<&'static str> {
+        for mime in paste_mimes(into) {
+            let dup = fd.try_clone().ok()?;
             match request_data_device_client_selection(&self.seat, mime.to_owned(), dup) {
-                Ok(()) => return true,
+                Ok(()) => return Some(mime),
                 Err(SelectionRequestError::InvalidMimetype) => {}
                 Err(SelectionRequestError::ServerSideSelection) => {
                     self.import_selection(SelectionTarget::Clipboard, mime.to_owned(), fd);
-                    return true;
+                    return Some(mime);
                 }
-                Err(SelectionRequestError::NoSelection) => return false,
+                Err(SelectionRequestError::NoSelection) => return None,
             }
         }
-        false
+        None
     }
 
     /// Where the clipboard's text read for a paste goes back to the event
-    /// loop, with the overlay it is for.
-    fn paste_sender(&mut self) -> Option<channel::Sender<(Overlay, String)>> {
+    /// loop, with the overlay it is for; or why an image couldn't be.
+    fn paste_sender(&mut self) -> Option<channel::Sender<Pasted>> {
         if self.notices.paste.is_none() {
-            let (tx, rx) = channel::channel::<(Overlay, String)>();
-            let inserted = self.loop_handle.insert_source(rx, |event, _, state| {
-                if let channel::Event::Msg((into, text)) = event {
-                    state.paste_text(into, &text);
-                }
-            });
+            let (tx, rx) = channel::channel::<Pasted>();
+            let inserted = self
+                .loop_handle
+                .insert_source(rx, |event, _, state| match event {
+                    channel::Event::Msg((into, Ok(text))) => state.paste_text(into, &text),
+                    channel::Event::Msg((_, Err(why))) => {
+                        tracing::warn!("paste of an image: {why}");
+                        state.show_error(format!("Couldn't paste the image: {why}"));
+                    }
+                    channel::Event::Closed => {}
+                });
             match inserted {
                 Ok(_) => self.notices.paste = Some(tx),
                 Err(err) => tracing::warn!("paste: {err}"),
@@ -420,5 +464,19 @@ impl Dispatch<WlRegistry, GlobalListContents> for Gerdr {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_chat_asks_for_an_image_and_after_text() {
+        let chat: Vec<_> = paste_mimes(Overlay::Chat).collect();
+        assert_eq!(chat.first(), Some(&TEXT_MIMES[0]));
+        assert_eq!(chat.last(), Some(&"image/jpeg"));
+        assert!(chat.iter().position(|m| is_image(m)) > chat.iter().position(|m| *m == "STRING"));
+        assert!(!paste_mimes(Overlay::Features).any(is_image));
     }
 }

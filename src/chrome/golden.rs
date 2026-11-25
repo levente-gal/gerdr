@@ -9738,7 +9738,7 @@ fn dump_ship_squash() {
 /// model's button right of the modes, hovered, the user's words kept on
 /// top of a list scrolled up past them, and an agent's own model menu in
 /// the waiting panel's place, a row hovered.
-const CHATS: [&str; 21] = [
+const CHATS: [&str; 22] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9759,6 +9759,7 @@ const CHATS: [&str; 21] = [
     "chat_plan_ask",
     "chat_model",
     "chat_pinned",
+    "chat_start",
     "chat_model_menu",
 ];
 
@@ -9783,7 +9784,10 @@ fn chat_view(i: usize) -> super::ChatView {
             hover: Some(ChatHit::ShowScreen),
             ..v
         },
-        2 => v,
+        2 => super::ChatView {
+            context: Some("context 84k / 1M".into()),
+            ..v
+        },
         3 => super::ChatView {
             status: AgentStatus::Blocked,
             waiting: Some(screen()),
@@ -10005,8 +10009,16 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
-        // Antigravity's model menu, read off its screen, a row hovered.
+        // Before the agent's first message, its link under the pointer.
         20 => super::ChatView {
+            status: AgentStatus::Idle,
+            reading: Reading::Missing(crate::chat::source::NOT_YET.into()),
+            items: std::sync::Arc::new(Vec::new()),
+            hover: Some(ChatHit::ShowScreen),
+            ..v
+        },
+        // Antigravity's model menu, read off its screen, a row hovered.
+        21 => super::ChatView {
             status: AgentStatus::Idle,
             hints: crate::chat::picker_footer(true),
             modes: ["Auto", "Plan", "Default", "Edits"].map(String::from).into(),
@@ -10033,12 +10045,12 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 21]; 4] = [
+const GOLDEN_CHATS: [[u64; 22]; 4] = [
     // Dark at 1
     [
         0xa5039d4ee1fb06ee, // chat_finding
         0x4c9a3c6fa240b9e9, // chat_missing
-        0x9f85d649e034a3ad, // chat
+        0xd685197ee22a32f7, // chat
         0x3bb87a98112621ad, // chat_waiting
         0x828c73a35d6b1c0a, // chat_composer
         0x336344c70c851544, // chat_picked
@@ -10053,16 +10065,17 @@ const GOLDEN_CHATS: [[u64; 21]; 4] = [
         0xe03e8d399611c068, // chat_side
         0x6c4d3e75cd1fbbd3, // chat_plan
         0x29f78ea279039845, // chat_plan_open
-        0xe7cbee2c7746c067, // chat_plan_ask
+        0x7fa3380865f1c3fe, // chat_plan_ask
         0x1baa8146186136c6, // chat_model
         0x46bfe697efbe6271, // chat_pinned
+        0xf8361e53ade0856d, // chat_start
         0x8a65ecf0604d9e68, // chat_model_menu
     ],
     // Dark at 2
     [
         0xd211836f5dcb7548, // chat_finding
         0x0c94100d5ab7460b, // chat_missing
-        0xd11591ee80ab6397, // chat
+        0x8a131dd56dac4a2c, // chat
         0x04cea78605830090, // chat_waiting
         0xee8c28267b0af3c8, // chat_composer
         0x6a515ed6af7ed950, // chat_picked
@@ -10077,16 +10090,17 @@ const GOLDEN_CHATS: [[u64; 21]; 4] = [
         0xca0b573784b91770, // chat_side
         0x2ca34c602eea2776, // chat_plan
         0xb137c3c620610f92, // chat_plan_open
-        0x3d17e45cb1fc313a, // chat_plan_ask
+        0x353dd5c5c50b6459, // chat_plan_ask
         0x70646c8cb13e8898, // chat_model
         0xd0a47890d6ecabfe, // chat_pinned
+        0xec72373387a755bb, // chat_start
         0x2bca90d536b37aa9, // chat_model_menu
     ],
     // Light at 1
     [
         0xcfe875ed39718011, // chat_finding
         0x8599e48c1a3a84f1, // chat_missing
-        0xee98c0f4e9c9b8df, // chat
+        0x88b5f643cefe1777, // chat
         0x03b95c0b949c5aaa, // chat_waiting
         0xc9eb7c27910b0a3e, // chat_composer
         0xc4a1da2ac75e7e03, // chat_picked
@@ -10101,16 +10115,17 @@ const GOLDEN_CHATS: [[u64; 21]; 4] = [
         0x6d48f599e60538e1, // chat_side
         0x32a2e31d552691ef, // chat_plan
         0xf89f6063d627b9c2, // chat_plan_open
-        0xfd65a0a88ee3c27e, // chat_plan_ask
+        0xb2c9504611643734, // chat_plan_ask
         0x1f5a36a977d402d0, // chat_model
         0x3a9fb789f9a3a6e3, // chat_pinned
+        0xa88f205ffb3c31fe, // chat_start
         0x0e3263b99d325732, // chat_model_menu
     ],
     // Light at 2
     [
         0x6a839f3b4ab2b79c, // chat_finding
         0x50c48f549721099b, // chat_missing
-        0x9665dc98473271fb, // chat
+        0xa22119b71d62e4ee, // chat
         0x65f7f2fd63bbcb5d, // chat_waiting
         0x57f4e1b82e7ef3e0, // chat_composer
         0xc1031423a1b0c52c, // chat_picked
@@ -10125,9 +10140,10 @@ const GOLDEN_CHATS: [[u64; 21]; 4] = [
         0x0c1f45535e2220e5, // chat_side
         0xca8f7ab03bda90dd, // chat_plan
         0xf1c18370a8a4e7d3, // chat_plan_open
-        0xa086dc1a84e0d05c, // chat_plan_ask
+        0xfe702f7546c95cac, // chat_plan_ask
         0x723a472ff593632d, // chat_model
         0x18b2695a30b259e4, // chat_pinned
+        0x5a6516ea634632f6, // chat_start
         0x5ad054a731b72839, // chat_model_menu
     ],
 ];

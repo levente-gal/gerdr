@@ -2165,15 +2165,7 @@ fn with_context(status: String, feature: &Feature, stage: Stage, state: &PanelSt
     let Some((_, context)) = read else {
         return status;
     };
-    // "84k", "1M": a whole figure needs no ".0".
-    let short = |n| crate::stats_panel::tokens(n).replace(".0", "");
-    let mut said = match context.window {
-        Some(window) => format!("context {} / {}", short(context.used), short(window)),
-        None => format!("context {}", short(context.used)),
-    };
-    if context.nearly_full() {
-        said.push_str(", nearly full");
-    }
+    let said = context.said();
     match status.is_empty() {
         true => said,
         false => format!("{status} \u{b7} {said}"),
