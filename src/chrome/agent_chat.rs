@@ -24,19 +24,21 @@ use super::glyphs::Face;
 use super::repos::{DIFF_BAR, DIFF_INSET, DIFF_TINT};
 use super::scrollback::{StyledRow, styled_row};
 use super::{
-    BUTTON_RADIUS, BUTTON_WIDTH, ButtonStyle, CHEVRON_WIDTH, Canvas, DOT_SLOT, Dot, FIELD_GAP, FieldSpot, ListBar,
-    Painter, Palette, ROW_INSET, ROW_RADIUS, Rect, Rgb, Thumb, band, button_width, centred_dot,
-    arrow, check, chevron_down, chevron_side, field_text, font_size, gutter_track, hint_at, hint_spots,
-    hints_height, icon_sdf, mix, pane_bar_height, phys, physical, quit_button, rect_px, row_button,
-    small_font_size, soft_rows, status_dot, suggestion_row, wrap_field_height,
+    BUTTON_RADIUS, BUTTON_WIDTH, ButtonStyle, CHECKBOX_GAP, CHECKBOX_SIZE, CHEVRON_WIDTH, Canvas,
+    Check, DOT_SLOT, Dot, FIELD_GAP, FieldSpot, ListBar, Painter, Palette, ROW_INSET, ROW_RADIUS,
+    Rect, Rgb, Thumb, arrow, band, button_width, centred_dot, check, chevron_down, chevron_side,
+    field_text, font_size, gutter_track, hint_at, hint_spots, hints_height, icon_sdf, mix,
+    pane_bar_height, phys, physical, quit_button, rect_px, row_button, small_font_size, soft_rows,
+    status_dot, suggestion_row, wrap_field_height,
 };
 use crate::{
     ChatRows,
     chat::{
         ChatFocus, DiffSide, Item, Reading, ToolOut,
         commands::Slash,
-        live::{AskReply, PendingAsk, Running},
+        live::{AskReply, PendingAsk, Question, Running},
         menu::{self, Menu},
+        questions::CardView,
         rows::{self, Row, Summary},
     },
     herdr::AgentStatus,
@@ -68,6 +70,9 @@ pub struct ChatView {
     pub focused: bool,
     pub draft: Line,
     pub waiting: Option<Arc<Vec<(String, crate::scrollback::Styled)>>>,
+    /// What its agent suggests saying next: the empty reply box shows it
+    /// in place of its placeholder.
+    pub suggestion: Option<String>,
     /// The footer's key hints, from the chat's key tables (`chat::footer`).
     pub hints: Vec<(String, String)>,
     /// Its transcript holds messages before those read: whether they are
@@ -85,6 +90,14 @@ pub struct ChatView {
     pub since: Option<u64>,
     /// The `/` menu over the reply box, while it shows.
     pub slash: Option<SlashView>,
+    /// The modes its agent offers (`chat::mode::offered`), under the reply
+    /// box; none for an agent without.
+    pub modes: Vec<String>,
+    /// The one its screen last said it is in.
+    pub mode: Option<String>,
+    /// The user's picks on the card of the ask's questions, while it asks
+    /// some.
+    pub card: Option<CardView>,
 }
 
 /// The `/` menu's rows in sight, as painted.
@@ -138,6 +151,7 @@ impl PartialEq for ChatView {
             && self.focused == other.focused
             && self.draft == other.draft
             && rows(&self.waiting, &other.waiting)
+            && self.suggestion == other.suggestion
             && self.hints == other.hints
             && self.earlier == other.earlier
             && self.hover == other.hover
@@ -145,6 +159,9 @@ impl PartialEq for ChatView {
             && self.ask == other.ask
             && self.since == other.since
             && self.slash == other.slash
+            && self.modes == other.modes
+            && self.mode == other.mode
+            && self.card == other.card
     }
 }
 
@@ -194,6 +211,24 @@ pub enum ChatHit {
     /// The button at the list's foot while it is scrolled up: goes to the
     /// last item and follows new ones.
     Bottom,
+    /// One of the agent's modes under the reply box, by its place in
+    /// `ChatView::modes`: switches the agent to it.
+    Mode(usize),
+    /// A part of the card of the ask's questions.
+    Card(CardHit),
+}
+
+/// What is under the pointer on the card of an ask's questions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardHit {
+    /// A question's tab: shows it.
+    Tab(usize),
+    /// An option's row, Other's last: picks it.
+    Row(usize),
+    /// Other's field: its words.
+    Other,
+    /// Next, or Submit on the last question.
+    Go,
 }
 
 /// Where a chat's parts go, in output coordinates.
@@ -223,6 +258,9 @@ impl ChatLayout {
         if on(self.composer) {
             return Some(ChatHit::Composer);
         }
+        if let Some((i, _)) = parts.modes.iter().find(|(_, rect)| on(*rect)) {
+            return Some(ChatHit::Mode(*i));
+        }
         if let Some((key, _)) = parts.keys.iter().find(|(_, rect)| on(*rect)) {
             return Some(ChatHit::Key(*key));
         }
@@ -230,9 +268,13 @@ impl ChatLayout {
             return Some(*hit);
         }
         if let Some((at, laid)) = &parts.card
-            && (laid.spots.iter()).any(|(r, _)| on(Rectangle::new(r.loc + *at, r.size)))
+            && let Some((_, spot)) =
+                (laid.spots.iter()).find(|(r, _)| on(Rectangle::new(r.loc + *at, r.size)))
         {
-            return Some(ChatHit::AskFold);
+            return Some(match spot {
+                Spot::Card(hit) => ChatHit::Card(*hit),
+                _ => ChatHit::AskFold,
+            });
         }
         if let Some((at, laid)) = &parts.menu {
             let pos = pos - at.loc.to_f64();
@@ -279,6 +321,7 @@ impl ChatLayout {
             Some(Spot::Path) => ChatHit::Path(i),
             Some(Spot::ShowAll) => ChatHit::ShowAll(i),
             Some(Spot::Key(key)) => ChatHit::Key(key),
+            Some(Spot::Card(hit)) => ChatHit::Card(hit),
             None => ChatHit::Item(i),
         })
     }
@@ -300,15 +343,35 @@ pub fn chat_layout(view: &ChatView) -> ChatLayout {
     }
 }
 
-/// The reply box as a field, for the pointer and the caret (checklist O6).
+/// The field with the keys, for the pointer and the caret (checklist O6):
+/// the reply box, or the Other field of the questions' card while the
+/// card's keys are on it.
 pub fn chat_field_spot(view: &ChatView, scale: f64) -> Option<FieldSpot> {
-    let area = parts(view).composer;
+    let parts = parts(view);
+    let (area, line) = match &view.card {
+        _ if view.focus == ChatFocus::Composer => (parts.composer, view.draft.clone()),
+        Some(card) if on_other(view, card) => {
+            let (at, laid) = parts.card.as_ref()?;
+            let (r, _) = (laid.spots.iter()).find(|(_, s)| *s == Spot::Card(CardHit::Other))?;
+            (Rectangle::new(r.loc + *at, r.size), card.other.clone())
+        }
+        _ => return None,
+    };
     (area.size.w > 0 && area.size.h > 0).then(|| FieldSpot {
         area,
         text: field_text(area, scale),
         size: font_size(),
-        line: view.draft.clone(),
+        line,
     })
+}
+
+/// The questions' card has the keys, on its Other row: what they type is
+/// its words.
+fn on_other(view: &ChatView, card: &CardView) -> bool {
+    view.focus == ChatFocus::List
+        && (view.ask.as_ref())
+            .and_then(|ask| ask.questions.get(card.at))
+            .is_some_and(|q| card.row == q.options.len())
 }
 
 /// The list's scrollbar, while not all of it shows.
@@ -475,6 +538,8 @@ fn card_row() -> i32 {
     row_button()
 }
 const CARD_GAP: i32 = 8;
+/// How far an option's description is pulled up into its label's row.
+const NOTE_PULL: i32 = 6;
 /// Room around the user's words on their ground.
 const BUBBLE_PAD: i32 = 8;
 /// How far a subagent's items are in from its card.
@@ -486,6 +551,8 @@ pub const CHAT_CUT: usize = 200;
 const WAIT_ROWS: usize = 14;
 /// Room either side of a key button's label.
 const KEY_PAD: i32 = 12;
+/// How far a mode's segment sits in from its track's edge.
+const MODE_INSET: i32 = 2;
 /// The waiting panel's keys under the agent's screen rows.
 const WAIT_KEYS: [WaitKey; 7] = [
     WaitKey::Esc,
@@ -505,6 +572,29 @@ pub const ASK_BUTTONS: [(ChatHit, &str); 3] = [
     (ChatHit::Answer(AskReply::Deny), "Deny"),
     (ChatHit::ShowScreen, "Show screen"),
 ];
+
+/// The questions' card's buttons, as they say them: Next, or Submit on the
+/// last question, then the one giving the questions back to the agent's own
+/// menu (the footer hints take their words: checklist K3).
+pub fn question_buttons(last: bool) -> [(ChatHit, &'static str); 2] {
+    let go = if last { "Submit" } else { "Next" };
+    [
+        (ChatHit::Card(CardHit::Go), go),
+        (ChatHit::Answer(AskReply::Pass), "Answer in terminal"),
+    ]
+}
+
+/// The buttons under `view`'s ask: the questions' card's, else Allow,
+/// Deny and Show screen.
+fn ask_buttons(view: &ChatView) -> Vec<(ChatHit, &'static str)> {
+    match (&view.card, &view.ask) {
+        (Some(card), Some(ask)) => question_buttons(card.at + 1 >= ask.questions.len()).to_vec(),
+        _ => ASK_BUTTONS.to_vec(),
+    }
+}
+
+/// What the questions' card's Other field says while it is empty.
+const OTHER_HINT: &str = "Other…";
 
 /// What `unfolded` holds for ask `ask` while its card shows what it would
 /// run.
@@ -566,6 +656,10 @@ struct Parts {
     /// its first rows don't fit above them (the picked one always shows).
     slash: Vec<Rect>,
     slash_skip: usize,
+    /// The agent's modes under the reply box: their track, and each one
+    /// that fits, by its place in `ChatView::modes`.
+    mode_track: Option<Rect>,
+    modes: Vec<(usize, Rect)>,
 }
 
 /// How wide a key button labelled `label` is.
@@ -582,8 +676,8 @@ fn screen_rows<T>(rows: &[(String, T)]) -> &[(String, T)] {
     &rows[end.saturating_sub(WAIT_ROWS)..end]
 }
 
-/// From the bottom up: the hints, the reply box with Send at its right,
-/// the waiting panel while the agent waits (as many screen rows as leave
+/// From the bottom up: the hints, the agent's modes, the reply box with
+/// Send at its right, the waiting panel while the agent waits (as many screen rows as leave
 /// the list three card rows), and the list from under the head line.
 fn parts(view: &ChatView) -> Parts {
     let r = view.rect;
@@ -599,8 +693,25 @@ fn parts(view: &ChatView) -> Parts {
     let send_w = button_width("Send");
     let field_w = (w - send_w - FIELD_GAP).max(0);
     let field_h = wrap_field_height(&view.draft, field_w);
+    // As many of the modes as fit across, on a track as high as a button.
+    let (mut mode_track, mut modes, mut modes_h) = (None, Vec::new(), 0);
+    if !view.modes.is_empty() {
+        let y = hints.loc.y - PART_GAP / 2 - row_button();
+        let mut sx = x + MODE_INSET;
+        for (i, mode) in view.modes.iter().enumerate() {
+            let sw = width_in(mode, Face::Ui, small_font_size()).ceil() as i32 + 2 * KEY_PAD;
+            if sx + sw + MODE_INSET > x + w {
+                break;
+            }
+            let h = row_button() - 2 * MODE_INSET;
+            modes.push((i, rect(sx, y + MODE_INSET, sw, h)));
+            sx += sw;
+        }
+        mode_track = Some(rect(x, y, sx + MODE_INSET - x, row_button()));
+        modes_h = row_button() + PART_GAP / 2;
+    }
     let composer = Rectangle::new(
-        (x, hints.loc.y - PART_GAP - field_h).into(),
+        (x, hints.loc.y - PART_GAP - modes_h - field_h).into(),
         (field_w, field_h).into(),
     );
     let send = Rectangle::new(
@@ -619,9 +730,15 @@ fn parts(view: &ChatView) -> Parts {
     let inner = (w - 2 * PART_GAP).max(0);
     if let Some(ask) = &view.ask {
         // As many lines of what it would run as leave the list three card
-        // rows.
-        let mut laid = lay_ask(view, ask, inner, 0);
-        if view.unfolded.contains(&ask_key(&ask.ask)) {
+        // rows; the options' descriptions go when they don't fit.
+        let mut laid = match &view.card {
+            Some(card) => lay_question(view, &ask.questions, card, inner, true),
+            None => lay_ask(view, ask, inner, 0),
+        };
+        let room = (end - list_top - 3 * card_row() - frame).max(0);
+        if let Some(card) = view.card.as_ref().filter(|_| laid.h > room) {
+            laid = lay_question(view, &ask.questions, card, inner, false);
+        } else if view.card.is_none() && view.unfolded.contains(&ask_key(&ask.ask)) {
             let room = (end - list_top - 3 * card_row() - frame - laid.h - PART_GAP).max(0);
             let lines = (room / small_line()) as usize;
             laid = lay_ask(view, ask, inner, lines.min(ASK_LINES));
@@ -630,8 +747,9 @@ fn parts(view: &ChatView) -> Parts {
         let panel = Rectangle::new((x, end - h).into(), (w, h).into());
         let at = Point::from((x + PART_GAP, panel.loc.y + PART_GAP));
         let (mut bx, by) = (at.x, at.y + laid.h + PART_GAP);
-        for (hit, label) in ASK_BUTTONS {
+        for (hit, label) in ask_buttons(view) {
             let bw = button_width(label);
+
             if bx + bw > at.x + inner {
                 break;
             }
@@ -693,7 +811,10 @@ fn parts(view: &ChatView) -> Parts {
     let n = view.slash.as_ref().map_or(0, |s| s.rows.len()) as i32;
     let n = n.min((composer.loc.y - PART_GAP / 2 - list_top - 2 * SLASH_BORDER) / suggestion_row());
     let n = n.max(0);
-    let slash_skip = view.slash.as_ref().map_or(0, |s| (s.picked + 1).saturating_sub(n as usize));
+    let slash_skip = view
+        .slash
+        .as_ref()
+        .map_or(0, |s| (s.picked + 1).saturating_sub(n as usize));
     let slash = (0..n)
         .map(|i| {
             let y = composer.loc.y - PART_GAP / 2 - SLASH_BORDER - (n - i) * suggestion_row();
@@ -716,6 +837,8 @@ fn parts(view: &ChatView) -> Parts {
         hints,
         slash,
         slash_skip,
+        mode_track,
+        modes,
     }
 }
 
@@ -757,37 +880,8 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
     let size = Font::Body.size();
     let mut y = 0;
     if !m.tabs.is_empty() {
-        let mut x = 0;
-        for tab in &m.tabs {
-            let face = if tab.current { Face::Bold } else { Face::Ui };
-            let mark_w = if tab.done {
-                TAB_CHECK + PART_GAP / 2
-            } else {
-                0
-            };
-            let text_w = width_in(&tab.label, face, size).ceil() as i32;
-            let tw = mark_w + text_w + 2 * BUBBLE_PAD;
-            if x + tw > w {
-                break;
-            }
-            if tab.current {
-                l.put(rect(x, 0, tw, card_row()), Bit::Picked);
-            }
-            if tab.done {
-                let y = (card_row() - TAB_CHECK) / 2;
-                l.put(rect(x + BUBBLE_PAD, y, TAB_CHECK, TAB_CHECK), Bit::Check);
-            }
-            let mark = if tab.current { Mark::Text } else { Mark::Muted };
-            let bit = Bit::Label {
-                text: tab.label.clone(),
-                face,
-                size,
-                mark,
-                centred: false,
-            };
-            l.put(rect(x + BUBBLE_PAD + mark_w, 0, text_w, card_row()), bit);
-            x += tw + PART_GAP / 2;
-        }
+        let tabs = m.tabs.iter().map(|t| (t.label.as_str(), t.done, t.current));
+        lay_tabs(&mut l, tabs, w);
         y = l.h + PART_GAP;
     }
     for (text, bold) in &m.ask {
@@ -806,6 +900,14 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
     let tw = (w - CHOICE_NUM).max(1);
     for choice in &m.choices {
         let top = y;
+        // A check box's choice: the box, then its label.
+        let (box_w, tw) = match choice.checked {
+            Some(_) => (
+                CHECKBOX_SIZE + CHECKBOX_GAP,
+                tw - CHECKBOX_SIZE - CHECKBOX_GAP,
+            ),
+            None => (0, tw),
+        };
         let num = format!("{}.", choice.n);
         let num = Bit::Label {
             text: num,
@@ -822,18 +924,20 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
             mark: Mark::Text,
             centred: false,
         };
+        let label_x = ROW_INSET + CHOICE_NUM + box_w;
         let mut bits = vec![
             (rect(ROW_INSET, y, CHOICE_NUM, card_row()), num),
-            (
-                rect(ROW_INSET + CHOICE_NUM, y, tw - ROW_INSET, card_row()),
-                label,
-            ),
+            (rect(label_x, y, tw - ROW_INSET, card_row()), label),
         ];
+        if let Some(on) = choice.checked {
+            let at = rect(ROW_INSET + CHOICE_NUM, y, CHECKBOX_SIZE, card_row());
+            bits.push((at, Bit::Checkbox(on)));
+        }
         y += card_row();
         if more && !choice.detail.is_empty() {
             let note = DocBlock::Note(choice.detail.clone());
             let (pieces, h) = doc_layout::stack_of(&[note], tw - 2 * ROW_INSET);
-            let at = Point::from((ROW_INSET + CHOICE_NUM, y));
+            let at = Point::from((label_x, y));
             bits.extend(
                 (pieces.into_iter())
                     .map(|(r, piece)| (Rectangle::new(r.loc + at, r.size), Bit::Doc(piece))),
@@ -850,6 +954,160 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
         if (1..=9).contains(&choice.n) {
             l.spots.push((ground, Spot::Key(WaitKey::Digit(choice.n))));
         }
+        y += STEP_GAP / 2;
+    }
+    l.h = l.h.max(y - STEP_GAP / 2);
+    l
+}
+
+/// Tab chips `tabs` (label, answered, current) in a row at the top of `l`,
+/// `w` wide, as many as fit: the current one on its own ground and bold,
+/// an answered one checked. Where each chip went.
+fn lay_tabs<'a>(
+    l: &mut Laid,
+    tabs: impl Iterator<Item = (&'a str, bool, bool)>,
+    w: i32,
+) -> Vec<Rect> {
+    let size = Font::Body.size();
+    let mut chips = Vec::new();
+    let mut x = 0;
+    for (text, done, current) in tabs {
+        let face = if current { Face::Bold } else { Face::Ui };
+        let mark_w = if done { TAB_CHECK + PART_GAP / 2 } else { 0 };
+        let text_w = width_in(text, face, size).ceil() as i32;
+        let tw = mark_w + text_w + 2 * BUBBLE_PAD;
+        if x + tw > w {
+            break;
+        }
+        let chip = rect(x, 0, tw, card_row());
+        if current {
+            l.put(chip, Bit::Picked);
+        }
+        if done {
+            let y = (card_row() - TAB_CHECK) / 2;
+            l.put(rect(x + BUBBLE_PAD, y, TAB_CHECK, TAB_CHECK), Bit::Check);
+        }
+        let mark = if current { Mark::Text } else { Mark::Muted };
+        let bit = Bit::Label {
+            text: text.to_owned(),
+            face,
+            size,
+            mark,
+            centred: false,
+        };
+        l.put(rect(x + BUBBLE_PAD + mark_w, 0, text_w, card_row()), bit);
+        chips.push(chip);
+        x += tw + PART_GAP / 2;
+    }
+    chips
+}
+
+/// The most characters of a question a tab without a header shows.
+const TAB_CHARS: usize = 24;
+
+/// What question `q`'s tab says: its header, else its first words.
+fn tab_name(q: &Question) -> String {
+    match q.header.trim() {
+        "" if q.question.chars().count() > TAB_CHARS => {
+            let cut: String = q.question.chars().take(TAB_CHARS - 1).collect();
+            format!("{}…", cut.trim_end())
+        }
+        "" => q.question.clone(),
+        header => header.to_owned(),
+    }
+}
+
+/// The card of the questions `qs` laid out from `(0, 0)` for `w` wide, as
+/// `card` has them, one at a time: their tabs (with more than one), the
+/// question shown, a row per option (a radio, or a check box where several
+/// may be picked, the label and, when `more`, its description), and last
+/// Other, a field for the user's own words. The row with the keys is lit
+/// while the card has them.
+fn lay_question(view: &ChatView, qs: &[Question], card: &CardView, w: i32, more: bool) -> Laid {
+    let mut l = Laid::default();
+    let Some(q) = qs.get(card.at) else {
+        return l;
+    };
+    let mut y = 0;
+    if qs.len() > 1 {
+        let names: Vec<String> = qs.iter().map(tab_name).collect();
+        let tabs = (names.iter().enumerate())
+            .map(|(i, name)| (name.as_str(), card.answered[i], i == card.at));
+        for (i, chip) in lay_tabs(&mut l, tabs, w).into_iter().enumerate() {
+            l.spots.push((chip, Spot::Card(CardHit::Tab(i))));
+        }
+        y = l.h + PART_GAP;
+    }
+    let block = DocBlock::Heading {
+        level: 2,
+        text: q.question.as_str().into(),
+    };
+    let (pieces, h) = doc_layout::stack_of(&[block], w);
+    l.doc(pieces, (0, y));
+    y += h + PART_GAP;
+    let keys = view.focused && view.focus == ChatFocus::List;
+    let mark = |on: bool| match q.multi {
+        true => Bit::Checkbox(on),
+        false => Bit::Radio(on),
+    };
+    let tx = ROW_INSET + CHECKBOX_SIZE + CHECKBOX_GAP;
+    let tw = (w - tx - ROW_INSET).max(1);
+    let other = q.options.len();
+    for i in 0..=other {
+        let option = q.options.get(i);
+        let top = y;
+        let row_h = match i == other {
+            true => wrap_field_height(&card.other, tw).max(card_row()),
+            false => card_row(),
+        };
+        // By the first line of Other's words, as they wrap.
+        let mark_h = row_h.min(wrap_field_height(&Line::default(), tw).max(card_row()));
+        let mut bits = vec![(
+            rect(ROW_INSET, y, CHECKBOX_SIZE, mark_h),
+            mark(card.picked.contains(&i)),
+        )];
+        match option {
+            Some(option) => {
+                // Bold at the page's size: its description under it is a
+                // page note.
+                let text = Bit::Label {
+                    text: option.label.clone(),
+                    face: Face::Bold,
+                    size: Font::Body.size(),
+                    mark: Mark::Text,
+                    centred: false,
+                };
+                bits.push((rect(tx, y, tw, row_h), text));
+            }
+            None => {
+                let field = rect(tx, y, tw, row_h);
+                let focused = keys && card.row == other;
+                bits.push((field, Bit::Field(card.other.clone(), focused)));
+                l.spots.push((field, Spot::Card(CardHit::Other)));
+            }
+        }
+        let described = option.filter(|o| more && !o.description.is_empty());
+        // A description sits up against its label, in the row's slack below it.
+        y += row_h - if described.is_some() { NOTE_PULL } else { 0 };
+        if let Some(option) = described {
+            let note = DocBlock::Note(option.description.clone());
+            let (pieces, h) = doc_layout::stack_of(&[note], tw);
+            let at = Point::from((tx, y));
+            bits.extend(
+                (pieces.into_iter())
+                    .map(|(r, piece)| (Rectangle::new(r.loc + at, r.size), Bit::Doc(piece))),
+            );
+            y += h + PART_GAP / 2;
+        }
+        let ground = rect(0, top, w, y - top);
+        if keys && card.row == i {
+            l.put(ground, Bit::Picked);
+        }
+        for (r, bit) in bits {
+            l.put(r, bit);
+        }
+        // Other's field takes its own presses (put first, found first).
+        l.spots.push((ground, Spot::Card(CardHit::Row(i))));
         y += STEP_GAP / 2;
     }
     l.h = l.h.max(y - STEP_GAP / 2);
@@ -1142,6 +1400,12 @@ pub fn chat_bottom_button(view: &ChatView) -> Option<Rect> {
     bottom_button(view, &parts, content)
 }
 
+/// The agent's mode under `pos`, by its place in `ChatView::modes`, and
+/// where its segment is.
+pub fn chat_mode_at(view: &ChatView, pos: Point<f64, Logical>) -> Option<(usize, Rect)> {
+    (parts(view).modes.into_iter()).find(|(_, rect)| rect.to_f64().contains(pos))
+}
+
 /// The list's scrollbar in the room right of its items, while they don't
 /// all show.
 fn thumb_of(parts: &Parts, content: i32, top: i32) -> Option<Thumb> {
@@ -1161,6 +1425,8 @@ enum Spot {
     ShowAll,
     /// A menu's choice: presses its key.
     Key(WaitKey),
+    /// A part of the questions' card.
+    Card(CardHit),
 }
 
 /// A colour of a card's words.
@@ -1224,6 +1490,13 @@ enum Bit {
     Picked,
     /// The check of a question answered.
     Check,
+    /// A radio button, on or not: one pick of several.
+    Radio(bool),
+    /// A check box, ticked or not.
+    Checkbox(bool),
+    /// A field for the user's own words, wrapping them as the reply box
+    /// does; with the keys or not.
+    Field(Line, bool),
 }
 
 /// An item laid out from `(0, 0)` for its width: what it paints, where a
@@ -1870,7 +2143,9 @@ impl Painter {
                 let fill = if lit { p.selected } else { p.element };
                 c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, w / 2.0 - b, fill);
                 let s = 1.3 * scale as f32;
-                icon_sdf(&mut c, here(button), scale, p.text, |x, y| arrow(false, x, y, s));
+                icon_sdf(&mut c, here(button), scale, p.text, |x, y| {
+                    arrow(false, x, y, s)
+                });
             }
         }
         rule(&mut c, parts.list.loc.y + parts.list.size.h);
@@ -1886,22 +2161,38 @@ impl Painter {
             c.rounded(x, y, w, h, radius, p.terminal_background);
             if let Some((at, laid)) = &parts.card {
                 let at = *at - r.loc;
-                if view.hover == Some(ChatHit::AskFold) {
-                    for (spot, _) in &laid.spots {
-                        let row = Rectangle::new(spot.loc + at, spot.size);
-                        self.row_highlight(&mut c, row, (false, 1.0), scale, p);
+                for (spot, what) in &laid.spots {
+                    let row = Rectangle::new(spot.loc + at, spot.size);
+                    match what {
+                        Spot::Card(CardHit::Other) => {}
+                        // The menu rows' hover: the bubble's tint.
+                        Spot::Card(hit) if view.hover == Some(ChatHit::Card(*hit)) => {
+                            let (x, y, w, h) = rect_px(row, scale);
+                            c.rounded(x, y, w, h, ROW_RADIUS * scale as f32, bubble(p));
+                        }
+                        Spot::Fold if view.hover == Some(ChatHit::AskFold) => {
+                            self.row_highlight(&mut c, row, (false, 1.0), scale, p);
+                        }
+                        _ => {}
                     }
                 }
                 for (rect, bit) in &laid.bits {
                     let rect = Rectangle::new(rect.loc + at, rect.size);
                     self.chat_bit(&mut c, rect, bit, scale, p);
                 }
+                let buttons = ask_buttons(view);
+                let ready = view.card.as_ref().is_none_or(CardView::ready);
                 for (hit, rect) in &parts.answers {
-                    let label = (ASK_BUTTONS.iter())
+                    let label = (buttons.iter())
                         .find(|(h, _)| h == hit)
                         .map_or("", |(_, l)| l);
                     let style = match hit {
                         ChatHit::Answer(AskReply::Allow) => ButtonStyle::Primary,
+                        // Submit waits for every answer.
+                        ChatHit::Card(CardHit::Go) if label == "Submit" && !ready => {
+                            ButtonStyle::Off
+                        }
+                        ChatHit::Card(CardHit::Go) => ButtonStyle::Primary,
                         _ => ButtonStyle::Plain,
                     };
                     let lit = view.hover == Some(*hit);
@@ -1950,7 +2241,8 @@ impl Painter {
         // The reply box and Send, dimmed while there is nothing to send or
         // the agent is paused.
         let focused = view.focused && view.focus == ChatFocus::Composer;
-        let hint = format!("Reply to {}…", agent_name(&view.label));
+        let hint = (view.suggestion.clone())
+            .unwrap_or_else(|| format!("Reply to {}…", agent_name(&view.label)));
         let composer = here(parts.composer);
         self.wrap_field(&mut c, &view.draft, &hint, composer, focused, scale, p);
         let style = match view.paused || view.draft.text.trim().is_empty() {
@@ -1967,6 +2259,20 @@ impl Painter {
             scale,
             p,
         );
+
+        if let Some(track) = parts.mode_track {
+            let segments: Vec<(&str, Rect)> = (parts.modes.iter())
+                .map(|(i, rect)| (view.modes[*i].as_str(), here(*rect)))
+                .collect();
+            let on = (view.mode.as_ref())
+                .and_then(|now| parts.modes.iter().position(|(i, _)| view.modes[*i] == *now))
+                .unwrap_or(usize::MAX);
+            let hover = match view.hover {
+                Some(ChatHit::Mode(m)) => parts.modes.iter().position(|(i, _)| *i == m),
+                _ => None,
+            };
+            self.segmented(&mut c, here(track), &segments, on, hover, scale, p);
+        }
 
         if let Some(slash) = &view.slash {
             let rows = (parts.slash.as_slice(), parts.slash_skip);
@@ -2116,6 +2422,15 @@ impl Painter {
             Bit::Running | Bit::Spinner | Bit::Clock => {}
             Bit::Picked => self.row_highlight(c, rect, (true, 0.0), scale, p),
             Bit::Check => icon_sdf(c, rect, scale, p.success, |x, y| check(x, y, s)),
+            Bit::Radio(on) => _ = self.radio(c, rect, *on, scale, p),
+            Bit::Checkbox(on) => {
+                let state = if *on { Check::On } else { Check::Off };
+                // Never lit itself: its row is (as the quit dialog's).
+                self.checkbox(c, rect, state, false, scale, p);
+            }
+            Bit::Field(line, focused) => {
+                self.wrap_field(c, line, OTHER_HINT, rect, *focused, scale, p);
+            }
         }
     }
 }
@@ -2227,13 +2542,17 @@ pub(super) mod tests {
             focused: true,
             draft: Line::default(),
             waiting: None,
-            hints: crate::chat::footer(ChatFocus::List, true),
+            suggestion: None,
+            hints: crate::chat::footer(ChatFocus::List, true, false, false),
             earlier: None,
             hover: None,
             running: Vec::new(),
             ask: None,
             since: Some(1_000),
             slash: None,
+            modes: Vec::new(),
+            mode: None,
+            card: None,
         }
     }
 
@@ -2248,6 +2567,85 @@ pub(super) mod tests {
     pub(in crate::chrome) fn question() -> Arc<Vec<(String, crate::scrollback::Styled)>> {
         let ansi = "←  ☒ Size  \x1b[7m☐ Where\x1b[27m  ✔ Submit  →\n\n\x1b[1mWhere should the size be changed from? The switcher has rows for it already, keys are quicker.\x1b[0m\n\n❯ 1. Switcher\n     Rows 'Bigger UI', 'Smaller UI' and 'Reset UI size' in the switcher, in steps of 10%.\n  2. Keys\n     Prefix keys only.\n  3. Type something.\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n";
         Arc::new(crate::scrollback::parse_ansi(ansi))
+    }
+
+    /// Claude asking three questions on its card: a size (one pick, with
+    /// descriptions), where (one pick), and fruits (several).
+    pub(in crate::chrome) fn question_ask() -> PendingAsk {
+        use crate::chat::live::QuestionOption;
+        let q = |header: &str, text: &str, options: &[(&str, &str)], multi| Question {
+            question: text.into(),
+            header: header.into(),
+            options: (options.iter())
+                .map(|(label, description)| QuestionOption {
+                    label: (*label).into(),
+                    description: (*description).into(),
+                })
+                .collect(),
+            multi,
+        };
+        PendingAsk {
+            ask: "q3".into(),
+            tool: "AskUserQuestion".into(),
+            gist: String::new(),
+            input: String::new(),
+            questions: vec![
+                q(
+                    "Size",
+                    "How should the UI grow? The switcher has rows for it already, keys are quicker.",
+                    &[
+                        (
+                            "Switcher rows + keys (Recommended)",
+                            "Rows 'Bigger UI', 'Smaller UI' and 'Reset UI size', in steps of 10%, plus Prefix keys.",
+                        ),
+                        ("Switcher rows only", "Only the three rows, no new keys."),
+                        ("Keys only", ""),
+                    ],
+                    false,
+                ),
+                q(
+                    "",
+                    "Where should it be saved?",
+                    &[("config.toml", ""), ("state.json", "")],
+                    false,
+                ),
+                q(
+                    "Fruits",
+                    "Which fruits do you want? Pick all that apply.",
+                    &[
+                        ("Apple", "Crisp and sweet"),
+                        ("Banana", "Soft"),
+                        ("Grape", "In bunches"),
+                    ],
+                    true,
+                ),
+            ],
+            since: std::time::Instant::now(),
+        }
+    }
+
+    /// Claude Code asking a question of several picks, as herdr read the
+    /// user's screen: an edge at the end of every row, its arrow on the
+    /// user's own answer.
+    pub(in crate::chrome) fn ticks() -> Arc<Vec<(String, crate::scrollback::Styled)>> {
+        let rule = "─".repeat(50);
+        let rows = [
+            "←  ☒ Languages  ☐ Fruits  ☐ Places  ✔ Submit  →".to_owned(),
+            String::new(),
+            "\x1b[1mWhich languages do you write code in? Pick all that apply.\x1b[0m".to_owned(),
+            String::new(),
+            "  1. [ ] Rust".to_owned(),
+            "     Systems code".to_owned(),
+            "  2. [✔] Python".to_owned(),
+            "     Scripts and tooling".to_owned(),
+            "❯ 3. [ ] Type something".to_owned(),
+            "     Next".to_owned(),
+            rule,
+            "  4. Chat about this".to_owned(),
+            String::new(),
+        ];
+        let ansi: String = rows.iter().map(|row| format!("{row:<70}│\n")).collect();
+        Arc::new(crate::scrollback::parse_ansi(&ansi))
     }
 
     fn middle(r: Rect) -> Point<f64, Logical> {
@@ -2437,7 +2835,10 @@ pub(super) mod tests {
         let last = p.slash[2];
         assert!(last.loc.y + last.size.h <= p.composer.loc.y);
         let layout = chat_layout(&v);
-        assert_eq!(layout.hit(&v, middle(p.slash[0])), Some(ChatHit::Command(5)));
+        assert_eq!(
+            layout.hit(&v, middle(p.slash[0])),
+            Some(ChatHit::Command(5))
+        );
         assert_eq!(layout.hit(&v, middle(last)), Some(ChatHit::Command(7)));
         assert_eq!(layout.hit(&v, middle(p.composer)), Some(ChatHit::Composer));
         // A pane too short for its rows shows those that fit.
@@ -2458,8 +2859,45 @@ pub(super) mod tests {
         let p = parts(&short);
         assert_eq!(p.slash_skip + p.slash.len(), 3, "the picked last row shows");
         let last = *p.slash.last().unwrap();
-        assert_eq!(chat_layout(&short).hit(&short, middle(last)), Some(ChatHit::Command(7)));
-        assert!(p.slash.iter().all(|r| r.loc.y >= p.head.loc.y + p.head.size.h));
+        assert_eq!(
+            chat_layout(&short).hit(&short, middle(last)),
+            Some(ChatHit::Command(7))
+        );
+        assert!(
+            p.slash
+                .iter()
+                .all(|r| r.loc.y >= p.head.loc.y + p.head.size.h)
+        );
+    }
+
+    #[test]
+    fn the_modes_sit_under_the_reply_box_as_many_as_fit() {
+        let modes: Vec<String> = ["Agent", "Plan", "Debug", "Ask"].map(String::from).into();
+        let v = ChatView {
+            modes: modes.clone(),
+            ..view()
+        };
+        let (layout, p) = (chat_layout(&v), parts(&v));
+        assert_eq!(p.modes.len(), 4);
+        let track = p.mode_track.unwrap();
+        assert!(track.loc.y >= layout.composer.loc.y + layout.composer.size.h);
+        assert!(track.loc.y + track.size.h <= p.hints.loc.y);
+        for (i, rect) in &p.modes {
+            assert_eq!(layout.hit(&v, middle(*rect)), Some(ChatHit::Mode(*i)));
+            assert_eq!(chat_mode_at(&v, middle(*rect)).map(|(m, _)| m), Some(*i));
+        }
+        // No modes, no track; the reply box sits lower.
+        let plain = parts(&view());
+        assert!(plain.mode_track.is_none());
+        assert!(plain.composer.loc.y > layout.composer.loc.y);
+        // A narrow pane shows those that fit.
+        let narrow = ChatView {
+            rect: Rectangle::new((0, 0).into(), (200, 500).into()),
+            modes,
+            ..view()
+        };
+        let shown = parts(&narrow).modes.len();
+        assert!((1..4).contains(&shown), "{shown}");
     }
 
     #[test]
@@ -2804,8 +3242,14 @@ pub(super) mod tests {
         assert_eq!(bottom_button(&v, &p, content), None);
         v.top = 0.0;
         let button = bottom_button(&v, &p, content).expect("a button to the end");
-        assert_eq!(button.loc.y + button.size.h + PART_GAP, p.list.loc.y + p.list.size.h);
-        assert_eq!(chat_layout(&v).hit(&v, middle(button)), Some(ChatHit::Bottom));
+        assert_eq!(
+            button.loc.y + button.size.h + PART_GAP,
+            p.list.loc.y + p.list.size.h
+        );
+        assert_eq!(
+            chat_layout(&v).hit(&v, middle(button)),
+            Some(ChatHit::Bottom)
+        );
         assert_eq!(chat_bottom_button(&v), Some(button), "its tooltip's place");
     }
 
@@ -2862,11 +3306,11 @@ pub(super) mod tests {
         };
         assert_eq!(keys(&v), ["J / K", "Space", "Y", "I"]);
         v.focus = ChatFocus::Composer;
-        v.hints = crate::chat::footer(ChatFocus::Composer, true);
+        v.hints = crate::chat::footer(ChatFocus::Composer, true, false, false);
         assert_eq!(chat_hints(&v)[2], ("Esc", "back"));
         assert!(!keys(&v).iter().any(|k| k == crate::text_field::DISCARD_KEY));
         v.draft.text = "half a reply".into();
-        v.hints = crate::chat::footer(ChatFocus::Composer, false);
+        v.hints = crate::chat::footer(ChatFocus::Composer, false, false, false);
         assert_eq!(chat_hints(&v)[2], ("Esc", "keep draft"));
         assert!(keys(&v).iter().any(|k| k == crate::text_field::DISCARD_KEY));
         let spots = hint_spots(&chat_hints(&v), parts(&v).hints);
@@ -2990,6 +3434,7 @@ pub(super) mod tests {
             tool: "Bash".into(),
             gist: "rm -rf target".into(),
             input: input.join("\n"),
+            questions: Vec::new(),
             since: std::time::Instant::now(),
         }
     }
@@ -3053,6 +3498,132 @@ pub(super) mod tests {
         assert!(q.list.size.h >= 3 * card_row(), "{:?}", q.list);
         let said = labels(&q.card.as_ref().unwrap().1);
         assert!(!said.contains(&"line 11".to_owned()));
+    }
+
+    #[test]
+    fn a_questions_card_shows_one_question_at_a_time_with_its_rows() {
+        let mut v = view();
+        v.waiting = Some(screen());
+        v.ask = Some(question_ask());
+        let blank = CardView {
+            answered: vec![false; 3],
+            ..CardView::default()
+        };
+        v.card = Some(blank.clone());
+        let p = parts(&v);
+        let panel = p.waiting.expect("the card's panel");
+        assert!(
+            p.menu.is_none() && p.keys.is_empty(),
+            "it beats the screen's menu"
+        );
+        let (at, laid) = p.card.as_ref().unwrap();
+        let said = labels(laid);
+        // A tab per question, a header or its first words; the first
+        // question's options, none of the others'.
+        assert_eq!(said[..3], ["Size", "Where should it be save…", "Fruits"]);
+        assert!(said.contains(&"Keys only".to_owned()) && !said.contains(&"Apple".to_owned()));
+        let radios = laid
+            .bits
+            .iter()
+            .filter(|(_, b)| matches!(b, Bit::Radio(_)))
+            .count();
+        assert_eq!(radios, 4, "three options and Other");
+        assert!(laid.bits.iter().any(|(_, b)| matches!(b, Bit::Field(..))));
+        let layout = chat_layout(&v);
+        let spot = |hit: CardHit| {
+            let (r, _) = laid
+                .spots
+                .iter()
+                .find(|(_, s)| *s == Spot::Card(hit))
+                .unwrap();
+            // Near its left: Other's row has its field at the right.
+            let r = Rectangle::new(r.loc + *at, r.size);
+            Point::from(((r.loc.x + 4) as f64, (r.loc.y + r.size.h / 2) as f64))
+        };
+
+        for hit in [
+            CardHit::Tab(2),
+            CardHit::Row(1),
+            CardHit::Row(3),
+            CardHit::Other,
+        ] {
+            assert_eq!(layout.hit(&v, spot(hit)), Some(ChatHit::Card(hit)));
+        }
+        // Next, and the way back to the agent's own menu.
+        let hits: Vec<_> = (p.answers.iter())
+            .map(|(_, b)| layout.hit(&v, middle(*b)))
+            .collect();
+        let pass = ChatHit::Answer(AskReply::Pass);
+        assert_eq!(hits, [Some(ChatHit::Card(CardHit::Go)), Some(pass)]);
+        assert!(p.answers.iter().all(|(_, b)| inside(panel, *b)));
+        assert_eq!(ask_buttons(&v)[0].1, "Next");
+        // The last: check boxes, Submit, the tabs of those answered checked.
+        v.card = Some(CardView {
+            at: 2,
+            row: 3,
+            other: Line {
+                text: "Kiwi".into(),
+                ..Line::default()
+            },
+            answered: vec![true, true, false],
+            ..blank
+        });
+        assert_eq!(ask_buttons(&v)[0].1, "Submit");
+        let p = parts(&v);
+        let laid = &p.card.as_ref().unwrap().1;
+        let boxes = laid
+            .bits
+            .iter()
+            .filter(|(_, b)| matches!(b, Bit::Checkbox(_)))
+            .count();
+        assert_eq!(boxes, 4);
+        assert_eq!(
+            laid.bits.iter().filter(|(_, b)| *b == Bit::Check).count(),
+            2
+        );
+        // The keys on Other: its field takes the pointer and the caret (O6).
+        let field = chat_field_spot(&v, 1.0).expect("Other's field");
+        assert_eq!(field.line.text, "Kiwi");
+        assert!(inside(p.waiting.unwrap(), field.area));
+        v.card.as_mut().unwrap().row = 0;
+        assert!(chat_field_spot(&v, 1.0).is_none());
+        // A short pane keeps its list: the descriptions go.
+        v.card.as_mut().unwrap().at = 0;
+        let tall = parts(&v).waiting.unwrap().size.h;
+        v.rect.size.h = 420;
+        let q = parts(&v);
+        assert!(q.waiting.unwrap().size.h < tall, "{tall} {:?}", q.waiting);
+        assert!(
+            !labels(&q.card.unwrap().1)
+                .iter()
+                .any(|t| t.starts_with("Rows"))
+        );
+    }
+
+    #[test]
+    fn the_screens_menu_shows_its_check_boxes_and_no_edges() {
+        let mut v = view();
+        v.waiting = Some(ticks());
+        let (_, laid) = parts(&v).menu.expect("a menu");
+        let ticked: Vec<bool> = (laid.bits.iter())
+            .filter_map(|(_, b)| match b {
+                Bit::Checkbox(on) => Some(*on),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ticked, [false, true, false]);
+        let said = labels(&laid);
+        assert!(said.contains(&"Rust".to_owned()) && said.contains(&"Submit".to_owned()));
+        let docs = (laid.bits.iter()).filter_map(|(_, b)| match b {
+            Bit::Doc(DocPiece::Text { text, .. }) => Some(text.clone()),
+            _ => None,
+        });
+        assert!(
+            said.into_iter()
+                .chain(docs)
+                .all(|t| !t.contains('│') && !t.contains("[ ]")),
+            "no edges, no [ ] in words"
+        );
     }
 
     /// The marks and words in their colours read on the chat's ground and

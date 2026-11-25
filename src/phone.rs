@@ -23,6 +23,7 @@ use resvg::{tiny_skia, usvg};
 use serde_json::{Value, json};
 
 use crate::{
+    chat::mode,
     feature::{Feature, Stage, Status, layout, setup, store},
     feature_agents::{self, Gate},
     feature_workspace::feature_on,
@@ -44,6 +45,9 @@ const PANE_LINES: usize = 400;
 /// The most lines herdr reads with their colours; past that, all of the
 /// pane's scrollback is read, plain.
 const PANE_STYLED_MAX: usize = 1000;
+/// How many of an idle Claude Code's last screen rows hold its reply box,
+/// and the suggestion in it, below whatever it shows under the box.
+const SUGGEST_ROWS: usize = 30;
 /// How many lines of a setup log are sent: its end, where it failed.
 const LOG_LINES: usize = 400;
 /// How many history events a feature's page gets, latest first.
@@ -449,6 +453,10 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
         "/api/answer" => "answer",
         "/api/agent" => {
             let (pane, line, key) = (text("pane"), text("text"), text("key"));
+            let mode = text("mode");
+            if !mode.is_empty() {
+                return agent_mode(&project, &slug, &pane, &mode, &text("from"));
+            }
             return agent_input(&project, &slug, &pane, &line, &key);
         }
         _ => return Reply::error(404, "Nothing here"),
@@ -584,21 +592,51 @@ fn agent_input(project: &str, slug: &str, pane: &str, line: &str, key: &str) -> 
         herdr.send_agent_line(pane, &line)
     } else if key == "close" && !slug.is_empty() {
         herdr.pane_close(pane)
-    } else if AGENT_KEYS.contains(&key) {
+    } else if AGENT_KEYS.contains(&key)
+        || (key.len() == 1 && key.bytes().all(|b| b.is_ascii_digit()))
+    {
+        // A digit goes as a key press: as text, Claude types it into its
+        // menu's own-answer row.
         herdr.send_keys(pane, &[key])
-    } else if key.len() == 1 && key.bytes().all(|b| b.is_ascii_digit()) {
-        herdr
-            .call(
-                "pane.send_input",
-                json!({ "pane_id": pane, "text": key, "keys": [] }),
-            )
-            .map(drop)
     } else {
         return Reply::error(400, "Nothing to send");
     };
     match sent {
         Ok(()) => Reply::json(&json!({ "said": [] })),
         Err(err) => Reply::error(502, &format!("Couldn't reach the agent: {err}")),
+    }
+}
+
+/// Switch the agent in `pane` to mode `want`, as the desktop chat does
+/// (`chat::mode::switch`); `from` is the mode the phone showed. Answers
+/// once its screen shows it, or why not.
+fn agent_mode(project: &str, slug: &str, pane: &str, want: &str, from: &str) -> Reply {
+    let project = match agent_of(project, slug, pane) {
+        Ok((project, _)) => project,
+        Err(reply) => return reply,
+    };
+    let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
+    let agent = match herdr.agent_list() {
+        Ok(agents) => agents.into_iter().find(|a| a.pane_id == pane),
+        Err(err) => return Reply::error(502, &format!("Couldn't reach the agent: {err}")),
+    };
+    let Some(kind) = agent.as_ref().and_then(crate::chat::source::kind) else {
+        return Reply::error(404, "No agent runs there any more");
+    };
+    // The key would answer its menu.
+    let waits = agent.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Blocked);
+    let went = match waits {
+        true => Err("the agent waits on an answer first".to_owned()),
+        false => {
+            let mut agent = mode::InPane { herdr: &mut herdr, pane, kind };
+            let n = mode::modes(kind).len();
+            let was = Some(from).filter(|f| !f.is_empty());
+            mode::switch(&mut agent, n, was, want, mode::READ_EVERY)
+        }
+    };
+    match went {
+        Ok(()) => Reply::json(&json!({ "said": [] })),
+        Err(why) => Reply::error(409, &format!("Couldn't switch the agent to {want}: {why}")),
     }
 }
 
@@ -1160,16 +1198,41 @@ fn commands(project: &str, slug: &str, pane: &str) -> Reply {
     Reply::json(&Value::Array(listed))
 }
 
+/// What the idle Claude Code in `pane` suggests saying next, read off the
+/// bottom of its screen as gerdr's chat reads it.
+fn pane_suggestion(herdr: &mut Herdr, pane: &str) -> Option<String> {
+    match herdr.pane_screen_styled(pane, SUGGEST_ROWS) {
+        Ok(text) => crate::chat::suggestion(&crate::scrollback::parse_ansi(&text)),
+        Err(why) => {
+            tracing::debug!("phone: the suggestion in pane {pane}: {why}");
+            None
+        }
+    }
+}
+
 fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     let (project, label) = match agent_of(project, slug, pane) {
         Ok(found) => found,
         Err(reply) => return reply,
     };
     let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
-    // Its title, for the page's head.
-    let title = (herdr.agent_list().ok())
-        .and_then(|agents| agents.into_iter().find(|a| a.pane_id == pane))
-        .and_then(|a| a.shown_title());
+    // Its title, for the page's head, and what it suggests saying next.
+    let agent = (herdr.agent_list().ok())
+        .and_then(|agents| agents.into_iter().find(|a| a.pane_id == pane));
+    let title = agent.as_ref().and_then(|a| a.shown_title());
+    let suggestion = (agent.as_ref())
+        .filter(|a| crate::chat::suggests(a))
+        .and_then(|_| pane_suggestion(&mut herdr, pane));
+    let kind = (agent.as_ref().and_then(crate::chat::source::kind))
+        .filter(|kind| !mode::modes(*kind).is_empty());
+    // The modes it offers and the one `screen` (its last rows) shows.
+    let modes = |screen: &str| match kind {
+        Some(kind) => {
+            let now = mode::shown_in(kind, screen);
+            (json!(mode::offered(kind, now.as_deref())), json!(now))
+        }
+        None => (json!([]), Value::Null),
+    };
     let all = lines == "all";
     let want = lines
         .parse()
@@ -1186,7 +1249,8 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             Ok(screen) => {
                 let text = chat_and_screen(path, &screen);
                 let (ask, working, sides) = pane_ask(&project.id, pane);
-                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "sides": sides });
+                let (modes, mode) = modes(&screen);
+                let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode });
                 Reply::json(&reply)
             }
             Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
@@ -1207,7 +1271,8 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             let more = chat.is_some()
                 || (!all && rows.is_some_and(|rows| rows > text.lines().count() as u64));
             let (ask, working, sides) = pane_ask(&project.id, pane);
-            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "sides": sides });
+            let (modes, mode) = modes(&text);
+            let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode });
             Reply::json(&reply)
         }
         Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),

@@ -11,15 +11,18 @@ use crate::{ai_work::AgentKind, md_blocks::DocBlock, text_field::TextField};
 pub mod btw;
 pub mod commands;
 pub mod menu;
+pub mod mode;
 pub mod parse;
 pub mod rows;
 pub mod source;
 pub mod live;
+pub mod questions;
 pub mod tail;
 mod view;
 
 #[cfg(test)]
 pub(crate) use view::{footer, slash_footer};
+pub(crate) use view::{suggestion, suggests};
 
 /// One thing said or done in a chat, in order.
 #[derive(Clone, Debug, PartialEq)]
@@ -177,8 +180,17 @@ pub struct PaneChat {
     /// approval menu, which the transcript doesn't hold. As
     /// `crate::scrollback::parse_ansi` reads them.
     pub waiting: Option<Vec<(String, crate::scrollback::Styled)>>,
+    /// What Claude Code suggests the user says next, read off its screen
+    /// once its turn ends (`view::suggestion`): the empty reply box shows
+    /// it, and Left fills it in.
+    pub suggestion: Option<String>,
+    /// How often its screen was read for a suggestion since its agent
+    /// last worked: it stops after `view::SUGGEST_READS`.
+    pub suggest_reads: u8,
     /// What its agent said live: the tools running, an ask (`live`).
     pub live: live::PaneLive,
+    /// The user's picks on the card of its ask's questions, till Submit.
+    pub card: questions::Card,
 }
 
 /// When an agent's turn began, as herdr's rounds saw its status.

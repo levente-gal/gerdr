@@ -12,7 +12,7 @@
 //! `Answer` line.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io::{BufRead, BufReader, Read, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
@@ -34,6 +34,9 @@ mod serve;
 /// How long an ask waits for an answer from the chat before the agent's TUI
 /// asks itself.
 pub const ASK_WAIT: Duration = Duration::from_secs(60);
+/// How long a question (Claude's AskUserQuestion) waits for its answer from
+/// a card: its TUI shows its own menu beside the wait, so it may wait long.
+pub const QUESTION_WAIT: Duration = Duration::from_secs(600);
 /// How long after a phone last read an agent pane (it reads a shown one
 /// every 2 s) its asks still wait on the phone's card.
 pub const PHONE_SIGHT: Duration = Duration::from_secs(5);
@@ -80,11 +83,15 @@ pub enum What {
     /// The agent's turn ended: nothing runs.
     TurnEnd,
     /// The agent asks to run `tool`; the connection waits for an `Answer`.
+    /// `questions` when it asks the user questions (Claude's
+    /// AskUserQuestion): answered with `Answer::answers`.
     Ask {
         ask: String,
         tool: String,
         gist: String,
         input: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        questions: Vec<Question>,
     },
     /// An ask was answered elsewhere (in the TUI) or withdrawn.
     AskGone {
@@ -101,11 +108,48 @@ pub enum AskReply {
     Pass,
 }
 
+/// The answers to an ask's questions, by each one's text
+/// (`Question::question`): an option's label, several joined by ", ", or
+/// the user's own words.
+pub type Answers = BTreeMap<String, String>;
+
+/// One question an agent asks the user, as Claude's AskUserQuestion has it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Question {
+    pub question: String,
+    /// Its short name, for its tab.
+    #[serde(default)]
+    pub header: String,
+    pub options: Vec<QuestionOption>,
+    /// Several options may be picked.
+    #[serde(default)]
+    pub multi: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionOption {
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// How long an ask with `questions` waits for its answer from a card.
+pub fn ask_wait(questions: &[Question]) -> Duration {
+    if questions.is_empty() {
+        ASK_WAIT
+    } else {
+        QUESTION_WAIT
+    }
+}
+
 /// gerdr's answer to an ask, one line on its connection.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Answer {
     pub ask: String,
     pub reply: AskReply,
+    /// For an ask with questions, allowed: what the user answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<Answers>,
 }
 
 /// A tool an agent runs now, as its hooks said.
@@ -124,6 +168,8 @@ pub struct PendingAsk {
     pub tool: String,
     pub gist: String,
     pub input: String,
+    /// What it asks the user, when it is questions, not a permission.
+    pub questions: Vec<Question>,
     pub since: Instant,
 }
 
@@ -280,24 +326,25 @@ pub fn from_env() -> Option<(PathBuf, String)> {
 }
 
 /// Tell gerdr at `socket` `event`. For an ask, its answer, waited for up
-/// to `ASK_WAIT` and a little: `None` when no gerdr listens or it said
+/// to `ask_wait` and a little: `None` when no gerdr listens or it said
 /// nothing. Never fails: a hook must not get in its agent's way.
-pub fn send(socket: &Path, event: &LiveEvent) -> Option<AskReply> {
+pub fn send(socket: &Path, event: &LiveEvent) -> Option<Answer> {
     let mut stream = UnixStream::connect(socket).ok()?;
-    let asks = matches!(event.what, What::Ask { .. });
+    let wait = match &event.what {
+        What::Ask { questions, .. } => Some(ask_wait(questions)),
+        _ => None,
+    };
     let _ = stream.set_write_timeout(Some(SEND_WAIT));
     let mut line = serde_json::to_vec(event).ok()?;
     line.push(b'\n');
     stream.write_all(&line).ok()?;
-    if !asks {
-        return None;
-    }
-    let _ = stream.set_read_timeout(Some(ASK_WAIT + Duration::from_secs(5)));
+    let wait = wait?;
+    let _ = stream.set_read_timeout(Some(wait + Duration::from_secs(5)));
     let mut answer = String::new();
     BufReader::new(stream.take(MAX_LINE as u64))
         .read_line(&mut answer)
         .ok()?;
-    Some(serde_json::from_str::<Answer>(&answer).ok()?.reply)
+    serde_json::from_str::<Answer>(&answer).ok()
 }
 
 /// Listen at `path`, made anew, without blocking.
@@ -634,6 +681,7 @@ mod tests {
                 &Answer {
                     ask,
                     reply: AskReply::Deny,
+                    answers: None,
                 },
             );
         });
@@ -642,8 +690,9 @@ mod tests {
             tool: "Bash".into(),
             gist: "rm x".into(),
             input: "{}".into(),
+            questions: Vec::new(),
         });
-        assert_eq!(send(&path, &ask), Some(AskReply::Deny));
+        assert_eq!(send(&path, &ask).map(|a| a.reply), Some(AskReply::Deny));
         server.join().unwrap();
     }
 
@@ -717,6 +766,7 @@ mod tests {
                 tool: "Bash".into(),
                 gist: "rm x".into(),
                 input: String::new(),
+                questions: Vec::new(),
                 since: Instant::now(),
             },
         };
