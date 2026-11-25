@@ -10,6 +10,7 @@ use crate::{ai_work::AgentKind, md_blocks::DocBlock, text_field::TextField};
 
 pub mod commands;
 pub mod menu;
+pub mod mode;
 pub mod parse;
 pub mod rows;
 pub mod source;
@@ -178,6 +179,10 @@ pub struct PaneChat {
     pub waiting: Option<Vec<(String, crate::scrollback::Styled)>>,
     /// What its agent said live: the tools running, an ask (`live`).
     pub live: live::PaneLive,
+    /// The mode its agent's screen last said it is in (`mode::shown`).
+    pub mode: Option<String>,
+    /// The mode picked in the chat, while its agent is stepped there.
+    pub mode_goal: Option<mode::Goal>,
 }
 
 /// When an agent's turn began, as herdr's rounds saw its status.

@@ -85,6 +85,11 @@ pub struct ChatView {
     pub since: Option<u64>,
     /// The `/` menu over the reply box, while it shows.
     pub slash: Option<SlashView>,
+    /// The modes its agent offers (`chat::mode::offered`), under the reply
+    /// box; none for an agent without.
+    pub modes: Vec<String>,
+    /// The one its screen last said it is in.
+    pub mode: Option<String>,
 }
 
 /// The `/` menu's rows in sight, as painted.
@@ -145,6 +150,8 @@ impl PartialEq for ChatView {
             && self.ask == other.ask
             && self.since == other.since
             && self.slash == other.slash
+            && self.modes == other.modes
+            && self.mode == other.mode
     }
 }
 
@@ -194,6 +201,9 @@ pub enum ChatHit {
     /// The button at the list's foot while it is scrolled up: goes to the
     /// last item and follows new ones.
     Bottom,
+    /// One of the agent's modes under the reply box, by its place in
+    /// `ChatView::modes`: switches the agent to it.
+    Mode(usize),
 }
 
 /// Where a chat's parts go, in output coordinates.
@@ -222,6 +232,9 @@ impl ChatLayout {
         }
         if on(self.composer) {
             return Some(ChatHit::Composer);
+        }
+        if let Some((i, _)) = parts.modes.iter().find(|(_, rect)| on(*rect)) {
+            return Some(ChatHit::Mode(*i));
         }
         if let Some((key, _)) = parts.keys.iter().find(|(_, rect)| on(*rect)) {
             return Some(ChatHit::Key(*key));
@@ -486,6 +499,8 @@ pub const CHAT_CUT: usize = 200;
 const WAIT_ROWS: usize = 14;
 /// Room either side of a key button's label.
 const KEY_PAD: i32 = 12;
+/// How far a mode's segment sits in from its track's edge.
+const MODE_INSET: i32 = 2;
 /// The waiting panel's keys under the agent's screen rows.
 const WAIT_KEYS: [WaitKey; 7] = [
     WaitKey::Esc,
@@ -566,6 +581,10 @@ struct Parts {
     /// its first rows don't fit above them (the picked one always shows).
     slash: Vec<Rect>,
     slash_skip: usize,
+    /// The agent's modes under the reply box: their track, and each one
+    /// that fits, by its place in `ChatView::modes`.
+    mode_track: Option<Rect>,
+    modes: Vec<(usize, Rect)>,
 }
 
 /// How wide a key button labelled `label` is.
@@ -582,8 +601,8 @@ fn screen_rows<T>(rows: &[(String, T)]) -> &[(String, T)] {
     &rows[end.saturating_sub(WAIT_ROWS)..end]
 }
 
-/// From the bottom up: the hints, the reply box with Send at its right,
-/// the waiting panel while the agent waits (as many screen rows as leave
+/// From the bottom up: the hints, the agent's modes, the reply box with
+/// Send at its right, the waiting panel while the agent waits (as many screen rows as leave
 /// the list three card rows), and the list from under the head line.
 fn parts(view: &ChatView) -> Parts {
     let r = view.rect;
@@ -599,8 +618,25 @@ fn parts(view: &ChatView) -> Parts {
     let send_w = button_width("Send");
     let field_w = (w - send_w - FIELD_GAP).max(0);
     let field_h = wrap_field_height(&view.draft, field_w);
+    // As many of the modes as fit across, on a track as high as a button.
+    let (mut mode_track, mut modes, mut modes_h) = (None, Vec::new(), 0);
+    if !view.modes.is_empty() {
+        let y = hints.loc.y - PART_GAP / 2 - row_button();
+        let mut sx = x + MODE_INSET;
+        for (i, mode) in view.modes.iter().enumerate() {
+            let sw = width_in(mode, Face::Ui, small_font_size()).ceil() as i32 + 2 * KEY_PAD;
+            if sx + sw + MODE_INSET > x + w {
+                break;
+            }
+            let h = row_button() - 2 * MODE_INSET;
+            modes.push((i, rect(sx, y + MODE_INSET, sw, h)));
+            sx += sw;
+        }
+        mode_track = Some(rect(x, y, sx + MODE_INSET - x, row_button()));
+        modes_h = row_button() + PART_GAP / 2;
+    }
     let composer = Rectangle::new(
-        (x, hints.loc.y - PART_GAP - field_h).into(),
+        (x, hints.loc.y - PART_GAP - modes_h - field_h).into(),
         (field_w, field_h).into(),
     );
     let send = Rectangle::new(
@@ -716,6 +752,8 @@ fn parts(view: &ChatView) -> Parts {
         hints,
         slash,
         slash_skip,
+        mode_track,
+        modes,
     }
 }
 
@@ -1140,6 +1178,12 @@ pub fn chat_bottom_button(view: &ChatView) -> Option<Rect> {
     let parts = parts(view);
     let (_, content) = stacked(view, parts.column.1);
     bottom_button(view, &parts, content)
+}
+
+/// The agent's mode under `pos`, by its place in `ChatView::modes`, and
+/// where its segment is.
+pub fn chat_mode_at(view: &ChatView, pos: Point<f64, Logical>) -> Option<(usize, Rect)> {
+    (parts(view).modes.into_iter()).find(|(_, rect)| rect.to_f64().contains(pos))
 }
 
 /// The list's scrollbar in the room right of its items, while they don't
@@ -1968,6 +2012,20 @@ impl Painter {
             p,
         );
 
+        if let Some(track) = parts.mode_track {
+            let segments: Vec<(&str, Rect)> = (parts.modes.iter())
+                .map(|(i, rect)| (view.modes[*i].as_str(), here(*rect)))
+                .collect();
+            let on = (view.mode.as_ref())
+                .and_then(|now| parts.modes.iter().position(|(i, _)| view.modes[*i] == *now))
+                .unwrap_or(usize::MAX);
+            let hover = match view.hover {
+                Some(ChatHit::Mode(m)) => parts.modes.iter().position(|(i, _)| *i == m),
+                _ => None,
+            };
+            self.segmented(&mut c, here(track), &segments, on, hover, scale, p);
+        }
+
         if let Some(slash) = &view.slash {
             let rows = (parts.slash.as_slice(), parts.slash_skip);
             self.chat_slash(&mut c, view, slash, rows, &here, scale, p);
@@ -2227,13 +2285,15 @@ pub(super) mod tests {
             focused: true,
             draft: Line::default(),
             waiting: None,
-            hints: crate::chat::footer(ChatFocus::List, true),
+            hints: crate::chat::footer(ChatFocus::List, true, false),
             earlier: None,
             hover: None,
             running: Vec::new(),
             ask: None,
             since: Some(1_000),
             slash: None,
+            modes: Vec::new(),
+            mode: None,
         }
     }
 
@@ -2460,6 +2520,36 @@ pub(super) mod tests {
         let last = *p.slash.last().unwrap();
         assert_eq!(chat_layout(&short).hit(&short, middle(last)), Some(ChatHit::Command(7)));
         assert!(p.slash.iter().all(|r| r.loc.y >= p.head.loc.y + p.head.size.h));
+    }
+
+    #[test]
+    fn the_modes_sit_under_the_reply_box_as_many_as_fit() {
+        let modes: Vec<String> = ["Agent", "Plan", "Debug", "Ask"].map(String::from).into();
+        let v = ChatView {
+            modes: modes.clone(),
+            ..view()
+        };
+        let (layout, p) = (chat_layout(&v), parts(&v));
+        assert_eq!(p.modes.len(), 4);
+        let track = p.mode_track.unwrap();
+        assert!(track.loc.y >= layout.composer.loc.y + layout.composer.size.h);
+        assert!(track.loc.y + track.size.h <= p.hints.loc.y);
+        for (i, rect) in &p.modes {
+            assert_eq!(layout.hit(&v, middle(*rect)), Some(ChatHit::Mode(*i)));
+            assert_eq!(chat_mode_at(&v, middle(*rect)).map(|(m, _)| m), Some(*i));
+        }
+        // No modes, no track; the reply box sits lower.
+        let plain = parts(&view());
+        assert!(plain.mode_track.is_none());
+        assert!(plain.composer.loc.y > layout.composer.loc.y);
+        // A narrow pane shows those that fit.
+        let narrow = ChatView {
+            rect: Rectangle::new((0, 0).into(), (200, 500).into()),
+            modes,
+            ..view()
+        };
+        let shown = parts(&narrow).modes.len();
+        assert!((1..4).contains(&shown), "{shown}");
     }
 
     #[test]
@@ -2862,11 +2952,11 @@ pub(super) mod tests {
         };
         assert_eq!(keys(&v), ["J / K", "Space", "Y", "I"]);
         v.focus = ChatFocus::Composer;
-        v.hints = crate::chat::footer(ChatFocus::Composer, true);
+        v.hints = crate::chat::footer(ChatFocus::Composer, true, false);
         assert_eq!(chat_hints(&v)[2], ("Esc", "back"));
         assert!(!keys(&v).iter().any(|k| k == crate::text_field::DISCARD_KEY));
         v.draft.text = "half a reply".into();
-        v.hints = crate::chat::footer(ChatFocus::Composer, false);
+        v.hints = crate::chat::footer(ChatFocus::Composer, false, false);
         assert_eq!(chat_hints(&v)[2], ("Esc", "keep draft"));
         assert!(keys(&v).iter().any(|k| k == crate::text_field::DISCARD_KEY));
         let spots = hint_spots(&chat_hints(&v), parts(&v).hints);
