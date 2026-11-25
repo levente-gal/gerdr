@@ -477,14 +477,6 @@ pub fn chat_clocks(view: &ChatView, now: u64) -> Vec<(String, Rect, f32)> {
     head.into_iter().chain(rows).collect()
 }
 
-/// Where the line sweeping under the head goes while its agent works
-/// (output coordinates): along the head's bottom edge.
-pub fn chat_sweep(view: &ChatView) -> Option<Rect> {
-    let head = parts(view).head;
-    let h = super::features::SWEEP_H;
-    works(view).then(|| rect(head.loc.x, head.loc.y + head.size.h - h, head.size.w, h))
-}
-
 /// Where the rows in sight of `view`'s list hold `bit` (output
 /// coordinates); none while the list shows a message instead.
 fn in_sight(view: &ChatView, parts: &Parts, bit: &Bit) -> Vec<Rect> {
@@ -3862,7 +3854,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn the_working_row_spinner_sweep_and_clocks_show_only_while_it_works() {
+    fn the_working_row_spinner_and_clocks_show_only_while_it_works() {
         let mut v = view();
         v.top = 1e9;
         let w = parts(&v).column.1;
@@ -3880,8 +3872,6 @@ pub(super) mod tests {
         assert!(clocks.iter().all(|(text, ..)| text == "1m 12s"));
         assert!(inside(parts(&v).head, clocks[0].1));
         assert!(inside(row, clocks[1].1));
-        let sweep = chat_sweep(&v).expect("a sweep");
-        assert!(inside(parts(&v).head, sweep));
         // A press on the row picks nothing.
         assert_eq!(chat_layout(&v).hit(&v, middle(row)), None);
         // In a short pane scrolled up, the row is out of view: only the
@@ -3901,7 +3891,6 @@ pub(super) mod tests {
                 .is_some_and(|(_, l)| l.bits.iter().any(|(_, b)| *b == Bit::Spinner));
             !row && chat_spinners(v).is_empty()
                 && chat_clocks(v, 73_000).is_empty()
-                && chat_sweep(v).is_none()
         };
         for status in [AgentStatus::Idle, AgentStatus::Blocked, AgentStatus::Done] {
             assert!(still(&ChatView { status, ..view() }), "{status:?}");
@@ -3914,7 +3903,7 @@ pub(super) mod tests {
             ask: Some(ask()),
             ..view()
         }));
-        // No turn start known: the row and sweep, no clocks.
+        // No turn start known: the row, no clocks.
         v.since = None;
         assert!(chat_clocks(&v, 73_000).is_empty());
         assert_eq!(chat_spinners(&v).len(), 1);
