@@ -10,6 +10,7 @@ use crate::{ai_work::AgentKind, md_blocks::DocBlock, text_field::TextField};
 
 pub mod btw;
 pub mod commands;
+pub mod images;
 pub mod menu;
 pub mod mode;
 pub mod model;

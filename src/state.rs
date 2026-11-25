@@ -444,7 +444,7 @@ pub struct Notices {
     /// `push_phone`).
     pub held: Vec<(crate::web_push::Note, Instant)>,
     /// Brings the clipboard's text read for a paste back (see `clipboard`).
-    pub paste: Option<channel::Sender<(input::Overlay, String)>>,
+    pub paste: Option<channel::Sender<crate::clipboard::Pasted>>,
     /// The text copied from one of gerdr's own text fields, while gerdr
     /// owns the clipboard with it (see `clipboard`).
     pub copied: Option<String>,
