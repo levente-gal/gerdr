@@ -92,7 +92,14 @@ pub enum Request {
     /// The phone shows agent pane `pane` of `project`: the permission its
     /// agent asks for, if it waits on one (see `chat::live`). Its asks wait
     /// on the phone's card while it shows the pane.
-    Ask { project: String, pane: String },
+    /// `cursor`: its agent is Cursor's, and the phone offers its models
+    /// (gerdr reads them once, as for the picker of a model).
+    Ask {
+        project: String,
+        pane: String,
+        #[serde(default)]
+        cursor: bool,
+    },
     /// Send `text` to agent pane `pane` as the chat would: a side question
     /// (`/btw …`) is followed for its answer, which the `ask` op then
     /// lists.
@@ -310,7 +317,7 @@ impl Gerdr {
                 stage,
             } => self.phone_offer(&project, &slug, stage),
             Request::Cards { features } => self.phone_cards(&features),
-            Request::Ask { pane, .. } => {
+            Request::Ask { pane, cursor, .. } => {
                 let asked = self.phone_ask(&pane).map(|a| {
                     json!({
                         "ask": a.ask, "tool": a.tool, "gist": a.gist, "input": a.input,
@@ -318,7 +325,20 @@ impl Gerdr {
                     })
                 });
                 let sides = self.phone_sides(&pane);
-                json!({ "ask": asked, "working": self.turn_took(&pane), "sides": sides })
+                let models = &self.features.cursor_models;
+                if cursor
+                    && models.offers.is_empty()
+                    && models.reading == crate::stage_models::Reading::Idle
+                {
+                    self.read_cursor_models(crate::chat::model::base(
+                        crate::ai_work::AgentKind::Cursor,
+                    ));
+                }
+                let listed: Vec<Value> = (self.features.cursor_models.offers.iter())
+                    .filter(|_| cursor)
+                    .map(|o| json!({ "id": o.id, "name": o.name }))
+                    .collect();
+                json!({ "ask": asked, "working": self.turn_took(&pane), "sides": sides, "cursor_models": listed })
             }
             Request::Side { pane, text, .. } => match self.send_line(&pane, &text) {
                 Ok(()) => json!({ "ok": true }),

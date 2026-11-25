@@ -9733,8 +9733,9 @@ fn dump_ship_squash() {
 /// of several picks, the keys on Other; one pick of one question, a row
 /// hovered) and on its screen (check boxes, an edge after every row), and
 /// Claude Code's suggestion in the reply box, the agent's modes under it,
-/// and side questions (`/btw`) answered and being answered.
-const CHATS: [&str; 15] = [
+/// side questions (`/btw`) answered and being answered, and the model's
+/// button right of the modes, hovered.
+const CHATS: [&str; 16] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9750,6 +9751,7 @@ const CHATS: [&str; 15] = [
     "chat_suggested",
     "chat_modes",
     "chat_side",
+    "chat_model",
 ];
 
 fn chat_view(i: usize) -> super::ChatView {
@@ -9785,7 +9787,7 @@ fn chat_view(i: usize) -> super::ChatView {
             super::ChatView {
                 status: AgentStatus::Idle,
                 focus: ChatFocus::Composer,
-                hints: crate::chat::footer(ChatFocus::Composer, false, false, false),
+                hints: crate::chat::footer(ChatFocus::Composer, false, false, false, false),
                 draft: Line {
                     text: text.into(),
                     caret: text.len(),
@@ -9897,13 +9899,13 @@ fn chat_view(i: usize) -> super::ChatView {
             status: AgentStatus::Idle,
             focus: ChatFocus::Composer,
             suggestion: Some("commit this and run the tests".into()),
-            hints: crate::chat::footer(ChatFocus::Composer, true, true, false),
+            hints: crate::chat::footer(ChatFocus::Composer, true, true, false, false),
             ..v
         },
         // Claude's modes, in plan mode, another one hovered.
         13 => super::ChatView {
             status: AgentStatus::Idle,
-            hints: crate::chat::footer(ChatFocus::List, true, false, true),
+            hints: crate::chat::footer(ChatFocus::List, true, false, true, false),
             modes: ["Auto", "Manual", "Edits", "Plan"].map(String::from).into(),
             mode: Some("Plan".into()),
             hover: Some(ChatHit::Mode(0)),
@@ -9930,6 +9932,16 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
+        // The model's button right of Claude's modes, hovered.
+        15 => super::ChatView {
+            status: AgentStatus::Idle,
+            hints: crate::chat::footer(ChatFocus::List, true, false, true, true),
+            modes: ["Auto", "Manual", "Edits", "Plan"].map(String::from).into(),
+            mode: Some("Auto".into()),
+            model: Some("Opus 5.5".into()),
+            hover: Some(ChatHit::Model),
+            ..v
+        },
         // A shorter pane, for the list to scroll.
         _ => super::ChatView {
             rect: super::Rect::new(v.rect.loc, (v.rect.size.w, 460).into()),
@@ -9947,7 +9959,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 15]; 4] = [
+const GOLDEN_CHATS: [[u64; 16]; 4] = [
     // Dark at 1
     [
         0xa5039d4ee1fb06ee, // chat_finding
@@ -9965,6 +9977,7 @@ const GOLDEN_CHATS: [[u64; 15]; 4] = [
         0x004ee553bdea6b96, // chat_suggested
         0xfe79e247979aad2d, // chat_modes
         0x3bb4cda8d8f1a46b, // chat_side
+        0x1baa8146186136c6, // chat_model
     ],
     // Dark at 2
     [
@@ -9983,6 +9996,7 @@ const GOLDEN_CHATS: [[u64; 15]; 4] = [
         0x95c0a660d63e9eb1, // chat_suggested
         0xd21d7d5694e74060, // chat_modes
         0x60f310cf03af302f, // chat_side
+        0x70646c8cb13e8898, // chat_model
     ],
     // Light at 1
     [
@@ -10001,6 +10015,7 @@ const GOLDEN_CHATS: [[u64; 15]; 4] = [
         0x1a9b6c02649b4f80, // chat_suggested
         0xd5e5939be4fc8b21, // chat_modes
         0x127bfb769349a783, // chat_side
+        0x1f5a36a977d402d0, // chat_model
     ],
     // Light at 2
     [
@@ -10019,6 +10034,7 @@ const GOLDEN_CHATS: [[u64; 15]; 4] = [
         0x3d7c424e61025c58, // chat_suggested
         0x7127f7ee025b5d03, // chat_modes
         0x1ef6725ddb8a2095, // chat_side
+        0x723a472ff593632d, // chat_model
     ],
 ];
 

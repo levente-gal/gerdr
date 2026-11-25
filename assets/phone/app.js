@@ -649,12 +649,17 @@ async function pane(p, s, id) {
   const since = d.working == null ? null : turnAt(id, d.working);
   const working = since === null ? "" : `<div class="work-row small"><span class="sdot blink"></span>working
     <span class="clock" data-since="${since}"></span></div>`;
-  // Its modes under the reply box, as on gerdr's chat: the one its screen shows lit.
-  const modes = d.modes?.length ? `<div class="modes" role="group" aria-label="Agent mode">${d.modes.map((m) =>
+  // Its modes under the reply box, as on gerdr's chat: the one its screen shows lit;
+  // its model at their right, the one it is on picked.
+  const group = d.modes?.length ? `<div class="modes" role="group" aria-label="Agent mode">${d.modes.map((m) =>
     `<button type="button" data-mode="${esc(m)}" aria-pressed="${m === d.mode}">${esc(m)}</button>`).join("")}</div>` : "";
+  const now = d.model_id ? "" : `<option value="" selected disabled>${esc(d.model || "Model")}</option>`;
+  const model = d.models?.length ? `<select class="model" aria-label="Model">${now}${d.models.map((m) =>
+    `<option value="${esc(m.id)}"${m.id === d.model_id ? " selected" : ""}>${esc(m.name)}</option>`).join("")}</select>` : "";
+  const modes = group || model ? `<div class="modes-row">${group}${model}</div>` : "";
   return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
     ask, askId: a?.ask || "", asking: !!a?.questions?.length, suggestion: d.suggestion || "",
-    modes, modesKey: JSON.stringify([d.modes, d.mode]),
+    modes, modesKey: JSON.stringify([d.modes, d.mode, d.models, d.model, d.model_id]),
     sides: sideCard(id, d.sides),
     bar: `<div id="asked"></div><div id="sides"></div><button type="button" id="suggest" hidden></button><form id="say"><ul id="slash" hidden></ul><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
       <button>Send</button></form>${modes}
@@ -856,7 +861,7 @@ async function render(fresh, force, keepBottom) {
     }
     // The rest of the bar keeps what is typed; the agent's modes follow its screen.
     if (v.modesKey !== undefined && bar.dataset.modes !== v.modesKey) {
-      bar.querySelector(".modes")?.remove();
+      bar.querySelector(".modes-row")?.remove();
       document.getElementById("say")?.insertAdjacentHTML("afterend", v.modes);
       bar.dataset.modes = v.modesKey;
     }
@@ -982,6 +987,21 @@ document.addEventListener("pointerdown", (e) => {
   document.querySelectorAll("details.menu[open]").forEach((m) => {
     if (!m.contains(e.target)) m.removeAttribute("open");
   });
+});
+
+// A model picked: the agent is switched with its own /model, as on gerdr's chat.
+document.addEventListener("change", async (e) => {
+  const pick = e.target.closest?.("select.model");
+  if (!pick?.value) return;
+  const [, p, s, pane] = here();
+  pick.disabled = true;
+  try {
+    const a = await post("/api/agent", { p, s, pane, model: pick.value });
+    if (a.error) say([{ text: a.error }], true);
+  } finally {
+    pick.disabled = false;
+  }
+  setTimeout(() => render(false, true), 400);
 });
 
 document.addEventListener("click", async (e) => {

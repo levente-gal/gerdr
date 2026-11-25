@@ -665,11 +665,17 @@ impl Chat {
         if self.sent.as_deref().map(Vec::as_slice) != Some(now) {
             let items = Arc::new(now.to_vec());
             self.sent = Some(items.clone());
+            let model = match self.source.agent {
+                AgentKind::Claude => self.reader.model().map(str::to_owned),
+                AgentKind::Cursor => super::model::cursor_now(),
+                _ => None,
+            };
             out.push(Event::Items {
                 pane_id: pane_id.to_owned(),
                 source: self.source.clone(),
                 items,
                 earlier: self.from > 0,
+                model,
             });
         }
     }

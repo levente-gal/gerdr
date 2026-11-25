@@ -75,6 +75,8 @@ pub struct Reader {
     last_entry: Option<String>,
     /// `invoke_subagent` calls and their subagents (Antigravity's).
     spawns: Vec<antigravity::Spawn>,
+    /// The model the chat is on, as its lines last said (Claude Code's).
+    model: Option<String>,
 }
 
 /// A subagent's work: its item, read by a reader of its own.
@@ -106,6 +108,7 @@ impl Reader {
             entries: HashMap::new(),
             last_entry: None,
             spawns: Vec::new(),
+            model: None,
         }
     }
 
@@ -193,6 +196,11 @@ impl Reader {
         }
     }
 
+    /// The model the chat is on, as its lines read so far last said.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
     /// The items read so far, in order.
     pub fn items(&self) -> &[Item] {
         &self.items
@@ -223,6 +231,9 @@ impl Reader {
     /// `line` read here, or in its subagent's reader.
     fn route(&mut self, line: &Value) {
         if line["isSidechain"] != true {
+            if let Some(model) = crate::chat::model::of_line(line) {
+                self.model = Some(model);
+            }
             return self.line(line);
         }
         let agent = line["agentId"].as_str();
