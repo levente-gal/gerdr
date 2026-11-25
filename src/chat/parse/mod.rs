@@ -611,7 +611,7 @@ fn texts(content: &Value) -> String {
 }
 
 /// Plan `text`, written to `path` or not, as its item.
-fn plan_item(id: String, path: Option<String>, text: &str) -> Item {
+pub(crate) fn plan_item(id: String, path: Option<String>, text: &str) -> Item {
     Item::Plan {
         id,
         path,

@@ -210,6 +210,9 @@ pub enum ChatHit {
     Answer(AskReply),
     /// The ask's head row: shows or folds what it would run.
     AskFold,
+    /// "Show whole plan" under a plan ask's peek: opens the plan's card in
+    /// the list instead.
+    AskPlan,
     /// The list's scrollbar.
     Scrollbar,
     /// A command of the `/` menu, by its place among those matching.
@@ -288,6 +291,7 @@ impl ChatLayout {
         {
             return Some(match spot {
                 Spot::Card(hit) => ChatHit::Card(*hit),
+                Spot::Plan => ChatHit::AskPlan,
                 _ => ChatHit::AskFold,
             });
         }
@@ -340,6 +344,7 @@ impl ChatLayout {
             Some(Spot::ShowAll) => ChatHit::ShowAll(i),
             Some(Spot::Key(key)) => ChatHit::Key(key),
             Some(Spot::Card(hit)) => ChatHit::Card(hit),
+            Some(Spot::Plan) => ChatHit::AskPlan,
             None => ChatHit::Item(i),
         })
     }
@@ -1450,13 +1455,14 @@ fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
         l.doc(pieces, (ix, top));
         if more > 0 {
             let text = match more {
-                1 => "1 more line in the chat".to_owned(),
-                n => format!("{n} more lines in the chat"),
+                1 => "Show whole plan (1 more line)".to_owned(),
+                n => format!("Show whole plan ({n} more lines)"),
             };
-            l.put(
-                rect(ix, l.below(), iw, small_line()),
-                label(&text, Face::Ui, Mark::Muted),
-            );
+            let row = rect(ix, l.below(), iw, small_line());
+            let wide = width_in(&text, Face::Ui, font_size()).ceil() as i32;
+            l.put(row, label(&text, Face::Ui, Mark::Link));
+            l.spots
+                .push((rect(ix, row.loc.y, wide.min(iw), small_line()), Spot::Plan));
         }
     } else if open {
         let (ix, iw) = (CHEVRON_WIDTH, (w - CHEVRON_WIDTH).max(1));
@@ -1620,6 +1626,8 @@ enum Spot {
     Key(WaitKey),
     /// A part of the questions' card.
     Card(CardHit),
+    /// A plan ask's "Show whole plan".
+    Plan,
 }
 
 /// A colour of a card's words.
@@ -3960,8 +3968,13 @@ pub(super) mod tests {
         let shown = text(laid);
         assert_eq!(shown.first().map(String::as_str), Some("Retry the upload"));
         assert!(shown.len() > 3 && shown.len() < 31, "{shown:?}");
-        let more = format!("{} more lines in the chat", 31 - shown.len());
+        let more = format!("Show whole plan ({} more lines)", 31 - shown.len());
         assert!(labels(laid).contains(&more), "{:?}", labels(laid));
+        // The link opens the plan's card in the list.
+        let (at, _) = p.card.as_ref().unwrap();
+        let (r, _) = (laid.spots.iter()).find(|(_, s)| *s == Spot::Plan).unwrap();
+        let on = Point::from(((at.x + r.loc.x + 2) as f64, (at.y + r.loc.y + 2) as f64));
+        assert_eq!(chat_layout(&v).hit(&v, on), Some(ChatHit::AskPlan));
         // Folded, as other input shows unfolded.
         v.unfolded.insert(ask_key("p1"));
         let q = parts(&v);
