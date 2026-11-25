@@ -6,7 +6,7 @@ use std::io::Read;
 
 use serde_json::{Value, json};
 
-use super::{AskReply, LiveEvent, What};
+use super::{Answer, AskReply, LiveEvent, QUESTION_WAIT, Question, QuestionOption, What};
 use crate::stats_panel::tool_gist;
 
 /// The subcommand Claude's hooks run.
@@ -14,14 +14,14 @@ pub const HOOK_COMMAND: &str = "claude-hook";
 /// The agent, as herdr names it.
 const AGENT: &str = "claude";
 /// The hook events gerdr listens to, each with how long its hook may take,
-/// in seconds: an ask waits for the chat's answer (`ASK_WAIT` and a little).
+/// in seconds: an ask waits for the chat's answer (`ask_wait` and a little).
 const EVENTS: [(&str, u64); 6] = [
     ("SessionStart", 5),
     ("PreToolUse", 5),
     ("PostToolUse", 5),
     ("PostToolUseFailure", 5),
     ("Stop", 5),
-    ("PermissionRequest", 90),
+    ("PermissionRequest", QUESTION_WAIT.as_secs() + 30),
 ];
 /// The most of a hook's input read.
 const MAX_INPUT: u64 = 4 << 20;
@@ -51,7 +51,8 @@ pub fn run_hook() {
         at_ms: now,
         what,
     };
-    if let Some(out) = super::send(&socket, &event).and_then(decision) {
+    let answer = super::send(&socket, &event);
+    if let Some(out) = answer.and_then(|answer| decision(answer, &payload["tool_input"])) {
         println!("{out}");
     }
 }
@@ -91,19 +92,50 @@ fn what_of(payload: &Value, ask: &str) -> Option<What> {
                 tool: text("tool_name")?,
                 gist: tool_gist(input).unwrap_or_default(),
                 input: shown,
+                questions: questions_of(input),
             }
         }
         _ => return None,
     })
 }
 
-/// What the hook prints for the chat's answer `reply`: nothing for `Pass`,
-/// so Claude's TUI asks as it always does.
-fn decision(reply: AskReply) -> Option<String> {
-    let decision = match reply {
-        AskReply::Allow => json!({ "behavior": "allow" }),
-        AskReply::Deny => json!({ "behavior": "deny", "message": "Denied from gerdr's chat" }),
-        AskReply::Pass => return None,
+/// The questions AskUserQuestion's `input` asks, none for other tools'.
+fn questions_of(input: &Value) -> Vec<Question> {
+    let text = |v: &Value, key: &str| v[key].as_str().unwrap_or_default().to_owned();
+    (input["questions"].as_array().into_iter().flatten())
+        .filter_map(|q| {
+            let options = (q["options"].as_array()?.iter())
+                .map(|o| QuestionOption {
+                    label: text(o, "label"),
+                    description: text(o, "description"),
+                })
+                .collect();
+            Some(Question {
+                question: q["question"].as_str()?.to_owned(),
+                header: text(q, "header"),
+                options,
+                multi: q["multiSelect"].as_bool() == Some(true),
+            })
+        })
+        .collect()
+}
+
+/// What the hook prints for the chat's `answer` to an ask for a tool run
+/// with `input`: nothing for `Pass`, so Claude's TUI asks as it always
+/// does. A question's answers go in as the tool's input, its questions
+/// kept.
+fn decision(answer: Answer, input: &Value) -> Option<String> {
+    let decision = match (answer.reply, answer.answers) {
+        (AskReply::Allow, Some(answers)) => {
+            let mut input = input.clone();
+            input["answers"] = json!(answers);
+            json!({ "behavior": "allow", "updatedInput": input })
+        }
+        (AskReply::Allow, None) => json!({ "behavior": "allow" }),
+        (AskReply::Deny, _) => {
+            json!({ "behavior": "deny", "message": "Denied from gerdr's chat" })
+        }
+        (AskReply::Pass, _) => return None,
     };
     let out = json!({
         "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": decision }
@@ -171,6 +203,9 @@ mod tests {
             "PreToolUse" => include_str!("fixtures/claude/PreToolUse.json"),
             "PostToolUse" => include_str!("fixtures/claude/PostToolUse.json"),
             "PermissionRequest" => include_str!("fixtures/claude/PermissionRequest.json"),
+            "PermissionRequestQuestion" => {
+                include_str!("fixtures/claude/PermissionRequestQuestion.json")
+            }
             "Stop" => include_str!("fixtures/claude/Stop.json"),
             "UserPromptSubmit" => include_str!("fixtures/claude/UserPromptSubmit.json"),
             _ => unreachable!(),
@@ -215,6 +250,7 @@ mod tests {
             tool,
             gist,
             input,
+            questions,
         }) = what("PermissionRequest")
         else {
             panic!("not an ask");
@@ -225,18 +261,64 @@ mod tests {
             input.starts_with("{\n  \"command\": \"echo done > out.txt\""),
             "{input}"
         );
+        assert!(questions.is_empty());
+    }
+
+    #[test]
+    fn a_question_asks_its_questions_and_its_answers_are_claudes_input() {
+        let payload = fixture("PermissionRequestQuestion");
+        let Some(What::Ask {
+            tool, questions, ..
+        }) = what_of(&payload, "q1")
+        else {
+            panic!("not an ask");
+        };
+        assert_eq!(tool, "AskUserQuestion");
+        let fruits = Question {
+            question: "Pick fruits".into(),
+            header: "Fruits".into(),
+            options: ["Apple", "Banana", "Grape"]
+                .map(|f| QuestionOption {
+                    label: f.into(),
+                    description: format!("{f} fruit"),
+                })
+                .into(),
+            multi: true,
+        };
+        assert_eq!(questions, vec![fruits]);
+        let answers = Answer {
+            ask: "q1".into(),
+            reply: AskReply::Allow,
+            answers: Some([("Pick fruits".into(), "Apple, Grape".into())].into()),
+        };
+        let input = &payload["tool_input"];
+        let out: Value = serde_json::from_str(&decision(answers, input).unwrap()).unwrap();
+        let decided = &out["hookSpecificOutput"]["decision"];
+        assert_eq!(decided["behavior"], "allow");
+        assert_eq!(decided["updatedInput"]["questions"], input["questions"]);
+        assert_eq!(
+            decided["updatedInput"]["answers"],
+            json!({"Pick fruits": "Apple, Grape"})
+        );
     }
 
     #[test]
     fn the_chats_answer_is_claudes_decision() {
-        let out: Value = serde_json::from_str(&decision(AskReply::Allow).unwrap()).unwrap();
+        let input = json!({"command": "ls"});
+        let reply = |reply| Answer {
+            ask: "q1".into(),
+            reply,
+            answers: None,
+        };
+        let out: Value =
+            serde_json::from_str(&decision(reply(AskReply::Allow), &input).unwrap()).unwrap();
         let allow = json!({"hookSpecificOutput": {
             "hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}
         }});
         assert_eq!(out, allow);
-        let out = decision(AskReply::Deny).unwrap();
+        let out = decision(reply(AskReply::Deny), &input).unwrap();
         assert!(out.contains(r#""behavior":"deny""#), "{out}");
-        assert_eq!(decision(AskReply::Pass), None);
+        assert_eq!(decision(reply(AskReply::Pass), &input), None);
     }
 
     #[test]
@@ -275,11 +357,9 @@ mod tests {
             {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
         ]);
         assert_eq!(hooks["Stop"], stop);
-        // An ask's hook outlives the wait for its answer.
+        // An ask's hook outlives the wait for its answer, a question's too.
         let wait = hooks["PermissionRequest"][0]["hooks"][0]["timeout"].as_u64();
-        assert!(
-            Duration::from_secs(wait.unwrap()) > super::super::ASK_WAIT + Duration::from_secs(5)
-        );
+        assert!(Duration::from_secs(wait.unwrap()) > QUESTION_WAIT + Duration::from_secs(5));
         assert_eq!(hooks["PreToolUse"][0]["matcher"], "*");
         assert_eq!(merged(Some(&out), command).unwrap(), out);
         let fresh = merged(None, command).unwrap();

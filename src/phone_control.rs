@@ -93,12 +93,15 @@ pub enum Request {
     /// agent asks for, if it waits on one (see `chat::live`). Its asks wait
     /// on the phone's card while it shows the pane.
     Ask { project: String, pane: String },
-    /// Answer ask `ask` of agent pane `pane`: allow or deny it.
+    /// Answer ask `ask` of agent pane `pane`: allow or deny it, and for
+    /// one with questions, allow it with what the user answered.
     Answer {
         project: String,
         pane: String,
         ask: String,
         reply: crate::chat::live::AskReply,
+        #[serde(default)]
+        answers: Option<crate::chat::live::Answers>,
     },
     /// Start a feature, and its Discover agent: answered once both are.
     Create {
@@ -300,14 +303,21 @@ impl Gerdr {
             } => self.phone_offer(&project, &slug, stage),
             Request::Cards { features } => self.phone_cards(&features),
             Request::Ask { pane, .. } => {
-                let asked = self.phone_ask(&pane).map(
-                    |a| json!({ "ask": a.ask, "tool": a.tool, "gist": a.gist, "input": a.input }),
-                );
+                let asked = self.phone_ask(&pane).map(|a| {
+                    json!({
+                        "ask": a.ask, "tool": a.tool, "gist": a.gist, "input": a.input,
+                        "questions": a.questions,
+                    })
+                });
                 json!({ "ask": asked, "working": self.turn_took(&pane) })
             }
             Request::Answer {
-                pane, ask, reply, ..
-            } => match self.phone_answer(&pane, &ask, reply) {
+                pane,
+                ask,
+                reply,
+                answers,
+                ..
+            } => match self.phone_answer(&pane, &ask, reply, answers) {
                 true => json!({ "ok": true }),
                 false => json!({ "error": "It was answered already" }),
             },

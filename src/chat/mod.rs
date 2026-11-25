@@ -15,11 +15,13 @@ pub mod parse;
 pub mod rows;
 pub mod source;
 pub mod live;
+pub mod questions;
 pub mod tail;
 mod view;
 
 #[cfg(test)]
 pub(crate) use view::{footer, slash_footer};
+pub(crate) use view::{suggestion, suggests};
 
 /// One thing said or done in a chat, in order.
 #[derive(Clone, Debug, PartialEq)]
@@ -186,6 +188,8 @@ pub struct PaneChat {
     pub suggest_reads: u8,
     /// What its agent said live: the tools running, an ask (`live`).
     pub live: live::PaneLive,
+    /// The user's picks on the card of its ask's questions, till Submit.
+    pub card: questions::Card,
 }
 
 /// When an agent's turn began, as herdr's rounds saw its status.

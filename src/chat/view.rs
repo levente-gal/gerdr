@@ -14,7 +14,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde_json::json;
 use smithay::{
     desktop::Window,
     input::keyboard::{Keysym, ModifiersState},
@@ -25,7 +24,9 @@ use smithay::{
 use super::{
     ChatFocus, Event, Item, PaneChat, Reading,
     commands::{self, Command, Slash},
-    live::AskReply,
+    live::{Answers, AskReply, PendingAsk, Question},
+    menu::{self, ChoiceKind, Menu},
+    questions::Card,
     mode,
     rows::{rows, unread},
     tail::Tail,
@@ -33,7 +34,7 @@ use super::{
 use crate::{
     ChatRows, Gerdr, Pane, Workspace,
     ai_work::AgentKind,
-    chrome::{self, ChatHit, ChatLayout, ChatView, FieldSpot, WaitKey},
+    chrome::{self, CardHit, ChatHit, ChatLayout, ChatView, FieldSpot, WaitKey},
     herdr::{AgentInfo, AgentSession, AgentStatus, Herdr, ProcessInfo},
     key_table::{self, Binding},
     md_blocks::{DocBlock, ItemMark},
@@ -167,6 +168,216 @@ fn ask_footer(open: bool) -> Vec<(String, String)> {
     .into_iter())
     .map(|(chord, said)| (chord.to_owned(), said))
     .collect()
+}
+
+/// A key of the questions' card, while it has the keys (the list's place).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CardKey {
+    /// Next, or Submit on the last question.
+    Go,
+    /// Answer in terminal.
+    Pass,
+    /// From Other's words back to the options.
+    Back,
+    /// Pick or tick the row the keys are on.
+    Pick,
+    Down,
+    Up,
+    /// The question before or after.
+    Before,
+    After,
+}
+
+/// Where the questions' card stands, for its keys.
+struct CardCtx {
+    /// Several questions, Several picks, the last question shown.
+    many: bool,
+    multi: bool,
+    last: bool,
+    /// The keys are on Other: what they type is its words.
+    other: bool,
+    /// Its words aren't empty: Space is one of them.
+    typing: bool,
+}
+
+/// The questions' card's keys: they come before the list's (Up, Down,
+/// Space, Enter are the card's while it shows), never the reply box's.
+const CARD_KEYS: &[Binding<CardCtx, CardKey>] = &[
+    Binding {
+        chord: "Enter",
+        does: |_| Some(CardKey::Go),
+        footer: true,
+        f1: "go to the next question; on the last, submit the answers",
+    },
+    Binding {
+        chord: "Space",
+        does: |c| (!c.typing).then_some(CardKey::Pick),
+        footer: true,
+        f1: "pick the option the keys are on (tick it, where several go)",
+    },
+    Binding {
+        chord: "Up",
+        does: |_| Some(CardKey::Up),
+        footer: true,
+        f1: "go to the option above",
+    },
+    Binding {
+        chord: "Down",
+        does: |_| Some(CardKey::Down),
+        footer: true,
+        f1: "go to the option below",
+    },
+    Binding {
+        chord: "Left",
+        does: |c| (c.many && !c.other).then_some(CardKey::Before),
+        footer: true,
+        f1: "show the question before",
+    },
+    Binding {
+        chord: "Right",
+        does: |c| (c.many && !c.other).then_some(CardKey::After),
+        footer: true,
+        f1: "show the next question",
+    },
+    Binding {
+        chord: "Esc",
+        does: |c| {
+            Some(if c.other {
+                CardKey::Back
+            } else {
+                CardKey::Pass
+            })
+        },
+        footer: true,
+        f1: "give the questions back to the agent's own menu (from Other: back to the options)",
+    },
+];
+
+/// The digits picking the card's options, hinted as one (they type into
+/// Other while the keys are on it).
+const CARD_DIGITS: &str = "1–9";
+
+fn card_ctx(card: &Card, qs: &[Question]) -> CardCtx {
+    let other = card.on_other(qs);
+    CardCtx {
+        many: qs.len() > 1,
+        multi: qs.get(card.at).is_some_and(|q| q.multi),
+        last: card.at + 1 >= qs.len(),
+        other,
+        typing: other && card.other.get(card.at).is_some_and(|f| !f.is_empty()),
+    }
+}
+
+/// The footer's hints of the questions' card's keys, Next / Submit and
+/// Answer in terminal in their buttons' words (checklist K3).
+fn card_footer(card: &Card, ask: &PendingAsk) -> Vec<(String, String)> {
+    let mut card = card.clone();
+    card.sync(ask);
+    let ctx = card_ctx(&card, &ask.questions);
+    let [go, pass] = chrome::question_buttons(ctx.last).map(|(_, label)| label.to_lowercase());
+    let pick = if ctx.multi { "tick" } else { "pick" };
+    let mut hints = key_table::hints(CARD_KEYS, &ctx, |k| match k {
+        CardKey::Go => go.clone(),
+        CardKey::Pass => pass.clone(),
+        CardKey::Back => "back".to_owned(),
+        CardKey::Pick => pick.to_owned(),
+        CardKey::Up | CardKey::Down => "choose".to_owned(),
+        CardKey::Before | CardKey::After => "question".to_owned(),
+    });
+    if !ctx.other {
+        hints.insert(1, (CARD_DIGITS, pick.to_owned()));
+    }
+    key_table::joined(hints)
+}
+
+/// A key for `chat`'s questions' card, while it has the keys: `Some` with
+/// what it asks of gerdr when the card took it, `None` when it is the
+/// list's.
+fn card_key(
+    chat: &mut PaneChat,
+    mods: &ModifiersState,
+    sym: Keysym,
+    typed: Keysym,
+) -> Option<Option<ChatDo>> {
+    let ask = chat.live.ask.clone()?;
+    let qs = &ask.questions;
+    let card = &mut chat.card;
+    card.sync(&ask);
+    let ctx = card_ctx(card, qs);
+    match key_table::press(CARD_KEYS, &ctx, mods, sym) {
+        Some(CardKey::Go) => return Some(card_go(card, qs)),
+        Some(CardKey::Pass) => return Some(Some(ChatDo::Answer(AskReply::Pass))),
+        Some(CardKey::Pick) => card.pick(qs, card.row),
+        Some(CardKey::Back | CardKey::Up) => card.step(qs, -1),
+        Some(CardKey::Down) => card.step(qs, 1),
+        Some(CardKey::Before) => card.go(qs, card.at.saturating_sub(1)),
+        Some(CardKey::After) => card.go(qs, card.at + 1),
+        // On Other, the keys write its words.
+        None if ctx.other => {
+            let edit = card.field()?.key(mods, sym, typed);
+            if edit.changed() {
+                card.typed(qs);
+            }
+            return (edit != text_field::Edit::Ignored).then_some(None);
+        }
+        None => {
+            let digit = (typed.key_char())
+                .filter(|_| !(mods.ctrl || mods.alt || mods.logo))
+                .and_then(|c| c.to_digit(10))
+                .filter(|d| (1..=9).contains(d))?;
+            card.pick(qs, digit as usize - 1);
+        }
+    }
+    Some(None)
+}
+
+/// Next, or Submit on the last question: the answers to send once each
+/// question has one, else the first without one shown.
+fn card_go(card: &mut Card, qs: &[Question]) -> Option<ChatDo> {
+    if card.at + 1 < qs.len() {
+        card.go(qs, card.at + 1);
+        return None;
+    }
+    if let Some(answers) = card.answers(qs) {
+        return Some(ChatDo::Answers(answers));
+    }
+    let open = (0..qs.len()).find(|i| card.answer(qs, *i).is_none());
+    card.go(qs, open.unwrap_or(card.at));
+    None
+}
+
+/// A press on `hit` of `chat`'s questions' card: what it asks of gerdr.
+fn card_press(chat: &mut PaneChat, hit: CardHit) -> Option<ChatDo> {
+    let ask = chat.live.ask.clone()?;
+    let qs = &ask.questions;
+    chat.focus = ChatFocus::List;
+    chat.card.sync(&ask);
+    match hit {
+        CardHit::Tab(i) => chat.card.go(qs, i),
+        CardHit::Row(i) => chat.card.pick(qs, i),
+        CardHit::Other => chat.card.row = qs.get(chat.card.at)?.options.len(),
+        CardHit::Go => return card_go(&mut chat.card, qs),
+    }
+    None
+}
+
+/// What a press on choice `n` of the menu `m` read off the screen sends:
+/// its digit, after Up while the menu's arrow is on the user's own answer
+/// (a digit typed there is its text); none for that row itself, whose words
+/// go in the reply box.
+fn choice_keys(m: Option<&Menu>, n: u8) -> Option<Vec<WaitKey>> {
+    let choices = m.map_or(&[][..], |m| &m.choices);
+    let free = |c: &&menu::Choice| c.kind == ChoiceKind::Free;
+    if choices.iter().filter(free).any(|c| c.n == n) {
+        return None;
+    }
+    let up = choices.iter().filter(free).any(|c| c.picked);
+    Some(
+        up.then_some(WaitKey::Up)
+            .into_iter()
+            .chain([WaitKey::Digit(n)])
+            .collect(),
+    )
 }
 
 /// The list's keys (`docs/ux-conventions.md`, the agent chat). As the
@@ -362,7 +573,10 @@ fn slash_sync(chat: &mut PaneChat, load: impl FnOnce() -> Vec<Command>) {
         .then(|| commands::query(&chat.draft).map(str::to_owned))
         .flatten();
     match typed {
-        Some(typed) => chat.slash.get_or_insert_with(|| Slash::new(load())).sync(&typed),
+        Some(typed) => chat
+            .slash
+            .get_or_insert_with(|| Slash::new(load()))
+            .sync(&typed),
         None => chat.slash = None,
     }
 }
@@ -415,6 +629,34 @@ pub(crate) fn footer(
     keys.into_iter().chain(mode).collect()
 }
 
+/// The footer's key hints of `chat` (K3): its ask card's, or its questions'
+/// card's while that has the keys, then those of where its keys are, but
+/// for a key the card took.
+fn chat_footer(chat: &PaneChat, modes: bool) -> Vec<(String, String)> {
+    let ask = chat.live.ask.as_ref();
+    let questions = ask.filter(|a| !a.questions.is_empty());
+    let card = questions.filter(|_| chat.focus == ChatFocus::List);
+    let mut hints = match (ask, card) {
+        (_, Some(ask)) => card_footer(&chat.card, ask),
+        (Some(ask), _) if questions.is_none() => {
+            ask_footer(chat.unfolded.contains(&chrome::ask_key(&ask.ask)))
+        }
+        _ => Vec::new(),
+    };
+    let rest = match chat.slash.as_ref().is_some_and(|s| s.open()) {
+        true => slash_footer(),
+        false => footer(
+            chat.focus,
+            chat.draft.line().text.is_empty(),
+            chat.suggestion.is_some(),
+            modes,
+        ),
+    };
+    let taken = |chord: &str| card.is_some() && CARD_KEYS.iter().any(|b| b.chord == chord);
+    hints.extend(rest.into_iter().filter(|(chord, _)| !taken(chord)));
+    hints
+}
+
 /// What a key of the chat asks of gerdr, once the chat took it.
 #[derive(Clone, Debug, PartialEq)]
 enum ChatDo {
@@ -422,6 +664,8 @@ enum ChatDo {
     Send,
     /// Answer the ask on the chat's card.
     Answer(AskReply),
+    /// Answer the questions on the chat's card.
+    Answers(Answers),
     /// Give the clipboard this text.
     Copy(String),
     /// Scroll to the top, to the bottom (following new items again), or a
@@ -480,7 +724,14 @@ fn chat_key(
     sym: Keysym,
     typed: Keysym,
 ) -> Option<ChatDo> {
-    if let Some(ask) = &chat.live.ask {
+    let questions = (chat.live.ask.as_ref()).is_some_and(|a| !a.questions.is_empty());
+    if questions
+        && chat.focus == ChatFocus::List
+        && let Some(done) = card_key(chat, mods, sym, typed)
+    {
+        return done;
+    }
+    if let Some(ask) = chat.live.ask.as_ref().filter(|_| !questions) {
         match key_table::press(ASK_KEYS, &(), mods, sym) {
             Some(AskKey::Answer(reply)) => return Some(ChatDo::Answer(reply)),
             Some(AskKey::Input) => {
@@ -756,10 +1007,17 @@ fn screen_rows(herdr: &mut Herdr, pane_id: &str) -> Result<ChatRows, String> {
     ))
 }
 
+/// Whether `agent`'s screen may show what it suggests saying next: a
+/// Claude Code whose turn ended.
+pub(crate) fn suggests(agent: &AgentInfo) -> bool {
+    matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done)
+        && super::source::kind(agent) == Some(crate::ai_work::AgentKind::Claude)
+}
+
 /// What Claude Code suggests saying next, as its screen shows it: the
 /// last `❯` line, its reply box, holding dim text only (what the user
 /// types there is plain).
-fn suggestion(rows: &[(String, crate::scrollback::Styled)]) -> Option<String> {
+pub(crate) fn suggestion(rows: &[(String, crate::scrollback::Styled)]) -> Option<String> {
     let (text, styles) = rows.iter().rev().find(|(text, _)| text.starts_with('❯'))?;
     let chars: Vec<char> = text.chars().collect();
     let start = (chars.iter()).take_while(|c| **c == '❯' || c.is_whitespace()).count();
@@ -938,6 +1196,7 @@ impl Gerdr {
         let agents = &self.session.agents;
         (self.chats.modes).retain(|id, _| agents.iter().any(|a| a.pane_id == *id));
         self.chats_read_rows(&wanted);
+        self.live_show_held();
         self.live_release_hidden();
     }
 
@@ -1046,8 +1305,7 @@ impl Gerdr {
             .map(|a| a.pane_id.as_str())
             .collect();
         let idle: HashSet<&str> = (wanted.iter())
-            .filter(|a| matches!(a.agent_status, AgentStatus::Idle | AgentStatus::Done))
-            .filter(|a| super::source::kind(a) == Some(crate::ai_work::AgentKind::Claude))
+            .filter(|a| suggests(a))
             .map(|a| a.pane_id.as_str())
             .collect();
         let mut suggesting = Vec::new();
@@ -1202,18 +1460,23 @@ impl Gerdr {
         Some((pane_id, chat))
     }
 
-    /// The reply box of the focused chat, while it has the keys.
+    /// The field of the focused chat with the keys: its reply box, or its
+    /// questions' card's Other.
     pub(crate) fn chat_field_mut(&mut self) -> Option<&mut TextField> {
         let (_, chat) = self.focused_chat_mut()?;
-        (chat.focus == ChatFocus::Composer).then_some(&mut chat.draft)
+        if chat.focus == ChatFocus::Composer {
+            return Some(&mut chat.draft);
+        }
+        let ask = chat.live.ask.as_ref()?;
+        (chat.card.ask == ask.ask && chat.card.on_other(&ask.questions))
+            .then(|| chat.card.field())
+            .flatten()
     }
 
-    /// Where the focused chat's reply box is, while it has the keys.
+    /// Where the focused chat's field with the keys is (`chat_field_mut`).
     pub(crate) fn chat_field_spot(&self) -> Option<FieldSpot> {
         let (_, _, view) = self.chat_places().into_iter().find(|(_, _, v)| v.focused)?;
-        (view.focus == ChatFocus::Composer)
-            .then(|| chrome::chat_field_spot(&view, self.scale()))
-            .flatten()
+        chrome::chat_field_spot(&view, self.scale())
     }
 
     /// A key for the focused chat (see `chat_key`).
@@ -1225,7 +1488,10 @@ impl Gerdr {
         match chat_key(chat, mods, sym, typed) {
             None => self.chat_show_picked(&pane_id, picked),
             Some(ChatDo::Send) => self.chat_send(&pane_id),
-            Some(ChatDo::Answer(reply)) => self.chat_answer(&pane_id, reply),
+            Some(ChatDo::Answer(reply)) => self.chat_answer(&pane_id, reply, None),
+            Some(ChatDo::Answers(answers)) => {
+                self.chat_answer(&pane_id, AskReply::Allow, Some(answers))
+            }
             Some(ChatDo::Copy(text)) => {
                 let lines = text.lines().count().max(1);
                 let s = if lines == 1 { "" } else { "s" };
@@ -1445,48 +1711,61 @@ impl Gerdr {
         self.show_error(format!("Couldn't switch the agent to {want}: {why}"));
     }
 
-    /// Answer what pane `pane_id`'s agent asks, from its chat's card. One
-    /// that waits no more (its hook gone, its time up) just loses its card.
-    fn chat_answer(&mut self, pane_id: &str, reply: AskReply) {
+    /// Answer what pane `pane_id`'s agent asks, from its chat's card, with
+    /// `answers` to its questions. One that waits no more (its hook gone,
+    /// its time up) just loses its card.
+    fn chat_answer(&mut self, pane_id: &str, reply: AskReply, answers: Option<Answers>) {
         let Some(ask) = chat_mut(&mut self.workspaces, pane_id)
             .and_then(|chat| chat.live.ask.as_ref())
             .map(|ask| ask.ask.clone())
         else {
             return;
         };
-        self.live_answer(&ask, reply);
+        match answers {
+            Some(answers) => self.live_answers(&ask, answers),
+            None => self.live_answer(&ask, reply),
+        }
         if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
             chat.live.ask = None;
         }
     }
 
     /// Press `key` in pane `pane_id`, from its waiting panel's button: a
-    /// digit typed as a menu's choice, without Enter.
+    /// digit typed as a menu's choice, without Enter (see `choice_keys`).
     fn chat_wait_key(&mut self, pane_id: &str, key: WaitKey) {
+        let keys = match key {
+            WaitKey::Digit(n) => {
+                let m = (self.chats.waiting.get(pane_id)).and_then(|rows| menu::menu(rows));
+                choice_keys(m.as_ref(), n)
+            }
+            key => Some(vec![key]),
+        };
+        // The user's own answer: written in the reply box, sent by Send.
+        let Some(keys) = keys else {
+            if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
+                chat.focus = ChatFocus::Composer;
+            }
+            return;
+        };
         if self.pane_paused(pane_id) {
             return self.show_error("Couldn't press the key: the agent is paused".into());
         }
         let Some(herdr) = self.session.herdr.as_mut() else {
             return self.show_error("Couldn't press the key: herdr isn't connected".into());
         };
-        let name = wait_key_name(key);
-        let sent = match key {
-            WaitKey::Digit(_) => herdr
-                .call(
-                    "pane.send_input",
-                    json!({ "pane_id": pane_id, "text": name, "keys": [] }),
-                )
-                .map(drop),
-            _ => herdr.send_keys(pane_id, &[&name]),
-        };
-        match sent {
-            // Its screen read again soon, as the menu moves.
-            Ok(()) => _ = self.chats.read_at.remove(pane_id),
-            Err(err) => {
+        for key in keys {
+            let name = wait_key_name(key);
+            // A digit goes as a key press: as text, Claude types it into its
+            // menu's own-answer row (probed with 2.1.332).
+            let sent = herdr.send_keys(pane_id, &[&name]);
+            if let Err(err) = sent {
                 tracing::warn!("pressing {name} in pane {pane_id}: {err}");
-                self.show_error(format!("Couldn't press {name} in the agent's pane: {err}"));
+                return self
+                    .show_error(format!("Couldn't press {name} in the agent's pane: {err}"));
             }
         }
+        // Its screen read again soon, as the menu moves.
+        self.chats.read_at.remove(pane_id);
     }
 
     /// Open the file edit `i` of pane `pane_id`'s chat changed, in the
@@ -1594,20 +1873,7 @@ impl Gerdr {
                     draft: chat.draft.line(),
                     waiting: self.chats.waiting.get(pane_id).cloned(),
                     suggestion: chat.suggestion.clone(),
-                    hints: (chat.live.ask.as_ref())
-                        .map(|ask| ask_footer(chat.unfolded.contains(&chrome::ask_key(&ask.ask))))
-                        .unwrap_or_default()
-                        .into_iter()
-                        .chain(match chat.slash.as_ref().is_some_and(|s| s.open()) {
-                            true => slash_footer(),
-                            false => footer(
-                                chat.focus,
-                                chat.draft.line().text.is_empty(),
-                                chat.suggestion.is_some(),
-                                !modes.is_empty(),
-                            ),
-                        })
-                        .collect(),
+                    hints: chat_footer(chat, !modes.is_empty()),
                     slash: (chat.slash.as_ref())
                         .filter(|slash| slash.open())
                         .map(chrome::SlashView::of),
@@ -1618,6 +1884,9 @@ impl Gerdr {
                     hover: None,
                     running: unread(&chat.items, &chat.live.running),
                     ask: chat.live.ask.clone(),
+                    card: (chat.live.ask.as_ref())
+                        .filter(|ask| !ask.questions.is_empty())
+                        .map(|ask| chat.card.view(ask)),
                     since: (self.chats.turns.get(pane_id)).and_then(|t| t.since(&chat.items)),
                     modes,
                     mode: self.chats.modes.get(pane_id).cloned(),
@@ -1728,7 +1997,15 @@ impl Gerdr {
                     self.chat_pick_mode(&pane_id, want);
                 }
             }
-            ChatHit::Answer(reply) => self.chat_answer(&pane_id, reply),
+            ChatHit::Answer(reply) => self.chat_answer(&pane_id, reply, None),
+            ChatHit::Card(hit) => {
+                let answers = card_press(chat, hit);
+                if hit == CardHit::Other {
+                    field(self);
+                } else if let Some(ChatDo::Answers(answers)) = answers {
+                    self.chat_answer(&pane_id, AskReply::Allow, Some(answers));
+                }
+            }
             ChatHit::AskFold => {
                 if let Some(ask) = &chat.live.ask {
                     let key = chrome::ask_key(&ask.ask);
@@ -2247,6 +2524,7 @@ mod tests {
             tool: "Bash".into(),
             gist: "ls".into(),
             input: "{}".into(),
+            questions: Vec::new(),
             since: Instant::now(),
         });
         let allow = Some(ChatDo::Answer(AskReply::Allow));
@@ -2277,5 +2555,176 @@ mod tests {
             .chain(COMPOSER_KEYS.iter().map(|b| b.chord))
             .collect();
         assert!(ASK_KEYS.iter().all(|b| !others.contains(&b.chord)));
+    }
+
+    /// Two questions: a size, one pick; fruits, several.
+    fn questions_ask() -> PendingAsk {
+        use crate::chat::live::QuestionOption;
+        let q = |text: &str, labels: &[&str], multi| Question {
+            question: text.into(),
+            header: String::new(),
+            options: (labels.iter())
+                .map(|l| QuestionOption {
+                    label: (*l).into(),
+                    description: String::new(),
+                })
+                .collect(),
+            multi,
+        };
+        PendingAsk {
+            ask: "q2".into(),
+            tool: "AskUserQuestion".into(),
+            gist: String::new(),
+            input: String::new(),
+            questions: vec![
+                q("Size?", &["Small", "Big"], false),
+                q("Fruits?", &["Apple", "Pear", "Fig"], true),
+            ],
+            since: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn a_questions_card_takes_the_keys_till_its_answers_go() {
+        let mut chat = with_items(vec![user("u1", "one")]);
+        chat.live.ask = Some(questions_ask());
+        // Not a permission: Ctrl+Enter allows nothing.
+        assert_eq!(press(&mut chat, "Ctrl+Enter", '\r'), None);
+        // A digit picks; one pick goes on to the next question.
+        assert_eq!(press(&mut chat, "2", '2'), None);
+        assert_eq!(chat.card.at, 1);
+        // Space ticks the row the keys are on; Down moves; a digit ticks.
+        press(&mut chat, "Space", ' ');
+        press(&mut chat, "Down", '\0');
+        press(&mut chat, "Space", ' ');
+        press(&mut chat, "3", '3');
+        press(&mut chat, "2", '2');
+        assert_eq!(
+            chat.card.answer(&questions_ask().questions, 1).as_deref(),
+            Some("Apple, Fig")
+        );
+        // On Other the keys write, digits and Space too; Esc steps back.
+        press(&mut chat, "4", '4');
+        for (key, c) in [("K", 'k'), ("Space", ' '), ("2", '2')] {
+            assert_eq!(press(&mut chat, key, c), None);
+        }
+        assert_eq!(chat.card.other[1], "k 2");
+        assert_eq!(chat.draft, "", "nothing went to the reply box");
+        press(&mut chat, "Esc", '\x1b');
+        assert_eq!(chat.card.row, 2);
+        // Left shows the question before; Enter the next again.
+        press(&mut chat, "Left", '\0');
+        assert_eq!((chat.card.at, chat.card.row), (0, 1));
+        assert_eq!(press(&mut chat, "Enter", '\r'), None);
+        assert_eq!(chat.card.at, 1);
+        // On the last, Enter submits them all.
+        let Some(ChatDo::Answers(answers)) = press(&mut chat, "Enter", '\r') else {
+            panic!("the answers");
+        };
+        assert_eq!(answers["Size?"], "Big");
+        assert_eq!(answers["Fruits?"], "Apple, Fig, k 2");
+        // Esc off Other gives the questions back to the agent's menu.
+        let pass = Some(ChatDo::Answer(AskReply::Pass));
+        assert_eq!(press(&mut chat, "Esc", '\x1b'), pass);
+        // The reply box keeps its keys: Enter sends, a digit is typed.
+        chat.focus = ChatFocus::Composer;
+        press(&mut chat, "1", '1');
+        assert_eq!(chat.draft, "1");
+        assert_eq!(press(&mut chat, "Enter", '\r'), Some(ChatDo::Send));
+    }
+
+    #[test]
+    fn submit_waits_for_every_answer() {
+        let mut chat = with_items(Vec::new());
+        chat.live.ask = Some(questions_ask());
+        press(&mut chat, "Right", '\0');
+        press(&mut chat, "1", '1');
+        // The size has none: Enter shows it, sending nothing.
+        assert_eq!(press(&mut chat, "Enter", '\r'), None);
+        assert_eq!(chat.card.at, 0);
+        assert!(!chat.card.view(chat.live.ask.as_ref().unwrap()).ready());
+        press(&mut chat, "1", '1');
+        assert!(matches!(
+            press(&mut chat, "Enter", '\r'),
+            Some(ChatDo::Answers(_))
+        ));
+    }
+
+    #[test]
+    fn the_cards_footer_says_its_keys_in_its_buttons_words() {
+        let ask = questions_ask();
+        let mut card = Card::default();
+        let hints: Vec<(String, String)> = [
+            ("Enter", "next"),
+            ("1–9 / Space", "pick"),
+            ("Up / Down", "choose"),
+            ("Left / Right", "question"),
+            ("Esc", "answer in terminal"),
+        ]
+        .map(|(k, s)| (k.to_owned(), s.to_owned()))
+        .into();
+        assert_eq!(card_footer(&card, &ask), hints);
+        card.sync(&ask);
+        card.go(&ask.questions, 1);
+        let last = card_footer(&card, &ask);
+        assert_eq!(last[0], ("Enter".to_owned(), "submit".to_owned()));
+        assert_eq!(last[1].1, "tick");
+        // On Other: no digits, no question keys, Esc steps back.
+        card.row = 3;
+        let other = card_footer(&card, &ask);
+        assert!(
+            other
+                .iter()
+                .all(|(k, _)| !k.contains('1') && !k.contains("Left"))
+        );
+        assert_eq!(other.last().unwrap().1, "back");
+        let ctxs = [false, true].map(|b| CardCtx {
+            many: b,
+            multi: b,
+            last: b,
+            other: b,
+            typing: b,
+        });
+        key_table::check(CARD_KEYS, &ctxs);
+        // While the card has the keys, the list's hints lose its keys.
+        let mut chat = with_items(Vec::new());
+        chat.live.ask = Some(ask);
+        let hints = chat_footer(&chat, false);
+        assert!(hints.iter().all(|(k, s)| k != "Space" || s != "fold"));
+        assert!(hints.iter().any(|(k, _)| k == "Y"));
+    }
+
+    #[test]
+    fn a_press_on_the_screens_menu_steps_off_the_users_own_answer_first() {
+        let choice = |n: u8, picked, kind| menu::Choice {
+            n,
+            label: String::new(),
+            detail: String::new(),
+            picked,
+            checked: Some(false),
+            kind,
+        };
+        let m = |free_picked: bool| Menu {
+            choices: vec![
+                choice(1, !free_picked, ChoiceKind::Pick),
+                choice(2, false, ChoiceKind::Pick),
+                choice(3, free_picked, ChoiceKind::Free),
+                choice(4, false, ChoiceKind::Chat),
+            ],
+            multi: true,
+            ..Menu::default()
+        };
+        assert_eq!(
+            choice_keys(Some(&m(false)), 2),
+            Some(vec![WaitKey::Digit(2)])
+        );
+        // The arrow on the user's own answer: a digit would be its text.
+        assert_eq!(
+            choice_keys(Some(&m(true)), 2),
+            Some(vec![WaitKey::Up, WaitKey::Digit(2)])
+        );
+        // That row itself: its words go in the reply box.
+        assert_eq!(choice_keys(Some(&m(false)), 3), None);
+        assert_eq!(choice_keys(None, 1), Some(vec![WaitKey::Digit(1)]));
     }
 }
