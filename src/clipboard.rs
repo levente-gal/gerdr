@@ -228,8 +228,9 @@ impl Gerdr {
                     let _ = tx.send((into, Err(format!("it is over {most} MB"))));
                 }
                 Ok(_) if image => {
+                    // Spaced off what is around it; a send drops spare spaces.
                     let saved = crate::chat::images::save(&bytes);
-                    let _ = tx.send((into, saved.map(|path| format!("{} ", path.display()))));
+                    let _ = tx.send((into, saved.map(|path| format!(" {} ", path.display()))));
                 }
                 Ok(_) => {
                     let text = String::from_utf8_lossy(&bytes).into_owned();
