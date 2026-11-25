@@ -1224,13 +1224,11 @@ impl Herdr {
     }
 
     /// Type `text` into pane `pane_id`, nothing pressed after it: letters
-    /// for an agent's menu's search.
+    /// for an agent's menu's search. As typed: Antigravity's search (1.5.17,
+    /// probed) takes no text `pane.send_input` sends.
     pub fn send_text(&mut self, pane_id: &str, text: &str) -> Result<(), String> {
-        self.call(
-            "pane.send_input",
-            json!({"pane_id": pane_id, "text": text, "keys": []}),
-        )
-        .map(drop)
+        self.call("pane.send_text", json!({"pane_id": pane_id, "text": text}))
+            .map(drop)
     }
 
     /// Press `keys` in pane `pane_id`, as typed on its terminal: `ctrl+c`
