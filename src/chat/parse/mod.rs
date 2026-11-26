@@ -9,8 +9,6 @@
 
 pub(crate) mod antigravity;
 pub(crate) mod claude;
-pub(crate) mod codex;
-pub(crate) mod cursor;
 pub(crate) mod opencode;
 pub(crate) mod patch;
 pub(crate) mod pi;

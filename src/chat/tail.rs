@@ -1419,7 +1419,7 @@ mod tests {
 
     /// A Codex rollout of chat `id` run in `cwd`, begun at `at`.
     fn codex_rollout(dir: &Path, id: &str, cwd: &Path, at: u64) {
-        let day = crate::ai_work::locate::codex_days(at)[1].clone();
+        let day = crate::integrations::codex::find::codex_days(at)[1].clone();
         let s = at % 86_400;
         let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
         let iso = format!("{}T{h:02}:{m:02}:{s:02}Z", day.replace('/', "-"));

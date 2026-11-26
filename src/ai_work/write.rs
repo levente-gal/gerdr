@@ -184,7 +184,7 @@ pub fn write_marks(dir: &Path, marks: &Marks) -> io::Result<()> {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(crate) mod tests {
 
     #[test]
     fn a_symlink_is_written_at_its_target() {

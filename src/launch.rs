@@ -742,7 +742,7 @@ impl Gerdr {
         let log = program_name(command).unwrap_or_else(|| "app".into());
         if log == CURSOR
             && let Some(home) = home_dir()
-            && let Err(err) = crate::cursor_agents::install_hooks(&home)
+            && let Err(err) = crate::integrations::cursor::live::install_hooks(&home)
         {
             tracing::warn!("adding gerdr to Cursor's hooks: {err}");
             self.toast(

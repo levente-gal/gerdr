@@ -43,7 +43,7 @@ pub fn shown(kind: AgentKind, rows: &[&str]) -> Option<String> {
 }
 
 /// What Codex and Cursor say after their mode.
-const CYCLE: &str = "(shift+tab to cycle)";
+pub(crate) const CYCLE: &str = "(shift+tab to cycle)";
 
 /// The mode Claude Code's `rows` (as `shown` gives them) show.
 pub(crate) fn claude_shown(rows: &[&str]) -> Option<String> {
@@ -67,22 +67,6 @@ pub(crate) fn opencode_shown(rows: &[&str]) -> Option<String> {
         let (name, _) = row.strip_prefix('┃')?.split_once(" · ")?;
         Some(name.trim().to_owned()).filter(|name| !name.is_empty())
     })
-}
-
-/// Cursor's: its default says nothing.
-pub(crate) fn cursor_shown(rows: &[&str]) -> Option<String> {
-    let mut said = rows.iter().take(4);
-    let said = said.find_map(|row| Some(row.split_once(CYCLE)?.0.trim().to_owned()));
-    Some(said.unwrap_or_else(|| "Agent".into()))
-}
-
-/// Codex's: its default says nothing.
-pub(crate) fn codex_shown(rows: &[&str]) -> Option<String> {
-    let said = rows.iter().take(3).find_map(|row| {
-        let said = row.split_once(CYCLE)?.0.trim().strip_suffix(" mode")?;
-        Some(said.rsplit("  ").next()?.trim().to_owned())
-    });
-    Some(said.unwrap_or_else(|| "Build".into()))
 }
 
 /// The Antigravity CLI's: "auto · model · effort" at the right of its last

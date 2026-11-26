@@ -263,14 +263,6 @@ fn not_written(path: &str, under: &[PathBuf]) -> bool {
         .any(|dir| real.starts_with(dir))
 }
 
-/// `path` as it really is, if it is a Codex rollout: a regular
-/// `rollout-*.jsonl` file under `sessions/` of Codex's home `codex`.
-pub(crate) fn codex_rollout(path: &str, codex: &Path) -> Option<PathBuf> {
-    transcript(path, &[codex.join("sessions")], |name| {
-        name.starts_with("rollout-")
-    })
-}
-
 /// `path` as it really is, if it is a regular `.jsonl` file under one of
 /// folders `under` whose name passes `name_ok`. The path comes from herdr's
 /// socket, which another process writes: no `..` or link leads out.

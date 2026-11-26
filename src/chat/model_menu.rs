@@ -64,19 +64,6 @@ pub fn now(kind: AgentKind, rows: &[&str]) -> Option<String> {
     Some(said.trim().to_owned()).filter(|said| !said.is_empty())
 }
 
-/// Codex's: "GPT-6.1 Terra medium · ~/folder", the effort after the model;
-/// `rows` as `now` gives them.
-pub(crate) fn codex_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
-    rows.iter().find_map(|row| {
-        let (model, place) = row.split_once(" · ")?;
-        if !place.starts_with(['~', '/']) {
-            return None;
-        }
-        let effort = model.rsplit_once(' ').filter(|(_, e)| EFFORTS.contains(e));
-        Some(effort.map_or(model, |(model, _)| model))
-    })
-}
-
 /// OpenCode's: "┃  Build · GPT-5.6 Sol OpenAI · high" under its reply box.
 pub(crate) fn opencode_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
     rows.iter().find_map(|row| {
@@ -105,27 +92,6 @@ pub(crate) fn antigravity_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
         parts.next_if(|p| ["auto", "plan", "accept-edits"].contains(p));
         parts.next().filter(|_| right.contains(" · "))
     })
-}
-
-/// The reasoning efforts Codex writes after its model.
-const EFFORTS: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
-
-/// Codex's: "Select Model and Effort", then the effort of the model picked
-/// ("Select Reasoning Level for …", "Advanced Reasoning"): numbered rows,
-/// the arrow (›) on one, what each is for after it.
-pub(crate) fn codex(rows: &[(String, Styled)]) -> Option<Menu> {
-    const TITLES: [&str; 3] = [
-        "Select Model",
-        "Select Reasoning Level",
-        "Advanced Reasoning",
-    ];
-    let top = (rows.iter()).rposition(|(t, _)| TITLES.iter().any(|w| t.trim().starts_with(w)))?;
-    let mut m = super::menu::menu(&rows[top..])?;
-    for choice in &mut m.choices {
-        let (label, detail) = wide_split(&choice.label);
-        (choice.label, choice.detail) = (label, detail);
-    }
-    Some(m)
 }
 
 /// OpenCode's dialog over its chat: "Select model … esc", its search
@@ -323,7 +289,7 @@ fn choice(label: String, detail: String, picked: bool, current: bool) -> Choice 
 
 /// `text` split at its first gap of two blanks or more: a row's label and
 /// what it says more, the blanks inside the label made one.
-fn wide_split(text: &str) -> (String, String) {
+pub(crate) fn wide_split(text: &str) -> (String, String) {
     let (label, more) = text.trim().split_once("  ").unwrap_or((text.trim(), ""));
     let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
     let more = more.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -357,51 +323,20 @@ fn style_at(styles: &Styled, col: usize) -> Option<&Style> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::scrollback::parse_ansi;
 
-    fn screen(ansi: &str) -> Vec<(String, Styled)> {
+    pub(crate) fn screen(ansi: &str) -> Vec<(String, Styled)> {
         parse_ansi(ansi)
     }
 
-    fn labels(m: &Menu) -> Vec<&str> {
+    pub(crate) fn labels(m: &Menu) -> Vec<&str> {
         m.choices.iter().map(|c| c.label.as_str()).collect()
     }
 
-    fn picked(m: &Menu) -> &str {
+    pub(crate) fn picked(m: &Menu) -> &str {
         (m.choices.iter().find(|c| c.picked)).map_or("", |c| c.label.as_str())
-    }
-
-    #[test]
-    fn codexs_model_menu_and_its_effort_step_read_with_what_each_is_for() {
-        let rows = screen(include_str!("fixtures/model_menu/codex.ansi"));
-        let m = read(AgentKind::Codex, &rows).expect("a menu");
-        assert!(m.arrows && !m.sideways);
-        assert_eq!(m.ask[0].0, "Select Model and Effort");
-        assert_eq!(m.choices.len(), 8);
-        assert_eq!(m.choices[0].label, "GPT-6.2-Sol");
-        assert_eq!(
-            m.choices[0].detail,
-            "Fast, go-to model for coding and everyday work."
-        );
-        assert_eq!(m.choices[1].label, "GPT-6.2-Astra (current)");
-        assert_eq!(picked(&m), "GPT-6.1 Terra");
-        assert_eq!(m.choices[7].n, 8);
-
-        let rows = screen(include_str!("fixtures/model_menu/codex-effort.ansi"));
-        let m = read(AgentKind::Codex, &rows).expect("the effort step");
-        assert!(m.ask[0].0.starts_with("Select Reasoning Level for "));
-        assert_eq!(labels(&m)[..2], ["Low (default)", "Medium"]);
-        assert_eq!(picked(&m), "More reasoning… (current)");
-
-        let rows = screen(include_str!("fixtures/model_menu/codex-advanced.ansi"));
-        let m = read(AgentKind::Codex, &rows).expect("its advanced efforts");
-        assert_eq!(m.ask[0].0, "Advanced Reasoning");
-        assert_eq!(labels(&m), ["Max", "Ultra"]);
-
-        let idle = screen(include_str!("fixtures/model_menu/codex-idle.ansi"));
-        assert_eq!(read(AgentKind::Codex, &idle), None);
     }
 
     #[test]
@@ -497,19 +432,6 @@ mod tests {
         ] {
             assert!(!shows(&plain(ansi)));
         }
-    }
-
-    #[test]
-    fn a_row_is_picked_with_the_arrow_moved_onto_it_then_enter() {
-        let rows = screen(include_str!("fixtures/model_menu/codex.ansi"));
-        let m = read(AgentKind::Codex, &rows).expect("a menu");
-        assert_eq!(keys_to(&m, "GPT-6.2-Sol"), Some(vec!["Up", "Up", "Enter"]));
-        assert_eq!(keys_to(&m, "GPT-6.1 Terra"), Some(vec!["Enter"]));
-        assert_eq!(
-            keys_to(&m, "GPT-5.6-Sol"),
-            Some(vec!["Down", "Down", "Down", "Down", "Down", "Enter"])
-        );
-        assert_eq!(keys_to(&m, "Nothing"), None);
     }
 
     #[test]

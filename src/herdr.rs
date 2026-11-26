@@ -54,15 +54,6 @@ const LINE_TRIES: u32 = 6;
 const LINE_BOX: usize = 14;
 /// How long an agent gets to close its plan menu once asked.
 const PLAN_MENU_WAIT: Duration = Duration::from_millis(1500);
-/// The menus agents wait on under a plan they suggest, where Enter starts
-/// building it: the menu's question, its choice to keep planning, and the
-/// key that takes that choice (herdr's name). Probed: Cursor 2026.11.22's
-/// `p` opens a box for how to revise the plan; Codex 0.171's Esc goes back
-/// to its input box, still in Plan mode.
-pub(crate) const PLAN_MENUS: [(&str, &str, &str); 2] = [
-    ("Ready to build?", "No, propose changes", "p"),
-    ("Implement this plan?", "No, stay in Plan mode", "esc"),
-];
 /// herdr's caller context, inherited when gerdr itself runs inside herdr; it
 /// must not leak into gerdr's children.
 const INHERITED: [&str; 7] = [
@@ -681,7 +672,7 @@ fn line_left_in_box(screen: &str, line: &str) -> bool {
     !head.is_empty() && bare(&tail.join("")).contains(&head)
 }
 
-/// The key that leaves the plan menu `screen` ends on (`PLAN_MENUS`), if it
+/// The key that leaves the plan menu `screen` ends on (`plan_menu`), if it
 /// waits on one: Enter there builds the plan as is, and Cursor's letters
 /// pick too (`b` builds). Cursor draws the same menu under the plans of past
 /// turns, but with the agent's later work below, not just its input box.
@@ -1169,7 +1160,7 @@ impl Herdr {
     }
 
     /// Leave the plan menu pane `pane_id` shows, if any, by its choice to
-    /// keep planning (`PLAN_MENUS`): a line typed then goes to the agent as
+    /// keep planning (`plan_menu`): a line typed then goes to the agent as
     /// how to change the plan, or a question on it, where on the menu its
     /// Enter would build the plan as is. Gives up before anything is typed
     /// into a menu that stays.

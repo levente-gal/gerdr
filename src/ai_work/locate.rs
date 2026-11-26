@@ -21,7 +21,7 @@ const CODEX_BEFORE: u64 = 60;
 /// A Codex chat found by time began this long after its run at most.
 const CODEX_AFTER: u64 = 600;
 /// The most of a rollout's first line read: its `session_meta`.
-const FIRST_LINE: u64 = 1 << 20;
+pub(crate) const FIRST_LINE: u64 = 1 << 20;
 
 /// When a chat found by folder and time began: from `from` to `to`, the
 /// one begun nearest `near` picked.
@@ -199,7 +199,7 @@ fn files_under(base: &Path, subs: &[&str]) -> Vec<(String, PathBuf)> {
     files
 }
 
-fn found(agent: AgentKind, id: &str, main: PathBuf, form: Form) -> Found {
+pub(crate) fn found(agent: AgentKind, id: &str, main: PathBuf, form: Form) -> Found {
     Found {
         agent,
         id: id.to_owned(),
@@ -225,26 +225,8 @@ pub fn claude(homes: &Homes, id: &str) -> Option<Found> {
     })
 }
 
-/// What a Cursor chat's folder holds beside its `store.db`.
-const CURSOR_EXTRAS: [&str; 3] = ["meta.json", "prompt_history.json", "pasted_text.json"];
-
-/// Cursor CLI chat `id`: `chats/<folder>/<id>/store.db`.
-pub(crate) fn cursor(homes: &Homes, id: &str) -> Option<Found> {
-    let folders = std::fs::read_dir(homes.cursor.join("chats")).ok()?;
-    let main = (folders.flatten())
-        .map(|dir| dir.path().join(id).join("store.db"))
-        .find(|db| db.is_file())?;
-    let folder = main.parent()?.to_path_buf();
-    let mut chat = found(AgentKind::Cursor, id, main, Form::Store);
-    chat.extra = (CURSOR_EXTRAS.iter())
-        .map(|name| (name.to_string(), folder.join(name)))
-        .filter(|(_, path)| path.is_file())
-        .collect();
-    Some(chat)
-}
-
 /// The folders of `dir`, by name in order.
-fn subdirs(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn subdirs(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -254,96 +236,6 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
         .collect();
     dirs.sort();
     dirs
-}
-
-/// The rollouts in Codex date folder `day`.
-fn rollouts(day: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(day) else {
-        return Vec::new();
-    };
-    let mut files: Vec<PathBuf> = (entries.flatten())
-        .map(|e| e.path())
-        .filter(|path| {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            name.starts_with("rollout-") && name.ends_with(".jsonl") && path.is_file()
-        })
-        .collect();
-    files.sort();
-    files
-}
-
-/// Codex chat `id`: `sessions/<y>/<m>/<d>/rollout-<time>-<id>.jsonl`.
-pub(crate) fn codex_by_id(codex: &Path, id: &str) -> Option<Found> {
-    let end = format!("-{id}.jsonl");
-    let years = subdirs(&codex.join("sessions"));
-    let days = (years.iter().rev())
-        .flat_map(|y| subdirs(y).into_iter().rev())
-        .flat_map(|m| subdirs(&m).into_iter().rev());
-    let main = days.flat_map(|day| rollouts(&day)).find(|path| {
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.ends_with(&end))
-    })?;
-    Some(found(AgentKind::Codex, id, main, Form::Lines))
-}
-
-/// The Codex date folders a run that began at `started` may have put its
-/// chat in: the day before to the day after, whatever the time zone.
-pub fn codex_days(started: u64) -> Vec<String> {
-    days_of_span(started, started)
-}
-
-/// The Codex date folders of chats begun from `from` to `to`, a day more
-/// on either side.
-fn days_of_span(from: u64, to: u64) -> Vec<String> {
-    ((from / 86_400) as i64 - 1..=(to / 86_400) as i64 + 1)
-        .map(|day| {
-            let (y, m, d) = civil(day);
-            format!("{y:04}/{m:02}/{d:02}")
-        })
-        .collect()
-}
-
-fn codex_meta(first: &str) -> Option<Begun> {
-    let line: Value = serde_json::from_str(first.trim()).ok()?;
-    if line["type"] != "session_meta" {
-        return None;
-    }
-    let payload = &line["payload"];
-    let id = payload["id"].as_str().or(payload["session_id"].as_str())?;
-    let at = payload["timestamp"]
-        .as_str()
-        .or(line["timestamp"].as_str())?;
-    Some(Begun {
-        id: id.to_owned(),
-        cwd: PathBuf::from(payload["cwd"].as_str()?),
-        started: iso_secs(at)?,
-    })
-}
-
-/// The Codex chat of `chat`'s run, by folder and time.
-pub(crate) fn codex_by_time(
-    codex: &Path,
-    chat: &Chat,
-    claimed: &HashSet<String>,
-    span: Span,
-) -> Option<Found> {
-    let sessions = codex.join("sessions");
-    let metas: Vec<(PathBuf, Begun)> = (days_of_span(span.from, span.to).iter())
-        .flat_map(|day| rollouts(&sessions.join(day)))
-        .filter_map(|path| {
-            let meta = codex_meta(&first_line(&path, FIRST_LINE, false)?)?;
-            Some((path, meta))
-        })
-        .collect();
-    let at = nearest(
-        chat,
-        span,
-        claimed,
-        metas.iter().enumerate().map(|(i, (_, m))| (i, m)),
-    )?;
-    let (main, meta) = &metas[at];
-    Some(found(AgentKind::Codex, &meta.id, main.clone(), Form::Lines))
 }
 
 /// pi's sessions under `sessions`, with when each began by its name
@@ -453,73 +345,6 @@ pub(crate) fn antigravity_by_time(
     plain_id(&meta.id)
         .then(|| antigravity_by_id(home, &meta.id))
         .flatten()
-}
-
-/// The folder Cursor keeps folder `dir`'s things in under `projects/`: its
-/// path with each run of other than letters and digits one `-`, none at
-/// either end (`/home/me/.cache/x` is `home-me-cache-x`).
-pub fn cursor_slug(dir: &Path) -> String {
-    let path = dir.to_string_lossy();
-    let words: Vec<&str> = (path.split(|c: char| !c.is_ascii_alphanumeric()))
-        .filter(|w| !w.is_empty())
-        .collect();
-    words.join("-")
-}
-
-/// Whether `name`, a folder under Cursor's `projects/`, is the one of
-/// `slug`. Newer Cursors cut a long slug to 55 bytes and add `-` and 7 hex
-/// digits of a hash gerdr doesn't know, so a cut one may be another
-/// folder's of the same start: the pick by time sorts them out.
-fn cursor_slug_is(name: &str, slug: &str) -> bool {
-    const CUT: usize = 55;
-    let cut = || {
-        slug.len() > CUT
-            && name.len() == CUT + 8
-            && name.starts_with(&slug[..CUT])
-            && name.as_bytes()[CUT] == b'-'
-            && name[CUT + 1..].bytes().all(|b| b.is_ascii_hexdigit())
-    };
-    name == slug || cut()
-}
-
-/// Of Cursor transcripts `begun` (an id and when its folder was made), the
-/// ones a run may have, nearest `span`'s time first: begun in `span`, not
-/// `claimed`.
-fn cursor_pick(span: Span, claimed: &HashSet<String>, begun: Vec<(String, u64)>) -> Vec<String> {
-    let mut fit: Vec<(String, u64)> = (begun.into_iter())
-        .filter(|(id, at)| {
-            (span.from..=span.to).contains(at) && !claimed.contains(id) && plain_id(id)
-        })
-        .collect();
-    fit.sort_by_key(|(id, at)| (at.abs_diff(span.near), id.clone()));
-    fit.into_iter().map(|(id, _)| id).collect()
-}
-
-/// The Cursor chat of `chat`'s run, by folder and time: Cursor keeps a
-/// transcript folder per chat, `projects/<slug>/agent-transcripts/<id>/`,
-/// made with its first message; the chat is the `store.db` of that id.
-pub fn cursor_by_time(
-    homes: &Homes,
-    chat: &Chat,
-    claimed: &HashSet<String>,
-    span: Span,
-) -> Option<Found> {
-    let slugs: Vec<String> = chat.folders.iter().map(|f| cursor_slug(f)).collect();
-    let begun = (subdirs(&homes.cursor.join("projects")).into_iter())
-        .filter(|dir| {
-            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            slugs.iter().any(|slug| cursor_slug_is(name, slug))
-        })
-        .flat_map(|dir| subdirs(&dir.join("agent-transcripts")))
-        .filter_map(|dir| {
-            let id = dir.file_name()?.to_str()?.to_owned();
-            let meta = dir.metadata().ok()?;
-            let made = meta.created().or_else(|_| meta.modified()).ok()?;
-            let at = made.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-            Some((id, at))
-        })
-        .collect();
-    (cursor_pick(span, claimed, begun).iter()).find_map(|id| cursor(homes, id))
 }
 
 /// `value` of a database row as JSON: texts of JSON columns (`*_json`,
@@ -835,48 +660,6 @@ done
     )
 }
 
-/// The body of `script` for Cursor chat `id`.
-pub(crate) fn cursor_script(id: &str) -> String {
-    format!(
-        r#"id='{id}'
-for f in "$HOME"/.cursor/chats/*/"$id"/store.db; do
-  [ -f "$f" ] || continue
-  say M '' "$f"
-  [ -f "$f-wal" ] && say W '' "$f-wal"
-  d="${{f%/store.db}}"
-  for x in {extras}; do [ -f "$d/$x" ] && say X "$x" "$d/$x"; done
-  exit 0
-done
-"#,
-        extras = CURSOR_EXTRAS.join(" ")
-    )
-}
-
-/// The body of `script` for Codex chat `id`, else `chat`'s by time.
-pub(crate) fn codex_script(chat: &Chat, id: Option<&str>) -> String {
-    match id {
-        Some(id) => format!(
-            r#"for f in "${{CODEX_HOME:-$HOME/.codex}}"/sessions/*/*/*/rollout-*-'{id}'.jsonl; do
-  [ -f "$f" ] && say M '' "$f" && exit 0
-done
-"#
-        ),
-        None => {
-            let days = codex_days(chat.started).join(" ");
-            format!(
-                r#"for day in {days}; do
-  for f in "${{CODEX_HOME:-$HOME/.codex}}"/sessions/$day/rollout-*.jsonl; do
-    [ -f "$f" ] || continue
-    say C '' "$f"
-    printf 'L\t'; head -n 1 "$f"; echo
-  done
-done
-"#
-            )
-        }
-    }
-}
-
 /// Whether `rel` stays inside the folder it is a path in.
 fn inside(rel: &str) -> bool {
     !rel.is_empty()
@@ -895,7 +678,10 @@ pub fn read_listing(chat: &Chat, out: &str, claimed: &HashSet<String>) -> Option
     let mut last: Option<Remote> = None;
     for line in out.lines() {
         if let Some(first) = line.strip_prefix("L\t") {
-            if let (Some(remote), Some(meta)) = (last.take(), codex_meta(first)) {
+            if let (Some(remote), Some(meta)) = (
+                last.take(),
+                crate::integrations::codex::find::codex_meta(first),
+            ) {
                 candidates.push((remote, meta));
             }
             continue;
@@ -972,7 +758,7 @@ pub fn staged(agent: AgentKind, id: &str, staging: &Path) -> Option<Found> {
 
 /// Days since the epoch as a year, month and day (Howard Hinnant's
 /// `civil_from_days`).
-fn civil(days: i64) -> (i64, u32, u32) {
+pub(crate) fn civil(days: i64) -> (i64, u32, u32) {
     let days = days + 719_468;
     let era = days.div_euclid(146_097);
     let doe = days.rem_euclid(146_097);
@@ -997,7 +783,7 @@ fn days_of(year: i64, month: u32, day: u32) -> i64 {
 
 /// An ISO 8601 time like `2026-08-26T10:58:45.531Z` (or with `+02:00`) in
 /// seconds since the epoch.
-fn iso_secs(text: &str) -> Option<u64> {
+pub(crate) fn iso_secs(text: &str) -> Option<u64> {
     let num = |s: Option<&str>| s?.parse::<i64>().ok();
     let (date, time) = text.split_once('T')?;
     let mut ymd = date.splitn(3, '-');
@@ -1025,11 +811,18 @@ fn iso_secs(text: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::{ai_work::write::tests::scratch, feature::Stage};
+    use crate::{
+        ai_work::write::tests::scratch, feature::Stage, integrations::codex::find::codex_days,
+    };
 
-    fn chat(agent: AgentKind, id: Option<&str>, started: u64, folders: &[&Path]) -> Chat {
+    pub(crate) fn chat(
+        agent: AgentKind,
+        id: Option<&str>,
+        started: u64,
+        folders: &[&Path],
+    ) -> Chat {
         Chat {
             agent,
             id: id.map(str::to_owned),
@@ -1041,7 +834,7 @@ mod tests {
         }
     }
 
-    fn put(path: &Path, text: &str) {
+    pub(crate) fn put(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
@@ -1154,188 +947,6 @@ mod tests {
         assert_eq!(find(&homes, &gone, &HashSet::new()).unwrap(), None);
         let bad = chat(AgentKind::Claude, Some("../x"), 0, &[]);
         assert!(find(&homes, &bad, &HashSet::new()).is_err());
-    }
-
-    #[test]
-    fn a_cursor_chat_is_its_store_and_files() {
-        let home = scratch("locate-cursor");
-        let homes = Homes::under(&home);
-        let folder = home.join(".cursor/chats/f00/c-1");
-        put(&folder.join("store.db"), "");
-        put(&folder.join("meta.json"), "{}");
-        let c = chat(AgentKind::Cursor, Some("c-1"), 0, &[]);
-        let f = find(&homes, &c, &HashSet::new()).unwrap().unwrap();
-        assert_eq!(f.main, folder.join("store.db"));
-        assert_eq!(f.form, Form::Store);
-        assert_eq!(
-            f.extra,
-            vec![("meta.json".to_owned(), folder.join("meta.json"))]
-        );
-    }
-
-    fn rollout(codex: &Path, day: &str, id: &str, cwd: &Path, at: &str) -> PathBuf {
-        let path = codex.join(format!(
-            "sessions/{day}/rollout-2026-08-26T13-58-45-{id}.jsonl"
-        ));
-        let meta = serde_json::json!({
-            "timestamp": at,
-            "type": "session_meta",
-            "payload": {"id": id, "timestamp": at, "cwd": cwd},
-        });
-        put(&path, &format!("{meta}\n{{\"type\":\"turn\"}}\n"));
-        path
-    }
-
-    #[test]
-    fn a_codex_chat_is_found_by_id() {
-        let home = scratch("locate-codex-id");
-        let homes = Homes::under(&home);
-        let path = rollout(
-            &homes.codex,
-            "2026/08/26",
-            "019a-1",
-            Path::new("/w"),
-            "2026-08-26T10:58:45Z",
-        );
-        rollout(
-            &homes.codex,
-            "2026/08/26",
-            "019a-2",
-            Path::new("/w"),
-            "2026-08-26T10:58:45Z",
-        );
-        let c = chat(AgentKind::Codex, Some("019a-1"), 0, &[]);
-        let f = find(&homes, &c, &HashSet::new()).unwrap().unwrap();
-        assert_eq!((f.id.as_str(), f.main), ("019a-1", path));
-    }
-
-    #[test]
-    fn a_codex_chat_is_found_by_folder_and_time() {
-        let home = scratch("locate-codex-time");
-        let homes = Homes::under(&home);
-        let work = Path::new("/work/feat");
-        let started = iso_secs("2026-08-26T10:58:00Z").unwrap();
-        // Another folder, too early, too late, then two that fit: the
-        // nearest wins unless another run has it.
-        rollout(
-            &homes.codex,
-            "2026/08/26",
-            "other",
-            Path::new("/else"),
-            "2026-08-26T10:58:10Z",
-        );
-        rollout(
-            &homes.codex,
-            "2026/08/26",
-            "early",
-            work,
-            "2026-08-26T10:56:00Z",
-        );
-        rollout(
-            &homes.codex,
-            "2026/08/26",
-            "late",
-            work,
-            "2026-08-26T11:09:00Z",
-        );
-        let near = rollout(
-            &homes.codex,
-            "2026/08/26",
-            "near",
-            &work.join("api"),
-            "2026-08-26T10:58:30Z",
-        );
-        let far = rollout(
-            &homes.codex,
-            "2026/08/27",
-            "far",
-            work,
-            "2026-08-26T11:05:00Z",
-        );
-        let c = chat(AgentKind::Codex, None, started, &[work]);
-        let f = find(&homes, &c, &HashSet::new()).unwrap().unwrap();
-        assert_eq!((f.id.as_str(), &f.main), ("near", &near));
-        let claimed = HashSet::from(["near".to_owned()]);
-        let f = find(&homes, &c, &claimed).unwrap().unwrap();
-        assert_eq!((f.id.as_str(), &f.main), ("far", &far));
-    }
-
-    #[test]
-    fn cursor_folders_are_named_as_cursor_does() {
-        let slug = |dir: &str| cursor_slug(Path::new(dir));
-        assert_eq!(
-            slug("/home/lgal/Work/alphaocean/ao-app"),
-            "home-lgal-Work-alphaocean-ao-app"
-        );
-        assert_eq!(slug("/home/me/.cache/x"), "home-me-cache-x");
-        assert_eq!(slug("/tmp/c-1/-home-me/a_b.c/"), "tmp-c-1-home-me-a-b-c");
-        let long = slug("/home/lgal/Work/alphaocean/ao-app/features/alpha-dashboard-redesign");
-        assert!(cursor_slug_is(&long, &long));
-        assert!(cursor_slug_is(
-            "home-lgal-Work-alphaocean-ao-app-features-alpha-dashboa-b953f1b",
-            &long
-        ));
-        assert!(!cursor_slug_is(
-            "home-lgal-Work-alphaocean-ao-app-features-alpha-dashboa-xyz1234",
-            &long
-        ));
-        assert!(!cursor_slug_is("home-me-cache-x-y", "home-me-cache-x"));
-    }
-
-    #[test]
-    fn a_cursor_chat_is_found_by_folder_and_time() {
-        let home = scratch("locate-cursor-time");
-        let homes = Homes::under(&home);
-        let work = Path::new("/work/my.app");
-        let transcripts = home.join(".cursor/projects/work-my-app/agent-transcripts");
-        for id in ["c-1", "c-2"] {
-            std::fs::create_dir_all(transcripts.join(id)).unwrap();
-        }
-        put(&home.join(".cursor/chats/f00/c-2/store.db"), "");
-        // Begun just now: c-1 has no store.db yet, so c-2 is the chat.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let c = chat(AgentKind::Cursor, None, now, &[work]);
-        let f = cursor_by_time(&homes, &c, &HashSet::new(), Span::of(now)).unwrap();
-        assert_eq!((f.id.as_str(), f.form), ("c-2", Form::Store));
-        assert_eq!(
-            cursor_by_time(&homes, &c, &HashSet::from(["c-2".into()]), Span::of(now)),
-            None
-        );
-        let other = chat(AgentKind::Cursor, None, now, &[Path::new("/work/my")]);
-        assert_eq!(
-            cursor_by_time(&homes, &other, &HashSet::new(), Span::of(now)),
-            None
-        );
-        let later = chat(AgentKind::Cursor, None, now + 3600, &[work]);
-        assert_eq!(
-            cursor_by_time(&homes, &later, &HashSet::new(), Span::of(now + 3600)),
-            None
-        );
-    }
-
-    #[test]
-    fn the_cursor_chat_begun_nearest_its_run_is_picked() {
-        let c = Span::of(1000);
-        let begun = |list: &[(&str, u64)]| -> Vec<(String, u64)> {
-            list.iter().map(|(id, at)| (id.to_string(), *at)).collect()
-        };
-        let all = begun(&[
-            ("early", 939),
-            ("before", 990),
-            ("after", 1005),
-            ("far", 1600),
-            ("late", 1601),
-            ("../x", 1000),
-        ]);
-        assert_eq!(
-            cursor_pick(c, &HashSet::new(), all.clone()),
-            ["after", "before", "far"]
-        );
-        let claimed = HashSet::from(["after".to_owned()]);
-        assert_eq!(cursor_pick(c, &claimed, all), ["before", "far"]);
     }
 
     #[test]
