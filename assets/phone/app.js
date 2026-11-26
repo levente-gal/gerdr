@@ -666,8 +666,8 @@ async function pane(p, s, id) {
     said: d.said || [], ask, askId: a?.ask || "", asking: !!a?.questions?.length, suggestion: d.suggestion || "",
     modes, modesKey: JSON.stringify([d.modes, d.mode, d.models, d.model, d.model_id, d.context]),
     sides: sideCard(id, d.sides),
-    bar: `<div id="asked"></div><div id="sides"></div><button type="button" id="suggest" hidden></button><form id="say"><ul id="slash" hidden></ul><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
-      <button type="button" id="pic" aria-label="Add an image">Image</button><input type="file" id="picFile" accept="image/*" hidden>
+    bar: `<div id="asked"></div><div id="sides"></div><button type="button" id="suggest" hidden></button><div id="files" hidden></div><form id="say"><ul id="slash" hidden></ul><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
+      <button type="button" id="attach" aria-label="Attach files">Attach</button><input type="file" id="attachFile" multiple hidden>
       <button>Send</button></form>${modes}
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
         ${s ? `<button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button>` : ""}</div>` };
@@ -863,6 +863,7 @@ async function render(fresh, force, keepBottom) {
       document.body.classList.toggle("with-bar", !!v.bar);
       barFor = hash;
       bar.dataset.modes = v.modesKey || "";
+      filesShow();
     }
     // The rest of the bar keeps what is typed; the agent's modes follow its screen.
     if (v.modesKey !== undefined && bar.dataset.modes !== v.modesKey) {
@@ -1086,13 +1087,18 @@ document.addEventListener("submit", async (e) => {
   if (e.target.id !== "say") return;
   e.preventDefault();
   const line = document.getElementById("line");
-  if (!line.value.trim()) return;
+  const files = attachedHere();
+  if (!line.value.trim() && !files.length) return;
   const [, p, s, pane] = here();
   document.getElementById("slash").hidden = true;
-  const a = await post("/api/agent", { p, s, pane, text: line.value });
+  // The files' paths go after the words: the agent reads each from its path.
+  const text = [line.value.trim(), ...files.map((f) => f.path)].filter(Boolean).join(" ");
+  const a = await post("/api/agent", { p, s, pane, text });
   if (a.error) say([{ text: a.error }], true);
   else {
     line.value = "";
+    files.length = 0;
+    filesShow();
     fit(line);
     // Spent: the next read brings the agent's next one.
     const sug = document.getElementById("suggest");
@@ -1102,54 +1108,76 @@ document.addEventListener("submit", async (e) => {
   setTimeout(() => render(false, true), 600);
 });
 
-// An image for the agent: scaled down to a JPEG here, saved by gerdr,
-// and its path put into the reply box, which the agent reads it from.
+// Files for the agent, attached to the reply: gerdr saves each, and its
+// path goes after the reply's words, which the agent reads it from. A
+// photo is scaled down to a JPEG here first. Each page's files stay till
+// sent, its chips over the reply box; a press on one takes it off.
 const PIC_SIDE = 2048;
-const PIC_MOST = 8 * 1024 * 1024;
-async function addPicture(file) {
-  const line = document.getElementById("line");
-  if (!line || !file?.type.startsWith("image/")) return;
-  let blob;
+const FILE_MOST = 20 * 1024 * 1024;
+const attachedBy = {};
+const attachedHere = () => (attachedBy[location.hash] ??= []);
+function filesShow() {
+  const box = document.getElementById("files");
+  if (!box) return;
+  const files = attachedHere();
+  box.hidden = !files.length;
+  box.innerHTML = files.map((f, i) =>
+    `<button type="button" class="chip" data-unattach="${i}" aria-label="Take ${esc(f.name)} off the reply">${esc(f.name)} <span aria-hidden="true">×</span></button>`).join("");
+}
+async function scaled(file) {
   try {
     const bitmap = await createImageBitmap(file);
     const scale = Math.min(1, PIC_SIDE / Math.max(bitmap.width, bitmap.height));
     const canvas = document.createElement("canvas");
     [canvas.width, canvas.height] = [Math.round(bitmap.width * scale), Math.round(bitmap.height * scale)];
     canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    blob = await new Promise((done) => canvas.toBlob(done, "image/jpeg", 0.85));
-  } catch {}
-  if (!blob) return say([{ text: "Couldn't read the image" }], true);
-  if (blob.size > PIC_MOST) return say([{ text: "The image is too big to send, over 8 MB" }], true);
+    return await new Promise((done) => canvas.toBlob(done, "image/jpeg", 0.85));
+  } catch {
+    return null;
+  }
+}
+async function addFile(file) {
+  if (!file) return;
+  const files = attachedHere();
+  let [blob, name] = [file, file.name || "file"];
+  // A photo the browser can draw goes as a JPEG; one it can't, as it is.
+  if (file.type.startsWith("image/") && file.type !== "image/gif" && file.type !== "image/svg+xml") {
+    const jpeg = await scaled(file);
+    if (jpeg) [blob, name] = [jpeg, `${name.replace(/\.[^.]*$/, "") || "image"}.jpg`];
+  }
+  if (blob.size > FILE_MOST) return say([{ text: `${name} is too big to send, over 20 MB` }], true);
   let a;
   try {
-    const res = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "image/jpeg", "X-Gerdr": "phone" }, body: blob });
+    const res = await fetch(`/api/file?name=${encodeURIComponent(name)}`, { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Gerdr": "phone" }, body: blob });
     a = await res.json().catch(() => ({ error: `Bad answer (${res.status})` }));
   } catch {
     a = { error: "Can't reach gerdr" };
   }
   if (a.error) return say([{ text: a.error }], true);
-  const at = line.selectionStart ?? line.value.length;
-  const before = line.value.slice(0, at);
-  const put = `${before && !/\s$/.test(before) ? " " : ""}${a.path} `;
-  line.value = before + put + line.value.slice(at);
-  line.selectionStart = line.selectionEnd = at + put.length;
-  fit(line);
-  line.focus();
+  files.push({ name, path: a.path });
+  filesShow();
 }
 document.addEventListener("click", (e) => {
-  if (e.target.id === "pic") document.getElementById("picFile")?.click();
+  if (e.target.id === "attach") document.getElementById("attachFile")?.click();
+  const chip = e.target.closest?.("[data-unattach]");
+  if (chip) {
+    attachedHere().splice(Number(chip.dataset.unattach), 1);
+    filesShow();
+    document.getElementById("line")?.focus();
+  }
 });
-document.addEventListener("change", (e) => {
-  if (e.target.id !== "picFile") return;
-  addPicture(e.target.files?.[0]);
+document.addEventListener("change", async (e) => {
+  if (e.target.id !== "attachFile") return;
+  const picked = [...(e.target.files || [])];
   e.target.value = "";
+  for (const file of picked) await addFile(file);
 });
-document.addEventListener("paste", (e) => {
+document.addEventListener("paste", async (e) => {
   if (e.target.id !== "line") return;
-  const file = [...(e.clipboardData?.files || [])].find((f) => f.type.startsWith("image/"));
-  if (!file) return;
+  const pasted = [...(e.clipboardData?.files || [])];
+  if (!pasted.length) return;
   e.preventDefault();
-  addPicture(file);
+  for (const file of pasted) await addFile(file);
 });
 
 // A box grows with what is written in it, up to five rows, then scrolls:

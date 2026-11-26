@@ -9,7 +9,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -25,6 +25,7 @@ use super::{
     ChatFocus, Event, Item, PaneChat, Reading,
     btw::{self, Follow, Side, SideState},
     commands::{self, Command, Slash},
+    files,
     live::{Answers, AskReply, PendingAsk, Question},
     menu::{self, ChoiceKind, Menu},
     questions::Card,
@@ -552,46 +553,73 @@ pub(crate) const MODEL_KEYS: &[Binding<(), ()>] = &[Binding {
     f1: "pick the model the agent runs on",
 }];
 
+/// The file picker's key, from the list and the reply box alike: its
+/// files are attached to the reply (also the Attach button).
+const ATTACH_KEYS: &[Binding<(), ()>] = &[Binding {
+    chord: "Ctrl+O",
+    does: |_| Some(()),
+    footer: true,
+    f1: "open the file picker, to attach files to the reply",
+}];
+
+/// The reply box's key taking the last file attached off its reply, while
+/// one is and the caret is at the reply's start (Backspace does nothing
+/// there otherwise).
+const UNATTACH_KEYS: &[Binding<bool, ()>] = &[Binding {
+    chord: "Backspace",
+    does: |&some| some.then_some(()),
+    footer: true,
+    f1: "at the reply's start: take the last file attached off it",
+}];
+
+/// Whether Backspace takes a file off `chat`'s reply now.
+fn unattaches(chat: &PaneChat) -> bool {
+    let line = chat.draft.line();
+    !chat.attached.is_empty() && line.caret == 0 && line.anchor == 0
+}
+
 /// The `/` menu's keys: they come before the reply box's while it shows.
 const SLASH_KEYS: &[Binding<(), SlashKey>] = &[
     Binding {
         chord: "Enter",
         does: |_| Some(SlashKey::Run),
         footer: true,
-        f1: "send the command picked to the agent",
+        f1: "send the command picked to the agent; in the @ menu, attach the file picked",
     },
     Binding {
         chord: "Tab",
         does: |_| Some(SlashKey::Fill),
         footer: true,
-        f1: "fill in the command picked, to add to it",
+        f1: "fill in the command picked, to add to it; in the @ menu, attach the file picked",
     },
     Binding {
         chord: "Down",
         does: |_| Some(SlashKey::Next),
         footer: true,
-        f1: "pick the next command",
+        f1: "pick the next command or file",
     },
     key_table::alias("Ctrl+J", |_| Some(SlashKey::Next)),
     Binding {
         chord: "Up",
         does: |_| Some(SlashKey::Previous),
         footer: true,
-        f1: "pick the previous command",
+        f1: "pick the previous command or file",
     },
     key_table::alias("Ctrl+K", |_| Some(SlashKey::Previous)),
     Binding {
         chord: "Esc",
         does: |_| Some(SlashKey::Close),
         footer: true,
-        f1: "close the commands, keeping the reply",
+        f1: "close the menu, keeping the reply",
     },
 ];
 
-/// The footer's key hints while the `/` menu shows (checklist K3).
-pub(crate) fn slash_footer() -> Vec<(String, String)> {
+/// The footer's key hints while the `/` menu shows (checklist K3), or
+/// the `@` menu of `files`.
+pub(crate) fn slash_footer(files: bool) -> Vec<(String, String)> {
     key_table::joined(key_table::hints(SLASH_KEYS, &(), |k| {
         match k {
+            SlashKey::Run | SlashKey::Fill if files => "attach",
             SlashKey::Run => "run",
             SlashKey::Fill => "fill in",
             SlashKey::Next | SlashKey::Previous => "pick",
@@ -601,17 +629,45 @@ pub(crate) fn slash_footer() -> Vec<(String, String)> {
     }))
 }
 
+/// How long the `@` menu waits for its files as it opens, before it shows
+/// without them: they come later (`Gerdr::chats_files_poll`).
+const FILES_WAIT: Duration = Duration::from_millis(60);
+
 /// Open, filter or close `chat`'s `/` menu for its reply as it now is;
-/// `load` lists its agent's commands, read each time the menu opens.
-fn slash_sync(chat: &mut PaneChat, load: impl FnOnce() -> Vec<Command>) {
-    let typed = (chat.focus == ChatFocus::Composer)
+/// `load` lists its agent's commands, read each time the menu opens. An
+/// `@word` at the caret opens the `@` menu of the files under `root`.
+fn slash_sync(chat: &mut PaneChat, root: Option<&Path>, load: impl FnOnce() -> Vec<Command>) {
+    let composing = chat.focus == ChatFocus::Composer;
+    let line = chat.draft.line();
+    if composing
+        && let Some(root) = root
+        && let Some((_, typed)) = files::query(&line)
+    {
+        let same = |s: &Slash| s.files.as_deref() == Some(root);
+        let menu = match chat.slash.take().filter(same) {
+            Some(mut menu) => {
+                menu.take_loaded(Duration::ZERO);
+                menu
+            }
+            None => {
+                let mut menu = Slash::files(root.to_path_buf());
+                menu.take_loaded(FILES_WAIT);
+                menu
+            }
+        };
+        let menu = chat.slash.insert(menu);
+        return menu.sync(typed);
+    }
+    let typed = composing
         .then(|| commands::query(&chat.draft).map(str::to_owned))
         .flatten();
     match typed {
-        Some(typed) => chat
-            .slash
-            .get_or_insert_with(|| Slash::new(load()))
-            .sync(&typed),
+        Some(typed) => {
+            if chat.slash.as_ref().is_some_and(|s| s.files.is_some()) {
+                chat.slash = None;
+            }
+            (chat.slash.get_or_insert_with(|| Slash::new(load()))).sync(&typed)
+        }
         None => chat.slash = None,
     }
 }
@@ -687,15 +743,26 @@ fn chat_footer(chat: &PaneChat, modes: bool, models: bool) -> Vec<(String, Strin
         }
         _ => Vec::new(),
     };
-    let rest = match chat.slash.as_ref().is_some_and(|s| s.open()) {
-        true => slash_footer(),
-        false => footer(
-            chat.focus,
-            chat.draft.line().text.is_empty(),
-            chat.suggestion.is_some(),
-            modes,
-            models,
-        ),
+    let rest = match chat.slash.as_ref().filter(|s| s.open()) {
+        Some(menu) => slash_footer(menu.files.is_some()),
+        None => {
+            let unattach = (key_table::hints(UNATTACH_KEYS, &unattaches(chat), |_| {
+                "remove file".to_owned()
+            }))
+            .into_iter()
+            .filter(|_| chat.focus == ChatFocus::Composer);
+            let attach = key_table::hints(ATTACH_KEYS, &(), |_| "attach".to_owned());
+            footer(
+                chat.focus,
+                chat.draft.line().text.is_empty(),
+                chat.suggestion.is_some(),
+                modes,
+                models,
+            )
+            .into_iter()
+            .chain((unattach.chain(attach)).map(|(chord, said)| (chord.to_owned(), said)))
+            .collect()
+        }
     };
     let taken = |chord: &str| card.is_some() && CARD_KEYS.iter().any(|b| b.chord == chord);
     hints.extend(rest.into_iter().filter(|(chord, _)| !taken(chord)));
@@ -722,6 +789,8 @@ enum ChatDo {
     NextMode,
     /// Open the picker of the agent's model.
     PickModel,
+    /// Open the file picker, to attach files to the reply.
+    PickFiles,
 }
 
 /// A key of the reply box, while it has the keys.
@@ -731,6 +800,10 @@ fn composer_key(
     sym: Keysym,
     typed: Keysym,
 ) -> Option<ChatDo> {
+    if key_table::press(UNATTACH_KEYS, &unattaches(chat), mods, sym).is_some() {
+        chat.attached.pop();
+        return None;
+    }
     match key_table::press(COMPOSER_KEYS, &fillable(chat), mods, sym) {
         Some(ComposerKey::Send) => return Some(ChatDo::Send),
         Some(ComposerKey::Newline) => _ = chat.draft.newline(),
@@ -755,6 +828,34 @@ fn fill_suggested(chat: &mut PaneChat) {
     if let Some(text) = chat.suggestion.clone() {
         chat.draft.set(&text);
         chat.focus = ChatFocus::Composer;
+    }
+}
+
+/// Attach the file of row `i` among those the `@` menu of `chat` shows,
+/// in place of the `@word` typed for it; the menu closes.
+fn attach_from_menu(chat: &mut PaneChat, i: usize) {
+    let Some(menu) = chat.slash.take() else {
+        return;
+    };
+    let (Some(root), Some(file)) = (&menu.files, menu.shown.get(i).map(|c| &menu.all[*c])) else {
+        return chat.slash = Some(menu);
+    };
+    attach(chat, [root.join(&file.name)]);
+    let line = chat.draft.line();
+    if let Some((at, _)) = files::query(&line) {
+        let (text, caret) = files::without_query(&line, at);
+        chat.draft.set(&text);
+        chat.draft.move_to(caret, false);
+    }
+    chat.focus = ChatFocus::Composer;
+}
+
+/// Attach `paths` to `chat`'s reply, after those already, each once.
+fn attach(chat: &mut PaneChat, paths: impl IntoIterator<Item = PathBuf>) {
+    for path in paths {
+        if !chat.attached.contains(&path) {
+            chat.attached.push(path);
+        }
     }
 }
 
@@ -797,6 +898,9 @@ fn chat_key(
     if key_table::press(MODEL_KEYS, &(), mods, sym).is_some() {
         return Some(ChatDo::PickModel);
     }
+    if key_table::press(ATTACH_KEYS, &(), mods, sym).is_some() {
+        return Some(ChatDo::PickFiles);
+    }
     if chat.focus == ChatFocus::Composer
         && let Some(slash) = chat.slash.as_mut().filter(|slash| slash.open())
     {
@@ -805,6 +909,10 @@ fn chat_key(
             Some(SlashKey::Next) => slash.step(1),
             Some(SlashKey::Previous) => slash.step(-1),
             Some(SlashKey::Close) => slash.hidden = true,
+            Some(SlashKey::Fill | SlashKey::Run) if slash.files.is_some() => {
+                let picked = slash.picked;
+                attach_from_menu(chat, picked);
+            }
             Some(SlashKey::Fill) => chat.draft.set(&format!("/{name} ")),
             Some(SlashKey::Run) => {
                 chat.draft.set(&format!("/{name}"));
@@ -1633,6 +1741,7 @@ impl Gerdr {
             }
             Some(ChatDo::NextMode) => self.chat_next_mode(&pane_id),
             Some(ChatDo::PickModel) => self.chat_open_model_picker(&pane_id),
+            Some(ChatDo::PickFiles) => self.chat_pick_files(&pane_id),
             Some(ChatDo::Top) => self.chat_scroll_to(&pane_id, Some(0.0)),
             Some(ChatDo::Bottom) => self.chat_scroll_to(&pane_id, None),
             Some(ChatDo::Page(by)) => {
@@ -1659,7 +1768,8 @@ impl Gerdr {
         let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
             return;
         };
-        slash_sync(chat, || {
+        let root = agent.and_then(|a| a.cwd.as_deref());
+        slash_sync(chat, root, || {
             let kind = agent.and_then(super::source::kind);
             let cwd = agent.and_then(|a| a.cwd.as_deref());
             match (kind, cwd) {
@@ -1682,13 +1792,48 @@ impl Gerdr {
         }
     }
 
-    /// Send the focused chat's reply to its agent, as if typed in its pane.
-    /// A reply refused keeps its draft.
+    /// Take the files listed for the `@` menus still waiting on them: a
+    /// menu opened in a big folder shows them once they come.
+    pub(crate) fn chats_files_poll(&mut self) {
+        for (_, chat) in chats_mut(&mut self.workspaces) {
+            if let Some(menu) = chat.slash.as_mut() {
+                menu.take_loaded(Duration::ZERO);
+            }
+        }
+    }
+
+    /// Open the file picker for pane `pane_id`'s chat: the files picked
+    /// are attached to its reply (`chat_attach`).
+    pub(crate) fn chat_pick_files(&mut self, pane_id: &str) {
+        let start = self.chat_agent(pane_id).and_then(|a| a.cwd.clone());
+        self.pick_files(start, crate::PickFor::ChatFiles(pane_id.to_owned()));
+    }
+
+    /// Attach `paths` to pane `pane_id`'s reply, its chips over the reply
+    /// box; the reply box gets the keys.
+    pub(crate) fn chat_attach(&mut self, pane_id: &str, paths: Vec<PathBuf>) {
+        if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
+            attach(chat, paths);
+            chat.focus = ChatFocus::Composer;
+        }
+    }
+
+    /// Attach `paths` to the focused chat's reply: files copied in a file
+    /// manager and pasted, or an image pasted.
+    pub(crate) fn chat_attach_focused(&mut self, paths: Vec<PathBuf>) {
+        if let Some((pane_id, _)) = self.focused_chat_mut() {
+            self.chat_attach(&pane_id, paths);
+        }
+    }
+
+    /// Send the focused chat's reply to its agent, as if typed in its pane,
+    /// with the paths of the files attached to it. A reply refused keeps
+    /// its draft and its files.
     fn chat_send(&mut self, pane_id: &str) {
         let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
             return;
         };
-        let line = one_line(&chat.draft);
+        let line = files::reply(&one_line(&chat.draft), &chat.attached);
         if line.is_empty() {
             return;
         }
@@ -1696,6 +1841,7 @@ impl Gerdr {
             Ok(()) => {
                 if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
                     chat.draft.clear();
+                    chat.attached.clear();
                     chat.stick = true;
                     // Spent: none is read again until the turn it starts.
                     (chat.suggestion, chat.suggest_reads) = (None, SUGGEST_READS);
@@ -2174,6 +2320,9 @@ impl Gerdr {
                     slash: (chat.slash.as_ref())
                         .filter(|slash| slash.open())
                         .map(chrome::SlashView::of),
+                    attached: (chat.attached.iter())
+                        .map(|path| files::label(path, agent.cwd.as_deref()))
+                        .collect(),
                     earlier: match (chat.earlier, chat.reading_earlier) {
                         (false, _) => None,
                         (true, reading) => Some(reading),
@@ -2286,6 +2435,15 @@ impl Gerdr {
             ChatHit::Composer => {
                 chat.focus = ChatFocus::Composer;
                 field(self);
+            }
+            ChatHit::Command(i) if chat.slash.as_ref().is_some_and(|s| s.files.is_some()) => {
+                attach_from_menu(chat, i);
+            }
+            ChatHit::Attach => self.chat_pick_files(&pane_id),
+            ChatHit::Attached(i) => {
+                if i < chat.attached.len() {
+                    chat.attached.remove(i);
+                }
             }
             ChatHit::Command(i) => {
                 let name = (chat.slash.as_ref())
@@ -2641,7 +2799,61 @@ mod tests {
             about: String::new(),
             hint: String::new(),
         };
-        slash_sync(chat, || all.iter().map(cmd).collect());
+        slash_sync(chat, None, || all.iter().map(cmd).collect());
+    }
+
+    #[test]
+    fn an_at_word_offers_the_agents_files_to_attach() {
+        let root = std::env::temp_dir().join(format!("gerdr-chat-at-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        std::fs::write(root.join("notes.md"), "").unwrap();
+        let mut chat = with_items(Vec::new());
+        for c in "read @mai".chars() {
+            let sym = Keysym::from_char(c);
+            chat_key(&mut chat, &ModifiersState::default(), sym, sym);
+            slash_sync(&mut chat, Some(&root), Vec::new);
+        }
+        let menu = chat.slash.as_mut().unwrap();
+        menu.take_loaded(Duration::from_secs(10));
+        assert!(menu.open() && menu.files.is_some());
+        assert_eq!(menu.picked().unwrap().name, "src/main.rs");
+        assert_eq!(footer_of(&chat)[0], ("Enter / Tab".into(), "attach".into()));
+        // Enter attaches it in place of the @word; nothing is sent.
+        assert_eq!(press(&mut chat, "Enter", '\r'), None);
+        slash_sync(&mut chat, Some(&root), Vec::new);
+        assert_eq!(chat.attached, [root.join("src/main.rs")]);
+        assert_eq!(chat.draft, "read ");
+        assert!(chat.slash.is_none());
+        // Backspace takes it off only from the reply's start.
+        press(&mut chat, "Backspace", '\u{8}');
+        assert_eq!((&*chat.draft, chat.attached.len()), ("read", 1));
+        let removes = |chat: &PaneChat| footer_of(chat).iter().any(|(_, s)| s == "remove file");
+        assert!(!removes(&chat));
+        chat.draft.move_to(0, false);
+        assert!(removes(&chat));
+        press(&mut chat, "Backspace", '\u{8}');
+        assert_eq!((&*chat.draft, chat.attached.len()), ("read", 0));
+        // Ctrl+O opens the file picker, from the list too.
+        assert_eq!(press(&mut chat, "Ctrl+O", 'o'), Some(ChatDo::PickFiles));
+        chat.focus = ChatFocus::List;
+        assert_eq!(press(&mut chat, "Ctrl+O", 'o'), Some(ChatDo::PickFiles));
+        assert!(footer_of(&chat).contains(&("Ctrl+O".into(), "attach".into())));
+        // The new chords mean nothing else in the chat (K1).
+        let others: Vec<&str> = (LIST_KEYS.iter().map(|b| b.chord))
+            .chain(COMPOSER_KEYS.iter().map(|b| b.chord))
+            .chain(SLASH_KEYS.iter().map(|b| b.chord))
+            .chain(ASK_KEYS.iter().map(|b| b.chord))
+            .chain(MODE_KEYS.iter().map(|b| b.chord))
+            .chain(MODEL_KEYS.iter().map(|b| b.chord))
+            .collect();
+        let new = ATTACH_KEYS.iter().map(|b| b.chord);
+        for b in new.chain(UNATTACH_KEYS.iter().map(|b| b.chord)) {
+            assert!(!others.contains(&b), "{b}");
+            assert!(crate::keys::hint_key(b).is_some(), "{b}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2691,16 +2903,7 @@ mod tests {
     }
 
     fn footer_of(chat: &PaneChat) -> Vec<(String, String)> {
-        match chat.slash.as_ref().is_some_and(|s| s.open()) {
-            true => slash_footer(),
-            false => footer(
-                chat.focus,
-                chat.draft.is_empty(),
-                chat.suggestion.is_some(),
-                false,
-                false,
-            ),
-        }
+        chat_footer(chat, false, false)
     }
 
     #[test]

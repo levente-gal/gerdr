@@ -360,6 +360,12 @@ body.with-bar #note { bottom: calc(var(--kb, 0px) + var(--bar-h, calc(104px + en
   overflow-wrap: anywhere;
 }
 #bar #suggest[hidden], #bar.asking #suggest { display: none; }
+/* The files attached to the reply, as chips over its box: a press on one
+   takes it off. */
+#bar #files { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+#bar #files[hidden], #bar.asking #files { display: none; }
+#bar #files .chip { min-height: 36px; border: 1px solid var(--line-soft); color: var(--text); }
+#bar #files .chip span { color: var(--quiet); }
 body.with-bar main { padding-bottom: calc(var(--bar-h, 110px) + 20px); }
 #end {
   position: fixed; z-index: 2; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); transform: translateX(-50%);

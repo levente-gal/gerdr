@@ -10,6 +10,7 @@ use crate::{ai_work::AgentKind, md_blocks::DocBlock, text_field::TextField};
 
 pub mod btw;
 pub mod commands;
+pub mod files;
 pub mod images;
 pub mod menu;
 pub mod mode;
@@ -189,6 +190,9 @@ pub struct PaneChat {
     /// The `/` menu over the reply box, while the reply is a command being
     /// typed.
     pub slash: Option<commands::Slash>,
+    /// The files attached to the reply: their chips show over the reply
+    /// box, and their paths go after its words (`files::reply`).
+    pub attached: Vec<std::path::PathBuf>,
     /// The pane's last screen rows while its agent waits on the user: the
     /// approval menu, which the transcript doesn't hold. As
     /// `crate::scrollback::parse_ansi` reads them.

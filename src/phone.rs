@@ -55,9 +55,9 @@ const LOG_LINES: usize = 400;
 const HISTORY: usize = 300;
 /// The most a request's body may take.
 const BODY_LIMIT: u64 = 64 * 1024;
-/// The most an image sent for an agent's chat may take (`/api/image`): the
+/// The most a file sent for an agent's chat may take (`/api/file`): the
 /// page scales a photo down before it sends it.
-const IMAGE_LIMIT: u64 = 8 * 1024 * 1024;
+const FILE_LIMIT: u64 = 20 * 1024 * 1024;
 /// How long gerdr is given to answer.
 const GERDR_TIME: Duration = Duration::from_secs(25);
 
@@ -287,8 +287,8 @@ fn read_request(stream: impl Read) -> Option<Request> {
             value.clone_into(&mut request.agent);
         }
     }
-    let most = if request.target == "/api/image" {
-        IMAGE_LIMIT
+    let most = if request.target.split('?').next() == Some("/api/file") {
+        FILE_LIMIT
     } else {
         BODY_LIMIT
     };
@@ -434,10 +434,14 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
     if target == "/api/push" {
         return push(body, host, from);
     }
-    if target == "/api/image" {
-        return match crate::chat::images::save(body) {
+    if let Some(query) = target.strip_prefix("/api/file?") {
+        let name = parse_query(query).remove("name").unwrap_or_default();
+        return match crate::chat::files::save(&name, body) {
             Ok(path) => Reply::json(&json!({ "path": path })),
-            Err(why) => Reply::error(400, &format!("Couldn't save the image: {why}")),
+            Err(why) => {
+                tracing::warn!("a file sent from the phone: {why}");
+                Reply::error(500, &format!("Couldn't save the file: {why}"))
+            }
         };
     }
     if target == "/api/push-test" {
@@ -1480,8 +1484,9 @@ mod tests {
             BODY_LIMIT + 1
         );
         assert_eq!(read_request(big.as_bytes()), None);
-        // An image may be bigger, only on its own route.
-        let image = |n: u64| format!("POST /api/image HTTP/1.1\r\nContent-Length: {n}\r\n\r\n");
+        // A file may be bigger, only on its own route.
+        let image =
+            |n: u64| format!("POST /api/file?name=a HTTP/1.1\r\nContent-Length: {n}\r\n\r\n");
         let fits = format!(
             "{}{}",
             image(BODY_LIMIT + 1),
@@ -1491,17 +1496,13 @@ mod tests {
             read_request(fits.as_bytes()).expect("image").body.len() as u64,
             BODY_LIMIT + 1
         );
-        assert_eq!(read_request(image(IMAGE_LIMIT + 1).as_bytes()), None);
+        assert_eq!(read_request(image(FILE_LIMIT + 1).as_bytes()), None);
     }
 
     #[test]
     fn a_press_needs_a_body_and_a_known_route() {
         assert_eq!(act("/api/press", b"nope", "localhost", "").status, 400);
         assert_eq!(act("/api/nope", b"{}", "localhost", "").status, 404);
-        assert_eq!(
-            act("/api/image", b"not an image", "localhost", "").status,
-            400
-        );
         assert_eq!(
             act("/api/agent", br#"{"p":"no-such","s":"x"}"#, "localhost", "").status,
             404

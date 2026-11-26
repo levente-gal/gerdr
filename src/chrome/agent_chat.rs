@@ -91,6 +91,9 @@ pub struct ChatView {
     pub since: Option<u64>,
     /// The `/` menu over the reply box, while it shows.
     pub slash: Option<SlashView>,
+    /// What the chips of the files attached to the reply say, over the
+    /// reply box.
+    pub attached: Vec<String>,
     /// The modes its agent offers (`chat::mode::offered`), under the reply
     /// box; none for an agent without.
     pub modes: Vec<String>,
@@ -125,6 +128,7 @@ impl SlashView {
         let rows = (shown.iter().map(|i| &slash.all[*i]))
             .map(|c| {
                 let name = match c.hint.is_empty() {
+                    _ if slash.files.is_some() => c.name.clone(),
                     true => format!("/{}", c.name),
                     false => format!("/{} {}", c.name, c.hint),
                 };
@@ -167,6 +171,7 @@ impl PartialEq for ChatView {
             && self.ask == other.ask
             && self.since == other.since
             && self.slash == other.slash
+            && self.attached == other.attached
             && self.modes == other.modes
             && self.mode == other.mode
             && self.model == other.model
@@ -207,6 +212,10 @@ pub enum ChatHit {
     /// The reply box.
     Composer,
     Send,
+    /// The Attach button, left of Send: opens the file picker.
+    Attach,
+    /// A file attached to the reply, by its chip's place: takes it off.
+    Attached(usize),
     /// "Show screen", where the chat couldn't be found or read, and on the
     /// ask's card.
     ShowScreen,
@@ -273,6 +282,12 @@ impl ChatLayout {
         }
         if on(self.send) {
             return Some(ChatHit::Send);
+        }
+        if on(parts.attach) {
+            return Some(ChatHit::Attach);
+        }
+        if let Some(i) = parts.chips.iter().position(|r| on(*r)) {
+            return Some(ChatHit::Attached(i));
         }
         if on(self.composer) {
             return Some(ChatHit::Composer);
@@ -704,6 +719,10 @@ struct Parts {
     answers: Vec<(ChatHit, Rect)>,
     composer: Rect,
     send: Rect,
+    /// The Attach button, between the reply box and Send.
+    attach: Rect,
+    /// The chips of the files attached, in rows over the reply box.
+    chips: Vec<Rect>,
     hints: Rect,
     /// The `/` menu's rows, hanging over the reply box, and how many of
     /// its first rows don't fit above them (the picked one always shows).
@@ -715,6 +734,14 @@ struct Parts {
     modes: Vec<(usize, Rect)>,
     /// The model's button, at the right end of the modes' row.
     model: Option<Rect>,
+}
+
+/// What ends a file's chip: a press on it takes the file off the reply.
+const CHIP_X: &str = "\u{00d7}";
+
+/// How wide the chip of a file attached is, saying `label` then `CHIP_X`.
+fn chip_width(label: &str) -> i32 {
+    key_width(&format!("{label}  {CHIP_X}"))
 }
 
 /// How wide a key button labelled `label` is.
@@ -746,7 +773,8 @@ fn parts(view: &ChatView) -> Parts {
         (r.size.w, hints_height()).into(),
     );
     let send_w = button_width("Send");
-    let field_w = (w - send_w - FIELD_GAP).max(0);
+    let attach_w = button_width("Attach");
+    let field_w = (w - send_w - attach_w - 2 * FIELD_GAP).max(0);
     let field_h = wrap_field_height(&view.draft, field_w);
     // As many of the modes as fit across, on a track as high as a button,
     // left of the model's button.
@@ -778,16 +806,37 @@ fn parts(view: &ChatView) -> Parts {
         (x, hints.loc.y - PART_GAP - modes_h - field_h).into(),
         (field_w, field_h).into(),
     );
-    let send = Rectangle::new(
-        (
-            x + field_w + FIELD_GAP,
-            composer.loc.y + field_h - quit_button(),
-        )
-            .into(),
-        (send_w, quit_button()).into(),
+    let attach = rect(
+        x + field_w + FIELD_GAP,
+        composer.loc.y + field_h - quit_button(),
+        attach_w,
+        quit_button(),
     );
+    let send = rect(
+        attach.loc.x + attach_w + FIELD_GAP,
+        attach.loc.y,
+        send_w,
+        quit_button(),
+    );
+    // The chips, left to right in rows over the reply box, a long name cut
+    // short; what is above stands on the first row.
+    let mut chips = Vec::new();
+    let (mut cx, mut row) = (x, 0);
+    for label in &view.attached {
+        let cw = chip_width(label).min(w);
+        if cx > x && cx + cw > x + w {
+            (cx, row) = (x, row + 1);
+        }
+        chips.push((cx, row, cw));
+        cx += cw + PART_GAP / 2;
+    }
+    let rows_h = |n: i32| n * (row_button() + PART_GAP / 2);
+    let box_top = composer.loc.y - chips.last().map_or(0, |(_, row, _)| rows_h(row + 1));
+    let chips = (chips.into_iter())
+        .map(|(cx, row, cw)| rect(cx, box_top + rows_h(row), cw, row_button()))
+        .collect();
     let list_top = head.loc.y + head.size.h;
-    let mut end = composer.loc.y - PART_GAP;
+    let mut end = box_top - PART_GAP;
     let (mut waiting, mut menu, mut rows, mut keys) = (None, None, Rect::default(), Vec::new());
     let (mut card, mut answers) = (None, Vec::new());
     let frame = 3 * PART_GAP + row_button();
@@ -873,7 +922,7 @@ fn parts(view: &ChatView) -> Parts {
     );
     // As many rows as fit between the head and the reply box.
     let n = view.slash.as_ref().map_or(0, |s| s.rows.len()) as i32;
-    let n = n.min((composer.loc.y - PART_GAP / 2 - list_top - 2 * SLASH_BORDER) / suggestion_row());
+    let n = n.min((box_top - PART_GAP / 2 - list_top - 2 * SLASH_BORDER) / suggestion_row());
     let n = n.max(0);
     let slash_skip = view
         .slash
@@ -881,7 +930,7 @@ fn parts(view: &ChatView) -> Parts {
         .map_or(0, |s| (s.picked + 1).saturating_sub(n as usize));
     let slash = (0..n)
         .map(|i| {
-            let y = composer.loc.y - PART_GAP / 2 - SLASH_BORDER - (n - i) * suggestion_row();
+            let y = box_top - PART_GAP / 2 - SLASH_BORDER - (n - i) * suggestion_row();
             rect(x, y, w, suggestion_row())
         })
         .collect();
@@ -898,6 +947,8 @@ fn parts(view: &ChatView) -> Parts {
         answers,
         composer,
         send,
+        attach,
+        chips,
         hints,
         slash,
         slash_skip,
@@ -2590,10 +2641,26 @@ impl Painter {
             .unwrap_or_else(|| format!("Reply to {}…", agent_name(&view.label)));
         let composer = here(parts.composer);
         self.wrap_field(&mut c, &view.draft, &hint, composer, focused, scale, p);
-        let style = match view.paused || view.draft.text.trim().is_empty() {
+        let empty = view.draft.text.trim().is_empty() && view.attached.is_empty();
+        let style = match view.paused || empty {
             true => ButtonStyle::Off,
             false => ButtonStyle::Primary,
         };
+        let lit = view.hover == Some(ChatHit::Attach);
+        let attach = here(parts.attach);
+        self.button(
+            &mut c,
+            "Attach",
+            attach,
+            (lit, false),
+            ButtonStyle::Plain,
+            scale,
+            p,
+        );
+        for (i, (label, rect)) in view.attached.iter().zip(&parts.chips).enumerate() {
+            let lit = view.hover == Some(ChatHit::Attached(i));
+            self.chat_chip(&mut c, label, here(*rect), lit, scale, p);
+        }
         let lit = view.hover == Some(ChatHit::Send);
         self.button(
             &mut c,
@@ -2640,6 +2707,29 @@ impl Painter {
         let spots = hint_spots(&hints, here(parts.hints));
         self.hints(&mut c, &hints, &spots, None, scale, p);
         c.into_buffer(true)
+    }
+
+    /// A file attached to the reply: a plain button's frame, its `label`
+    /// cut short to leave room for the `CHIP_X` at its right end.
+    fn chat_chip(
+        &self,
+        c: &mut Canvas,
+        label: &str,
+        rect: Rect,
+        lit: bool,
+        scale: f64,
+        p: &Palette,
+    ) {
+        self.button(c, "", rect, (lit, false), ButtonStyle::Plain, scale, p);
+        let (start, end) = phys(rect, scale);
+        let pad = (f64::from(KEY_PAD) * scale) as f32;
+        let size = font_size();
+        let x_w = (width_in(CHIP_X, Face::Ui, size) as f64 * scale) as f32;
+        let band = band(rect, scale);
+        let x_at = end - pad - x_w;
+        let label_end = x_at - pad / 2.0;
+        self.text(c, label, size, start + pad, label_end, band, scale, p.text);
+        self.text(c, CHIP_X, size, x_at, end, band, scale, p.placeholder);
     }
 
     /// The `/` menu in a box over the reply box, as the folder suggestions
@@ -2908,6 +2998,7 @@ pub(super) mod tests {
             ask: None,
             since: Some(1_000),
             slash: None,
+            attached: Vec::new(),
             modes: Vec::new(),
             mode: None,
             model: None,
@@ -3176,6 +3267,33 @@ pub(super) mod tests {
                 "Type something."
             ]
         );
+    }
+
+    #[test]
+    fn attached_files_sit_in_rows_over_the_reply_box_and_take_presses() {
+        let long = "a-name-so-long-it-takes-more-than-the-whole-width-of-the-chat.pdf".repeat(3);
+        let v = ChatView {
+            attached: vec!["src/a.rs".into(), long, "b.txt".into()],
+            ..view()
+        };
+        let p = parts(&v);
+        assert_eq!(p.chips.len(), 3);
+        // The long one is cut to the width, on a row of its own.
+        let (a, long, b) = (p.chips[0], p.chips[1], p.chips[2]);
+        assert!(long.size.w <= p.column.1);
+        assert!(a.loc.y < long.loc.y && long.loc.y < b.loc.y);
+        assert!(b.loc.y + b.size.h <= p.composer.loc.y);
+        assert!(p.list.loc.y + p.list.size.h < a.loc.y);
+        // Attach sits between the reply box and Send.
+        assert!(p.composer.loc.x + p.composer.size.w < p.attach.loc.x);
+        assert!(p.attach.loc.x + p.attach.size.w < p.send.loc.x);
+        let layout = chat_layout(&v);
+        assert_eq!(layout.hit(&v, middle(p.attach)), Some(ChatHit::Attach));
+        assert_eq!(layout.hit(&v, middle(b)), Some(ChatHit::Attached(2)));
+        // None attached: no row, the list reaches down to the reply box.
+        let none = parts(&view());
+        assert!(none.chips.is_empty());
+        assert!(none.list.size.h > p.list.size.h);
     }
 
     #[test]

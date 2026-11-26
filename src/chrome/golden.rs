@@ -9737,7 +9737,7 @@ fn dump_ship_squash() {
 /// card, cut and whole, plan mode asking to go ahead with it, and the
 /// model's button right of the modes, hovered, and the user's words kept
 /// on top of a list scrolled up past them.
-const CHATS: [&str; 21] = [
+const CHATS: [&str; 22] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9759,6 +9759,7 @@ const CHATS: [&str; 21] = [
     "chat_model",
     "chat_pinned",
     "chat_start",
+    "chat_files",
 ];
 
 fn chat_view(i: usize) -> super::ChatView {
@@ -9838,7 +9839,7 @@ fn chat_view(i: usize) -> super::ChatView {
                     anchor: text.len(),
                     scroll: 0,
                 },
-                hints: crate::chat::slash_footer(),
+                hints: crate::chat::slash_footer(false),
                 slash: Some(super::SlashView {
                     rows: vec![
                         row("/compact", "Compact the conversation, keeping a summary"),
@@ -10015,6 +10016,38 @@ fn chat_view(i: usize) -> super::ChatView {
             hover: Some(ChatHit::ShowScreen),
             ..v
         },
+        // Two files attached, the first's chip under the pointer, and the
+        // `@` menu of the agent's files over them.
+        21 => {
+            let text = "read @src/ma";
+            let row = |name: &str| (name.to_owned(), String::new());
+            super::ChatView {
+                status: AgentStatus::Idle,
+                focus: ChatFocus::Composer,
+                draft: Line {
+                    text: text.into(),
+                    caret: text.len(),
+                    anchor: text.len(),
+                    scroll: 0,
+                },
+                hints: crate::chat::slash_footer(true),
+                slash: Some(super::SlashView {
+                    rows: vec![
+                        row("src/main.rs"),
+                        row("src/chat/mod.rs"),
+                        row("src/markdown.rs"),
+                    ],
+                    first: 0,
+                    picked: 0,
+                }),
+                attached: vec![
+                    "src/chat/view.rs".into(),
+                    "a report with a very long name that is cut short before its end.pdf".into(),
+                ],
+                hover: Some(ChatHit::Attached(0)),
+                ..v
+            }
+        }
         // A shorter pane, for the list to scroll.
         _ => super::ChatView {
             rect: super::Rect::new(v.rect.loc, (v.rect.size.w, 460).into()),
@@ -10032,102 +10065,106 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 21]; 4] = [
+const GOLDEN_CHATS: [[u64; 22]; 4] = [
     // Dark at 1
     [
-        0xa5039d4ee1fb06ee, // chat_finding
-        0x4c9a3c6fa240b9e9, // chat_missing
-        0xd685197ee22a32f7, // chat
-        0x3bb87a98112621ad, // chat_waiting
-        0x828c73a35d6b1c0a, // chat_composer
-        0x336344c70c851544, // chat_picked
-        0x404446eb993dd555, // chat_scrolled
-        0x2954caea8b68d52e, // chat_question
-        0x350b10267bd544d0, // chat_slash
-        0x39bbfca0980f3e32, // chat_question_card
-        0x257d5a14188fedb4, // chat_question_radio
-        0xfcf05ca12ee002e6, // chat_question_ticks
-        0x004ee553bdea6b96, // chat_suggested
-        0xfe79e247979aad2d, // chat_modes
-        0xe03e8d399611c068, // chat_side
-        0x6c4d3e75cd1fbbd3, // chat_plan
-        0x29f78ea279039845, // chat_plan_open
-        0x7fa3380865f1c3fe, // chat_plan_ask
-        0x1baa8146186136c6, // chat_model
-        0x46bfe697efbe6271, // chat_pinned
-        0xf8361e53ade0856d, // chat_start
+        0x0a7677a974e281be, // chat_finding
+        0x7a9fcfede9da1605, // chat_missing
+        0xe8aeb9625db9c337, // chat
+        0x5853079495b72161, // chat_waiting
+        0x023f73da62d93e8e, // chat_composer
+        0x652931f0953d2b60, // chat_picked
+        0x5a321b65d112e749, // chat_scrolled
+        0x1f1fde08ec661efe, // chat_question
+        0xb7547e4231335094, // chat_slash
+        0x2902dd99ecb5418e, // chat_question_card
+        0x4b58aada3de87f04, // chat_question_radio
+        0x5b93b834ca2e95d6, // chat_question_ticks
+        0x936247169ea0234e, // chat_suggested
+        0xc0eb11ff27714f31, // chat_modes
+        0x8009f466f4efb1bc, // chat_side
+        0x8fc3cc5f9b8533fb, // chat_plan
+        0xe5693cb5306f7a39, // chat_plan_open
+        0x224377e6e1764452, // chat_plan_ask
+        0xf0790d3617fe581a, // chat_model
+        0x0d9d640a038fcfed, // chat_pinned
+        0xf6bf32aab503d121, // chat_start
+        0x8f775fce7ee2c03d, // chat_files
     ],
     // Dark at 2
     [
-        0xd211836f5dcb7548, // chat_finding
-        0x0c94100d5ab7460b, // chat_missing
-        0x8a131dd56dac4a2c, // chat
-        0x04cea78605830090, // chat_waiting
-        0xee8c28267b0af3c8, // chat_composer
-        0x6a515ed6af7ed950, // chat_picked
-        0xbbb09541105aaf77, // chat_scrolled
-        0xbd7b808017ba7eaf, // chat_question
-        0x59de8e2f81514423, // chat_slash
-        0xdaa0f93fe2c594e3, // chat_question_card
-        0x91811a3578493260, // chat_question_radio
-        0xa7b4647525da3658, // chat_question_ticks
-        0x95c0a660d63e9eb1, // chat_suggested
-        0xd21d7d5694e74060, // chat_modes
-        0xca0b573784b91770, // chat_side
-        0x2ca34c602eea2776, // chat_plan
-        0xb137c3c620610f92, // chat_plan_open
-        0x353dd5c5c50b6459, // chat_plan_ask
-        0x70646c8cb13e8898, // chat_model
-        0xd0a47890d6ecabfe, // chat_pinned
-        0xec72373387a755bb, // chat_start
+        0x4a86fd0e1e2f44ef, // chat_finding
+        0x0f61142377a0643c, // chat_missing
+        0xdacc321e4bb78cab, // chat
+        0xb6283bfecaf433e7, // chat_waiting
+        0xd38e46e29e90491b, // chat_composer
+        0xab992e69f9837fa7, // chat_picked
+        0x71662f6445e4e130, // chat_scrolled
+        0x7c1247c57aff1bf8, // chat_question
+        0xbc5b3654d8b78f6c, // chat_slash
+        0x0d4130ff5179ffa8, // chat_question_card
+        0x4cbfd8432bce3b9b, // chat_question_radio
+        0x4dcae86f1b2de31f, // chat_question_ticks
+        0xf5c96f41082a29fa, // chat_suggested
+        0xd5e31e31282c17ff, // chat_modes
+        0x0ca5a15678b84e87, // chat_side
+        0xf85d979ff461697d, // chat_plan
+        0x66938403deb5d0b1, // chat_plan_open
+        0x3d4828d867a21126, // chat_plan_ask
+        0xeaf037ca8b89965f, // chat_model
+        0x81a83e3228349375, // chat_pinned
+        0xdb2c5ac8f62ce1cc, // chat_start
+        0x097c0ef5d7cb9ae8, // chat_files
     ],
     // Light at 1
     [
-        0xcfe875ed39718011, // chat_finding
-        0x8599e48c1a3a84f1, // chat_missing
-        0x88b5f643cefe1777, // chat
-        0x03b95c0b949c5aaa, // chat_waiting
-        0xc9eb7c27910b0a3e, // chat_composer
-        0xc4a1da2ac75e7e03, // chat_picked
-        0xe23ae76ee4fa5bff, // chat_scrolled
-        0xfe3c94d97c6ef24d, // chat_question
-        0x014696fd5f206c34, // chat_slash
-        0xd822691fee231a2f, // chat_question_card
-        0x559bcff84f28c18b, // chat_question_radio
-        0xd69ec9cb4ee9dea1, // chat_question_ticks
-        0x1a9b6c02649b4f80, // chat_suggested
-        0xd5e5939be4fc8b21, // chat_modes
-        0x6d48f599e60538e1, // chat_side
-        0x32a2e31d552691ef, // chat_plan
-        0xf89f6063d627b9c2, // chat_plan_open
-        0xb2c9504611643734, // chat_plan_ask
-        0x1f5a36a977d402d0, // chat_model
-        0x3a9fb789f9a3a6e3, // chat_pinned
-        0xa88f205ffb3c31fe, // chat_start
+        0xac583ef579dff97f, // chat_finding
+        0x6aa135b94a597f5f, // chat_missing
+        0x615c6f1ad3368351, // chat
+        0x320eba1d1cb6f694, // chat_waiting
+        0x1b271769bfda5100, // chat_composer
+        0xcf70f5014c0eb90d, // chat_picked
+        0xb477c1f381a377d9, // chat_scrolled
+        0xe9d9bdded091310b, // chat_question
+        0xd1791eb9e3dc6f62, // chat_slash
+        0xd60cb90da53caaa5, // chat_question_card
+        0x62f6e4343845f331, // chat_question_radio
+        0x427e23ef8499a8ef, // chat_question_ticks
+        0xe5ff509255e7f7a2, // chat_suggested
+        0xeedcddd366c8b23b, // chat_modes
+        0xe7deedef9f56f42f, // chat_side
+        0x4095495956818b29, // chat_plan
+        0x5a2a7e740bbc566c, // chat_plan_open
+        0x9005cc4b6c362aa6, // chat_plan_ask
+        0xf157fe71b5b21e42, // chat_model
+        0xbc341c99b133556d, // chat_pinned
+        0xdc5cb64f2ae77c68, // chat_start
+        0xa33ec17ccd843a30, // chat_files
     ],
     // Light at 2
     [
-        0x6a839f3b4ab2b79c, // chat_finding
-        0x50c48f549721099b, // chat_missing
-        0xa22119b71d62e4ee, // chat
-        0x65f7f2fd63bbcb5d, // chat_waiting
-        0x57f4e1b82e7ef3e0, // chat_composer
-        0xc1031423a1b0c52c, // chat_picked
-        0x487f717d28fa8f37, // chat_scrolled
-        0xb73ddd6736a93ef0, // chat_question
-        0x1b47d4c333fafeda, // chat_slash
-        0x156d84ec9533e8b3, // chat_question_card
-        0xa4a8cb1aba5716f4, // chat_question_radio
-        0xb0e9a3d6bbb5692f, // chat_question_ticks
-        0x3d7c424e61025c58, // chat_suggested
-        0x7127f7ee025b5d03, // chat_modes
-        0x0c1f45535e2220e5, // chat_side
-        0xca8f7ab03bda90dd, // chat_plan
-        0xf1c18370a8a4e7d3, // chat_plan_open
-        0xfe702f7546c95cac, // chat_plan_ask
-        0x723a472ff593632d, // chat_model
-        0x18b2695a30b259e4, // chat_pinned
-        0x5a6516ea634632f6, // chat_start
+        0xda45ba16191a45b1, // chat_finding
+        0xe51e01ed1f9a96fe, // chat_missing
+        0xfeb138f9481156d3, // chat
+        0x8973e8883ebaa0c8, // chat_waiting
+        0x9abcf828e93bfab9, // chat_composer
+        0x806a8657e8cf88e1, // chat_picked
+        0x8acc322b85f49c62, // chat_scrolled
+        0xd80303a3965e996d, // chat_question
+        0xd9f06f9f4e01d85b, // chat_slash
+        0xdaceb0b04cd0c236, // chat_question_card
+        0xa6fe1f598a8d65d1, // chat_question_radio
+        0x6bfab3232f143a4a, // chat_question_ticks
+        0x6b1ac424698fd8ed, // chat_suggested
+        0xbb323716a3715c4a, // chat_modes
+        0x72a8fc9a637a56e0, // chat_side
+        0xec98d897627d9348, // chat_plan
+        0x94bca27921de9dc6, // chat_plan_open
+        0xd87c159933e54379, // chat_plan_ask
+        0x5b60f8a986a62104, // chat_model
+        0x86ff847aaa2d3229, // chat_pinned
+        0x30c5847e6d3cbc0b, // chat_start
+        0x20948fbc740c0467, // chat_files
     ],
 ];
 

@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::ai_work::{AgentKind, locate::Homes};
 
 /// A command offered: typed as `/<name>`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Command {
     pub name: String,
     /// What it does, in one line; may be empty.
@@ -369,10 +369,15 @@ pub fn query(draft: &str) -> Option<&str> {
 pub const ROWS: usize = 8;
 
 /// The `/` menu over the reply box: the commands its agent takes, those
-/// matching what follows the `/`, best first.
+/// matching what follows the `/`, best first. The `@` menu is one too: its
+/// rows are the files under `files` (`chat::files`), by their paths from it.
 #[derive(Debug, Default)]
 pub struct Slash {
     pub all: Vec<Command>,
+    /// The folder of the `@` menu's files; none for the `/` menu.
+    pub files: Option<PathBuf>,
+    /// The `@` menu's files while they are being listed.
+    loading: Option<std::sync::mpsc::Receiver<Vec<Command>>>,
     /// What it was filtered for; none before the first time.
     query: Option<String>,
     /// The commands matching, by index in `all`.
@@ -388,6 +393,38 @@ impl Slash {
             all,
             ..Self::default()
         }
+    }
+
+    /// The `@` menu of the files under `root`, listed on a thread
+    /// (`files::load`): it shows once they come (`take_loaded`).
+    pub fn files(root: PathBuf) -> Self {
+        Self {
+            loading: Some(super::files::load(root.clone())),
+            files: Some(root),
+            ..Self::default()
+        }
+    }
+
+    /// Take the files listed for the `@` menu, once they came, waiting at
+    /// most `wait` for them; whether they came now.
+    pub fn take_loaded(&mut self, wait: std::time::Duration) -> bool {
+        let Some(rx) = &self.loading else {
+            return false;
+        };
+        let got = match rx.recv_timeout(wait) {
+            Ok(all) => all,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => return false,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Vec::new(),
+        };
+        self.all = got;
+        self.loading = None;
+        // Filtered again for what is typed now; Esc's close kept.
+        if let Some(query) = self.query.take() {
+            let hidden = self.hidden;
+            self.sync(&query);
+            self.hidden = hidden;
+        }
+        true
     }
 
     /// Whether it shows, and takes its keys.
