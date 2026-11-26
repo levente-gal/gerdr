@@ -36,6 +36,10 @@ impl Integration for OpenCode {
         "OpenCode"
     }
 
+    fn command(&self) -> Option<&'static str> {
+        Some("opencode")
+    }
+
     fn store(&self) -> Option<Store> {
         Some(Store::Database)
     }

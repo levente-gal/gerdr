@@ -194,7 +194,7 @@ pub struct Features {
     /// When each machine was last told its record lost, by machine, project, slug.
     pub(crate) claims: HashMap<(String, String, String), Instant>,
     /// Cursor's models, for the picker of a stage's model.
-    pub cursor_models: crate::stage_models::CursorModels,
+    pub listed_models: crate::stage_models::ListedModels,
     pub dialog: Option<NewFeatureDialog>,
     /// The project commands dialog, while it is open.
     pub commands: Option<crate::project_commands::CommandsDialog>,

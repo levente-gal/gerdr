@@ -10,10 +10,13 @@ guide for adding an agent or changing one.
 - **`Integration`** has a method for each thing gerdr can do with an agent.
   Every method but `kind` and `label` has a default, and the default means
   "this agent doesn't have that".
-- **`of(kind)`** gives the integration of an `AgentKind`. **`ALL`** lists
-  every integration in `AgentKind`'s order. Code that has to ask every agent
-  loops over `ALL`: the hook subcommands in `src/main.rs`, hook installs in
-  `src/chat/live/serve.rs`, plan menus in `src/herdr.rs`.
+- **`of(kind)`** gives the integration of an `AgentKind`, and
+  **`by_command(command)`** the one a command starts, by its program's name
+  (`Plain` for a CLI gerdr has no integration of). **`ALL`** lists every
+  integration in the order the launcher offers them. Code that has to ask
+  every agent loops over `ALL`: the hook subcommands in `src/main.rs`, hook
+  installs in `src/chat/live/serve.rs`, plan menus in `src/herdr.rs`, the
+  launcher's agents in `src/cli_agents.rs`.
 - **`Caps`** is what a chat offers, all in one. `caps()` builds each field
   from the other methods, so an agent never writes it by hand.
 
@@ -100,9 +103,12 @@ rows as `Parser::rows` takes them. See `src/integrations/cursor/db.rs` and
 | Method | What gerdr does with it | Default |
 |---|---|---|
 | `model_switch` | `Typed`: gerdr's picker types `/model <id>`. `OwnMenu`: `/model` opens the agent's menu, mirrored in the chat and on the phone. Sets `Caps::model`. | `None`: no picker |
-| `offers` | The models a `Typed` picker lists. | none |
+| `offers` | The models a `Typed` picker, or a stage's model picker, lists. It is given the list its CLI or app listed, as last read. | none |
 | `own_model` | The first row, back to the agent's own choice (Claude's Default). | none |
-| `models_read` | The offers are read from the CLI. gerdr reads them once for the desktop and the phone. | a fixed list |
+| `models_read` | The offers are read from the CLI, by `list_models`, off the event loop (`src/stage_models.rs`). gerdr reads them once for the desktop and the phone. | a fixed list |
+| `list_models` | Runs the CLI to list its models, for one that `models_read`. | lists none |
+| `reading_hint` | What the picker says while they are read, or when the read failed. | "Reading its models…" |
+| `model_hint` | What a model picker says over its list, for a stage, an agent started now or a chat (`PickedFor`): what switching does to the agent's default. | the picker's own words |
 | `model_menu` | The agent's model menu, read off the bottom of its screen, as a `Menu`. The reader sets `Menu::search` and `Menu::sideways`. | no menu |
 | `model_on_screen` | The model its screen says it is on. | not said |
 | `model_in_chat` | The model the chat is on, read after each read of the chat. | not said |
@@ -196,6 +202,35 @@ waiting to go ahead: the plan card's review sends a deny. The agent decides
 | `context` | The same from the chat's path. Override it for a chat that isn't a transcript (Cursor's `store.db`). | `context_in` on the file's tail |
 | `usage` | The messages of a transcript with their tokens, for the stats panel. | none |
 
+### Starting it
+
+These are read where gerdr starts an agent: the launcher (`src/cli_agents.rs`),
+a feature stage's command line (`src/feature/agents.rs`), the stage chips and
+Discover (`src/feature_agents.rs`), and the model picker (`src/switcher.rs`).
+An agent whose methods all keep their defaults starts as any CLI does: its
+first message as its last argument, no flag, no going back to its chat.
+
+| Method | What gerdr does with it | Default |
+|---|---|---|
+| `command` | The program that starts it, and its `[agents]` key. The launcher offers it, named by `label`, once it is installed; `by_command` finds it by it. | none: not offered, not known by command |
+| `in_app` | It starts as a draft in its own app, not in a terminal (T3 Code). | no |
+| `asks_trust` | It asks to trust a new folder: it is started with `--trust`. | no |
+| `adds_dirs` | It takes `--add-dir`, and its first message after `--`: it can be told what to do as it starts, so it can run Discover. | no |
+| `add_dirs` | How its command is allowed into a feature's folders. Claude's go in `--settings`. | one `--add-dir` each |
+| `adds_roots` | It also gets each repository of a folder that holds several, and the main checkouts of the others (Cursor). | no |
+| `takes_model` | It starts on a model with `--model`. | no |
+| `picks_model` | A stage's model can be picked for it. | `takes_model` |
+| `resumes` | gerdr keeps its chat's id, to go back to it with `--resume <id>`. | no |
+| `new_chat` | The words that make its new chat's id known, kept beside the prompt, for one that `resumes`. | none |
+| `retells_model` | Gone back to, its chat is told its model again. | no: it keeps its own |
+| `runs_stages` | A feature's stages are offered to it. | `resumes` or `in_app` |
+| `launcher_script` | Where its launcher's own words end in what its process shows, so a rerun leaves them out (Cursor's node script). | none |
+| `runs_as` | A command runs it by another name (Cursor's `agent`). | no |
+| `run_model` | The model a stage's chat ran on, by the id `new_chat` kept, for the stage's card. | not said |
+
+Icons aren't here: `AgentIcon` (`src/agent_icons.rs`) also covers CLIs gerdr
+has no integration of, and goes by the names herdr calls agents by.
+
 ## What a parser must produce
 
 A parser turns what the agent wrote into `chat::Item`s (`src/chat/mod.rs`),
@@ -248,7 +283,7 @@ what the new agent lacks.
    `pub struct <Agent>;` and `impl Integration` with `kind` and `label`. Its
    module doc says where its chats are and where its live word comes from.
 3. **The registry.** In `src/integrations/mod.rs`, add `mod <agent>;`, its
-   place in `ALL` (in `AgentKind`'s order), and its arm in `of`.
+   place in `ALL` (where the launcher offers it), and its arm in `of`.
 4. **The files, in order.** Each one adds methods to the impl in `mod.rs`.
    - `find.rs`: `store`, `find`, `guesses`, `transcript_at`,
      `transcripts_under`, `id_in_path`, and `remote_script` if its chats are
@@ -263,6 +298,7 @@ what the new agent lacks.
    - `live.rs`: `install_live`, and `hook_command` with `run_hook` for a
      hook. Its asks and questions come through as live `Ask` events.
    - `stats.rs`: `has_context`, `context_in`, `usage`.
+   - `launch.rs`: `command` and the flags it takes (see "Starting it").
 5. **Tests and fixtures.** Test each file in its own `mod tests`. Real hook
    payloads and screen captures go in `src/integrations/<agent>/fixtures/`
    (`.json`, `.ansi`). Run tests with `TMPDIR` outside the repo.
@@ -275,9 +311,9 @@ what the new agent lacks.
    `the_chat_doc_says_what_caps_say`, and paste the table it prints between
    `<!-- caps:begin -->` and `<!-- caps:end -->`.
 
-Launching isn't behind the trait yet. A new agent may also need entries in
-`src/feature/agents.rs` (`Flavor`), `src/cli_agents.rs` (`KNOWN`),
-`src/stage_models.rs` and `src/agent_icons.rs`.
+8. **The icon.** If it has a logo, add it to `assets/agents/`, and a variant
+   to `AgentIcon` with its `LOGOS` entry and its names in `from_agent`
+   (`src/agent_icons.rs`).
 
 ## Rules
 

@@ -47,7 +47,7 @@ use crate::{
     chrome::{self, ItemIcon, SwitcherRow, SwitcherView, status_label},
     cli_agents::{CliAgent, Start},
     desktop,
-    feature::{Stage, agents::Flavor},
+    feature::Stage,
     feature_agents::ModelSlot,
     fuzzy, git, home_dir,
     input::Overlay,
@@ -58,7 +58,8 @@ use crate::{
     project_list::RowTops,
     projects::Project,
     scroll::{Bounds, Motion, Scroll},
-    stage_models::{self, Offer, Reading},
+    integrations::{self, PickedFor},
+    stage_models::{Offer, Reading},
     text_field::{Edit, TextField},
     toast::{Level, ToastHit},
     tooltip::Tooltip,
@@ -951,14 +952,11 @@ fn typed_model(slot: &ModelPick, typed: &str) -> Item {
 }
 
 /// The rows of the picker of `slot`'s model for `pick`: the agent's own
-/// choice, then what it offers (Cursor's from `cursor`, T3 Code's from
-/// `t3`), and the model picked now if it offers none such.
-fn model_rows(slot: &ModelSlot, pick: &ModelPick, cursor: &[Offer], t3: &[Offer]) -> Vec<Item> {
-    let mut offers = match Flavor::of(&slot.base) {
-        Flavor::Cursor => cursor.to_vec(),
-        Flavor::T3 => t3.to_vec(),
-        _ => stage_models::claude_offers(),
-    };
+/// choice, then what it offers (of `listed`, those its CLI or app listed),
+/// and the model picked now if it offers none such.
+fn model_rows(slot: &ModelSlot, pick: &ModelPick, listed: &[Offer]) -> Vec<Item> {
+    let agent = integrations::by_command(&slot.base);
+    let mut offers = agent.offers(listed);
     if let Some(id) = &slot.picked
         && !offers.iter().any(|o| o.id == *id)
     {
@@ -990,10 +988,9 @@ fn model_rows(slot: &ModelSlot, pick: &ModelPick, cursor: &[Offer], t3: &[Offer]
         )
     };
     let own = format!("{}'s own choice", slot.agent);
-    // Cursor's `/model` takes no default back.
-    let chat_cursor =
-        matches!(pick.of, ModelFor::Chat { .. }) && Flavor::of(&slot.base) == Flavor::Cursor;
-    let mut items = match chat_cursor {
+    // A chat's `/model` takes no default back but where the agent has one.
+    let no_own = matches!(pick.of, ModelFor::Chat { .. }) && agent.own_model().is_none();
+    let mut items = match no_own {
         true => Vec::new(),
         false => vec![row("Default".to_owned(), own, None)],
     };
@@ -1005,7 +1002,7 @@ fn model_rows(slot: &ModelSlot, pick: &ModelPick, cursor: &[Offer], t3: &[Offer]
 /// `w`, named as `agents` name it; none for a CLI gerdr can't tell a model,
 /// which starts at once.
 fn free_model_pick(w: usize, command: &str, agents: &[CliAgent]) -> Option<(ModelFor, ModelSlot)> {
-    if !Flavor::of(command).takes_model() {
+    if !integrations::by_command(command).takes_model() {
         return None;
     }
     let agent = agents.iter().find(|a| a.command() == Some(command))?;
@@ -1242,8 +1239,8 @@ impl Gerdr {
     /// Open the switcher as the picker of a model for what `of` says, for
     /// the agent of `slot`, on the row of the model picked now.
     pub(crate) fn open_model_picker(&mut self, of: ModelFor, slot: ModelSlot) {
-        if Flavor::of(&slot.base) == Flavor::Cursor {
-            self.read_cursor_models(&slot.base);
+        if integrations::by_command(&slot.base).models_read() {
+            self.read_listed_models(&slot.base);
         }
         self.make_room_for_switcher();
         let pick = ModelPick {
@@ -1293,28 +1290,24 @@ impl Gerdr {
     /// What the picker of `slot`'s model says over its list, for what `of`
     /// says: a stage, a new agent or a chat's.
     fn model_hint(&self, slot: &ModelSlot, of: &ModelFor) -> &'static str {
-        let models = &self.features.cursor_models;
-        let free = matches!(of, ModelFor::Free { .. });
-        let chat = matches!(of, ModelFor::Chat { .. });
-        match Flavor::of(&slot.base) {
-            Flavor::Cursor if models.offers.is_empty() => match models.reading {
-                Reading::Busy => "Reading Cursor's models…",
-                Reading::Failed => "Couldn't read Cursor's models: type a model's id…",
+        let agent = integrations::by_command(&slot.base);
+        let models = &self.features.listed_models;
+        if agent.models_read() && models.offers.is_empty() {
+            return match models.reading {
+                Reading::Busy => agent.reading_hint(false),
+                Reading::Failed => agent.reading_hint(true),
                 Reading::Idle => "Type a model's id…",
-            },
-            // Tried on 2026.10.22: its first message saves `--model` as the
-            // default of every Cursor chat, as its own `/model` does.
-            Flavor::Cursor if free || chat => {
-                "Model for this agent; Cursor keeps it as its default…"
-            }
-            // Tried on 2.1.325: its `/model` saves the model as the default
-            // of new sessions.
-            _ if chat => "Model for this agent; Claude Code may keep it as its default…",
-            Flavor::Cursor => "Model for this stage's next start; Cursor keeps it as its default…",
-            Flavor::T3 => "Model for this stage's T3 Code draft; type one as provider/model…",
-            _ if free => "Model for this agent…",
-            _ => "Model for this stage's next start…",
+            };
         }
+        let of = match of {
+            ModelFor::Stage { .. } => PickedFor::Stage,
+            ModelFor::Free { .. } => PickedFor::Start,
+            ModelFor::Chat { .. } => PickedFor::Chat,
+        };
+        agent.model_hint(of).unwrap_or(match of {
+            PickedFor::Stage => "Model for this stage's next start…",
+            PickedFor::Start | PickedFor::Chat => "Model for this agent…",
+        })
     }
 
     /// The rows of the picker of `slot`'s model (see `model_rows`).
@@ -1322,12 +1315,15 @@ impl Gerdr {
         let Some(pick) = pick else {
             return Vec::new();
         };
-        let cursor = &self.features.cursor_models.offers;
-        let t3 = match Flavor::of(&slot.base) {
-            Flavor::T3 => stage_models::t3_offers(self.t3.home.as_deref(), &self.t3.rows),
-            _ => Vec::new(),
+        let agent = integrations::by_command(&slot.base);
+        let listed = match (agent.models_read(), agent.in_app()) {
+            (true, _) => self.features.listed_models.offers.clone(),
+            (false, true) => {
+                integrations::t3::launch::offers(self.t3.home.as_deref(), &self.t3.rows)
+            }
+            (false, false) => Vec::new(),
         };
-        self.weighed(model_rows(slot, pick, cursor, &t3))
+        self.weighed(model_rows(slot, pick, &listed))
     }
 
     /// Open the switcher as the run prompt, for a command to launch in
@@ -2596,7 +2592,7 @@ mod tests {
             agent: slot.agent.clone(),
             model: None,
         };
-        let rows = model_rows(&slot, &pick, &[], &[]);
+        let rows = model_rows(&slot, &pick, &[]);
         assert_eq!(rows[0].label, "Default");
         assert_eq!(rows[0].target, Target::StageModel(pick.clone()));
         // Nothing was picked before: no row says so.
@@ -2637,12 +2633,12 @@ mod tests {
             agent: "Cursor".into(),
             model: None,
         };
-        let rows = model_rows(&slot("cursor-agent"), &pick, &cursor, &[]);
+        let rows = model_rows(&slot("cursor-agent"), &pick, &cursor);
         let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
         assert_eq!(labels, ["GPT-5.2"]);
         assert!(rows[0].detail.contains("picked"));
         // Claude Code's chat keeps its own choice.
-        let rows = model_rows(&slot("claude"), &pick, &cursor, &[]);
+        let rows = model_rows(&slot("claude"), &pick, &cursor);
         assert_eq!(rows[0].label, "Default");
     }
 

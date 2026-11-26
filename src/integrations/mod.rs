@@ -33,7 +33,7 @@ pub(crate) mod cursor;
 pub(crate) mod opencode;
 mod pi;
 mod plain;
-mod t3;
+pub(crate) mod t3;
 
 /// Where an agent keeps a chat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,9 +49,8 @@ pub enum Store {
 pub enum ModelSwitch {
     /// It can't.
     None,
-    /// gerdr types `/model <id>`; `cli` is the command the stage picker
-    /// names the agent by.
-    Typed { cli: &'static str },
+    /// gerdr types `/model <id>`.
+    Typed,
     /// `/model` opens a menu of the agent's own, mirrored in the chat.
     OwnMenu,
 }
@@ -59,8 +58,19 @@ pub enum ModelSwitch {
 impl ModelSwitch {
     /// gerdr types the line that switches it.
     pub fn typed(self) -> bool {
-        matches!(self, Self::Typed { .. })
+        matches!(self, Self::Typed)
     }
+}
+
+/// What a model is picked for, as a picker of it says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickedFor {
+    /// A feature stage's next start.
+    Stage,
+    /// An agent started now.
+    Start,
+    /// A chat's agent, switched as it runs.
+    Chat,
 }
 
 /// An agent's `/btw` side panel as its screen draws it: the marks
@@ -252,8 +262,9 @@ pub trait Integration: Sync {
     fn model_switch(&self) -> ModelSwitch {
         ModelSwitch::None
     }
-    /// The models a chat offers to type; `cursor`: Cursor's, as last read.
-    fn offers(&self, _cursor: &[Offer]) -> Vec<Offer> {
+    /// The models a chat or a picker offers; `listed`: those its CLI or
+    /// app listed, as last read.
+    fn offers(&self, _listed: &[Offer]) -> Vec<Offer> {
         Vec::new()
     }
     /// The row a chat offers first, to put it back on its own choice of
@@ -323,6 +334,103 @@ pub trait Integration: Sync {
         Vec::new()
     }
 
+    // Starting it (`feature::agents`, `cli_agents`).
+
+    /// The program that starts it, which is also its `[agents]` key
+    /// (`claude`); none for one gerdr doesn't start.
+    fn command(&self) -> Option<&'static str> {
+        None
+    }
+    /// Whether it starts in its own app rather than in a terminal: its
+    /// threads are drafts there (T3 Code).
+    fn in_app(&self) -> bool {
+        false
+    }
+    /// Whether it asks to trust a new folder unless told `--trust`.
+    fn asks_trust(&self) -> bool {
+        false
+    }
+    /// Whether it takes `--add-dir`, and its first message after `--`: it
+    /// can be told what to do as it starts. One that doesn't gets a message
+    /// as its last argument and nothing else.
+    fn adds_dirs(&self) -> bool {
+        false
+    }
+    /// Whether it is told, besides a feature's folders, each repository of
+    /// a folder that holds several and the main checkouts of the others
+    /// (`Feature::agent_dirs_for`): one that sees a root's git branch and
+    /// status only in a root that is a repository, and doesn't search roots
+    /// nested in another.
+    fn adds_roots(&self) -> bool {
+        false
+    }
+    /// Its command `line` allowed into `dirs`, none of them empty, for one
+    /// that `adds_dirs`.
+    fn add_dirs(&self, line: String, dirs: &[PathBuf]) -> String {
+        common::launch::add_dirs(line, dirs)
+    }
+    /// Whether gerdr can start it on a model, with `--model` (a second one
+    /// wins over one in the `[agents]` command).
+    fn takes_model(&self) -> bool {
+        false
+    }
+    /// Whether a stage's model can be picked for it.
+    fn picks_model(&self) -> bool {
+        self.takes_model()
+    }
+    /// Whether a feature's stages are offered to it: one gerdr can go back
+    /// to the chat of, or that starts in its app.
+    fn runs_stages(&self) -> bool {
+        self.resumes() || self.in_app()
+    }
+    /// Whether its chat, gone back to, is told its model again: one that
+    /// isn't keeps its own.
+    fn retells_model(&self) -> bool {
+        false
+    }
+    /// Whether gerdr can know its chat's id, to go back to the chat with
+    /// `--resume <id>`.
+    fn resumes(&self) -> bool {
+        false
+    }
+    /// What its command `base` gets to keep its new chat's id in file
+    /// `id_file` (shell-quoted), for one that `resumes`.
+    fn new_chat(&self, _base: &str, _id_file: &str) -> Option<String> {
+        None
+    }
+    /// Where the script its launcher runs is in `argv`, what its process
+    /// shows, when the launcher's own words come before what it was told.
+    fn launcher_script(&self, _argv: &[&str]) -> Option<usize> {
+        None
+    }
+    /// Whether `command`, whose program is called `name` (no `.exe`), runs
+    /// it under another name than `command`'s.
+    fn runs_as(&self, _name: &str, _command: &str) -> bool {
+        false
+    }
+    /// The model its chat `id` ran on, as kept under `homes`. Reads files.
+    fn run_model(&self, _homes: &Homes, _id: &str) -> Option<String> {
+        None
+    }
+    /// Read the models its CLI `base` lists. Blocks: run off the event
+    /// loop, for one whose models are read (`models_read`).
+    fn list_models(&self, _base: &str) -> Result<Vec<Offer>, String> {
+        Err("it lists none".to_owned())
+    }
+    /// What a picker of its model says while it reads them, with none read
+    /// yet; `failed`: the last read failed.
+    fn reading_hint(&self, failed: bool) -> &'static str {
+        match failed {
+            false => "Reading its models…",
+            true => "Couldn't read its models: type a model's id…",
+        }
+    }
+    /// What a picker of its model says over its list, for a model picked
+    /// for `of`; none: the picker's own words.
+    fn model_hint(&self, _of: PickedFor) -> Option<&'static str> {
+        None
+    }
+
     /// What its chat offers, from the methods above.
     fn caps(&self) -> Caps {
         Caps {
@@ -384,13 +492,13 @@ pub trait DbChat: Send {
     fn rows(&self) -> Vec<Cow<'_, Value>>;
 }
 
-/// Every agent, in `AgentKind`'s order.
+/// Every agent, in the order the launcher offers them (`cli_agents`).
 pub const ALL: [&dyn Integration; 8] = [
     &claude::Claude,
-    &cursor::Cursor,
-    &codex::Codex,
-    &opencode::OpenCode,
     &t3::T3,
+    &codex::Codex,
+    &cursor::Cursor,
+    &opencode::OpenCode,
     &pi::Pi,
     &antigravity::Antigravity,
     &plain::Plain,
@@ -419,6 +527,16 @@ pub fn of(kind: AgentKind) -> &'static dyn Integration {
     }
 }
 
+/// The agent `command` starts, by its program's name (`env`, `exec` and
+/// `VAR=value` before it skipped); `Plain` for one gerdr doesn't know.
+pub fn by_command(command: &str) -> &'static dyn Integration {
+    let program = crate::feature::agents::program(command);
+    let name = program.rsplit('/').next().unwrap_or(program);
+    (ALL.iter().copied())
+        .find(|agent| agent.command() == Some(name))
+        .unwrap_or(&plain::Plain)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,7 +554,7 @@ mod tests {
         let caps = |kind| of(kind).caps();
         let claude = caps(AgentKind::Claude);
         assert!(claude.chat && claude.side && claude.suggests && claude.context);
-        assert!(matches!(claude.model, ModelSwitch::Typed { cli: "claude" }));
+        assert!(matches!(claude.model, ModelSwitch::Typed));
         assert_eq!(caps(AgentKind::Codex).model, ModelSwitch::OwnMenu);
         assert!(!caps(AgentKind::Codex).side && !caps(AgentKind::Pi).modes);
         assert!(!caps(AgentKind::OpenCode).earlier && caps(AgentKind::OpenCode).side);
@@ -478,7 +596,7 @@ mod tests {
         let yes = |on: bool| if on { "✓" } else { "—" };
         let model = match model {
             ModelSwitch::None => "—",
-            ModelSwitch::Typed { .. } => "typed",
+            ModelSwitch::Typed => "typed",
             ModelSwitch::OwnMenu => "own menu",
         };
         [

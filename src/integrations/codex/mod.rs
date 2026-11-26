@@ -36,6 +36,14 @@ impl Integration for Codex {
         "Codex"
     }
 
+    fn command(&self) -> Option<&'static str> {
+        Some("codex")
+    }
+
+    fn adds_dirs(&self) -> bool {
+        true
+    }
+
     fn store(&self) -> Option<Store> {
         Some(Store::Lines)
     }

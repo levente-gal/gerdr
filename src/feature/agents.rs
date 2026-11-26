@@ -40,61 +40,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::{Feature, Stage};
-
-/// Which CLI a command runs, for its flags.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Flavor {
-    Claude,
-    Codex,
-    Cursor,
-    /// T3 Code, whose threads start in its app rather than in a terminal
-    /// (see `Gerdr::t3_stage_draft`).
-    T3,
-    /// Another CLI: given the prompt as its last argument, no other flag.
-    Other,
-}
-
-impl Flavor {
-    /// The flavor of `command`, by its program's name.
-    /// `env`, `exec` and `VAR=value` before it are skipped.
-    pub fn of(command: &str) -> Flavor {
-        let program = program(command);
-        match program.rsplit('/').next().unwrap_or(program) {
-            "claude" => Flavor::Claude,
-            "codex" => Flavor::Codex,
-            "cursor-agent" => Flavor::Cursor,
-            crate::cli_agents::T3 => Flavor::T3,
-            _ => Flavor::Other,
-        }
-    }
-
-    /// Whether it asks to trust a new folder unless told not to.
-    pub fn asks_trust(self) -> bool {
-        self == Flavor::Cursor
-    }
-
-    /// Whether it takes `--add-dir`.
-    pub fn adds_dirs(self) -> bool {
-        !matches!(self, Flavor::Other | Flavor::T3)
-    }
-
-    /// Whether gerdr can start it on a model: `--model`, checked for these
-    /// two (a second one wins over one in the `[agents]` command).
-    pub fn takes_model(self) -> bool {
-        matches!(self, Flavor::Claude | Flavor::Cursor)
-    }
-
-    /// Whether a stage's model can be picked for it: one it starts on, or
-    /// T3 Code's draft set to it (see `stage_models::t3_selection`).
-    pub fn picks_model(self) -> bool {
-        self.takes_model() || self == Flavor::T3
-    }
-
-    /// Whether gerdr can know its chat's id, to go back to the chat.
-    pub fn resumes(self) -> bool {
-        matches!(self, Flavor::Claude | Flavor::Cursor)
-    }
-}
+use crate::integrations::{self, by_command};
 
 /// The program `command` runs: past `env`, `exec` and the variables it sets.
 pub(crate) fn program(command: &str) -> &str {
@@ -187,22 +133,15 @@ pub fn command_line(base: &str, prompt: &Path, dirs: &[PathBuf]) -> String {
     use crate::desktop::shell_quote;
     let mut line = unattended(base, dirs);
     let id_file = shell_quote(&session_file(prompt).to_string_lossy());
-    match Flavor::of(base) {
-        Flavor::Claude => line.push_str(&format!(
-            " --session-id \"$(tee {id_file} </proc/sys/kernel/random/uuid)\""
-        )),
-        Flavor::Cursor => line.push_str(&format!(
-            " --resume \"$({} create-chat | tee {id_file})\"",
-            program(base)
-        )),
-        Flavor::Codex | Flavor::T3 | Flavor::Other => {}
+    if let Some(words) = by_command(base).new_chat(base, &id_file) {
+        line.push_str(&words);
     }
     line
 }
 
 /// `base` started on `model`, for a CLI that can be told one.
 pub fn with_model(base: &str, model: Option<&str>) -> String {
-    match model.filter(|_| Flavor::of(base).takes_model()) {
+    match model.filter(|_| by_command(base).takes_model()) {
         Some(model) => format!(
             "{} --model {}",
             base.trim(),
@@ -218,19 +157,18 @@ pub fn with_model(base: &str, model: Option<&str>) -> String {
 /// argument and nothing else.
 pub fn with_prompt(line: &str, text: &str) -> String {
     let text = crate::desktop::shell_quote(text);
-    match Flavor::of(line).adds_dirs() {
+    match by_command(line).adds_dirs() {
         true => format!("{line} -- {text}"),
         false => format!("{line} {text}"),
     }
 }
 
-/// What `run`'s chat is resumed with. Claude's chat keeps its model (tried on
-/// 2.1.318), and one changed there with `/model` must stay. Whether Cursor's
-/// does couldn't be told from its chat, so it is told again.
+/// What `run`'s chat is resumed with: told its model again by an agent
+/// that `retells_model`, as it was.
 pub fn resume_base(run: &StageRun) -> String {
-    match Flavor::of(&run.base) {
-        Flavor::Cursor => with_model(&run.base, run.asked_model.as_deref()),
-        _ => run.base.clone(),
+    match by_command(&run.base).retells_model() {
+        true => with_model(&run.base, run.asked_model.as_deref()),
+        false => run.base.clone(),
     }
 }
 
@@ -241,15 +179,10 @@ pub fn resume_line(base: &str, session: &str, dirs: &[PathBuf]) -> String {
     format!("{} --resume {id}", unattended(base, dirs))
 }
 
-/// Where the script of Cursor's CLI is in `argv`, what its process shows. Its
-/// launcher ends in `exec -a "$0" node --use-system-ca …/index.js "$@"`, so
-/// node's flags and the script come before what the CLI was told, and the CLI
-/// refuses them (`unknown option '--use-system-ca'`).
+/// Where the script an agent's launcher runs is in `argv`, what its process
+/// shows (`Integration::launcher_script`).
 fn launcher_script(argv: &[&str]) -> Option<usize> {
-    let name = argv.first()?.rsplit('/').next()?;
-    let at = argv.iter().skip(1).position(|w| !w.starts_with('-'))? + 1;
-    let ours = name == "cursor-agent" || (name == "agent" && argv[at].contains("/cursor-agent/"));
-    (ours && argv[at].ends_with("/index.js")).then_some(at)
+    (integrations::ALL.iter()).find_map(|agent| agent.launcher_script(argv))
 }
 
 /// `line`, a saved command, with no launcher's words in it, as `rerun_argv`
@@ -266,8 +199,8 @@ pub fn without_launcher(line: &str) -> Option<String> {
 
 /// How to run `argv`, what a pane is seen running, again: a chat started
 /// with an id of its own goes back to that chat. Claude refuses an id already
-/// used, and the prompt would be sent a second time. Cursor's runs without
-/// what its launcher adds (see `launcher_script`).
+/// used, and the prompt would be sent a second time. One runs without what
+/// its launcher adds (see `launcher_script`).
 pub fn rerun_argv<'a>(argv: &[&'a str]) -> Vec<&'a str> {
     let told: Vec<&'a str>;
     let argv = match launcher_script(argv) {
@@ -278,7 +211,7 @@ pub fn rerun_argv<'a>(argv: &[&'a str]) -> Vec<&'a str> {
         None => argv,
     };
     let same = || argv.to_vec();
-    if !argv.first().is_some_and(|a| Flavor::of(a).resumes()) {
+    if !argv.first().is_some_and(|a| by_command(a).resumes()) {
         return same();
     }
     let Some(flag) = (argv.iter()).position(|w| matches!(*w, "--session-id" | "--resume")) else {
@@ -300,44 +233,23 @@ pub fn session_file(prompt: &Path) -> PathBuf {
 
 /// `base` allowed into `dirs`, needing no one to answer before it starts.
 fn unattended(base: &str, dirs: &[PathBuf]) -> String {
-    if Flavor::of(base).asks_trust() {
+    if by_command(base).asks_trust() {
         allowed_into(&format!("{} --trust", base.trim()), dirs)
     } else {
         allowed_into(base, dirs)
     }
 }
 
-/// What has Claude read the instructions of its `--add-dir` folders.
-const CLAUDE_MD_ENV: &str = "CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD";
-
 /// The shell command that starts `base` allowed into `dirs` too, for a CLI
-/// gerdr knows the flag of: the others reach the feature's files through
-/// `layout::DOCS_LINK`. Claude asks to trust each `--add-dir` folder every
-/// time it starts unless its repository was trusted by starting Claude in it
-/// (checked on 2.1.326), so its folders go in as the `additionalDirectories`
-/// of `--settings`, which it doesn't ask about. It doesn't load their
-/// CLAUDE.md or AGENTS.md then: the prompt says to read them
-/// (`assets/prompts/repos.md`). A Claude command with `--settings` of its own
-/// keeps `--add-dir`, told to read those folders' instructions.
+/// gerdr knows the flag of (`Integration::add_dirs`): the others reach the
+/// feature's files through `layout::DOCS_LINK`.
 pub fn allowed_into(base: &str, dirs: &[PathBuf]) -> String {
-    let mut line = base.trim().to_owned();
-    if !Flavor::of(base).adds_dirs() || dirs.is_empty() {
-        return line;
+    let line = base.trim().to_owned();
+    let agent = by_command(base);
+    match agent.adds_dirs() && !dirs.is_empty() {
+        true => agent.add_dirs(line, dirs),
+        false => line,
     }
-    if Flavor::of(base) == Flavor::Claude && !base.contains("--settings") {
-        let settings = serde_json::json!({ "permissions": { "additionalDirectories": dirs } });
-        line.push_str(" --settings ");
-        line.push_str(&crate::desktop::shell_quote(&settings.to_string()));
-        return line;
-    }
-    if Flavor::of(base) == Flavor::Claude && !line.contains(CLAUDE_MD_ENV) {
-        line = format!("{CLAUDE_MD_ENV}=1 {line}");
-    }
-    for dir in dirs {
-        line.push_str(" --add-dir ");
-        line.push_str(&crate::desktop::shell_quote(&dir.to_string_lossy()));
-    }
-    line
 }
 
 /// Where a stage's agent runs in T3 Code.
@@ -514,7 +426,7 @@ impl StageRun {
     /// Whether its chat can be gone back to once its tab is closed.
     pub fn resumes(&self) -> bool {
         // A chat its prompt never reached has nothing to go back to.
-        !self.held && !self.base.is_empty() && Flavor::of(&self.base).resumes()
+        !self.held && !self.base.is_empty() && by_command(&self.base).resumes()
     }
 
     /// Its chat's id, as its command kept it. None until the command ran.
@@ -531,106 +443,27 @@ pub struct Blocked {
     pub at: u64,
 }
 
-/// How much of a transcript's end is read first for its model: most of a
-/// long chat needn't be read to find its last answer.
-const TRANSCRIPT_TAIL: u64 = 256 * 1024;
-
-/// The model of the last answer in a Claude Code transcript's `text`. Lines
-/// it wrote itself name `<synthetic>`, and subagents' their own.
-fn last_claude_model(text: &str) -> Option<String> {
-    text.lines()
-        .rev()
-        .filter(|l| l.contains("\"model\""))
-        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-        .filter(|v| v["type"] == "assistant" && v["isSidechain"] != true)
-        .find_map(|v| {
-            let model = v["message"]["model"].as_str()?;
-            (!model.is_empty() && model != "<synthetic>").then(|| model.to_owned())
-        })
-}
-
-/// The model of Claude Code chat `id`, from its transcript under `projects`
-/// (one folder per working directory). None without an answer yet.
-fn claude_model(projects: &Path, id: &str) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let name = format!("{id}.jsonl");
-    let path = (std::fs::read_dir(projects).ok()?.flatten())
-        .map(|dir| dir.path().join(&name))
-        .find(|path| path.is_file())?;
-    let mut file = std::fs::File::open(&path).ok()?;
-    let from = file.metadata().ok()?.len().saturating_sub(TRANSCRIPT_TAIL);
-    file.seek(SeekFrom::Start(from)).ok()?;
-    // A line cut by the seek isn't JSON: it is passed over.
-    let mut tail = Vec::new();
-    file.read_to_end(&mut tail).ok()?;
-    last_claude_model(&String::from_utf8_lossy(&tail)).or_else(|| {
-        let whole = (from > 0).then(|| std::fs::read(&path).ok())??;
-        last_claude_model(&String::from_utf8_lossy(&whole))
-    })
-}
-
-/// The model of Cursor CLI chat `id`, from its store under `chats` (one
-/// folder per working directory). None for a chat that never answered.
-fn cursor_model(chats: &Path, id: &str) -> Option<String> {
-    let db = (std::fs::read_dir(chats).ok()?.flatten())
-        .map(|dir| dir.path().join(id).join("store.db"))
-        .find(|db| db.is_file())?;
-    let read = || -> rusqlite::Result<String> {
-        crate::cursor_agents::open_read_only(&db)?.query_row(
-            "SELECT value FROM meta WHERE key = '0'",
-            [],
-            |row| row.get(0),
-        )
-    };
-    // Asked again at every read of the feature while it runs, and its agent's
-    // name shows meanwhile: not worth a toast, nor a line each time.
-    let meta = read()
-        .inspect_err(|err| tracing::debug!("reading {}: {err}", db.display()))
-        .ok()?;
-    let meta: serde_json::Value =
-        serde_json::from_slice(&crate::ai_work::usage::from_hex(&meta)?).ok()?;
-    let model = meta["lastUsedModel"].as_str()?;
-    (!model.is_empty()).then(|| model.to_owned())
-}
-
-/// Where the agents keep their chats.
-struct ChatDirs {
-    claude: PathBuf,
-    cursor: PathBuf,
-}
-
-impl ChatDirs {
-    fn here() -> Option<Self> {
-        let home = crate::home_dir()?;
-        let claude = (std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from))
-            .unwrap_or_else(|| home.join(".claude"));
-        Some(Self {
-            claude: claude.join("projects"),
-            cursor: home.join(".cursor").join("chats"),
-        })
-    }
-}
-
 /// The models found for `feature`'s runs, by stage, with the run each read
 /// was of. Reads files and databases, so not on the UI thread. A done stage
 /// with its model kept isn't read again. A chat that can't be read has no
 /// model and says nothing: it is asked again at every read of the feature,
 /// and its agent's name shows in the model's place.
 pub fn read_models(feature: &Feature) -> BTreeMap<Stage, (u32, String)> {
-    ChatDirs::here().map_or_else(BTreeMap::new, |dirs| models_in(feature, &dirs))
+    crate::ai_work::locate::Homes::here()
+        .map_or_else(BTreeMap::new, |homes| models_in(feature, &homes))
 }
 
-fn models_in(feature: &Feature, dirs: &ChatDirs) -> BTreeMap<Stage, (u32, String)> {
+fn models_in(
+    feature: &Feature,
+    homes: &crate::ai_work::locate::Homes,
+) -> BTreeMap<Stage, (u32, String)> {
     (feature.runs.iter())
         .filter(|(stage, run)| run.model.is_none() || !feature.is_done(**stage))
         .filter_map(|(stage, run)| {
-            let model = match Flavor::of(&run.base) {
-                Flavor::Claude => claude_model(&dirs.claude, &run.session()?),
-                Flavor::Cursor => cursor_model(&dirs.cursor, &run.session()?),
-                // Its thread names it when bound; the others can't be told
-                // a chat id to look for.
-                Flavor::T3 | Flavor::Codex | Flavor::Other => None,
-            }?;
+            // T3 Code's thread names it when bound; the others can't be
+            // told a chat id to look for.
+            let agent = by_command(&run.base);
+            let model = agent.resumes().then(|| agent.run_model(homes, &run.session()?))??;
             Some((*stage, (run.n, model)))
         })
         .collect()
@@ -649,13 +482,6 @@ pub struct Stop {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A transcript line of an answer by `model`.
-    fn answer(model: &str, sidechain: bool) -> String {
-        format!(
-            "{{\"type\":\"assistant\",\"isSidechain\":{sidechain},\"message\":{{\"model\":\"{model}\"}}}}\n"
-        )
-    }
 
     /// A folder of its own for test `name`, gone with the test.
     struct Scratch(PathBuf);
@@ -680,88 +506,15 @@ mod tests {
         }
     }
 
-    /// A Claude Code chat `id` of `text`, in a folder of a working directory.
-    fn transcript(name: &str, id: &str, text: &str) -> Scratch {
-        let dir = Scratch::new(name);
-        let cwd = dir.path().join("-home-me-x");
-        std::fs::create_dir_all(&cwd).unwrap();
-        std::fs::write(cwd.join(format!("{id}.jsonl")), text).unwrap();
-        dir
-    }
-
     #[test]
-    fn a_claude_chat_names_the_model_of_its_last_real_answer() {
-        let text = [
-            answer("claude-sonnet-5-5", false),
-            answer("claude-opus-5-5", false),
-            answer("claude-haiku-5-5", true),
-            answer("<synthetic>", false),
-            "{\"type\":\"user\",\"model\":\"nope\"}\n".to_owned(),
-        ]
-        .concat();
-        let dir = transcript("claude", "c1", &text);
-        assert_eq!(
-            claude_model(dir.path(), "c1").as_deref(),
-            Some("claude-opus-5-5")
-        );
-        assert_eq!(claude_model(dir.path(), "other"), None);
-        assert_eq!(claude_model(&dir.path().join("none"), "c1"), None);
-    }
-
-    #[test]
-    fn a_claude_answer_older_than_the_tail_is_still_found() {
-        let filler = "{\"type\":\"user\"}\n".repeat(TRANSCRIPT_TAIL as usize / 8);
-        let dir = transcript("tail", "c1", &(answer("claude-opus-5-5", false) + &filler));
-        assert_eq!(
-            claude_model(dir.path(), "c1").as_deref(),
-            Some("claude-opus-5-5")
-        );
-    }
-
-    /// A Cursor chat `id` whose first meta row is `meta`, as hex; none
-    /// without one.
-    fn cursor_chat(name: &str, id: &str, meta: Option<&str>) -> Scratch {
-        let dir = Scratch::new(name);
-        let chat = dir.path().join("hash-of-cwd").join(id);
-        std::fs::create_dir_all(&chat).unwrap();
-        let db = rusqlite::Connection::open(chat.join("store.db")).unwrap();
-        db.execute("CREATE TABLE meta (key TEXT, value TEXT)", [])
-            .unwrap();
-        if let Some(meta) = meta {
-            let hex: String = meta.bytes().map(|b| format!("{b:02x}")).collect();
-            db.execute("INSERT INTO meta VALUES ('0', ?1)", [hex])
-                .unwrap();
-        }
-        dir
-    }
-
-    #[test]
-    fn a_cursor_chat_names_its_last_used_model() {
-        let dir = cursor_chat("cursor", "k1", Some("{\"lastUsedModel\":\"grok-4.7\"}"));
-        assert_eq!(cursor_model(dir.path(), "k1").as_deref(), Some("grok-4.7"));
-        assert_eq!(cursor_model(dir.path(), "other"), None);
-    }
-
-    #[test]
-    fn a_cursor_chat_without_a_model_names_none() {
-        let empty = cursor_chat("empty", "k1", None);
-        assert_eq!(cursor_model(empty.path(), "k1"), None);
-        let unused = cursor_chat("unused", "k1", Some("{\"lastUsedModel\":\"\"}"));
-        assert_eq!(cursor_model(unused.path(), "k1"), None);
-        let broken = cursor_chat("broken", "k1", Some("not json"));
-        assert_eq!(cursor_model(broken.path(), "k1"), None);
-    }
-
-    #[test]
-    fn models_are_read_by_flavor_and_once_for_a_done_stage() {
-        let chats = cursor_chat("chats", "k1", Some("{\"lastUsedModel\":\"grok-4.7\"}"));
+    fn models_are_read_by_agent_and_once_for_a_done_stage() {
+        let home = Scratch::new("home");
+        let homes = crate::ai_work::locate::Homes::under(home.path());
+        let meta = Some("{\"lastUsedModel\":\"grok-4.7\"}");
+        crate::integrations::cursor::launch::tests::chat(&homes.cursor.join("chats"), "k1", meta);
         let data = Scratch::new("data");
         let prompt = data.path().join("plan-1.md");
         std::fs::write(session_file(&prompt), "k1\n").unwrap();
-        let dirs = ChatDirs {
-            claude: data.path().join("none"),
-            cursor: chats.path().to_owned(),
-        };
         let run = |base: &str, model: Option<&str>| StageRun {
             n: 3,
             base: base.to_owned(),
@@ -772,12 +525,12 @@ mod tests {
         let mut f = crate::feature::tests::feature("a", 1);
         f.runs.insert(Stage::Plan, run("cursor-agent", None));
         f.runs.insert(Stage::Build, run("codex", None));
-        let found = models_in(&f, &dirs);
+        let found = models_in(&f, &homes);
         assert_eq!(found.get(&Stage::Plan), Some(&(3, "grok-4.7".to_owned())));
         assert_eq!(found.get(&Stage::Build), None);
         // One still running is read again: it may be switched.
         f.runs.insert(Stage::Plan, run("cursor-agent", Some("old")));
-        assert_eq!(models_in(&f, &dirs).len(), 1);
+        assert_eq!(models_in(&f, &homes).len(), 1);
         // Done, the model kept stands.
         let mark = crate::feature::Mark {
             at: 1,
@@ -786,7 +539,7 @@ mod tests {
             patch: None,
         };
         f.marks.insert(Stage::Plan, mark);
-        assert!(models_in(&f, &dirs).is_empty());
+        assert!(models_in(&f, &homes).is_empty());
     }
 
     #[test]
@@ -799,19 +552,22 @@ mod tests {
     }
 
     #[test]
-    fn flavors_go_by_program_name() {
-        assert_eq!(Flavor::of("claude"), Flavor::Claude);
-        assert_eq!(Flavor::of("/usr/bin/claude --model opus"), Flavor::Claude);
-        assert_eq!(Flavor::of("env FOO=1 codex"), Flavor::Codex);
-        assert_eq!(Flavor::of("cursor-agent"), Flavor::Cursor);
-        assert_eq!(Flavor::of("t3"), Flavor::T3);
-        assert!(!Flavor::T3.adds_dirs());
-        assert!(!Flavor::T3.resumes());
-        assert!(Flavor::T3.picks_model() && !Flavor::T3.takes_model());
-        assert_eq!(Flavor::of("aider"), Flavor::Other);
-        assert_eq!(Flavor::of(""), Flavor::Other);
-        assert!(Flavor::Cursor.adds_dirs());
-        assert!(!Flavor::Other.adds_dirs());
+    fn agents_go_by_program_name() {
+        use crate::ai_work::AgentKind;
+        let kind = |command: &str| by_command(command).kind();
+        assert_eq!(kind("claude"), AgentKind::Claude);
+        assert_eq!(kind("/usr/bin/claude --model opus"), AgentKind::Claude);
+        assert_eq!(kind("env FOO=1 codex"), AgentKind::Codex);
+        assert_eq!(kind("cursor-agent"), AgentKind::Cursor);
+        assert_eq!(kind("t3"), AgentKind::T3);
+        let t3 = by_command("t3");
+        assert!(!t3.adds_dirs());
+        assert!(!t3.resumes());
+        assert!(t3.picks_model() && !t3.takes_model());
+        assert_eq!(kind("aider"), AgentKind::Unknown);
+        assert_eq!(kind(""), AgentKind::Unknown);
+        assert!(by_command("cursor-agent").adds_dirs());
+        assert!(!by_command("aider").adds_dirs());
     }
 
     #[test]
@@ -832,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn command_lines_per_flavor() {
+    fn command_lines_per_agent() {
         let prompt = Path::new("/d/my feature/prompts/plan-1.md");
         let dirs = [PathBuf::from("/d/my feature")];
         let id = "'/d/my feature/prompts/plan-1.session'";
@@ -879,7 +635,7 @@ mod tests {
         // Who reads the command still knows the agent, and its chat's id
         // comes after the model, which a rerun keeps.
         let line = command_line(&with_model("claude", Some("opus")), Path::new("/p.md"), &[]);
-        assert_eq!(Flavor::of(&line), Flavor::Claude);
+        assert_eq!(by_command(&line).kind(), crate::ai_work::AgentKind::Claude);
         let argv: Vec<&str> = line.split_whitespace().collect();
         assert_eq!(rerun_argv(&argv)[..3], ["claude", "--model", "opus"]);
     }
@@ -940,7 +696,7 @@ mod tests {
     fn the_program_stays_first_for_who_reads_the_command() {
         // `same_agent` tells the builder from the reviewer by it.
         let line = command_line("env A=1 /bin/cursor-agent -f", Path::new("/p.md"), &[]);
-        assert_eq!(Flavor::of(&line), Flavor::Cursor);
+        assert_eq!(by_command(&line).kind(), crate::ai_work::AgentKind::Cursor);
         assert!(line.contains("$(/bin/cursor-agent create-chat | tee /p.session)"));
     }
 
@@ -1123,7 +879,7 @@ mod tests {
             claude,
             "claude --settings '{\"permissions\":{\"additionalDirectories\":[\"/d/my feature\",\"/e\"]}}'"
         );
-        assert_eq!(Flavor::of(&claude), Flavor::Claude);
+        assert_eq!(by_command(&claude).kind(), crate::ai_work::AgentKind::Claude);
         assert_eq!(allowed_into(&claude, &[]), claude);
         // One with settings of its own keeps --add-dir, told to read their
         // CLAUDE.md, once.

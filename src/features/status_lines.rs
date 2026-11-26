@@ -97,7 +97,7 @@ pub(super) struct PanelState<'a> {
 /// What the button picking a stage's model says: T3 Code's without its
 /// provider.
 pub(super) fn model_label(picked: Option<&str>) -> String {
-    let model = picked.map_or("default", crate::stage_models::t3_model_name);
+    let model = picked.map_or("default", crate::integrations::t3::launch::model_name);
     format!("Model: {model}")
 }
 

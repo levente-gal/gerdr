@@ -2379,7 +2379,7 @@ impl Gerdr {
         let kind = (self.chat_agent(pane_id).and_then(super::source::kind))
             .filter(|kind| caps(*kind).model.typed())?;
         let now = chat_mut(&mut self.workspaces, pane_id).and_then(|chat| chat.model.clone());
-        let offers = model::offers(kind, &self.features.cursor_models.offers);
+        let offers = model::offers(kind, &self.features.listed_models.offers);
         Some(crate::feature_agents::ModelSlot {
             agent: model::name(kind).to_owned(),
             base: model::base(kind).to_owned(),
@@ -2400,7 +2400,7 @@ impl Gerdr {
             tracing::warn!("switching the agent in pane {pane_id} to model {id}: {why}");
             return self.show_error(format!("Couldn't switch the agent to {id}: {why}"));
         }
-        let mut offers = model::offers(kind, &self.features.cursor_models.offers);
+        let mut offers = model::offers(kind, &self.features.listed_models.offers);
         offers.extend(crate::integrations::of(kind).own_model());
         let name = (offers.iter().find(|o| o.id == id)).map_or(id, |o| o.name.as_str());
         if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {

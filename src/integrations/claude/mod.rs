@@ -5,6 +5,7 @@
 
 mod commands;
 pub(crate) mod find;
+mod launch;
 mod live;
 pub(crate) mod parse;
 mod screen;
@@ -17,7 +18,7 @@ use std::{
 };
 
 use super::{
-    Integration, ModelSwitch, Parser, SidePanel, Store,
+    Integration, ModelSwitch, Parser, PickedFor, SidePanel, Store,
     common::{files::SubFiles, install::Changed},
 };
 use crate::{
@@ -118,11 +119,11 @@ impl Integration for Claude {
     }
 
     fn model_switch(&self) -> ModelSwitch {
-        ModelSwitch::Typed { cli: "claude" }
+        ModelSwitch::Typed
     }
 
-    fn offers(&self, _cursor: &[Offer]) -> Vec<Offer> {
-        crate::stage_models::claude_offers()
+    fn offers(&self, _listed: &[Offer]) -> Vec<Offer> {
+        launch::offers()
     }
 
     /// `/model default`: Claude Code's own choice.
@@ -163,5 +164,43 @@ impl Integration for Claude {
 
     fn install_live(&self, home: &Path) -> Vec<Result<Option<Changed>, String>> {
         live::install(home)
+    }
+
+    fn command(&self) -> Option<&'static str> {
+        Some("claude")
+    }
+
+    fn adds_dirs(&self) -> bool {
+        true
+    }
+
+    fn add_dirs(&self, line: String, dirs: &[PathBuf]) -> String {
+        launch::add_dirs(line, dirs)
+    }
+
+    fn takes_model(&self) -> bool {
+        true
+    }
+
+    /// It takes a chat id of our choosing (`new_chat`). Its chat, gone back
+    /// to, keeps its model (tried on 2.1.318): one changed there with
+    /// `/model` must stay.
+    fn resumes(&self) -> bool {
+        true
+    }
+
+    fn new_chat(&self, _base: &str, id_file: &str) -> Option<String> {
+        Some(launch::new_chat(id_file))
+    }
+
+    fn run_model(&self, homes: &Homes, id: &str) -> Option<String> {
+        launch::run_model(homes, id)
+    }
+
+    fn model_hint(&self, of: PickedFor) -> Option<&'static str> {
+        // Tried on 2.1.325: its `/model` saves the model as the default of
+        // new sessions.
+        (of == PickedFor::Chat)
+            .then_some("Model for this agent; Claude Code may keep it as its default…")
     }
 }

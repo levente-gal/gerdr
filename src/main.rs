@@ -8061,7 +8061,7 @@ fn start(
     state.start_services();
     state.watch_system_theme(system_theme);
     state.watch_zoxide();
-    state.watch_cursor_models();
+    state.watch_listed_models();
     state.watch_profile_imports();
     state.watch_keyring();
     state.watch_installed_apps();

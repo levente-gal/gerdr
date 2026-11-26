@@ -42,6 +42,10 @@ impl Integration for Antigravity {
         "Antigravity"
     }
 
+    fn command(&self) -> Option<&'static str> {
+        Some("agy")
+    }
+
     fn herdr_target(&self) -> Option<&'static str> {
         Some("antigravity-cli")
     }

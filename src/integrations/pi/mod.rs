@@ -38,6 +38,10 @@ impl Integration for Pi {
         "pi"
     }
 
+    fn command(&self) -> Option<&'static str> {
+        Some("pi")
+    }
+
     fn store(&self) -> Option<Store> {
         Some(Store::Lines)
     }

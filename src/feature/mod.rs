@@ -1679,18 +1679,15 @@ impl Feature {
             .collect()
     }
 
-    /// `agent_dirs` for the agent `base` starts. Cursor's CLI, which asks no
-    /// trust, also gets the main checkout of each other repository of the
-    /// root (`layout::others_in_root`), and each
-    /// repository's worktree under a folder that holds several: it tells an
-    /// agent a root's git branch and status only for a root that is a git
-    /// repository, which such a folder isn't, and a root's own search leaves
-    /// out roots nested in it. A worktree that isn't there is left out, as the
-    /// CLI refuses to start on a root that doesn't exist (checked on
-    /// 2026.11.05).
+    /// `agent_dirs` for the agent `base` starts. One that `adds_roots` also
+    /// gets the main checkout of each other repository of the root
+    /// (`layout::others_in_root`), and each repository's worktree under a
+    /// folder that holds several. A worktree that isn't there is left out,
+    /// as such a CLI refuses to start on a root that doesn't exist (checked
+    /// on 2026.11.05).
     pub fn agent_dirs_for(&self, base: &str, data: &Path) -> Vec<PathBuf> {
         let mut dirs = self.agent_dirs(data);
-        if agents::Flavor::of(base) == agents::Flavor::Cursor {
+        if crate::integrations::by_command(base).adds_roots() {
             dirs.extend(layout::others_in_root(self).into_iter().map(|(_, main)| main));
             let roots = self.repos.iter().map(|r| &r.worktree).filter(|worktree| {
                 **worktree != self.dir && !dirs.contains(*worktree) && worktree.is_dir()

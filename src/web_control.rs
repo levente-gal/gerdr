@@ -918,7 +918,7 @@ impl Gerdr {
         prompt: Option<&str>,
         model: Option<&str>,
     ) -> bool {
-        let model = model.and_then(crate::stage_models::t3_selection);
+        let model = model.and_then(crate::integrations::t3::launch::selection);
         let message = ToBrowser::NewThread {
             pane: pane_token(pane),
             origin,

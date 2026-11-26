@@ -36,7 +36,7 @@ impl CliAgent {
     }
 
     /// What a feature stage's agent starts from: the command, or for T3
-    /// Code, which has none, its key (see `feature::agents::Flavor::T3`).
+    /// Code, which has none, its key (see `Integration::in_app`).
     pub fn stage_base(&self) -> &str {
         match &self.start {
             Start::Command(command) => command,
@@ -50,14 +50,9 @@ impl CliAgent {
 /// (see `CliAgent::stage_base`).
 pub const T3: &str = "t3";
 
-/// The agents gerdr knows, in the order offered: (the `[agents]` key and,
-/// but for T3 Code, command, the name).
-const KNOWN: &[(&str, &str)] = &[
-    ("claude", "Claude Code"),
-    (T3, "T3 Code"),
-    ("codex", "Codex"),
-    ("cursor-agent", "Cursor"),
-    ("opencode", "OpenCode"),
+/// The agents gerdr knows but has no integration of (`crate::integrations`),
+/// offered after those: (the `[agents]` key and command, the name).
+const OTHERS: &[(&str, &str)] = &[
     ("copilot", "Copilot"),
     ("amp", "Amp"),
     ("qwen", "Qwen Code"),
@@ -71,6 +66,14 @@ const KNOWN: &[(&str, &str)] = &[
     ("goose", "Goose"),
     ("crush", "Crush"),
 ];
+
+/// The agents gerdr knows, in the order offered: (the `[agents]` key and,
+/// but for one started in its app, command, the name, whether it is).
+fn known() -> impl Iterator<Item = (&'static str, &'static str, bool)> {
+    let ours = (crate::integrations::ALL.iter())
+        .filter_map(|agent| Some((agent.command()?, agent.label(), agent.in_app())));
+    ours.chain(OTHERS.iter().map(|(key, name)| (*key, *name, false)))
+}
 
 /// The agents installed: the known ones with `config`'s commands for them
 /// (an empty one hides it), T3 Code if it ran here, then the ones `config`
@@ -87,51 +90,43 @@ fn offered(
     installed: impl Fn(&str) -> bool,
     t3: bool,
 ) -> Vec<CliAgent> {
-    let known = KNOWN.iter().filter_map(|(key, name)| {
-        let set = config.get(*key).map(|c| c.trim());
-        let start = if *key == T3 {
+    let ours = known().filter_map(|(key, name, in_app)| {
+        let set = config.get(key).map(|c| c.trim());
+        let start = if in_app {
             (t3 && set != Some("")).then_some(Start::T3)?
         } else {
             let command = set.unwrap_or(key);
             let on_path = program(command).is_some_and(&installed);
             on_path.then(|| Start::Command(command.to_owned()))?
         };
-        Some(agent(key, (*name).to_owned(), start))
+        Some(agent(key, name.to_owned(), start))
     });
     let added = config
         .iter()
-        .filter(|(key, _)| !KNOWN.iter().any(|(k, _)| k == key))
+        .filter(|(key, _)| !known().any(|(k, ..)| k == key.as_str()))
         .filter(|(_, command)| program(command).is_some_and(&installed))
         .map(|(key, command)| {
             let start = Start::Command(command.trim().to_owned());
             agent(key, key.clone(), start)
         });
-    known.chain(added).collect()
+    ours.chain(added).collect()
 }
 
 /// Whether the saved `command` runs an agent CLI: one gerdr knows, installed
 /// or not, or one `config` starts. npm's OpenCode runs as `opencode.exe`, on
-/// Linux too. Cursor's CLI, started by its other name, is told by where that
-/// name leads (`…/cursor-agent/versions/…/cursor-agent`), or by its script
-/// in a line saved before gerdr dropped it.
+/// Linux too. One started by another name tells itself
+/// (`Integration::runs_as`).
 pub fn runs_agent(command: &str, config: &BTreeMap<String, String>) -> bool {
     use crate::projects::command_program;
     let Some(program) = command_program(command) else {
         return false;
     };
     let name = program.strip_suffix(".exe").unwrap_or(&program);
-    KNOWN.iter().any(|(key, _)| *key == name)
-        || (name == "agent" && (command.contains("/cursor-agent/") || leads_to_cursor(command)))
+    known().any(|(key, ..)| key == name)
+        || (crate::integrations::ALL.iter()).any(|agent| agent.runs_as(name, command))
         || config
             .values()
             .any(|c| command_program(c).as_ref() == Some(&program))
-}
-
-/// Whether the first word of `command` is a link into Cursor's CLI.
-fn leads_to_cursor(command: &str) -> bool {
-    (crate::projects::split_command(command).first())
-        .and_then(|program| std::fs::canonicalize(program).ok())
-        .is_some_and(|path| path.to_string_lossy().contains("/cursor-agent/"))
 }
 
 /// The agent `[agents]` calls `key`, named `name`, started by `start`.

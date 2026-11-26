@@ -6,6 +6,7 @@
 mod commands;
 mod db;
 mod find;
+pub(crate) mod launch;
 pub(crate) mod live;
 mod parse;
 mod screen;
@@ -13,7 +14,9 @@ pub(crate) mod stats;
 
 use std::{collections::HashSet, path::Path};
 
-use super::{DbChat, Integration, ModelSwitch, Parser, SidePanel, Store, common::install::Changed};
+use super::{
+    DbChat, Integration, ModelSwitch, Parser, PickedFor, SidePanel, Store, common::install::Changed,
+};
 use crate::{
     ai_work::{
         AgentKind, Chat,
@@ -114,13 +117,11 @@ impl Integration for Cursor {
     }
 
     fn model_switch(&self) -> ModelSwitch {
-        ModelSwitch::Typed {
-            cli: "cursor-agent",
-        }
+        ModelSwitch::Typed
     }
 
-    fn offers(&self, cursor: &[Offer]) -> Vec<Offer> {
-        cursor.to_vec()
+    fn offers(&self, listed: &[Offer]) -> Vec<Offer> {
+        listed.to_vec()
     }
 
     fn models_read(&self) -> bool {
@@ -157,5 +158,76 @@ impl Integration for Cursor {
             return Vec::new();
         }
         vec![live::install_hooks(home)]
+    }
+
+    fn command(&self) -> Option<&'static str> {
+        Some("cursor-agent")
+    }
+
+    /// Each feature's folder is new to it (checked on 2026-11-04).
+    fn asks_trust(&self) -> bool {
+        true
+    }
+
+    fn adds_dirs(&self) -> bool {
+        true
+    }
+
+    /// It tells an agent a root's git branch and status only for a root
+    /// that is a git repository, and a root's own search leaves out roots
+    /// nested in it.
+    fn adds_roots(&self) -> bool {
+        true
+    }
+
+    fn takes_model(&self) -> bool {
+        true
+    }
+
+    /// Whether its chat keeps its model couldn't be told from its chat.
+    fn retells_model(&self) -> bool {
+        true
+    }
+
+    fn resumes(&self) -> bool {
+        true
+    }
+
+    fn new_chat(&self, base: &str, id_file: &str) -> Option<String> {
+        Some(launch::new_chat(base, id_file))
+    }
+
+    fn launcher_script(&self, argv: &[&str]) -> Option<usize> {
+        launch::launcher_script(argv)
+    }
+
+    fn runs_as(&self, name: &str, command: &str) -> bool {
+        launch::runs_as(name, command)
+    }
+
+    fn run_model(&self, homes: &Homes, id: &str) -> Option<String> {
+        launch::run_model(homes, id)
+    }
+
+    fn list_models(&self, base: &str) -> Result<Vec<Offer>, String> {
+        launch::list_models(base)
+    }
+
+    fn reading_hint(&self, failed: bool) -> &'static str {
+        match failed {
+            false => "Reading Cursor's models…",
+            true => "Couldn't read Cursor's models: type a model's id…",
+        }
+    }
+
+    fn model_hint(&self, of: PickedFor) -> Option<&'static str> {
+        // Tried on 2026.10.22: its first message saves `--model` as the
+        // default of every chat of it, as its own `/model` does.
+        Some(match of {
+            PickedFor::Stage => "Model for this stage's next start; Cursor keeps it as its default…",
+            PickedFor::Start | PickedFor::Chat => {
+                "Model for this agent; Cursor keeps it as its default…"
+            }
+        })
     }
 }

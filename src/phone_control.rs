@@ -328,15 +328,15 @@ impl Gerdr {
                     })
                 });
                 let sides = self.phone_sides(&pane);
-                let models = &self.features.cursor_models;
+                let models = &self.features.listed_models;
                 if read_models
                     && models.offers.is_empty()
                     && models.reading == crate::stage_models::Reading::Idle
                     && let Some(cli) = crate::chat::model::read_from()
                 {
-                    self.read_cursor_models(cli);
+                    self.read_listed_models(cli);
                 }
-                let listed: Vec<Value> = (self.features.cursor_models.offers.iter())
+                let listed: Vec<Value> = (self.features.listed_models.offers.iter())
                     .filter(|_| read_models)
                     .map(|o| json!({ "id": o.id, "name": o.name }))
                     .collect();

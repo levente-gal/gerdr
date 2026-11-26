@@ -5,17 +5,14 @@
 
 use crate::{
     ai_work::AgentKind,
-    integrations::{ModelSwitch, of},
+    integrations::of,
     stage_models::Offer,
 };
 
 /// The command `kind`'s CLI runs as, as the stage picker names it (for
-/// `Flavor::of` and the read of Cursor's models).
+/// `integrations::by_command` and the read of the models it lists).
 pub fn base(kind: AgentKind) -> &'static str {
-    match of(kind).model_switch() {
-        ModelSwitch::Typed { cli } => cli,
-        _ => "claude",
-    }
+    of(kind).command().unwrap_or("claude")
 }
 
 /// What `kind`'s CLI is called, for the picker's rows.
@@ -28,10 +25,10 @@ pub fn line(id: &str) -> String {
     format!("/model {id}")
 }
 
-/// What a chat offers for agent `kind`: Claude Code's aliases, `cursor`
-/// (Cursor's models, as last read) for Cursor.
-pub fn offers(kind: AgentKind, cursor: &[Offer]) -> Vec<Offer> {
-    of(kind).offers(cursor)
+/// What a chat offers for agent `kind`, of `listed`: the models its CLI
+/// listed, as last read.
+pub fn offers(kind: AgentKind, listed: &[Offer]) -> Vec<Offer> {
+    of(kind).offers(listed)
 }
 
 /// Whether the models a chat offers for agent `kind` are read from its CLI.

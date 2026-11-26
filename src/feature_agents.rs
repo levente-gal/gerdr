@@ -33,7 +33,7 @@ use crate::{
     feature::{
         self, Feature, PerProject, Stage, Status,
         agents::{
-            Flavor, StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs,
+            StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs,
             session_file, with_model, with_prompt,
         },
         artifacts,
@@ -45,6 +45,7 @@ use crate::{
         store, verify,
     },
     herdr::AgentStatus,
+    integrations::by_command,
     machine_work::{Placed, StartKind},
     projects::Workflow,
     prompts::{self, render::Vars},
@@ -654,7 +655,7 @@ fn program(command: &str) -> &str {
 fn same_agent(name: &str, command: &str, builder: Option<(&str, &str)>) -> bool {
     // T3 Code runs whichever agent the user picks in its draft: told apart
     // once its thread runs (see `Gerdr::t3_stage_thread_sent`).
-    if Flavor::of(command) == Flavor::T3 {
+    if by_command(command).in_app() {
         return false;
     }
     builder.is_some_and(|(b_name, b_command)| {
@@ -757,7 +758,7 @@ fn unpicked(
             resolve_pick(Some(&run.agent), feature, stage, workflow, installed)
         }
         Stage::Ship => match stage_pick(feature, Stage::Build, workflow, installed) {
-            Pick::Agent(_, base) if Flavor::of(&base) == Flavor::T3 => {
+            Pick::Agent(_, base) if by_command(&base).in_app() => {
                 resolve_pick(None, feature, stage, workflow, installed)
             }
             pick => pick,
@@ -864,7 +865,7 @@ pub(crate) fn stage_model_slot(
     let Pick::Agent(agent, base) = stage_pick(feature, stage, workflow, installed) else {
         return None;
     };
-    Flavor::of(&base).picks_model().then(|| ModelSlot {
+    by_command(&base).picks_model().then(|| ModelSlot {
         picked: picked_model(feature, stage, &agent),
         agent,
         base,
@@ -890,12 +891,9 @@ pub(crate) fn stage_chips(
         .iter()
         .filter_map(|a| {
             let base = a.stage_base();
-            match Flavor::of(base) {
-                Flavor::Claude | Flavor::Cursor => true,
-                Flavor::T3 => t3,
-                _ => false,
-            }
-            .then(|| (a.name.clone(), base.to_owned()))
+            let agent = by_command(base);
+            (agent.runs_stages() && (t3 || !agent.in_app()))
+                .then(|| (a.name.clone(), base.to_owned()))
         })
         .collect();
     // One chip per program: the project's `claude` is the installed
@@ -904,7 +902,7 @@ pub(crate) fn stage_chips(
         n.eq_ignore_ascii_case(name) || program(c) == program(command)
     };
     if let Pick::Agent(name, command) = unpicked(feature, stage, workflow, installed)
-        && (t3 || Flavor::of(&command) != Flavor::T3)
+        && (t3 || !by_command(&command).in_app())
         && !agents.iter().any(|a| same(a, &name, &command))
     {
         agents.push((name, command));
@@ -973,10 +971,7 @@ pub(crate) fn new_discover_agents(
     let asks = |name: &str| {
         (installed.iter()).any(|a| {
             a.name == name
-                && matches!(
-                    Flavor::of(a.stage_base()),
-                    Flavor::Claude | Flavor::Codex | Flavor::Cursor
-                )
+                && by_command(a.stage_base()).adds_dirs()
         })
     };
     let chips: Vec<AgentChip> = stage_chips(&fresh, Stage::Discover, workflow, installed)
@@ -1634,7 +1629,7 @@ impl Gerdr {
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
         match stage_pick(feature, stage, workflow, &self.launcher.cli_agents) {
             Pick::Agent(agent, base) if run.t3.is_some() => {
-                Flavor::of(&base) != Flavor::T3
+                !by_command(&base).in_app()
                     || run.asked_model != picked_model(feature, stage, &agent)
             }
             Pick::Agent(agent, base) => {
@@ -1698,10 +1693,7 @@ impl Gerdr {
             );
         // Another CLI may read a bare argument as something else (OpenCode,
         // as a folder): it starts untold.
-        let told = matches!(
-            Flavor::of(command),
-            Flavor::Claude | Flavor::Codex | Flavor::Cursor
-        );
+        let told = by_command(command).adds_dirs();
         if !told && let Some(task) = &task {
             self.show_warning(format!(
                 "{agent} can't be told what to do: pick Claude Code, Codex or Cursor as the {}",
@@ -1843,10 +1835,10 @@ impl Gerdr {
         model: Option<String>,
     ) {
         let in_t3 = (self.model_slot_of(project, slug, stage))
-            .is_some_and(|slot| Flavor::of(&slot.base) == Flavor::T3);
+            .is_some_and(|slot| by_command(&slot.base).in_app());
         if in_t3
             && let Some(typed) = model.as_deref()
-            && crate::stage_models::t3_selection(typed).is_none()
+            && crate::integrations::t3::launch::selection(typed).is_none()
         {
             return self.show_warning(format!(
                 "T3 Code's model goes as provider/model, like claudeAgent/{typed}"
@@ -1863,7 +1855,7 @@ impl Gerdr {
             Some(run) => {
                 run.asked_model.clone_from(&model);
                 if let Some(id) = &model {
-                    run.model = Some(crate::stage_models::t3_model_name(id).to_owned());
+                    run.model = Some(crate::integrations::t3::launch::model_name(id).to_owned());
                 }
                 model.is_some()
             }
@@ -1923,7 +1915,7 @@ impl Gerdr {
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
         !matches!(
             stage_pick(feature, stage, workflow, &self.launcher.cli_agents),
-            Pick::Agent(_, base) if Flavor::of(&base) == Flavor::T3
+            Pick::Agent(_, base) if by_command(&base).in_app()
         )
     }
 
@@ -1959,7 +1951,7 @@ impl Gerdr {
     ) -> Result<(String, String), String> {
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
         match stage_pick(feature, stage, workflow, &self.launcher.cli_agents) {
-            Pick::Agent(agent, base) if Flavor::of(&base) != Flavor::T3 => {
+            Pick::Agent(agent, base) if !by_command(&base).in_app() => {
                 let model = picked_model(feature, stage, &agent);
                 let base = with_model(&base, model.as_deref());
                 Ok((agent, base))
@@ -2078,7 +2070,7 @@ impl Gerdr {
         // on the old, which keeps its tab (`picked_now`).
         let workflow = self.projects.project(project).map(|p| &p.workflow);
         let (agent, base) = match stage_pick(&feature, stage, workflow, &self.launcher.cli_agents) {
-            Pick::Agent(agent, base) if Flavor::of(&base) != Flavor::T3 => (agent, base),
+            Pick::Agent(agent, base) if !by_command(&base).in_app() => (agent, base),
             _ => (run.agent.clone(), run.base.clone()),
         };
         let model = picked_model(&feature, stage, &agent);
@@ -2255,12 +2247,7 @@ impl Gerdr {
         let stage = Stage::Discover;
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
         match stage_pick(feature, stage, workflow, &self.launcher.cli_agents) {
-            Pick::Agent(agent, base)
-                if matches!(
-                    Flavor::of(&base),
-                    Flavor::Claude | Flavor::Codex | Flavor::Cursor
-                ) =>
-            {
+            Pick::Agent(agent, base) if by_command(&base).adds_dirs() => {
                 let model = picked_model(feature, stage, &agent);
                 Ok((agent, with_model(&base, model.as_deref())))
             }
@@ -2418,7 +2405,7 @@ impl Gerdr {
                 return false;
             }
         };
-        let in_t3 = Flavor::of(&base) == Flavor::T3;
+        let in_t3 = by_command(&base).in_app();
         if in_t3 && let Err(why) = self.t3_can_draft() {
             self.log_not_started(project, slug, stage, &why);
             return false;
@@ -2460,7 +2447,7 @@ impl Gerdr {
             self.plan_review_starts(project, slug);
         }
         let version = prompts::builtin(need.template).map_or(0, |(_, v)| v);
-        let asked_model = (Flavor::of(&base).picks_model())
+        let asked_model = (by_command(&base).picks_model())
             .then(|| picked_model(&feature, stage, &agent))
             .flatten();
         let waiting = takes_new_work(last, &base, asked_model.as_deref(), extra)
@@ -2577,7 +2564,7 @@ impl Gerdr {
             model: (asked_model.as_deref())
                 .map(|m| {
                     if in_t3 {
-                        crate::stage_models::t3_model_name(m)
+                        crate::integrations::t3::launch::model_name(m)
                     } else {
                         m
                     }
