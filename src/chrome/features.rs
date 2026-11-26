@@ -5470,6 +5470,8 @@ fn char_at_x(text: &str, font: Font, bold: bool, runs: &Runs, x: f32) -> usize {
     let mut i = 0;
     for (range, on) in spans(text, runs) {
         let face = doc_layout::face(on, bold);
+        let pad = doc_layout::run_pad(on);
+        pen += pad;
         for ch in text[range].chars() {
             let advance = doc_layout::width_in(ch.encode_utf8(&mut [0; 4]), face, font.size());
             if x < pen + advance / 2.0 {
@@ -5478,6 +5480,7 @@ fn char_at_x(text: &str, font: Font, bold: bool, runs: &Runs, x: f32) -> usize {
             pen += advance;
             i += 1;
         }
+        pen += pad;
     }
     i
 }
@@ -7904,7 +7907,7 @@ impl Painter {
             Piece::Doc(piece) => self.doc_piece(c, rect, piece, scale, p),
             Piece::OutputLine(text) => {
                 let ground = mix(p.background, p.text, OUTPUT_GROUND);
-                self.code_line(c, rect, text, ground, scale, p);
+                self.code_line(c, rect, (text, &[]), ground, scale, p);
             }
             Piece::YourComment => {
                 let (x, y, w, h) = rect_px(rect, scale);
@@ -8452,12 +8455,14 @@ impl Painter {
                 let (x, end) = phys(rect, scale);
                 let (y, h) = band(rect, scale);
                 let px = font.size() * s;
-                let width = |t: &str| {
-                    doc_layout::line_width(t, runs, *bold, |t, face| glyphs::width(t, face, px))
+                // Measured physical, as painted; the runs' room is logical.
+                let width = |at: usize| {
+                    let measure = |t: &str, face| glyphs::width(t, face, px) / s;
+                    doc_layout::x_at(text, runs, *bold, at, measure) * s
                 };
                 let byte = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(b, _)| b);
-                let x0 = x + width(&text[..byte(range.start)]);
-                let x1 = (x + width(&text[..byte(range.end)])).min(end);
+                let x0 = x + width(byte(range.start));
+                let x1 = (x + width(byte(range.end))).min(end);
                 if x1 > x0 {
                     let color = mix(p.background, p.accent, PICKED_TINT);
                     c.rounded(x0, y as f32, x1 - x0, h as f32, 2.0 * s, color);

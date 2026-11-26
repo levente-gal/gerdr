@@ -1587,7 +1587,7 @@ fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
         let (mut pieces, mut h) = doc_layout::stack_of(&plan_blocks(&ask.input), iw);
         let mut fit: Vec<i32> = (pieces.iter())
             .filter(|(r, piece)| {
-                matches!(piece, DocPiece::Text { .. } | DocPiece::CodeLine(_))
+                matches!(piece, DocPiece::Text { .. } | DocPiece::CodeLine(..))
                     && r.loc.y + r.size.h <= room
             })
             .map(|(r, _)| r.loc.y)
@@ -1928,7 +1928,7 @@ fn short(gist: &str, cwd: Option<&Path>) -> String {
 /// The tops of `pieces`' lines of words and code, top first.
 fn line_tops(pieces: &[(Rect, DocPiece)]) -> Vec<i32> {
     let mut tops: Vec<i32> = (pieces.iter())
-        .filter(|(_, piece)| matches!(piece, DocPiece::Text { .. } | DocPiece::CodeLine(_)))
+        .filter(|(_, piece)| matches!(piece, DocPiece::Text { .. } | DocPiece::CodeLine(..)))
         .map(|(r, _)| r.loc.y)
         .collect();
     // A table's cells side by side share their tops.
@@ -2078,7 +2078,7 @@ impl Laid {
         let lines: Vec<String> = (text.lines().take(cut))
             .map(|line| line.replace('\t', "    "))
             .collect();
-        let (pieces, _) = doc_layout::stack_of(&[DocBlock::Code(lines)], w);
+        let (pieces, _) = doc_layout::stack_of(&[crate::md_blocks::code_block("", lines)], w);
         let top = self.below();
         self.doc(pieces, (x, top));
         let n = text.lines().count();
@@ -3632,7 +3632,7 @@ pub(super) mod tests {
         let code = laid
             .bits
             .iter()
-            .filter(|(_, b)| matches!(b, Bit::Doc(DocPiece::CodeLine(t)) if !t.is_empty()));
+            .filter(|(_, b)| matches!(b, Bit::Doc(DocPiece::CodeLine(..))));
         assert_eq!(code.count(), CHAT_CUT);
         let (spot, _) = laid
             .spots
