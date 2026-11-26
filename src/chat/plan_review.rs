@@ -24,6 +24,8 @@ use std::{
 
 use crate::{
     Gerdr,
+    ai_work::AgentKind,
+    herdr::AgentStatus,
     chat::{Item, PaneChat},
     prompts,
 };
@@ -193,9 +195,23 @@ impl Gerdr {
                 return Ok(());
             }
         }
+        let agent = self.chat_agent(pane_id);
+        let status = agent.map(|a| a.agent_status);
+        // Its own menu would take the line's Enter as a choice: Claude's
+        // "Ready to code?" given back to its screen would go ahead.
+        if status == Some(AgentStatus::Blocked) {
+            return Err("its agent waits on its own menu: answer it there first".into());
+        }
+        // Codex ends a plan on "Implement this plan?", which its screen
+        // shows idle: Esc leaves it, still planning ("esc back").
+        let codex = agent.and_then(super::source::kind) == Some(AgentKind::Codex);
         let file = write_back(key(item_id), comments)
             .map_err(|err| format!("couldn't write the comments: {err}"))?;
         let line = back_line(&file)?;
+        if codex && status == Some(AgentStatus::Idle) {
+            let herdr = (self.session.herdr.as_mut()).ok_or("herdr isn't connected")?;
+            herdr.send_keys(pane_id, &["esc"]).map_err(|err| err.to_string())?;
+        }
         self.send_line(pane_id, &line)
     }
 }

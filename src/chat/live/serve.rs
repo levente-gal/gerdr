@@ -326,11 +326,14 @@ impl Gerdr {
     }
 
     /// Whether an ask of agent pane `pane` can be answered on a card: its
-    /// chat shows here (`chat_in_sight`), or a phone showed the pane lately.
+    /// chat shows here (`chat_in_sight`), the review of its plan shows
+    /// (Approve and Send back answer it), or a phone showed the pane lately.
     fn ask_in_sight(&self, pane: &str) -> bool {
         let phone =
             (self.chats.live.phone_seen.get(pane)).is_some_and(|at| at.elapsed() < PHONE_SIGHT);
-        phone || self.chat_in_sight(pane)
+        let reviewing = (self.wd().and_then(|wd| wd.doc.as_ref()?.chat.as_ref()))
+            .is_some_and(|chat| chat.pane_id == pane);
+        phone || reviewing || self.chat_in_sight(pane)
     }
 
     /// The phone shows agent pane `pane` now: the ask waiting on it, if any,

@@ -1236,6 +1236,11 @@ impl WorktreeDiff {
         let restores = |o: &Outcome| matches!(o, Outcome::Cut(e) if e.cut.restored().is_some());
         let locked = self.doc.as_ref().and_then(|d| d.locked);
         match outcome {
+            // A chat's plan is a copy, not its agent's file: Zed has nothing
+            // of it to open.
+            Some(Outcome::OpenInZed { .. }) if self.chat_plan().is_some() => {
+                Some(Outcome::Notice(crate::doc_review::CHAT_PLAN_READ_ONLY))
+            }
             Some(o) if self.only_read() && refused(&o) => {
                 Some(Outcome::Notice(locked.unwrap_or(EVIDENCE_READ_ONLY)))
             }
@@ -4332,6 +4337,8 @@ pub(crate) mod tests {
         key(&mut wd, Keysym::d);
         assert_eq!(key(&mut wd, Keysym::d), why);
         assert_eq!(key(&mut wd, Keysym::x), why);
+        // Enter opens no Zed on it: it is a copy.
+        assert_eq!(key(&mut wd, Keysym::Return), why);
         // Its keys say what they do to a chat's plan.
         let help = wd.help_lines();
         let says = |text: &str| help.iter().any(|(_, what, _)| what == text);
