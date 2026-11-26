@@ -334,7 +334,9 @@ fn text_in(
     let px = size * scale as f32;
     let baseline = baseline(face, px, band);
     let shaped = glyphs::shaped(text, face, px);
-    if x + shaped.w <= max_x {
+    // A pixel of slack: rooms sized to text in logical pixels lose up to
+    // one rounding their edges to physical ones at a fractional scale.
+    if x + shaped.w <= max_x + 1.0 {
         return glyphs::draw(c, text, face, px, x, baseline, None, color);
     }
     // The longest start of `text` whose glyphs fit with an ellipsis after it.
@@ -1411,6 +1413,35 @@ mod tests {
         let end = painter.text(&mut c, text, 14.0, 4.0, max_x, (0, 30), 1.0, p.text);
         assert!(end <= max_x + 0.5, "{end} past {max_x}");
         assert!(end > 4.0);
+    }
+
+    #[test]
+    fn text_in_a_room_its_own_width_is_never_cut_at_a_fractional_scale() {
+        let painter = Painter::new();
+        if !painter.has_font() {
+            return;
+        }
+        let p = Theme::Dark.palette();
+        let (scale, size) = (1.5, 14.0);
+        for text in [
+            "Review",
+            "Plan",
+            "4.1 s",
+            "Show whole plan (241 more lines)",
+        ] {
+            // As the chat lays a label out: its logical width, rounded up,
+            // at any logical x; the painter rounds both edges.
+            let w = (painter.text_width(text, size, 1.0)).ceil() as f64;
+            let whole = painter.text_width(text, size, scale);
+            for x in 0..4 {
+                let (x0, x1) = ((x as f64 * scale).round(), ((x as f64 + w) * scale).round());
+                let mut c = Canvas::new((600, 30).into());
+                let (x0, x1) = (x0 as f32, x1 as f32);
+                let end = painter.text(&mut c, text, size, x0, x1, (0, 30), scale, p.text);
+                let at = format!("{text:?} at {x}");
+                assert!(end >= x0 + whole - 0.5, "{at} cut: {end} < {x0} + {whole}");
+            }
+        }
     }
 
     #[test]
