@@ -12,297 +12,310 @@
 
 use serde_json::Value;
 
-use super::{
-    DiffLine, DiffSide, Item, MAX_LINES, Reader, ToolOut, cap, change, more, patch, plan_item,
+use super::{Item, ToolOut, patch};
+use crate::{
+    ai_work::usage::iso_ms,
+    integrations::{
+        Parser,
+        common::build::{
+            Builder, CHAT_COMPACTED, INTERRUPTED, cant_show, cap, capped, change, plan_item,
+        },
+    },
+    stats_panel::tool_gist,
 };
-use crate::{ai_work::usage::iso_ms, stats_panel::tool_gist};
 
-impl Reader {
+/// A reader of Codex's: it keeps nothing of its own.
+pub(crate) struct Codex;
+
+impl Parser for Codex {
     /// Read rollout line `line`.
-    pub(super) fn codex_line(&mut self, line: &Value) {
+    fn line(&mut self, b: &mut Builder, line: &Value) {
         let at = line["timestamp"].as_str().and_then(iso_ms);
         let p = &line["payload"];
         match line["type"].as_str().unwrap_or_default() {
-            "response_item" => self.codex_item(p, at),
-            "event_msg" => self.codex_event(p),
+            "response_item" => codex_item(b, p, at),
+            "event_msg" => codex_event(b, p),
             "compacted" => {
-                let id = self.codex_id(p);
-                let text = "The chat was compacted".to_owned();
-                self.push(Item::Note { id, text });
+                let id = codex_id(b, p);
+                let text = CHAT_COMPACTED.to_owned();
+                b.push(Item::Note { id, text });
             }
             // session_meta, turn_context, world_state, token_usage_record:
             // Codex's bookkeeping.
             _ => {}
         }
     }
+}
 
-    fn codex_item(&mut self, p: &Value, at: Option<u64>) {
-        let id = self.codex_id(p);
-        let call = p["call_id"].as_str().unwrap_or(&id).to_owned();
-        let name = p["name"].as_str().unwrap_or("tool");
-        match p["type"].as_str().unwrap_or_default() {
-            "message" => match p["role"].as_str() {
-                Some("user") => {
-                    let text = typed(&p["content"]);
-                    if !text.is_empty() {
-                        self.push(Item::User { id, at, text });
-                    }
-                }
-                Some("assistant") => {
-                    let text = parts(&p["content"]).concat();
-                    // Plan mode's plan, in its block: on its own card.
-                    match proposed_plan(&text) {
-                        Some((before, plan, after)) => {
-                            self.answer(&id.clone(), id.clone(), at, before);
-                            self.push(plan_item(format!("{id}:plan"), None, plan));
-                            let rest = format!("{id}:after");
-                            self.answer(&rest.clone(), rest, at, after);
-                        }
-                        None => self.answer(&id.clone(), id, at, &text),
-                    }
-                }
-                // Developer and system messages are Codex's instructions.
-                _ => {}
-            },
-            "reasoning" => {
-                let said = |key: &str| {
-                    (p[key].as_array().into_iter().flatten())
-                        .filter_map(|s| s["text"].as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n\n")
-                };
-                let mut text = said("summary");
-                if text.trim().is_empty() {
-                    text = said("content");
-                }
-                let text = text.trim();
+fn codex_item(b: &mut Builder, p: &Value, at: Option<u64>) {
+    let id = codex_id(b, p);
+    let call = p["call_id"].as_str().unwrap_or(&id).to_owned();
+    let name = p["name"].as_str().unwrap_or("tool");
+    match p["type"].as_str().unwrap_or_default() {
+        "message" => match p["role"].as_str() {
+            Some("user") => {
+                let text = typed(&p["content"]);
                 if !text.is_empty() {
-                    let text = text.to_owned();
-                    self.push(Item::Thinking { id, text });
+                    b.push(Item::User { id, at, text });
                 }
             }
-            "function_call" => {
-                let args = (p["arguments"].as_str())
-                    .and_then(|a| serde_json::from_str(a).ok())
-                    .unwrap_or_else(|| p["arguments"].clone());
-                if name == "apply_patch"
-                    && let Some(text) = args["input"].as_str().or(args.as_str())
-                    && self.codex_patch(&id, &call, at, text)
-                {
-                    return;
-                }
-                self.codex_call(id, call, at, name, &args);
-            }
-            "local_shell_call" => self.codex_call(id, call, at, "shell", &p["action"]),
-            "custom_tool_call" => {
-                let input = p["input"].as_str().unwrap_or_default();
-                if name == "apply_patch" && self.codex_patch(&id, &call, at, input) {
-                    return;
-                }
-                // A script ("code mode"): its gist is the command or query it
-                // runs, when one is plain to see. A patch's files show as
-                // edits (`patch_apply_end`).
-                let gist = match input.contains("*** Begin Patch") {
-                    true => "apply_patch".to_owned(),
-                    false => (js_str(input, "cmd").or_else(|| js_str(input, "q")))
-                        .map_or_else(|| gist(input), |said| gist(&said)),
-                };
-                let item = Item::Tool {
-                    id,
-                    name: name.to_owned(),
-                    gist,
-                    input: input.to_owned(),
-                    output: None,
-                };
-                self.push_call(call, at, item);
-            }
-            "function_call_output" | "custom_tool_call_output" => {
-                let Some(&(_, called)) = self.calls.get(&call) else {
-                    return;
-                };
-                let (text, failed, ms) = outcome(&p["output"]);
-                let ms = ms.or_else(|| at?.checked_sub(called?));
-                let text = cap(text.trim_end());
-                self.fill(&call, ToolOut { text, failed, ms });
-            }
-            "web_search_call" => self.codex_search(id, p),
-            // A snapshot of the work tree, a compaction's encrypted summary.
-            "ghost_snapshot" | "compaction" => {}
-            kind => {
-                let text = format!("A \"{kind}\" line gerdr can't show yet");
-                self.push(Item::Note { id, text });
-            }
-        }
-    }
-
-    /// What only an `event_msg` line tells; the rest of them say again what
-    /// a `response_item` said, or are bookkeeping.
-    fn codex_event(&mut self, p: &Value) {
-        let id = self.codex_id(p);
-        match p["type"].as_str().unwrap_or_default() {
-            "patch_apply_end" => self.codex_applied(&id, p),
-            "web_search_end" => self.codex_search(id, p),
-            "item_completed" => {
-                let item = &p["item"];
-                if item["type"] == "WebSearch" || item["kind"] == "web.search" {
-                    self.codex_search(self.codex_id(item), item);
-                }
-            }
-            "turn_aborted" => {
-                let text = "Interrupted by the user".to_owned();
-                self.push(Item::Note { id, text });
-            }
-            "error" => {
-                let text = p["message"]
-                    .as_str()
-                    .unwrap_or("An error")
-                    .trim()
-                    .to_owned();
-                self.push(Item::Note { id, text });
-            }
-            _ => {}
-        }
-    }
-
-    /// A tool call: a command run (`shell`, `exec_command`, a local shell
-    /// call's action), or another tool with its arguments `args`.
-    fn codex_call(&mut self, id: String, call: String, at: Option<u64>, name: &str, args: &Value) {
-        let command = match &args["command"] {
-            Value::Array(argv) => {
-                let argv: Vec<&str> = argv.iter().filter_map(Value::as_str).collect();
-                match argv[..] {
-                    ["apply_patch", text] if self.codex_patch(&id, &call, at, text) => return,
-                    [_, flag, script] if flag.starts_with('-') && flag.ends_with('c') => {
-                        Some(script.to_owned())
+            Some("assistant") => {
+                let text = parts(&p["content"]).concat();
+                // Plan mode's plan, in its block: on its own card.
+                match proposed_plan(&text) {
+                    Some((before, plan, after)) => {
+                        b.answer(&id.clone(), id.clone(), at, before);
+                        b.push(plan_item(format!("{id}:plan"), None, plan));
+                        let rest = format!("{id}:after");
+                        b.answer(&rest.clone(), rest, at, after);
                     }
-                    _ => Some(argv.join(" ")),
+                    None => b.answer(&id.clone(), id, at, &text),
                 }
             }
-            Value::String(command) => Some(command.clone()),
-            _ => args["cmd"].as_str().map(str::to_owned),
-        };
-        let item = Item::Tool {
-            id,
-            name: name.to_owned(),
-            gist: command
-                .as_deref()
-                .map_or_else(|| tool_gist(args).unwrap_or_default(), gist),
-            input: command
-                .unwrap_or_else(|| serde_json::to_string_pretty(args).unwrap_or_default()),
-            output: None,
-        };
-        self.push_call(call, at, item);
-    }
-
-    /// Patch `text` of call `call` as an edit per file, the call's result
-    /// going to the last; false when it changes no file.
-    fn codex_patch(&mut self, id: &str, call: &str, at: Option<u64>, text: &str) -> bool {
-        let files = patch::files(text);
-        let n = files.len();
-        let last = n.saturating_sub(1);
-        for (k, (path, diff)) in files.into_iter().enumerate() {
-            let item = Item::Edit {
-                id: if k == 0 {
-                    id.to_owned()
-                } else {
-                    format!("{id}.{k}")
-                },
-                path,
-                diff: capped(diff),
+            // Developer and system messages are Codex's instructions.
+            _ => {}
+        },
+        "reasoning" => {
+            let said = |key: &str| {
+                (p[key].as_array().into_iter().flatten())
+                    .filter_map(|s| s["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            };
+            let mut text = said("summary");
+            if text.trim().is_empty() {
+                text = said("content");
+            }
+            b.thinking(id, &text);
+        }
+        "function_call" => {
+            let args = (p["arguments"].as_str())
+                .and_then(|a| serde_json::from_str(a).ok())
+                .unwrap_or_else(|| p["arguments"].clone());
+            if name == "apply_patch"
+                && let Some(text) = args["input"].as_str().or(args.as_str())
+                && codex_patch(b, &id, &call, at, text)
+            {
+                return;
+            }
+            codex_call(b, id, call, at, name, &args);
+        }
+        "local_shell_call" => codex_call(b, id, call, at, "shell", &p["action"]),
+        "custom_tool_call" => {
+            let input = p["input"].as_str().unwrap_or_default();
+            if name == "apply_patch" && codex_patch(b, &id, &call, at, input) {
+                return;
+            }
+            // A script ("code mode"): its gist is the command or query it
+            // runs, when one is plain to see. A patch's files show as
+            // edits (`patch_apply_end`).
+            let gist = match input.contains("*** Begin Patch") {
+                true => "apply_patch".to_owned(),
+                false => (js_str(input, "cmd").or_else(|| js_str(input, "q")))
+                    .map_or_else(|| gist(input), |said| gist(&said)),
+            };
+            let item = Item::Tool {
+                id,
+                name: name.to_owned(),
+                gist,
+                input: input.to_owned(),
                 output: None,
             };
-            match k == last {
-                true => self.push_call(call.to_owned(), at, item),
-                false => self.push(item),
+            b.push_call(call, at, item);
+        }
+        "function_call_output" | "custom_tool_call_output" => {
+            let Some(&(_, called)) = b.calls.get(&call) else {
+                return;
+            };
+            let (text, failed, ms) = outcome(&p["output"]);
+            let ms = ms.or_else(|| at?.checked_sub(called?));
+            let text = cap(text.trim_end());
+            b.fill(&call, ToolOut { text, failed, ms });
+        }
+        "web_search_call" => codex_search(b, id, p),
+        // A snapshot of the work tree, a compaction's encrypted summary.
+        "ghost_snapshot" | "compaction" => {}
+        kind => {
+            let text = cant_show(kind);
+            b.push(Item::Note { id, text });
+        }
+    }
+}
+
+/// What only an `event_msg` line tells; the rest of them say again what
+/// a `response_item` said, or are bookkeeping.
+fn codex_event(b: &mut Builder, p: &Value) {
+    let id = codex_id(b, p);
+    match p["type"].as_str().unwrap_or_default() {
+        "patch_apply_end" => codex_applied(b, &id, p),
+        "web_search_end" => codex_search(b, id, p),
+        "item_completed" => {
+            let item = &p["item"];
+            if item["type"] == "WebSearch" || item["kind"] == "web.search" {
+                let id = codex_id(b, item);
+                codex_search(b, id, item);
             }
         }
-        n > 0
-    }
-
-    /// The files a patch changed, from `patch_apply_end` `p`: an edit each,
-    /// unless its call already showed them (an `apply_patch` call).
-    fn codex_applied(&mut self, id: &str, p: &Value) {
-        let call = p["call_id"].as_str().unwrap_or_default();
-        if let Some(&(i, _)) = self.calls.get(call)
-            && matches!(self.items[i], Item::Edit { .. })
-        {
-            return;
+        "turn_aborted" => {
+            let text = INTERRUPTED.to_owned();
+            b.push(Item::Note { id, text });
         }
-        let failed = p["success"] == false;
-        let said = p[if failed { "stderr" } else { "stdout" }]
-            .as_str()
-            .unwrap_or_default();
-        let out = ToolOut {
-            text: cap(said.trim()),
-            failed,
-            ms: None,
-        };
-        for (k, (path, made)) in p["changes"].as_object().into_iter().flatten().enumerate() {
-            // `{type: add, content}`, or older `{add: {content}}`.
-            let (kind, made) = match made["type"].as_str() {
-                Some(kind) => (kind, made),
-                None => (made.as_object().and_then(|o| o.iter().next()))
-                    .map_or(("", made), |(kind, made)| (kind.as_str(), made)),
-            };
-            let text = |key: &str| made[key].as_str().unwrap_or_default();
-            let diff = match kind {
-                "add" => change("", text("content")),
-                "delete" => change(text("content"), ""),
-                _ => {
-                    let headed = format!("--- {path}\n+++ {path}\n{}", text("unified_diff"));
-                    patch::files(&headed)
-                        .into_iter()
-                        .flat_map(|(_, d)| d)
-                        .collect()
+        "error" => {
+            let text = p["message"]
+                .as_str()
+                .unwrap_or("An error")
+                .trim()
+                .to_owned();
+            b.push(Item::Note { id, text });
+        }
+        _ => {}
+    }
+}
+
+/// A tool call: a command run (`shell`, `exec_command`, a local shell
+/// call's action), or another tool with its arguments `args`.
+fn codex_call(
+    b: &mut Builder,
+    id: String,
+    call: String,
+    at: Option<u64>,
+    name: &str,
+    args: &Value,
+) {
+    let command = match &args["command"] {
+        Value::Array(argv) => {
+            let argv: Vec<&str> = argv.iter().filter_map(Value::as_str).collect();
+            match argv[..] {
+                ["apply_patch", text] if codex_patch(b, &id, &call, at, text) => return,
+                [_, flag, script] if flag.starts_with('-') && flag.ends_with('c') => {
+                    Some(script.to_owned())
                 }
-            };
-            self.push(Item::Edit {
-                id: format!("{id}.{k}"),
-                path: made["move_path"].as_str().unwrap_or(path).to_owned(),
-                diff: capped(diff),
-                output: Some(out.clone()),
-            });
+                _ => Some(argv.join(" ")),
+            }
+        }
+        Value::String(command) => Some(command.clone()),
+        _ => args["cmd"].as_str().map(str::to_owned),
+    };
+    let item = Item::Tool {
+        id,
+        name: name.to_owned(),
+        gist: command
+            .as_deref()
+            .map_or_else(|| tool_gist(args).unwrap_or_default(), gist),
+        input: command.unwrap_or_else(|| serde_json::to_string_pretty(args).unwrap_or_default()),
+        output: None,
+    };
+    b.push_call(call, at, item);
+}
+
+/// Patch `text` of call `call` as an edit per file, the call's result
+/// going to the last; false when it changes no file.
+fn codex_patch(b: &mut Builder, id: &str, call: &str, at: Option<u64>, text: &str) -> bool {
+    let files = patch::files(text);
+    let n = files.len();
+    let last = n.saturating_sub(1);
+    for (k, (path, diff)) in files.into_iter().enumerate() {
+        let item = Item::Edit {
+            id: if k == 0 {
+                id.to_owned()
+            } else {
+                format!("{id}.{k}")
+            },
+            path,
+            diff: capped(diff),
+            output: None,
+        };
+        match k == last {
+            true => b.push_call(call.to_owned(), at, item),
+            false => b.push(item),
         }
     }
+    n > 0
+}
 
-    /// A web search, from `p`'s query or action; shown once, though Codex
-    /// may tell it both as a call and as an event, or as the script that
-    /// ran it.
-    fn codex_search(&mut self, id: String, p: &Value) {
-        let action = &p["action"];
-        let query = (p["query"].as_str().or(action["query"].as_str()))
-            .or(action["url"].as_str())
-            .map(str::to_owned)
-            .or_else(|| {
-                let queries = action["queries"]
-                    .as_array()?
-                    .iter()
-                    .filter_map(Value::as_str);
-                Some(queries.collect::<Vec<_>>().join("; "))
-            })
-            .unwrap_or_default();
-        let gist = gist(&query);
-        let told = (self.items.iter().rev())
-            .take_while(|i| !matches!(i, Item::User { .. }))
-            .any(|i| matches!(i, Item::Tool { gist: g, .. } if *g == gist));
-        if !told {
-            let (name, input, output) = ("web search".to_owned(), query, None);
-            self.push(Item::Tool {
-                id,
-                name,
-                gist,
-                input,
-                output,
-            });
-        }
+/// The files a patch changed, from `patch_apply_end` `p`: an edit each,
+/// unless its call already showed them (an `apply_patch` call).
+fn codex_applied(b: &mut Builder, id: &str, p: &Value) {
+    let call = p["call_id"].as_str().unwrap_or_default();
+    if let Some(&(i, _)) = b.calls.get(call)
+        && matches!(b.items[i], Item::Edit { .. })
+    {
+        return;
     }
+    let failed = p["success"] == false;
+    let said = p[if failed { "stderr" } else { "stdout" }]
+        .as_str()
+        .unwrap_or_default();
+    let out = ToolOut {
+        text: cap(said.trim()),
+        failed,
+        ms: None,
+    };
+    for (k, (path, made)) in p["changes"].as_object().into_iter().flatten().enumerate() {
+        // `{type: add, content}`, or older `{add: {content}}`.
+        let (kind, made) = match made["type"].as_str() {
+            Some(kind) => (kind, made),
+            None => (made.as_object().and_then(|o| o.iter().next()))
+                .map_or(("", made), |(kind, made)| (kind.as_str(), made)),
+        };
+        let text = |key: &str| made[key].as_str().unwrap_or_default();
+        let diff = match kind {
+            "add" => change("", text("content")),
+            "delete" => change(text("content"), ""),
+            _ => {
+                let headed = format!("--- {path}\n+++ {path}\n{}", text("unified_diff"));
+                patch::files(&headed)
+                    .into_iter()
+                    .flat_map(|(_, d)| d)
+                    .collect()
+            }
+        };
+        b.push(Item::Edit {
+            id: format!("{id}.{k}"),
+            path: made["move_path"].as_str().unwrap_or(path).to_owned(),
+            diff: capped(diff),
+            output: Some(out.clone()),
+        });
+    }
+}
 
-    /// An id for payload `p`: its own, its call's, else its line's number.
-    fn codex_id(&self, p: &Value) -> String {
-        (p["id"].as_str().or(p["call_id"].as_str()))
-            .filter(|id| !id.is_empty())
-            .map_or_else(|| format!("line{}", self.lines), str::to_owned)
+/// A web search, from `p`'s query or action; shown once, though Codex
+/// may tell it both as a call and as an event, or as the script that
+/// ran it.
+fn codex_search(b: &mut Builder, id: String, p: &Value) {
+    let action = &p["action"];
+    let query = (p["query"].as_str().or(action["query"].as_str()))
+        .or(action["url"].as_str())
+        .map(str::to_owned)
+        .or_else(|| {
+            let queries = action["queries"]
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str);
+            Some(queries.collect::<Vec<_>>().join("; "))
+        })
+        .unwrap_or_default();
+    let gist = gist(&query);
+    let told = (b.items.iter().rev())
+        .take_while(|i| !matches!(i, Item::User { .. }))
+        .any(|i| matches!(i, Item::Tool { gist: g, .. } if *g == gist));
+    if !told {
+        let (name, input, output) = ("web search".to_owned(), query, None);
+        b.push(Item::Tool {
+            id,
+            name,
+            gist,
+            input,
+            output,
+        });
     }
+}
+
+/// An id for payload `p`: its own, its call's, else its line's number.
+fn codex_id(b: &Builder, p: &Value) -> String {
+    (p["id"].as_str().or(p["call_id"].as_str()))
+        .filter(|id| !id.is_empty())
+        .map_or_else(|| format!("line{}", b.lines), str::to_owned)
 }
 
 /// `text` split around plan mode's `<proposed_plan>` block: what comes
@@ -434,25 +447,15 @@ fn gist(text: &str) -> String {
     tool_gist(&Value::String(text.to_owned())).unwrap_or_default()
 }
 
-/// `diff` kept to its first `MAX_LINES` lines, saying how many it left out.
-fn capped(mut diff: Vec<DiffLine>) -> Vec<DiffLine> {
-    if diff.len() > MAX_LINES {
-        let text = more(diff.len() - MAX_LINES);
-        diff.truncate(MAX_LINES);
-        diff.push(DiffLine {
-            side: DiffSide::Context,
-            text,
-        });
-    }
-    diff
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::ai_work::AgentKind;
+    use crate::{
+        ai_work::AgentKind,
+        chat::{DiffSide, parse::Reader},
+    };
 
     /// Rollout lines by hand: `(type, payload)`, a second apart.
     fn rollout(lines: &[(&str, Value)]) -> Vec<u8> {

@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, path::Path};
 
-use super::{Integration, ModelSwitch, Store};
+use super::{DbChat, Integration, ModelSwitch, Parser, Store};
 use crate::{
     ai_work::{
         AgentKind, Chat, context,
@@ -10,7 +10,13 @@ use crate::{
         locate::{self, Found, Homes, Span},
         usage::{self, Message},
     },
-    chat::{commands, commands::Command, live, mode, parse::Reader},
+    chat::{
+        commands,
+        commands::Command,
+        live, mode,
+        parse::{self, Reader},
+        tail,
+    },
     stage_models::Offer,
 };
 
@@ -27,6 +33,14 @@ impl Integration for Cursor {
 
     fn store(&self) -> Option<Store> {
         Some(Store::Database)
+    }
+
+    fn parser(&self) -> Box<dyn Parser> {
+        Box::new(parse::cursor::Cursor)
+    }
+
+    fn db(&self) -> Option<Box<dyn DbChat>> {
+        Some(Box::<tail::db::CursorDb>::default())
     }
 
     fn guesses(&self) -> bool {

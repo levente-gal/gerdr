@@ -8,93 +8,29 @@ use std::{
 
 use serde_json::Value;
 
-use crate::ai_work::{AgentKind, locate::rows_of};
+use crate::{ai_work::locate::rows_of, integrations::DbChat};
 
-/// What of a database chat was read.
+/// What of a Cursor chat was read.
 #[derive(Default)]
-pub(super) struct Kept {
-    /// The rows `parse::snapshot` takes, in its order: Cursor messages by
-    /// rowid, OpenCode messages by seq (v2) or time created (v1); then id.
+pub struct CursorDb {
+    /// The messages, by rowid and id.
     rows: BTreeMap<(i64, String), Value>,
-    /// OpenCode v1 parts, by message id, time created and id.
-    parts: BTreeMap<(String, i64, String), Value>,
-    /// Cursor: every blob's id by rowid, a message or not, as last read.
-    /// Blobs are named by their content: a rowid with the same id is the
-    /// same blob.
+    /// Every blob's id by rowid, a message or not, as last read. Blobs are
+    /// named by their content: a rowid with the same id is the same blob.
     blobs: HashMap<i64, String>,
-    /// OpenCode: the newest `time_updated` read, by table. Rows from it on
-    /// are read again: OpenCode writes a row over as it streams, and a
-    /// write in the same millisecond keeps the time.
-    marks: HashMap<&'static str, i64>,
-    /// OpenCode: whether the chat is in the v2 tables; None: not looked.
-    v2: Option<bool>,
-    /// OpenCode: the child sessions its `task` calls started (subagents),
-    /// by id, each kept as a chat of its own; and whether its calls ended,
-    /// so it grows no more and isn't read again.
-    children: HashMap<String, (Kept, bool)>,
 }
 
-impl Kept {
-    /// Read what changed in database `conn` since the last read: rows new
-    /// or written over, and rows gone.
-    pub fn read(
-        &mut self,
-        agent: AgentKind,
-        id: &str,
-        conn: &rusqlite::Connection,
-    ) -> Result<(), String> {
-        match agent {
-            AgentKind::Cursor => self.cursor(conn).map_err(|err| err.to_string()),
-            _ => self.opencode(conn, id),
-        }
+impl DbChat for CursorDb {
+    fn read(&mut self, _id: &str, conn: &rusqlite::Connection) -> Result<(), String> {
+        self.cursor(conn).map_err(|err| err.to_string())
     }
 
-    /// The rows, as `parse::snapshot` takes them: OpenCode v1 messages
-    /// carry their parts, and a `task` part its child session's rows, once
-    /// read, as `subagent`.
-    pub fn rows(&self) -> Vec<Cow<'_, Value>> {
-        (self.rows.iter())
-            .map(|((_, id), row)| {
-                let from = (id.clone(), i64::MIN, String::new());
-                let parts: Vec<Value> = (self.parts.range(from..))
-                    .take_while(|((message, ..), _)| message == id)
-                    .map(|(_, part)| {
-                        let mut part = part.clone();
-                        self.attach(&mut part["data"]);
-                        part
-                    })
-                    .collect();
-                let content = row["data"]["content"].as_array().into_iter().flatten();
-                let tasks = content.clone().any(|part| self.child(part).is_some());
-                if parts.is_empty() && !tasks {
-                    return Cow::Borrowed(row);
-                }
-                let mut row = row.clone();
-                if !parts.is_empty() {
-                    row["parts"] = Value::Array(parts);
-                }
-                let content = row["data"]["content"].as_array_mut().into_iter().flatten();
-                content.for_each(|part| self.attach(part));
-                Cow::Owned(row)
-            })
-            .collect()
+    fn rows(&self) -> Vec<Cow<'_, Value>> {
+        self.rows.values().map(Cow::Borrowed).collect()
     }
+}
 
-    /// The child session OpenCode tool part `part` started, when it is a
-    /// `task` call and that session was read.
-    fn child<'a>(&'a self, part: &Value) -> Option<&'a Kept> {
-        let (child, _) = self.children.get(started(part)?)?;
-        child.v2.is_some().then_some(child)
-    }
-
-    /// Tool part `part` given its child session's rows, when it has one.
-    fn attach(&self, part: &mut Value) {
-        if let Some(child) = self.child(part) {
-            let rows = child.rows().into_iter().map(Cow::into_owned).collect();
-            part["subagent"] = Value::Array(rows);
-        }
-    }
-
+impl CursorDb {
     fn cursor(&mut self, conn: &rusqlite::Connection) -> rusqlite::Result<()> {
         let mut ids = conn.prepare("SELECT rowid, id FROM blobs")?;
         let alive = (ids.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?)
@@ -128,6 +64,78 @@ impl Kept {
         }
         self.blobs = alive;
         Ok(())
+    }
+}
+
+/// What of an OpenCode chat was read.
+#[derive(Default)]
+pub struct OpenCodeDb {
+    /// The messages, by seq (v2) or time created (v1), then id.
+    rows: BTreeMap<(i64, String), Value>,
+    /// v1 parts, by message id, time created and id.
+    parts: BTreeMap<(String, i64, String), Value>,
+    /// The newest `time_updated` read, by table. Rows from it on are read
+    /// again: OpenCode writes a row over as it streams, and a write in the
+    /// same millisecond keeps the time.
+    marks: HashMap<&'static str, i64>,
+    /// Whether the chat is in the v2 tables; None: not looked.
+    v2: Option<bool>,
+    /// The child sessions its `task` calls started (subagents), by id,
+    /// each kept as a chat of its own; and whether its calls ended, so it
+    /// grows no more and isn't read again.
+    children: HashMap<String, (OpenCodeDb, bool)>,
+}
+
+impl DbChat for OpenCodeDb {
+    fn read(&mut self, id: &str, conn: &rusqlite::Connection) -> Result<(), String> {
+        self.opencode(conn, id)
+    }
+
+    /// The rows: v1 messages carry their parts, and a `task` part its
+    /// child session's rows, once read, as `subagent`.
+    fn rows(&self) -> Vec<Cow<'_, Value>> {
+        (self.rows.iter())
+            .map(|((_, id), row)| {
+                let from = (id.clone(), i64::MIN, String::new());
+                let parts: Vec<Value> = (self.parts.range(from..))
+                    .take_while(|((message, ..), _)| message == id)
+                    .map(|(_, part)| {
+                        let mut part = part.clone();
+                        self.attach(&mut part["data"]);
+                        part
+                    })
+                    .collect();
+                let content = row["data"]["content"].as_array().into_iter().flatten();
+                let tasks = content.clone().any(|part| self.child(part).is_some());
+                if parts.is_empty() && !tasks {
+                    return Cow::Borrowed(row);
+                }
+                let mut row = row.clone();
+                if !parts.is_empty() {
+                    row["parts"] = Value::Array(parts);
+                }
+                let content = row["data"]["content"].as_array_mut().into_iter().flatten();
+                content.for_each(|part| self.attach(part));
+                Cow::Owned(row)
+            })
+            .collect()
+    }
+}
+
+impl OpenCodeDb {
+    /// The child session OpenCode tool part `part` started, when it is a
+    /// `task` call and that session was read.
+    fn child<'a>(&'a self, part: &Value) -> Option<&'a OpenCodeDb> {
+        let (child, _) = self.children.get(started(part)?)?;
+        child.v2.is_some().then_some(child)
+    }
+
+    /// Tool part `part` given its child session's rows, when it has one.
+    fn attach(&self, part: &mut Value) {
+        if let Some(child) = self.child(part) {
+            let rows = child.rows().into_iter().map(Cow::into_owned).collect();
+            part["subagent"] = Value::Array(rows);
+        }
     }
 
     fn opencode(&mut self, conn: &rusqlite::Connection, id: &str) -> Result<(), String> {
@@ -257,6 +265,7 @@ fn started(part: &Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai_work::AgentKind;
 
     fn opencode_db() -> rusqlite::Connection {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -275,7 +284,7 @@ mod tests {
         conn
     }
 
-    fn texts(kept: &Kept) -> Vec<String> {
+    fn texts(kept: &OpenCodeDb) -> Vec<String> {
         (kept.rows().iter())
             .flat_map(|row| row["parts"].as_array().cloned().unwrap_or_default())
             .map(|part| part["data"]["text"].as_str().unwrap_or_default().to_owned())
@@ -285,8 +294,8 @@ mod tests {
     #[test]
     fn an_opencode_chat_reads_what_was_written_since() {
         let conn = opencode_db();
-        let mut kept = Kept::default();
-        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        let mut kept = OpenCodeDb::default();
+        kept.read("ses_a", &conn).unwrap();
         let rows = kept.rows();
         assert_eq!(rows.len(), 2, "its own messages only");
         assert_eq!(rows[1]["data"]["role"], "assistant");
@@ -298,16 +307,16 @@ mod tests {
              DELETE FROM message WHERE id = 'm1'; DELETE FROM part WHERE id = 'p1';",
         )
         .unwrap();
-        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        kept.read("ses_a", &conn).unwrap();
         assert_eq!(texts(&kept), ["word", "s"]);
         assert_eq!(kept.rows().len(), 1);
         assert_eq!(kept.marks["part"], 900);
-        let mut other = Kept::default();
-        assert!(other.read(AgentKind::OpenCode, "ses_c", &conn).is_err());
+        let mut other = OpenCodeDb::default();
+        assert!(other.read("ses_c", &conn).is_err());
     }
 
     /// The items of what `kept` read, as the chat shows them.
-    fn items(kept: &Kept) -> Vec<crate::chat::Item> {
+    fn items(kept: &OpenCodeDb) -> Vec<crate::chat::Item> {
         let rows = kept.rows();
         crate::chat::parse::snapshot(AgentKind::OpenCode, rows.iter().map(|row| &**row))
     }
@@ -350,9 +359,9 @@ mod tests {
              INSERT INTO part VALUES ('cp1', 'c1', 'ses_c', 861, 861, '{\"type\":\"text\",\"text\":\"Reading\"}');",
         )
         .unwrap();
-        let mut kept = Kept::default();
-        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
-        let card = |kept: &Kept| said(items(kept).last().unwrap());
+        let mut kept = OpenCodeDb::default();
+        kept.read("ses_a", &conn).unwrap();
+        let card = |kept: &OpenCodeDb| said(items(kept).last().unwrap());
         let (id, words, ended) = card(&kept);
         assert_eq!(id, "agent:call_t");
         assert_eq!(words.len(), 1);
@@ -363,7 +372,7 @@ mod tests {
              INSERT INTO part VALUES ('cp2', 'c2', 'ses_c', 871, 871, '{\"type\":\"text\",\"text\":\"Found\"}');",
         )
         .unwrap();
-        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        kept.read("ses_a", &conn).unwrap();
         assert_eq!(card(&kept).1.len(), 2);
         // Its call ended: read once more, then no more.
         conn.execute(
@@ -371,19 +380,19 @@ mod tests {
             [task("completed")],
         )
         .unwrap();
-        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        kept.read("ses_a", &conn).unwrap();
         assert!(card(&kept).2);
         assert!(kept.children["ses_c"].1);
         conn.execute_batch(
             "INSERT INTO message VALUES ('c3', 'ses_c', 890, 890, '{\"role\":\"assistant\"}');",
         )
         .unwrap();
-        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        kept.read("ses_a", &conn).unwrap();
         assert_eq!(kept.children["ses_c"].0.rows.len(), 2);
         // The call gone, its child goes too.
         conn.execute_batch("DELETE FROM part WHERE id = 'p9';")
             .unwrap();
-        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        kept.read("ses_a", &conn).unwrap();
         assert!(kept.children.is_empty());
     }
 
@@ -401,8 +410,8 @@ mod tests {
                '{\"content\":[{\"type\":\"text\",\"text\":\"Inside\"}]}');",
         )
         .unwrap();
-        let mut kept = Kept::default();
-        kept.read(AgentKind::OpenCode, "ses_a", &conn).unwrap();
+        let mut kept = OpenCodeDb::default();
+        kept.read("ses_a", &conn).unwrap();
         let items = items(&kept);
         assert_eq!(items.len(), 2, "{items:?}");
         let (id, words, ended) = said(&items[1]);
@@ -422,13 +431,13 @@ mod tests {
              INSERT INTO blobs VALUES ('b', CAST('{\"role\":\"assistant\",\"n\":2}' AS BLOB));",
         )
         .unwrap();
-        let mut kept = Kept::default();
-        let ns = |kept: &Kept| -> Vec<i64> {
+        let mut kept = CursorDb::default();
+        let ns = |kept: &CursorDb| -> Vec<i64> {
             (kept.rows().iter())
                 .map(|r| r["n"].as_i64().unwrap())
                 .collect()
         };
-        kept.read(AgentKind::Cursor, "c", &conn).unwrap();
+        kept.read("c", &conn).unwrap();
         assert_eq!(ns(&kept), [1, 2]);
         // The last blob gone and another one in its rowid.
         conn.execute_batch(
@@ -436,7 +445,7 @@ mod tests {
              INSERT INTO blobs VALUES ('c', CAST('{\"role\":\"assistant\",\"n\":3}' AS BLOB));",
         )
         .unwrap();
-        kept.read(AgentKind::Cursor, "c", &conn).unwrap();
+        kept.read("c", &conn).unwrap();
         assert_eq!(ns(&kept), [1, 3]);
     }
 }

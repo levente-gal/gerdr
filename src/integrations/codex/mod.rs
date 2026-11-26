@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{Integration, ModelSwitch, Store};
+use super::{Integration, ModelSwitch, Parser, Store};
 use crate::{
     ai_work::{
         AgentKind, Chat, context,
@@ -13,7 +13,7 @@ use crate::{
         locate::{self, Found, Homes, Span},
         usage::{self, Message},
     },
-    chat::{commands, commands::Command, menu::Menu, mode, model_menu, source},
+    chat::{commands, commands::Command, menu::Menu, mode, model_menu, parse, source},
     scrollback::Styled,
 };
 
@@ -30,6 +30,10 @@ impl Integration for Codex {
 
     fn store(&self) -> Option<Store> {
         Some(Store::Lines)
+    }
+
+    fn parser(&self) -> Box<dyn Parser> {
+        Box::new(parse::codex::Codex)
     }
 
     fn guesses(&self) -> bool {

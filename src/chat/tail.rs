@@ -4,7 +4,6 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
-    io::{Read as _, Seek as _, SeekFrom},
     os::unix::fs::MetadataExt as _,
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
@@ -20,8 +19,12 @@ use super::{
     source::{self, Run},
 };
 use crate::{
-    ai_work::{AgentKind, locate::Homes},
+    ai_work::locate::Homes,
     herdr::{AgentInfo, Herdr},
+    integrations::{
+        DbChat,
+        common::files::{self, Stamp, SubFiles},
+    },
 };
 
 /// The most of a transcript read the first time, its end; and how much
@@ -540,40 +543,21 @@ impl Followed {
     }
 }
 
-mod db;
+pub(crate) mod db;
 
 /// A transcript being read, line by line as it grows; or a database chat
 /// (OpenCode's, Cursor's), read whole each time it changes.
 struct Chat {
     source: Source,
     reader: Reader,
-    /// A database chat's items, as last read.
-    snapshot: Vec<Item>,
-    /// A database chat's rows, as last read.
-    kept: db::Kept,
-    /// What the database and its WAL were (`stamp`) when last read.
-    stamped: Option<[Option<Stamp>; 2]>,
-    /// The file read (device and inode): another one is read from the start.
-    file: Option<(u64, u64)>,
-    /// How far it is read.
-    offset: u64,
+    /// What of it was read, as it is kept.
+    store: Store,
     /// Where its reading began: what is before is read on asking.
     from: u64,
     /// How much a read from the end, or further back, takes.
     chunk: u64,
-    /// Claude Code's subagents' own transcripts, by file: how far each is
-    /// read (see `read_subagents`).
-    subagents: HashMap<PathBuf, u64>,
-    /// The calls that started them, by file, as their meta files say.
-    started_by: HashMap<PathBuf, String>,
-    /// The Antigravity CLI's conversation summaries (and WAL) when last
-    /// looked in for subagents, with how many were still to find then.
-    summaries: Option<([Option<Stamp>; 2], usize)>,
-    /// Whether `offset` is at a line's start: not when the first read began
-    /// mid-line.
-    whole: bool,
-    /// The bytes just before `offset`, at most `PREV`.
-    prev: Vec<u8>,
+    /// Its subagents' own transcripts, as read (see `read_subagents`).
+    subs: SubFiles,
     /// The items last sent; None: send them next, changed or not.
     sent: Option<Arc<Vec<Item>>>,
     /// A read failed, and the user was told.
@@ -582,55 +566,43 @@ struct Chat {
     resets: u32,
 }
 
-/// A file as it is: its inode, change time and length.
-type Stamp = (u64, i64, i64, u64);
-
-fn stamp(path: &Path) -> std::io::Result<Stamp> {
-    let meta = std::fs::metadata(path)?;
-    Ok((meta.ino(), meta.mtime(), meta.mtime_nsec(), meta.len()))
+/// How a chat is kept, and what of it was read.
+enum Store {
+    /// A transcript of lines.
+    Lines(Lines),
+    /// A database: its rows as last read (`kept`), their items, and what
+    /// the database and its WAL were (`with_wal`) when last read.
+    Db {
+        kept: Box<dyn DbChat>,
+        snapshot: Vec<Item>,
+        stamped: Option<[Option<Stamp>; 2]>,
+    },
 }
 
-/// The Antigravity CLI's conversations under conversation `id`, as its
-/// summaries database `db` has them.
-fn antigravity_children(db: &Path, id: &str) -> rusqlite::Result<Vec<String>> {
-    let conn = crate::cursor_agents::open_read_only(db)?;
-    let mut rows = conn.prepare(
-        "SELECT conversation_id FROM conversation_summaries WHERE parent_conversation_id = ?1",
-    )?;
-    rows.query_map([id], |row| row.get(0))?.collect()
-}
-
-/// The first line of file `path`, once it is whole.
-fn first_line(path: &Path) -> Option<String> {
-    use std::io::BufRead as _;
-    let mut line = String::new();
-    std::io::BufReader::new(File::open(path).ok()?)
-        .read_line(&mut line)
-        .ok()?;
-    line.ends_with('\n').then_some(line)
-}
-
-/// Whether chats of agent `kind` are kept in a database.
-fn in_database(kind: AgentKind) -> bool {
-    crate::integrations::of(kind).store() == Some(crate::integrations::Store::Database)
+/// What of a transcript was read.
+#[derive(Default)]
+struct Lines {
+    /// The file read (device and inode): another one is read from the start.
+    file: Option<(u64, u64)>,
+    /// How far it is read.
+    offset: u64,
+    /// Whether `offset` is at a line's start: not when the first read began
+    /// mid-line.
+    whole: bool,
+    /// The bytes just before `offset`, at most `PREV`.
+    prev: Vec<u8>,
 }
 
 /// What the user said in `source`'s chat, oldest first, as the end of it
 /// (`CHAT_TAIL`) holds: read once, for the phone's agent page.
 pub fn said(source: Source) -> Result<Vec<String>, String> {
     let mut chat = Chat::new(source);
-    let items = match in_database(chat.source.agent) {
-        true => {
-            chat.read_rows()?;
-            chat.snapshot
-        }
-        false => {
-            chat.read().map_err(|err| err.to_string())?;
-            chat.reader.items().to_vec()
-        }
-    };
-    let said = items.into_iter().filter_map(|item| match item {
-        Item::User { text, .. } => Some(text),
+    match chat.store {
+        Store::Db { .. } => chat.read_rows()?,
+        Store::Lines(_) => chat.read().map_err(|err| err.to_string())?,
+    }
+    let said = chat.items().iter().filter_map(|item| match item {
+        Item::User { text, .. } => Some(text.clone()),
         _ => None,
     });
     Ok(said.collect())
@@ -638,32 +610,43 @@ pub fn said(source: Source) -> Result<Vec<String>, String> {
 
 impl Chat {
     fn new(source: Source) -> Self {
+        let store = match crate::integrations::of(source.agent).db() {
+            Some(kept) => Store::Db {
+                kept,
+                snapshot: Vec::new(),
+                stamped: None,
+            },
+            None => Store::Lines(Lines {
+                whole: true,
+                ..Lines::default()
+            }),
+        };
         Self {
             reader: Reader::new(source.agent),
-            snapshot: Vec::new(),
-            kept: db::Kept::default(),
-            stamped: None,
+            store,
             source,
-            file: None,
-            offset: 0,
             from: 0,
             chunk: CHAT_TAIL,
-            subagents: HashMap::new(),
-            started_by: HashMap::new(),
-            summaries: None,
-            whole: true,
-            prev: Vec::new(),
+            subs: SubFiles::default(),
             sent: None,
             failed: false,
             resets: 0,
         }
     }
 
+    /// Its items, as last read.
+    fn items(&self) -> &[Item] {
+        match &self.store {
+            Store::Db { snapshot, .. } => snapshot,
+            Store::Lines(_) => self.reader.items(),
+        }
+    }
+
     /// Read what it grew by, and send its items if they changed.
     fn poll(&mut self, pane_id: &str, out: &mut Vec<Event>) {
-        let read = match in_database(self.source.agent) {
-            true => self.read_rows(),
-            false => {
+        let read = match self.store {
+            Store::Db { .. } => self.read_rows(),
+            Store::Lines(_) => {
                 (self.read().and_then(|()| self.read_subagents())).map_err(|err| err.to_string())
             }
         };
@@ -681,10 +664,7 @@ impl Chat {
             return;
         }
         self.failed = false;
-        let now = match in_database(self.source.agent) {
-            true => &self.snapshot[..],
-            false => self.reader.items(),
-        };
+        let now = self.items();
         if self.sent.as_deref().map(Vec::as_slice) != Some(now) {
             let items = Arc::new(now.to_vec());
             self.sent = Some(items.clone());
@@ -704,22 +684,25 @@ impl Chat {
     /// Read what changed in a database chat's rows if the database or its
     /// WAL changed since the last read.
     fn read_rows(&mut self) -> Result<(), String> {
-        let mut wal = self.source.path.clone().into_os_string();
-        wal.push("-wal");
-        let now = [
-            Some(stamp(&self.source.path).map_err(|err| err.to_string())?),
-            stamp(Path::new(&wal)).ok(),
-        ];
-        if self.stamped == Some(now) {
+        let Store::Db {
+            kept,
+            snapshot,
+            stamped,
+        } = &mut self.store
+        else {
+            return Ok(());
+        };
+        let now = files::with_wal(&self.source.path).map_err(|err| err.to_string())?;
+        if *stamped == Some(now) {
             return Ok(());
         }
         let conn = crate::cursor_agents::open_read_only(&self.source.path)
             .and_then(|conn| conn.busy_timeout(Duration::from_secs(1)).map(|()| conn))
             .map_err(|err| err.to_string())?;
-        (self.kept).read(self.source.agent, &self.source.id, &conn)?;
-        let rows = self.kept.rows();
-        self.snapshot = parse::snapshot(self.source.agent, rows.iter().map(|row| &**row));
-        self.stamped = Some(now);
+        kept.read(&self.source.id, &conn)?;
+        let rows = kept.rows();
+        *snapshot = parse::snapshot(self.source.agent, rows.iter().map(|row| &**row));
+        *stamped = Some(now);
         self.resets += 1;
         Ok(())
     }
@@ -728,51 +711,53 @@ impl Chat {
     /// file, a shorter one or one whose bytes before the offset changed is
     /// read again from the start, with a fresh reader.
     fn read(&mut self) -> std::io::Result<()> {
+        let Store::Lines(lines) = &mut self.store else {
+            return Ok(());
+        };
+        let mut lines = std::mem::take(lines);
+        let read = self.read_lines(&mut lines);
+        self.store = Store::Lines(lines);
+        read
+    }
+
+    /// `read`, with what of the transcript was read (`at`) held apart.
+    fn read_lines(&mut self, at: &mut Lines) -> std::io::Result<()> {
         let mut file = File::open(&self.source.path)?;
         let meta = file.metadata()?;
         let (id, len) = ((meta.dev(), meta.ino()), meta.len());
-        if self.file != Some(id) || len < self.offset {
-            self.restart(id, len);
+        if at.file != Some(id) || len < at.offset {
+            self.restart(at, id, len);
         }
-        if len == self.offset {
+        if len == at.offset {
             return Ok(());
         }
-        let back = self.prev.len() as u64;
-        file.seek(SeekFrom::Start(self.offset - back))?;
-        let mut bytes = Vec::new();
-        (&mut file)
-            .take(len - self.offset + back)
-            .read_to_end(&mut bytes)?;
-        if !bytes.starts_with(&self.prev) {
-            self.restart(id, len);
-            file.seek(SeekFrom::Start(self.offset))?;
-            bytes.clear();
-            (&mut file)
-                .take(len - self.offset)
-                .read_to_end(&mut bytes)?;
+        let back = at.prev.len() as u64;
+        let mut bytes = files::read_at(&mut file, at.offset - back, len - at.offset + back)?;
+        if !bytes.starts_with(&at.prev) {
+            self.restart(at, id, len);
+            bytes = files::read_at(&mut file, at.offset, len - at.offset)?;
         }
-        let back = self.prev.len();
+        let back = at.prev.len();
         let new = &bytes[back..];
         // Begun mid-line: from the first whole one.
-        let start = match self.whole {
+        let start = match at.whole {
             true => 0,
             false => match new.iter().position(|&b| b == b'\n') {
-                Some(at) => {
-                    self.whole = true;
-                    at + 1
+                Some(at_end) => {
+                    at.whole = true;
+                    at_end + 1
                 }
                 None => new.len(),
             },
         };
         // A last line still being written waits until it is whole.
-        let end =
-            (new[start..].iter().rposition(|&b| b == b'\n')).map_or(start, |at| start + at + 1);
+        let end = start + files::whole_end(&new[start..]);
         if end > start {
             self.reader.feed(&new[start..end]);
         }
-        self.offset += end as u64;
+        at.offset += end as u64;
         let before = &bytes[..back + end];
-        self.prev = before[before.len().saturating_sub(PREV)..].to_vec();
+        at.prev = before[before.len().saturating_sub(PREV)..].to_vec();
         Ok(())
     }
 
@@ -781,21 +766,21 @@ impl Chat {
     /// reader, so the calls just before the old start meet their results.
     /// Items keep their ids, so what was unfolded stays so.
     fn earlier(&mut self) -> std::io::Result<()> {
-        if self.from == 0 || in_database(self.source.agent) {
+        let Store::Lines(lines) = &self.store else {
+            return Ok(());
+        };
+        if self.from == 0 {
             return Ok(());
         }
+        let (read, offset) = (lines.file, lines.offset);
         let mut file = File::open(&self.source.path)?;
         let meta = file.metadata()?;
         // Another file now: the next poll reads it from its end.
-        if self.file != Some((meta.dev(), meta.ino())) || meta.len() < self.offset {
+        if read != Some((meta.dev(), meta.ino())) || meta.len() < offset {
             return Ok(());
         }
         let from = self.from.saturating_sub(self.chunk);
-        file.seek(SeekFrom::Start(from))?;
-        let mut bytes = Vec::new();
-        (&mut file)
-            .take(self.offset - from)
-            .read_to_end(&mut bytes)?;
+        let bytes = files::read_at(&mut file, from, offset - from)?;
         // Begun mid-line: from the first whole one.
         let start = match from {
             0 => 0,
@@ -804,169 +789,32 @@ impl Chat {
         let mut reader = Reader::new(self.source.agent);
         reader.feed(&bytes[start..]);
         self.reader = reader;
-        self.subagents.clear();
-        self.summaries = None;
+        self.subs.reset();
         self.from = from;
-        self.whole = true;
+        if let Store::Lines(lines) = &mut self.store {
+            lines.whole = true;
+        }
         self.sent = None;
         Ok(())
     }
 
-    /// Feed the reader what Claude Code's subagents wrote since the last
-    /// read, each in its own file beside the chat's
-    /// (`<chat>/subagents/agent-<id>.jsonl`), the call that started it named
-    /// in its `.meta.json`. Only those whose call was read: their work has a
-    /// place to show. A file is read from its last `chunk` bytes.
+    /// Feed the reader what the agent's subagents wrote since the last
+    /// read, each in a file of its own beside the chat's.
     fn read_subagents(&mut self) -> std::io::Result<()> {
-        if self.source.agent == AgentKind::Antigravity {
-            self.read_antigravity_subagents();
-            return Ok(());
-        }
-        if self.source.agent != AgentKind::Claude {
-            return Ok(());
-        }
-        let dir = self.source.path.with_extension("").join("subagents");
-        let files = match std::fs::read_dir(&dir) {
-            Ok(files) => files,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err),
-        };
-        for entry in files.flatten() {
-            let path = entry.path();
-            let Some(agent) = (path.file_name().and_then(|n| n.to_str()))
-                .and_then(|n| n.strip_prefix("agent-")?.strip_suffix(".jsonl"))
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            let Some(call) = self.started_by(&path) else {
-                continue;
-            };
-            if !self.reader.knows_call(&call) {
-                continue;
-            }
-            if let Err(err) = self.read_subagent(&path, &agent, &call) {
-                // One subagent unread leaves the chat as it is.
-                tracing::warn!("agent chat: can't read {}: {err}", path.display());
-            }
-        }
-        Ok(())
-    }
-
-    /// Feed the reader what the Antigravity CLI's subagents wrote since the
-    /// last read: each a conversation of its own (`brain/<id>/…`), the one
-    /// an `invoke_subagent` call's result names; else a child conversation
-    /// of the chat's, as the summaries database says, whose first input is
-    /// a prompt the call gave.
-    fn read_antigravity_subagents(&mut self) {
-        let path = &self.source.path;
-        // `<home>/brain/<id>/.system_generated/logs/<transcript>`
-        let (Some(home), Some(name)) = (path.ancestors().nth(5), path.file_name()) else {
-            return;
-        };
-        let (home, name) = (home.to_owned(), name.to_owned());
-        let transcript = |id: &str| {
-            (home.join("brain").join(id))
-                .join(".system_generated/logs")
-                .join(&name)
-        };
-        for child in self.reader.named_subagents() {
-            if child != self.source.id && transcript(&child).is_file() {
-                self.reader.take_subagent(&child, "");
-            }
-        }
-        if self.reader.unfound_subagents() > 0 {
-            self.find_antigravity_subagents(&home.join("conversation_summaries.db"), transcript);
-        }
-        for child in self.reader.subagents() {
-            let path = transcript(&child);
-            if let Err(err) = self.read_subagent(&path, &child, "") {
-                // One subagent unread leaves the chat as it is.
-                tracing::warn!("agent chat: can't read {}: {err}", path.display());
-            }
-        }
-    }
-
-    /// Take the child conversations summaries database `db` has of the
-    /// chat as subagents, by their first input; looked in again when it
-    /// changed or more are to find.
-    fn find_antigravity_subagents(&mut self, db: &Path, transcript: impl Fn(&str) -> PathBuf) {
-        let mut wal = db.as_os_str().to_owned();
-        wal.push("-wal");
-        let now = (
-            [stamp(db).ok(), stamp(Path::new(&wal)).ok()],
-            self.reader.unfound_subagents(),
-        );
-        if now.0[0].is_none() || self.summaries == Some(now) {
-            return;
-        }
-        self.summaries = Some(now);
-        let children = match antigravity_children(db, &self.source.id) {
-            Ok(children) => children,
-            Err(err) => {
-                tracing::warn!("agent chat: can't read {}: {err}", db.display());
-                return;
-            }
-        };
-        let taken = self.reader.subagents();
-        for child in children.iter().filter(|c| !taken.contains(c)) {
-            match first_line(&transcript(child)) {
-                Some(first) => _ = self.reader.take_subagent(child, &first),
-                // Not written yet: looked for again.
-                None => self.summaries = None,
-            }
-        }
-    }
-
-    /// The call that started the subagent of file `path`, as its meta file
-    /// says; asked again until it says.
-    fn started_by(&mut self, path: &Path) -> Option<String> {
-        if let Some(call) = self.started_by.get(path) {
-            return Some(call.clone());
-        }
-        let meta = std::fs::read(path.with_extension("meta.json")).ok()?;
-        let meta: Value = serde_json::from_slice(&meta).ok()?;
-        let call = meta["toolUseId"].as_str()?.to_owned();
-        self.started_by.insert(path.to_owned(), call.clone());
-        Some(call)
-    }
-
-    /// The whole lines subagent `agent`'s file `path` grew by, fed.
-    fn read_subagent(&mut self, path: &Path, agent: &str, call: &str) -> std::io::Result<()> {
-        let mut file = File::open(path)?;
-        let len = file.metadata()?.len();
-        let offset = match self.subagents.get(path) {
-            Some(&at) if at <= len => at,
-            _ => len.saturating_sub(self.chunk),
-        };
-        if offset == len {
-            self.subagents.insert(path.to_owned(), len);
-            return Ok(());
-        }
-        file.seek(SeekFrom::Start(offset))?;
-        let mut bytes = Vec::new();
-        (&mut file).take(len - offset).read_to_end(&mut bytes)?;
-        // A last line still being written waits until it is whole.
-        let end = bytes
-            .iter()
-            .rposition(|&b| b == b'\n')
-            .map_or(0, |at| at + 1);
-        self.reader.feed_subagent(agent, call, &bytes[..end]);
-        self.subagents.insert(path.to_owned(), offset + end as u64);
-        Ok(())
+        let integration = crate::integrations::of(self.source.agent);
+        integration.subagents(&self.source, &mut self.reader, &mut self.subs, self.chunk)
     }
 
     /// Read file `id`, `len` bytes long, again from the start: its last
     /// `chunk` bytes.
-    fn restart(&mut self, id: (u64, u64), len: u64) {
+    fn restart(&mut self, at: &mut Lines, id: (u64, u64), len: u64) {
         self.reader = Reader::new(self.source.agent);
-        self.subagents.clear();
-        self.summaries = None;
-        self.file = Some(id);
-        self.offset = len.saturating_sub(self.chunk);
-        self.from = self.offset;
-        self.whole = self.offset == 0;
-        self.prev.clear();
+        self.subs.reset();
+        at.file = Some(id);
+        at.offset = len.saturating_sub(self.chunk);
+        self.from = at.offset;
+        at.whole = at.offset == 0;
+        at.prev.clear();
         self.sent = None;
         self.resets += 1;
     }
@@ -977,7 +825,7 @@ mod tests {
     use std::io::Write as _;
 
     use super::*;
-    use crate::chat::source::tests::agent;
+    use crate::{ai_work::AgentKind, chat::source::tests::agent};
 
     fn line(role: &str, text: &str) -> String {
         let id = format!("{role}-{text}");
@@ -1036,8 +884,41 @@ mod tests {
             out
         }
 
-        fn chat(&self) -> &Chat {
-            self.chats.panes["p1"].chat.as_ref().expect("a chat")
+        fn chat(&self) -> Seen<'_> {
+            let chat = self.chats.panes["p1"].chat.as_ref().expect("a chat");
+            let (offset, whole, kept) = match &chat.store {
+                Store::Lines(lines) => (lines.offset, lines.whole, None),
+                Store::Db { kept, .. } => (0, true, Some(&**kept)),
+            };
+            Seen {
+                source: &chat.source,
+                reader: &chat.reader,
+                from: chat.from,
+                resets: chat.resets,
+                offset,
+                whole,
+                kept: Rows(kept),
+            }
+        }
+    }
+
+    /// A chat as the tests look at it: what of it was read beside the rest.
+    struct Seen<'a> {
+        source: &'a Source,
+        reader: &'a Reader,
+        from: u64,
+        resets: u32,
+        offset: u64,
+        whole: bool,
+        kept: Rows<'a>,
+    }
+
+    /// A database chat's rows as read, if it is one.
+    struct Rows<'a>(Option<&'a dyn DbChat>);
+
+    impl<'a> Rows<'a> {
+        fn rows(&self) -> Vec<std::borrow::Cow<'a, Value>> {
+            self.0.expect("a database chat").rows()
         }
     }
 
@@ -1134,7 +1015,9 @@ mod tests {
         let pane = home.chats.panes.get_mut("p1").unwrap();
         let chat = pane.chat.as_mut().unwrap();
         chat.chunk = chunk;
-        chat.file = None;
+        if let Store::Lines(lines) = &mut chat.store {
+            lines.file = None;
+        }
         let events = home.poll();
         let shown = |events: &[Event]| match events {
             [Event::Items { items, earlier, .. }] => (items.len(), *earlier),

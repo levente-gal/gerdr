@@ -2,13 +2,13 @@
 
 use std::{collections::HashSet, path::Path};
 
-use super::{Integration, ModelSwitch, Store};
+use super::{DbChat, Integration, ModelSwitch, Parser, Store};
 use crate::{
     ai_work::{
         AgentKind, Chat,
         locate::{self, Found, Homes, Span},
     },
-    chat::{commands, commands::Command, live, menu::Menu, mode, model_menu},
+    chat::{commands, commands::Command, live, menu::Menu, mode, model_menu, parse, tail},
     scrollback::Styled,
 };
 
@@ -25,6 +25,14 @@ impl Integration for OpenCode {
 
     fn store(&self) -> Option<Store> {
         Some(Store::Database)
+    }
+
+    fn parser(&self) -> Box<dyn Parser> {
+        Box::new(parse::opencode::OpenCode)
+    }
+
+    fn db(&self) -> Option<Box<dyn DbChat>> {
+        Some(Box::<tail::db::OpenCodeDb>::default())
     }
 
     fn guesses(&self) -> bool {

@@ -5,13 +5,16 @@
 
 use std::{
     collections::HashSet,
-    io::{BufRead as _, Read as _},
     path::{Path, PathBuf},
 };
 
 use serde_json::{Map, Value};
 
 use super::{AgentKind, Chat};
+use crate::integrations::common::{
+    files::first_line,
+    pick::{Begun, nearest},
+};
 
 /// A Codex chat found by time began this long before its run at most.
 const CODEX_BEFORE: u64 = 60;
@@ -301,15 +304,7 @@ fn days_of_span(from: u64, to: u64) -> Vec<String> {
         .collect()
 }
 
-/// What a rollout's first line says: its id, folder and start.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct CodexMeta {
-    id: String,
-    cwd: PathBuf,
-    started: u64,
-}
-
-fn codex_meta(first: &str) -> Option<CodexMeta> {
+fn codex_meta(first: &str) -> Option<Begun> {
     let line: Value = serde_json::from_str(first.trim()).ok()?;
     if line["type"] != "session_meta" {
         return None;
@@ -319,37 +314,11 @@ fn codex_meta(first: &str) -> Option<CodexMeta> {
     let at = payload["timestamp"]
         .as_str()
         .or(line["timestamp"].as_str())?;
-    Some(CodexMeta {
+    Some(Begun {
         id: id.to_owned(),
         cwd: PathBuf::from(payload["cwd"].as_str()?),
         started: iso_secs(at)?,
     })
-}
-
-/// Of `metas`, the one of `chat`'s run: in one of its folders, begun in
-/// `span`, not `claimed`; the nearest in time.
-fn codex_pick<'a, T>(
-    chat: &Chat,
-    span: Span,
-    claimed: &HashSet<String>,
-    metas: impl Iterator<Item = (T, &'a CodexMeta)>,
-) -> Option<T> {
-    (metas)
-        .filter(|(_, meta)| (span.from..=span.to).contains(&meta.started))
-        .filter(|(_, meta)| !claimed.contains(&meta.id))
-        .filter(|(_, meta)| chat.folders.iter().any(|f| meta.cwd.starts_with(f)))
-        .min_by_key(|(_, meta)| meta.started.abs_diff(span.near))
-        .map(|(it, _)| it)
-}
-
-/// The first line of the file at `path`, up to `FIRST_LINE` of it.
-fn first_line(path: &Path) -> Option<String> {
-    let file = std::fs::File::open(path).ok()?;
-    let mut line = String::new();
-    std::io::BufReader::new(file.take(FIRST_LINE))
-        .read_line(&mut line)
-        .ok()?;
-    Some(line)
 }
 
 /// The Codex chat of `chat`'s run, by folder and time.
@@ -360,14 +329,14 @@ pub(crate) fn codex_by_time(
     span: Span,
 ) -> Option<Found> {
     let sessions = codex.join("sessions");
-    let metas: Vec<(PathBuf, CodexMeta)> = (days_of_span(span.from, span.to).iter())
+    let metas: Vec<(PathBuf, Begun)> = (days_of_span(span.from, span.to).iter())
         .flat_map(|day| rollouts(&sessions.join(day)))
         .filter_map(|path| {
-            let meta = codex_meta(&first_line(&path)?)?;
+            let meta = codex_meta(&first_line(&path, FIRST_LINE, false)?)?;
             Some((path, meta))
         })
         .collect();
-    let at = codex_pick(
+    let at = nearest(
         chat,
         span,
         claimed,
@@ -413,14 +382,15 @@ pub(crate) fn pi_by_time(
     claimed: &HashSet<String>,
     span: Span,
 ) -> Option<Found> {
-    let metas: Vec<(PathBuf, CodexMeta)> = (pi_sessions(sessions).into_iter())
+    let metas: Vec<(PathBuf, Begun)> = (pi_sessions(sessions).into_iter())
         .filter(|(_, at)| (span.from..=span.to).contains(at))
         .filter_map(|(path, _)| {
-            let head: Value = serde_json::from_str(first_line(&path)?.trim()).ok()?;
+            let head: Value =
+                serde_json::from_str(first_line(&path, FIRST_LINE, false)?.trim()).ok()?;
             if head["type"] != "session" {
                 return None;
             }
-            let meta = CodexMeta {
+            let meta = Begun {
                 id: head["id"].as_str()?.to_owned(),
                 cwd: PathBuf::from(head["cwd"].as_str()?),
                 started: super::usage::iso_ms(head["timestamp"].as_str()?)? / 1000,
@@ -428,7 +398,7 @@ pub(crate) fn pi_by_time(
             Some((path, meta))
         })
         .collect();
-    let at = codex_pick(
+    let at = nearest(
         chat,
         span,
         claimed,
@@ -462,7 +432,7 @@ pub(crate) fn antigravity_by_time(
     span: Span,
 ) -> Option<Found> {
     let history = std::fs::read_to_string(home.join("history.jsonl")).ok()?;
-    let mut metas: Vec<CodexMeta> = Vec::new();
+    let mut metas: Vec<Begun> = Vec::new();
     for line in history.lines() {
         let Ok(line) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -476,10 +446,10 @@ pub(crate) fn antigravity_by_time(
         };
         if !metas.iter().any(|m| m.id == id) {
             let (id, cwd, started) = (id.to_owned(), PathBuf::from(cwd), ms / 1000);
-            metas.push(CodexMeta { id, cwd, started });
+            metas.push(Begun { id, cwd, started });
         }
     }
-    let meta = codex_pick(chat, span, claimed, metas.iter().map(|m| (m, m)))?;
+    let meta = nearest(chat, span, claimed, metas.iter().map(|m| (m, m)))?;
     plain_id(&meta.id)
         .then(|| antigravity_by_id(home, &meta.id))
         .flatten()
@@ -921,7 +891,7 @@ pub fn read_listing(chat: &Chat, out: &str, claimed: &HashSet<String>) -> Option
     let mut main = None;
     let mut wal = None;
     let mut extra = Vec::new();
-    let mut candidates: Vec<(Remote, CodexMeta)> = Vec::new();
+    let mut candidates: Vec<(Remote, Begun)> = Vec::new();
     let mut last: Option<Remote> = None;
     for line in out.lines() {
         if let Some(first) = line.strip_prefix("L\t") {
@@ -953,7 +923,7 @@ pub fn read_listing(chat: &Chat, out: &str, claimed: &HashSet<String>) -> Option
     let (main, id) = match (main, &chat.id) {
         (Some(main), Some(id)) => (main, id.clone()),
         (None, None) if crate::integrations::of(chat.agent).remote_guesses() => {
-            let at = codex_pick(
+            let at = nearest(
                 chat,
                 Span::of(chat.started),
                 claimed,

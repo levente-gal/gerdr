@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{Integration, ModelSwitch, Store};
+use super::{Integration, ModelSwitch, Parser, Store};
 use crate::{
     ai_work::{
         AgentKind, Chat, context,
@@ -13,7 +13,7 @@ use crate::{
         locate::{self, Found, Homes, Span},
         usage::{self, Message},
     },
-    chat::{commands, commands::Command, live, menu::Menu, model_menu, source},
+    chat::{commands, commands::Command, live, menu::Menu, model_menu, parse, source},
     scrollback::Styled,
 };
 
@@ -30,6 +30,10 @@ impl Integration for Pi {
 
     fn store(&self) -> Option<Store> {
         Some(Store::Lines)
+    }
+
+    fn parser(&self) -> Box<dyn Parser> {
+        Box::<parse::pi::Pi>::default()
     }
 
     fn guesses(&self) -> bool {

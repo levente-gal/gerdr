@@ -4,10 +4,14 @@
 //! a kind. A method's default means the agent doesn't have that.
 
 use std::{
+    borrow::Cow,
     collections::HashSet,
     path::{Path, PathBuf},
 };
 
+use serde_json::Value;
+
+use self::common::{build::Builder, files::SubFiles};
 use crate::{
     ai_work::{
         AgentKind, Chat,
@@ -15,7 +19,7 @@ use crate::{
         locate::{self, Found, Homes, Span},
         usage::Message,
     },
-    chat::{commands::Command, live::Changed, menu::Menu, parse::Reader},
+    chat::{Source, commands::Command, live::Changed, menu::Menu, parse::Reader},
     scrollback::Styled,
     stage_models::Offer,
 };
@@ -23,6 +27,7 @@ use crate::{
 mod antigravity;
 mod claude;
 mod codex;
+pub mod common;
 mod cursor;
 mod opencode;
 mod pi;
@@ -160,6 +165,27 @@ pub trait Integration: Sync {
 
     // Reading its chats.
 
+    /// A reader of its chat's lines or rows, with what it keeps of its own.
+    fn parser(&self) -> Box<dyn Parser> {
+        Box::new(plain::Plain)
+    }
+    /// What of its database chat was read, to read what changed since;
+    /// none for a chat that isn't in a database.
+    fn db(&self) -> Option<Box<dyn DbChat>> {
+        None
+    }
+    /// Feed `reader` what the subagents of chat `chat` wrote since the
+    /// last read, in files of their own (`files`, read from their last
+    /// `chunk` bytes first).
+    fn subagents(
+        &self,
+        _chat: &Source,
+        _reader: &mut Reader,
+        _files: &mut SubFiles,
+        _chunk: u64,
+    ) -> std::io::Result<()> {
+        Ok(())
+    }
     /// The model its chat is on, as `reader` read it or its CLI says.
     fn model_in_chat(&self, _reader: &Reader) -> Option<String> {
         None
@@ -274,6 +300,53 @@ pub trait Integration: Sync {
             context: self.has_context(),
         }
     }
+}
+
+/// What an agent's chat reader keeps of its own; what all keep is in
+/// `Builder`. Each method's default reads nothing.
+pub trait Parser: Send {
+    /// Read transcript line `line`.
+    fn line(&mut self, _b: &mut Builder, _line: &Value) {}
+    /// Read a database chat's rows, all of them in order.
+    fn rows(&mut self, _b: &mut Builder, _rows: &mut dyn Iterator<Item = &Value>) {}
+    /// Read line `line` of a subagent, in the subagent's own reader.
+    fn sub_line(&mut self, _b: &mut Builder, _line: &Value) {}
+    /// Whole lines of subagent `agent`'s own transcript; `call` started it.
+    fn subagent(&mut self, _b: &mut Builder, _agent: &str, _call: &str, _lines: &[u8]) {}
+    /// The model the chat is on, as its lines read so far last said.
+    fn model(&self) -> Option<String> {
+        None
+    }
+    /// The conversations results named as subagents that aren't taken as
+    /// such yet, in order.
+    fn named_subagents(&self, _b: &Builder) -> Vec<String> {
+        Vec::new()
+    }
+    /// How many subagents asked for have no conversation yet, of calls
+    /// whose result came and named none.
+    fn unfound_subagents(&self) -> usize {
+        0
+    }
+    /// The conversations taken as subagents.
+    fn subagents(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Take conversation `child` as a subagent, its transcript's first line
+    /// `first`; whether it was taken.
+    fn take_subagent(&mut self, _b: &mut Builder, _child: &str, _first: &str) -> bool {
+        false
+    }
+}
+
+impl Parser for plain::Plain {}
+
+/// What of a database chat was read: read by what changed since.
+pub trait DbChat: Send {
+    /// Read what changed in database `conn` of chat `id` since the last
+    /// read: rows new or written over, and rows gone.
+    fn read(&mut self, id: &str, conn: &rusqlite::Connection) -> Result<(), String>;
+    /// The rows, as the agent's `Parser::rows` takes them.
+    fn rows(&self) -> Vec<Cow<'_, Value>>;
 }
 
 /// Every agent, in `AgentKind`'s order.
