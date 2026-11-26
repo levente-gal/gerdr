@@ -449,6 +449,28 @@ pub fn chat_item_span(view: &ChatView, i: usize) -> Option<(i32, i32)> {
     items.get(i).map(|(y, laid)| (*y, laid.h))
 }
 
+/// How much of the list's top the bar of the user's words would cover
+/// with row `i` scrolled up to it: the bar of the last words before the
+/// row, else nothing. A row scrolled into sight starts under it.
+pub fn chat_pin_room(view: &ChatView, i: usize) -> i32 {
+    let parts = parts(view);
+    let rows = rows::rows(&view.items, &view.unfolded);
+    let said = (rows.iter().take(i).rev()).find_map(|row| match row {
+        Row::Item(j) => match &view.items[*j] {
+            Item::User { text, .. } => Some(text),
+            _ => None,
+        },
+        _ => None,
+    });
+    let room = said.map_or(0, |text| lay_pinned(text, parts.column.1).h + PART_GAP);
+    // As `pinned`: no bar over half the list.
+    if room <= parts.list.size.h / 2 {
+        room
+    } else {
+        0
+    }
+}
+
 /// The footer's key hints (K3), as the chat's key tables say them.
 pub fn chat_hints(view: &ChatView) -> Vec<(&str, &str)> {
     super::hint_strs(&view.hints)
@@ -1475,6 +1497,12 @@ fn earlier_words(reading: bool) -> (&'static str, Mark) {
     }
 }
 
+/// How far past each side of a column `w` wide a table too wide for it
+/// may reach: to the list's edges, the column being in their middle.
+fn reach(view: &ChatView, w: i32) -> i32 {
+    ((view.rect.size.w - 2 * PAD).max(0) - w).max(0) / 2
+}
+
 /// Row `row` of `view` laid out for a column `w` wide: a subagent's own
 /// rows in from its card.
 fn laid_row(view: &ChatView, row: &Row, w: i32) -> Rc<Laid> {
@@ -1487,7 +1515,8 @@ fn laid_row(view: &ChatView, row: &Row, w: i32) -> Rc<Laid> {
     match row.item(&view.items) {
         Some(item) => {
             let step = matches!(innermost(row), Row::Step(_));
-            laid(item, w, nest + if step { NEST } else { 0 }, unfolded, cwd)
+            let nest = nest + if step { NEST } else { 0 };
+            laid(item, (w, reach(view, w)), nest, unfolded, cwd)
         }
         None => {
             let open = matches!(innermost(row), Row::Steps { open: true, .. });
@@ -1508,7 +1537,7 @@ fn running_row(view: &ChatView, r: &Running, w: i32) -> Rc<Laid> {
         input: String::new(),
         output: None,
     };
-    laid(&item, w, 0, &view.unfolded, view.cwd.as_deref())
+    laid(&item, (w, 0), 0, &view.unfolded, view.cwd.as_deref())
 }
 
 /// The row at the list's end while its agent works: a spinner in the fold
@@ -1908,6 +1937,8 @@ fn line_tops(pieces: &[(Rect, DocPiece)]) -> Vec<i32> {
         .filter(|(_, piece)| matches!(piece, DocPiece::Text { .. } | DocPiece::CodeLine(_)))
         .map(|(r, _)| r.loc.y)
         .collect();
+    // A table's cells side by side share their tops.
+    tops.sort_unstable();
     tops.dedup();
     tops
 }
@@ -2089,8 +2120,15 @@ fn lay_pinned(text: &str, w: i32) -> Laid {
 }
 
 /// `item` laid out for a column `w` wide, in `nest` from its left, as
-/// `unfolded` has its cards; its paths shown from the agent's `cwd`.
-fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&Path>) -> Laid {
+/// `unfolded` has its cards; its paths shown from the agent's `cwd`. The
+/// agent's tables too wide for it reach `out` further either side.
+fn lay(
+    item: &Item,
+    (w, out): (i32, i32),
+    nest: i32,
+    unfolded: &HashSet<String>,
+    cwd: Option<&Path>,
+) -> Laid {
     #[cfg(test)]
     LAYS.with(|n| n.set(n.get() + 1));
     let mut l = Laid::default();
@@ -2149,7 +2187,7 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
             l.doc(pieces, (x + BUBBLE_PAD, BUBBLE_PAD));
         }
         Item::Assistant { blocks, .. } => {
-            let (pieces, _) = doc_layout::stack_of(blocks, cw);
+            let (pieces, _) = doc_layout::stack_in(blocks, cw, (-out - x, cw + out));
             l.doc(pieces, (x, 0));
         }
         Item::Plan {
@@ -2339,7 +2377,8 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
 /// list is laid out whenever its view changes (a scroll, a hover).
 struct Memo {
     item: Item,
-    w: i32,
+    /// The column's width, and how far past it a table may reach.
+    w: (i32, i32),
     nest: i32,
     cwd: Option<PathBuf>,
     /// Which of it is unfolded (see `opened`).
@@ -2374,7 +2413,7 @@ fn opened(item: &Item, unfolded: &HashSet<String>, out: &mut Vec<bool>) {
 /// depend on it).
 fn laid(
     item: &Item,
-    w: i32,
+    w: (i32, i32),
     nest: i32,
     unfolded: &HashSet<String>,
     cwd: Option<&Path>,
@@ -2886,10 +2925,14 @@ impl Painter {
                 Some(ChatHit::Item(j) | ChatHit::Fold(j) | ChatHit::Path(j) | ChatHit::ShowAll(j))
                     if j == i
             );
+        // As wide as the column, or as a table reaching out of it.
+        let (left, right) = (laid.bits.iter()).fold((0, w), |(l, r), (b, _)| {
+            (l.min(b.loc.x), r.max(b.loc.x + b.size.w))
+        });
         let ground = rect(
-            at.x - ROW_INSET,
+            at.x + left - ROW_INSET,
             at.y - STEP_GAP / 2,
-            w + 2 * ROW_INSET,
+            right - left + 2 * ROW_INSET,
             laid.h + STEP_GAP,
         );
         let hover = if hovered { 1.0 } else { 0.0 };
@@ -3589,7 +3632,7 @@ pub(super) mod tests {
         };
         v.items = Arc::new(vec![long]);
         v.unfolded = ["long".to_owned(), rows::steps_key("long")].into();
-        let laid = laid(&v.items[0], 500, 0, &v.unfolded, None);
+        let laid = laid(&v.items[0], (500, 0), 0, &v.unfolded, None);
         let code = laid
             .bits
             .iter()
@@ -3639,7 +3682,7 @@ pub(super) mod tests {
                 ms: Some(1500),
             }),
         };
-        let laid = laid(&item, 400, 0, &HashSet::new(), None);
+        let laid = laid(&item, (400, 0), 0, &HashSet::new(), None);
         let labels: Vec<(Rect, &str, Mark)> = (laid.bits.iter())
             .filter_map(|(r, b)| match b {
                 Bit::Label { text, mark, .. } => Some((*r, text.as_str(), *mark)),
@@ -3681,7 +3724,7 @@ pub(super) mod tests {
             output: None,
         };
         let cwd = Some(Path::new("/w"));
-        let folded = laid(&edit, 500, 0, &HashSet::new(), cwd);
+        let folded = laid(&edit, (500, 0), 0, &HashSet::new(), cwd);
         let lines = |l: &Laid| {
             (l.bits.iter())
                 .filter(|(_, b)| matches!(b, Bit::Diff(..)))
@@ -3703,7 +3746,7 @@ pub(super) mod tests {
         let path = (folded.bits.iter())
             .any(|(_, b)| matches!(b, Bit::Label { text, .. } if text == "src/a.rs"));
         assert!(path);
-        let open = laid(&edit, 500, 0, &HashSet::from(["big".to_owned()]), cwd);
+        let open = laid(&edit, (500, 0), 0, &HashSet::from(["big".to_owned()]), cwd);
         assert_eq!(lines(&open), 20);
     }
 
@@ -3737,7 +3780,7 @@ pub(super) mod tests {
                 .find_map(|(r, b)| (*b == Bit::Card).then_some(*r))
                 .expect("a card")
         };
-        let folded = laid(&plan, 500, 0, &HashSet::new(), None);
+        let folded = laid(&plan, (500, 0), 0, &HashSet::new(), None);
         assert_eq!(lines(&folded), PLAN_PEEK);
         assert_eq!(
             link(&folded).as_deref(),
@@ -3757,7 +3800,13 @@ pub(super) mod tests {
                 .filter(|(_, b)| matches!(b, Bit::Doc(_)))
                 .all(|(r, _)| r.loc.y + r.size.h <= ground.loc.y + ground.size.h)
         );
-        let open = laid(&plan, 500, 0, &HashSet::from(["plan".to_owned()]), None);
+        let open = laid(
+            &plan,
+            (500, 0),
+            0,
+            &HashSet::from(["plan".to_owned()]),
+            None,
+        );
         assert_eq!(lines(&open), 20);
         assert_eq!(link(&open).as_deref(), Some("Show less"));
         assert!(card(&open).size.h > ground.size.h);
@@ -3776,7 +3825,7 @@ pub(super) mod tests {
             text: "- one\n".into(),
             output: None,
         };
-        let s = laid(&short, 500, 0, &HashSet::new(), None);
+        let s = laid(&short, (500, 0), 0, &HashSet::new(), None);
         assert_eq!(link(&s).as_deref(), Some(REVIEW_PLAN));
         assert!(s.spots.iter().any(|(_, sp)| *sp == Spot::Review));
     }
@@ -3799,13 +3848,19 @@ pub(super) mod tests {
         };
         let none = HashSet::new();
         // The chat's own words show whole.
-        assert_eq!(lines(&laid(&user, 500, 0, &none, None)), 10);
-        let folded = laid(&user, 500, NEST, &none, None);
+        assert_eq!(lines(&laid(&user, (500, 0), 0, &none, None)), 10);
+        let folded = laid(&user, (500, 0), NEST, &none, None);
         assert_eq!(lines(&folded), PROMPT_PEEK);
         let more = (folded.bits.iter())
             .any(|(_, b)| matches!(b, Bit::Label { text, .. } if text == "7 more lines"));
         assert!(more);
-        let open = laid(&user, 500, NEST, &HashSet::from(["p".to_owned()]), None);
+        let open = laid(
+            &user,
+            (500, 0),
+            NEST,
+            &HashSet::from(["p".to_owned()]),
+            None,
+        );
         assert_eq!(lines(&open), 10);
         assert!(open.spots.iter().any(|(_, s)| *s == Spot::Fold));
     }
@@ -4239,6 +4294,22 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_row_scrolled_up_leaves_room_for_the_bar_of_the_users_words() {
+        let mut v = view();
+        let mut items = (*v.items).clone();
+        let plan = crate::chat::parse::plan_item("pl".into(), None, "# Plan\n\nDo it.");
+        items.push(plan);
+        v.items = Arc::new(items);
+        let rows = rows::rows(&v.items, &v.unfolded);
+        // The user's words open the chat: nothing before them to pin.
+        assert!(matches!(rows[0], Row::Item(0)) && matches!(v.items[0], Item::User { .. }));
+        assert_eq!(chat_pin_room(&v, 0), 0);
+        let plan = rows.len() - 1;
+        let bar = lay_pinned("Add a retry to the upload client", parts(&v).column.1).h;
+        assert_eq!(chat_pin_room(&v, plan), bar + PART_GAP);
+    }
+
+    #[test]
     fn a_plans_ask_shows_it_as_markdown_until_folded() {
         let mut v = view();
         v.ask = Some(plan_ask());
@@ -4475,5 +4546,33 @@ pub(super) mod tests {
             let ratio = super::super::contrast(p.text, bubble(p));
             assert!(ratio >= 4.5, "{theme:?} the user's words: {ratio}");
         }
+    }
+
+    #[test]
+    fn a_table_too_wide_for_the_column_reaches_out_of_it() {
+        let wide = "a cell with words enough to be wider than the column";
+        let item = Item::Assistant {
+            id: "t".into(),
+            at: None,
+            blocks: Arc::new(vec![DocBlock::Table(vec![
+                vec!["Case".into(), "Reply".into()],
+                vec![wide.into(), wide.into()],
+            ])]),
+        };
+        let none = HashSet::new();
+        let span = |l: &Laid| {
+            (l.bits.iter()).fold((i32::MAX, i32::MIN), |(a, b), (r, _)| {
+                (a.min(r.loc.x), b.max(r.loc.x + r.size.w))
+            })
+        };
+        let kept = laid(&item, (300, 0), 0, &none, None);
+        let (l, r) = span(&kept);
+        assert!(l >= 0 && r <= 300, "{l}..{r}");
+        let out = laid(&item, (300, 400), 0, &none, None);
+        let (l, r) = span(&out);
+        assert!(l < 0 && r > 300 && l >= -400 && r <= 700, "{l}..{r}");
+        // Centred on the column, and shorter for the room.
+        assert!((l + r - 300).abs() <= 2, "{l}..{r}");
+        assert!(out.h < kept.h);
     }
 }
