@@ -18,7 +18,7 @@ use crate::{
     integrations::{
         Parser,
         common::build::{
-            Builder, CHAT_COMPACTED, INTERRUPTED, arg_gist, cap, change, edit_or_tool, flat_edits,
+            Builder, COMPACTED, INTERRUPTED, arg_gist, cap, change, edit_or_tool, flat_edits,
             input_text,
         },
     },
@@ -73,7 +73,7 @@ fn pi_entry(b: &mut Builder, line: &Value, kind: &str, id: String) {
     match kind {
         "message" => pi_message(b, &line["message"], id),
         "compaction" => {
-            let text = CHAT_COMPACTED.to_owned();
+            let text = COMPACTED.to_owned();
             b.push(Item::Note { id, text });
         }
         "branch_summary" => {

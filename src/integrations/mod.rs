@@ -11,7 +11,7 @@ use std::{
 
 use serde_json::Value;
 
-use self::common::{build::Builder, files::SubFiles};
+use self::common::{build::Builder, files::SubFiles, install::Changed};
 use crate::{
     ai_work::{
         AgentKind, Chat,
@@ -19,7 +19,7 @@ use crate::{
         locate::{self, Found, Homes, Span},
         usage::Message,
     },
-    chat::{Source, commands::Command, live::Changed, menu::Menu, parse::Reader},
+    chat::{Source, commands::Command, menu::Menu, parse::Reader},
     herdr::Herdr,
     scrollback::Styled,
     stage_models::Offer,
@@ -63,13 +63,26 @@ impl ModelSwitch {
     }
 }
 
-/// How a plan review goes back to the agent.
+/// An agent's `/btw` side panel as its screen draws it: the marks
+/// `chat::btw` knows it by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PlanReply {
-    /// A line naming the review's file.
-    Line,
-    /// A deny of the agent's plan ask, with the comments.
-    DenyAsk,
+pub struct SidePanel {
+    /// What its footer says, on its first row: where the panel ends.
+    pub footers: &'static [&'static str],
+    /// The marks of its frame, left of its rows.
+    pub frame: &'static str,
+    /// What its question row ends with, past the question.
+    pub question_end: Option<&'static str>,
+    /// The marks at the end of the rows past which it scrolls.
+    pub scroll_marks: &'static [char],
+    /// It spins a braille spinner while it answers.
+    pub braille: bool,
+    /// The marks it spins before a word that goes on (`✽ Answering…`),
+    /// which a bullet doesn't.
+    pub stars: &'static str,
+    /// What its footer says when the answer is cut, and the keys that show
+    /// the rest.
+    pub expand: Option<(&'static str, &'static [&'static str])>,
 }
 
 /// What a chat of an agent offers, all in one: what the UI reads.
@@ -86,11 +99,6 @@ pub struct Caps {
     pub side: bool,
     /// Its screen suggests what to say next.
     pub suggests: bool,
-    /// Its asks can be allowed or denied from the chat.
-    pub asks: bool,
-    /// Its questions show as cards of their own.
-    pub questions: bool,
-    pub plan_reply: PlanReply,
     /// Its chat says how full its context is.
     pub context: bool,
 }
@@ -271,9 +279,6 @@ pub trait Integration: Sync {
     fn plan_menu(&self) -> Option<(&'static str, &'static str, &'static str)> {
         None
     }
-    fn plan_reply(&self) -> PlanReply {
-        PlanReply::Line
-    }
     /// Whether its screen suggests what to say next.
     fn suggests(&self) -> bool {
         false
@@ -282,13 +287,10 @@ pub trait Integration: Sync {
     fn suggestion(&self, _rows: &[(String, Styled)]) -> Option<String> {
         None
     }
-    /// Whether its asks can be allowed or denied from the chat.
-    fn asks(&self) -> bool {
-        false
-    }
-    /// Whether its questions show as cards of their own.
-    fn questions(&self) -> bool {
-        false
+    /// Its `/btw` side panel, as its screen draws it; none: it takes no
+    /// side questions.
+    fn side_panel(&self) -> Option<SidePanel> {
+        None
     }
 
     // Its commands.
@@ -328,11 +330,8 @@ pub trait Integration: Sync {
             earlier: self.store() == Some(Store::Lines),
             modes: !self.modes().is_empty(),
             model: self.model_switch(),
-            side: self.builtins().iter().any(|(name, _)| *name == "btw"),
+            side: self.side_panel().is_some(),
             suggests: self.suggests(),
-            asks: self.asks(),
-            questions: self.questions(),
-            plan_reply: self.plan_reply(),
             context: self.has_context(),
         }
     }
@@ -437,15 +436,19 @@ mod tests {
         let caps = |kind| of(kind).caps();
         let claude = caps(AgentKind::Claude);
         assert!(claude.chat && claude.side && claude.suggests && claude.context);
-        assert_eq!(claude.plan_reply, PlanReply::DenyAsk);
         assert!(matches!(claude.model, ModelSwitch::Typed { cli: "claude" }));
         assert_eq!(caps(AgentKind::Codex).model, ModelSwitch::OwnMenu);
         assert!(!caps(AgentKind::Codex).side && !caps(AgentKind::Pi).modes);
-        assert!(!caps(AgentKind::OpenCode).earlier && caps(AgentKind::OpenCode).asks);
+        assert!(!caps(AgentKind::OpenCode).earlier && caps(AgentKind::OpenCode).side);
         for kind in [AgentKind::T3, AgentKind::Unknown] {
             let none = caps(kind);
             assert!(!none.chat && !none.modes && !none.side && !none.context);
             assert_eq!(none.model, ModelSwitch::None);
+        }
+        // A side panel for each agent whose `/` menu offers `/btw`.
+        for agent in ALL {
+            let btw = agent.builtins().iter().any(|(name, _)| *name == "btw");
+            assert_eq!(agent.caps().side, btw, "{:?}", agent.kind());
         }
     }
 
@@ -462,7 +465,7 @@ mod tests {
 
     /// Each field of `caps` as the doc's table says it: a new field won't
     /// build here until it has its row.
-    fn caps_rows(caps: Caps) -> [(&'static str, &'static str); 10] {
+    fn caps_rows(caps: Caps) -> [(&'static str, &'static str); 7] {
         let Caps {
             chat,
             earlier,
@@ -470,9 +473,6 @@ mod tests {
             model,
             side,
             suggests,
-            asks,
-            questions,
-            plan_reply,
             context,
         } = caps;
         let yes = |on: bool| if on { "✓" } else { "—" };
@@ -481,10 +481,6 @@ mod tests {
             ModelSwitch::Typed { .. } => "typed",
             ModelSwitch::OwnMenu => "own menu",
         };
-        let plan_reply = match plan_reply {
-            PlanReply::Line => "line",
-            PlanReply::DenyAsk => "deny",
-        };
         [
             ("`chat`: gerdr reads its chats", yes(chat)),
             ("`earlier`: earlier messages on ask", yes(earlier)),
@@ -492,9 +488,6 @@ mod tests {
             ("`model`: model picker", model),
             ("`side`: `/btw` side panel", yes(side)),
             ("`suggests`: prompt suggestion", yes(suggests)),
-            ("`asks`: Allow/Deny from the chat", yes(asks)),
-            ("`questions`: question cards", yes(questions)),
-            ("`plan_reply`: a plan review goes back as", plan_reply),
             ("`context`: context size", yes(context)),
         ]
     }
@@ -525,10 +518,13 @@ mod tests {
         );
     }
 
-    /// The files of the chat's UI, desktop and phone: they read `Caps`,
-    /// items, live events and menus, and name no agent.
-    const UI: [(&str, &str); 5] = [
+    /// The files of the chat's UI, desktop and phone, and the shared
+    /// readers of what an agent's screen shows: they read `Caps`, items,
+    /// live events, menus and side panels, and name no agent.
+    const UI: [(&str, &str); 7] = [
         ("src/chat/view.rs", include_str!("../chat/view.rs")),
+        ("src/chat/btw.rs", include_str!("../chat/btw.rs")),
+        ("src/chat/menu.rs", include_str!("../chat/menu.rs")),
         (
             "src/chrome/agent_chat.rs",
             include_str!("../chrome/agent_chat.rs"),

@@ -220,7 +220,7 @@ mod tests {
             },
             Item::Note {
                 id: "cursor4".into(),
-                text: "Conversation compacted".into(),
+                text: "The chat was compacted".into(),
             },
         ];
         assert_eq!(items, want);

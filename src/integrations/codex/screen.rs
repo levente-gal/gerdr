@@ -2,7 +2,8 @@
 //! model under its reply box, and the menu it waits on under a plan.
 
 use crate::{
-    chat::{menu::Menu, mode::CYCLE, model_menu::wide_split},
+    chat::menu::Menu,
+    integrations::common::screen::{CYCLE, wide_split},
     scrollback::Styled,
 };
 

@@ -2,9 +2,10 @@
 //! prompt, and its model dialog.
 
 use crate::{
-    chat::{
-        menu::Menu,
-        model_menu::{asked, choice, col_of, cut, style_at, wide_split},
+    chat::menu::Menu,
+    integrations::{
+        SidePanel,
+        common::screen::{asked, choice, col_of, cut, style_at, wide_split},
     },
     scrollback::Styled,
 };
@@ -78,6 +79,20 @@ pub(super) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
         ..Menu::default()
     })
 }
+
+// shortcut: its side panel's marks are as OpenCode 2.3.0 drew them (2026-11-25);
+// recheck them when it updates.
+/// Its `/btw` panel, floating over the chat: "esc" right of its question,
+/// "copy c" under it, and none until it has answered.
+pub(crate) const SIDE_PANEL: SidePanel = SidePanel {
+    footers: &["copy c"],
+    frame: "",
+    question_end: Some("esc"),
+    scroll_marks: &[],
+    braille: false,
+    stars: "",
+    expand: None,
+};
 
 #[cfg(test)]
 mod tests {

@@ -5,9 +5,12 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::ai_work::{
-    AgentKind, Chat,
-    locate::{Form, Found, Homes, find, found, plain_id, pretty, rows_json},
+use crate::{
+    ai_work::{
+        AgentKind, Chat,
+        locate::{Form, Found, Homes, find, plain_id},
+    },
+    integrations::common::find::{found, pretty, rows_json},
 };
 
 /// A T3 Code thread's rows: the thread, its runs, its agents' threads.
@@ -97,13 +100,16 @@ mod tests {
 
     use serde_json::Value;
 
-    use crate::ai_work::{
-        AgentKind,
-        locate::{
-            Form, Homes, columns, find,
-            tests::{chat, put},
+    use crate::{
+        ai_work::{
+            AgentKind,
+            locate::{
+                Form, Homes, find,
+                tests::{chat, put},
+            },
+            write::tests::scratch,
         },
-        write::tests::scratch,
+        integrations::common::find::columns,
     };
 
     #[test]

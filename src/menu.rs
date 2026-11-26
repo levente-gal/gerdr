@@ -27,7 +27,7 @@ pub enum MenuAction {
     NewTerminal,
     /// Put back the files gerdr changed to hear agents live: its toast's
     /// Undo (see `Gerdr::install_live_hooks`).
-    UndoLiveHooks(Vec<crate::chat::live::Changed>),
+    UndoLiveHooks(Vec<crate::integrations::common::install::Changed>),
     /// Give project `.0` the id `.1` (see `Gerdr::change_project_id`): a
     /// change's Undo.
     ChangeProjectId(String, String),

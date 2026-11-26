@@ -15,13 +15,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{Integration, ModelSwitch, Parser, Store, common::files::SubFiles};
+use super::{
+    Integration, ModelSwitch, Parser, SidePanel, Store,
+    common::{
+        files::SubFiles,
+        install::{self, Changed},
+    },
+};
 use crate::{
     ai_work::{
         AgentKind, Chat,
         locate::{Found, Homes, Span},
     },
-    chat::{Source, commands::Command, live as hub, menu::Menu, parse::Reader},
+    chat::{Source, commands::Command, menu::Menu, parse::Reader},
     scrollback::Styled,
 };
 
@@ -109,6 +115,10 @@ impl Integration for Antigravity {
         screen::model_now(rows)
     }
 
+    fn side_panel(&self) -> Option<SidePanel> {
+        Some(screen::SIDE_PANEL)
+    }
+
     fn builtins(&self) -> &'static [(&'static str, &'static str)] {
         commands::BUILTINS
     }
@@ -125,12 +135,12 @@ impl Integration for Antigravity {
         live::run_hook();
     }
 
-    fn install_live(&self, home: &Path) -> Vec<Result<Option<hub::Changed>, String>> {
+    fn install_live(&self, home: &Path) -> Vec<Result<Option<Changed>, String>> {
         if !home.join(".gemini/config").is_dir() {
             return Vec::new();
         }
-        vec![hub::hook_command(live::HOOK_COMMAND).and_then(|command| {
-            hub::install(&home.join(".gemini/config/hooks.json"), |text| {
+        vec![install::hook_command(live::HOOK_COMMAND).and_then(|command| {
+            install::install(&home.join(".gemini/config/hooks.json"), |text| {
                 live::merged(text, &command)
             })
         })]

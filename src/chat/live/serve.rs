@@ -10,11 +10,15 @@ use smithay::reexports::calloop::{
 };
 
 use super::{
-    Answer, Answers, AskReply, Changed, HeldAsk, LiveEvent, PHONE_SIGHT, PendingAsk, SOURCE, What,
-    ask_wait,
+    Answer, Answers, AskReply, HeldAsk, LiveEvent, PHONE_SIGHT, PendingAsk, SOURCE, What, ask_wait,
 };
 use crate::{
-    Gerdr, ai_work::AgentKind, chat::view::chat_mut, herdr::AgentInfo, herdr::AgentSession,
+    Gerdr,
+    ai_work::AgentKind,
+    chat::view::chat_mut,
+    herdr::AgentInfo,
+    herdr::AgentSession,
+    integrations::common::install::{Changed, undo},
     menu::MenuAction,
 };
 
@@ -420,7 +424,7 @@ impl Gerdr {
     pub(crate) fn undo_live_hooks(&mut self, changed: &[Changed]) {
         let failed: Vec<String> = changed
             .iter()
-            .filter_map(|c| super::undo(c).err())
+            .filter_map(|c| undo(c).err())
             .collect();
         self.settings.agent_hooks = false;
         if let Err(err) = crate::config::write_bool("ui", "agent_hooks", false) {

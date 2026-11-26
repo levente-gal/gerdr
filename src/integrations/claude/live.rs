@@ -7,8 +7,11 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::{
-    chat::live::{self, Answer, AskReply, Changed, QUESTION_WAIT, Question, QuestionOption, What},
-    integrations::common::hook,
+    chat::live::{self, Answer, AskReply, QUESTION_WAIT, Question, QuestionOption, What},
+    integrations::common::{
+        hook,
+        install::{self, Changed, hook_command, is_gerdr_command, with_key},
+    },
     stats_panel::tool_gist,
 };
 
@@ -56,8 +59,8 @@ pub fn install(home: &Path) -> Vec<Result<Option<Changed>, String>> {
     if !home.join(".claude").is_dir() {
         return Vec::new();
     }
-    vec![live::hook_command(HOOK_COMMAND).and_then(|command| {
-        live::install(&home.join(".claude/settings.json"), |text| {
+    vec![hook_command(HOOK_COMMAND).and_then(|command| {
+        install::install(&home.join(".claude/settings.json"), |text| {
             merged(text, &command)
         })
     })]
@@ -185,7 +188,7 @@ pub fn merged(existing: Option<&str>, command: &str) -> Result<String, String> {
             let had = list.len();
             list.retain(|hook| {
                 !(hook.get("command").and_then(Value::as_str))
-                    .is_some_and(|c| crate::cursor_agents::is_gerdr_command(c, HOOK_COMMAND))
+                    .is_some_and(|c| is_gerdr_command(c, HOOK_COMMAND))
             });
             list.len() == had || !list.is_empty()
         });
@@ -198,7 +201,7 @@ pub fn merged(existing: Option<&str>, command: &str) -> Result<String, String> {
     }
     match text {
         Some(text) if old.as_ref() == Some(&hooks) => Ok(text.to_owned()),
-        Some(text) => live::with_key(text, "hooks", &hooks),
+        Some(text) => with_key(text, "hooks", &hooks),
         None => serde_json::to_string_pretty(&json!({ "hooks": hooks }))
             .map(|text| text + "\n")
             .map_err(|err| err.to_string()),

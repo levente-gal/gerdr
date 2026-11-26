@@ -13,7 +13,7 @@ pub(crate) mod stats;
 
 use std::{collections::HashSet, path::Path};
 
-use super::{DbChat, Integration, ModelSwitch, Parser, Store};
+use super::{DbChat, Integration, ModelSwitch, Parser, SidePanel, Store, common::install::Changed};
 use crate::{
     ai_work::{
         AgentKind, Chat,
@@ -21,7 +21,7 @@ use crate::{
         locate::{self, Found, Homes, Span},
         usage::Message,
     },
-    chat::{commands::Command, live as hub, parse::Reader},
+    chat::{commands::Command, parse::Reader},
     stage_models::Offer,
 };
 
@@ -131,6 +131,10 @@ impl Integration for Cursor {
         Some(screen::PLAN_MENU)
     }
 
+    fn side_panel(&self) -> Option<SidePanel> {
+        Some(screen::SIDE_PANEL)
+    }
+
     fn builtins(&self) -> &'static [(&'static str, &'static str)] {
         commands::CURSOR
     }
@@ -148,7 +152,7 @@ impl Integration for Cursor {
     }
 
     /// Cursor's CLI runs the hooks Cursor's IDE does.
-    fn install_live(&self, home: &Path) -> Vec<Result<Option<hub::Changed>, String>> {
+    fn install_live(&self, home: &Path) -> Vec<Result<Option<Changed>, String>> {
         if !home.join(".cursor").is_dir() {
             return Vec::new();
         }

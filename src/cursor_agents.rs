@@ -1011,23 +1011,6 @@ pub(crate) fn is_cli_agent(args: &[String]) -> bool {
     cli && !args.iter().any(|arg| arg == "worker")
 }
 
-/// Whether hook `command` is a gerdr's, running its `subcommand`.
-pub(crate) fn is_gerdr_command(command: &str, subcommand: &str) -> bool {
-    let Some(program) = command.trim().strip_suffix(subcommand) else {
-        return false;
-    };
-    let program = program.trim().trim_matches(|c| c == '\'' || c == '"');
-    Path::new(live_path(program))
-        .file_name()
-        .is_some_and(|name| name == "gerdr")
-}
-
-/// `path` as /proc names a program run from it: without the " (deleted)"
-/// it gets once the file is built again under the running program.
-pub(crate) fn live_path(path: &str) -> &str {
-    path.strip_suffix(" (deleted)").unwrap_or(path)
-}
-
 impl crate::state::CursorWatch {
     /// Ask for Cursor's database to be read now.
     pub(crate) fn read_db(&self, projects: &crate::projects::Store) {

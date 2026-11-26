@@ -20,10 +20,8 @@ pub const MAX_BYTES: usize = 200 * 1024;
 
 /// Said where the user stopped the agent.
 pub const INTERRUPTED: &str = "Interrupted by the user";
-/// Said where Cursor's and OpenCode's chats were compacted.
-pub const COMPACTED: &str = "Conversation compacted";
-/// Said where Codex's and pi's chats were compacted.
-pub const CHAT_COMPACTED: &str = "The chat was compacted";
+/// Said where an agent's chat was compacted.
+pub const COMPACTED: &str = "The chat was compacted";
 
 /// Said of a line of kind `kind` that isn't shown.
 pub fn cant_show(kind: &str) -> String {

@@ -47,7 +47,7 @@ fn cli_json(existing: Option<&str>) -> Result<String, String> {
         return Ok(text.to_owned());
     }
     list.push(NAME.into());
-    crate::chat::live::with_key(text, "plugins", &plugins)
+    crate::integrations::common::install::with_key(text, "plugins", &plugins)
 }
 
 #[cfg(test)]

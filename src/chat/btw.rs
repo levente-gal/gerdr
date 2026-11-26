@@ -1,10 +1,9 @@
 //! Side questions (`/btw`): asked from the chat or the phone, answered by
-//! the agent in a panel of its own that its transcript never holds (Claude
-//! Code 2.1.332, Cursor CLI 2026.11.22, OpenCode 2.3.0 and Antigravity CLI
-//! 1.5.17, probed 2026-11-25). gerdr reads that panel off the pane's screen
-//! (`panel`), presses what shows the rest of it (`Follow`), closes it once
-//! it holds the whole answer, and keeps it for this run: rows of the chat
-//! (`with_sides`) and a card on the phone.
+//! the agent in a panel of its own that its transcript never holds. gerdr
+//! reads that panel off the pane's screen by the marks the agent draws it
+//! with (`panel_of`, its `SidePanel`), presses what shows the rest of it
+//! (`Follow`), closes it once it holds the whole answer, and keeps it for
+//! this run: rows of the chat (`with_sides`) and a card on the phone.
 
 use std::{
     sync::Arc,
@@ -14,8 +13,12 @@ use std::{
 use serde::Serialize;
 
 use super::Item;
-use crate::herdr::AgentSession;
-use crate::md_blocks::{self, DocBlock, Inline, Styled};
+use crate::{
+    ai_work::AgentKind,
+    herdr::AgentSession,
+    integrations::{self, SidePanel},
+    md_blocks::{self, DocBlock, Inline, Styled},
+};
 
 /// A side question and what came of it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,31 +80,28 @@ pub struct Panel {
     pub working: bool,
     /// Its footer says ↑/↓ scroll it.
     pub scrolls: bool,
-    /// Its footer says Tab shows the rest (Antigravity).
+    /// Its footer says a key shows the rest.
     pub cut: bool,
+    /// The keys that show the rest, when it is cut.
+    pub expand: &'static [&'static str],
 }
 
-/// What starts each agent's footer: how to close it, OpenCode's how to
-/// copy, and Antigravity's how to see more, a row above its close on a
-/// narrow pane.
-const FOOTERS: [&str; 6] = [
-    "to close",
-    "to dismiss",
-    "copy c",
-    "to scroll",
-    "Tab to expand",
-    "Tab to collapse",
-];
+/// Every agent's side panel: the marks of a screen whose agent isn't known.
+fn any() -> Vec<SidePanel> {
+    (integrations::ALL.iter()).filter_map(|agent| agent.side_panel()).collect()
+}
 
-/// What an agent draws while it answers, in the answer's place or under
-/// what it has so far: a braille spinner (Cursor, Antigravity), or Claude's
-/// star with a word that goes on (`✽ Answering…`), which a bullet doesn't.
-fn spinner(line: &str) -> bool {
+/// Whether `line` is what an agent of `marks` draws while it answers, in
+/// the answer's place or under what it has so far: a braille spinner, or a
+/// star of its own with a word that goes on (`✽ Answering…`), which a
+/// bullet doesn't.
+fn spinner(marks: &[SidePanel], line: &str) -> bool {
     let Some(c) = line.chars().next() else {
         return false;
     };
     let goes_on = line.ends_with('…') || line.ends_with("...") || line.contains("... (");
-    ('\u{2800}'..='\u{28ff}').contains(&c) || ("✻✽✶✢✳·*".contains(c) && goes_on)
+    let braille = ('\u{2800}'..='\u{28ff}').contains(&c);
+    (marks.iter()).any(|m| (m.braille && braille) || (m.stars.contains(c) && goes_on))
 }
 
 fn is_rule(row: &str) -> bool {
@@ -109,42 +109,59 @@ fn is_rule(row: &str) -> bool {
     !row.is_empty() && row.chars().all(|c| "─━▔▀═".contains(c))
 }
 
-/// The side panel among a pane's screen `rows`, if one shows: its last
-/// `/btw` row (Claude lists the earlier ones above it) down to its footer.
-/// Each row is cut from that row's column: OpenCode's panel floats over
-/// the chat, and Antigravity's has a bar at its left.
+/// The side panel of any agent among a pane's screen `rows`, if one shows,
+/// as `panel_of` reads it: for a screen whose agent isn't known.
+pub fn panel(rows: &[&str]) -> Option<Panel> {
+    read(&any(), rows)
+}
+
+/// The side panel of agent `kind` among its pane's screen `rows`, if one
+/// shows; none for an agent that takes no side questions.
+pub fn panel_of(kind: AgentKind, rows: &[&str]) -> Option<Panel> {
+    read(&[integrations::of(kind).side_panel()?], rows)
+}
+
+/// The side panel among screen `rows`, drawn with any of `marks`: its last
+/// `/btw` row (an agent may list the earlier ones above it) down to its
+/// footer. Each row is cut from that row's column: a panel may float over
+/// the chat, or have a frame at its left.
 /// shortcut: columns are counted in chars; a wide char left of a floating
 /// panel shifts its rows. Count cells if that shows.
-pub fn panel(rows: &[&str]) -> Option<Panel> {
+fn read(marks: &[SidePanel], rows: &[&str]) -> Option<Panel> {
     // A `/btw` row is the panel's own when nothing but its frame is left
-    // of it, or a gap (OpenCode's over the chat); an answer that says
-    // `/btw` has it mid-text, or right of the panel's column.
+    // of it, or a gap (a panel floating over the chat); an answer that
+    // says `/btw` has it mid-text, or right of the panel's column.
+    let framed = |c: char| marks.iter().any(|m| m.frame.contains(c));
     let asks = |row: &&str| {
         let at = row.find("/btw ")?;
         let before = &row[..at];
-        let own = before.trim().chars().all(|c| "┃│".contains(c)) || before.ends_with("  ");
+        let own = before.trim().chars().all(framed) || before.ends_with("  ");
         own.then(|| before.chars().count())
     };
     let col = rows.iter().filter_map(asks).min()?;
     let q = rows.iter().rposition(|row| asks(row) == Some(col))?;
     let at = rows[q].find("/btw ")?;
     let asked = rows[q][at + 5..].trim();
-    let question = asked.strip_suffix("esc").unwrap_or(asked);
-    let footer = (q + 1..rows.len()).find(|&i| FOOTERS.iter().any(|f| rows[i].contains(f)));
+    let question = (marks.iter())
+        .find_map(|m| asked.strip_suffix(m.question_end?))
+        .unwrap_or(asked);
+    let footed = |row: &str| (marks.iter()).any(|m| m.footers.iter().any(|f| row.contains(f)));
+    let footer = (q + 1..rows.len()).find(|&i| footed(rows[i]));
     let end = footer
         .or_else(|| (q + 1..rows.len()).find(|&i| is_rule(rows[i])))
         .unwrap_or(rows.len());
+    let scroll_marks: Vec<char> = marks.iter().flat_map(|m| m.scroll_marks).copied().collect();
     let mut lines: Vec<String> = (rows[q + 1..end].iter())
         .map(|row| {
             let cut: String = row.chars().skip(col).collect();
-            // Claude marks the rows past which it scrolls.
-            let cut = cut.trim_end().trim_end_matches(['↑', '↓']);
+            // An agent may mark the rows past which it scrolls.
+            let cut = cut.trim_end().trim_end_matches(scroll_marks.as_slice());
             cut.trim_end().to_owned()
         })
         .collect();
     trimmed(&mut lines);
-    // Antigravity draws the answer as it comes, its spinner under it.
-    let working = [lines.first(), lines.last()].into_iter().flatten().any(|l| spinner(l));
+    // An agent may draw the answer as it comes, its spinner under it.
+    let working = [lines.first(), lines.last()].into_iter().flatten().any(|l| spinner(marks, l));
     // Its rows down to the panel's end: a narrow pane wraps it.
     let footer = footer.map(|i| {
         let rest = rows[i..].iter().take(3).take_while(|row| !is_rule(row));
@@ -153,12 +170,16 @@ pub fn panel(rows: &[&str]) -> Option<Panel> {
     if footer.is_none() && !working {
         return None;
     }
+    let expand = footer.as_ref().and_then(|f| {
+        (marks.iter()).find_map(|m| m.expand.filter(|(says, _)| f.contains(says)))
+    });
     Some(Panel {
         question: words(question),
         lines,
         working,
         scrolls: footer.as_ref().is_some_and(|f| f.contains("scroll")),
-        cut: footer.as_ref().is_some_and(|f| f.contains("Tab to expand")),
+        cut: expand.is_some(),
+        expand: expand.map_or(&[], |(_, keys)| keys),
     })
 }
 
@@ -216,12 +237,12 @@ pub enum Step {
 }
 
 /// How many reads in a row must show the same answer before it counts as
-/// whole: Cursor draws it as it comes.
+/// whole: an agent may draw it as it comes.
 const STILL: u8 = 3;
 /// How many reads in a row must miss a panel seen before it counts as
 /// closed: a frame drawn halfway reads as none.
 const GONE: u8 = 3;
-/// How long its panel may take to show, at most: OpenCode shows none
+/// How long its panel may take to show, at most: an agent may show none
 /// until it has answered.
 pub const SHOW_WAIT: Duration = Duration::from_secs(120);
 /// How long a side question is followed, at most.
@@ -317,7 +338,7 @@ impl Follow {
         }
         if panel.cut && !self.tabbed {
             self.tabbed = true;
-            return Step::Press(&["Tab"]);
+            return Step::Press(panel.expand);
         }
         let window = self.answer(&panel);
         let changed = match self.scrolling {
@@ -587,8 +608,8 @@ mod tests {
         let coming = " ┃ /btw name rivers\n ┃\n ┃   Danube\n ┃   Rhine\n ┃ ⣯  Generating... (Enter/Esc to cancel)\n────\n>";
         assert!(panel(&rows(coming)).expect("coming").working);
         // A bullet is no spinner.
-        assert!(!spinner("* one"));
-        assert!(!spinner("· two"));
+        assert!(!spinner(&any(), "* one"));
+        assert!(!spinner(&any(), "· two"));
         let p = panel(&rows(CLAUDE_LONG)).expect("long");
         assert_eq!(p.question, "list the numbers");
         // Its scroll mark is no part of the answer.

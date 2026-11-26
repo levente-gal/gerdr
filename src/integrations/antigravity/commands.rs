@@ -5,7 +5,8 @@ use std::path::Path;
 
 use crate::{
     ai_work::locate::Homes,
-    chat::commands::{Command, named_skills, sub_dirs},
+    chat::commands::Command,
+    integrations::common::commands::{named_skills, sub_dirs},
 };
 
 // shortcut: built-ins are hard-coded as Antigravity CLI 1.5.15 had them

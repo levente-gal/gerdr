@@ -1329,12 +1329,13 @@ pub(crate) fn screen_rows(
     Ok(last_rows(crate::scrollback::parse_ansi(&text), n))
 }
 
-/// Follow side question `follow` asked of pane `pane_id`'s agent on its
-/// screen (`btw::Follow`), on the thread it runs on, until it is answered
-/// or fails; each change goes to `tx` as side `n` of the pane.
+/// Follow side question `follow` asked of pane `pane_id`'s agent, of kind
+/// `kind`, on its screen (`btw::Follow`), on the thread it runs on, until it
+/// is answered or fails; each change goes to `tx` as side `n` of the pane.
 fn follow_side(
     herdr: &mut Herdr,
     pane_id: &str,
+    kind: AgentKind,
     n: usize,
     mut follow: Follow,
     tx: &channel::Sender<(String, usize, Side)>,
@@ -1347,7 +1348,7 @@ fn follow_side(
             Ok(rows) => {
                 misses = 0;
                 let rows: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
-                follow.took(btw::panel(&rows), Instant::now())
+                follow.took(btw::panel_of(kind, &rows), Instant::now())
             }
             Err(err) => {
                 misses += 1;
@@ -2033,21 +2034,22 @@ impl Gerdr {
         if (sides.iter()).any(|side| side.state == SideState::Answering) {
             return Err("its agent is still answering a side question".into());
         }
-        let offered = (self.session.agents.iter())
+        let kind = (self.session.agents.iter())
             .find(|a| a.pane_id == pane_id)
             .and_then(super::source::kind)
-            .is_some_and(|kind| caps(kind).side);
-        let question = btw::question(line).filter(|_| offered);
+            .filter(|kind| caps(*kind).side);
+        let question = btw::question(line).filter(|_| kind.is_some());
         self.send_to_agent(pane_id, line)?;
-        if let Some(question) = question {
-            self.ask_side(pane_id, question);
+        if let (Some(question), Some(kind)) = (question, kind) {
+            self.ask_side(pane_id, kind, question);
         }
         Ok(())
     }
 
-    /// Follow side question `question`, just sent to pane `pane_id`'s agent,
-    /// on a thread of its own; its rows show in the chat meanwhile.
-    fn ask_side(&mut self, pane_id: &str, question: &str) {
+    /// Follow side question `question`, just sent to pane `pane_id`'s agent
+    /// of kind `kind`, on a thread of its own; its rows show in the chat
+    /// meanwhile.
+    fn ask_side(&mut self, pane_id: &str, kind: AgentKind, question: &str) {
         let mut side = Side::new(question, crate::ai_work::now_ms());
         side.session =
             (self.chat_agent(pane_id)).and_then(|a| self.with_live_session(a).agent_session);
@@ -2062,7 +2064,9 @@ impl Gerdr {
                 let follow = Follow::new(side, Instant::now());
                 std::thread::Builder::new()
                     .name("side question".into())
-                    .spawn(move || follow_side(&mut Herdr::on_socket(socket), &id, n, follow, &tx))
+                    .spawn(move || {
+                        follow_side(&mut Herdr::on_socket(socket), &id, kind, n, follow, &tx)
+                    })
                     .map(drop)
                     .map_err(|err| err.to_string())
             }

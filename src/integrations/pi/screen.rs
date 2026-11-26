@@ -1,10 +1,8 @@
 //! What pi's screen shows: its model selector, and the model it is on.
 
 use crate::{
-    chat::{
-        menu::Menu,
-        model_menu::{asked, choice},
-    },
+    chat::menu::Menu,
+    integrations::common::screen::{asked, choice},
     scrollback::Styled,
 };
 

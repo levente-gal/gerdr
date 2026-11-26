@@ -12,13 +12,16 @@ mod screen;
 
 use std::{collections::HashSet, path::Path};
 
-use super::{DbChat, Integration, ModelSwitch, Parser, Store};
+use super::{
+    DbChat, Integration, ModelSwitch, Parser, SidePanel, Store,
+    common::install::{self, Changed},
+};
 use crate::{
     ai_work::{
         AgentKind, Chat,
         locate::{Found, Homes, Span},
     },
-    chat::{commands::Command, live as hub, menu::Menu},
+    chat::{commands::Command, menu::Menu},
     scrollback::Styled,
 };
 
@@ -85,8 +88,8 @@ impl Integration for OpenCode {
         screen::model_now(rows)
     }
 
-    fn asks(&self) -> bool {
-        true
+    fn side_panel(&self) -> Option<SidePanel> {
+        Some(screen::SIDE_PANEL)
     }
 
     fn builtins(&self) -> &'static [(&'static str, &'static str)] {
@@ -97,13 +100,13 @@ impl Integration for OpenCode {
         commands::on_disk(cwd, config, found);
     }
 
-    fn install_live(&self, home: &Path) -> Vec<Result<Option<hub::Changed>, String>> {
+    fn install_live(&self, home: &Path) -> Vec<Result<Option<Changed>, String>> {
         let config = home.join(".config/opencode");
         if !config.is_dir() {
             return Vec::new();
         }
         (live::files(&config).into_iter())
-            .map(|(path, merge)| hub::install(&path, merge))
+            .map(|(path, merge)| install::install(&path, merge))
             .collect()
     }
 }

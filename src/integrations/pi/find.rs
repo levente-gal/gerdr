@@ -10,11 +10,12 @@ use serde_json::Value;
 use crate::{
     ai_work::{
         AgentKind, Chat,
-        locate::{FIRST_LINE, Form, Found, Span, found, plain_id, subdirs},
+        locate::{Form, Found, Span, plain_id},
         usage::iso_ms,
     },
     integrations::common::{
         files::first_line,
+        find::{FIRST_LINE, found, subdirs},
         pick::{Begun, nearest},
     },
 };

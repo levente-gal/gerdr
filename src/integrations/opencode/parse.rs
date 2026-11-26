@@ -617,8 +617,8 @@ mod tests {
             [
                 ("m1.error", "Rate limited"),
                 ("m2.error", "Interrupted by the user"),
-                ("p2", "Conversation compacted"),
-                ("s1", "Conversation compacted"),
+                ("p2", "The chat was compacted"),
+                ("s1", "The chat was compacted"),
                 ("s2.error", "Overloaded"),
                 ("s3.error", "Interrupted by the user"),
             ]

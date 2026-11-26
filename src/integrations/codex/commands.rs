@@ -3,7 +3,8 @@
 
 use crate::{
     ai_work::locate::Homes,
-    chat::commands::{Command, md_files, read_md},
+    chat::commands::Command,
+    integrations::common::commands::{md_files, read_md},
 };
 
 // shortcut: hard-coded as Codex 0.171.0 had them; refresh them when it

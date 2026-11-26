@@ -22,7 +22,8 @@ use crate::{
         locate::{Found, Homes, Span},
         usage::Message,
     },
-    chat::{commands::Command, live::Changed, menu::Menu, source},
+    chat::{commands::Command, menu::Menu, source},
+    integrations::common::install::Changed,
     scrollback::Styled,
 };
 

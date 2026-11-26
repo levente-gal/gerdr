@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::chat::live::{self, Changed};
+use crate::integrations::common::install::{self, Changed};
 
 /// pi's extension, as gerdr writes it to `~/.pi/agent/extensions/`.
 const EXTENSION: &str = include_str!("../../../assets/pi/gerdr-live.ts");
@@ -15,7 +15,7 @@ pub fn install(home: &Path) -> Vec<Result<Option<Changed>, String>> {
         return Vec::new();
     }
     let path = home.join(".pi/agent/extensions/gerdr-live.ts");
-    vec![live::install(&path, |_| Ok(EXTENSION.to_owned()))]
+    vec![install::install(&path, |_| Ok(EXTENSION.to_owned()))]
 }
 
 #[cfg(test)]

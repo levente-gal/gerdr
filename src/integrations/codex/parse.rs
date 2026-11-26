@@ -18,7 +18,7 @@ use crate::{
     integrations::{
         Parser,
         common::build::{
-            Builder, CHAT_COMPACTED, INTERRUPTED, cant_show, cap, capped, change, plan_item,
+            Builder, COMPACTED, INTERRUPTED, cant_show, cap, capped, change, plan_item,
         },
     },
     stats_panel::tool_gist,
@@ -37,7 +37,7 @@ impl Parser for Codex {
             "event_msg" => codex_event(b, p),
             "compacted" => {
                 let id = codex_id(b, p);
-                let text = CHAT_COMPACTED.to_owned();
+                let text = COMPACTED.to_owned();
                 b.push(Item::Note { id, text });
             }
             // session_meta, turn_context, world_state, token_usage_record:

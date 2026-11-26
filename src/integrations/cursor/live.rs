@@ -9,8 +9,11 @@ use serde_json::Value;
 
 use crate::{
     chat::live,
-    cursor_agents::{HookEvent, hook_socket, is_cli_agent, is_gerdr_command, now_ms},
-    integrations::common::{build, hook},
+    cursor_agents::{HookEvent, hook_socket, is_cli_agent, now_ms},
+    integrations::common::{
+        build, hook,
+        install::{self, Changed, hook_command, is_gerdr_command},
+    },
 };
 
 /// The subcommand Cursor's hooks run.
@@ -136,9 +139,9 @@ pub fn merge_hooks(existing: Option<&str>, command: &str) -> Result<String, Stri
 
 /// Add this gerdr to Cursor's hooks, in `~/.cursor/hooks.json`, unless it
 /// is there already: the file as it was, if it changed.
-pub fn install_hooks(home: &Path) -> Result<Option<live::Changed>, String> {
-    let command = live::hook_command(HOOK_COMMAND)?;
-    live::install(&home.join(".cursor/hooks.json"), |text| {
+pub fn install_hooks(home: &Path) -> Result<Option<Changed>, String> {
+    let command = hook_command(HOOK_COMMAND)?;
+    install::install(&home.join(".cursor/hooks.json"), |text| {
         merge_hooks(text, &command)
     })
 }

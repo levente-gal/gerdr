@@ -14,8 +14,8 @@ guide for adding an agent or changing one.
   every integration in `AgentKind`'s order. Code that has to ask every agent
   loops over `ALL`: the hook subcommands in `src/main.rs`, hook installs in
   `src/chat/live/serve.rs`, plan menus in `src/herdr.rs`.
-- **`Caps`** is what a chat offers, all in one. `caps()` builds it from the
-  other methods, so an agent never writes it by hand.
+- **`Caps`** is what a chat offers, all in one. `caps()` builds each field
+  from the other methods, so an agent never writes it by hand.
 
 The chat's UI is `src/chat/view.rs`, `src/chrome/agent_chat.rs`,
 `src/phone.rs`, `src/phone_control.rs` and `assets/phone/app.js`. It reads
@@ -28,12 +28,12 @@ only these:
 
 So every agent's chat looks the same, and a feature shows for each agent that
 has it. Of `Caps`, the UI checks `chat`, `modes`, `model`, `side`, `suggests`
-and `context`. `earlier`, `asks`, `questions` and `plan_reply` only describe
-the chat, for `docs/chat-agents.md`. The UI acts on what comes instead: the
-reader says when there are earlier messages, and live `Ask` events bring
-asks, questions and plans. The test `the_ui_names_no_agent` in `src/integrations/mod.rs` fails
-when one of those files names an `AgentKind::` variant or an agent's name
-outside its tests.
+and `context`. `earlier` only describes the chat, for `docs/chat-agents.md`:
+the reader itself says when there are earlier messages. Asks, questions and
+plans have no field. They come as live `Ask` events, and the UI acts on
+those. The test `the_ui_names_no_agent` in `src/integrations/mod.rs` fails
+when one of the UI's files, or `src/chat/btw.rs` and `src/chat/menu.rs`,
+names an `AgentKind::` variant or an agent's name outside its tests.
 
 | Folder | Agent |
 |---|---|
@@ -116,12 +116,15 @@ rows as `Parser::rows` takes them. See `src/integrations/cursor/db.rs` and
 | `modes` | The modes Shift+Tab steps through, in order. They show under the reply box, on desktop and phone. Sets `Caps::modes`. | none: no switcher |
 | `mode_shown` | The mode its screen shows, from its last rows that aren't empty, last first. | not read |
 
-### Plan menu and replies
+### Plan menu
 
 | Method | What gerdr does with it | Default |
 |---|---|---|
 | `plan_menu` | The menu it waits on under a plan: its question, its "keep planning" choice, and that choice's key. A line sent there leaves the menu first (`src/herdr.rs`). | no such menu |
-| `plan_reply` | How a plan review goes back: `DenyAsk` denies the plan ask with the comments, `Line` sends a line naming the review's file. Sets `Caps::plan_reply`. | `Line` |
+
+How a plan review goes back isn't the agent's to say. While a plan `Ask` of
+its waits, the review denies it with the comments. Else a line names the
+review's file (`send_plan_back` in `src/chat/plan_review.rs`).
 
 ### Suggestions
 
@@ -134,8 +137,30 @@ rows as `Parser::rows` takes them. See `src/integrations/cursor/db.rs` and
 
 | Method | What gerdr does with it | Default |
 |---|---|---|
-| `builtins` | Its built-in commands, for the `/` menu. A `btw` here sets `Caps::side`, which turns on the `/btw` side panel. | none |
+| `builtins` | Its built-in commands, for the `/` menu. | none |
 | `disk_commands` | Its commands, prompts and skills on disk for a folder, added to the `/` menu. | none |
+
+### Side questions
+
+| Method | What gerdr does with it | Default |
+|---|---|---|
+| `side_panel` | Its `/btw` panel, as a `SidePanel`: the marks `src/chat/btw.rs` reads it off the screen by. Sets `Caps::side`, which turns on side questions. | `None`: it takes none |
+
+A `SidePanel` is static data:
+
+| Field | What it is |
+|---|---|
+| `footers` | What its footer says, on its first row: where the panel ends |
+| `frame` | The marks of its frame, left of its rows |
+| `question_end` | What its question row ends with past the question (OpenCode's `esc`) |
+| `scroll_marks` | The marks at the end of the rows past which it scrolls (Claude's `↑`, `↓`) |
+| `braille` | It spins a braille spinner while it answers |
+| `stars` | The marks it spins before a word that goes on (`✽ Answering…`) |
+| `expand` | What its footer says when the answer is cut, and the keys that show the rest |
+
+The pane's agent is known when gerdr follows a side question, so its panel
+is read by its own marks only. `src/herdr.rs` checks for any agent's panel,
+by all of them (`btw::panel`).
 
 ### Live (hooks or plugin, asks)
 
@@ -155,9 +180,7 @@ a turn's end, an ask. There are two ways in.
 |---|---|---|
 | `hook_command` | The subcommand its hooks run. `src/main.rs` runs `run_hook` for it and exits. | no hook |
 | `run_hook` | Read the event, send it, and end. | nothing |
-| `install_live` | Add gerdr's hooks or plugin under a home folder, if the agent is installed. Runs once a run when the setting allows. Each file changed comes back for the Undo toast. | nothing installed |
-| `asks` | Its asks can be allowed or denied from the chat. Sets `Caps::asks`. | no |
-| `questions` | Its questions show as cards of their own. Sets `Caps::questions`. | no |
+| `install_live` | Add gerdr's hooks or plugin under a home folder, if the agent is installed, with `common/install.rs`. Runs once a run when the setting allows. Each file changed comes back for the Undo toast. | nothing installed |
 
 The events do the work. An `Ask` shows Allow and Deny. An `Ask` with
 `questions` shows a question card. An `Ask` with `plan: true` is a plan
@@ -188,7 +211,7 @@ through `Builder` (`src/integrations/common/build.rs`).
 | `Edit` | A file's path and its change. When there isn't both, it is a `Tool`. | `edit_or_tool`, `change`, `flat_edits`, `capped` |
 | `Plan` | A plan's markdown, and its file if it has one. A plan handed over again (plan mode's file, then its ask) shows once. | `plan(id, path, text)`, `plan_item`, `is_plan_file` |
 | `Subagent` | A subagent's work, in the place of the call that started it, with id `agent:<call>`. Its items come from a reader of its own in `b.subs` (`Sub::new`), copied in by `sync_subs`, or are built whole from rows (OpenCode). | `Sub`, `sync_subs`, `knows_call` |
-| `Note` | What gerdr says in the chat's place. | `INTERRUPTED`, `COMPACTED`, `CHAT_COMPACTED`, `cant_show(kind)` |
+| `Note` | What gerdr says in the chat's place. | `INTERRUPTED`, `COMPACTED`, `cant_show(kind)` |
 
 `Reader` adds a note itself for a line that isn't JSON. It skips a cut first
 line, since reading can start mid-file. Text parts of message content come
@@ -200,15 +223,16 @@ from `texts`, and a tag's text from `tag`.
 |---|---|---|
 | `common/build.rs` | `Builder`, `Sub`, the item helpers above, the note texts, the output caps (`MAX_LINES`, `MAX_BYTES`) | writing a parser |
 | `common/files.rs` | `stamp`, `with_wal` (a database and its WAL as they are now), `first_line`, `json_lines`, `lines_back` (a tail's JSON lines, last first), `read_at`, `whole_end`, `SubFiles` (subagents' transcripts as they grow) | finding chats, reading context and usage, reading subagent files |
-| `common/hook.rs` | `input`, `pane_input`, `tell`, `MAX_INPUT` | writing `run_hook` |
+| `common/find.rs` | `found` (a `Found` with nothing more), `subdirs`, `files_under`, `FIRST_LINE`, and a database's rows as JSON: `rows_json`, `rows_of`, `columns`, `pretty` | writing `find.rs` |
 | `common/pick.rs` | `Begun`, `nearest`: of chats with a start, the one in a run's folder and span, nearest in time | finding a chat by folder and time |
+| `common/screen.rs` | `asked`, `choice` (a model menu's rows), `wide_split`, `col_of`, `cut`, `style_at` (cutting rows by column), `CYCLE` | writing `screen.rs` |
+| `common/commands.rs` | `md_files`, `sub_dirs`, `tree`, `skills`, `named_skills`, `read_md`, `one_line` | writing `disk_commands` |
+| `common/hook.rs` | `input`, `pane_input`, `tell`, `MAX_INPUT` | writing `run_hook` |
+| `common/install.rs` | `install` (a file changed once, for Undo), `Changed`, `undo`, `with_key` (one key of the user's JSON set, the rest as it was), `hook_command`, `is_gerdr_command` | writing `install_live` |
 
-Some shared helpers still live next to the code that uses them:
-
-- `src/chat/live.rs`: `install`, `with_key`, `hook_command` (writing hooks).
-- `src/chat/commands.rs`: `md_files`, `named_skills`, `read_md`, `one_line` (commands on disk).
-- `src/chat/model_menu.rs`: `asked`, `choice`, `col_of`, `cut`, `style_at`, `wide_split` (reading menus off the screen).
-- `src/ai_work/locate.rs`: `found`, `plain_id`, `subdirs`, `FIRST_LINE` (finding).
+Only `plain_id` and the date helpers `civil` and `iso_secs` are still shared
+from outside `common/`, in `src/ai_work/locate.rs`: the finder and
+`chat::source` check ids with `plain_id` too.
 
 ## Adding an agent
 
@@ -232,11 +256,12 @@ what the new agent lacks.
    - `parse.rs`: the `Parser`, given by `parser`. Add `db.rs` for a database
      chat, and `subagents.rs` for subagents in files of their own.
    - `screen.rs`: `modes`, `mode_shown`, `model_switch`, `model_menu`,
-     `model_on_screen`, `plan_menu`, `suggestion`. Note the CLI version its
-     words were read from, in a `shortcut:` comment.
+     `model_on_screen`, `plan_menu`, `suggestion`, and `side_panel` if it
+     takes `/btw`. Note the CLI version its words were read from, in a
+     `shortcut:` comment.
    - `commands.rs`: `BUILTINS` for `builtins`, and `disk_commands`.
    - `live.rs`: `install_live`, and `hook_command` with `run_hook` for a
-     hook. Set `asks` and `questions` if its asks come through.
+     hook. Its asks and questions come through as live `Ask` events.
    - `stats.rs`: `has_context`, `context_in`, `usage`.
 5. **Tests and fixtures.** Test each file in its own `mod tests`. Real hook
    payloads and screen captures go in `src/integrations/<agent>/fixtures/`

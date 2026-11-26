@@ -1,7 +1,7 @@
 //! What Claude Code's screen shows: its mode under its reply box, and what
 //! it suggests saying next in it.
 
-use crate::scrollback::Styled;
+use crate::{integrations::SidePanel, scrollback::Styled};
 
 // shortcut: its words and marks are as Claude Code 2.1.332 drew them;
 // recheck them when it updates.
@@ -38,6 +38,20 @@ pub(crate) fn suggestion(rows: &[(String, Styled)]) -> Option<String> {
     let ghost = (start..chars.len()).all(|i| chars[i].is_whitespace() || dim(i));
     (ghost && !words.is_empty()).then_some(words)
 }
+
+// shortcut: its side panel's marks are as Claude Code 2.1.332 drew them (2026-11-25);
+// recheck them when it updates.
+/// Its `/btw` panel: "Esc to close" under it, its star spinning as it
+/// answers, `↑`/`↓` at the rows past which it scrolls.
+pub(crate) const SIDE_PANEL: SidePanel = SidePanel {
+    footers: &["to close", "to scroll"],
+    frame: "",
+    question_end: None,
+    scroll_marks: &['↑', '↓'],
+    braille: false,
+    stars: "✻✽✶✢✳·*",
+    expand: None,
+};
 
 #[cfg(test)]
 mod tests {

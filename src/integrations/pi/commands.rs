@@ -5,7 +5,8 @@ use std::{fs, path::Path};
 
 use crate::{
     ai_work::locate::Homes,
-    chat::commands::{Command, md_files, named_skills, one_line, read_md},
+    chat::commands::Command,
+    integrations::common::commands::{md_files, named_skills, one_line, read_md},
 };
 
 // shortcut: built-ins are hard-coded as pi 1.6.0 had them here; refresh them

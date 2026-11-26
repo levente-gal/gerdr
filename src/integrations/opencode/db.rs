@@ -8,7 +8,7 @@ use std::{
 
 use serde_json::Value;
 
-use crate::{ai_work::locate::rows_of, integrations::DbChat};
+use crate::integrations::{DbChat, common::find::rows_of};
 
 /// What of an OpenCode chat was read.
 #[derive(Default)]

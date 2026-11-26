@@ -5,7 +5,10 @@ use std::{fs, path::Path};
 
 use serde_json::Value;
 
-use crate::chat::commands::{Command, one_line, tree};
+use crate::{
+    chat::commands::Command,
+    integrations::common::commands::{one_line, tree},
+};
 
 // shortcut: built-ins are hard-coded as OpenCode 2.3.0 had them here;
 // refresh them when it changes.

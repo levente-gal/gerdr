@@ -12,10 +12,13 @@ use serde_json::Value;
 use crate::{
     ai_work::{
         AgentKind, Chat,
-        locate::{Form, Found, Homes, Span, found, plain_id},
+        locate::{Form, Found, Homes, Span, plain_id},
     },
     chat::source,
-    integrations::common::pick::{Begun, nearest},
+    integrations::common::{
+        find::found,
+        pick::{Begun, nearest},
+    },
 };
 
 /// The whole transcript's name; herdr's hook names the cut one beside it.

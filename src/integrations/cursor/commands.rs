@@ -5,7 +5,8 @@ use std::{fs, path::Path};
 
 use crate::{
     ai_work::locate::Homes,
-    chat::commands::{Command, md_files, one_line, skills},
+    chat::commands::Command,
+    integrations::common::commands::{md_files, one_line, skills},
 };
 
 // shortcut: hard-coded as Cursor 2026.11.22 had them; refresh them when it

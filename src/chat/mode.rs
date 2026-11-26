@@ -41,9 +41,6 @@ pub fn shown(kind: AgentKind, rows: &[&str]) -> Option<String> {
     crate::integrations::of(kind).mode_shown(&rows)
 }
 
-/// What Codex and Cursor say after their mode.
-pub(crate) const CYCLE: &str = "(shift+tab to cycle)";
-
 /// The mode agent `kind` shows on `ansi`, a pane's text with its escape
 /// sequences as herdr reads it.
 pub fn shown_in(kind: AgentKind, ansi: &str) -> Option<String> {

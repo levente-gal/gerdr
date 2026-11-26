@@ -28,9 +28,6 @@ table by hand: run `the_chat_doc_says_what_caps_say` in
 | `model`: model picker | typed | own menu | own menu | typed | own menu | own menu |
 | `side`: `/btw` side panel | ✓ | — | ✓ | ✓ | — | ✓ |
 | `suggests`: prompt suggestion | ✓ | — | — | — | — | — |
-| `asks`: Allow/Deny from the chat | ✓ | — | ✓ | — | — | — |
-| `questions`: question cards | ✓ | — | — | — | — | — |
-| `plan_reply`: a plan review goes back as | deny | line | line | line | line | line |
 | `context`: context size | ✓ | ✓ | — | ✓ | ✓ | — |
 <!-- caps:end -->
 
@@ -78,16 +75,16 @@ shared engine reads what they give. `<agent>/` below is any agent's folder.
 | Thinking, tool and edit-diff rows | `Parser::line`, `Parser::rows` | `<agent>/parse.rs` | `src/integrations/common/build.rs` |
 | Subagents | `subagents`, `Parser::subagent`, `Parser::take_subagent` | `claude/subagents.rs`, `antigravity/subagents.rs`, `opencode/db.rs` | `src/integrations/common/files.rs` (`SubFiles`) |
 | Plan cards | `parser` (`Builder::plan`, `plan_item`) | `claude/parse.rs` (`ExitPlanMode`), `codex/parse.rs` (`proposed_plan`), `cursor/parse.rs` (`CreatePlan`) | `src/integrations/common/build.rs` |
-| Plan review, and how it goes back | `plan_reply`; a live `Ask` with `plan` | `claude/live.rs` | `src/chat/plan_review.rs`, `src/chat/view.rs` (`review_target`) |
+| Plan review, and how it goes back | a live `Ask` with `plan` | `claude/live.rs` | `src/chat/plan_review.rs` (`send_plan_back`), `src/chat/view.rs` (`review_target`) |
 | A line on the plan menu leaves it first | `plan_menu` | `codex/screen.rs`, `cursor/screen.rs` | `src/herdr.rs` (`plan_menu_key`) |
-| Live events | `hook_command`, `run_hook`, `install_live` | `<agent>/live.rs`, `assets/opencode/gerdr-live/tui.js`, `assets/pi/gerdr-live.ts` | `src/chat/live.rs`, `src/integrations/common/hook.rs` |
-| Allow/Deny | `asks` | `claude/live.rs`, `assets/opencode/gerdr-live/tui.js` | `src/chat/live.rs` |
-| Question cards | `questions` | `claude/live.rs` | `src/chat/questions.rs` |
+| Live events | `hook_command`, `run_hook`, `install_live` | `<agent>/live.rs`, `assets/opencode/gerdr-live/tui.js`, `assets/pi/gerdr-live.ts` | `src/chat/live.rs`, `src/integrations/common/hook.rs`, `src/integrations/common/install.rs` |
+| Allow/Deny | a live `Ask` | `claude/live.rs`, `assets/opencode/gerdr-live/tui.js` | `src/chat/live.rs` |
+| Question cards | a live `Ask` with `questions` | `claude/live.rs` | `src/chat/questions.rs` |
 | Waiting panel | none, the same for all | | `src/chat/menu.rs` (`menu`) |
-| `/` menu | `builtins`, `disk_commands` | `<agent>/commands.rs` | `src/chat/commands.rs` (`list`) |
-| `/btw` | `builtins` (a `btw` sets `Caps::side`) | `<agent>/commands.rs` | `src/chat/btw.rs` |
+| `/` menu | `builtins`, `disk_commands` | `<agent>/commands.rs` | `src/chat/commands.rs` (`list`), `src/integrations/common/commands.rs` |
+| `/btw` | `side_panel` (sets `Caps::side`) | `<agent>/screen.rs` | `src/chat/btw.rs` |
 | Prompt suggestion | `suggests`, `suggestion` | `claude/screen.rs` | `src/chat/view.rs` |
-| Model picker | `model_switch`, `offers`, `own_model`, `models_read`, `model_menu`, `model_on_screen` | `<agent>/screen.rs` | `src/chat/model.rs`, `src/chat/model_menu.rs` |
+| Model picker | `model_switch`, `offers`, `own_model`, `models_read`, `model_menu`, `model_on_screen` | `<agent>/screen.rs` | `src/chat/model.rs`, `src/chat/model_menu.rs`, `src/integrations/common/screen.rs` |
 | Modes | `modes`, `mode_shown` | `<agent>/screen.rs` | `src/chat/mode.rs` |
 | Context | `has_context`, `context_in`, `context` | `<agent>/stats.rs` | `src/ai_work/context.rs` |
 

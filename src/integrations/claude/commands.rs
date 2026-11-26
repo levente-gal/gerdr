@@ -10,7 +10,8 @@ use serde_json::Value;
 
 use crate::{
     ai_work::locate::Homes,
-    chat::commands::{Command, skills, sub_dirs, tree},
+    chat::commands::Command,
+    integrations::common::commands::{skills, sub_dirs, tree},
 };
 
 // shortcut: built-ins are hard-coded as Claude Code 2.1.331 had them here;

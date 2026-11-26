@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use super::parse::GIST_KEYS;
 use crate::{
     chat::live::{self, What},
-    integrations::common::hook,
+    integrations::common::{hook, install::with_key},
     stats_panel::tool_gist,
 };
 
@@ -153,7 +153,7 @@ pub fn merged(existing: Option<&str>, command: &str) -> Result<String, String> {
     if object.get(NAME) == Some(&ours) {
         return Ok(text.to_owned());
     }
-    live::with_key(text, NAME, &ours)
+    with_key(text, NAME, &ours)
 }
 
 #[cfg(test)]
@@ -274,5 +274,24 @@ mod tests {
         assert_eq!(merged(Some(&fresh), command).unwrap(), fresh);
         assert!(merged(Some("{oops"), command).is_err());
         assert!(merged(Some("[]"), command).is_err());
+    }
+
+    #[test]
+    fn undo_gives_antigravity_its_hooks_back_as_they_were() {
+        use crate::integrations::antigravity::live as antigravity;
+        use crate::{
+            chat::live::tests::TempDir,
+            integrations::common::install::{install, undo},
+        };
+        let dir = TempDir::new();
+        let path = dir.path().join("hooks.json");
+        let theirs = "{\"herdr\": {\"PreInvocation\": [{\"command\": \"h\"}]}}\n";
+        std::fs::write(&path, theirs).unwrap();
+        let merge = |text: Option<&str>| antigravity::merged(text, "/g agy-hook");
+        let changed = install(&path, merge).unwrap().unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("agy-hook"));
+        assert_eq!(install(&path, merge).unwrap(), None, "once");
+        undo(&changed).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs);
     }
 }

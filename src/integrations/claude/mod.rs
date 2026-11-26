@@ -16,7 +16,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{Integration, ModelSwitch, Parser, PlanReply, Store, common::files::SubFiles};
+use super::{
+    Integration, ModelSwitch, Parser, SidePanel, Store,
+    common::{files::SubFiles, install::Changed},
+};
 use crate::{
     ai_work::{
         AgentKind, Chat,
@@ -24,7 +27,7 @@ use crate::{
         locate::{Found, Homes, Span},
         usage::Message,
     },
-    chat::{Source, commands::Command, live::Changed, parse::Reader},
+    chat::{Source, commands::Command, parse::Reader},
     herdr::Herdr,
     scrollback::Styled,
     stage_models::Offer,
@@ -130,10 +133,6 @@ impl Integration for Claude {
         })
     }
 
-    fn plan_reply(&self) -> PlanReply {
-        PlanReply::DenyAsk
-    }
-
     fn suggests(&self) -> bool {
         true
     }
@@ -142,12 +141,8 @@ impl Integration for Claude {
         screen::suggestion(rows)
     }
 
-    fn asks(&self) -> bool {
-        true
-    }
-
-    fn questions(&self) -> bool {
-        true
+    fn side_panel(&self) -> Option<SidePanel> {
+        Some(screen::SIDE_PANEL)
     }
 
     fn builtins(&self) -> &'static [(&'static str, &'static str)] {

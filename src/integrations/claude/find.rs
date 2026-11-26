@@ -6,9 +6,10 @@ use std::path::PathBuf;
 use crate::{
     ai_work::{
         AgentKind,
-        locate::{Form, Found, Homes, files_under, found},
+        locate::{Form, Found, Homes},
     },
     chat::source,
+    integrations::common::find::{files_under, found},
 };
 
 /// Claude Code chat `id`: `projects/<folder>/<id>.jsonl` of a config

@@ -4,9 +4,12 @@
 
 use std::{collections::HashSet, path::Path};
 
-use crate::ai_work::{
-    AgentKind, Chat,
-    locate::{Form, Found, Homes, Span, found, plain_id, subdirs},
+use crate::{
+    ai_work::{
+        AgentKind, Chat,
+        locate::{Form, Found, Homes, Span, plain_id},
+    },
+    integrations::common::find::{found, subdirs},
 };
 
 /// What a Cursor chat's folder holds beside its `store.db`.

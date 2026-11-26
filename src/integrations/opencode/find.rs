@@ -5,9 +5,12 @@ use std::{collections::HashSet, path::Path};
 
 use serde_json::Value;
 
-use crate::ai_work::{
-    AgentKind, Chat,
-    locate::{Form, Found, Span, columns, found, plain_id, pretty, rows_json},
+use crate::{
+    ai_work::{
+        AgentKind, Chat,
+        locate::{Form, Found, Span, plain_id},
+    },
+    integrations::common::find::{columns, found, pretty, rows_json},
 };
 
 /// The OpenCode chat of `chat`: by its id, or by folder and time. Its

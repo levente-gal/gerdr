@@ -2,9 +2,10 @@
 //! right of its last row, and its model menu.
 
 use crate::{
-    chat::{
-        menu::Menu,
-        model_menu::{asked, choice},
+    chat::menu::Menu,
+    integrations::{
+        SidePanel,
+        common::screen::{asked, choice},
     },
     scrollback::Styled,
 };
@@ -102,6 +103,21 @@ fn level(slider: &str, levels: &str) -> Option<String> {
         .min_by_key(|(mid, _)| mid.abs_diff(knob))?;
     Some(nearest.1)
 }
+
+// shortcut: its side panel's marks are as Antigravity CLI 1.5.17 drew them (2026-11-25);
+// recheck them when it updates.
+/// Its `/btw` panel: a bar at its left, a braille spinner under what it
+/// has so far, and a footer of how to see more (Tab), a row above its
+/// "Enter/Esc to dismiss" on a narrow pane.
+pub(crate) const SIDE_PANEL: SidePanel = SidePanel {
+    footers: &["to dismiss", "to scroll", "Tab to expand", "Tab to collapse"],
+    frame: "┃│",
+    question_end: None,
+    scroll_marks: &[],
+    braille: true,
+    stars: "",
+    expand: Some(("Tab to expand", &["Tab"])),
+};
 
 #[cfg(test)]
 mod tests {
