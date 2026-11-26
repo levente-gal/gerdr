@@ -152,12 +152,15 @@ impl Gerdr {
     /// Whether pane `pane_id`'s agent waits on the user's answer to the
     /// plan of item `item_id`.
     pub(crate) fn plan_ask_waits(&self, pane_id: &str, item_id: &str) -> bool {
-        self.plan_chat(pane_id).is_some_and(|chat| waits_on(chat, item_id))
+        self.plan_chat(pane_id)
+            .is_some_and(|chat| waits_on(chat, item_id))
     }
 
     /// Allow the plan pane `pane_id`'s agent waits on, as its card's Allow.
     pub(crate) fn allow_plan(&mut self, pane_id: &str) {
-        let ask = self.plan_chat(pane_id).and_then(|chat| chat.live.ask.clone());
+        let ask = self
+            .plan_chat(pane_id)
+            .and_then(|chat| chat.live.ask.clone());
         if let Some(ask) = ask.filter(crate::chrome::is_plan) {
             self.live_answer(&ask.ask, crate::chat::live::AskReply::Allow);
             if let Some(chat) = super::view::chat_mut(&mut self.workspaces, pane_id) {
@@ -176,8 +179,13 @@ impl Gerdr {
         comments: &str,
     ) -> Result<(), String> {
         if self.plan_ask_waits(pane_id, item_id) {
-            let ask = self.plan_chat(pane_id).and_then(|chat| chat.live.ask.clone());
-            if let Some(ask) = ask {
+            let ask = self
+                .plan_chat(pane_id)
+                .and_then(|chat| chat.live.ask.clone());
+            // Its hook still holding on: else the deny would go nowhere.
+            let held =
+                |ask: &crate::chat::live::PendingAsk| self.chats.live.asks.contains_key(&ask.ask);
+            if let Some(ask) = ask.filter(held) {
                 self.live_deny(&ask.ask, comments.to_owned());
                 if let Some(chat) = super::view::chat_mut(&mut self.workspaces, pane_id) {
                     chat.live.ask = None;

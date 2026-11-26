@@ -133,7 +133,7 @@ impl DocFile {
             DocFile::DraftChanges(stage, _) => artifacts::name(stage),
             DocFile::Suggestions => artifacts::name(Stage::Plan),
             DocFile::Findings => Some(review_import::FINDINGS),
-            // Its snapshot is named by its key: its comments say plan.md.
+            // Its snapshot is named by its key: its comments say "your plan".
             DocFile::ChatPlan(_) => Some(CHAT_PLAN_NAME),
             // Named by its turn or its number: its path says it.
             DocFile::ConflictPlan(_) | DocFile::Research(_) => None,
@@ -244,8 +244,9 @@ impl DocFile {
 
 /// Why a chat's plan can't be edited in its review.
 pub const CHAT_PLAN_READ_ONLY: &str = "A chat's plan takes comments only";
-/// What a chat's plan is called in its review and its comments.
-const CHAT_PLAN_NAME: &str = "plan.md";
+/// What a chat's plan is called in its review and its comments: not a
+/// file's name, which its agent would write.
+const CHAT_PLAN_NAME: &str = "your plan";
 /// What Approve does to a chat's plan nothing waits on: it refuses.
 pub const CHAT_PLAN_NOTHING_WAITS: &str =
     "Nothing waits on this plan: Send back sends your comments";
@@ -1444,7 +1445,7 @@ mod tests {
         assert_eq!(doc.standing, Standing::Open);
         assert_eq!(doc.path, crate::chat::plan_review::path(7));
         assert_eq!(doc.comments, crate::chat::plan_review::comments_path(7));
-        assert_eq!(doc.name(), "plan.md");
+        assert_eq!(doc.name(), "your plan");
         assert!(!doc.only_read() && !doc.closed());
         let waiting = chat_plan_doc("p", 7, chat(true), "");
         assert_eq!(waiting.state, "waiting for your answer");

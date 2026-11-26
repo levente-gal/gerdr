@@ -8201,7 +8201,7 @@ fn doc_suggestions() -> super::ReposView {
     view
 }
 
-const PLAN_REVIEW: [&str; 7] = [
+const PLAN_REVIEW: [&str; 8] = [
     "tab_plan_review_cards_1180",
     "tab_plan_review_cards_860",
     "tab_plan_review_writing_1180",
@@ -8209,10 +8209,11 @@ const PLAN_REVIEW: [&str; 7] = [
     "doc_suggestions_850",
     "finding_dialog_reject",
     "tab_plan_review_final_1180",
+    "doc_chat_plan_1180",
 ];
 
 /// The recorded hashes of `PLAN_REVIEW`, per case in `CASES`.
-const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
+const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
     // Dark at 1
     [
         0x24269a8e2d697d06, // tab_plan_review_cards_1180
@@ -8222,6 +8223,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
         0xa2d01c7198efce5a, // doc_suggestions_850
         0xef29518e2dc79076, // finding_dialog_reject
         0x01f089ca58405009, // tab_plan_review_final_1180
+        0x24898c7773397449, // doc_chat_plan_1180
     ],
     // Dark at 2
     [
@@ -8232,6 +8234,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
         0xd0ff3ff64d0737ab, // doc_suggestions_850
         0xb606ef86798ca204, // finding_dialog_reject
         0x71504de1609945c5, // tab_plan_review_final_1180
+        0xe91a16683836648b, // doc_chat_plan_1180
     ],
     // Light at 1
     [
@@ -8242,6 +8245,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
         0x2d929b2a87c88b65, // doc_suggestions_850
         0x6b76f1508ea97daa, // finding_dialog_reject
         0x886b4f096f2d5b9a, // tab_plan_review_final_1180
+        0xdc713deadf09a62a, // doc_chat_plan_1180
     ],
     // Light at 2
     [
@@ -8252,6 +8256,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 7]; 4] = [
         0x99b85378c2ada16f, // doc_suggestions_850
         0x31b7feb26a182cfc, // finding_dialog_reject
         0x1ca653a53ce94e81, // tab_plan_review_final_1180
+        0x90f049b49dd93e07, // doc_chat_plan_1180
     ],
 ];
 
@@ -8282,6 +8287,10 @@ fn plan_review_surface(
         }
         2 => tab(&tab_plan_review(true), 1180),
         6 => tab(&tab_plan_review_final(), 1180),
+        7 => (
+            doc_tab_buffer(painter, &doc_chat_plan(), 1180, theme, scale),
+            1180 + 2 * super::SHADOW,
+        ),
         3 => (
             doc_tab_buffer(painter, &doc_suggestions(), 1180, theme, scale),
             1180 + 2 * super::SHADOW,
@@ -8412,6 +8421,28 @@ fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposVi
         modes: Some(ModeSwitch { labels, on, off }),
         ..ReposView::diff_only(title, summary, None, hints, detail, None, density)
     }
+}
+
+/// A chat's plan in its review, its agent not waiting on it: only
+/// comments, no Approve, no Preview (`DocFile::ChatPlan`).
+fn doc_chat_plan() -> super::ReposView {
+    use super::ReposButton;
+    let mut view = doc_tab(0, 1.0, Vec::new(), false);
+    let mut review = doc_tab(1, 1.0, Vec::new(), false);
+    review.hints.retain(|h| h.button != ReposButton::Approve);
+    review.detail.title_buttons.retain(|h| h.button != ReposButton::Approve);
+    review.detail.title = "your plan \u{b7} 4 lines".into();
+    super::mark_primary(&mut review.detail.title_buttons);
+    view.hints = review.hints;
+    view.detail = review.detail;
+    view.title = "Plan from the chat".into();
+    view.summary =
+        "\u{201c}Log in with a password\u{201d} \u{b7} comments go to the agent as a message".into();
+    if let Some(modes) = view.modes.as_mut() {
+        modes.labels = vec!["Review".into(), "Split".into()];
+        modes.on = 0;
+    }
+    view
 }
 
 /// The brief, approved: only read, it reopens until the plan is written

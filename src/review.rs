@@ -322,7 +322,7 @@ pub fn doc_markdown(review: &Review, name: &str, outdated: impl Fn(&Comment) -> 
     let n = comments.len();
     let mut out = format!(
         "Review comments on {name} ({n} comment{}). \
-         Each quotes the lines it is about; address each one and write the file again.\n",
+         Each quotes the lines it is about; address each one and write it again.\n",
         if n == 1 { "" } else { "s" }
     );
     for c in comments {
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(
             text,
             "Review comments on brief.md (3 comments). \
-             Each quotes the lines it is about; address each one and write the file again.\n\
+             Each quotes the lines it is about; address each one and write it again.\n\
              \n### `brief.md` (the whole file)\n\nToo long overall\n\
              \n### `brief.md:1` (the file changed since)\n\n```\n# Title\n```\n\ngone\n\
              \n### `brief.md:3-4`\n\n````\n## Outcome\n```sh\n````\n\nSay who it is for.\n"

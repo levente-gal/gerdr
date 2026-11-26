@@ -1493,6 +1493,10 @@ impl WorktreeDiff {
             if doc.file == DocFile::Suggestions {
                 return format!("{REVIEW_IN_PLAN} \u{b7} {}", doc.name());
             }
+            // Its agent's plan in its chat: no file of the user's to name.
+            if doc.chat.is_some() {
+                return "Plan from the chat".into();
+            }
             if doc.file == DocFile::PlanChanges {
                 return format!("Plan review \u{b7} what {} changed", doc.name());
             }
@@ -4312,7 +4316,7 @@ pub(crate) mod tests {
             view.title_buttons.iter().map(|h| h.button).collect()
         };
         let mut wd = chat_plan(false);
-        assert_eq!(wd.heading(), "Plan · plan.md");
+        assert_eq!(wd.heading(), "Plan from the chat");
         assert_eq!(
             wd.summary(),
             "\u{201c}Cache the tokens\u{201d} · comments go to the agent as a message"
