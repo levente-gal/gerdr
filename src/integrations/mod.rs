@@ -449,6 +449,82 @@ mod tests {
         }
     }
 
+    /// The agents with a chat, as `docs/chat-agents.md` names them, in its
+    /// order.
+    const CHATS: [(AgentKind, &str); 6] = [
+        (AgentKind::Claude, "Claude"),
+        (AgentKind::Codex, "Codex"),
+        (AgentKind::OpenCode, "OpenCode"),
+        (AgentKind::Cursor, "Cursor"),
+        (AgentKind::Pi, "pi"),
+        (AgentKind::Antigravity, "agy"),
+    ];
+
+    /// Each field of `caps` as the doc's table says it: a new field won't
+    /// build here until it has its row.
+    fn caps_rows(caps: Caps) -> [(&'static str, &'static str); 10] {
+        let Caps {
+            chat,
+            earlier,
+            modes,
+            model,
+            side,
+            suggests,
+            asks,
+            questions,
+            plan_reply,
+            context,
+        } = caps;
+        let yes = |on: bool| if on { "✓" } else { "—" };
+        let model = match model {
+            ModelSwitch::None => "—",
+            ModelSwitch::Typed { .. } => "typed",
+            ModelSwitch::OwnMenu => "own menu",
+        };
+        let plan_reply = match plan_reply {
+            PlanReply::Line => "line",
+            PlanReply::DenyAsk => "deny",
+        };
+        [
+            ("`chat`: gerdr reads its chats", yes(chat)),
+            ("`earlier`: earlier messages on ask", yes(earlier)),
+            ("`modes`: mode switcher", yes(modes)),
+            ("`model`: model picker", model),
+            ("`side`: `/btw` side panel", yes(side)),
+            ("`suggests`: prompt suggestion", yes(suggests)),
+            ("`asks`: Allow/Deny from the chat", yes(asks)),
+            ("`questions`: question cards", yes(questions)),
+            ("`plan_reply`: a plan review goes back as", plan_reply),
+            ("`context`: context size", yes(context)),
+        ]
+    }
+
+    #[test]
+    fn the_chat_doc_says_what_caps_say() {
+        const DOC: &str = include_str!("../../docs/chat-agents.md");
+        let mut table = String::from("| `Caps` |");
+        for (_, name) in CHATS {
+            table += &format!(" {name} |");
+        }
+        table += &format!("\n|---|{}\n", "---|".repeat(CHATS.len()));
+        let rows: Vec<_> = CHATS.map(|(kind, _)| caps_rows(caps(kind))).into();
+        for (i, (field, _)) in rows[0].iter().enumerate() {
+            table += &format!("| {field} |");
+            for row in &rows {
+                table += &format!(" {} |", row[i].1);
+            }
+            table += "\n";
+        }
+        let block = (DOC.split_once("<!-- caps:begin -->\n"))
+            .and_then(|(_, rest)| rest.split_once("<!-- caps:end -->"))
+            .map(|(block, _)| block);
+        assert!(
+            block == Some(table.as_str()),
+            "docs/chat-agents.md's caps table isn't what the code says; put this \
+             between its caps:begin and caps:end lines:\n{table}"
+        );
+    }
+
     /// The files of the chat's UI, desktop and phone: they read `Caps`,
     /// items, live events and menus, and name no agent.
     const UI: [(&str, &str); 5] = [
