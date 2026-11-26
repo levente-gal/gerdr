@@ -7,19 +7,17 @@
 //! `cursor`). Item ids come from the transcript (a message's, a call's), so
 //! they stay the same when it is read again and folds keep.
 
-pub(crate) mod antigravity;
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
-pub(crate) mod opencode;
 pub(crate) mod patch;
 pub(crate) mod pi;
 
-pub(crate) use opencode::gist;
+pub(crate) use crate::integrations::opencode::parse::gist;
 
 use serde_json::Value;
 
-use super::{DiffLine, Item, ToolOut};
+use super::{Item, ToolOut};
 #[cfg(test)]
 pub(crate) use crate::integrations::common::build::plan_item;
 use crate::{
@@ -140,7 +138,7 @@ mod tests {
     use super::*;
     use crate::{
         ai_work::usage::iso_ms,
-        chat::DiffSide,
+        chat::{DiffLine, DiffSide},
         integrations::common::build::{MAX_BYTES, MAX_LINES, cap},
         md_blocks,
     };

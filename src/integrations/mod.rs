@@ -24,12 +24,12 @@ use crate::{
     stage_models::Offer,
 };
 
-mod antigravity;
+pub(crate) mod antigravity;
 mod claude;
 mod codex;
 pub mod common;
 mod cursor;
-mod opencode;
+pub(crate) mod opencode;
 mod pi;
 mod plain;
 mod t3;

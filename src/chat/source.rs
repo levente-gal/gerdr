@@ -211,16 +211,6 @@ fn locate(
     }))
 }
 
-/// The whole transcript of the Antigravity CLI conversation whose
-/// transcript is at `path` (herdr's hook names the cut one), if it is one
-/// under its home's `brain/`.
-pub(crate) fn antigravity_transcript(path: &str, homes: &Homes) -> Option<PathBuf> {
-    let brain = homes.antigravity.join("brain");
-    let real = transcript(path, std::slice::from_ref(&brain), |_| true)?;
-    let full = real.with_file_name("transcript_full.jsonl");
-    Some(if full.is_file() { full } else { real })
-}
-
 /// `path` as it really is, if it is a Claude transcript: a regular
 /// `.jsonl` file under `projects/` of one of the config folders `homes`.
 pub(crate) fn claude_transcript(path: &str, homes: &[PathBuf]) -> Option<PathBuf> {

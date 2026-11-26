@@ -1,4 +1,14 @@
-//! OpenCode.
+//! OpenCode. Its chats are sessions in its database,
+//! `~/.local/share/opencode/opencode.db`, read by what changed. Its live
+//! word comes from a plugin in its TUI (`~/.config/opencode/gerdr-live/`)
+//! that tells gerdr's socket itself.
+
+mod commands;
+mod db;
+mod find;
+mod live;
+pub(crate) mod parse;
+mod screen;
 
 use std::{collections::HashSet, path::Path};
 
@@ -6,9 +16,9 @@ use super::{DbChat, Integration, ModelSwitch, Parser, Store};
 use crate::{
     ai_work::{
         AgentKind, Chat,
-        locate::{self, Found, Homes, Span},
+        locate::{Found, Homes, Span},
     },
-    chat::{commands, commands::Command, live, menu::Menu, mode, model_menu, parse, tail},
+    chat::{commands::Command, live as hub, menu::Menu},
     scrollback::Styled,
 };
 
@@ -28,11 +38,11 @@ impl Integration for OpenCode {
     }
 
     fn parser(&self) -> Box<dyn Parser> {
-        Box::new(parse::opencode::OpenCode)
+        Box::new(parse::OpenCode)
     }
 
     fn db(&self) -> Option<Box<dyn DbChat>> {
-        Some(Box::<tail::db::OpenCodeDb>::default())
+        Some(Box::<db::OpenCodeDb>::default())
     }
 
     fn guesses(&self) -> bool {
@@ -48,7 +58,7 @@ impl Integration for OpenCode {
         claimed: &HashSet<String>,
         span: Span,
     ) -> Result<Option<Found>, String> {
-        locate::opencode(&homes.opencode, chat, claimed, span)
+        find::find(&homes.opencode, chat, claimed, span)
     }
 
     fn modes(&self) -> &'static [&'static str] {
@@ -56,7 +66,7 @@ impl Integration for OpenCode {
     }
 
     fn mode_shown(&self, rows: &[&str]) -> Option<String> {
-        mode::opencode_shown(rows)
+        screen::mode_shown(rows)
     }
 
     fn model_switch(&self) -> ModelSwitch {
@@ -64,11 +74,11 @@ impl Integration for OpenCode {
     }
 
     fn model_menu(&self, rows: &[(String, Styled)]) -> Option<Menu> {
-        model_menu::opencode(rows)
+        screen::model_menu(rows)
     }
 
     fn model_on_screen<'a>(&self, rows: &[&'a str]) -> Option<&'a str> {
-        model_menu::opencode_now(rows)
+        screen::model_now(rows)
     }
 
     fn asks(&self) -> bool {
@@ -76,20 +86,20 @@ impl Integration for OpenCode {
     }
 
     fn builtins(&self) -> &'static [(&'static str, &'static str)] {
-        commands::OPENCODE
+        commands::BUILTINS
     }
 
     fn disk_commands(&self, cwd: &Path, _homes: &Homes, config: &Path, found: &mut Vec<Command>) {
-        commands::opencode_disk(cwd, config, found);
+        commands::on_disk(cwd, config, found);
     }
 
-    fn install_live(&self, home: &Path) -> Vec<Result<Option<live::Changed>, String>> {
+    fn install_live(&self, home: &Path) -> Vec<Result<Option<hub::Changed>, String>> {
         let config = home.join(".config/opencode");
         if !config.is_dir() {
             return Vec::new();
         }
-        (live::opencode::files(&config).into_iter())
-            .map(|(path, merge)| live::install(&path, merge))
+        (live::files(&config).into_iter())
+            .map(|(path, merge)| hub::install(&path, merge))
             .collect()
     }
 }

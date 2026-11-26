@@ -9,11 +9,13 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::{DiffLine, Item, ToolOut, patch};
-use crate::integrations::{
-    Parser,
-    common::build::{
-        self, Builder, COMPACTED, INTERRUPTED, cap, capped, change, input_text, texts,
+use crate::{
+    chat::{DiffLine, Item, ToolOut, parse::patch},
+    integrations::{
+        Parser,
+        common::build::{
+            self, Builder, COMPACTED, INTERRUPTED, cap, capped, change, input_text, texts,
+        },
     },
 };
 

@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 
-use super::{Item, ToolOut, opencode::gist};
+use super::{Item, ToolOut, gist};
 use crate::integrations::{
     Parser,
     common::build::{Builder, COMPACTED, cap, change, edit_or_tool, input_text, tag, texts},

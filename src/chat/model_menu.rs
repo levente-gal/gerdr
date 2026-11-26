@@ -77,14 +77,6 @@ pub(crate) fn codex_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
     })
 }
 
-/// OpenCode's: "┃  Build · GPT-5.6 Sol OpenAI · high" under its reply box.
-pub(crate) fn opencode_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
-    rows.iter().find_map(|row| {
-        let row = row.strip_prefix('┃')?;
-        row.split(" · ").nth(1)
-    })
-}
-
 /// pi's: "(anthropic) claude-opus-5-5 • medium" at the right of its last
 /// row.
 pub(crate) fn pi_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
@@ -92,18 +84,6 @@ pub(crate) fn pi_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
         let right = row.rsplit("  ").next()?.trim();
         let (_, model) = right.strip_prefix('(')?.split_once(") ")?;
         Some(model.split(" • ").next().unwrap_or(model))
-    })
-}
-
-/// The Antigravity CLI's: "auto · model · effort" at the right of its last
-/// row: its default mode leaves the mode out, a model without efforts the
-/// effort.
-pub(crate) fn antigravity_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
-    rows.iter().take(2).find_map(|row| {
-        let right = row.rsplit("  ").next()?.trim();
-        let mut parts = right.split(" · ").peekable();
-        parts.next_if(|p| ["auto", "plan", "accept-edits"].contains(p));
-        parts.next().filter(|_| right.contains(" · "))
     })
 }
 
@@ -126,56 +106,6 @@ pub(crate) fn codex(rows: &[(String, Styled)]) -> Option<Menu> {
         (choice.label, choice.detail) = (label, detail);
     }
     Some(m)
-}
-
-/// OpenCode's dialog over its chat: "Select model … esc", its search
-/// field, then models under headings (Recent, each provider); the current
-/// one marked ●, the arrow's on a ground of its own.
-pub(crate) fn opencode(rows: &[(String, Styled)]) -> Option<Menu> {
-    let top = rows.iter().rposition(|(t, _)| {
-        let t = t.trim();
-        t.starts_with("Select model") && t.ends_with("esc")
-    })?;
-    let (title, title_styles) = &rows[top];
-    let left = col_of(title, "Select model")?;
-    let right = col_of(title, "esc")? + 3;
-    // The dialog's own ground: the arrow's row has another.
-    let ground = style_at(title_styles, left).and_then(|s| s.bg);
-    let mut search = None;
-    let mut choices = Vec::new();
-    for (text, styles) in &rows[top + 1..] {
-        let row = cut(text, left.saturating_sub(2), right);
-        let words = row.trim();
-        if words.contains("ctrl+") {
-            break;
-        }
-        if words.is_empty() {
-            continue;
-        }
-        // Its first row is the search field: a dim "Search" till typed in.
-        let Some(_) = search else {
-            search = Some(if words == "Search" { "" } else { words }.to_owned());
-            continue;
-        };
-        if words == "No results found" {
-            continue;
-        }
-        let at = style_at(styles, left).copied().unwrap_or_default();
-        let picked = at.bg.is_some() && at.bg != ground;
-        // A heading: bold on the dialog's ground.
-        if at.bold && !picked {
-            continue;
-        }
-        let current = row.trim_start().starts_with('●');
-        let (label, detail) = wide_split(words.trim_start_matches('●').trim());
-        choices.push(choice(label, detail, picked, current));
-    }
-    let search = search?;
-    Some(Menu {
-        ask: asked("Select model", &search, None),
-        choices,
-        ..Menu::default()
-    })
 }
 
 /// pi's selector under its chat: its search line (">"), the models (→ on
@@ -228,74 +158,9 @@ pub(crate) fn pi(rows: &[(String, Styled)]) -> Option<Menu> {
     })
 }
 
-/// Antigravity's: "Switch Model", "Search:", the models (> on the arrow's,
-/// "(current)" after the current one), and an effort slider (◉ over its
-/// level) that ←/→ move while no search is typed.
-pub(crate) fn antigravity(rows: &[(String, Styled)]) -> Option<Menu> {
-    let top = (rows.iter()).rposition(|(t, _)| t.trim() == "Switch Model")?;
-    let mut search = String::new();
-    let mut choices = Vec::new();
-    let mut effort = None;
-    let mut i = top + 1;
-    while i < rows.len() {
-        let t = rows[i].0.trim();
-        if let Some(typed) = t.strip_prefix("Search:") {
-            search = typed.trim().to_owned();
-        } else if t.starts_with("Effort") {
-            // Its levels and what the one picked is for come under it.
-            effort = rows
-                .get(i + 1)
-                .and_then(|(levels, _)| level(&rows[i].0, levels));
-            break;
-        } else if t.starts_with("Keyboard:") {
-            break;
-        } else if !t.is_empty() && !t.chars().all(|c| c == '─') {
-            let (picked, t) = match t.strip_prefix("> ") {
-                Some(after) => (true, after.trim()),
-                None => (false, t),
-            };
-            let (current, t) = match t.strip_suffix("(current)") {
-                Some(name) => (true, name.trim()),
-                None => (false, t),
-            };
-            choices.push(choice(t.to_owned(), String::new(), picked, current));
-        }
-        i += 1;
-    }
-    Some(Menu {
-        ask: asked("Switch model", &search, effort.as_deref()),
-        sideways: effort.is_some(),
-        choices,
-        ..Menu::default()
-    })
-}
-
-/// The level under the slider's knob (◉) on row `slider`, by the word of
-/// row `levels` nearest it.
-fn level(slider: &str, levels: &str) -> Option<String> {
-    let knob = slider.chars().position(|c| c == '◉')?;
-    let mut words = Vec::new();
-    let mut start = None;
-    for (i, c) in levels.chars().chain([' ']).enumerate() {
-        match (c.is_alphabetic(), start) {
-            (true, None) => start = Some(i),
-            (false, Some(s)) => {
-                let word: String = levels.chars().skip(s).take(i - s).collect();
-                words.push(((s + i) / 2, word));
-                start = None;
-            }
-            _ => {}
-        }
-    }
-    let nearest = words
-        .into_iter()
-        .min_by_key(|(mid, _)| mid.abs_diff(knob))?;
-    Some(nearest.1)
-}
-
 /// What the panel says above the rows: the menu's title, what is typed in
 /// its search, and its effort.
-fn asked(title: &str, search: &str, effort: Option<&str>) -> Vec<(String, bool)> {
+pub(crate) fn asked(title: &str, search: &str, effort: Option<&str>) -> Vec<(String, bool)> {
     let mut ask = vec![(title.to_owned(), true)];
     if !search.is_empty() {
         ask.push((format!("Search: {search}"), false));
@@ -306,7 +171,7 @@ fn asked(title: &str, search: &str, effort: Option<&str>) -> Vec<(String, bool)>
     ask
 }
 
-fn choice(label: String, detail: String, picked: bool, current: bool) -> Choice {
+pub(crate) fn choice(label: String, detail: String, picked: bool, current: bool) -> Choice {
     let label = match current {
         true => format!("{label} (current)"),
         false => label,
@@ -323,7 +188,7 @@ fn choice(label: String, detail: String, picked: bool, current: bool) -> Choice 
 
 /// `text` split at its first gap of two blanks or more: a row's label and
 /// what it says more, the blanks inside the label made one.
-fn wide_split(text: &str) -> (String, String) {
+pub(crate) fn wide_split(text: &str) -> (String, String) {
     let (label, more) = text.trim().split_once("  ").unwrap_or((text.trim(), ""));
     let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
     let more = more.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -335,13 +200,13 @@ fn wide_split(text: &str) -> (String, String) {
 }
 
 /// Where `word` starts in `text`, in characters.
-fn col_of(text: &str, word: &str) -> Option<usize> {
+pub(crate) fn col_of(text: &str, word: &str) -> Option<usize> {
     let at = text.find(word)?;
     Some(text[..at].chars().count())
 }
 
 /// The characters of `text` from `from` up to `to`.
-fn cut(text: &str, from: usize, to: usize) -> String {
+pub(crate) fn cut(text: &str, from: usize, to: usize) -> String {
     text.chars()
         .skip(from)
         .take(to.saturating_sub(from))
@@ -349,7 +214,7 @@ fn cut(text: &str, from: usize, to: usize) -> String {
 }
 
 /// The style of character `col` of a row styled `styles`.
-fn style_at(styles: &Styled, col: usize) -> Option<&Style> {
+pub(crate) fn style_at(styles: &Styled, col: usize) -> Option<&Style> {
     styles
         .iter()
         .find(|(r, _)| r.contains(&col))
@@ -405,33 +270,6 @@ mod tests {
     }
 
     #[test]
-    fn opencodes_dialog_reads_without_its_headings_the_arrow_by_its_ground() {
-        let rows = screen(include_str!("fixtures/model_menu/oc.ansi"));
-        let m = read(AgentKind::OpenCode, &rows).expect("a menu");
-        assert_eq!(m.ask, [("Select model".to_owned(), true)]);
-        assert_eq!(
-            labels(&m)[..3],
-            [
-                "GPT-5.6 Sol OpenAI (current)",
-                "GPT-5.6 Luna OpenAI",
-                "Big Pickle OpenCode"
-            ]
-        );
-        assert_eq!(m.choices[2].detail, "Free");
-        assert!(!labels(&m).contains(&"Recent") && !labels(&m).contains(&"OpenCode"));
-        assert!(labels(&m).contains(&"Tidepool Alpha Free"));
-        assert_eq!(picked(&m), "GPT-5.6 Luna OpenAI");
-
-        let rows = screen(include_str!("fixtures/model_menu/oc-search.ansi"));
-        let m = read(AgentKind::OpenCode, &rows).expect("a menu searched");
-        assert_eq!(m.ask[1].0, "Search: son");
-        assert!(m.choices.is_empty());
-
-        let idle = screen(include_str!("fixtures/model_menu/oc-idle.ansi"));
-        assert_eq!(read(AgentKind::OpenCode, &idle), None);
-    }
-
-    #[test]
     fn pis_selector_reads_with_its_providers_and_search() {
         let rows = screen(include_str!("fixtures/model_menu/pi.ansi"));
         let m = read(AgentKind::Pi, &rows).expect("a menu");
@@ -454,27 +292,6 @@ mod tests {
 
         let idle = screen(include_str!("fixtures/model_menu/pi-idle.ansi"));
         assert_eq!(read(AgentKind::Pi, &idle), None);
-    }
-
-    #[test]
-    fn antigravitys_menu_reads_with_its_effort_then_searched_without() {
-        let rows = screen(include_str!("fixtures/model_menu/agy.ansi"));
-        let m = read(AgentKind::Antigravity, &rows).expect("a menu");
-        assert_eq!(m.choices.len(), 8);
-        assert_eq!(m.choices[0].label, "Gemini 4 Hydrogen (current)");
-        assert_eq!(picked(&m), "Gemini 3.8 Flash");
-        assert!(m.sideways);
-        // The effort the model under the arrow would get.
-        assert_eq!(m.ask[1].0, "Effort: medium (← →)");
-
-        let rows = screen(include_str!("fixtures/model_menu/agy-search.ansi"));
-        let m = read(AgentKind::Antigravity, &rows).expect("a menu searched");
-        assert_eq!(labels(&m), ["Claude Sonnet 4.6 (Thinking)"]);
-        assert_eq!(m.ask[1].0, "Search: son");
-        assert!(!m.sideways);
-
-        let idle = screen(include_str!("fixtures/model_menu/agy-idle.ansi"));
-        assert_eq!(read(AgentKind::Antigravity, &idle), None);
     }
 
     #[test]

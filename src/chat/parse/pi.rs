@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::{Item, ToolOut, opencode::gist};
+use super::{Item, ToolOut, gist};
 use crate::integrations::{
     Parser,
     common::build::{

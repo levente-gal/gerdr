@@ -27,9 +27,9 @@ use std::{
 
 use serde_json::Value;
 
-use super::{Item, Reader, ToolOut};
 use crate::{
     ai_work::{AgentKind, usage::iso_ms},
+    chat::{Item, ToolOut, parse::Reader},
     integrations::{
         Parser,
         common::build::{Builder, Sub, cap, change, edit_or_tool, flat_edits, input_text},
@@ -61,8 +61,9 @@ struct Spawn {
     taken: Vec<(String, usize, usize)>,
 }
 
-/// What a tool's arguments are named, its gist first.
-const GIST_KEYS: [&str; 9] = [
+/// What a tool's arguments are named, its gist first: the chat's and the
+/// live hook's.
+pub(super) const GIST_KEYS: [&str; 8] = [
     "CommandLine",
     "AbsolutePath",
     "Path",
@@ -71,8 +72,10 @@ const GIST_KEYS: [&str; 9] = [
     "SearchPath",
     "Query",
     "Url",
-    "toolSummary",
 ];
+/// The chat's gist after all `GIST_KEYS`: what the transcript says the
+/// call is for.
+const SUMMARY_KEY: &str = "toolSummary";
 
 impl Parser for Antigravity {
     /// Read transcript line `line`.
@@ -249,7 +252,7 @@ impl Antigravity {
             });
         }
         let item = edit_or_tool(id.clone(), args["TargetFile"].as_str(), diff, || {
-            let gist = (GIST_KEYS.iter())
+            let gist = (GIST_KEYS.iter().chain([&SUMMARY_KEY]))
                 .find_map(|k| args.get(*k).and_then(tool_gist))
                 .unwrap_or_default();
             let input = match args["CommandLine"].as_str() {

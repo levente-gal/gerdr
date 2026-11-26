@@ -199,7 +199,7 @@ fn files_under(base: &Path, subs: &[&str]) -> Vec<(String, PathBuf)> {
     files
 }
 
-fn found(agent: AgentKind, id: &str, main: PathBuf, form: Form) -> Found {
+pub(crate) fn found(agent: AgentKind, id: &str, main: PathBuf, form: Form) -> Found {
     Found {
         agent,
         id: id.to_owned(),
@@ -408,53 +408,6 @@ pub(crate) fn pi_by_time(
     plain_id(&meta.id).then(|| found(AgentKind::Pi, &meta.id, main.clone(), Form::Lines))
 }
 
-/// The Antigravity CLI's transcript of conversation `id`, the whole one:
-/// `brain/<id>/.system_generated/logs/transcript_full.jsonl`.
-pub fn antigravity_transcript(home: &Path, id: &str) -> PathBuf {
-    (home.join("brain").join(id)).join(".system_generated/logs/transcript_full.jsonl")
-}
-
-/// Antigravity CLI conversation `id`.
-pub(crate) fn antigravity_by_id(home: &Path, id: &str) -> Option<Found> {
-    let main = antigravity_transcript(home, id);
-    main.is_file()
-        .then(|| found(AgentKind::Antigravity, id, main, Form::Lines))
-}
-
-/// The Antigravity CLI conversation of `chat`'s run, by folder and time:
-/// its `history.jsonl` has a line per prompt typed, with the conversation
-/// and the folder (`{timestamp, workspace, conversationId}`); a
-/// conversation begins with its first.
-pub(crate) fn antigravity_by_time(
-    home: &Path,
-    chat: &Chat,
-    claimed: &HashSet<String>,
-    span: Span,
-) -> Option<Found> {
-    let history = std::fs::read_to_string(home.join("history.jsonl")).ok()?;
-    let mut metas: Vec<Begun> = Vec::new();
-    for line in history.lines() {
-        let Ok(line) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        let (Some(id), Some(cwd), Some(ms)) = (
-            line["conversationId"].as_str(),
-            line["workspace"].as_str(),
-            line["timestamp"].as_u64(),
-        ) else {
-            continue;
-        };
-        if !metas.iter().any(|m| m.id == id) {
-            let (id, cwd, started) = (id.to_owned(), PathBuf::from(cwd), ms / 1000);
-            metas.push(Begun { id, cwd, started });
-        }
-    }
-    let meta = nearest(chat, span, claimed, metas.iter().map(|m| (m, m)))?;
-    plain_id(&meta.id)
-        .then(|| antigravity_by_id(home, &meta.id))
-        .flatten()
-}
-
 /// The folder Cursor keeps folder `dir`'s things in under `projects/`: its
 /// path with each run of other than letters and digits one `-`, none at
 /// either end (`/home/me/.cache/x` is `home-me-cache-x`).
@@ -541,7 +494,11 @@ fn cell(name: &str, value: rusqlite::types::ValueRef) -> Value {
 }
 
 /// The rows `sql` gives for `arg`, each as a JSON object by column.
-fn rows_json(conn: &rusqlite::Connection, sql: &str, arg: &str) -> rusqlite::Result<Vec<Value>> {
+pub(crate) fn rows_json(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    arg: &str,
+) -> rusqlite::Result<Vec<Value>> {
     rows_of(conn, sql, [arg])
 }
 
@@ -564,134 +521,14 @@ pub(crate) fn rows_of(
 }
 
 /// The columns of table `table`; none when it isn't there.
-fn columns(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+pub(crate) fn columns(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<Vec<String>> {
     let mut query = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
     let names = query.query_map([table], |row| row.get(0))?;
     names.collect()
 }
 
-fn pretty(value: &Value) -> Vec<u8> {
+pub(crate) fn pretty(value: &Value) -> Vec<u8> {
     serde_json::to_vec_pretty(value).unwrap_or_default()
-}
-
-/// The OpenCode chat of `chat`: by its id, or by folder and time. Its
-/// schema isn't known for sure, so it is asked first; a database not as
-/// expected finds nothing.
-pub(crate) fn opencode(
-    db: &Path,
-    chat: &Chat,
-    claimed: &HashSet<String>,
-    span: Span,
-) -> Result<Option<Found>, String> {
-    if !db.is_file() {
-        return Ok(None);
-    }
-    let read = || -> rusqlite::Result<Option<Found>> {
-        let conn = crate::cursor_agents::open_read_only(db)?;
-        conn.busy_timeout(std::time::Duration::from_secs(2))?;
-        let has = |table: &str, want: &[&str]| -> rusqlite::Result<bool> {
-            let cols = columns(&conn, table)?;
-            Ok(want.iter().all(|w| cols.iter().any(|c| c == w)))
-        };
-        let need = ["id", "directory", "time_created"];
-        // OpenCode 2 keeps both: older chats in the first tables, newer
-        // ones only in the second.
-        let mut schemas = Vec::new();
-        if has("session", &need)? && has("message", &["session_id", "data"])? {
-            schemas.push(("session", false));
-        }
-        if has("session_v2", &need)? && has("session_message", &["session_id", "seq", "data"])? {
-            schemas.push(("session_v2", true));
-        }
-        let mut hit = None;
-        for (session, v2) in schemas {
-            if let Some(row) = opencode_session(&conn, session, chat, claimed, span)? {
-                hit = Some((row, v2));
-                break;
-            }
-        }
-        let Some((session_row, v2)) = hit else {
-            return Ok(None);
-        };
-        let id = session_row["id"].as_str().unwrap_or_default().to_owned();
-        if !plain_id(&id) {
-            return Ok(None);
-        }
-        let mut lines = Vec::new();
-        let messages = match v2 {
-            false => rows_json(
-                &conn,
-                "SELECT * FROM message WHERE session_id = ?1 ORDER BY time_created, id",
-                &id,
-            )?,
-            true => rows_json(
-                &conn,
-                "SELECT * FROM session_message WHERE session_id = ?1 ORDER BY seq",
-                &id,
-            )?,
-        };
-        let parts = match !v2 && has("part", &["message_id", "session_id", "data"])? {
-            true => rows_json(
-                &conn,
-                "SELECT * FROM part WHERE session_id = ?1 ORDER BY time_created, id",
-                &id,
-            )?,
-            false => Vec::new(),
-        };
-        for mut message in messages {
-            let own: Vec<Value> = (parts.iter())
-                .filter(|p| p["message_id"] == message["id"])
-                .cloned()
-                .collect();
-            if !own.is_empty() {
-                message["parts"] = Value::Array(own);
-            }
-            lines.extend(serde_json::to_vec(&message).unwrap_or_default());
-            lines.push(b'\n');
-        }
-        let mut chat = found(
-            AgentKind::OpenCode,
-            &id,
-            db.to_path_buf(),
-            Form::Made(lines),
-        );
-        chat.rows = vec![("opencode/session.json".to_owned(), pretty(&session_row))];
-        Ok(Some(chat))
-    };
-    read().map_err(|err| format!("reading {}: {err}", db.display()))
-}
-
-/// The session row of `chat` in OpenCode's table `table`.
-fn opencode_session(
-    conn: &rusqlite::Connection,
-    table: &str,
-    chat: &Chat,
-    claimed: &HashSet<String>,
-    span: Span,
-) -> rusqlite::Result<Option<Value>> {
-    if let Some(id) = &chat.id {
-        let rows = rows_json(conn, &format!("SELECT * FROM {table} WHERE id = ?1"), id)?;
-        return Ok(rows.into_iter().next());
-    }
-    // OpenCode's times are in milliseconds.
-    let (from, to) = (span.from * 1000, span.to * 1000);
-    let rows = rows_json(
-        conn,
-        &format!(
-            "SELECT * FROM {table} WHERE time_created BETWEEN {from} AND {to} AND ?1 = ?1 \
-             ORDER BY time_created"
-        ),
-        "",
-    )?;
-    let near = span.near * 1000;
-    Ok((rows.into_iter())
-        .filter(|row| row["parent_id"].is_null())
-        .filter(|row| !row["id"].as_str().is_some_and(|id| claimed.contains(id)))
-        .filter(|row| {
-            let dir = Path::new(row["directory"].as_str().unwrap_or(""));
-            !dir.as_os_str().is_empty() && chat.folders.iter().any(|f| dir.starts_with(f))
-        })
-        .min_by_key(|row| row["time_created"].as_u64().unwrap_or(0).abs_diff(near)))
 }
 
 /// A T3 Code thread's rows: the thread, its runs, its agents' threads.
@@ -1048,6 +885,7 @@ mod tests {
 
     #[test]
     fn pi_and_antigravity_chats_are_found_by_id_and_by_folder_and_time() {
+        use crate::integrations::antigravity::find::transcript as antigravity_transcript;
         let home = std::env::temp_dir().join(format!("gerdr-locate-piagy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let homes = Homes::under(&home);
@@ -1386,74 +1224,6 @@ mod tests {
         );
         assert_eq!(listing.main.len, 3);
         assert_eq!(listing.extra[0].0, "subagents/a.jsonl");
-    }
-
-    #[test]
-    fn an_opencode_chat_is_read_out_of_its_database() {
-        let home = scratch("locate-opencode");
-        let homes = Homes::under(&home);
-        std::fs::create_dir_all(homes.opencode.parent().unwrap()).unwrap();
-        let conn = rusqlite::Connection::open(&homes.opencode).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, time_created INTEGER);
-             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
-             CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
-             INSERT INTO session VALUES ('ses_a', NULL, '/w/x', 100500);
-             INSERT INTO session VALUES ('ses_sub', 'ses_a', '/w/x', 100600);
-             INSERT INTO message VALUES ('m1', 'ses_a', 100700, '{\"role\":\"user\"}');
-             INSERT INTO part VALUES ('p1', 'm1', 'ses_a', 100701, '{\"text\":\"hi\"}');",
-        )
-        .unwrap();
-        drop(conn);
-        let c = chat(AgentKind::OpenCode, None, 100, &[Path::new("/w")]);
-        let f = find(&homes, &c, &HashSet::new()).unwrap().unwrap();
-        assert_eq!(f.id, "ses_a");
-        let Form::Made(lines) = &f.form else {
-            panic!("{:?}", f.form)
-        };
-        let line: Value =
-            serde_json::from_slice(lines.split(|b| *b == b'\n').next().unwrap()).unwrap();
-        assert_eq!(line["data"]["role"], "user");
-        assert_eq!(line["parts"][0]["data"]["text"], "hi");
-        assert_eq!(f.rows[0].0, "opencode/session.json");
-    }
-
-    #[test]
-    fn a_newer_opencode_chat_is_found_beside_older_ones() {
-        let home = scratch("locate-opencode2");
-        let homes = Homes::under(&home);
-        std::fs::create_dir_all(homes.opencode.parent().unwrap()).unwrap();
-        let conn = rusqlite::Connection::open(&homes.opencode).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE session (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, time_created INTEGER);
-             CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
-             CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT, time_created INTEGER);
-             CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER, data TEXT);
-             INSERT INTO session VALUES ('ses_old', NULL, '/w/x', 100500);
-             INSERT INTO session_v2 VALUES ('ses_old', NULL, '/w/x', 100500);
-             INSERT INTO session_v2 VALUES ('ses_new', NULL, '/w/y', 200500);
-             INSERT INTO session_message VALUES ('m1', 'ses_new', 'user', 1, '{\"text\":\"hi\"}');",
-        )
-        .unwrap();
-        drop(conn);
-        let mut c = chat(AgentKind::OpenCode, None, 200, &[Path::new("/w/y")]);
-        c.id = Some("ses_new".into());
-        let f = find(&homes, &c, &HashSet::new()).unwrap().unwrap();
-        let Form::Made(lines) = &f.form else {
-            panic!("{:?}", f.form)
-        };
-        let line: Value =
-            serde_json::from_slice(lines.split(|b| *b == b'\n').next().unwrap()).unwrap();
-        assert_eq!(
-            (line["type"].as_str(), line["data"]["text"].as_str()),
-            (Some("user"), Some("hi"))
-        );
-        // By folder and time too.
-        c.id = None;
-        assert_eq!(
-            find(&homes, &c, &HashSet::new()).unwrap().unwrap().id,
-            "ses_new"
-        );
     }
 
     #[test]

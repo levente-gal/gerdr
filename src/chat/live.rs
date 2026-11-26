@@ -26,9 +26,7 @@ use sha2::{Digest, Sha256};
 use super::Item;
 use crate::herdr::AgentSession;
 
-pub mod antigravity;
 pub mod claude;
-pub mod opencode;
 pub(crate) mod serve;
 
 /// How long an ask waits for an answer from the chat before the agent's TUI
@@ -431,7 +429,7 @@ pub fn install(
 /// `text`, a JSON object, with its top-level `key` set to `value`. Only
 /// that value's text changes: serde_json here sorts keys, and the user's
 /// files keep their order and spacing.
-pub(super) fn with_key(text: &str, key: &str, value: &serde_json::Value) -> Result<String, String> {
+pub(crate) fn with_key(text: &str, key: &str, value: &serde_json::Value) -> Result<String, String> {
     let root: serde_json::Value = serde_json::from_str(text).map_err(|err| err.to_string())?;
     if !root.is_object() {
         return Err("not a JSON object".into());
@@ -817,6 +815,7 @@ mod tests {
 
     #[test]
     fn undo_gives_antigravity_its_hooks_back_as_they_were() {
+        use crate::integrations::antigravity::live as antigravity;
         let dir = TempDir::new();
         let path = dir.path().join("hooks.json");
         let theirs = "{\"herdr\": {\"PreInvocation\": [{\"command\": \"h\"}]}}\n";

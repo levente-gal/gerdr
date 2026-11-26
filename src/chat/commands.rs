@@ -75,39 +75,6 @@ pub(crate) const CLAUDE: &[(&str, &str)] = &[
     ("schedule", "Schedule a cloud agent"),
 ];
 
-pub(crate) const OPENCODE: &[(&str, &str)] = &[
-    ("agents", "Pick the agent"),
-    ("btw", "Ask a side question"),
-    ("cd", "Change the folder"),
-    ("clear", "Clear the session"),
-    ("compact", "Compact the session"),
-    ("connect", "Connect a provider"),
-    ("copy", "Copy the session"),
-    ("diff", "Show the changes"),
-    ("editor", "Write in the editor"),
-    ("exit", "Quit"),
-    ("export", "Export the session"),
-    ("fork", "Fork the session"),
-    ("help", "Show help"),
-    ("init", "Write AGENTS.md"),
-    ("mcps", "List MCP servers"),
-    ("models", "Pick the model"),
-    ("new", "Start a new session"),
-    ("plugins", "List plugins"),
-    ("redo", "Redo"),
-    ("rename", "Rename the session"),
-    ("review", "Review changes"),
-    ("sessions", "Pick a session"),
-    ("skills", "Pick a skill"),
-    ("stats", "Show stats"),
-    ("status", "Show the status"),
-    ("themes", "Pick the theme"),
-    ("timeline", "Jump to a message"),
-    ("undo", "Undo the last message"),
-    ("usage", "Show usage"),
-    ("variants", "Pick the thinking effort"),
-];
-
 pub(crate) const CURSOR: &[(&str, &str)] = &[
     ("add-dir", "Add a working folder"),
     ("ask", "Ask without changes"),
@@ -187,54 +154,6 @@ pub(crate) const PI: &[(&str, &str)] = &[
     ("trust", "Trust this project"),
 ];
 
-pub(crate) const ANTIGRAVITY: &[(&str, &str)] = &[
-    ("add-dir", "Add a working folder"),
-    ("agents", "Open the agent manager"),
-    ("artifact", "Review the artifacts"),
-    ("boost", "Reason deeper with more agents"),
-    ("browser", "Hand a task to the browser agent"),
-    ("btw", "Ask on the side"),
-    ("changelog", "Show the release notes"),
-    ("clear", "Start a new conversation"),
-    ("codesearch", "Search the code"),
-    ("compact", "Compact the conversation"),
-    ("config", "Open the settings"),
-    ("context", "Show the context use"),
-    ("copy", "Copy the last answer"),
-    ("credits", "Show the credits left"),
-    ("diff", "Show the changes"),
-    ("effort", "Set the reasoning effort"),
-    ("exit", "Quit"),
-    ("feedback", "Send feedback"),
-    ("fork", "Fork the conversation"),
-    ("goal", "Work until the goal is met"),
-    ("grill-me", "Ask me questions first"),
-    ("help", "Show commands and shortcuts"),
-    ("hooks", "Show the hooks"),
-    ("keybindings", "Edit the shortcuts"),
-    ("learn", "Keep corrections as rules or skills"),
-    ("logout", "Sign out"),
-    ("mcp", "Manage MCP servers"),
-    ("model", "Pick the model"),
-    ("open", "Open a file in the editor"),
-    ("permissions", "Set what it may do"),
-    ("plan", "Plan first"),
-    ("plugin", "Manage plugins"),
-    ("remote-control", "Turn remote control on or off"),
-    ("rename", "Rename the conversation"),
-    ("resume", "Resume a conversation"),
-    ("rewind", "Go back to an earlier message"),
-    ("schedule", "Wake the agent later"),
-    ("skills", "List skills"),
-    ("statusline", "Edit the status bar"),
-    ("swarm", "Run a swarm of agents"),
-    ("tasks", "Show background tasks"),
-    ("teamwork", "Run a team of agents"),
-    ("title", "Set the window title"),
-    ("usage", "Show usage"),
-    ("voice", "Talk or dictate"),
-];
-
 /// Whether agent `kind` takes side questions: a `/btw` of its own.
 pub fn asks_aside(kind: AgentKind) -> bool {
     crate::integrations::of(kind).caps().side
@@ -269,17 +188,6 @@ pub(crate) fn claude_disk(cwd: &Path, homes: &Homes, found: &mut Vec<Command>) {
         skills(&home.join("skills"), "", found);
         synced(&home.join("skills/synced"), found);
         plugins(home, found);
-    }
-}
-
-/// OpenCode's command folders and `opencode.json`, the project's and the
-/// config's.
-pub(crate) fn opencode_disk(cwd: &Path, config: &Path, found: &mut Vec<Command>) {
-    for root in [cwd.join(".opencode"), config.join("opencode")] {
-        for dir in ["command", "commands"] {
-            tree(&root.join(dir), "", found);
-        }
-        opencode_json(&root.join("opencode.json"), found);
     }
 }
 
@@ -323,26 +231,6 @@ pub(crate) fn pi_disk(cwd: &Path, homes: &Homes, found: &mut Vec<Command>) {
     dirs.extend(home.map(|home| home.join(".agents/skills")));
     for dir in dirs {
         named_skills(&dir, "skill:", found);
-    }
-}
-
-/// The Antigravity CLI's skills on disk, its plugins' too.
-pub(crate) fn antigravity_disk(cwd: &Path, homes: &Homes, found: &mut Vec<Command>) {
-    // shortcut: every plugin's skills show, enabled or not.
-    let cli = &homes.antigravity;
-    let gemini = cli.parent().unwrap_or(Path::new("/"));
-    let mut dirs = vec![cwd.join(".agents/skills"), cwd.join(".agent/skills")];
-    dirs.push(gemini.join("config/skills"));
-    dirs.push(cli.join("skills"));
-    dirs.push(gemini.join("skills"));
-    for plugins in [cwd.join(".agents/plugins"), gemini.join("config/plugins")] {
-        dirs.extend(sub_dirs(&plugins).into_iter().map(|(_, p)| p.join("skills")));
-    }
-    dirs.push(cli.join("builtin/skills"));
-    let builtin = sub_dirs(&cli.join("builtin/plugins"));
-    dirs.extend(builtin.into_iter().map(|(_, p)| p.join("skills")));
-    for dir in dirs {
-        named_skills(&dir, "", found);
     }
 }
 
@@ -481,7 +369,7 @@ fn md_files(dir: &Path) -> Vec<(String, PathBuf)> {
 }
 
 /// The folders right in `dir`, by name, in name order.
-fn sub_dirs(dir: &Path) -> Vec<(String, PathBuf)> {
+pub(crate) fn sub_dirs(dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(read) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -505,7 +393,7 @@ fn claude_commands(dir: &Path, found: &mut Vec<Command>) {
 }
 
 /// The `*.md` files in `dir` as commands named `<prefix><name>`.
-fn tree(dir: &Path, prefix: &str, found: &mut Vec<Command>) {
+pub(crate) fn tree(dir: &Path, prefix: &str, found: &mut Vec<Command>) {
     for (name, path) in md_files(dir) {
         found.push(read_md(&path, format!("{prefix}{name}")));
     }
@@ -523,7 +411,7 @@ fn skills(dir: &Path, prefix: &str, found: &mut Vec<Command>) {
 
 /// The skills in `dir` named as their front matter says (else by folder),
 /// as `<prefix><name>`; those with `disable-slash-command` left out.
-fn named_skills(dir: &Path, prefix: &str, found: &mut Vec<Command>) {
+pub(crate) fn named_skills(dir: &Path, prefix: &str, found: &mut Vec<Command>) {
     for (folder, sub) in sub_dirs(dir) {
         let path = sub.join("SKILL.md");
         let front = front_matter(&fs::read_to_string(&path).unwrap_or_default());
@@ -587,25 +475,6 @@ fn plugins(home: &Path, found: &mut Vec<Command>) {
     }
 }
 
-/// OpenCode's commands in the `command` key of its config file `path`.
-fn opencode_json(path: &Path, found: &mut Vec<Command>) {
-    // shortcut: opencode.jsonc (comments) isn't read; parse it once someone
-    // keeps commands there.
-    let config: Value = (fs::read_to_string(path).ok())
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
-    let Some(commands) = config["command"].as_object() else {
-        return;
-    };
-    for (name, command) in commands {
-        found.push(Command {
-            name: name.clone(),
-            about: one_line(command["description"].as_str().unwrap_or("")),
-            hint: String::new(),
-        });
-    }
-}
-
 /// Cursor's command files in `dir`: their first line says what they do (it
 /// reads no front matter).
 fn cursor_commands(dir: &Path, found: &mut Vec<Command>) {
@@ -651,7 +520,7 @@ fn front_matter(text: &str) -> HashMap<String, serde_norway::Value> {
 }
 
 /// `text` on one line, its runs of whitespace one space.
-fn one_line(text: &str) -> String {
+pub(crate) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

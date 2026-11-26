@@ -60,15 +60,6 @@ pub(crate) fn claude_shown(rows: &[&str]) -> Option<String> {
     })
 }
 
-/// OpenCode's: the agent's name heads the line under the prompt, "Build ·
-/// model".
-pub(crate) fn opencode_shown(rows: &[&str]) -> Option<String> {
-    rows.iter().take(8).find_map(|row| {
-        let (name, _) = row.strip_prefix('┃')?.split_once(" · ")?;
-        Some(name.trim().to_owned()).filter(|name| !name.is_empty())
-    })
-}
-
 /// Cursor's: its default says nothing.
 pub(crate) fn cursor_shown(rows: &[&str]) -> Option<String> {
     let mut said = rows.iter().take(4);
@@ -83,20 +74,6 @@ pub(crate) fn codex_shown(rows: &[&str]) -> Option<String> {
         Some(said.rsplit("  ").next()?.trim().to_owned())
     });
     Some(said.unwrap_or_else(|| "Build".into()))
-}
-
-/// The Antigravity CLI's: "auto · model · effort" at the right of its last
-/// row; its default leaves the model first.
-pub(crate) fn antigravity_shown(rows: &[&str]) -> Option<String> {
-    let row = rows.iter().take(2).find(|row| row.contains(" · "))?;
-    let said = row.split_once(" · ")?.0.split_whitespace().last()?;
-    let mode = match said {
-        "auto" => "Auto",
-        "plan" => "Plan",
-        "accept-edits" => "Edits",
-        _ => "Default",
-    };
-    Some(mode.to_owned())
 }
 
 /// The mode agent `kind` shows on `ansi`, a pane's text with its escape
