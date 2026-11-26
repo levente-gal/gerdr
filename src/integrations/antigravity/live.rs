@@ -33,7 +33,7 @@ const MAX_TAIL: u64 = 1 << 20;
 /// Prints nothing, and never fails the hook: Antigravity reads `{}` from a
 /// `PreToolUse` hook as an empty `decision` and denies the call.
 pub fn run_hook() {
-    let Some(payload) = hook::input() else {
+    let Some(payload) = hook::pane_input() else {
         return;
     };
     if let Some(what) = what_of(&payload, read_tail) {

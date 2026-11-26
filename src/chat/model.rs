@@ -9,11 +9,6 @@ use crate::{
     stage_models::Offer,
 };
 
-/// Whether a chat with agent `kind` offers to switch its model.
-pub fn picks(kind: AgentKind) -> bool {
-    matches!(of(kind).model_switch(), ModelSwitch::Typed { .. })
-}
-
 /// The command `kind`'s CLI runs as, as the stage picker names it (for
 /// `Flavor::of` and the read of Cursor's models).
 pub fn base(kind: AgentKind) -> &'static str {
@@ -37,6 +32,18 @@ pub fn line(id: &str) -> String {
 /// (Cursor's models, as last read) for Cursor.
 pub fn offers(kind: AgentKind, cursor: &[Offer]) -> Vec<Offer> {
     of(kind).offers(cursor)
+}
+
+/// Whether the models a chat offers for agent `kind` are read from its CLI.
+pub fn read(kind: AgentKind) -> bool {
+    of(kind).models_read()
+}
+
+/// The command of the CLI whose models are read (`read`), to read them by.
+pub fn read_from() -> Option<&'static str> {
+    (crate::integrations::ALL.iter())
+        .find(|agent| agent.models_read())
+        .map(|agent| base(agent.kind()))
 }
 
 /// The id among `offers` of the model named `now`: by its id or name, or the

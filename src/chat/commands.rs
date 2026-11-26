@@ -20,10 +20,8 @@ pub struct Command {
     pub hint: String,
 }
 
-// shortcut: built-ins are hard-coded as the CLIs were here (Claude Code
-// 2.1.331, OpenCode 2.3.0, Cursor 2026.11.22, Codex 0.171.0, pi 1.6.0,
-// Antigravity CLI 1.5.15); refresh them when the agents change.
 /// Whether agent `kind` takes side questions: a `/btw` of its own.
+#[cfg(test)]
 pub fn asks_aside(kind: AgentKind) -> bool {
     crate::integrations::of(kind).caps().side
 }

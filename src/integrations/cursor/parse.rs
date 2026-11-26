@@ -7,10 +7,12 @@
 use serde_json::Value;
 
 use crate::{
-    chat::{Item, ToolOut, parse::gist},
+    chat::{Item, ToolOut},
     integrations::{
         Parser,
-        common::build::{Builder, COMPACTED, cap, change, edit_or_tool, input_text, tag, texts},
+        common::build::{
+            Builder, COMPACTED, arg_gist, cap, change, edit_or_tool, input_text, tag, texts,
+        },
     },
 };
 
@@ -120,7 +122,7 @@ fn cursor_call(b: &mut Builder, part: &Value, id: String) {
             name = args["toolName"].as_str().unwrap_or(name);
             input = &args["arguments"];
         }
-        (name.to_owned(), gist(input), input_text(input))
+        (name.to_owned(), arg_gist(input), input_text(input))
     });
     b.push_call(call, None, item);
 }

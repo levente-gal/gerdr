@@ -243,7 +243,7 @@ impl Claude {
             .map(str::to_owned);
         let text = |key: &str| input[key].as_str().unwrap_or("");
         let plan = match (name, &path) {
-            (crate::chat::live::PLAN_TOOL, _) => input["plan"].as_str(),
+            (super::live::PLAN_TOOL, _) => input["plan"].as_str(),
             ("Write", Some(path)) if is_plan_file(path) => Some(text("content")),
             _ => None,
         };

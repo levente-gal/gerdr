@@ -9,6 +9,8 @@ use crate::{
     scrollback::Styled,
 };
 
+// shortcut: its words and marks are as OpenCode 2.3.0 drew them; recheck
+// them when it updates.
 /// OpenCode's: the agent's name heads the line under the prompt, "Build ·
 /// model".
 pub(super) fn mode_shown(rows: &[&str]) -> Option<String> {
@@ -72,6 +74,7 @@ pub(super) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
     Some(Menu {
         ask: asked("Select model", &search, None),
         choices,
+        search: true,
         ..Menu::default()
     })
 }

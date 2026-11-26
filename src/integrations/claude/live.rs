@@ -7,13 +7,14 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 use crate::{
-    chat::live::{
-        self, Answer, AskReply, Changed, PLAN_TOOL, QUESTION_WAIT, Question, QuestionOption, What,
-    },
+    chat::live::{self, Answer, AskReply, Changed, QUESTION_WAIT, Question, QuestionOption, What},
     integrations::common::hook,
     stats_panel::tool_gist,
 };
 
+/// The tool Claude's plan mode asks to go ahead with its plan by: its input
+/// has the plan's markdown (`plan`) and file (`planFilePath`).
+pub(super) const PLAN_TOOL: &str = "ExitPlanMode";
 /// The subcommand Claude's hooks run.
 pub const HOOK_COMMAND: &str = "claude-hook";
 /// The agent, as herdr names it.
@@ -35,7 +36,7 @@ const MAX_ASK_INPUT: usize = 4000;
 /// for `PermissionRequest`, print the chat's answer, if any. Always exits
 /// at once without gerdr, and never fails the hook.
 pub fn run_hook() {
-    let Some(payload) = hook::input() else {
+    let Some(payload) = hook::pane_input() else {
         return;
     };
     let now = live::now_ms();
@@ -99,6 +100,7 @@ fn what_of(payload: &Value, ask: &str) -> Option<What> {
             }
             What::Ask {
                 ask: ask.to_owned(),
+                plan: tool == PLAN_TOOL,
                 tool,
                 gist: tool_gist(input).unwrap_or_default(),
                 input: shown,
@@ -263,6 +265,7 @@ mod tests {
             gist,
             input,
             questions,
+            ..
         }) = what("PermissionRequest")
         else {
             panic!("not an ask");

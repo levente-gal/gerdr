@@ -5,8 +5,6 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::Value;
-
 use super::AgentKind;
 #[cfg(test)]
 use crate::feature::Stage;
@@ -50,13 +48,6 @@ pub struct Message {
 /// it writes are passed over. Cursor's `raw` is its `store.db`.
 pub fn read(agent: AgentKind, raw: &[u8]) -> Vec<Message> {
     crate::integrations::of(agent).usage(raw)
-}
-
-/// The JSON lines of `raw`, each with its number.
-pub(crate) fn json_lines(raw: &[u8]) -> impl Iterator<Item = (usize, Value)> + '_ {
-    (raw.split(|b| *b == b'\n').enumerate())
-        .filter(|(_, line)| !line.iter().all(u8::is_ascii_whitespace))
-        .filter_map(|(i, line)| Some((i, serde_json::from_slice(line).ok()?)))
 }
 
 /// The bytes `hex` spells.

@@ -49,6 +49,10 @@ impl Integration for OpenCode {
         true
     }
 
+    fn backfill_by_time(&self) -> bool {
+        true
+    }
+
     /// By `chat`'s id, or by folder and time.
     fn find(
         &self,

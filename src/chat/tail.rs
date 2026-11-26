@@ -544,7 +544,7 @@ impl Followed {
 }
 
 /// A transcript being read, line by line as it grows; or a database chat
-/// (OpenCode's, Cursor's), read whole each time it changes.
+/// (`Store::Database`), read whole each time it changes.
 struct Chat {
     source: Source,
     reader: Reader,

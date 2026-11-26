@@ -9,6 +9,8 @@ use crate::{
     scrollback::Styled,
 };
 
+// shortcut: its words and marks are as the Antigravity CLI drew them (its
+// modes 1.5.15, its model menu 1.5.17); recheck them when it updates.
 /// The Antigravity CLI's: "auto · model · effort" at the right of its last
 /// row; its default leaves the model first.
 pub(super) fn mode_shown(rows: &[&str]) -> Option<String> {
@@ -73,6 +75,7 @@ pub(super) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
         ask: asked("Switch model", &search, effort.as_deref()),
         sideways: effort.is_some(),
         choices,
+        search: true,
         ..Menu::default()
     })
 }

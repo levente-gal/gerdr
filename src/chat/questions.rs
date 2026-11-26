@@ -191,6 +191,7 @@ mod tests {
             gist: String::new(),
             input: String::new(),
             questions,
+            plan: false,
             since: std::time::Instant::now(),
         }
     }

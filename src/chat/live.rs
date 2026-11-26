@@ -35,9 +35,6 @@ pub const ASK_WAIT: Duration = Duration::from_secs(60);
 /// answer from a card: its TUI shows its own menu beside the wait, so it may
 /// wait long, and a plan takes reading.
 pub const QUESTION_WAIT: Duration = Duration::from_secs(600);
-/// The tool Claude's plan mode asks to go ahead with its plan by: its input
-/// has the plan's markdown (`plan`) and file (`planFilePath`).
-pub const PLAN_TOOL: &str = "ExitPlanMode";
 /// How long after a phone last read an agent pane (it reads a shown one
 /// every 2 s) its asks still wait on the phone's card.
 pub const PHONE_SIGHT: Duration = Duration::from_secs(5);
@@ -85,7 +82,8 @@ pub enum What {
     TurnEnd,
     /// The agent asks to run `tool`; the connection waits for an `Answer`.
     /// `questions` when it asks the user questions (Claude's
-    /// AskUserQuestion): answered with `Answer::answers`.
+    /// AskUserQuestion): answered with `Answer::answers`. `plan` when it
+    /// asks to go ahead with its plan: `input` is the plan's markdown.
     Ask {
         ask: String,
         tool: String,
@@ -93,6 +91,8 @@ pub enum What {
         input: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         questions: Vec<Question>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        plan: bool,
     },
     /// An ask was answered elsewhere (in the TUI) or withdrawn.
     AskGone {
@@ -134,10 +134,10 @@ pub struct QuestionOption {
     pub description: String,
 }
 
-/// How long an ask for `tool` with `questions` waits for its answer from a
-/// card.
-pub fn ask_wait(tool: &str, questions: &[Question]) -> Duration {
-    if questions.is_empty() && tool != PLAN_TOOL {
+/// How long an ask with `questions`, or for a `plan`, waits for its answer
+/// from a card.
+pub fn ask_wait(plan: bool, questions: &[Question]) -> Duration {
+    if questions.is_empty() && !plan {
         ASK_WAIT
     } else {
         QUESTION_WAIT
@@ -176,6 +176,8 @@ pub struct PendingAsk {
     pub input: String,
     /// What it asks the user, when it is questions, not a permission.
     pub questions: Vec<Question>,
+    /// It asks to go ahead with its plan: `input` is the plan's markdown.
+    pub plan: bool,
     pub since: Instant,
 }
 
@@ -338,8 +340,8 @@ pub fn send(socket: &Path, event: &LiveEvent) -> Option<Answer> {
     let mut stream = UnixStream::connect(socket).ok()?;
     let wait = match &event.what {
         What::Ask {
-            tool, questions, ..
-        } => Some(ask_wait(tool, questions)),
+            questions, plan, ..
+        } => Some(ask_wait(*plan, questions)),
         _ => None,
     };
     let _ = stream.set_write_timeout(Some(SEND_WAIT));
@@ -602,8 +604,8 @@ mod tests {
 
     #[test]
     fn a_plan_waits_as_long_as_a_question() {
-        assert_eq!(ask_wait("Bash", &[]), ASK_WAIT);
-        assert_eq!(ask_wait(PLAN_TOOL, &[]), QUESTION_WAIT);
+        assert_eq!(ask_wait(false, &[]), ASK_WAIT);
+        assert_eq!(ask_wait(true, &[]), QUESTION_WAIT);
     }
 
     #[test]
@@ -706,6 +708,7 @@ mod tests {
             gist: "rm x".into(),
             input: "{}".into(),
             questions: Vec::new(),
+            plan: false,
         });
         assert_eq!(send(&path, &ask).map(|a| a.reply), Some(AskReply::Deny));
         server.join().unwrap();
@@ -782,6 +785,7 @@ mod tests {
                 gist: "rm x".into(),
                 input: String::new(),
                 questions: Vec::new(),
+                plan: false,
                 since: Instant::now(),
             },
         };

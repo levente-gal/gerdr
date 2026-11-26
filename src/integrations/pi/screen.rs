@@ -8,6 +8,8 @@ use crate::{
     scrollback::Styled,
 };
 
+// shortcut: its words and marks are as pi 1.6.0 drew them; recheck them
+// when it updates.
 /// pi's: "(anthropic) claude-opus-5-5 • medium" at the right of its last
 /// row.
 pub(crate) fn model_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
@@ -64,6 +66,7 @@ pub(crate) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
     Some(Menu {
         ask: asked("Select model", &search, None),
         choices,
+        search: true,
         ..Menu::default()
     })
 }

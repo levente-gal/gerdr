@@ -20,6 +20,7 @@ use crate::{
         usage::Message,
     },
     chat::{Source, commands::Command, live::Changed, menu::Menu, parse::Reader},
+    herdr::Herdr,
     scrollback::Styled,
     stage_models::Offer,
 };
@@ -55,6 +56,13 @@ pub enum ModelSwitch {
     OwnMenu,
 }
 
+impl ModelSwitch {
+    /// gerdr types the line that switches it.
+    pub fn typed(self) -> bool {
+        matches!(self, Self::Typed { .. })
+    }
+}
+
 /// How a plan review goes back to the agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlanReply {
@@ -66,7 +74,6 @@ pub enum PlanReply {
 
 /// What a chat of an agent offers, all in one: what the UI reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // fields read by the UI from wave 2 on (contract)
 pub struct Caps {
     /// gerdr reads its chats.
     pub chat: bool,
@@ -108,6 +115,11 @@ pub trait Integration: Sync {
     /// Whether its chat in a pane can be found by folder and start time
     /// when herdr names none.
     fn guesses(&self) -> bool {
+        false
+    }
+    /// Whether a run's chat whose id wasn't kept is still found, by folder
+    /// and time.
+    fn backfill_by_time(&self) -> bool {
         false
     }
     /// `chat` among `homes` (`locate::find_in`): by `id` (plain), else by
@@ -190,6 +202,17 @@ pub trait Integration: Sync {
     fn model_in_chat(&self, _reader: &Reader) -> Option<String> {
         None
     }
+    /// The model its chat is on with no reader: by the end of its
+    /// transcript `chat`, or as its CLI says.
+    fn model_now(&self, _chat: Option<&Path>) -> Option<String> {
+        None
+    }
+    /// The transcript of its chat in herdr pane `pane`, read for the
+    /// pane's words when herdr keeps it no scrollback (the alternate
+    /// screen).
+    fn pane_transcript(&self, _herdr: &mut Herdr, _pane: &str) -> Option<PathBuf> {
+        None
+    }
     /// Whether its chats say how full its context is.
     fn has_context(&self) -> bool {
         false
@@ -224,6 +247,15 @@ pub trait Integration: Sync {
     /// The models a chat offers to type; `cursor`: Cursor's, as last read.
     fn offers(&self, _cursor: &[Offer]) -> Vec<Offer> {
         Vec::new()
+    }
+    /// The row a chat offers first, to put it back on its own choice of
+    /// model; not one of `offers`, picked by none.
+    fn own_model(&self) -> Option<Offer> {
+        None
+    }
+    /// Whether the models it offers are read from its CLI (`offers`' list).
+    fn models_read(&self) -> bool {
+        false
     }
     /// Its own model menu, as its screen `rows` show it at their bottom.
     fn model_menu(&self, _rows: &[(String, Styled)]) -> Option<Menu> {
@@ -365,6 +397,15 @@ pub const ALL: [&dyn Integration; 8] = [
     &plain::Plain,
 ];
 
+/// The agents a chat of no known agent is looked for as by its id, in
+/// order: the names of its files don't say whose it is.
+pub const BY_ID: [AgentKind; 3] = [AgentKind::Claude, AgentKind::Cursor, AgentKind::Codex];
+
+/// What a chat of agent `kind` offers.
+pub fn caps(kind: AgentKind) -> Caps {
+    of(kind).caps()
+}
+
 /// The integration of agent `kind`.
 pub fn of(kind: AgentKind) -> &'static dyn Integration {
     match kind {
@@ -406,5 +447,60 @@ mod tests {
             assert!(!none.chat && !none.modes && !none.side && !none.context);
             assert_eq!(none.model, ModelSwitch::None);
         }
+    }
+
+    /// The files of the chat's UI, desktop and phone: they read `Caps`,
+    /// items, live events and menus, and name no agent.
+    const UI: [(&str, &str); 5] = [
+        ("src/chat/view.rs", include_str!("../chat/view.rs")),
+        (
+            "src/chrome/agent_chat.rs",
+            include_str!("../chrome/agent_chat.rs"),
+        ),
+        ("src/phone.rs", include_str!("../phone.rs")),
+        ("src/phone_control.rs", include_str!("../phone_control.rs")),
+        (
+            "assets/phone/app.js",
+            include_str!("../../assets/phone/app.js"),
+        ),
+    ];
+
+    #[test]
+    fn the_ui_names_no_agent() {
+        let agents = ALL
+            .iter()
+            .map(|i| i.kind())
+            .filter(|k| *k != AgentKind::Unknown);
+        let agents: Vec<AgentKind> = agents.collect();
+        let variants: Vec<String> = agents.iter().map(|k| format!("AgentKind::{k:?}")).collect();
+        let mut names: Vec<String> = agents.iter().map(|k| format!("\"{}\"", k.name())).collect();
+        names.push("\"agy\"".into());
+        let mut found = Vec::new();
+        for (path, text) in UI {
+            let rust = path.ends_with(".rs");
+            let mut lines = text.lines().enumerate().peekable();
+            while let Some((i, line)) = lines.next() {
+                // The tests come last, and may name any.
+                let tests = lines
+                    .peek()
+                    .is_some_and(|(_, next)| next.ends_with("mod tests {"));
+                if rust && line.starts_with("#[cfg(test)]") && tests {
+                    break;
+                }
+                let code = line.split("//").next().unwrap_or_default();
+                let named = (names.iter()).find(|name| code.contains(name.as_str()));
+                let named = named.or_else(|| {
+                    (variants.iter()).find(|variant| rust && line.contains(variant.as_str()))
+                });
+                if let Some(named) = named {
+                    found.push(format!("{path}:{}: {named}: {}", i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "agents named in the UI:\n{}",
+            found.join("\n")
+        );
     }
 }

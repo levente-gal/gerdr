@@ -51,13 +51,6 @@ pub fn context(agent: AgentKind, tail: &[u8]) -> Option<Context> {
     crate::integrations::of(agent).context_in(tail)
 }
 
-/// The JSON lines of `tail`, last first; a line cut where the tail starts
-/// isn't JSON: it is passed over.
-pub(crate) fn lines_back(tail: &[u8]) -> impl Iterator<Item = Value> + '_ {
-    (tail.split(|b| *b == b'\n').rev())
-        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
-}
-
 pub(crate) fn num(v: &Value) -> u64 {
     v.as_u64().unwrap_or(0)
 }

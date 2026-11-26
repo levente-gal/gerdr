@@ -761,8 +761,9 @@ function quizCard(a) {
     <button class="primary" data-qnext${last ? "" : " hidden"}>Next</button>
     <button class="primary" data-answer="allow" data-ask="${esc(a.ask)}"${last ? " hidden" : ""} disabled>Submit</button></div></div>`;
 }
-// A question's answer as Claude takes it: the picked labels joined by ", ",
-// what was typed for Other in its place and never the word.
+// A question's answer as gerdr's `Answers` take it (chat/live.rs): the
+// picked labels joined by ", ", what was typed for Other in its place and
+// never the word.
 const quizAnswer = (q) => [...q.querySelectorAll("input:checked")]
   .map((x) => x.dataset.other === undefined ? x.value : x.nextElementSibling.value.trim()).filter(Boolean).join(", ");
 const quizAnswers = (card) => Object.fromEntries([...card.querySelectorAll(".q")].map((q) => [q.dataset.question, quizAnswer(q)]));

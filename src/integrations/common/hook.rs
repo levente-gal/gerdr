@@ -12,9 +12,22 @@ pub const MAX_INPUT: u64 = 4 << 20;
 
 /// The hook's input on stdin, as JSON; `None` when it isn't.
 pub fn input() -> Option<Value> {
+    serde_json::from_slice(&stdin()).ok()
+}
+
+/// The hook's input, as `input`, read on only in a herdr pane: outside one
+/// nobody hears it, so nothing it names is read.
+pub fn pane_input() -> Option<Value> {
+    let input = stdin();
+    live::from_env()?;
+    serde_json::from_slice(&input).ok()
+}
+
+/// All of stdin, up to `MAX_INPUT`.
+fn stdin() -> Vec<u8> {
     let mut input = Vec::new();
     let _ = std::io::stdin().take(MAX_INPUT).read_to_end(&mut input);
-    serde_json::from_slice(&input).ok()
+    input
 }
 
 /// Tells the gerdr of this hook's pane (by `HERDR_SOCKET_PATH` and

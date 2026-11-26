@@ -48,6 +48,10 @@ impl Integration for Codex {
         true
     }
 
+    fn backfill_by_time(&self) -> bool {
+        true
+    }
+
     fn find(
         &self,
         homes: &Homes,

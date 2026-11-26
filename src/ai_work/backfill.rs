@@ -556,11 +556,11 @@ fn chat_of(record: &Feature, run: &Run) -> Chat {
 }
 
 /// `chat` among `homes`; `dir` the feature folder that may keep it. With
-/// no agent known, its id is looked for as Claude's, Cursor's, then
-/// Codex's: the names of the files don't say whose it is.
+/// no agent known, its id is looked for as each of `integrations::BY_ID`'s:
+/// the names of the files don't say whose it is.
 fn look(homes: &Homes, dir: &Path, chat: &Chat) -> Result<Option<Found>, String> {
     let kinds = match chat.agent {
-        AgentKind::Unknown => vec![AgentKind::Claude, AgentKind::Cursor, AgentKind::Codex],
+        AgentKind::Unknown => crate::integrations::BY_ID.to_vec(),
         kind => vec![kind],
     };
     for agent in kinds {
@@ -599,8 +599,7 @@ fn transcript(
             why: why.to_owned(),
         })
     };
-    // Codex's and OpenCode's are found by folder and time.
-    let by_time = matches!(chat.agent, AgentKind::Codex | AgentKind::OpenCode);
+    let by_time = crate::integrations::of(chat.agent).backfill_by_time();
     if chat.id.is_none() && !by_time {
         return Ok((None, missing("its chat id wasn't kept")));
     }

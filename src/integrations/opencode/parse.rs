@@ -14,7 +14,7 @@ use crate::{
     integrations::{
         Parser,
         common::build::{
-            self, Builder, COMPACTED, INTERRUPTED, cap, capped, change, input_text, texts,
+            Builder, COMPACTED, INTERRUPTED, arg_gist, cap, capped, change, input_text, texts,
         },
     },
 };
@@ -131,10 +131,10 @@ fn opencode_tool(b: &mut Builder, pid: String, part: &Value) {
     let state = &part["state"];
     let input = &state["input"];
     let output = opencode_out(part);
-    // A `task` call whose child session was read (`tail::db`): its work
+    // A `task` call whose child session was read (`db`): its work
     // under one card, as Claude's subagents.
     if let Some(rows) = part["subagent"].as_array() {
-        let title = Some(gist(input)).filter(|title| !title.is_empty());
+        let title = Some(arg_gist(input)).filter(|title| !title.is_empty());
         return b.push(Item::Subagent {
             id: format!("agent:{id}"),
             title: title.unwrap_or_else(|| name.to_owned()),
@@ -175,7 +175,7 @@ fn opencode_tool(b: &mut Builder, pid: String, part: &Value) {
         return b.push(Item::Tool {
             id,
             name: name.to_owned(),
-            gist: gist(input),
+            gist: arg_gist(input),
             input: input_text(input),
             output,
         });
@@ -233,27 +233,6 @@ fn opencode_out(part: &Value) -> Option<ToolOut> {
 fn compacted(id: String) -> Item {
     let text = COMPACTED.to_owned();
     Item::Note { id, text }
-}
-
-/// What OpenCode's and Cursor's tools name their arguments, their gist
-/// first.
-const GIST_KEYS: [&str; 10] = [
-    "command",
-    "filePath",
-    "pattern",
-    "glob_pattern",
-    "path",
-    "target_directory",
-    "url",
-    "query",
-    "description",
-    "name",
-];
-
-/// The one line a tool's `input` says: its command, file, pattern; OpenCode's
-/// and Cursor's keys first (`filePath`, `glob_pattern`), else as Claude's.
-pub(crate) fn gist(input: &Value) -> String {
-    build::gist(input, &GIST_KEYS)
 }
 
 #[cfg(test)]

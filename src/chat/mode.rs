@@ -20,9 +20,8 @@ pub const READ_EVERY: Duration = Duration::from_millis(150);
 /// How many of a pane's last rows are read for its mode.
 const SCREEN_ROWS: usize = 40;
 
-// shortcut: the modes and their words on screen are as the CLIs were here
-// (Claude Code 2.1.332, OpenCode 2.3.0, Cursor 2026.11.22, Codex 0.171.0,
-// Antigravity CLI 1.5.15); refresh them with `commands.rs`'s lists.
+// shortcut: the modes and their words on screen are as each CLI was when
+// its `screen.rs` says; refresh them with its `commands.rs` list.
 /// The modes agent `kind` steps through on `NEXT_KEY`, in its order; none
 /// for one without (pi). Claude's Auto shows only where its account has it,
 /// and OpenCode's own agents of the user's come after Plan.

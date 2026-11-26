@@ -14,11 +14,12 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::{
-    chat::{Item, ToolOut, parse::gist},
+    chat::{Item, ToolOut},
     integrations::{
         Parser,
         common::build::{
-            Builder, CHAT_COMPACTED, INTERRUPTED, cap, change, edit_or_tool, flat_edits, input_text,
+            Builder, CHAT_COMPACTED, INTERRUPTED, arg_gist, cap, change, edit_or_tool, flat_edits,
+            input_text,
         },
     },
 };
@@ -175,7 +176,7 @@ fn pi_call(b: &mut Builder, part: &Value, id: String, at: Option<u64>) {
         _ => None,
     };
     let item = edit_or_tool(id, args["path"].as_str(), diff, || {
-        (name.to_owned(), gist(args), input_text(args))
+        (name.to_owned(), arg_gist(args), input_text(args))
     });
     b.push_call(call, at, item);
 }

@@ -1,9 +1,12 @@
 //! What a pi chat says of itself: how full its context is, what its
 //! messages cost.
 
-use crate::ai_work::{
-    context::{Context, lines_back, num},
-    usage::{Message, Usage, json_lines},
+use crate::{
+    ai_work::{
+        context::{Context, num},
+        usage::{Message, Usage},
+    },
+    integrations::common::files::{json_lines, lines_back},
 };
 
 /// The context of the pi chat whose transcript ends with `tail`: each assistant message says what its

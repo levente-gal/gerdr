@@ -133,6 +133,7 @@ impl Gerdr {
                 gist,
                 input,
                 questions,
+                plan,
             } => {
                 let Some(mut stream) = stream else {
                     return;
@@ -155,6 +156,7 @@ impl Gerdr {
                     gist,
                     input,
                     questions,
+                    plan,
                     since: std::time::Instant::now(),
                 };
                 let mut call = None;
@@ -170,7 +172,7 @@ impl Gerdr {
                     call,
                     asked,
                 };
-                let wait = ask_wait(&held.asked.tool, &held.asked.questions);
+                let wait = ask_wait(held.asked.plan, &held.asked.questions);
                 self.chats.live.asks.insert(ask.clone(), held);
                 // Looked at every `ASK_LOOK`: one that waited `ask_wait`, or
                 // (no question) whose chat a panel came over, goes back to
@@ -264,7 +266,7 @@ impl Gerdr {
         if let Some(held) = self.chats.live.asks.remove(ask) {
             self.live_clear_card(&held.pane, ask);
         }
-        // OpenCode's asks don't wait on a connection: only their cards.
+        // An ask that waits on no connection has only its card.
         for ws in &mut self.workspaces {
             for tab in &mut ws.tabs {
                 for pane in &mut tab.panes {
@@ -506,6 +508,7 @@ mod tests {
                 gist: "ls".into(),
                 input: String::new(),
                 questions: Vec::new(),
+                plan: false,
                 since: std::time::Instant::now(),
             },
         };

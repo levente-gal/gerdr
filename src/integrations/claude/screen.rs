@@ -3,6 +3,8 @@
 
 use crate::scrollback::Styled;
 
+// shortcut: its words and marks are as Claude Code 2.1.332 drew them;
+// recheck them when it updates.
 /// The mode Claude Code's `rows` (as `chat::mode::shown` gives them) show.
 pub(crate) fn mode_shown(rows: &[&str]) -> Option<String> {
     rows.iter().take(3).find_map(|row| {

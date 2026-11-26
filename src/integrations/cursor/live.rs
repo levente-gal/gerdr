@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use crate::{
     chat::live,
-    cursor_agents::{HookEvent, hook_socket, is_cli_agent, is_gerdr_command, live_path, now_ms},
-    integrations::common::hook,
+    cursor_agents::{HookEvent, hook_socket, is_cli_agent, is_gerdr_command, now_ms},
+    integrations::common::{build, hook},
 };
 
 /// The subcommand Cursor's hooks run.
@@ -84,7 +84,7 @@ fn live_what(payload: &Value) -> Option<live::What> {
         "preToolUse" => live::What::ToolStart {
             call: call()?,
             name: text("tool_name")?,
-            gist: crate::chat::parse::gist(&payload["tool_input"]),
+            gist: build::arg_gist(&payload["tool_input"]),
         },
         "postToolUse" => live::What::ToolEnd {
             call: call()?,
@@ -135,26 +135,12 @@ pub fn merge_hooks(existing: Option<&str>, command: &str) -> Result<String, Stri
 }
 
 /// Add this gerdr to Cursor's hooks, in `~/.cursor/hooks.json`, unless it
-/// is there already.
-pub fn install_hooks(home: &Path) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|err| err.to_string())?;
-    let command = format!(
-        "{} {HOOK_COMMAND}",
-        crate::desktop::shell_quote(live_path(&exe.to_string_lossy()))
-    );
-    let path = home.join(".cursor/hooks.json");
-    let existing = match std::fs::read_to_string(&path) {
-        Ok(text) => Some(text),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
-        Err(err) => return Err(format!("{}: {err}", path.display())),
-    };
-    let merged = merge_hooks(existing.as_deref(), &command)
-        .map_err(|err| format!("{}: {err}", path.display()))?;
-    if existing.as_deref() == Some(merged.as_str()) {
-        return Ok(());
-    }
-    crate::projects::write_atomic(&path, merged.as_bytes())
-        .map_err(|err| format!("{}: {err}", path.display()))
+/// is there already: the file as it was, if it changed.
+pub fn install_hooks(home: &Path) -> Result<Option<live::Changed>, String> {
+    let command = live::hook_command(HOOK_COMMAND)?;
+    live::install(&home.join(".cursor/hooks.json"), |text| {
+        merge_hooks(text, &command)
+    })
 }
 
 #[cfg(test)]

@@ -4,9 +4,12 @@
 use std::collections::{HashMap, HashSet};
 
 use super::parse::main_model;
-use crate::ai_work::{
-    context::{Context, lines_back, num},
-    usage::{Message, Usage, iso_ms, json_lines},
+use crate::{
+    ai_work::{
+        context::{Context, num},
+        usage::{Message, Usage, iso_ms},
+    },
+    integrations::common::files::{json_lines, lines_back},
 };
 
 /// The windows of Claude's models before the 4.6 family; all since take 1M.

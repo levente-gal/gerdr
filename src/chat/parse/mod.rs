@@ -1,15 +1,13 @@
 //! A transcript read into chat items, as it grows.
 //!
-//! Claude Code's (`claude`), Codex's rollout (`codex`), pi's and the
-//! Antigravity CLI's are lines, fed as they come. OpenCode's and
-//! Cursor's chats are in databases: their rows are read whole each time they
-//! change, and `snapshot` makes the items of all of them (`opencode`,
-//! `cursor`). Item ids come from the transcript (a message's, a call's), so
+//! A chat kept as lines (`Store::Lines`) is fed them as they come; one
+//! kept in a database has its rows read whole each time they change, and
+//! `snapshot` makes the items of all of them. Each agent's `Parser` (in
+//! `integrations::<agent>::parse`) reads its own; what all keep is in
+//! `Builder`. Item ids come from the transcript (a message's, a call's), so
 //! they stay the same when it is read again and folds keep.
 
 pub(crate) mod patch;
-
-pub(crate) use crate::integrations::opencode::parse::gist;
 
 use serde_json::Value;
 
@@ -121,8 +119,8 @@ impl Reader {
 /// The items of a chat kept in a database, from all its rows in order:
 /// OpenCode's message rows as `ai_work::locate` reads them (a `message`
 /// row with its `parts`, or a `session_message` row, its JSON columns as
-/// what they hold), Cursor's `store.db` messages as
-/// `ai_work::usage::cursor_messages` gives them. Other agents' have none.
+/// what they hold), Cursor's `store.db` messages as its `stats` reads
+/// them. Other agents' have none.
 pub fn snapshot<'a>(agent: AgentKind, rows: impl IntoIterator<Item = &'a Value>) -> Vec<Item> {
     let mut reader = Reader::new(agent);
     reader.p.rows(&mut reader.b, &mut rows.into_iter());

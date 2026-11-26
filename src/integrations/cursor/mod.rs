@@ -89,6 +89,10 @@ impl Integration for Cursor {
         stats::cursor_now()
     }
 
+    fn model_now(&self, _chat: Option<&Path>) -> Option<String> {
+        stats::cursor_now()
+    }
+
     fn has_context(&self) -> bool {
         true
     }
@@ -119,6 +123,10 @@ impl Integration for Cursor {
         cursor.to_vec()
     }
 
+    fn models_read(&self) -> bool {
+        true
+    }
+
     fn plan_menu(&self) -> Option<(&'static str, &'static str, &'static str)> {
         Some(screen::PLAN_MENU)
     }
@@ -144,10 +152,6 @@ impl Integration for Cursor {
         if !home.join(".cursor").is_dir() {
             return Vec::new();
         }
-        vec![hub::hook_command(live::HOOK_COMMAND).and_then(|command| {
-            hub::install(&home.join(".cursor/hooks.json"), |text| {
-                live::merge_hooks(text, &command)
-            })
-        })]
+        vec![live::install_hooks(home)]
     }
 }

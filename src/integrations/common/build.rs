@@ -323,6 +323,27 @@ pub fn input_text(input: &Value) -> String {
         .unwrap_or_else(|| serde_json::to_string_pretty(input).unwrap_or_default())
 }
 
+/// What OpenCode's, Cursor's and pi's tools name their arguments, their
+/// gist first.
+const ARG_KEYS: [&str; 10] = [
+    "command",
+    "filePath",
+    "pattern",
+    "glob_pattern",
+    "path",
+    "target_directory",
+    "url",
+    "query",
+    "description",
+    "name",
+];
+
+/// The one line a tool's `input` says by `ARG_KEYS`: its command, file,
+/// pattern (`filePath`, `glob_pattern`), else as Claude's.
+pub fn arg_gist(input: &Value) -> String {
+    gist(input, &ARG_KEYS)
+}
+
 /// The one line a tool's `input` says: the first of `keys` it gives a
 /// string for, else as Claude's.
 pub fn gist(input: &Value, keys: &[&str]) -> String {

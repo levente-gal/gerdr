@@ -13,14 +13,8 @@ use crate::{
 /// The line that opens it.
 pub const LINE: &str = "/model";
 
-/// Whether agent `kind` picks its model in a menu of its own on `LINE`.
-pub fn opens(kind: AgentKind) -> bool {
-    crate::integrations::of(kind).model_switch() == crate::integrations::ModelSwitch::OwnMenu
-}
-
-// shortcut: the menus' words and marks are as the CLIs drew them here
-// (Codex 0.171.0, OpenCode 2.3.0, pi 1.6.0, Antigravity CLI 1.5.17); recheck
-// them with `mode.rs`'s when one updates.
+// shortcut: the menus' words and marks are as each CLI drew them when its
+// `screen.rs` says; recheck them with its modes when one updates.
 /// The model menu agent `kind`'s screen `rows` show at their bottom, as a
 /// menu picked with the arrows (`Menu::arrows`); none when they show none.
 pub fn read(kind: AgentKind, rows: &[(String, Styled)]) -> Option<Menu> {

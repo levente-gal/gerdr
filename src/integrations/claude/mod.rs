@@ -20,11 +20,12 @@ use super::{Integration, ModelSwitch, Parser, PlanReply, Store, common::files::S
 use crate::{
     ai_work::{
         AgentKind, Chat,
-        context::Context,
+        context::{Context, tail_of},
         locate::{Found, Homes, Span},
         usage::Message,
     },
     chat::{Source, commands::Command, live::Changed, parse::Reader},
+    herdr::Herdr,
     scrollback::Styled,
     stage_models::Offer,
 };
@@ -85,6 +86,14 @@ impl Integration for Claude {
         reader.model()
     }
 
+    fn model_now(&self, chat: Option<&Path>) -> Option<String> {
+        parse::last_in(&tail_of(chat?)?)
+    }
+
+    fn pane_transcript(&self, herdr: &mut Herdr, pane: &str) -> Option<PathBuf> {
+        find::claude_chat(herdr, pane)
+    }
+
     fn has_context(&self) -> bool {
         true
     }
@@ -111,6 +120,14 @@ impl Integration for Claude {
 
     fn offers(&self, _cursor: &[Offer]) -> Vec<Offer> {
         crate::stage_models::claude_offers()
+    }
+
+    /// `/model default`: Claude Code's own choice.
+    fn own_model(&self) -> Option<Offer> {
+        Some(Offer {
+            id: "default".into(),
+            name: "Default".into(),
+        })
     }
 
     fn plan_reply(&self) -> PlanReply {

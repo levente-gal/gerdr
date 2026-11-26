@@ -9,6 +9,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use serde_json::Value;
+
 use crate::chat::parse::Reader;
 
 /// A file as it is: its inode, change time and length.
@@ -36,6 +38,20 @@ pub fn first_line(path: &Path, most: u64, whole: bool) -> Option<String> {
         .read_line(&mut line)
         .ok()?;
     (!whole || line.ends_with('\n')).then_some(line)
+}
+
+/// The JSON lines of `raw`, each with its number.
+pub fn json_lines(raw: &[u8]) -> impl Iterator<Item = (usize, Value)> + '_ {
+    (raw.split(|b| *b == b'\n').enumerate())
+        .filter(|(_, line)| !line.iter().all(u8::is_ascii_whitespace))
+        .filter_map(|(i, line)| Some((i, serde_json::from_slice(line).ok()?)))
+}
+
+/// The JSON lines of `tail`, last first (lazily, unlike `json_lines`); a
+/// line cut where the tail starts isn't JSON: it is passed over.
+pub fn lines_back(tail: &[u8]) -> impl Iterator<Item = Value> + '_ {
+    (tail.split(|b| *b == b'\n').rev())
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
 }
 
 /// `len` bytes of `file` from `from` on.
