@@ -10050,9 +10050,9 @@ const GOLDEN_CHATS: [[u64; 21]; 4] = [
         0x004ee553bdea6b96, // chat_suggested
         0xfe79e247979aad2d, // chat_modes
         0xe03e8d399611c068, // chat_side
-        0x6c4d3e75cd1fbbd3, // chat_plan
-        0x29f78ea279039845, // chat_plan_open
-        0x7fa3380865f1c3fe, // chat_plan_ask
+        0xc920f1924fef4337, // chat_plan
+        0xfc46eee66173e8cd, // chat_plan_open
+        0x6438155ae8183d52, // chat_plan_ask
         0x1baa8146186136c6, // chat_model
         0x46bfe697efbe6271, // chat_pinned
         0xf8361e53ade0856d, // chat_start
@@ -10074,9 +10074,9 @@ const GOLDEN_CHATS: [[u64; 21]; 4] = [
         0x95c0a660d63e9eb1, // chat_suggested
         0xd21d7d5694e74060, // chat_modes
         0xca0b573784b91770, // chat_side
-        0x2ca34c602eea2776, // chat_plan
-        0xb137c3c620610f92, // chat_plan_open
-        0x353dd5c5c50b6459, // chat_plan_ask
+        0xf3a53da233a04f02, // chat_plan
+        0x9e48d314c8544956, // chat_plan_open
+        0x0ba3f99a46918a65, // chat_plan_ask
         0x70646c8cb13e8898, // chat_model
         0xd0a47890d6ecabfe, // chat_pinned
         0xec72373387a755bb, // chat_start
@@ -10098,9 +10098,9 @@ const GOLDEN_CHATS: [[u64; 21]; 4] = [
         0x1a9b6c02649b4f80, // chat_suggested
         0xd5e5939be4fc8b21, // chat_modes
         0x6d48f599e60538e1, // chat_side
-        0x32a2e31d552691ef, // chat_plan
-        0xf89f6063d627b9c2, // chat_plan_open
-        0xb2c9504611643734, // chat_plan_ask
+        0x7b6652b22175f364, // chat_plan
+        0x33e22dc06fdb040d, // chat_plan_open
+        0xd269b1d389750a6f, // chat_plan_ask
         0x1f5a36a977d402d0, // chat_model
         0x3a9fb789f9a3a6e3, // chat_pinned
         0xa88f205ffb3c31fe, // chat_start
@@ -10122,9 +10122,9 @@ const GOLDEN_CHATS: [[u64; 21]; 4] = [
         0x3d7c424e61025c58, // chat_suggested
         0x7127f7ee025b5d03, // chat_modes
         0x0c1f45535e2220e5, // chat_side
-        0xca8f7ab03bda90dd, // chat_plan
-        0xf1c18370a8a4e7d3, // chat_plan_open
-        0xfe702f7546c95cac, // chat_plan_ask
+        0x4e241b85e173bdf0, // chat_plan
+        0x647864acfaa7c142, // chat_plan_open
+        0xa1688079201936c9, // chat_plan_ask
         0x723a472ff593632d, // chat_model
         0x18b2695a30b259e4, // chat_pinned
         0x5a6516ea634632f6, // chat_start

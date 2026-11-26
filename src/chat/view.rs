@@ -179,6 +179,35 @@ fn ask_footer(open: bool, what: &str) -> Vec<(String, String)> {
     .collect()
 }
 
+/// The key that opens a plan's review (`docs/ux-conventions.md`:
+/// Ctrl+Shift+O opens the selected row's page): the picked plan card's, or
+/// the plan its agent waits on.
+const PLAN_KEYS: &[Binding<(), ()>] = &[Binding {
+    chord: "Ctrl+Shift+O",
+    does: |_| Some(()),
+    footer: true,
+    f1: "review the plan: comment on it and send it back",
+}];
+
+/// The plan item whose review Ctrl+Shift+O opens in `chat`: the picked
+/// row's, in the list, else the last plan while its agent waits on it.
+fn review_target(chat: &PaneChat) -> Option<String> {
+    let plan = |item: &Item| match item {
+        Item::Plan { id, .. } => Some(id.clone()),
+        _ => None,
+    };
+    let shown = rows(&chat.items, &chat.unfolded);
+    let picked = (chat.picked.filter(|_| chat.focus == ChatFocus::List))
+        .and_then(|i| shown.get(i)?.item(&chat.items))
+        .and_then(plan);
+    let waits = (chat.live.ask.as_ref()).is_some_and(chrome::is_plan);
+    picked.or_else(|| {
+        waits
+            .then(|| chat.items.iter().rev().find_map(plan))
+            .flatten()
+    })
+}
+
 /// Open `chat`'s last plan card in the list and pick it, folding its plan
 /// ask's peek: the list has the room the waiting panel lacks. The card's
 /// row, to scroll to; `None` and nothing changed without one.
@@ -698,6 +727,14 @@ fn chat_footer(chat: &PaneChat, modes: bool, models: bool) -> Vec<(String, Strin
         ),
     };
     let taken = |chord: &str| card.is_some() && CARD_KEYS.iter().any(|b| b.chord == chord);
+    if card.is_none() && review_target(chat).is_some() {
+        let review = key_table::hints(PLAN_KEYS, &(), |_| "review plan".to_owned());
+        hints.extend(
+            review
+                .into_iter()
+                .map(|(chord, said)| (chord.to_owned(), said)),
+        );
+    }
     hints.extend(rest.into_iter().filter(|(chord, _)| !taken(chord)));
     hints
 }
@@ -722,6 +759,8 @@ enum ChatDo {
     NextMode,
     /// Open the picker of the agent's model.
     PickModel,
+    /// Open plan item `.0`'s review.
+    Review(String),
 }
 
 /// A key of the reply box, while it has the keys.
@@ -790,6 +829,9 @@ fn chat_key(
             }
             None => {}
         }
+    }
+    if !questions && key_table::press(PLAN_KEYS, &(), mods, sym).is_some() {
+        return review_target(chat).map(ChatDo::Review);
     }
     if key_table::press(MODE_KEYS, &(), mods, sym).is_some() {
         return Some(ChatDo::NextMode);
@@ -1633,6 +1675,7 @@ impl Gerdr {
             }
             Some(ChatDo::NextMode) => self.chat_next_mode(&pane_id),
             Some(ChatDo::PickModel) => self.chat_open_model_picker(&pane_id),
+            Some(ChatDo::Review(item_id)) => self.open_chat_plan(&pane_id, &item_id),
             Some(ChatDo::Top) => self.chat_scroll_to(&pane_id, Some(0.0)),
             Some(ChatDo::Bottom) => self.chat_scroll_to(&pane_id, None),
             Some(ChatDo::Page(by)) => {
@@ -2333,6 +2376,25 @@ impl Gerdr {
                     self.chat_scroll_to(&pane_id, Some(f64::from(to)));
                 }
             }
+            ChatHit::AskReview => {
+                let last = chat.items.iter().rev().find_map(|item| match item {
+                    Item::Plan { id, .. } => Some(id.clone()),
+                    _ => None,
+                });
+                match last {
+                    Some(item_id) => self.open_chat_plan(&pane_id, &item_id),
+                    None => self.show_warning("The plan isn't in the chat yet".into()),
+                }
+            }
+            ChatHit::ReviewPlan(i) => {
+                chat.picked = Some(i);
+                let shown = rows(&chat.items, &chat.unfolded);
+                let item = shown.get(i).and_then(|row| row.item(&chat.items));
+                if let Some(Item::Plan { id, .. }) = item {
+                    let item_id = id.clone();
+                    self.open_chat_plan(&pane_id, &item_id);
+                }
+            }
             ChatHit::ShowScreen => self.toggle_pane_chat(id),
             ChatHit::Scrollbar => {
                 self.chats.bar_drag = Some(pane_id);
@@ -2905,6 +2967,50 @@ mod tests {
         // The panel's peek folds: the card shows the plan.
         assert!(!chrome::ask_open(chat.live.ask.as_ref().unwrap(), &chat.unfolded));
         assert_eq!((chat.picked, chat.focus), (Some(1), ChatFocus::List));
+    }
+
+    #[test]
+    fn ctrl_shift_o_reviews_the_picked_plan_or_the_one_waited_on() {
+        let review = |chat: &PaneChat| {
+            (chat_footer(chat, false, false).iter())
+                .any(|(k, said)| k == "Ctrl+Shift+O" && said == "review plan")
+        };
+        let plan = |id: &str| crate::chat::parse::plan_item(id.into(), None, "# Plan\n");
+        let mut chat = with_items(vec![plan("p1"), user("u1", "one"), plan("p2")]);
+        // Nothing picked, nothing waits: nothing to review.
+        assert_eq!(press(&mut chat, "Ctrl+Shift+O", 'O'), None);
+        assert!(!review(&chat));
+        chat.picked = Some(0);
+        assert!(review(&chat));
+        assert_eq!(
+            press(&mut chat, "Ctrl+Shift+O", 'O'),
+            Some(ChatDo::Review("p1".into()))
+        );
+        // Not a plan's row: none, but the plan waited on.
+        chat.picked = Some(1);
+        assert_eq!(press(&mut chat, "Ctrl+Shift+O", 'O'), None);
+        chat.live.ask = Some(crate::chat::live::PendingAsk {
+            ask: "a1".into(),
+            tool: crate::chat::live::PLAN_TOOL.into(),
+            gist: String::new(),
+            input: "# Plan\n".into(),
+            questions: Vec::new(),
+            since: Instant::now(),
+        });
+        assert!(review(&chat));
+        assert_eq!(
+            press(&mut chat, "Ctrl+Shift+O", 'O'),
+            Some(ChatDo::Review("p2".into()))
+        );
+        // From the reply box too, its draft kept.
+        chat.focus = ChatFocus::Composer;
+        chat.draft.set("hi");
+        assert_eq!(
+            press(&mut chat, "Ctrl+Shift+O", 'O'),
+            Some(ChatDo::Review("p2".into()))
+        );
+        assert_eq!(chat.draft, "hi");
+        key_table::check(PLAN_KEYS, &[()]);
     }
 
     #[test]

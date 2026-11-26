@@ -217,6 +217,11 @@ pub enum ChatHit {
     /// "Show whole plan" under a plan ask's peek: opens the plan's card in
     /// the list instead.
     AskPlan,
+    /// "Review" under a plan ask's peek: opens the plan in a file's tab, to
+    /// comment on and send back.
+    AskReview,
+    /// "Review" under a plan card, by row: the same for that plan.
+    ReviewPlan(usize),
     /// The list's scrollbar.
     Scrollbar,
     /// A command of the `/` menu, by its place among those matching.
@@ -296,6 +301,7 @@ impl ChatLayout {
             return Some(match spot {
                 Spot::Card(hit) => ChatHit::Card(*hit),
                 Spot::Plan => ChatHit::AskPlan,
+                Spot::Review => ChatHit::AskReview,
                 _ => ChatHit::AskFold,
             });
         }
@@ -349,6 +355,7 @@ impl ChatLayout {
             Some(Spot::Key(key)) => ChatHit::Key(key),
             Some(Spot::Card(hit)) => ChatHit::Card(hit),
             Some(Spot::Plan) => ChatHit::AskPlan,
+            Some(Spot::Review) => ChatHit::ReviewPlan(i),
             None => ChatHit::Item(i),
         })
     }
@@ -559,6 +566,11 @@ fn card_row() -> i32 {
     row_button()
 }
 const CARD_GAP: i32 = 8;
+/// Between links on one row: "Show whole plan" and "Review".
+const LINK_GAP: i32 = 16;
+
+/// What a plan's link to its review says, on its card and under its ask.
+pub const REVIEW_PLAN: &str = "Review";
 /// How far an option's description is pulled up into its label's row.
 const NOTE_PULL: i32 = 6;
 /// Room around the user's words on their ground.
@@ -1457,17 +1469,17 @@ fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
         let more = peek(&mut pieces, &mut h, fit.len());
         let top = l.below();
         l.doc(pieces, (ix, top));
-        if more > 0 {
-            let text = match more {
-                1 => "Show whole plan (1 more line)".to_owned(),
-                n => format!("Show whole plan ({n} more lines)"),
-            };
-            let row = rect(ix, l.below(), iw, small_line());
-            let wide = width_in(&text, Face::Ui, font_size()).ceil() as i32;
-            l.put(row, label(&text, Face::Ui, Mark::Link));
-            l.spots
-                .push((rect(ix, row.loc.y, wide.min(iw), small_line()), Spot::Plan));
-        }
+        let whole = match more {
+            0 => None,
+            1 => Some("Show whole plan (1 more line)".to_owned()),
+            n => Some(format!("Show whole plan ({n} more lines)")),
+        };
+        let review = (REVIEW_PLAN.to_owned(), Spot::Review);
+        let row = whole
+            .map(|text| (text, Spot::Plan))
+            .into_iter()
+            .chain([review]);
+        l.links(ix, iw, row.collect());
     } else if open {
         let (ix, iw) = (CHEVRON_WIDTH, (w - CHEVRON_WIDTH).max(1));
         let all: Vec<&str> = ask.input.lines().collect();
@@ -1632,6 +1644,8 @@ enum Spot {
     Card(CardHit),
     /// A plan ask's "Show whole plan".
     Plan,
+    /// A plan's "Review": opens it in a file's tab.
+    Review,
 }
 
 /// A colour of a card's words.
@@ -1899,6 +1913,24 @@ impl Laid {
         self.spots.push((rect(x, 0, w, card_row()), Spot::Fold));
     }
 
+    /// `links` on one row below the rest, from `x`, each pressed as its
+    /// spot: those past `w` left out, the first cut to it.
+    fn links(&mut self, x: i32, w: i32, links: Vec<(String, Spot)>) {
+        let y = self.below();
+        let mut lx = x;
+        for (n, (text, spot)) in links.into_iter().enumerate() {
+            let wide = width_in(&text, Face::Ui, font_size()).ceil() as i32;
+            let room = (x + w - lx).max(0);
+            if n > 0 && wide > room {
+                break;
+            }
+            let at = rect(lx, y, wide.min(room), small_line());
+            self.put(at, label(&text, Face::Ui, Mark::Link));
+            self.spots.push((at, spot));
+            lx += wide + LINK_GAP;
+        }
+    }
+
     /// "Show all (N lines)" under what was cut to `CHAT_CUT` of `n` lines.
     fn more(&mut self, x: i32, w: i32, n: usize) {
         let row = rect(x, self.below(), w, small_line());
@@ -2052,13 +2084,12 @@ fn lay(item: &Item, w: i32, nest: i32, unfolded: &HashSet<String>, cwd: Option<&
                 (1, _) => Some("Show whole plan (1 more line)".to_owned()),
                 (n, _) => Some(format!("Show whole plan ({n} more lines)")),
             };
-            if let Some(text) = link {
-                let row = rect(ix, l.below(), iw, small_line());
-                let wide = width_in(&text, Face::Ui, font_size()).ceil() as i32;
-                l.put(row, label(&text, Face::Ui, Mark::Link));
-                l.spots
-                    .push((rect(ix, row.loc.y, wide.min(iw), small_line()), Spot::Fold));
-            }
+            let review = (REVIEW_PLAN.to_owned(), Spot::Review);
+            let row = link
+                .map(|text| (text, Spot::Fold))
+                .into_iter()
+                .chain([review]);
+            l.links(ix, iw, row.collect());
         }
         Item::Thinking { text, .. } => {
             // Codex and OpenCode open theirs with a bold title: no stars.
@@ -3506,6 +3537,24 @@ pub(super) mod tests {
         assert_eq!(lines(&open), 20);
         assert_eq!(link(&open).as_deref(), Some("Show less"));
         assert!(card(&open).size.h > ground.size.h);
+        // Folded or open, "Review" is beside the fold link, on its row.
+        for l in [&folded, &open] {
+            let spot = |want: Spot| (l.spots.iter()).rfind(|(_, s)| *s == want).map(|(r, _)| *r);
+            let (fold, review) = (spot(Spot::Fold).unwrap(), spot(Spot::Review).unwrap());
+            assert_eq!(fold.loc.y, review.loc.y);
+            assert!(review.loc.x >= fold.loc.x + fold.size.w + LINK_GAP);
+        }
+        // A short plan has "Review" alone.
+        let short = Item::Plan {
+            id: "s".into(),
+            path: None,
+            blocks: Arc::new(crate::md_blocks::blocks("- one\n")),
+            text: "- one\n".into(),
+            output: None,
+        };
+        let s = laid(&short, 500, 0, &HashSet::new(), None);
+        assert_eq!(link(&s).as_deref(), Some(REVIEW_PLAN));
+        assert!(s.spots.iter().any(|(_, sp)| *sp == Spot::Review));
     }
 
     #[test]
@@ -3989,6 +4038,13 @@ pub(super) mod tests {
         let (r, _) = (laid.spots.iter()).find(|(_, s)| *s == Spot::Plan).unwrap();
         let on = Point::from(((at.x + r.loc.x + 2) as f64, (at.y + r.loc.y + 2) as f64));
         assert_eq!(chat_layout(&v).hit(&v, on), Some(ChatHit::AskPlan));
+        // "Review" beside it opens the plan's review.
+        assert!(labels(laid).contains(&REVIEW_PLAN.to_owned()));
+        let (r, _) = (laid.spots.iter())
+            .find(|(_, s)| *s == Spot::Review)
+            .unwrap();
+        let on = Point::from(((at.x + r.loc.x + 2) as f64, (at.y + r.loc.y + 2) as f64));
+        assert_eq!(chat_layout(&v).hit(&v, on), Some(ChatHit::AskReview));
         // Folded, as other input shows unfolded.
         v.unfolded.insert(ask_key("p1"));
         let q = parts(&v);
