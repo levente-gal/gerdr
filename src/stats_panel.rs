@@ -1139,15 +1139,9 @@ const NONE: &str = "–";
 /// How an agent named `agent` (as a run records it) is called here.
 pub(crate) fn agent_name(agent: &str) -> String {
     match AgentKind::of(agent) {
-        AgentKind::Claude => "Claude Code".into(),
-        AgentKind::Cursor => "Cursor".into(),
-        AgentKind::Codex => "Codex".into(),
-        AgentKind::OpenCode => "OpenCode".into(),
-        AgentKind::T3 => "T3 Code".into(),
-        AgentKind::Pi => "pi".into(),
-        AgentKind::Antigravity => "Antigravity".into(),
         AgentKind::Unknown if agent.is_empty() => NONE.into(),
         AgentKind::Unknown => agent.to_owned(),
+        kind => crate::integrations::of(kind).label().into(),
     }
 }
 
@@ -1431,7 +1425,7 @@ pub(crate) fn readable(path: &Path) -> Result<String, String> {
     };
     // A Cursor chat is kept as its database: its messages are read out.
     if plain.ends_with(".db") {
-        let messages = ai_work::usage::cursor_messages(&bytes)?;
+        let messages = crate::integrations::cursor::stats::cursor_messages(&bytes)?;
         let lines: Vec<String> = messages.iter().map(Value::to_string).collect();
         return Ok(chat_text(&lines.join("\n")));
     }
@@ -1445,27 +1439,6 @@ pub(crate) fn readable(path: &Path) -> Result<String, String> {
 /// The most of a Claude Code transcript read for a pane on the alternate
 /// screen: its end, the turns that scrolled away.
 const CHAT_TAIL: u64 = 2 * 1024 * 1024;
-
-/// The transcript of the Claude Code chat running in herdr pane `pane`, if
-/// herdr knows its id and it is on disk. Claude Code draws on the
-/// alternate screen, where herdr keeps no scrollback: this stands for it.
-pub(crate) fn claude_chat(herdr: &mut crate::herdr::Herdr, pane: &str) -> Option<PathBuf> {
-    let agent = herdr
-        .agent_list()
-        .ok()?
-        .into_iter()
-        .find(|a| a.pane_id == pane)?;
-    let session = agent
-        .agent_session
-        .filter(|s| s.agent == "claude" && s.kind == "id")?;
-    // It goes into a path: an id, not a way out of the folder.
-    let plain = (session.value.chars()).all(|c| c.is_ascii_alphanumeric() || c == '-');
-    let homes = ai_work::locate::Homes::here()?;
-    plain
-        .then(|| ai_work::locate::claude(&homes, &session.value))
-        .flatten()
-        .map(|f| f.main)
-}
 
 /// The end of transcript `path` as who said what, a rule, then `screen`:
 /// a Claude Code pane's output, for want of its scrollback.

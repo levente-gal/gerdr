@@ -20,20 +20,13 @@ pub const READ_EVERY: Duration = Duration::from_millis(150);
 /// How many of a pane's last rows are read for its mode.
 const SCREEN_ROWS: usize = 40;
 
-// shortcut: the modes and their words on screen are as the CLIs were here
-// (Claude Code 2.1.332, OpenCode 2.3.0, Cursor 2026.11.22, Codex 0.171.0,
-// Antigravity CLI 1.5.15); refresh them with `commands.rs`'s lists.
+// shortcut: the modes and their words on screen are as each CLI was when
+// its `screen.rs` says; refresh them with its `commands.rs` list.
 /// The modes agent `kind` steps through on `NEXT_KEY`, in its order; none
 /// for one without (pi). Claude's Auto shows only where its account has it,
 /// and OpenCode's own agents of the user's come after Plan.
 pub fn modes(kind: AgentKind) -> &'static [&'static str] {
-    match kind {
-        AgentKind::Claude => &["Auto", "Manual", "Edits", "Plan"],
-        AgentKind::OpenCode | AgentKind::Codex => &["Build", "Plan"],
-        AgentKind::Cursor => &["Agent", "Plan", "Debug", "Ask"],
-        AgentKind::Antigravity => &["Auto", "Plan", "Default", "Edits"],
-        _ => &[],
-    }
+    crate::integrations::of(kind).modes()
 }
 
 /// The mode agent `kind`'s screen shows on its last `rows`, by `modes`'s
@@ -45,51 +38,7 @@ pub fn shown(kind: AgentKind, rows: &[&str]) -> Option<String> {
         .filter(|row| !row.is_empty())
         .take(8)
         .collect();
-    let last = |n: usize| rows.iter().take(n).copied();
-    let cycle = "(shift+tab to cycle)";
-    let word = match kind {
-        AgentKind::Claude => last(3).find_map(|row| {
-            [
-                ("plan mode on", "Plan"),
-                ("accept edits on", "Edits"),
-                ("auto mode on", "Auto"),
-                ("manual mode on", "Manual"),
-                ("bypass permissions on", "Bypass"),
-            ]
-            .into_iter()
-            .find_map(|(says, mode)| row.contains(says).then(|| mode.to_owned()))
-        })?,
-        // The agent's name heads the line under the prompt: "Build · model".
-        AgentKind::OpenCode => last(8).find_map(|row| {
-            let (name, _) = row.strip_prefix('┃')?.split_once(" · ")?;
-            Some(name.trim().to_owned()).filter(|name| !name.is_empty())
-        })?,
-        // Its default says nothing.
-        AgentKind::Cursor => last(4)
-            .find_map(|row| Some(row.split_once(cycle)?.0.trim().to_owned()))
-            .unwrap_or_else(|| "Agent".into()),
-        AgentKind::Codex => last(3)
-            .find_map(|row| {
-                let said = row.split_once(cycle)?.0.trim().strip_suffix(" mode")?;
-                Some(said.rsplit("  ").next()?.trim().to_owned())
-            })
-            .unwrap_or_else(|| "Build".into()),
-        // "auto · model · effort" at the right of its last row; its
-        // default leaves the model first.
-        AgentKind::Antigravity => {
-            let row = last(2).find(|row| row.contains(" · "))?;
-            let said = row.split_once(" · ")?.0.split_whitespace().last()?;
-            match said {
-                "auto" => "Auto",
-                "plan" => "Plan",
-                "accept-edits" => "Edits",
-                _ => "Default",
-            }
-            .to_owned()
-        }
-        _ => return None,
-    };
-    Some(word)
+    crate::integrations::of(kind).mode_shown(&rows)
 }
 
 /// The mode agent `kind` shows on `ansi`, a pane's text with its escape

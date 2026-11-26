@@ -6,130 +6,125 @@
 
 use serde_json::Value;
 
-use super::opencode::{capped, gist, input_text};
-use super::{Item, Reader, ToolOut, cap, change, tag, texts};
+use crate::{
+    chat::{Item, ToolOut},
+    integrations::{
+        Parser,
+        common::build::{
+            Builder, COMPACTED, arg_gist, cap, change, edit_or_tool, input_text, tag, texts,
+        },
+    },
+};
 
-impl Reader {
-    /// Read message `row`, the `n`th of the chat (see `super::snapshot`).
-    pub(super) fn cursor_row(&mut self, n: usize, row: &Value) {
-        match row["role"].as_str().unwrap_or_default() {
-            "user" => {
-                let text = texts(&row["content"]);
-                let text = text.trim();
-                let id = format!("cursor{n}");
-                if let Some(typed) = tag(text, "user_query") {
-                    let text = typed.trim().to_owned();
-                    if !text.is_empty() {
-                        self.push(Item::User { id, at: None, text });
-                    }
-                } else if text.contains("<conversation_summary>") {
-                    let text = "Conversation compacted".to_owned();
-                    self.push(Item::Note { id, text });
-                } else if !text.is_empty() && !text.starts_with('<') {
-                    // What Cursor adds for the model comes in tags alone.
-                    let text = text.to_owned();
-                    self.push(Item::User { id, at: None, text });
-                }
-            }
-            "assistant" => {
-                let message = format!("cursor{n}");
-                for (k, part) in row["content"].as_array().into_iter().flatten().enumerate() {
-                    let id = format!("cursor{n}.{k}");
-                    match part["type"].as_str() {
-                        Some("text") => {
-                            self.answer(&message, id, None, part["text"].as_str().unwrap_or(""))
-                        }
-                        Some("reasoning") => {
-                            let text = part["text"].as_str().unwrap_or("").trim().to_owned();
-                            if !text.is_empty() {
-                                self.push(Item::Thinking { id, text });
-                            }
-                        }
-                        Some("tool-call") => self.cursor_call(part, id),
-                        _ => {}
-                    }
-                }
-            }
-            "tool" => {
-                let done = &row["providerOptions"]["cursor"]["highLevelToolCallResult"];
-                let said = &done["output"];
-                // A shell command that exited non-zero is a "failure".
-                let failed = done["isError"] == true
-                    || !said["error"].is_null()
-                    || !said["failure"].is_null();
-                for part in row["content"].as_array().into_iter().flatten() {
-                    let Some(call) = part["toolCallId"].as_str() else {
-                        continue;
-                    };
-                    let mut text = match &part["result"] {
-                        Value::String(text) => text.clone(),
-                        Value::Null => String::new(),
-                        other => serde_json::to_string_pretty(other).unwrap_or_default(),
-                    };
-                    if text.trim().is_empty() && failed {
-                        let error = &said["error"];
-                        let why = (error["errorMessage"].as_str())
-                            .or(error["error"].as_str())
-                            .or(error.as_str());
-                        text = why.unwrap_or_default().to_owned();
-                    }
-                    let out = ToolOut {
-                        text: cap(&text),
-                        failed,
-                        ms: None,
-                    };
-                    self.fill(call, out);
-                }
-            }
-            // system: the instructions.
-            _ => {}
-        }
-    }
+/// A reader of Cursor's: it keeps nothing of its own.
+pub(crate) struct Cursor;
 
-    /// Tool call `part`: an edit with its change, or a tool with its gist.
-    fn cursor_call(&mut self, part: &Value, id: String) {
-        let call = part["toolCallId"].as_str().map_or(id, str::to_owned);
-        let args = &part["args"];
-        // Plan mode hands its plan over; its file is named in the result.
-        if part["toolName"] == "CreatePlan"
-            && let Some(item) =
-                (args["plan"].as_str()).and_then(|plan| self.plan(call.clone(), None, plan))
-        {
-            self.push_call(call, None, item);
-            return;
-        }
-        let text = |key: &str| args[key].as_str().unwrap_or("");
-        let diff = match part["toolName"].as_str().unwrap_or("tool") {
-            "StrReplace" => Some(change(text("old_string"), text("new_string"))),
-            "Write" => Some(change("", text("contents"))),
-            _ => None,
-        };
-        let item = match (args["path"].as_str(), diff) {
-            (Some(path), Some(diff)) => Item::Edit {
-                id: call.clone(),
-                path: path.to_owned(),
-                diff: capped(diff),
-                output: None,
-            },
-            _ => {
-                let mut name = part["toolName"].as_str().unwrap_or("tool");
-                let mut input = args;
-                // A tool of an MCP server or Cursor's own, called by name.
-                if name == "CallDynamicTool" {
-                    name = args["toolName"].as_str().unwrap_or(name);
-                    input = &args["arguments"];
+impl Parser for Cursor {
+    /// Read the chat's messages, each named by its place.
+    fn rows(&mut self, b: &mut Builder, rows: &mut dyn Iterator<Item = &Value>) {
+        rows.enumerate().for_each(|(n, row)| cursor_row(b, n, row));
+    }
+}
+
+/// Read message `row`, the `n`th of the chat (see `chat::parse::snapshot`).
+fn cursor_row(b: &mut Builder, n: usize, row: &Value) {
+    match row["role"].as_str().unwrap_or_default() {
+        "user" => {
+            let text = texts(&row["content"]);
+            let text = text.trim();
+            let id = format!("cursor{n}");
+            if let Some(typed) = tag(text, "user_query") {
+                let text = typed.trim().to_owned();
+                if !text.is_empty() {
+                    b.push(Item::User { id, at: None, text });
                 }
-                Item::Tool {
-                    id: call.clone(),
-                    name: name.to_owned(),
-                    gist: gist(input),
-                    input: input_text(input),
-                    output: None,
+            } else if text.contains("<conversation_summary>") {
+                let text = COMPACTED.to_owned();
+                b.push(Item::Note { id, text });
+            } else if !text.is_empty() && !text.starts_with('<') {
+                // What Cursor adds for the model comes in tags alone.
+                let text = text.to_owned();
+                b.push(Item::User { id, at: None, text });
+            }
+        }
+        "assistant" => {
+            let message = format!("cursor{n}");
+            for (k, part) in row["content"].as_array().into_iter().flatten().enumerate() {
+                let id = format!("cursor{n}.{k}");
+                match part["type"].as_str() {
+                    Some("text") => {
+                        b.answer(&message, id, None, part["text"].as_str().unwrap_or(""))
+                    }
+                    Some("reasoning") => b.thinking(id, part["text"].as_str().unwrap_or("")),
+                    Some("tool-call") => cursor_call(b, part, id),
+                    _ => {}
                 }
             }
-        };
-        self.push_call(call, None, item);
+        }
+        "tool" => {
+            let done = &row["providerOptions"]["cursor"]["highLevelToolCallResult"];
+            let said = &done["output"];
+            // A shell command that exited non-zero is a "failure".
+            let failed =
+                done["isError"] == true || !said["error"].is_null() || !said["failure"].is_null();
+            for part in row["content"].as_array().into_iter().flatten() {
+                let Some(call) = part["toolCallId"].as_str() else {
+                    continue;
+                };
+                let mut text = match &part["result"] {
+                    Value::String(text) => text.clone(),
+                    Value::Null => String::new(),
+                    other => serde_json::to_string_pretty(other).unwrap_or_default(),
+                };
+                if text.trim().is_empty() && failed {
+                    let error = &said["error"];
+                    let why = (error["errorMessage"].as_str())
+                        .or(error["error"].as_str())
+                        .or(error.as_str());
+                    text = why.unwrap_or_default().to_owned();
+                }
+                let out = ToolOut {
+                    text: cap(&text),
+                    failed,
+                    ms: None,
+                };
+                b.fill(call, out);
+            }
+        }
+        // system: the instructions.
+        _ => {}
     }
+}
+
+/// Tool call `part`: an edit with its change, or a tool with its gist.
+fn cursor_call(b: &mut Builder, part: &Value, id: String) {
+    let call = part["toolCallId"].as_str().map_or(id, str::to_owned);
+    let args = &part["args"];
+    // Plan mode hands its plan over; its file is named in the result.
+    if part["toolName"] == "CreatePlan"
+        && let Some(item) =
+            (args["plan"].as_str()).and_then(|plan| b.plan(call.clone(), None, plan))
+    {
+        b.push_call(call, None, item);
+        return;
+    }
+    let text = |key: &str| args[key].as_str().unwrap_or("");
+    let diff = match part["toolName"].as_str().unwrap_or("tool") {
+        "StrReplace" => Some(change(text("old_string"), text("new_string"))),
+        "Write" => Some(change("", text("contents"))),
+        _ => None,
+    };
+    let item = edit_or_tool(call.clone(), args["path"].as_str(), diff, || {
+        let mut name = part["toolName"].as_str().unwrap_or("tool");
+        let mut input = args;
+        // A tool of an MCP server or Cursor's own, called by name.
+        if name == "CallDynamicTool" {
+            name = args["toolName"].as_str().unwrap_or(name);
+            input = &args["arguments"];
+        }
+        (name.to_owned(), arg_gist(input), input_text(input))
+    });
+    b.push_call(call, None, item);
 }
 
 #[cfg(test)]
@@ -225,7 +220,7 @@ mod tests {
             },
             Item::Note {
                 id: "cursor4".into(),
-                text: "Conversation compacted".into(),
+                text: "The chat was compacted".into(),
             },
         ];
         assert_eq!(items, want);

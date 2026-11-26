@@ -89,6 +89,7 @@ mod inbox_sources;
 mod inbox_store;
 mod inotify_limit;
 mod input;
+mod integrations;
 mod issues;
 mod keep;
 mod keyring;
@@ -7359,20 +7360,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// gerdr's extension run here and end, as do `--help` and `--version`:
 /// `None` then. A mistyped option exits before anything starts.
 fn command_line() -> Option<Args> {
-    // Run by Cursor's hooks, many times a chat: in and out at once.
-    if std::env::args().nth(1).as_deref() == Some(cursor_agents::HOOK_COMMAND) {
-        cursor_agents::run_hook();
-        return None;
-    }
-    // Run by Claude Code's hooks: in and out at once, but an ask, which
-    // waits for the chat's answer (see `chat::live`).
-    if std::env::args().nth(1).as_deref() == Some(chat::live::claude::HOOK_COMMAND) {
-        chat::live::claude::run_hook();
-        return None;
-    }
-    // Run by the Antigravity CLI's hooks: in and out at once.
-    if std::env::args().nth(1).as_deref() == Some(chat::live::antigravity::HOOK_COMMAND) {
-        chat::live::antigravity::run_hook();
+    // Run by an agent's hooks (Cursor's many times a chat): in and out at
+    // once, but a Claude Code ask, which waits for the chat's answer (see
+    // `chat::live`).
+    let first = std::env::args().nth(1);
+    let hooked = (integrations::ALL.iter()).find(|agent| {
+        agent
+            .hook_command()
+            .is_some_and(|c| first.as_deref() == Some(c))
+    });
+    if let Some(agent) = hooked {
+        agent.run_hook();
         return None;
     }
     // Run by the browser, for gerdr's extension in it: nothing may go to

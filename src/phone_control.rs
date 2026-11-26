@@ -92,13 +92,14 @@ pub enum Request {
     /// The phone shows agent pane `pane` of `project`: the permission its
     /// agent asks for, if it waits on one (see `chat::live`). Its asks wait
     /// on the phone's card while it shows the pane.
-    /// `cursor`: its agent is Cursor's, and the phone offers its models
-    /// (gerdr reads them once, as for the picker of a model).
+    /// `read_models`: its agent's models are read from its CLI, and the
+    /// phone offers them (gerdr reads them once, as for the picker of a
+    /// model).
     Ask {
         project: String,
         pane: String,
         #[serde(default)]
-        cursor: bool,
+        read_models: bool,
     },
     /// Send `text` to agent pane `pane` as the chat would: a side question
     /// (`/btw …`) is followed for its answer, which the `ask` op then
@@ -317,11 +318,10 @@ impl Gerdr {
                 stage,
             } => self.phone_offer(&project, &slug, stage),
             Request::Cards { features } => self.phone_cards(&features),
-            Request::Ask { pane, cursor, .. } => {
+            Request::Ask { pane, read_models, .. } => {
                 let asked = self.phone_ask(&pane).map(|a| {
                     // A plan reads as its markdown, rendered here.
-                    let plan =
-                        crate::chrome::is_plan(&a).then(|| crate::md_preview::render(&a.input));
+                    let plan = a.plan.then(|| crate::md_preview::render(&a.input));
                     json!({
                         "ask": a.ask, "tool": a.tool, "gist": a.gist, "input": a.input,
                         "questions": a.questions, "plan": plan,
@@ -329,19 +329,18 @@ impl Gerdr {
                 });
                 let sides = self.phone_sides(&pane);
                 let models = &self.features.cursor_models;
-                if cursor
+                if read_models
                     && models.offers.is_empty()
                     && models.reading == crate::stage_models::Reading::Idle
+                    && let Some(cli) = crate::chat::model::read_from()
                 {
-                    self.read_cursor_models(crate::chat::model::base(
-                        crate::ai_work::AgentKind::Cursor,
-                    ));
+                    self.read_cursor_models(cli);
                 }
                 let listed: Vec<Value> = (self.features.cursor_models.offers.iter())
-                    .filter(|_| cursor)
+                    .filter(|_| read_models)
                     .map(|o| json!({ "id": o.id, "name": o.name }))
                     .collect();
-                json!({ "ask": asked, "working": self.turn_took(&pane), "sides": sides, "cursor_models": listed })
+                json!({ "ask": asked, "working": self.turn_took(&pane), "sides": sides, "read_models": listed })
             }
             Request::Side { pane, text, .. } => match self.send_line(&pane, &text) {
                 Ok(()) => json!({ "ok": true }),

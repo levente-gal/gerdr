@@ -1,14 +1,23 @@
-//! Claude Code's hooks, for live word (see `super`): `gerdr claude-hook`
-//! reads a hook's input and tells gerdr; `merged` adds it to
+//! Claude Code's hooks, for live word (see `chat::live`): `gerdr
+//! claude-hook` reads a hook's input and tells gerdr; `merged` adds it to
 //! `~/.claude/settings.json`.
 
-use std::io::Read;
+use std::path::Path;
 
 use serde_json::{Value, json};
 
-use super::{Answer, AskReply, LiveEvent, QUESTION_WAIT, Question, QuestionOption, What};
-use crate::stats_panel::tool_gist;
+use crate::{
+    chat::live::{self, Answer, AskReply, QUESTION_WAIT, Question, QuestionOption, What},
+    integrations::common::{
+        hook,
+        install::{self, Changed, hook_command, is_gerdr_command, with_key},
+    },
+    stats_panel::tool_gist,
+};
 
+/// The tool Claude's plan mode asks to go ahead with its plan by: its input
+/// has the plan's markdown (`plan`) and file (`planFilePath`).
+pub(super) const PLAN_TOOL: &str = "ExitPlanMode";
 /// The subcommand Claude's hooks run.
 pub const HOOK_COMMAND: &str = "claude-hook";
 /// The agent, as herdr names it.
@@ -23,8 +32,6 @@ const EVENTS: [(&str, u64); 6] = [
     ("Stop", 5),
     ("PermissionRequest", QUESTION_WAIT.as_secs() + 30),
 ];
-/// The most of a hook's input read.
-const MAX_INPUT: u64 = 4 << 20;
 /// The most of a tool's input an ask shows, in chars.
 const MAX_ASK_INPUT: usize = 4000;
 
@@ -32,29 +39,31 @@ const MAX_ASK_INPUT: usize = 4000;
 /// for `PermissionRequest`, print the chat's answer, if any. Always exits
 /// at once without gerdr, and never fails the hook.
 pub fn run_hook() {
-    let mut input = Vec::new();
-    let _ = std::io::stdin().take(MAX_INPUT).read_to_end(&mut input);
-    let Some((socket, pane)) = super::from_env() else {
+    let Some(payload) = hook::pane_input() else {
         return;
     };
-    let Ok(payload) = serde_json::from_slice::<Value>(&input) else {
-        return;
-    };
-    let now = super::now_ms();
+    let now = live::now_ms();
     let ask = format!("claude-{}-{now}", std::process::id());
     let Some(what) = what_of(&payload, &ask) else {
         return;
     };
-    let event = LiveEvent {
-        pane,
-        agent: AGENT.into(),
-        at_ms: now,
-        what,
-    };
-    let answer = super::send(&socket, &event);
+    let answer = hook::tell(AGENT, now, what);
     if let Some(out) = answer.and_then(|answer| decision(answer, &payload["tool_input"])) {
         println!("{out}");
     }
+}
+
+/// Add gerdr's hooks to Claude Code under home folder `home`, if it is
+/// installed.
+pub fn install(home: &Path) -> Vec<Result<Option<Changed>, String>> {
+    if !home.join(".claude").is_dir() {
+        return Vec::new();
+    }
+    vec![hook_command(HOOK_COMMAND).and_then(|command| {
+        install::install(&home.join(".claude/settings.json"), |text| {
+            merged(text, &command)
+        })
+    })]
 }
 
 /// What hook input `payload` says, an ask named `ask`; `None` for what
@@ -84,7 +93,7 @@ fn what_of(payload: &Value, ask: &str) -> Option<What> {
         "PermissionRequest" => {
             let tool = text("tool_name")?;
             // A plan reads as its markdown; other input as its JSON.
-            let mut shown = match input["plan"].as_str().filter(|_| tool == super::PLAN_TOOL) {
+            let mut shown = match input["plan"].as_str().filter(|_| tool == PLAN_TOOL) {
                 Some(plan) => plan.to_owned(),
                 None => serde_json::to_string_pretty(input).unwrap_or_default(),
             };
@@ -94,6 +103,7 @@ fn what_of(payload: &Value, ask: &str) -> Option<What> {
             }
             What::Ask {
                 ask: ask.to_owned(),
+                plan: tool == PLAN_TOOL,
                 tool,
                 gist: tool_gist(input).unwrap_or_default(),
                 input: shown,
@@ -178,7 +188,7 @@ pub fn merged(existing: Option<&str>, command: &str) -> Result<String, String> {
             let had = list.len();
             list.retain(|hook| {
                 !(hook.get("command").and_then(Value::as_str))
-                    .is_some_and(|c| crate::cursor_agents::is_gerdr_command(c, HOOK_COMMAND))
+                    .is_some_and(|c| is_gerdr_command(c, HOOK_COMMAND))
             });
             list.len() == had || !list.is_empty()
         });
@@ -191,7 +201,7 @@ pub fn merged(existing: Option<&str>, command: &str) -> Result<String, String> {
     }
     match text {
         Some(text) if old.as_ref() == Some(&hooks) => Ok(text.to_owned()),
-        Some(text) => super::with_key(text, "hooks", &hooks),
+        Some(text) => with_key(text, "hooks", &hooks),
         None => serde_json::to_string_pretty(&json!({ "hooks": hooks }))
             .map(|text| text + "\n")
             .map_err(|err| err.to_string()),
@@ -206,15 +216,15 @@ mod tests {
 
     fn fixture(name: &str) -> Value {
         let text = match name {
-            "SessionStart" => include_str!("fixtures/claude/SessionStart.json"),
-            "PreToolUse" => include_str!("fixtures/claude/PreToolUse.json"),
-            "PostToolUse" => include_str!("fixtures/claude/PostToolUse.json"),
-            "PermissionRequest" => include_str!("fixtures/claude/PermissionRequest.json"),
+            "SessionStart" => include_str!("fixtures/SessionStart.json"),
+            "PreToolUse" => include_str!("fixtures/PreToolUse.json"),
+            "PostToolUse" => include_str!("fixtures/PostToolUse.json"),
+            "PermissionRequest" => include_str!("fixtures/PermissionRequest.json"),
             "PermissionRequestQuestion" => {
-                include_str!("fixtures/claude/PermissionRequestQuestion.json")
+                include_str!("fixtures/PermissionRequestQuestion.json")
             }
-            "Stop" => include_str!("fixtures/claude/Stop.json"),
-            "UserPromptSubmit" => include_str!("fixtures/claude/UserPromptSubmit.json"),
+            "Stop" => include_str!("fixtures/Stop.json"),
+            "UserPromptSubmit" => include_str!("fixtures/UserPromptSubmit.json"),
             _ => unreachable!(),
         };
         serde_json::from_str(text).unwrap()
@@ -258,6 +268,7 @@ mod tests {
             gist,
             input,
             questions,
+            ..
         }) = what("PermissionRequest")
         else {
             panic!("not an ask");

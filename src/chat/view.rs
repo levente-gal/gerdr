@@ -39,6 +39,7 @@ use crate::{
     ai_work::AgentKind,
     chrome::{self, CardHit, ChatHit, ChatLayout, ChatView, FieldSpot, WaitKey},
     herdr::{AgentInfo, AgentSession, AgentStatus, Herdr, ProcessInfo},
+    integrations::{ModelSwitch, caps},
     key_table::{self, Binding},
     md_blocks::{DocBlock, ItemMark},
     prepare::{self, Step},
@@ -216,7 +217,7 @@ fn review_target(chat: &PaneChat) -> Option<String> {
     let picked = (chat.picked.filter(|_| chat.focus == ChatFocus::List))
         .and_then(|i| shown.get(i)?.item(&chat.items))
         .and_then(plan);
-    let waits = (chat.live.ask.as_ref()).is_some_and(chrome::is_plan);
+    let waits = (chat.live.ask.as_ref()).is_some_and(|ask| ask.plan);
     picked.or_else(|| {
         waits
             .then(|| chat.items.iter().rev().find_map(plan))
@@ -844,7 +845,7 @@ fn chat_footer(chat: &PaneChat, modes: bool, models: bool) -> Vec<(String, Strin
     let mut hints = match (ask, card) {
         (_, Some(ask)) => card_footer(&chat.card, ask),
         (Some(ask), _) if questions.is_none() => {
-            let what = match chrome::is_plan(ask) {
+            let what = match ask.plan {
                 true => "plan",
                 false => "input",
             };
@@ -1328,12 +1329,13 @@ pub(crate) fn screen_rows(
     Ok(last_rows(crate::scrollback::parse_ansi(&text), n))
 }
 
-/// Follow side question `follow` asked of pane `pane_id`'s agent on its
-/// screen (`btw::Follow`), on the thread it runs on, until it is answered
-/// or fails; each change goes to `tx` as side `n` of the pane.
+/// Follow side question `follow` asked of pane `pane_id`'s agent, of kind
+/// `kind`, on its screen (`btw::Follow`), on the thread it runs on, until it
+/// is answered or fails; each change goes to `tx` as side `n` of the pane.
 fn follow_side(
     herdr: &mut Herdr,
     pane_id: &str,
+    kind: AgentKind,
     n: usize,
     mut follow: Follow,
     tx: &channel::Sender<(String, usize, Side)>,
@@ -1346,7 +1348,7 @@ fn follow_side(
             Ok(rows) => {
                 misses = 0;
                 let rows: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
-                follow.took(btw::panel(&rows), Instant::now())
+                follow.took(btw::panel_of(kind, &rows), Instant::now())
             }
             Err(err) => {
                 misses += 1;
@@ -1383,20 +1385,16 @@ fn follow_side(
 /// Claude Code whose turn ended.
 pub(crate) fn suggests(agent: &AgentInfo) -> bool {
     matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done)
-        && super::source::kind(agent) == Some(crate::ai_work::AgentKind::Claude)
+        && super::source::kind(agent)
+            .is_some_and(|kind| crate::integrations::of(kind).caps().suggests)
 }
 
-/// What Claude Code suggests saying next, as its screen shows it: the
-/// last `❯` line, its reply box, holding dim text only (what the user
-/// types there is plain).
-pub(crate) fn suggestion(rows: &[(String, crate::scrollback::Styled)]) -> Option<String> {
-    let (text, styles) = rows.iter().rev().find(|(text, _)| text.starts_with('❯'))?;
-    let chars: Vec<char> = text.chars().collect();
-    let start = (chars.iter()).take_while(|c| **c == '❯' || c.is_whitespace()).count();
-    let dim = |i: usize| (styles.iter()).any(|(at, style)| at.contains(&i) && style.dim);
-    let words: String = chars[start..].iter().collect::<String>().trim_end().to_owned();
-    let ghost = (start..chars.len()).all(|i| chars[i].is_whitespace() || dim(i));
-    (ghost && !words.is_empty()).then_some(words)
+/// What `kind`'s screen `rows` suggest saying next.
+pub(crate) fn suggestion(
+    kind: AgentKind,
+    rows: &[(String, crate::scrollback::Styled)],
+) -> Option<String> {
+    crate::integrations::of(kind).suggestion(rows)
 }
 
 /// How a chat's list scrolls: in pixels, from its top to as far as its
@@ -1719,13 +1717,15 @@ impl Gerdr {
         // The others with modes, for the one they are in.
         let moded = (wanted.iter())
             .filter(|a| !blocked.contains(a.pane_id.as_str()))
-            .filter(|a| super::source::kind(a).is_some_and(|k| !mode::modes(k).is_empty()))
+            .filter(|a| super::source::kind(a).is_some_and(|k| caps(k).modes))
             .map(|a| (a.pane_id.as_str(), MODE_EVERY));
         // Those that pick their model in a menu of their own, for the model
         // they are on; often while the menu shows or was just asked for.
         let asked = |id: &str| (self.chats.model_asked.get(id)).is_some_and(|at| at.elapsed() < MENU_TAKES);
         let menus = (wanted.iter())
-            .filter(|a| super::source::kind(a).is_some_and(model_menu::opens))
+            .filter(|a| {
+                super::source::kind(a).is_some_and(|k| caps(k).model == ModelSwitch::OwnMenu)
+            })
             .map(|a| a.pane_id.as_str())
             .map(|id| match picking.contains(id) || asked(id) {
                 true => (id, WAITING_EVERY),
@@ -1801,7 +1801,8 @@ impl Gerdr {
             return;
         };
         let (status, kind) = (Some(agent.agent_status), super::source::kind(agent));
-        if let (Some(kind), Ok(rows)) = (kind.filter(|k| model_menu::opens(*k)), &rows) {
+        let menu = kind.filter(|k| caps(*k).model == ModelSwitch::OwnMenu);
+        if let (Some(kind), Ok(rows)) = (menu, &rows) {
             self.chat_take_picker(&pane_id, kind, rows);
         }
         if status != Some(AgentStatus::Blocked) {
@@ -1820,7 +1821,7 @@ impl Gerdr {
             // asked again every second for ever.
             chat.suggest_reads = chat.suggest_reads.saturating_add(1);
             match rows {
-                Ok(rows) => chat.suggestion = suggestion(&rows),
+                Ok(rows) => chat.suggestion = kind.and_then(|kind| suggestion(kind, &rows)),
                 Err(err) => tracing::warn!("the suggestion in pane {pane_id}: {err}"),
             }
             return;
@@ -2033,21 +2034,22 @@ impl Gerdr {
         if (sides.iter()).any(|side| side.state == SideState::Answering) {
             return Err("its agent is still answering a side question".into());
         }
-        let offered = (self.session.agents.iter())
+        let kind = (self.session.agents.iter())
             .find(|a| a.pane_id == pane_id)
             .and_then(super::source::kind)
-            .is_some_and(super::commands::asks_aside);
-        let question = btw::question(line).filter(|_| offered);
+            .filter(|kind| caps(*kind).side);
+        let question = btw::question(line).filter(|_| kind.is_some());
         self.send_to_agent(pane_id, line)?;
-        if let Some(question) = question {
-            self.ask_side(pane_id, question);
+        if let (Some(question), Some(kind)) = (question, kind) {
+            self.ask_side(pane_id, kind, question);
         }
         Ok(())
     }
 
-    /// Follow side question `question`, just sent to pane `pane_id`'s agent,
-    /// on a thread of its own; its rows show in the chat meanwhile.
-    fn ask_side(&mut self, pane_id: &str, question: &str) {
+    /// Follow side question `question`, just sent to pane `pane_id`'s agent
+    /// of kind `kind`, on a thread of its own; its rows show in the chat
+    /// meanwhile.
+    fn ask_side(&mut self, pane_id: &str, kind: AgentKind, question: &str) {
         let mut side = Side::new(question, crate::ai_work::now_ms());
         side.session =
             (self.chat_agent(pane_id)).and_then(|a| self.with_live_session(a).agent_session);
@@ -2062,7 +2064,9 @@ impl Gerdr {
                 let follow = Follow::new(side, Instant::now());
                 std::thread::Builder::new()
                     .name("side question".into())
-                    .spawn(move || follow_side(&mut Herdr::on_socket(socket), &id, n, follow, &tx))
+                    .spawn(move || {
+                        follow_side(&mut Herdr::on_socket(socket), &id, kind, n, follow, &tx)
+                    })
                     .map(drop)
                     .map_err(|err| err.to_string())
             }
@@ -2251,7 +2255,7 @@ impl Gerdr {
     /// thing (pi's thinking level), or while one is being switched.
     fn chat_next_mode(&mut self, pane_id: &str) {
         let kind = self.chat_agent(pane_id).and_then(super::source::kind);
-        if kind.is_none_or(|kind| mode::modes(kind).is_empty())
+        if kind.is_none_or(|kind| !caps(kind).modes)
             || self.chats.switching.contains(pane_id)
         {
             return;
@@ -2287,7 +2291,7 @@ impl Gerdr {
     /// chat says it is on; nothing for an agent gerdr can't switch.
     pub(crate) fn chat_open_model_picker(&mut self, pane_id: &str) {
         let kind = self.chat_agent(pane_id).and_then(super::source::kind);
-        if kind.is_some_and(model_menu::opens) {
+        if kind.is_some_and(|kind| caps(kind).model == ModelSwitch::OwnMenu) {
             return self.chat_open_model_menu(pane_id);
         }
         let Some(slot) = self.chat_model_slot(pane_id) else {
@@ -2373,7 +2377,7 @@ impl Gerdr {
         pane_id: &str,
     ) -> Option<crate::feature_agents::ModelSlot> {
         let kind = (self.chat_agent(pane_id).and_then(super::source::kind))
-            .filter(|kind| model::picks(*kind))?;
+            .filter(|kind| caps(*kind).model.typed())?;
         let now = chat_mut(&mut self.workspaces, pane_id).and_then(|chat| chat.model.clone());
         let offers = model::offers(kind, &self.features.cursor_models.offers);
         Some(crate::feature_agents::ModelSlot {
@@ -2396,11 +2400,9 @@ impl Gerdr {
             tracing::warn!("switching the agent in pane {pane_id} to model {id}: {why}");
             return self.show_error(format!("Couldn't switch the agent to {id}: {why}"));
         }
-        let offers = model::offers(kind, &self.features.cursor_models.offers);
-        let name = match id {
-            "default" => "Default",
-            _ => (offers.iter().find(|o| o.id == id)).map_or(id, |o| o.name.as_str()),
-        };
+        let mut offers = model::offers(kind, &self.features.cursor_models.offers);
+        offers.extend(crate::integrations::of(kind).own_model());
+        let name = (offers.iter().find(|o| o.id == id)).map_or(id, |o| o.name.as_str());
         if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
             chat.model = Some(name.to_owned());
         }
@@ -2556,10 +2558,10 @@ impl Gerdr {
                 }
                 // Its model's button: what its chat says it is on.
                 let model = (super::source::kind(agent))
-                    .filter(|kind| model::picks(*kind) || model_menu::opens(*kind))
+                    .filter(|kind| caps(*kind).model != ModelSwitch::None)
                     .map(|_| chat.model.clone().unwrap_or_else(|| "Model".to_owned()));
                 let modes = (super::source::kind(agent))
-                    .filter(|kind| !mode::modes(*kind).is_empty())
+                    .filter(|kind| caps(*kind).modes)
                     .map_or_else(Vec::new, |kind| {
                         mode::offered(kind, self.chats.modes.get(pane_id).map(String::as_str))
                     });
@@ -3370,22 +3372,6 @@ mod tests {
     }
 
     #[test]
-    fn a_suggestion_is_the_dim_text_of_the_reply_line_only() {
-        let read = |ansi: &str| suggestion(&crate::scrollback::parse_ansi(ansi));
-        // As Claude Code 2.1.332 drew it under herdr: the chat's own `❯`
-        // lines above, then its reply box.
-        let rule = "\x1b[0m\x1b[38;2;138;138;138m────\x1b[0m\r\n";
-        let screen = format!(
-            "❯ Create hello.txt\r\n● Done.\r\n{rule}❯\u{a0}\x1b[0m\x1b[2mcommit this\x1b[0m\r\n{rule}  \x1b[0m\x1b[38;2;150;108;30m⏵⏵ auto mode on\x1b[0m\n"
-        );
-        assert_eq!(read(&screen).as_deref(), Some("commit this"));
-        // Typed by the user: plain. Nothing in the box: none.
-        assert_eq!(read("❯\u{a0}com\r\n"), None);
-        assert_eq!(read("❯\u{a0}\r\n"), None);
-        assert_eq!(read("❯ \x1b[2mcom\x1b[0mmit\r\n"), None);
-    }
-
-    #[test]
     fn left_fills_the_empty_reply_with_the_suggestion() {
         let mut chat = with_items(vec![user("u1", "one")]);
         // None waits: Left does nothing and isn't hinted.
@@ -3429,10 +3415,11 @@ mod tests {
         let mut chat = with_items(vec![user("u1", "one"), plan, user("u2", "two")]);
         chat.live.ask = Some(crate::chat::live::PendingAsk {
             ask: "a1".into(),
-            tool: crate::chat::live::PLAN_TOOL.into(),
+            tool: "ExitPlanMode".into(),
             gist: String::new(),
             input: "# Plan\n\nDo it.".into(),
             questions: Vec::new(),
+            plan: true,
             since: Instant::now(),
         });
         chat.focus = ChatFocus::Composer;
@@ -3465,10 +3452,11 @@ mod tests {
         assert_eq!(press(&mut chat, "Ctrl+Shift+O", 'O'), None);
         chat.live.ask = Some(crate::chat::live::PendingAsk {
             ask: "a1".into(),
-            tool: crate::chat::live::PLAN_TOOL.into(),
+            tool: "ExitPlanMode".into(),
             gist: String::new(),
             input: "# Plan\n".into(),
             questions: Vec::new(),
+            plan: true,
             since: Instant::now(),
         });
         assert!(review(&chat));
@@ -3498,6 +3486,7 @@ mod tests {
             gist: "ls".into(),
             input: "{}".into(),
             questions: Vec::new(),
+            plan: false,
             since: Instant::now(),
         });
         let allow = Some(ChatDo::Answer(AskReply::Allow));
@@ -3554,6 +3543,7 @@ mod tests {
                 q("Size?", &["Small", "Big"], false),
                 q("Fruits?", &["Apple", "Pear", "Fig"], true),
             ],
+            plan: false,
             since: Instant::now(),
         }
     }

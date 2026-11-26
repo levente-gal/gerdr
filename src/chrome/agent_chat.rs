@@ -680,17 +680,11 @@ pub fn ask_key(ask: &str) -> String {
     format!("{ask}\u{0}ask")
 }
 
-/// Whether `ask` is plan mode asking to go ahead with its plan: its input
-/// is the plan's markdown.
-pub fn is_plan(ask: &PendingAsk) -> bool {
-    ask.tool == crate::chat::live::PLAN_TOOL
-}
-
 /// Whether `ask`'s card shows what it would run, as `unfolded` has it: a
 /// plan shows until folded, as it is what the answer is about; other input
 /// once unfolded.
 pub fn ask_open(ask: &PendingAsk, unfolded: &HashSet<String>) -> bool {
-    unfolded.contains(&ask_key(&ask.ask)) != is_plan(ask)
+    unfolded.contains(&ask_key(&ask.ask)) != ask.plan
 }
 
 /// Plan `md` as blocks, parsed once while it stays the same (the ask's
@@ -1569,7 +1563,7 @@ fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
     let mut l = Laid::default();
     let open = ask_open(ask, &view.unfolded);
     // A plan's gist is its first line, which its markdown shows.
-    let gist = match is_plan(ask) {
+    let gist = match ask.plan {
         true => String::new(),
         false => short(&ask.gist, view.cwd.as_deref()),
     };
@@ -1577,7 +1571,7 @@ fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
         x: 0,
         w,
         open,
-        name: if is_plan(ask) { "Plan" } else { &ask.tool },
+        name: if ask.plan { "Plan" } else { &ask.tool },
         bold: true,
         gist: &gist,
         tail: Vec::new(),
@@ -1585,7 +1579,7 @@ fn lay_ask(view: &ChatView, ask: &PendingAsk, w: i32, lines: usize) -> Laid {
         path: false,
         mono: true,
     });
-    if open && is_plan(ask) {
+    if open && ask.plan {
         // The plan as markdown, as much as `lines` small lines' room
         // holds: the whole of it is on its card in the chat.
         let (ix, iw) = (CHEVRON_WIDTH, (w - CHEVRON_WIDTH).max(1));
@@ -2234,7 +2228,8 @@ fn lay(
             l.links(ix, iw, row.collect());
         }
         Item::Thinking { text, .. } => {
-            // Codex and OpenCode open theirs with a bold title: no stars.
+            // A thinking that opens with a bold title (`**…**`) heads its
+            // row without the stars.
             let first = (text
                 .lines()
                 .map(|line| line.trim().trim_matches('*').trim()))
@@ -3199,6 +3194,7 @@ pub(super) mod tests {
                     true,
                 ),
             ],
+            plan: false,
             since: std::time::Instant::now(),
         }
     }
@@ -4267,6 +4263,7 @@ pub(super) mod tests {
             gist: "rm -rf target".into(),
             input: input.join("\n"),
             questions: Vec::new(),
+            plan: false,
             since: std::time::Instant::now(),
         }
     }
@@ -4289,6 +4286,7 @@ pub(super) mod tests {
             gist: String::new(),
             input: format!("# Retry the upload\n\n{steps}"),
             questions: Vec::new(),
+            plan: true,
             since: std::time::Instant::now(),
         }
     }

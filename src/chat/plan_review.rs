@@ -126,7 +126,7 @@ fn waits_on(chat: &PaneChat, item_id: &str) -> bool {
         Item::Plan { id, .. } => Some(id.as_str()),
         _ => None,
     });
-    (chat.live.ask.as_ref()).is_some_and(crate::chrome::is_plan) && last == Some(item_id)
+    (chat.live.ask.as_ref()).is_some_and(|ask| ask.plan) && last == Some(item_id)
 }
 
 impl Gerdr {
@@ -162,7 +162,7 @@ impl Gerdr {
         let ask = self
             .plan_chat(pane_id)
             .and_then(|chat| chat.live.ask.clone());
-        if let Some(ask) = ask.filter(crate::chrome::is_plan) {
+        if let Some(ask) = ask.filter(|ask| ask.plan) {
             self.live_answer(&ask.ask, crate::chat::live::AskReply::Allow);
             if let Some(chat) = super::view::chat_mut(&mut self.workspaces, pane_id) {
                 chat.live.ask = None;
@@ -256,10 +256,11 @@ mod tests {
         assert!(!waits_on(&chat, "b"));
         chat.live.ask = Some(PendingAsk {
             ask: "q".into(),
-            tool: crate::chat::live::PLAN_TOOL.into(),
+            tool: "ExitPlanMode".into(),
             gist: String::new(),
             input: "# P\n".into(),
             questions: Vec::new(),
+            plan: true,
             since: std::time::Instant::now(),
         });
         assert!(waits_on(&chat, "b"));

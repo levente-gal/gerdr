@@ -1,4 +1,4 @@
-//! The Antigravity CLI's hooks, for live word (see `super`): `gerdr
+//! The Antigravity CLI's hooks, for live word (see `chat::live`): `gerdr
 //! agy-hook` reads a hook's input and tells gerdr; `merged` adds it to
 //! `~/.gemini/config/hooks.json` under a name of its own.
 //!
@@ -13,8 +13,12 @@ use std::{
 
 use serde_json::{Value, json};
 
-use super::{LiveEvent, What};
-use crate::stats_panel::tool_gist;
+use super::parse::GIST_KEYS;
+use crate::{
+    chat::live::{self, What},
+    integrations::common::{hook, install::with_key},
+    stats_panel::tool_gist,
+};
 
 /// The subcommand Antigravity's hooks run.
 pub const HOOK_COMMAND: &str = "agy-hook";
@@ -22,45 +26,19 @@ pub const HOOK_COMMAND: &str = "agy-hook";
 const AGENT: &str = "agy";
 /// gerdr's hook's name in `hooks.json`, beside herdr's (`"herdr"`).
 const NAME: &str = "gerdr";
-/// The most of a hook's input read.
-const MAX_INPUT: u64 = 4 << 20;
 /// The most of a transcript's end read for a call's step.
 const MAX_TAIL: u64 = 1 << 20;
-/// A tool's arguments that say its gist, first found first (as the chat's
-/// `parse::antigravity` says it).
-const GIST_KEYS: [&str; 8] = [
-    "CommandLine",
-    "AbsolutePath",
-    "Path",
-    "TargetFile",
-    "DirectoryPath",
-    "SearchPath",
-    "Query",
-    "Url",
-];
 
 /// `gerdr agy-hook`: read the hook's input from stdin and tell gerdr.
 /// Prints nothing, and never fails the hook: Antigravity reads `{}` from a
 /// `PreToolUse` hook as an empty `decision` and denies the call.
 pub fn run_hook() {
-    let mut input = Vec::new();
-    let _ = std::io::stdin().take(MAX_INPUT).read_to_end(&mut input);
-    let Some((socket, pane)) = super::from_env() else {
+    let Some(payload) = hook::pane_input() else {
         return;
     };
-    let Ok(payload) = serde_json::from_slice::<Value>(&input) else {
-        return;
-    };
-    let Some(what) = what_of(&payload, read_tail) else {
-        return;
-    };
-    let event = LiveEvent {
-        pane,
-        agent: AGENT.into(),
-        at_ms: super::now_ms(),
-        what,
-    };
-    super::send(&socket, &event);
+    if let Some(what) = what_of(&payload, read_tail) {
+        hook::tell(AGENT, live::now_ms(), what);
+    }
 }
 
 /// What hook input `payload` says; `None` for what gerdr doesn't hear.
@@ -110,7 +88,7 @@ fn what_of(payload: &Value, tail: impl Fn(&Path) -> Option<String>) -> Option<Wh
     })
 }
 
-/// The chat's id (`step<n>.<k>`, see `parse::antigravity`) of the call
+/// The chat's id (`step<n>.<k>`, see `parse`) of the call
 /// named `name` with `args` that runs as step `step`, by transcript
 /// `lines`: call `k` of the last model turn at or before `step`. Its calls
 /// run as the steps after it, in order; one of the same name and
@@ -175,7 +153,7 @@ pub fn merged(existing: Option<&str>, command: &str) -> Result<String, String> {
     if object.get(NAME) == Some(&ours) {
         return Ok(text.to_owned());
     }
-    super::with_key(text, NAME, &ours)
+    with_key(text, NAME, &ours)
 }
 
 #[cfg(test)]
@@ -296,5 +274,24 @@ mod tests {
         assert_eq!(merged(Some(&fresh), command).unwrap(), fresh);
         assert!(merged(Some("{oops"), command).is_err());
         assert!(merged(Some("[]"), command).is_err());
+    }
+
+    #[test]
+    fn undo_gives_antigravity_its_hooks_back_as_they_were() {
+        use crate::integrations::antigravity::live as antigravity;
+        use crate::{
+            chat::live::tests::TempDir,
+            integrations::common::install::{install, undo},
+        };
+        let dir = TempDir::new();
+        let path = dir.path().join("hooks.json");
+        let theirs = "{\"herdr\": {\"PreInvocation\": [{\"command\": \"h\"}]}}\n";
+        std::fs::write(&path, theirs).unwrap();
+        let merge = |text: Option<&str>| antigravity::merged(text, "/g agy-hook");
+        let changed = install(&path, merge).unwrap().unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("agy-hook"));
+        assert_eq!(install(&path, merge).unwrap(), None, "once");
+        undo(&changed).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), theirs);
     }
 }

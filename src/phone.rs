@@ -29,9 +29,11 @@ use crate::{
     feature_agents::{self, Gate},
     feature_workspace::feature_on,
     herdr::{self, AgentInfo, AgentStatus, Herdr, WorkspaceInfo},
-    inbox_sources, md_preview, phone_control, phone_devices,
+    inbox_sources,
+    integrations::{self, ModelSwitch},
+    md_preview, phone_control, phone_devices,
     projects::{self, Project, WorkspaceRecord},
-    stats_panel::{chat_and_screen, claude_chat},
+    stats_panel::chat_and_screen,
     web_push,
 };
 
@@ -509,16 +511,16 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
 /// The permission the agent in `pane` of `project` asks for on gerdr's card,
 /// if it waits on one; gerdr holds its asks for the phone while it reads
 /// the pane. And how long its turn has run, in seconds, while it works,
-/// and the side questions asked of it this run. None without a gerdr to
-/// ask.
-fn pane_ask(project: &str, pane: &str, cursor: bool) -> (Value, Value, Value, Value) {
-    let request = json!({ "op": "ask", "project": project, "pane": pane, "cursor": cursor });
+/// and the side questions asked of it this run; with `read`, the models
+/// read from its CLI. None without a gerdr to ask.
+fn pane_ask(project: &str, pane: &str, read: bool) -> (Value, Value, Value, Value) {
+    let request = json!({ "op": "ask", "project": project, "pane": pane, "read_models": read });
     match gerdr(Some(project), &request) {
         Ok(answer) => (
             answer["ask"].clone(),
             answer["working"].clone(),
             answer["sides"].clone(),
-            answer["cursor_models"].clone(),
+            answer["read_models"].clone(),
         ),
         Err(why) => {
             tracing::debug!("phone: the ask of pane {pane}: {why}");
@@ -528,15 +530,15 @@ fn pane_ask(project: &str, pane: &str, cursor: bool) -> (Value, Value, Value, Va
 }
 
 /// The models the agent of `kind` in a pane can be switched to, as the
-/// desktop chat's picker offers them (`cursor`: Cursor's, as gerdr last
-/// read them), the one it is on (`chat`: its Claude Code transcript), and
+/// desktop chat's picker offers them (`read`: those read from its CLI, as
+/// gerdr last read them), the one it is on (`chat`: its transcript), and
 /// that one's id among them: `[models, model, model_id]`. Empty for an
 /// agent gerdr can't switch.
-fn pane_models(kind: Option<AgentKind>, chat: Option<&Path>, cursor: &Value) -> [Value; 3] {
-    let Some(kind) = kind.filter(|k| model::picks(*k)) else {
+fn pane_models(kind: Option<AgentKind>, chat: Option<&Path>, read: &Value) -> [Value; 3] {
+    let Some(kind) = kind.filter(|k| integrations::caps(*k).model.typed()) else {
         return [json!([]), Value::Null, Value::Null];
     };
-    let cursor: Vec<crate::stage_models::Offer> = (cursor.as_array().into_iter().flatten())
+    let read: Vec<crate::stage_models::Offer> = (read.as_array().into_iter().flatten())
         .filter_map(|o| {
             Some(crate::stage_models::Offer {
                 id: o["id"].as_str()?.to_owned(),
@@ -544,22 +546,11 @@ fn pane_models(kind: Option<AgentKind>, chat: Option<&Path>, cursor: &Value) -> 
             })
         })
         .collect();
-    let mut offers = model::offers(kind, &cursor);
-    let now = match kind {
-        AgentKind::Cursor => model::cursor_now(),
-        _ => {
-            (chat.and_then(crate::ai_work::context::tail_of)).and_then(|tail| model::last_in(&tail))
-        }
-    };
+    let mut offers = model::offers(kind, &read);
+    let now = integrations::of(kind).model_now(chat);
     let picked = now.as_deref().and_then(|now| model::picked(&offers, now));
-    // Claude Code's own choice, as the desktop's Default row.
-    if kind == AgentKind::Claude {
-        let own = crate::stage_models::Offer {
-            id: "default".into(),
-            name: "Default".into(),
-        };
-        offers.insert(0, own);
-    }
+    // The agent's own choice, as the desktop's Default row.
+    offers.splice(0..0, integrations::of(kind).own_model());
     let listed: Vec<Value> = (offers.iter())
         .map(|o| json!({ "id": o.id, "name": o.name }))
         .collect();
@@ -633,7 +624,7 @@ fn socket_holds(socket: &Path, lock: &Path) -> bool {
 }
 
 /// The keys the phone may press in an agent's pane: herdr's names. Left
-/// and Right move Antigravity's model menu's effort.
+/// and Right move what a menu has sideways (`Menu::sideways`).
 const AGENT_KEYS: [&str; 6] = ["Enter", "esc", "Up", "Down", "Left", "Right"];
 
 /// How many of a pane's last screen rows are read for its model menu.
@@ -733,7 +724,8 @@ fn agent_model(project: &str, slug: &str, pane: &str, id: &str) -> Reply {
         Ok(agents) => agents.into_iter().find(|a| a.pane_id == pane),
         Err(err) => return Reply::error(502, &format!("Couldn't reach the agent: {err}")),
     };
-    if !(agent.as_ref().and_then(crate::chat::source::kind)).is_some_and(model::picks) {
+    let typed = |kind| integrations::caps(kind).model.typed();
+    if !(agent.as_ref().and_then(crate::chat::source::kind)).is_some_and(typed) {
         return Reply::error(404, "No agent whose model gerdr can switch runs there");
     }
     // The line would answer its menu.
@@ -769,7 +761,8 @@ fn agent_menu(project: &str, slug: &str, pane: &str, row: &str, typed: &str, era
         Ok(agents) => agents.into_iter().find(|a| a.pane_id == pane),
         Err(err) => return Reply::error(502, &format!("Couldn't reach the agent: {err}")),
     };
-    let Some(kind) = (agent.as_ref().and_then(crate::chat::source::kind)).filter(|k| model_menu::opens(*k)) else {
+    let menu = |k: &AgentKind| integrations::caps(*k).model == ModelSwitch::OwnMenu;
+    let Some(kind) = (agent.as_ref().and_then(crate::chat::source::kind)).filter(menu) else {
         return Reply::error(404, "No agent with a model menu runs there");
     };
     let sent = match row.is_empty() {
@@ -798,7 +791,7 @@ fn agent_menu(project: &str, slug: &str, pane: &str, row: &str, typed: &str, era
 /// (`{ask, rows: [{label, detail, at}], sideways}`), or null; and the
 /// model its screen says it is on. Nothing for an agent without one.
 fn pane_menu(herdr: &mut Herdr, pane: &str, kind: Option<AgentKind>) -> (Value, Option<String>) {
-    let Some(kind) = kind.filter(|k| model_menu::opens(*k)) else {
+    let Some(kind) = kind.filter(|k| integrations::caps(*k).model == ModelSwitch::OwnMenu) else {
         return (Value::Null, None);
     };
     let rows = match crate::chat::screen_rows(herdr, pane, MENU_ROWS) {
@@ -815,9 +808,7 @@ fn pane_menu(herdr: &mut Herdr, pane: &str, kind: Option<AgentKind>) -> (Value, 
             .map(|c| json!({ "label": c.label, "detail": c.detail, "at": c.picked }))
             .collect();
         let ask: Vec<&str> = m.ask.iter().map(|(text, _)| text.as_str()).collect();
-        // Codex's menu has no search: its digits pick.
-        let search = kind != AgentKind::Codex;
-        json!({ "ask": ask, "rows": rows, "sideways": m.sideways, "search": search })
+        json!({ "ask": ask, "rows": rows, "sideways": m.sideways, "search": m.search })
     });
     (menu.unwrap_or(Value::Null), now)
 }
@@ -1382,9 +1373,9 @@ fn commands(project: &str, slug: &str, pane: &str) -> Reply {
 
 /// What the idle Claude Code in `pane` suggests saying next, read off the
 /// bottom of its screen as gerdr's chat reads it.
-fn pane_suggestion(herdr: &mut Herdr, pane: &str) -> Option<String> {
+fn pane_suggestion(herdr: &mut Herdr, pane: &str, kind: AgentKind) -> Option<String> {
     match herdr.pane_screen_styled(pane, SUGGEST_ROWS) {
-        Ok(text) => crate::chat::suggestion(&crate::scrollback::parse_ansi(&text)),
+        Ok(text) => crate::chat::suggestion(kind, &crate::scrollback::parse_ansi(&text)),
         Err(why) => {
             tracing::debug!("phone: the suggestion in pane {pane}: {why}");
             None
@@ -1422,9 +1413,10 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     let title = agent.as_ref().and_then(|a| a.shown_title());
     let suggestion = (agent.as_ref())
         .filter(|a| crate::chat::suggests(a))
-        .and_then(|_| pane_suggestion(&mut herdr, pane));
+        .and_then(crate::chat::source::kind)
+        .and_then(|kind| pane_suggestion(&mut herdr, pane, kind));
     let agent_kind = agent.as_ref().and_then(crate::chat::source::kind);
-    let kind = agent_kind.filter(|kind| !mode::modes(*kind).is_empty());
+    let kind = agent_kind.filter(|kind| integrations::caps(*kind).modes);
     // The modes it offers and the one `screen` (its last rows) shows.
     let modes = |screen: &str| match kind {
         Some(kind) => {
@@ -1444,20 +1436,16 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
         .unwrap_or(PANE_LINES)
         .clamp(1, PANE_STYLED_MAX);
     let rows = herdr.pane_scrollback_rows(pane).ok();
-    let chat = (rows == Some(0))
-        .then(|| claude_chat(&mut herdr, pane))
-        .flatten();
-    // Its transcript, for its model.
-    let transcript = match (&chat, agent_kind) {
-        (Some(path), _) => Some(path.clone()),
-        (None, Some(AgentKind::Claude)) => claude_chat(&mut herdr, pane),
-        _ => None,
-    };
-    let cursor = agent_kind == Some(AgentKind::Cursor);
+    // Its transcript, for its model, and for its words with no scrollback.
+    let transcript =
+        agent_kind.and_then(|kind| integrations::of(kind).pane_transcript(&mut herdr, pane));
+    let chat = transcript.clone().filter(|_| rows == Some(0));
+    // Its models are read from its CLI: gerdr reads them for the phone.
+    let read = agent_kind.is_some_and(model::read);
     // An agent picking its model in a menu of its own: the menu while it
     // shows, the model it is on, a button that opens the menu.
     let (picker, on) = pane_menu(&mut herdr, pane, agent_kind);
-    let menu = agent_kind.is_some_and(model_menu::opens);
+    let menu = agent_kind.is_some_and(|k| integrations::caps(k).model == ModelSwitch::OwnMenu);
     let with_menu = |mut reply: Value| {
         reply["picker"] = picker.clone();
         reply["menu"] = json!(menu);
@@ -1480,10 +1468,10 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
         return match herdr.pane_read(pane, "visible", PANE_LINES) {
             Ok(screen) => {
                 let text = chat_and_screen(path, &screen);
-                let (ask, working, sides, cursor) = pane_ask(&project.id, pane, cursor);
+                let (ask, working, sides, listed) = pane_ask(&project.id, pane, read);
                 let (modes, mode) = modes(&screen);
                 let [models, model, model_id] =
-                    pane_models(agent_kind, transcript.as_deref(), &cursor);
+                    pane_models(agent_kind, transcript.as_deref(), &listed);
                 let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "models": models, "model": model, "model_id": model_id, "said": said, "context": context });
                 Reply::json(&with_menu(reply))
             }
@@ -1504,9 +1492,9 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             // The rows above its screen, wrapped: at worst one more read, of all.
             let more = chat.is_some()
                 || (!all && rows.is_some_and(|rows| rows > text.lines().count() as u64));
-            let (ask, working, sides, cursor) = pane_ask(&project.id, pane, cursor);
+            let (ask, working, sides, listed) = pane_ask(&project.id, pane, read);
             let (modes, mode) = modes(&text);
-            let [models, model, model_id] = pane_models(agent_kind, transcript.as_deref(), &cursor);
+            let [models, model, model_id] = pane_models(agent_kind, transcript.as_deref(), &listed);
             let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "models": models, "model": model, "model_id": model_id, "said": said, "context": context });
             Reply::json(&with_menu(reply))
         }

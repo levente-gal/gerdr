@@ -1,4 +1,4 @@
-//! OpenCode's TUI plugin, for live word (see `super`): the plugin
+//! OpenCode's TUI plugin, for live word (see `chat::live`): the plugin
 //! (`assets/opencode/gerdr-live/tui.js`) runs in each TUI, in its pane, and
 //! tells gerdr; `files` puts it in OpenCode's config.
 
@@ -47,7 +47,7 @@ fn cli_json(existing: Option<&str>) -> Result<String, String> {
         return Ok(text.to_owned());
     }
     list.push(NAME.into());
-    super::with_key(text, "plugins", &plugins)
+    crate::integrations::common::install::with_key(text, "plugins", &plugins)
 }
 
 #[cfg(test)]

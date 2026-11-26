@@ -20,6 +20,8 @@ pub struct Menu {
     pub arrows: bool,
     /// Left and Right change something of it: Antigravity's effort.
     pub sideways: bool,
+    /// Letters typed search it: an agent's model menu with a search box.
+    pub search: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

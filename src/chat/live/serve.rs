@@ -10,16 +10,17 @@ use smithay::reexports::calloop::{
 };
 
 use super::{
-    Answer, Answers, AskReply, Changed, HeldAsk, LiveEvent, PHONE_SIGHT, PendingAsk, SOURCE, What,
-    antigravity, ask_wait, claude, opencode,
+    Answer, Answers, AskReply, HeldAsk, LiveEvent, PHONE_SIGHT, PendingAsk, SOURCE, What, ask_wait,
 };
 use crate::{
-    Gerdr, ai_work::AgentKind, chat::view::chat_mut, herdr::AgentInfo, herdr::AgentSession,
+    Gerdr,
+    ai_work::AgentKind,
+    chat::view::chat_mut,
+    herdr::AgentInfo,
+    herdr::AgentSession,
+    integrations::common::install::{Changed, undo},
     menu::MenuAction,
 };
-
-/// pi's extension, as gerdr writes it to `~/.pi/agent/extensions/`.
-const PI_EXTENSION: &str = include_str!("../../../assets/pi/gerdr-live.ts");
 
 /// How often a waiting ask looks whether its chat is still in sight.
 const ASK_LOOK: std::time::Duration = std::time::Duration::from_secs(1);
@@ -136,6 +137,7 @@ impl Gerdr {
                 gist,
                 input,
                 questions,
+                plan,
             } => {
                 let Some(mut stream) = stream else {
                     return;
@@ -158,6 +160,7 @@ impl Gerdr {
                     gist,
                     input,
                     questions,
+                    plan,
                     since: std::time::Instant::now(),
                 };
                 let mut call = None;
@@ -173,7 +176,7 @@ impl Gerdr {
                     call,
                     asked,
                 };
-                let wait = ask_wait(&held.asked.tool, &held.asked.questions);
+                let wait = ask_wait(held.asked.plan, &held.asked.questions);
                 self.chats.live.asks.insert(ask.clone(), held);
                 // Looked at every `ASK_LOOK`: one that waited `ask_wait`, or
                 // (no question) whose chat a panel came over, goes back to
@@ -267,7 +270,7 @@ impl Gerdr {
         if let Some(held) = self.chats.live.asks.remove(ask) {
             self.live_clear_card(&held.pane, ask);
         }
-        // OpenCode's asks don't wait on a connection: only their cards.
+        // An ask that waits on no connection has only its card.
         for ws in &mut self.workspaces {
             for tab in &mut ws.tabs {
                 for pane in &mut tab.panes {
@@ -389,44 +392,8 @@ impl Gerdr {
             Ok(None) => {}
             Err(err) => failed.push(err),
         };
-        if home.join(".claude").is_dir() {
-            take(
-                super::hook_command(claude::HOOK_COMMAND).and_then(|command| {
-                    super::install(&home.join(".claude/settings.json"), |text| {
-                        claude::merged(text, &command)
-                    })
-                }),
-            );
-        }
-        // Cursor's CLI runs the hooks Cursor's IDE does.
-        if home.join(".cursor").is_dir() {
-            take(
-                super::hook_command(crate::cursor_agents::HOOK_COMMAND).and_then(|command| {
-                    super::install(&home.join(".cursor/hooks.json"), |text| {
-                        crate::cursor_agents::merge_hooks(text, &command)
-                    })
-                }),
-            );
-        }
-        let config = home.join(".config/opencode");
-        if config.is_dir() {
-            for (path, merge) in opencode::files(&config) {
-                take(super::install(&path, merge));
-            }
-        }
-        // pi loads every extension in its folder: gerdr's goes beside herdr's.
-        if home.join(".pi/agent").is_dir() {
-            let path = home.join(".pi/agent/extensions/gerdr-live.ts");
-            take(super::install(&path, |_| Ok(PI_EXTENSION.to_owned())));
-        }
-        if home.join(".gemini/config").is_dir() {
-            take(
-                super::hook_command(antigravity::HOOK_COMMAND).and_then(|command| {
-                    super::install(&home.join(".gemini/config/hooks.json"), |text| {
-                        antigravity::merged(text, &command)
-                    })
-                }),
-            );
+        for agent in crate::integrations::ALL {
+            agent.install_live(&home).into_iter().for_each(&mut take);
         }
         for err in &failed {
             tracing::warn!("agent live: adding gerdr's hooks: {err}");
@@ -457,7 +424,7 @@ impl Gerdr {
     pub(crate) fn undo_live_hooks(&mut self, changed: &[Changed]) {
         let failed: Vec<String> = changed
             .iter()
-            .filter_map(|c| super::undo(c).err())
+            .filter_map(|c| undo(c).err())
             .collect();
         self.settings.agent_hooks = false;
         if let Err(err) = crate::config::write_bool("ui", "agent_hooks", false) {
@@ -498,12 +465,6 @@ fn live_session<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pis_extension_names_the_socket_as_gerdr_does() {
-        assert!(PI_EXTENSION.contains("gerdr-live-${hash}.sock"));
-        assert!(PI_EXTENSION.contains("digest(\"hex\").slice(0, 16)"));
-    }
 
     #[test]
     fn a_session_heard_beats_herdrs_when_it_is_the_running_agents() {
@@ -551,6 +512,7 @@ mod tests {
                 gist: "ls".into(),
                 input: String::new(),
                 questions: Vec::new(),
+                plan: false,
                 since: std::time::Instant::now(),
             },
         };

@@ -20,21 +20,37 @@
 //! call's by its first input holding a prompt the call gave. A subagent's
 //! own subagents stay calls. Check both against a real transcript.
 
-use std::sync::Arc;
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Arc,
+};
 
 use serde_json::Value;
 
-use super::{
-    Item, Reader, Sub, ToolOut, cap, change,
-    opencode::{capped, input_text},
-};
 use crate::{
     ai_work::{AgentKind, usage::iso_ms},
+    chat::{Item, ToolOut, parse::Reader},
+    integrations::{
+        Parser,
+        common::build::{Builder, Sub, cap, change, edit_or_tool, flat_edits, input_text},
+    },
     stats_panel::tool_gist,
 };
 
+/// What a reader of the Antigravity CLI's keeps of its own.
+#[derive(Default)]
+pub(crate) struct Antigravity {
+    /// Calls whose results come in their order, with no id to tell, first
+    /// first.
+    waiting: VecDeque<String>,
+    /// The steps read, by their index.
+    steps: HashSet<u64>,
+    /// `invoke_subagent` calls and their subagents.
+    spawns: Vec<Spawn>,
+}
+
 /// An `invoke_subagent` call and its subagents.
-pub(super) struct Spawn {
+struct Spawn {
     call: String,
     /// Each subagent it asked for: its prompt and its card's title.
     asked: Vec<(String, String)>,
@@ -45,8 +61,9 @@ pub(super) struct Spawn {
     taken: Vec<(String, usize, usize)>,
 }
 
-/// What a tool's arguments are named, its gist first.
-const GIST_KEYS: [&str; 9] = [
+/// What a tool's arguments are named, its gist first: the chat's and the
+/// live hook's.
+pub(super) const GIST_KEYS: [&str; 8] = [
     "CommandLine",
     "AbsolutePath",
     "Path",
@@ -55,12 +72,14 @@ const GIST_KEYS: [&str; 9] = [
     "SearchPath",
     "Query",
     "Url",
-    "toolSummary",
 ];
+/// The chat's gist after all `GIST_KEYS`: what the transcript says the
+/// call is for.
+const SUMMARY_KEY: &str = "toolSummary";
 
-impl Reader {
+impl Parser for Antigravity {
     /// Read transcript line `line`.
-    pub(super) fn antigravity_line(&mut self, line: &Value) {
+    fn line(&mut self, b: &mut Builder, line: &Value) {
         let Some(step) = line["step_index"].as_u64() else {
             return;
         };
@@ -75,24 +94,21 @@ impl Reader {
                 let text = request(said("content"));
                 if !text.is_empty() {
                     let text = text.to_owned();
-                    self.push(Item::User { id, at, text });
+                    b.push(Item::User { id, at, text });
                 }
             }
             "PLANNER_RESPONSE" => {
-                if !said("thinking").is_empty() {
-                    let (id, text) = (format!("{id}.t"), said("thinking").to_owned());
-                    self.push(Item::Thinking { id, text });
-                }
-                self.answer(&id, format!("{id}.a"), at, said("content"));
+                b.thinking(format!("{id}.t"), said("thinking"));
+                b.answer(&id, format!("{id}.a"), at, said("content"));
                 let calls = line["tool_calls"].as_array().into_iter().flatten();
                 for (k, call) in calls.enumerate() {
-                    self.antigravity_call(call, format!("{id}.{k}"), at);
+                    self.call(b, call, format!("{id}.{k}"), at);
                 }
             }
             // A call's result: the first call still waiting gets it.
             "GENERIC" if line["source"] == "MODEL" => {
                 if let Some(call) = self.waiting.pop_front() {
-                    self.fill(&call, outcome(said("content")));
+                    b.fill(&call, outcome(said("content")));
                     if let Some(spawn) = self.spawns.iter_mut().find(|s| s.call == call) {
                         spawn.named = Some(conversation_ids(said("content")));
                     }
@@ -101,7 +117,7 @@ impl Reader {
             "ERROR_MESSAGE" => {
                 let text = said("error").lines().next().unwrap_or_default().to_owned();
                 if !text.is_empty() {
-                    self.push(Item::Note { id, text });
+                    b.push(Item::Note { id, text });
                 }
             }
             // Antigravity's own messages to the model.
@@ -109,89 +125,31 @@ impl Reader {
         }
     }
 
-    /// Tool call `call` (`{name, args}`): a file written or replaced in with
-    /// its change, else a tool with its gist.
-    fn antigravity_call(&mut self, call: &Value, id: String, at: Option<u64>) {
-        let name = call["name"].as_str().unwrap_or("tool");
-        let args = &call["args"];
-        let said = |v: &Value, key: &str| v[key].as_str().unwrap_or_default().to_owned();
-        let replaced = |chunk: &Value| {
-            change(
-                &said(chunk, "TargetContent"),
-                &said(chunk, "ReplacementContent"),
-            )
+    /// Whole lines of subagent `child`'s own transcript.
+    fn subagent(&mut self, b: &mut Builder, child: &str, _call: &str, lines: &[u8]) {
+        let Some(&sub) = b.sub_of.get(child) else {
+            return;
         };
-        let diff = match name {
-            "write_to_file" => Some(change("", &said(args, "CodeContent"))),
-            "replace_file_content" | "multi_replace_file_content" => {
-                Some(match args["ReplacementChunks"].as_array() {
-                    Some(chunks) => chunks.iter().flat_map(replaced).collect(),
-                    None => replaced(args),
-                })
-            }
-            _ => None,
-        };
-        if name == "invoke_subagent" {
-            // One subagent per call (`{TypeName, Role, Prompt}`, agy 1.5);
-            // or a `Subagents` list of them.
-            let asked = (args["Subagents"].as_array())
-                .map_or(std::slice::from_ref(args), Vec::as_slice)
-                .iter()
-                .map(|entry| {
-                    let prompt = said(entry, "Prompt");
-                    let line = prompt.lines().map(str::trim).find(|l| !l.is_empty());
-                    let title = (entry["Role"].as_str().filter(|r| !r.is_empty()))
-                        .or(line)
-                        .or(entry["TypeName"].as_str())
-                        .unwrap_or("Subagent");
-                    let title = title.to_owned();
-                    (prompt, title)
-                })
-                .collect();
-            self.spawns.push(Spawn {
-                call: id.clone(),
-                asked,
-                named: None,
-                taken: Vec::new(),
-            });
+        b.subs[sub].reader.feed(lines);
+        let spawn = (self.spawns.iter()).position(|s| s.taken.iter().any(|t| t.2 == sub));
+        if let Some(s) = spawn {
+            self.spawn_card(b, s);
         }
-        let item = match (args["TargetFile"].as_str(), diff) {
-            (Some(path), Some(diff)) => Item::Edit {
-                id: id.clone(),
-                path: path.to_owned(),
-                diff: capped(diff),
-                output: None,
-            },
-            _ => Item::Tool {
-                id: id.clone(),
-                name: name.to_owned(),
-                gist: (GIST_KEYS.iter())
-                    .find_map(|k| args.get(*k).and_then(tool_gist))
-                    .unwrap_or_default(),
-                input: match args["CommandLine"].as_str() {
-                    Some(command) => command.to_owned(),
-                    None => input_text(args),
-                },
-                output: None,
-            },
-        };
-        self.waiting.push_back(id.clone());
-        self.push_call(id, at, item);
     }
 
     /// The conversations `invoke_subagent` results named that aren't taken
     /// as subagents yet, in order.
-    pub fn named_subagents(&self) -> Vec<String> {
+    fn named_subagents(&self, b: &Builder) -> Vec<String> {
         (self.spawns.iter())
             .flat_map(|s| s.named.iter().flatten())
-            .filter(|id| !self.sub_of.contains_key(*id))
+            .filter(|id| !b.sub_of.contains_key(*id))
             .cloned()
             .collect()
     }
 
     /// How many subagents asked for have no conversation yet, of calls
     /// whose result came and named none.
-    pub fn unfound_subagents(&self) -> usize {
+    fn unfound_subagents(&self) -> usize {
         (self.spawns.iter())
             .filter(|s| s.named.as_ref().is_some_and(Vec::is_empty))
             .map(|s| s.asked.len() - s.taken.len())
@@ -199,7 +157,7 @@ impl Reader {
     }
 
     /// The conversations taken as subagents.
-    pub fn subagents(&self) -> Vec<String> {
+    fn subagents(&self) -> Vec<String> {
         let taken = self.spawns.iter().flat_map(|s| &s.taken);
         taken.map(|(child, ..)| child.clone()).collect()
     }
@@ -208,8 +166,8 @@ impl Reader {
     /// named it, else of a call that named none and gave the prompt its
     /// first input (`first`, its transcript's first line) holds. Whether
     /// it was taken.
-    pub fn take_subagent(&mut self, child: &str, first: &str) -> bool {
-        if self.sub_of.contains_key(child) {
+    fn take_subagent(&mut self, b: &mut Builder, child: &str, first: &str) -> bool {
+        if b.sub_of.contains_key(child) {
             return false;
         }
         let first = serde_json::from_str::<Value>(first).unwrap_or_default();
@@ -237,49 +195,88 @@ impl Reader {
         let Some((s, k)) = found else {
             return false;
         };
-        let Some(&(at, _)) = self.calls.get(&self.spawns[s].call) else {
+        let Some(&(at, _)) = b.calls.get(&self.spawns[s].call) else {
             return false;
         };
-        self.subs.push(Sub {
-            at,
-            reader: Reader::new(AgentKind::Antigravity),
-            changed: false,
-            span: None,
-            spanned: false,
-        });
-        let sub = self.subs.len() - 1;
-        self.sub_of.insert(child.to_owned(), sub);
+        b.subs
+            .push(Sub::new(at, Reader::new(AgentKind::Antigravity)));
+        let sub = b.subs.len() - 1;
+        b.sub_of.insert(child.to_owned(), sub);
         let taken = &mut self.spawns[s].taken;
         taken.push((child.to_owned(), k, sub));
         taken.sort_by_key(|(_, k, _)| *k);
-        self.spawn_card(s);
+        self.spawn_card(b, s);
         true
     }
+}
 
-    /// Whole lines of subagent `child`'s own transcript.
-    pub(super) fn antigravity_subagent(&mut self, child: &str, lines: &[u8]) {
-        let Some(&sub) = self.sub_of.get(child) else {
-            return;
+impl Antigravity {
+    /// Tool call `call` (`{name, args}`): a file written or replaced in with
+    /// its change, else a tool with its gist.
+    fn call(&mut self, b: &mut Builder, call: &Value, id: String, at: Option<u64>) {
+        let name = call["name"].as_str().unwrap_or("tool");
+        let args = &call["args"];
+        let said = |v: &Value, key: &str| v[key].as_str().unwrap_or_default().to_owned();
+        let diff = match name {
+            "write_to_file" => Some(change("", &said(args, "CodeContent"))),
+            "replace_file_content" | "multi_replace_file_content" => Some(flat_edits(
+                (args["ReplacementChunks"].as_array())
+                    .map_or(std::slice::from_ref(args), Vec::as_slice),
+                "TargetContent",
+                "ReplacementContent",
+            )),
+            _ => None,
         };
-        self.subs[sub].reader.feed(lines);
-        let spawn = (self.spawns.iter()).position(|s| s.taken.iter().any(|t| t.2 == sub));
-        if let Some(s) = spawn {
-            self.spawn_card(s);
+        if name == "invoke_subagent" {
+            // One subagent per call (`{TypeName, Role, Prompt}`, agy 1.5);
+            // or a `Subagents` list of them.
+            let asked = (args["Subagents"].as_array())
+                .map_or(std::slice::from_ref(args), Vec::as_slice)
+                .iter()
+                .map(|entry| {
+                    let prompt = said(entry, "Prompt");
+                    let line = prompt.lines().map(str::trim).find(|l| !l.is_empty());
+                    let title = (entry["Role"].as_str().filter(|r| !r.is_empty()))
+                        .or(line)
+                        .or(entry["TypeName"].as_str())
+                        .unwrap_or("Subagent");
+                    let title = title.to_owned();
+                    (prompt, title)
+                })
+                .collect();
+            self.spawns.push(Spawn {
+                call: id.clone(),
+                asked,
+                named: None,
+                taken: Vec::new(),
+            });
         }
+        let item = edit_or_tool(id.clone(), args["TargetFile"].as_str(), diff, || {
+            let gist = (GIST_KEYS.iter().chain([&SUMMARY_KEY]))
+                .find_map(|k| args.get(*k).and_then(tool_gist))
+                .unwrap_or_default();
+            let input = match args["CommandLine"].as_str() {
+                Some(command) => command.to_owned(),
+                None => input_text(args),
+            };
+            (name.to_owned(), gist, input)
+        });
+        self.waiting.push_back(id.clone());
+        b.push_call(id, at, item);
     }
 
     /// Spawn `s`'s card in its call's place: its subagent's steps, or a
     /// card per subagent when it asked for several.
-    fn spawn_card(&mut self, s: usize) {
+    fn spawn_card(&self, b: &mut Builder, s: usize) {
         let spawn = &self.spawns[s];
-        let Some(&(at, _)) = self.calls.get(&spawn.call) else {
+        let Some(&(at, _)) = b.calls.get(&spawn.call) else {
             return;
         };
-        let output = match &self.items[at] {
+        let output = match &b.items[at] {
             Item::Tool { output, .. } | Item::Subagent { output, .. } => output.clone(),
             _ => None,
         };
-        let own = |child: &str, sub: usize| Arc::new(prefixed(&self.subs[sub].reader.items, child));
+        let own = |child: &str, sub: usize| Arc::new(prefixed(b.subs[sub].reader.items(), child));
         let (title, items) = match (&spawn.asked[..], &spawn.taken[..]) {
             ([(_, title)], [(child, _, sub)]) => (title.clone(), own(child, *sub)),
             (asked, taken) => {
@@ -293,7 +290,7 @@ impl Reader {
                 (title, Arc::new(cards.collect()))
             }
         };
-        self.items[at] = Item::Subagent {
+        b.items[at] = Item::Subagent {
             id: format!("agent:{}", spawn.call),
             title,
             items,
@@ -398,7 +395,7 @@ mod tests {
             bytes.push(b'\n');
         }
         reader.feed(&bytes);
-        reader.items
+        reader.items().to_vec()
     }
 
     fn step(n: u64, kind: &str, source: &str, rest: Value) -> Value {

@@ -9,181 +9,189 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use super::{
-    DiffLine, DiffSide, Item, MAX_LINES, Reader, ToolOut, cap, change, more, patch, texts,
+use crate::{
+    chat::{DiffLine, Item, ToolOut, parse::patch},
+    integrations::{
+        Parser,
+        common::build::{
+            Builder, COMPACTED, INTERRUPTED, arg_gist, cap, capped, change, input_text, texts,
+        },
+    },
 };
-use crate::{ai_work::AgentKind, stats_panel::tool_gist};
 
-impl Reader {
-    /// Read message row `row` of an OpenCode session (see `super::snapshot`).
-    pub(super) fn opencode_row(&mut self, row: &Value) {
-        let id = row["id"].as_str().unwrap_or_default();
-        let data = &row["data"];
-        let at = data["time"]["created"]
-            .as_u64()
-            .or(row["time_created"].as_u64());
-        // v2 rows have a type; v1 rows a role in their data.
-        let kind = (row["type"].as_str()).or(data["role"].as_str());
-        match kind.unwrap_or_default() {
-            "user" if row.get("parts").is_some() => {
-                for part in row["parts"].as_array().into_iter().flatten() {
-                    let pid = part["id"].as_str().unwrap_or(id).to_owned();
-                    let part = &part["data"];
-                    match part["type"].as_str() {
-                        Some("text") if part["synthetic"] != true => {
-                            let text = part["text"].as_str().unwrap_or("").trim().to_owned();
-                            if !text.is_empty() {
-                                self.push(Item::User { id: pid, at, text });
-                            }
-                        }
-                        Some("compaction") => self.push(compacted(pid)),
-                        _ => {}
-                    }
-                }
-            }
-            "user" => {
-                let text = data["text"].as_str().unwrap_or("").trim().to_owned();
-                if !text.is_empty() {
-                    self.push(Item::User {
-                        id: id.to_owned(),
-                        at,
-                        text,
-                    });
-                }
-            }
-            "assistant" => {
-                // v1 parts are rows of their own; v2 content is in the data.
-                let parts: Vec<(String, &Value)> = match row.get("parts") {
-                    Some(parts) => (parts.as_array().into_iter().flatten())
-                        .map(|p| (p["id"].as_str().unwrap_or(id).to_owned(), &p["data"]))
-                        .collect(),
-                    None => (data["content"].as_array().into_iter().flatten())
-                        .enumerate()
-                        .map(|(k, p)| (format!("{id}.{k}"), p))
-                        .collect(),
-                };
-                for (pid, part) in parts {
-                    match part["type"].as_str() {
-                        // The summary a compaction made, noted where it was asked.
-                        Some("text") if data["summary"] == true => {}
-                        Some("text") => {
-                            self.answer(id, pid, at, part["text"].as_str().unwrap_or(""))
-                        }
-                        Some("reasoning") => {
-                            let text = part["text"].as_str().unwrap_or("").trim().to_owned();
-                            if !text.is_empty() {
-                                self.push(Item::Thinking { id: pid, text });
-                            }
-                        }
-                        Some("tool") => self.opencode_tool(pid, part),
-                        Some("compaction") => self.push(compacted(pid)),
-                        _ => {}
-                    }
-                }
-                let error = &data["error"];
-                if !error.is_null() {
-                    let aborted =
-                        error["name"] == "MessageAbortedError" || error["type"] == "aborted";
-                    let text = match aborted {
-                        true => "Interrupted by the user".to_owned(),
-                        false => (error["data"]["message"].as_str())
-                            .or(error["message"].as_str())
-                            .or(error["name"].as_str())
-                            .unwrap_or("The agent stopped on an error")
-                            .to_owned(),
-                    };
-                    self.push(Item::Note {
-                        id: format!("{id}.error"),
-                        text,
-                    });
-                }
-            }
-            "compaction" => self.push(compacted(id.to_owned())),
-            "model-switched" => {
-                if let Some(model) = data["model"]["id"].as_str() {
-                    let text = format!("Set model to {model}");
-                    self.push(Item::Note {
-                        id: id.to_owned(),
-                        text,
-                    });
-                }
-            }
-            // system (instructions), synthetic (what OpenCode tells the
-            // model), idle (an aborted turn's error notes it already).
-            _ => {}
-        }
+/// A reader of OpenCode's: it keeps nothing of its own.
+pub(crate) struct OpenCode;
+
+impl Parser for OpenCode {
+    fn rows(&mut self, b: &mut Builder, rows: &mut dyn Iterator<Item = &Value>) {
+        rows.for_each(|row| opencode_row(b, row));
     }
+}
 
-    /// Tool part `part` (v1's `{tool, callID, state}` or v2's `{id, name,
-    /// state, time}`): an edit per file it changed, or a tool.
-    fn opencode_tool(&mut self, pid: String, part: &Value) {
-        let name = (part["tool"].as_str())
-            .or(part["name"].as_str())
-            .unwrap_or("tool");
-        let id = (part["callID"].as_str())
-            .or(part["id"].as_str())
-            .map_or(pid, str::to_owned);
-        let state = &part["state"];
-        let input = &state["input"];
-        let output = opencode_out(part);
-        // A `task` call whose child session was read (`tail::db`): its work
-        // under one card, as Claude's subagents.
-        if let Some(rows) = part["subagent"].as_array() {
-            let title = Some(gist(input)).filter(|title| !title.is_empty());
-            return self.push(Item::Subagent {
-                id: format!("agent:{id}"),
-                title: title.unwrap_or_else(|| name.to_owned()),
-                items: Arc::new(super::snapshot(AgentKind::OpenCode, rows)),
-                output,
-            });
-        }
-        let text = |key: &str| input[key].as_str().unwrap_or("");
-        let path = (input["filePath"].as_str()).or(input["path"].as_str());
-        let diffs: Vec<(String, Vec<DiffLine>)> = match (name, path) {
-            ("edit", Some(path)) => vec![(
-                path.to_owned(),
-                change(text("oldString"), text("newString")),
-            )],
-            ("write", Some(path)) => vec![(path.to_owned(), change("", text("content")))],
-            ("apply_patch" | "patch", _) => {
-                let made: Vec<_> = (state["metadata"]["files"].as_array().into_iter().flatten())
-                    .flat_map(|f| {
-                        let lines = patch::files(f["patch"].as_str().unwrap_or("")).into_iter();
-                        let lines = lines.flat_map(|(_, lines)| lines).collect();
-                        let path = (f["filePath"].as_str()).or(f["file"].as_str())?;
-                        Some((path.to_owned(), lines))
-                    })
-                    .collect();
-                // Not run yet, or it failed: the patch as asked.
-                match made.is_empty() {
-                    true => patch::files(text("patchText")),
-                    false => made,
+/// Read message row `row` of an OpenCode session (see `super::snapshot`).
+fn opencode_row(b: &mut Builder, row: &Value) {
+    let id = row["id"].as_str().unwrap_or_default();
+    let data = &row["data"];
+    let at = data["time"]["created"]
+        .as_u64()
+        .or(row["time_created"].as_u64());
+    // v2 rows have a type; v1 rows a role in their data.
+    let kind = (row["type"].as_str()).or(data["role"].as_str());
+    match kind.unwrap_or_default() {
+        "user" if row.get("parts").is_some() => {
+            for part in row["parts"].as_array().into_iter().flatten() {
+                let pid = part["id"].as_str().unwrap_or(id).to_owned();
+                let part = &part["data"];
+                match part["type"].as_str() {
+                    Some("text") if part["synthetic"] != true => {
+                        let text = part["text"].as_str().unwrap_or("").trim().to_owned();
+                        if !text.is_empty() {
+                            b.push(Item::User { id: pid, at, text });
+                        }
+                    }
+                    Some("compaction") => b.push(compacted(pid)),
+                    _ => {}
                 }
             }
-            _ => Vec::new(),
-        };
-        if diffs.is_empty() {
-            return self.push(Item::Tool {
-                id,
-                name: name.to_owned(),
-                gist: gist(input),
-                input: input_text(input),
-                output,
-            });
         }
-        for (k, (path, diff)) in diffs.into_iter().enumerate() {
-            let id = match k {
-                0 => id.clone(),
-                k => format!("{id}.{k}"),
+        "user" => {
+            let text = data["text"].as_str().unwrap_or("").trim().to_owned();
+            if !text.is_empty() {
+                b.push(Item::User {
+                    id: id.to_owned(),
+                    at,
+                    text,
+                });
+            }
+        }
+        "assistant" => {
+            // v1 parts are rows of their own; v2 content is in the data.
+            let parts: Vec<(String, &Value)> = match row.get("parts") {
+                Some(parts) => (parts.as_array().into_iter().flatten())
+                    .map(|p| (p["id"].as_str().unwrap_or(id).to_owned(), &p["data"]))
+                    .collect(),
+                None => (data["content"].as_array().into_iter().flatten())
+                    .enumerate()
+                    .map(|(k, p)| (format!("{id}.{k}"), p))
+                    .collect(),
             };
-            let output = output.clone();
-            self.push(Item::Edit {
-                id,
-                path,
-                diff: capped(diff),
-                output,
-            });
+            for (pid, part) in parts {
+                match part["type"].as_str() {
+                    // The summary a compaction made, noted where it was asked.
+                    Some("text") if data["summary"] == true => {}
+                    Some("text") => b.answer(id, pid, at, part["text"].as_str().unwrap_or("")),
+                    Some("reasoning") => b.thinking(pid, part["text"].as_str().unwrap_or("")),
+                    Some("tool") => opencode_tool(b, pid, part),
+                    Some("compaction") => b.push(compacted(pid)),
+                    _ => {}
+                }
+            }
+            let error = &data["error"];
+            if !error.is_null() {
+                let aborted = error["name"] == "MessageAbortedError" || error["type"] == "aborted";
+                let text = match aborted {
+                    true => INTERRUPTED.to_owned(),
+                    false => (error["data"]["message"].as_str())
+                        .or(error["message"].as_str())
+                        .or(error["name"].as_str())
+                        .unwrap_or("The agent stopped on an error")
+                        .to_owned(),
+                };
+                b.push(Item::Note {
+                    id: format!("{id}.error"),
+                    text,
+                });
+            }
         }
+        "compaction" => b.push(compacted(id.to_owned())),
+        "model-switched" => {
+            if let Some(model) = data["model"]["id"].as_str() {
+                let text = format!("Set model to {model}");
+                b.push(Item::Note {
+                    id: id.to_owned(),
+                    text,
+                });
+            }
+        }
+        // system (instructions), synthetic (what OpenCode tells the
+        // model), idle (an aborted turn's error notes it already).
+        _ => {}
+    }
+}
+
+/// Tool part `part` (v1's `{tool, callID, state}` or v2's `{id, name,
+/// state, time}`): an edit per file it changed, or a tool.
+fn opencode_tool(b: &mut Builder, pid: String, part: &Value) {
+    let name = (part["tool"].as_str())
+        .or(part["name"].as_str())
+        .unwrap_or("tool");
+    let id = (part["callID"].as_str())
+        .or(part["id"].as_str())
+        .map_or(pid, str::to_owned);
+    let state = &part["state"];
+    let input = &state["input"];
+    let output = opencode_out(part);
+    // A `task` call whose child session was read (`db`): its work
+    // under one card, as Claude's subagents.
+    if let Some(rows) = part["subagent"].as_array() {
+        let title = Some(arg_gist(input)).filter(|title| !title.is_empty());
+        return b.push(Item::Subagent {
+            id: format!("agent:{id}"),
+            title: title.unwrap_or_else(|| name.to_owned()),
+            items: Arc::new({
+                let mut b = Builder::default();
+                OpenCode.rows(&mut b, &mut rows.iter());
+                b.items
+            }),
+            output,
+        });
+    }
+    let text = |key: &str| input[key].as_str().unwrap_or("");
+    let path = (input["filePath"].as_str()).or(input["path"].as_str());
+    let diffs: Vec<(String, Vec<DiffLine>)> = match (name, path) {
+        ("edit", Some(path)) => vec![(
+            path.to_owned(),
+            change(text("oldString"), text("newString")),
+        )],
+        ("write", Some(path)) => vec![(path.to_owned(), change("", text("content")))],
+        ("apply_patch" | "patch", _) => {
+            let made: Vec<_> = (state["metadata"]["files"].as_array().into_iter().flatten())
+                .flat_map(|f| {
+                    let lines = patch::files(f["patch"].as_str().unwrap_or("")).into_iter();
+                    let lines = lines.flat_map(|(_, lines)| lines).collect();
+                    let path = (f["filePath"].as_str()).or(f["file"].as_str())?;
+                    Some((path.to_owned(), lines))
+                })
+                .collect();
+            // Not run yet, or it failed: the patch as asked.
+            match made.is_empty() {
+                true => patch::files(text("patchText")),
+                false => made,
+            }
+        }
+        _ => Vec::new(),
+    };
+    if diffs.is_empty() {
+        return b.push(Item::Tool {
+            id,
+            name: name.to_owned(),
+            gist: arg_gist(input),
+            input: input_text(input),
+            output,
+        });
+    }
+    for (k, (path, diff)) in diffs.into_iter().enumerate() {
+        let id = match k {
+            0 => id.clone(),
+            k => format!("{id}.{k}"),
+        };
+        let output = output.clone();
+        b.push(Item::Edit {
+            id,
+            path,
+            diff: capped(diff),
+            output,
+        });
     }
 }
 
@@ -223,49 +231,8 @@ fn opencode_out(part: &Value) -> Option<ToolOut> {
 }
 
 fn compacted(id: String) -> Item {
-    let text = "Conversation compacted".to_owned();
+    let text = COMPACTED.to_owned();
     Item::Note { id, text }
-}
-
-/// The one line a tool's `input` says: its command, file, pattern; OpenCode's
-/// and Cursor's keys first (`filePath`, `glob_pattern`), else as Claude's.
-pub(crate) fn gist(input: &Value) -> String {
-    let keys = [
-        "command",
-        "filePath",
-        "pattern",
-        "glob_pattern",
-        "path",
-        "target_directory",
-        "url",
-        "query",
-        "description",
-        "name",
-    ];
-    // A string alone `tool_gist` gives as its first line, cut short.
-    (keys.iter())
-        .find_map(|k| input.get(*k).filter(|v| v.is_string()).and_then(tool_gist))
-        .or_else(|| tool_gist(input))
-        .unwrap_or_default()
-}
-
-/// A tool's input as shown: its command, else its JSON.
-pub(super) fn input_text(input: &Value) -> String {
-    (input["command"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| serde_json::to_string_pretty(input).unwrap_or_default())
-}
-
-/// `diff` kept to its first `MAX_LINES` lines, saying how many it left out.
-pub(super) fn capped(mut diff: Vec<DiffLine>) -> Vec<DiffLine> {
-    if diff.len() > MAX_LINES {
-        let text = more(diff.len() - MAX_LINES);
-        diff.truncate(MAX_LINES);
-        diff.push(DiffLine {
-            side: DiffSide::Context,
-            text,
-        });
-    }
-    diff
 }
 
 #[cfg(test)]
@@ -273,7 +240,11 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{ai_work::AgentKind, chat::parse::snapshot, md_blocks};
+    use crate::{
+        ai_work::AgentKind,
+        chat::{DiffSide, parse::snapshot},
+        md_blocks,
+    };
 
     fn read(rows: &[Value]) -> Vec<Item> {
         snapshot(AgentKind::OpenCode, rows)
@@ -646,8 +617,8 @@ mod tests {
             [
                 ("m1.error", "Rate limited"),
                 ("m2.error", "Interrupted by the user"),
-                ("p2", "Conversation compacted"),
-                ("s1", "Conversation compacted"),
+                ("p2", "The chat was compacted"),
+                ("s1", "The chat was compacted"),
                 ("s2.error", "Overloaded"),
                 ("s3.error", "Interrupted by the user"),
             ]

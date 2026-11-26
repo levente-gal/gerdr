@@ -432,7 +432,7 @@ impl Gerdr {
     }
 
     /// Hear the hooks of a Cursor on the shown project's server, which
-    /// sends them by its display (see `cursor_agents::run_hook`).
+    /// sends them by its display (see `integrations::cursor::live::run_hook`).
     fn hear_kept_cursor(&mut self) {
         let Some(display) = self.keep.keeper.as_ref().map(|k| k.display.clone()) else {
             return;
