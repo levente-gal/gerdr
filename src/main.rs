@@ -408,6 +408,9 @@ pub struct Chats {
     /// pane, and the panes whose agent is being switched to another.
     pub modes: HashMap<String, String>,
     pub switching: HashSet<String>,
+    /// The panes whose agent's own model menu was asked for (`/model`
+    /// sent), when: their screen is read often till it shows.
+    pub model_asked: HashMap<String, std::time::Instant>,
     /// Where those switches come back to, as (pane, mode, how it went).
     pub mode_tx: Option<channel::Sender<ModeSwitched>>,
 }
@@ -1338,6 +1341,8 @@ pub enum PickFor {
     MenuFolder,
     /// The venv of a project's herdr workspace.
     Venv { project: String, workspace: String },
+    /// Files to attach to the reply in the chat of this agent pane.
+    ChatFiles(String),
 }
 
 /// What a workspace opens with: Zed over a terminal, just a terminal, or
@@ -4047,6 +4052,17 @@ impl Gerdr {
     /// open for the same purpose already stays; one open for another gives
     /// way, so the folder picked goes where it was last asked for.
     fn pick_folder(&mut self, title: &str, start: Option<PathBuf>, purpose: PickFor) {
+        self.pick(title, start, purpose, true);
+    }
+
+    /// Ask zenity for files to attach to an agent's chat, any number,
+    /// starting in `start` (see `pick_folder`).
+    pub(crate) fn pick_files(&mut self, start: Option<PathBuf>, purpose: PickFor) {
+        self.pick("Pick files to attach", start, purpose, false);
+    }
+
+    /// Ask zenity for a folder, or for files (`folder` false).
+    fn pick(&mut self, title: &str, start: Option<PathBuf>, purpose: PickFor, folder: bool) {
         match self.overlays.picker.take() {
             Some(open) if open.1 == purpose => return self.overlays.picker = Some(open),
             Some((mut other, _)) => {
@@ -4056,8 +4072,12 @@ impl Gerdr {
             None => {}
         }
         let mut cmd = Command::new("zenity");
-        cmd.args(["--file-selection", "--directory"])
-            .arg(format!("--title={title}"))
+        cmd.arg("--file-selection");
+        match folder {
+            true => cmd.arg("--directory"),
+            false => cmd.args(["--multiple", "--separator=\n"]),
+        };
+        cmd.arg(format!("--title={title}"))
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         if let Some(start) = start {
@@ -4070,13 +4090,19 @@ impl Gerdr {
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => self.report_problem(
                 "zenity",
-                "Can't ask for a folder: zenity isn't installed (install it, or type the path)"
-                    .into(),
+                match folder {
+                    true => "Can't ask for a folder: zenity isn't installed (install it, or type the path)",
+                    false => "Can't ask for files: zenity isn't installed (install it, or type @ in the reply)",
+                }
+                .into(),
             ),
-            Err(err) => self.report_problem(
-                "zenity",
-                format!("The folder picker (zenity) didn't start: {err}"),
-            ),
+            Err(err) => {
+                let what = if folder { "folder" } else { "file" };
+                self.report_problem(
+                    "zenity",
+                    format!("The {what} picker (zenity) didn't start: {err}"),
+                )
+            }
         }
     }
 
@@ -4117,6 +4143,10 @@ impl Gerdr {
                 }
                 PickFor::Venv { project, workspace } => {
                     self.set_venv(&project, &workspace, PathBuf::from(path))
+                }
+                PickFor::ChatFiles(pane_id) => {
+                    let paths = path.lines().filter(|l| !l.is_empty()).map(PathBuf::from);
+                    self.chat_attach(&pane_id, paths.collect())
                 }
             }
         }
@@ -5128,6 +5158,7 @@ impl Gerdr {
         }
         self.procs.retired.retain(|g| group_alive(*g));
         self.poll_picker();
+        self.chats_files_poll();
     }
 
     /// Whether a window shown in a tab belongs to a process of `group`.

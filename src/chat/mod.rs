@@ -10,10 +10,12 @@ use crate::{ai_work::AgentKind, md_blocks::DocBlock, text_field::TextField};
 
 pub mod btw;
 pub mod commands;
+pub mod files;
 pub mod images;
 pub mod menu;
 pub mod mode;
 pub mod model;
+pub mod model_menu;
 pub mod parse;
 pub mod plan_review;
 pub mod rows;
@@ -24,8 +26,8 @@ pub mod tail;
 mod view;
 
 #[cfg(test)]
-pub(crate) use view::{footer, slash_footer};
-pub(crate) use view::{suggestion, suggests};
+pub(crate) use view::{footer, picker_footer, slash_footer};
+pub(crate) use view::{screen_rows, suggestion, suggests};
 
 /// One thing said or done in a chat, in order.
 #[derive(Clone, Debug, PartialEq)]
@@ -190,6 +192,9 @@ pub struct PaneChat {
     /// The `/` menu over the reply box, while the reply is a command being
     /// typed.
     pub slash: Option<commands::Slash>,
+    /// The files attached to the reply: their chips show over the reply
+    /// box, and their paths go after its words (`files::reply`).
+    pub attached: Vec<std::path::PathBuf>,
     /// The pane's last screen rows while its agent waits on the user: the
     /// approval menu, which the transcript doesn't hold. As
     /// `crate::scrollback::parse_ansi` reads them.
@@ -206,8 +211,11 @@ pub struct PaneChat {
     /// The user's picks on the card of its ask's questions, till Submit.
     pub card: questions::Card,
     /// The model its agent is on, as its chat last said or as last picked
-    /// here (`model`).
+    /// here (`model`), or as its screen says (`model_menu::now`).
     pub model: Option<String>,
+    /// The agent's own model menu while its screen shows it
+    /// (`model_menu`): the chat shows it, and its keys go to it.
+    pub picker: Option<Arc<menu::Menu>>,
     /// How full its agent's context is, as its chat last said.
     pub context: Option<crate::ai_work::context::Context>,
 }

@@ -15,6 +15,11 @@ pub struct Menu {
     pub choices: Vec<Choice>,
     /// Several choices may be picked: they have check boxes.
     pub multi: bool,
+    /// Its choices are picked by moving its arrow onto one, then Enter: an
+    /// agent's model menu (`model_menu`), its numbers only gerdr's.
+    pub arrows: bool,
+    /// Left and Right change something of it: Antigravity's effort.
+    pub sideways: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -151,6 +156,7 @@ pub fn menu(rows: &[(String, Styled)]) -> Option<Menu> {
         ask,
         choices,
         multi,
+        ..Menu::default()
     })
 }
 

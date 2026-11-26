@@ -657,21 +657,67 @@ async function pane(p, s, id) {
   const group = d.modes?.length ? `<div class="modes" role="group" aria-label="Agent mode">${d.modes.map((m) =>
     `<button type="button" data-mode="${esc(m)}" aria-pressed="${m === d.mode}">${esc(m)}</button>`).join("")}</div>` : "";
   const now = d.model_id ? "" : `<option value="" selected disabled>${esc(d.model || "Model")}</option>`;
+  // An agent picking its model in a menu of its own: a button opening it, named for
+  // the model its screen says it is on; the menu then shows over the reply box.
+  const opener = d.menu ? `<button type="button" class="model" data-model-menu aria-label="Model">${esc(d.model || "Model")}</button>` : "";
   const model = d.models?.length ? `<select class="model" aria-label="Model">${now}${d.models.map((m) =>
-    `<option value="${esc(m.id)}"${m.id === d.model_id ? " selected" : ""}>${esc(m.name)}</option>`).join("")}</select>` : "";
+    `<option value="${esc(m.id)}"${m.id === d.model_id ? " selected" : ""}>${esc(m.name)}</option>`).join("")}</select>` : opener;
   // How full its context is, as gerdr's chat head says it.
   const context = d.context ? `<span class="context">${esc(d.context)}</span>` : "";
   const modes = group || model || context ? `<div class="modes-row">${group}${context}${model}</div>` : "";
   return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
     said: d.said || [], ask, askId: a?.ask || "", asking: !!a?.questions?.length, suggestion: d.suggestion || "",
-    modes, modesKey: JSON.stringify([d.modes, d.mode, d.models, d.model, d.model_id, d.context]),
+    modes, modesKey: JSON.stringify([d.modes, d.mode, d.models, d.model, d.model_id, d.menu, d.context]),
+    picker: d.picker || null, pickerKey: JSON.stringify(d.picker || null),
     sides: sideCard(id, d.sides),
-    bar: `<div id="asked"></div><div id="sides"></div><button type="button" id="suggest" hidden></button><form id="say"><ul id="slash" hidden></ul><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
-      <button type="button" id="pic" aria-label="Add an image">Image</button><input type="file" id="picFile" accept="image/*" hidden>
+    bar: `<div id="picker"></div><div id="asked"></div><div id="sides"></div><button type="button" id="suggest" hidden></button><div id="files" hidden></div><form id="say"><ul id="slash" hidden></ul><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
+      <button type="button" id="attach" aria-label="Attach files">Attach</button><input type="file" id="attachFile" multiple hidden>
       <button>Send</button></form>${modes}
       <div class="keys">${KEYS.map(([k, l, name]) => `<button data-key="${k}" aria-label="${name}">${l}</button>`).join("")}
         ${s ? `<button data-key="close" class="close" title="Close its tab, as on the desktop">Close</button>` : ""}</div>` };
 }
+
+// The agent's own model menu (Codex, OpenCode, pi, Antigravity), as gerdr reads it
+// off its screen: its rows to tap, its search typed into it, its effort moved.
+// The search box is drawn once per menu, so what is typed holds across reads.
+let menuSent = "";
+function pickerShow(el, m) {
+  if (!m) { el.innerHTML = ""; menuSent = ""; return; }
+  if (!el.firstChild) {
+    menuSent = "";
+    el.innerHTML = `<div class="picker"><div class="what"></div>
+      ${m.search ? `<input type="search" class="menu-search" placeholder="Search" aria-label="Search the models" autocomplete="off">` : ""}
+      <div class="opts" role="list"></div><div class="buttons"></div></div>`;
+  }
+  const [title, ...more] = m.ask;
+  el.querySelector(".what").innerHTML = `<b>${esc(title || "Model")}</b>${more.map((t) => `<div class="quiet small">${esc(t)}</div>`).join("")}`;
+  el.querySelector(".opts").innerHTML = m.rows.length ? m.rows.map((r) => `<button type="button" class="opt${r.at ? " at" : ""}" data-menu-pick="${esc(r.label)}"${r.at ? ` aria-current="true"` : ""}>
+    <span><b>${esc(r.label)}</b>${r.detail ? `<small>${esc(r.detail)}</small>` : ""}</span></button>`).join("")
+    : `<div class="quiet small">No models match</div>`;
+  el.querySelector(".at")?.scrollIntoView({ block: "nearest" });
+  el.querySelector(".buttons").innerHTML = (m.sideways ? `<button type="button" data-key="Left" aria-label="Less effort">←</button><button type="button" data-key="Right" aria-label="More effort">→</button>` : "")
+    + `<button type="button" data-key="esc">Close</button>`;
+}
+
+// Letters typed in the menu's search go to the agent's own, a moment after the
+// last: those taken back first, then those new.
+let menuTimer;
+document.addEventListener("input", (e) => {
+  if (!e.target.matches?.(".menu-search")) return;
+  clearTimeout(menuTimer);
+  menuTimer = setTimeout(async () => {
+    const want = e.target.value;
+    let same = 0;
+    while (same < want.length && same < menuSent.length && want[same] === menuSent[same]) same++;
+    const erase = [...menuSent.slice(same)].length, type = want.slice(same);
+    if (!erase && !type) return;
+    menuSent = want;
+    const [, p, s, pane] = here();
+    const a = await post("/api/agent", { p, s, pane, type, erase });
+    if (a.error) say([{ text: a.error }], true);
+    render(false, true);
+  }, 400);
+});
 
 // The side questions (`/btw …`) asked of the agent this run, as gerdr
 // keeps them: its own chat doesn't. The last shows on a card until hidden,
@@ -863,12 +909,21 @@ async function render(fresh, force, keepBottom) {
       document.body.classList.toggle("with-bar", !!v.bar);
       barFor = hash;
       bar.dataset.modes = v.modesKey || "";
+      filesShow();
     }
     // The rest of the bar keeps what is typed; the agent's modes follow its screen.
     if (v.modesKey !== undefined && bar.dataset.modes !== v.modesKey) {
       bar.querySelector(".modes-row")?.remove();
       document.getElementById("say")?.insertAdjacentHTML("afterend", v.modes);
       bar.dataset.modes = v.modesKey;
+    }
+    // The agent's model menu shows while its screen does; its keys and
+    // replies would land in it.
+    const picking = v.pane && document.getElementById("picker");
+    if (picking && v.pickerKey !== undefined && picking.dataset.key !== v.pickerKey) {
+      pickerShow(picking, v.picker);
+      picking.dataset.key = v.pickerKey;
+      bar.classList.toggle("picking", !!v.picker);
     }
     // An ask comes and goes between reads; its card stays while it waits,
     // with what was picked on it. Keys and replies would land in its menu.
@@ -1016,7 +1071,7 @@ document.addEventListener("change", async (e) => {
 });
 
 document.addEventListener("click", async (e) => {
-  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push], button[data-answer], button[data-mode], button[data-hide-sides]");
+  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push], button[data-answer], button[data-mode], button[data-hide-sides], button[data-menu-pick], button[data-model-menu]");
   if (!b || b.disabled) return;
   const [, p, s, pane] = here();
   if (b.dataset.hideSides) {
@@ -1063,6 +1118,15 @@ document.addEventListener("click", async (e) => {
       const a = await post("/api/answer", { p, s, pane, ask: b.dataset.ask, reply: b.dataset.answer, answers });
       if (a.error) say([{ text: a.error }], true);
       setTimeout(() => render(false, true), 400);
+    } else if (b.dataset.menuPick !== undefined) {
+      const a = await post("/api/agent", { p, s, pane, pick: b.dataset.menuPick });
+      if (a.error) say([{ text: a.error }], true);
+      setTimeout(() => render(false, true), 400);
+    } else if (b.dataset.modelMenu !== undefined) {
+      // Its own /model opens the menu, which then shows here as its screen does.
+      const a = await post("/api/agent", { p, s, pane, text: "/model" });
+      if (a.error) say([{ text: a.error }], true);
+      setTimeout(() => render(false, true), 800);
     } else if (b.dataset.key) {
       if (b.dataset.key === "close" &&
           !(await sheetAsk({ title: `Close ${titleEl.textContent}?`, body: "Its tab closes, as on the desktop.", go: "Close" }))) return;
@@ -1086,13 +1150,18 @@ document.addEventListener("submit", async (e) => {
   if (e.target.id !== "say") return;
   e.preventDefault();
   const line = document.getElementById("line");
-  if (!line.value.trim()) return;
+  const files = attachedHere();
+  if (!line.value.trim() && !files.length) return;
   const [, p, s, pane] = here();
   document.getElementById("slash").hidden = true;
-  const a = await post("/api/agent", { p, s, pane, text: line.value });
+  // The files' paths go after the words: the agent reads each from its path.
+  const text = [line.value.trim(), ...files.map((f) => f.path)].filter(Boolean).join(" ");
+  const a = await post("/api/agent", { p, s, pane, text });
   if (a.error) say([{ text: a.error }], true);
   else {
     line.value = "";
+    files.length = 0;
+    filesShow();
     fit(line);
     // Spent: the next read brings the agent's next one.
     const sug = document.getElementById("suggest");
@@ -1102,54 +1171,76 @@ document.addEventListener("submit", async (e) => {
   setTimeout(() => render(false, true), 600);
 });
 
-// An image for the agent: scaled down to a JPEG here, saved by gerdr,
-// and its path put into the reply box, which the agent reads it from.
+// Files for the agent, attached to the reply: gerdr saves each, and its
+// path goes after the reply's words, which the agent reads it from. A
+// photo is scaled down to a JPEG here first. Each page's files stay till
+// sent, its chips over the reply box; a press on one takes it off.
 const PIC_SIDE = 2048;
-const PIC_MOST = 8 * 1024 * 1024;
-async function addPicture(file) {
-  const line = document.getElementById("line");
-  if (!line || !file?.type.startsWith("image/")) return;
-  let blob;
+const FILE_MOST = 20 * 1024 * 1024;
+const attachedBy = {};
+const attachedHere = () => (attachedBy[location.hash] ??= []);
+function filesShow() {
+  const box = document.getElementById("files");
+  if (!box) return;
+  const files = attachedHere();
+  box.hidden = !files.length;
+  box.innerHTML = files.map((f, i) =>
+    `<button type="button" class="chip" data-unattach="${i}" aria-label="Take ${esc(f.name)} off the reply">${esc(f.name)} <span aria-hidden="true">×</span></button>`).join("");
+}
+async function scaled(file) {
   try {
     const bitmap = await createImageBitmap(file);
     const scale = Math.min(1, PIC_SIDE / Math.max(bitmap.width, bitmap.height));
     const canvas = document.createElement("canvas");
     [canvas.width, canvas.height] = [Math.round(bitmap.width * scale), Math.round(bitmap.height * scale)];
     canvas.getContext("2d").drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    blob = await new Promise((done) => canvas.toBlob(done, "image/jpeg", 0.85));
-  } catch {}
-  if (!blob) return say([{ text: "Couldn't read the image" }], true);
-  if (blob.size > PIC_MOST) return say([{ text: "The image is too big to send, over 8 MB" }], true);
+    return await new Promise((done) => canvas.toBlob(done, "image/jpeg", 0.85));
+  } catch {
+    return null;
+  }
+}
+async function addFile(file) {
+  if (!file) return;
+  const files = attachedHere();
+  let [blob, name] = [file, file.name || "file"];
+  // A photo the browser can draw goes as a JPEG; one it can't, as it is.
+  if (file.type.startsWith("image/") && file.type !== "image/gif" && file.type !== "image/svg+xml") {
+    const jpeg = await scaled(file);
+    if (jpeg) [blob, name] = [jpeg, `${name.replace(/\.[^.]*$/, "") || "image"}.jpg`];
+  }
+  if (blob.size > FILE_MOST) return say([{ text: `${name} is too big to send, over 20 MB` }], true);
   let a;
   try {
-    const res = await fetch("/api/image", { method: "POST", headers: { "Content-Type": "image/jpeg", "X-Gerdr": "phone" }, body: blob });
+    const res = await fetch(`/api/file?name=${encodeURIComponent(name)}`, { method: "POST", headers: { "Content-Type": "application/octet-stream", "X-Gerdr": "phone" }, body: blob });
     a = await res.json().catch(() => ({ error: `Bad answer (${res.status})` }));
   } catch {
     a = { error: "Can't reach gerdr" };
   }
   if (a.error) return say([{ text: a.error }], true);
-  const at = line.selectionStart ?? line.value.length;
-  const before = line.value.slice(0, at);
-  const put = `${before && !/\s$/.test(before) ? " " : ""}${a.path} `;
-  line.value = before + put + line.value.slice(at);
-  line.selectionStart = line.selectionEnd = at + put.length;
-  fit(line);
-  line.focus();
+  files.push({ name, path: a.path });
+  filesShow();
 }
 document.addEventListener("click", (e) => {
-  if (e.target.id === "pic") document.getElementById("picFile")?.click();
+  if (e.target.id === "attach") document.getElementById("attachFile")?.click();
+  const chip = e.target.closest?.("[data-unattach]");
+  if (chip) {
+    attachedHere().splice(Number(chip.dataset.unattach), 1);
+    filesShow();
+    document.getElementById("line")?.focus();
+  }
 });
-document.addEventListener("change", (e) => {
-  if (e.target.id !== "picFile") return;
-  addPicture(e.target.files?.[0]);
+document.addEventListener("change", async (e) => {
+  if (e.target.id !== "attachFile") return;
+  const picked = [...(e.target.files || [])];
   e.target.value = "";
+  for (const file of picked) await addFile(file);
 });
-document.addEventListener("paste", (e) => {
+document.addEventListener("paste", async (e) => {
   if (e.target.id !== "line") return;
-  const file = [...(e.clipboardData?.files || [])].find((f) => f.type.startsWith("image/"));
-  if (!file) return;
+  const pasted = [...(e.clipboardData?.files || [])];
+  if (!pasted.length) return;
   e.preventDefault();
-  addPicture(file);
+  for (const file of pasted) await addFile(file);
 });
 
 // A box grows with what is written in it, up to five rows, then scrolls:

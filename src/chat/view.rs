@@ -9,7 +9,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -25,11 +25,12 @@ use super::{
     ChatFocus, Event, Item, PaneChat, Reading,
     btw::{self, Follow, Side, SideState},
     commands::{self, Command, Slash},
+    files,
     live::{Answers, AskReply, PendingAsk, Question},
     menu::{self, ChoiceKind, Menu},
     questions::Card,
     mode,
-    model,
+    model, model_menu,
     rows::{rows, unread},
     tail::Tail,
 };
@@ -61,6 +62,21 @@ const SIDE_MISSES: u32 = 10;
 /// How often a chat's screen is read for its agent's mode otherwise: the
 /// agent changes it by itself too (Claude leaving plan mode).
 const MODE_EVERY: Duration = Duration::from_secs(3);
+/// How long an agent's model menu may take to show once `/model` went: its
+/// screen is read often till then.
+const MENU_TAKES: Duration = Duration::from_secs(5);
+/// When the screen is first read for it: OpenCode's dialog showed in
+/// under half a second.
+const MENU_SHOWS: Duration = Duration::from_millis(400);
+
+/// What goes to an agent's model menu from its chat's keys.
+#[derive(Debug)]
+enum Press<'a> {
+    /// A key, by herdr's name.
+    Key(&'static str),
+    /// Letters typed.
+    Text(&'a str),
+}
 /// How many times, `WAITING_EVERY` apart, an idle Claude Code's screen is
 /// read for its suggestion before gerdr gives up until its next turn: it
 /// comes a few seconds after the turn, or never when it is turned off.
@@ -581,46 +597,138 @@ pub(crate) const MODEL_KEYS: &[Binding<(), ()>] = &[Binding {
     f1: "pick the model the agent runs on",
 }];
 
+/// The file picker's key, from the list and the reply box alike: its
+/// files are attached to the reply (also the Attach button).
+const ATTACH_KEYS: &[Binding<(), ()>] = &[Binding {
+    chord: "Ctrl+O",
+    does: |_| Some(()),
+    footer: true,
+    f1: "open the file picker, to attach files to the reply",
+}];
+
+/// The reply box's key taking the last file attached off its reply, while
+/// one is and the caret is at the reply's start (Backspace does nothing
+/// there otherwise).
+const UNATTACH_KEYS: &[Binding<bool, ()>] = &[Binding {
+    chord: "Backspace",
+    does: |&some| some.then_some(()),
+    footer: true,
+    f1: "at the reply's start: take the last file attached off it",
+}];
+
+/// Whether Backspace takes a file off `chat`'s reply now.
+fn unattaches(chat: &PaneChat) -> bool {
+    let line = chat.draft.line();
+    !chat.attached.is_empty() && line.caret == 0 && line.anchor == 0
+}
+
+/// The keys of the agent's own model menu while the chat shows it
+/// (`model_menu`): they come before all the chat's others, and go to the
+/// agent's menu as pressed, the letters typed too (its search). Left and
+/// Right only where they change something (`Menu::sideways`).
+const PICKER_KEYS: &[Binding<bool, &'static str>] = &[
+    Binding {
+        chord: "Down",
+        does: |_| Some("Down"),
+        footer: true,
+        f1: "move the arrow of the agent's model menu",
+    },
+    key_table::alias("Ctrl+J", |_| Some("Down")),
+    Binding {
+        chord: "Up",
+        does: |_| Some("Up"),
+        footer: true,
+        f1: "move the arrow of the agent's model menu",
+    },
+    key_table::alias("Ctrl+K", |_| Some("Up")),
+    Binding {
+        chord: "Left",
+        does: |&side| side.then_some("Left"),
+        footer: true,
+        f1: "lower the effort of the model under the arrow",
+    },
+    Binding {
+        chord: "Right",
+        does: |&side| side.then_some("Right"),
+        footer: true,
+        f1: "raise the effort of the model under the arrow",
+    },
+    Binding {
+        chord: "Enter",
+        does: |_| Some("Enter"),
+        footer: true,
+        f1: "pick the model under the arrow",
+    },
+    Binding {
+        chord: "BackSpace",
+        does: |_| Some("backspace"),
+        footer: true,
+        f1: "take back a letter of the menu's search (letters typed search it)",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some("esc"),
+        footer: true,
+        f1: "close the agent's model menu, or clear its search first",
+    },
+];
+
+/// The footer's key hints while the agent's model menu shows (checklist K3).
+pub(crate) fn picker_footer(sideways: bool) -> Vec<(String, String)> {
+    key_table::joined(key_table::hints(PICKER_KEYS, &sideways, |k| {
+        match *k {
+            "Up" | "Down" => "move",
+            "Left" | "Right" => "effort",
+            "Enter" => "pick",
+            "backspace" => "erase",
+            _ => "close",
+        }
+        .to_owned()
+    }))
+}
+
 /// The `/` menu's keys: they come before the reply box's while it shows.
 const SLASH_KEYS: &[Binding<(), SlashKey>] = &[
     Binding {
         chord: "Enter",
         does: |_| Some(SlashKey::Run),
         footer: true,
-        f1: "send the command picked to the agent",
+        f1: "send the command picked to the agent; in the @ menu, attach the file picked",
     },
     Binding {
         chord: "Tab",
         does: |_| Some(SlashKey::Fill),
         footer: true,
-        f1: "fill in the command picked, to add to it",
+        f1: "fill in the command picked, to add to it; in the @ menu, attach the file picked",
     },
     Binding {
         chord: "Down",
         does: |_| Some(SlashKey::Next),
         footer: true,
-        f1: "pick the next command",
+        f1: "pick the next command or file",
     },
     key_table::alias("Ctrl+J", |_| Some(SlashKey::Next)),
     Binding {
         chord: "Up",
         does: |_| Some(SlashKey::Previous),
         footer: true,
-        f1: "pick the previous command",
+        f1: "pick the previous command or file",
     },
     key_table::alias("Ctrl+K", |_| Some(SlashKey::Previous)),
     Binding {
         chord: "Esc",
         does: |_| Some(SlashKey::Close),
         footer: true,
-        f1: "close the commands, keeping the reply",
+        f1: "close the menu, keeping the reply",
     },
 ];
 
-/// The footer's key hints while the `/` menu shows (checklist K3).
-pub(crate) fn slash_footer() -> Vec<(String, String)> {
+/// The footer's key hints while the `/` menu shows (checklist K3), or
+/// the `@` menu of `files`.
+pub(crate) fn slash_footer(files: bool) -> Vec<(String, String)> {
     key_table::joined(key_table::hints(SLASH_KEYS, &(), |k| {
         match k {
+            SlashKey::Run | SlashKey::Fill if files => "attach",
             SlashKey::Run => "run",
             SlashKey::Fill => "fill in",
             SlashKey::Next | SlashKey::Previous => "pick",
@@ -630,17 +738,45 @@ pub(crate) fn slash_footer() -> Vec<(String, String)> {
     }))
 }
 
+/// How long the `@` menu waits for its files as it opens, before it shows
+/// without them: they come later (`Gerdr::chats_files_poll`).
+const FILES_WAIT: Duration = Duration::from_millis(60);
+
 /// Open, filter or close `chat`'s `/` menu for its reply as it now is;
-/// `load` lists its agent's commands, read each time the menu opens.
-fn slash_sync(chat: &mut PaneChat, load: impl FnOnce() -> Vec<Command>) {
-    let typed = (chat.focus == ChatFocus::Composer)
+/// `load` lists its agent's commands, read each time the menu opens. An
+/// `@word` at the caret opens the `@` menu of the files under `root`.
+fn slash_sync(chat: &mut PaneChat, root: Option<&Path>, load: impl FnOnce() -> Vec<Command>) {
+    let composing = chat.focus == ChatFocus::Composer;
+    let line = chat.draft.line();
+    if composing
+        && let Some(root) = root
+        && let Some((_, typed)) = files::query(&line)
+    {
+        let same = |s: &Slash| s.files.as_deref() == Some(root);
+        let menu = match chat.slash.take().filter(same) {
+            Some(mut menu) => {
+                menu.take_loaded(Duration::ZERO);
+                menu
+            }
+            None => {
+                let mut menu = Slash::files(root.to_path_buf());
+                menu.take_loaded(FILES_WAIT);
+                menu
+            }
+        };
+        let menu = chat.slash.insert(menu);
+        return menu.sync(typed);
+    }
+    let typed = composing
         .then(|| commands::query(&chat.draft).map(str::to_owned))
         .flatten();
     match typed {
-        Some(typed) => chat
-            .slash
-            .get_or_insert_with(|| Slash::new(load()))
-            .sync(&typed),
+        Some(typed) => {
+            if chat.slash.as_ref().is_some_and(|s| s.files.is_some()) {
+                chat.slash = None;
+            }
+            (chat.slash.get_or_insert_with(|| Slash::new(load()))).sync(&typed)
+        }
         None => chat.slash = None,
     }
 }
@@ -716,15 +852,29 @@ fn chat_footer(chat: &PaneChat, modes: bool, models: bool) -> Vec<(String, Strin
         }
         _ => Vec::new(),
     };
-    let rest = match chat.slash.as_ref().is_some_and(|s| s.open()) {
-        true => slash_footer(),
-        false => footer(
-            chat.focus,
-            chat.draft.line().text.is_empty(),
-            chat.suggestion.is_some(),
-            modes,
-            models,
-        ),
+    if let Some(m) = &chat.picker {
+        return picker_footer(m.sideways);
+    }
+    let rest = match chat.slash.as_ref().filter(|s| s.open()) {
+        Some(menu) => slash_footer(menu.files.is_some()),
+        None => {
+            let unattach = (key_table::hints(UNATTACH_KEYS, &unattaches(chat), |_| {
+                "remove file".to_owned()
+            }))
+            .into_iter()
+            .filter(|_| chat.focus == ChatFocus::Composer);
+            let attach = key_table::hints(ATTACH_KEYS, &(), |_| "attach".to_owned());
+            footer(
+                chat.focus,
+                chat.draft.line().text.is_empty(),
+                chat.suggestion.is_some(),
+                modes,
+                models,
+            )
+            .into_iter()
+            .chain((unattach.chain(attach)).map(|(chord, said)| (chord.to_owned(), said)))
+            .collect()
+        }
     };
     let taken = |chord: &str| card.is_some() && CARD_KEYS.iter().any(|b| b.chord == chord);
     if card.is_none() && review_target(chat).is_some() {
@@ -761,6 +911,12 @@ enum ChatDo {
     PickModel,
     /// Open plan item `.0`'s review.
     Review(String),
+    /// Open the file picker, to attach files to the reply.
+    PickFiles,
+    /// Press this key in the agent's own model menu (herdr's name), or
+    /// type these letters into its search.
+    MenuKey(&'static str),
+    MenuText(String),
 }
 
 /// A key of the reply box, while it has the keys.
@@ -770,6 +926,10 @@ fn composer_key(
     sym: Keysym,
     typed: Keysym,
 ) -> Option<ChatDo> {
+    if key_table::press(UNATTACH_KEYS, &unattaches(chat), mods, sym).is_some() {
+        chat.attached.pop();
+        return None;
+    }
     match key_table::press(COMPOSER_KEYS, &fillable(chat), mods, sym) {
         Some(ComposerKey::Send) => return Some(ChatDo::Send),
         Some(ComposerKey::Newline) => _ = chat.draft.newline(),
@@ -797,6 +957,34 @@ fn fill_suggested(chat: &mut PaneChat) {
     }
 }
 
+/// Attach the file of row `i` among those the `@` menu of `chat` shows,
+/// in place of the `@word` typed for it; the menu closes.
+fn attach_from_menu(chat: &mut PaneChat, i: usize) {
+    let Some(menu) = chat.slash.take() else {
+        return;
+    };
+    let (Some(root), Some(file)) = (&menu.files, menu.shown.get(i).map(|c| &menu.all[*c])) else {
+        return chat.slash = Some(menu);
+    };
+    attach(chat, [root.join(&file.name)]);
+    let line = chat.draft.line();
+    if let Some((at, _)) = files::query(&line) {
+        let (text, caret) = files::without_query(&line, at);
+        chat.draft.set(&text);
+        chat.draft.move_to(caret, false);
+    }
+    chat.focus = ChatFocus::Composer;
+}
+
+/// Attach `paths` to `chat`'s reply, after those already, each once.
+fn attach(chat: &mut PaneChat, paths: impl IntoIterator<Item = PathBuf>) {
+    for path in paths {
+        if !chat.attached.contains(&path) {
+            chat.attached.push(path);
+        }
+    }
+}
+
 /// Whether the key typed is a character, to write into the reply box.
 fn types(mods: &ModifiersState, typed: Keysym) -> bool {
     !(mods.ctrl || mods.alt || mods.logo) && typed.key_char().is_some_and(|c| !c.is_control())
@@ -810,6 +998,15 @@ fn chat_key(
     sym: Keysym,
     typed: Keysym,
 ) -> Option<ChatDo> {
+    // The agent's own menu has every key while it shows.
+    if let Some(m) = &chat.picker {
+        return match key_table::press(PICKER_KEYS, &m.sideways, mods, sym) {
+            Some(key) => Some(ChatDo::MenuKey(key)),
+            None => (types(mods, typed))
+                .then(|| typed.key_char().map(|c| ChatDo::MenuText(c.to_string())))
+                .flatten(),
+        };
+    }
     let questions = (chat.live.ask.as_ref()).is_some_and(|a| !a.questions.is_empty());
     if questions
         && chat.focus == ChatFocus::List
@@ -839,6 +1036,9 @@ fn chat_key(
     if key_table::press(MODEL_KEYS, &(), mods, sym).is_some() {
         return Some(ChatDo::PickModel);
     }
+    if key_table::press(ATTACH_KEYS, &(), mods, sym).is_some() {
+        return Some(ChatDo::PickFiles);
+    }
     if chat.focus == ChatFocus::Composer
         && let Some(slash) = chat.slash.as_mut().filter(|slash| slash.open())
     {
@@ -847,6 +1047,10 @@ fn chat_key(
             Some(SlashKey::Next) => slash.step(1),
             Some(SlashKey::Previous) => slash.step(-1),
             Some(SlashKey::Close) => slash.hidden = true,
+            Some(SlashKey::Fill | SlashKey::Run) if slash.files.is_some() => {
+                let picked = slash.picked;
+                attach_from_menu(chat, picked);
+            }
             Some(SlashKey::Fill) => chat.draft.set(&format!("/{name} ")),
             Some(SlashKey::Run) => {
                 chat.draft.set(&format!("/{name}"));
@@ -1003,7 +1207,7 @@ fn wait_key_name(key: WaitKey) -> String {
         WaitKey::Left => "Left".into(),
         WaitKey::Right => "Right".into(),
         WaitKey::Enter => "Enter".into(),
-        WaitKey::Digit(d) => d.to_string(),
+        WaitKey::Digit(d) | WaitKey::Row(d) => d.to_string(),
     }
 }
 
@@ -1103,7 +1307,11 @@ fn last_rows(mut rows: ChatRows, n: usize) -> ChatRows {
 
 /// Pane `pane_id`'s last `n` screen rows with their colours, read from
 /// herdr off the UI thread.
-fn screen_rows(herdr: &mut Herdr, pane_id: &str, n: usize) -> Result<ChatRows, String> {
+pub(crate) fn screen_rows(
+    herdr: &mut Herdr,
+    pane_id: &str,
+    n: usize,
+) -> Result<ChatRows, String> {
     let text = herdr.pane_styled(pane_id, n)?;
     // An app on the alternate screen has no scrollback: its screen, plainly.
     let text = match text.trim().is_empty() {
@@ -1484,7 +1692,11 @@ impl Gerdr {
             .map(|a| a.pane_id.as_str())
             .collect();
         let mut suggesting = Vec::new();
+        let mut picking = HashSet::new();
         for (pane_id, chat) in chats_mut(&mut self.workspaces) {
+            if chat.picker.is_some() {
+                picking.insert(pane_id.to_owned());
+            }
             if !blocked.contains(pane_id) {
                 chat.waiting = None;
             }
@@ -1502,9 +1714,20 @@ impl Gerdr {
             .filter(|a| !blocked.contains(a.pane_id.as_str()))
             .filter(|a| super::source::kind(a).is_some_and(|k| !mode::modes(k).is_empty()))
             .map(|a| (a.pane_id.as_str(), MODE_EVERY));
+        // Those that pick their model in a menu of their own, for the model
+        // they are on; often while the menu shows or was just asked for.
+        let asked = |id: &str| (self.chats.model_asked.get(id)).is_some_and(|at| at.elapsed() < MENU_TAKES);
+        let menus = (wanted.iter())
+            .filter(|a| super::source::kind(a).is_some_and(model_menu::opens))
+            .map(|a| a.pane_id.as_str())
+            .map(|id| match picking.contains(id) || asked(id) {
+                true => (id, WAITING_EVERY),
+                false => (id, MODE_EVERY),
+            });
         let due: Vec<String> = (blocked.iter().map(|id| (*id, WAITING_EVERY)))
             .chain(suggesting.iter().map(|id| (id.as_str(), WAITING_EVERY)))
             .chain(moded)
+            .chain(menus)
             .filter(|(id, every)| {
                 (self.chats.read_at.get(*id)).is_none_or(|at| at.elapsed() >= *every)
             })
@@ -1571,6 +1794,9 @@ impl Gerdr {
             return;
         };
         let (status, kind) = (Some(agent.agent_status), super::source::kind(agent));
+        if let (Some(kind), Ok(rows)) = (kind.filter(|k| model_menu::opens(*k)), &rows) {
+            self.chat_take_picker(&pane_id, kind, rows);
+        }
         if status != Some(AgentStatus::Blocked) {
             match (kind, &rows) {
                 (Some(kind), Ok(rows)) => self.chat_take_mode(&pane_id, kind, rows),
@@ -1676,6 +1902,9 @@ impl Gerdr {
             Some(ChatDo::NextMode) => self.chat_next_mode(&pane_id),
             Some(ChatDo::PickModel) => self.chat_open_model_picker(&pane_id),
             Some(ChatDo::Review(item_id)) => self.open_chat_plan(&pane_id, &item_id),
+            Some(ChatDo::PickFiles) => self.chat_pick_files(&pane_id),
+            Some(ChatDo::MenuKey(key)) => self.chat_menu_press(&pane_id, Press::Key(key)),
+            Some(ChatDo::MenuText(text)) => self.chat_menu_press(&pane_id, Press::Text(&text)),
             Some(ChatDo::Top) => self.chat_scroll_to(&pane_id, Some(0.0)),
             Some(ChatDo::Bottom) => self.chat_scroll_to(&pane_id, None),
             Some(ChatDo::Page(by)) => {
@@ -1702,7 +1931,8 @@ impl Gerdr {
         let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
             return;
         };
-        slash_sync(chat, || {
+        let root = agent.and_then(|a| a.cwd.as_deref());
+        slash_sync(chat, root, || {
             let kind = agent.and_then(super::source::kind);
             let cwd = agent.and_then(|a| a.cwd.as_deref());
             match (kind, cwd) {
@@ -1725,13 +1955,48 @@ impl Gerdr {
         }
     }
 
-    /// Send the focused chat's reply to its agent, as if typed in its pane.
-    /// A reply refused keeps its draft.
+    /// Take the files listed for the `@` menus still waiting on them: a
+    /// menu opened in a big folder shows them once they come.
+    pub(crate) fn chats_files_poll(&mut self) {
+        for (_, chat) in chats_mut(&mut self.workspaces) {
+            if let Some(menu) = chat.slash.as_mut() {
+                menu.take_loaded(Duration::ZERO);
+            }
+        }
+    }
+
+    /// Open the file picker for pane `pane_id`'s chat: the files picked
+    /// are attached to its reply (`chat_attach`).
+    pub(crate) fn chat_pick_files(&mut self, pane_id: &str) {
+        let start = self.chat_agent(pane_id).and_then(|a| a.cwd.clone());
+        self.pick_files(start, crate::PickFor::ChatFiles(pane_id.to_owned()));
+    }
+
+    /// Attach `paths` to pane `pane_id`'s reply, its chips over the reply
+    /// box; the reply box gets the keys.
+    pub(crate) fn chat_attach(&mut self, pane_id: &str, paths: Vec<PathBuf>) {
+        if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
+            attach(chat, paths);
+            chat.focus = ChatFocus::Composer;
+        }
+    }
+
+    /// Attach `paths` to the focused chat's reply: files copied in a file
+    /// manager and pasted, or an image pasted.
+    pub(crate) fn chat_attach_focused(&mut self, paths: Vec<PathBuf>) {
+        if let Some((pane_id, _)) = self.focused_chat_mut() {
+            self.chat_attach(&pane_id, paths);
+        }
+    }
+
+    /// Send the focused chat's reply to its agent, as if typed in its pane,
+    /// with the paths of the files attached to it. A reply refused keeps
+    /// its draft and its files.
     fn chat_send(&mut self, pane_id: &str) {
         let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
             return;
         };
-        let line = one_line(&chat.draft);
+        let line = files::reply(&one_line(&chat.draft), &chat.attached);
         if line.is_empty() {
             return;
         }
@@ -1739,6 +2004,7 @@ impl Gerdr {
             Ok(()) => {
                 if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
                     chat.draft.clear();
+                    chat.attached.clear();
                     chat.stick = true;
                     // Spent: none is read again until the turn it starts.
                     (chat.suggestion, chat.suggest_reads) = (None, SUGGEST_READS);
@@ -1869,6 +2135,27 @@ impl Gerdr {
         herdr.send_agent_line(pane_id, line)
     }
 
+    /// The model menu pane `pane_id`'s agent of `kind` shows on its screen
+    /// `rows`, if any, and the model they say it is on; one that doesn't
+    /// say keeps the last it said.
+    fn chat_take_picker(&mut self, pane_id: &str, kind: AgentKind, rows: &ChatRows) {
+        let picker = model_menu::read(kind, rows);
+        let texts: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
+        let now = model_menu::now(kind, &texts);
+        if picker.is_some() {
+            self.chats.model_asked.remove(pane_id);
+        }
+        let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
+            return;
+        };
+        if chat.picker.as_deref() != picker.as_ref() {
+            chat.picker = picker.map(Arc::new);
+        }
+        if now.is_some() {
+            chat.model = now;
+        }
+    }
+
     /// The mode pane `pane_id`'s agent of `kind` is in, as its screen
     /// `rows` say; one that doesn't say keeps the last it said.
     fn chat_take_mode(&mut self, pane_id: &str, kind: AgentKind, rows: &ChatRows) {
@@ -1992,6 +2279,10 @@ impl Gerdr {
     /// Open the picker of pane `pane_id`'s agent's model, on the one its
     /// chat says it is on; nothing for an agent gerdr can't switch.
     pub(crate) fn chat_open_model_picker(&mut self, pane_id: &str) {
+        let kind = self.chat_agent(pane_id).and_then(super::source::kind);
+        if kind.is_some_and(model_menu::opens) {
+            return self.chat_open_model_menu(pane_id);
+        }
         let Some(slot) = self.chat_model_slot(pane_id) else {
             return;
         };
@@ -1999,6 +2290,73 @@ impl Gerdr {
             pane: pane_id.to_owned(),
         };
         self.open_model_picker(of, slot);
+    }
+
+    /// Open pane `pane_id`'s agent's own model menu, its `/model` typed:
+    /// the chat shows it once its screen does (`model_menu`).
+    fn chat_open_model_menu(&mut self, pane_id: &str) {
+        if chat_mut(&mut self.workspaces, pane_id).is_some_and(|chat| chat.picker.is_some()) {
+            return;
+        }
+        let sent = (self.mode_key_goes(pane_id))
+            .and_then(|()| self.send_to_agent(pane_id, model_menu::LINE));
+        if let Err(why) = sent {
+            tracing::warn!("opening the model menu of the agent in pane {pane_id}: {why}");
+            return self.show_error(format!("Couldn't open the agent's model menu: {why}"));
+        }
+        (self.chats.model_asked).insert(pane_id.to_owned(), Instant::now());
+        self.read_rows(pane_id.to_owned(), MENU_SHOWS);
+    }
+
+    /// Press `press` in pane `pane_id`'s agent's model menu, from its
+    /// chat's keys; its screen is read again soon, as the menu moves.
+    fn chat_menu_press(&mut self, pane_id: &str, press: Press) {
+        if self.pane_paused(pane_id) {
+            return self.show_error("Couldn't press the key: the agent is paused".into());
+        }
+        let Some(herdr) = self.session.herdr.as_mut() else {
+            return self.show_error("Couldn't press the key: herdr isn't connected".into());
+        };
+        let sent = match press {
+            Press::Key(key) => herdr.send_keys(pane_id, &[key]),
+            Press::Text(text) => herdr.send_text(pane_id, text),
+        };
+        if let Err(err) = sent {
+            tracing::warn!("pressing {press:?} in pane {pane_id}'s model menu: {err}");
+            return self.show_error(format!("Couldn't press the key in the agent's pane: {err}"));
+        }
+        self.read_rows(pane_id.to_owned(), mode::READ_EVERY);
+    }
+
+    /// Pick row `n` (from 1) of pane `pane_id`'s agent's model menu, as the
+    /// chat shows it: its arrow moved onto it on the screen as it is now,
+    /// then Enter.
+    fn chat_pick_row(&mut self, pane_id: &str, n: u8) {
+        let kind = self.chat_agent(pane_id).and_then(super::source::kind);
+        let shown = chat_mut(&mut self.workspaces, pane_id).and_then(|chat| chat.picker.clone());
+        let (Some(kind), Some(shown)) = (kind, shown) else {
+            return;
+        };
+        let Some(label) = (shown.choices.get(usize::from(n).wrapping_sub(1)))
+            .map(|c| c.label.clone())
+        else {
+            return;
+        };
+        if self.pane_paused(pane_id) {
+            return self.show_error(format!("Couldn't pick {label}: the agent is paused"));
+        }
+        let Some(herdr) = self.session.herdr.as_mut() else {
+            return self.show_error(format!("Couldn't pick {label}: herdr isn't connected"));
+        };
+        let keys = screen_rows(herdr, pane_id, WAITING_ROWS).and_then(|rows| {
+            let now = model_menu::read(kind, &rows).ok_or("the agent's menu closed")?;
+            model_menu::keys_to(&now, &label).ok_or_else(|| "the agent's menu doesn't show it".to_owned())
+        });
+        if let Err(why) = keys.and_then(|keys| herdr.send_keys(pane_id, &keys)) {
+            tracing::warn!("picking {label} in pane {pane_id}'s model menu: {why}");
+            self.show_error(format!("Couldn't pick {label}: {why}"));
+        }
+        self.read_rows(pane_id.to_owned(), mode::READ_EVERY);
     }
 
     /// The agent of pane `pane_id`'s chat, for the picker of its model;
@@ -2070,6 +2428,7 @@ impl Gerdr {
     /// digit typed as a menu's choice, without Enter (see `choice_keys`).
     fn chat_wait_key(&mut self, pane_id: &str, key: WaitKey) {
         let keys = match key {
+            WaitKey::Row(n) => return self.chat_pick_row(pane_id, n),
             WaitKey::Digit(n) => {
                 let m = (self.chats.waiting.get(pane_id)).and_then(|rows| menu::menu(rows));
                 choice_keys(m.as_ref(), n)
@@ -2101,7 +2460,7 @@ impl Gerdr {
             }
         }
         // Its screen read again soon, as the menu moves.
-        self.chats.read_at.remove(pane_id);
+        self.read_rows(pane_id.to_owned(), mode::READ_EVERY);
     }
 
     /// Open the file edit or plan `i` of pane `pane_id`'s chat wrote, in the
@@ -2190,7 +2549,7 @@ impl Gerdr {
                 }
                 // Its model's button: what its chat says it is on.
                 let model = (super::source::kind(agent))
-                    .filter(|kind| model::picks(*kind))
+                    .filter(|kind| model::picks(*kind) || model_menu::opens(*kind))
                     .map(|_| chat.model.clone().unwrap_or_else(|| "Model".to_owned()));
                 let modes = (super::source::kind(agent))
                     .filter(|kind| !mode::modes(*kind).is_empty())
@@ -2211,12 +2570,18 @@ impl Gerdr {
                     focus: chat.focus,
                     focused: focused == Some(id),
                     draft: chat.draft.line(),
-                    waiting: self.chats.waiting.get(pane_id).cloned(),
+                    // The agent's model menu takes the waiting panel's place.
+                    waiting: (chat.picker.is_none())
+                        .then(|| self.chats.waiting.get(pane_id).cloned())
+                        .flatten(),
                     suggestion: chat.suggestion.clone(),
                     hints: chat_footer(chat, !modes.is_empty(), model.is_some()),
                     slash: (chat.slash.as_ref())
                         .filter(|slash| slash.open())
                         .map(chrome::SlashView::of),
+                    attached: (chat.attached.iter())
+                        .map(|path| files::label(path, agent.cwd.as_deref()))
+                        .collect(),
                     earlier: match (chat.earlier, chat.reading_earlier) {
                         (false, _) => None,
                         (true, reading) => Some(reading),
@@ -2232,6 +2597,7 @@ impl Gerdr {
                     mode: self.chats.modes.get(pane_id).cloned(),
                     model,
                     context: chat.context.map(|c| c.said()),
+                    picker: chat.picker.clone(),
                 };
                 view.hover = pointer
                     .filter(|pos| view.rect.to_f64().contains(*pos))
@@ -2329,6 +2695,15 @@ impl Gerdr {
             ChatHit::Composer => {
                 chat.focus = ChatFocus::Composer;
                 field(self);
+            }
+            ChatHit::Command(i) if chat.slash.as_ref().is_some_and(|s| s.files.is_some()) => {
+                attach_from_menu(chat, i);
+            }
+            ChatHit::Attach => self.chat_pick_files(&pane_id),
+            ChatHit::Attached(i) => {
+                if i < chat.attached.len() {
+                    chat.attached.remove(i);
+                }
             }
             ChatHit::Command(i) => {
                 let name = (chat.slash.as_ref())
@@ -2703,7 +3078,61 @@ mod tests {
             about: String::new(),
             hint: String::new(),
         };
-        slash_sync(chat, || all.iter().map(cmd).collect());
+        slash_sync(chat, None, || all.iter().map(cmd).collect());
+    }
+
+    #[test]
+    fn an_at_word_offers_the_agents_files_to_attach() {
+        let root = std::env::temp_dir().join(format!("gerdr-chat-at-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        std::fs::write(root.join("notes.md"), "").unwrap();
+        let mut chat = with_items(Vec::new());
+        for c in "read @mai".chars() {
+            let sym = Keysym::from_char(c);
+            chat_key(&mut chat, &ModifiersState::default(), sym, sym);
+            slash_sync(&mut chat, Some(&root), Vec::new);
+        }
+        let menu = chat.slash.as_mut().unwrap();
+        menu.take_loaded(Duration::from_secs(10));
+        assert!(menu.open() && menu.files.is_some());
+        assert_eq!(menu.picked().unwrap().name, "src/main.rs");
+        assert_eq!(footer_of(&chat)[0], ("Enter / Tab".into(), "attach".into()));
+        // Enter attaches it in place of the @word; nothing is sent.
+        assert_eq!(press(&mut chat, "Enter", '\r'), None);
+        slash_sync(&mut chat, Some(&root), Vec::new);
+        assert_eq!(chat.attached, [root.join("src/main.rs")]);
+        assert_eq!(chat.draft, "read ");
+        assert!(chat.slash.is_none());
+        // Backspace takes it off only from the reply's start.
+        press(&mut chat, "Backspace", '\u{8}');
+        assert_eq!((&*chat.draft, chat.attached.len()), ("read", 1));
+        let removes = |chat: &PaneChat| footer_of(chat).iter().any(|(_, s)| s == "remove file");
+        assert!(!removes(&chat));
+        chat.draft.move_to(0, false);
+        assert!(removes(&chat));
+        press(&mut chat, "Backspace", '\u{8}');
+        assert_eq!((&*chat.draft, chat.attached.len()), ("read", 0));
+        // Ctrl+O opens the file picker, from the list too.
+        assert_eq!(press(&mut chat, "Ctrl+O", 'o'), Some(ChatDo::PickFiles));
+        chat.focus = ChatFocus::List;
+        assert_eq!(press(&mut chat, "Ctrl+O", 'o'), Some(ChatDo::PickFiles));
+        assert!(footer_of(&chat).contains(&("Ctrl+O".into(), "attach".into())));
+        // The new chords mean nothing else in the chat (K1).
+        let others: Vec<&str> = (LIST_KEYS.iter().map(|b| b.chord))
+            .chain(COMPOSER_KEYS.iter().map(|b| b.chord))
+            .chain(SLASH_KEYS.iter().map(|b| b.chord))
+            .chain(ASK_KEYS.iter().map(|b| b.chord))
+            .chain(MODE_KEYS.iter().map(|b| b.chord))
+            .chain(MODEL_KEYS.iter().map(|b| b.chord))
+            .collect();
+        let new = ATTACH_KEYS.iter().map(|b| b.chord);
+        for b in new.chain(UNATTACH_KEYS.iter().map(|b| b.chord)) {
+            assert!(!others.contains(&b), "{b}");
+            assert!(crate::keys::hint_key(b).is_some(), "{b}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2753,16 +3182,7 @@ mod tests {
     }
 
     fn footer_of(chat: &PaneChat) -> Vec<(String, String)> {
-        match chat.slash.as_ref().is_some_and(|s| s.open()) {
-            true => slash_footer(),
-            false => footer(
-                chat.focus,
-                chat.draft.is_empty(),
-                chat.suggestion.is_some(),
-                false,
-                false,
-            ),
-        }
+        chat_footer(chat, false, false)
     }
 
     #[test]
@@ -2839,6 +3259,44 @@ mod tests {
         assert_eq!(got, rows(&["b", "c"]));
         assert_eq!(wait_key_name(WaitKey::Esc), "esc");
         assert_eq!(wait_key_name(WaitKey::Digit(2)), "2");
+    }
+
+    #[test]
+    fn the_agents_model_menu_takes_every_key_while_it_shows() {
+        let mut chat = with_items(vec![user("u1", "one")]);
+        chat.focus = ChatFocus::Composer;
+        chat.draft.set("kept");
+        chat.picker = Some(Arc::new(Menu {
+            arrows: true,
+            ..Menu::default()
+        }));
+        assert_eq!(press(&mut chat, "Down", 'j'), Some(ChatDo::MenuKey("Down")));
+        assert_eq!(press(&mut chat, "Ctrl+K", 'k'), Some(ChatDo::MenuKey("Up")));
+        assert_eq!(press(&mut chat, "Enter", '\r'), Some(ChatDo::MenuKey("Enter")));
+        assert_eq!(press(&mut chat, "Esc", '\u{1b}'), Some(ChatDo::MenuKey("esc")));
+        assert_eq!(
+            press(&mut chat, "BackSpace", '\u{8}'),
+            Some(ChatDo::MenuKey("backspace"))
+        );
+        // Letters search it, the reply kept as it was.
+        assert_eq!(press(&mut chat, "S", 's'), Some(ChatDo::MenuText("s".into())));
+        assert_eq!(press(&mut chat, "Shift+Tab", '\t'), None);
+        assert_eq!(chat.draft, "kept");
+        // Left and Right only where they change its effort.
+        assert_eq!(press(&mut chat, "Left", '\0'), None);
+        let hinted = |chat: &PaneChat| chat_footer(chat, true, true);
+        assert!(!hinted(&chat).iter().any(|(_, said)| said == "effort"));
+        assert!(!hinted(&chat).iter().any(|(_, said)| said == "send"));
+        chat.picker = Some(Arc::new(Menu {
+            arrows: true,
+            sideways: true,
+            ..Menu::default()
+        }));
+        assert_eq!(press(&mut chat, "Right", '\0'), Some(ChatDo::MenuKey("Right")));
+        assert!(hinted(&chat).iter().any(|(k, said)| k == "Left / Right" && said == "effort"));
+        // Gone with the menu.
+        chat.picker = None;
+        assert_eq!(press(&mut chat, "Enter", '\r'), Some(ChatDo::Send));
     }
 
     #[test]

@@ -44,8 +44,21 @@ use crate::{Gerdr, input::Overlay};
 type OfferMimes = Mutex<Vec<String>>;
 
 /// What a paste brings back to the event loop: the overlay it is for, and
-/// the text to type into it or why an image couldn't be pasted.
-pub type Pasted = (Overlay, Result<String, String>);
+/// what to put into it or why an image couldn't be pasted.
+pub type Pasted = (Overlay, Result<Paste, String>);
+
+/// What a paste puts into a field.
+#[derive(Debug)]
+pub enum Paste {
+    /// Text, typed into it.
+    Text(String),
+    /// Files attached to an agent's chat: copied in a file manager, or an
+    /// image saved to a file.
+    Files(Vec<std::path::PathBuf>),
+}
+
+/// The mime type of files copied in a file manager.
+const URI_LIST: &str = "text/uri-list";
 
 /// The text mime types gerdr pastes, the most wanted first.
 const TEXT_MIMES: [&str; 4] = [
@@ -62,14 +75,13 @@ const PASTE_LIMIT: u64 = 64 * 1024;
 const IMAGE_LIMIT: u64 = 20 * 1024 * 1024;
 
 /// The mime types a paste into overlay `into` asks for, the most wanted
-/// first: text, and an image too in an agent's chat (see `chat::images`).
+/// first: text; in an agent's chat, files copied in a file manager before
+/// it and an image after it (see `chat::files`, `chat::images`).
 fn paste_mimes(into: Overlay) -> impl Iterator<Item = &'static str> {
-    let images = into == Overlay::Chat;
-    TEXT_MIMES.into_iter().chain(
-        crate::chat::images::MIMES
-            .into_iter()
-            .filter(move |_| images),
-    )
+    let chat = into == Overlay::Chat;
+    let files = std::iter::once(URI_LIST).filter(move |_| chat);
+    let images = crate::chat::images::MIMES.into_iter().filter(move |_| chat);
+    files.chain(TEXT_MIMES).chain(images)
 }
 
 /// Whether `mime` is one of an image.
@@ -200,8 +212,9 @@ impl Gerdr {
     /// Read the clipboard's text off the event loop (its owner may be one of
     /// our clients, which needs the loop to answer), for `paste_text` into
     /// overlay `into`: not into one opened later, when the owner is slow.
-    /// Nothing comes back when the owner writes nothing. An image pasted
-    /// into a chat is saved to a file, and its path is what is typed.
+    /// Nothing comes back when the owner writes nothing. In a chat, files
+    /// copied in a file manager are attached, and so is an image pasted,
+    /// saved to a file first.
     pub fn paste_clipboard(&mut self, into: Overlay) {
         let Some(tx) = self.paste_sender() else {
             return;
@@ -228,13 +241,20 @@ impl Gerdr {
                     let _ = tx.send((into, Err(format!("it is over {most} MB"))));
                 }
                 Ok(_) if image => {
-                    // Spaced off what is around it; a send drops spare spaces.
                     let saved = crate::chat::images::save(&bytes);
-                    let _ = tx.send((into, saved.map(|path| format!(" {} ", path.display()))));
+                    let _ = tx.send((into, saved.map(|path| Paste::Files(vec![path]))));
                 }
                 Ok(_) => {
                     let text = String::from_utf8_lossy(&bytes).into_owned();
-                    let _ = tx.send((into, Ok(text)));
+                    let paths = match mime == URI_LIST {
+                        true => crate::chat::files::uri_paths(&text),
+                        false => Vec::new(),
+                    };
+                    let paste = match paths.is_empty() {
+                        true => Paste::Text(text),
+                        false => Paste::Files(paths),
+                    };
+                    let _ = tx.send((into, Ok(paste)));
                 }
                 Err(err) if image => _ = tx.send((into, Err(err.to_string()))),
                 Err(err) => tracing::debug!("paste: {err}"),
@@ -269,7 +289,12 @@ impl Gerdr {
             let inserted = self
                 .loop_handle
                 .insert_source(rx, |event, _, state| match event {
-                    channel::Event::Msg((into, Ok(text))) => state.paste_text(into, &text),
+                    channel::Event::Msg((into, Ok(Paste::Text(text)))) => {
+                        state.paste_text(into, &text)
+                    }
+                    channel::Event::Msg((_, Ok(Paste::Files(paths)))) => {
+                        state.chat_attach_focused(paths)
+                    }
                     channel::Event::Msg((_, Err(why))) => {
                         tracing::warn!("paste of an image: {why}");
                         state.show_error(format!("Couldn't paste the image: {why}"));
@@ -472,11 +497,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_chat_asks_for_an_image_and_after_text() {
+    fn only_a_chat_asks_for_files_before_text_and_an_image_after_it() {
         let chat: Vec<_> = paste_mimes(Overlay::Chat).collect();
-        assert_eq!(chat.first(), Some(&TEXT_MIMES[0]));
+        assert_eq!(chat[..2], [URI_LIST, TEXT_MIMES[0]]);
         assert_eq!(chat.last(), Some(&"image/jpeg"));
         assert!(chat.iter().position(|m| is_image(m)) > chat.iter().position(|m| *m == "STRING"));
-        assert!(!paste_mimes(Overlay::Features).any(is_image));
+        let other: Vec<_> = paste_mimes(Overlay::Features).collect();
+        assert_eq!(other, TEXT_MIMES);
     }
 }

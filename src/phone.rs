@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 
 use crate::{
     ai_work::AgentKind,
-    chat::{mode, model},
+    chat::{mode, model, model_menu},
     feature::{Feature, Stage, Status, layout, setup, store},
     feature_agents::{self, Gate},
     feature_workspace::feature_on,
@@ -55,9 +55,9 @@ const LOG_LINES: usize = 400;
 const HISTORY: usize = 300;
 /// The most a request's body may take.
 const BODY_LIMIT: u64 = 64 * 1024;
-/// The most an image sent for an agent's chat may take (`/api/image`): the
+/// The most a file sent for an agent's chat may take (`/api/file`): the
 /// page scales a photo down before it sends it.
-const IMAGE_LIMIT: u64 = 8 * 1024 * 1024;
+const FILE_LIMIT: u64 = 20 * 1024 * 1024;
 /// How long gerdr is given to answer.
 const GERDR_TIME: Duration = Duration::from_secs(25);
 
@@ -287,8 +287,8 @@ fn read_request(stream: impl Read) -> Option<Request> {
             value.clone_into(&mut request.agent);
         }
     }
-    let most = if request.target == "/api/image" {
-        IMAGE_LIMIT
+    let most = if request.target.split('?').next() == Some("/api/file") {
+        FILE_LIMIT
     } else {
         BODY_LIMIT
     };
@@ -434,10 +434,14 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
     if target == "/api/push" {
         return push(body, host, from);
     }
-    if target == "/api/image" {
-        return match crate::chat::images::save(body) {
+    if let Some(query) = target.strip_prefix("/api/file?") {
+        let name = parse_query(query).remove("name").unwrap_or_default();
+        return match crate::chat::files::save(&name, body) {
             Ok(path) => Reply::json(&json!({ "path": path })),
-            Err(why) => Reply::error(400, &format!("Couldn't save the image: {why}")),
+            Err(why) => {
+                tracing::warn!("a file sent from the phone: {why}");
+                Reply::error(500, &format!("Couldn't save the file: {why}"))
+            }
         };
     }
     if target == "/api/push-test" {
@@ -458,6 +462,8 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
     let Ok(Value::Object(mut args)) = serde_json::from_slice::<Value>(body) else {
         return Reply::error(400, "Bad request");
     };
+    // How many letters of a model menu's search go before what is typed.
+    let erase = args.get("erase").and_then(Value::as_u64).unwrap_or(0);
     let mut text = |name: &str| match args.remove(name) {
         Some(Value::String(text)) => text,
         _ => String::new(),
@@ -477,6 +483,10 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
             let picked = text("model");
             if !picked.is_empty() {
                 return agent_model(&project, &slug, &pane, &picked);
+            }
+            let (row, typed) = (text("pick"), text("type"));
+            if !row.is_empty() || !typed.is_empty() || erase > 0 {
+                return agent_menu(&project, &slug, &pane, &row, &typed, erase);
             }
             return agent_input(&project, &slug, &pane, &line, &key);
         }
@@ -622,8 +632,14 @@ fn socket_holds(socket: &Path, lock: &Path) -> bool {
     fds.any(|fd| std::fs::read_link(fd.path()).is_ok_and(|to| to == lock))
 }
 
-/// The keys the phone may press in an agent's pane: herdr's names.
-const AGENT_KEYS: [&str; 4] = ["Enter", "esc", "Up", "Down"];
+/// The keys the phone may press in an agent's pane: herdr's names. Left
+/// and Right move Antigravity's model menu's effort.
+const AGENT_KEYS: [&str; 6] = ["Enter", "esc", "Up", "Down", "Left", "Right"];
+
+/// How many of a pane's last screen rows are read for its model menu.
+const MENU_ROWS: usize = 60;
+/// The most letters typed into a model menu's search at once.
+const SEARCH_MAX: usize = 100;
 
 /// Type `line` to an agent of feature `slug` (with no `slug`, of a
 /// workspace: see `agent_of`), Enter after it, or press `key`, or type a
@@ -734,6 +750,76 @@ fn agent_model(project: &str, slug: &str, pane: &str, id: &str) -> Reply {
         Ok(()) => Reply::json(&json!({ "said": [] })),
         Err(err) => Reply::error(502, &format!("Couldn't reach the agent: {err}")),
     }
+}
+
+/// In the model menu of the agent in `pane` (`model_menu`): pick the row
+/// labelled `row`, its arrow moved onto it on the screen as it is now, then
+/// Enter; or take back `erase` letters of its search and type `typed`.
+fn agent_menu(project: &str, slug: &str, pane: &str, row: &str, typed: &str, erase: u64) -> Reply {
+    // Letters only: they go to the agent's terminal as typed.
+    if typed.chars().count() > SEARCH_MAX || typed.chars().any(char::is_control) || erase > SEARCH_MAX as u64 {
+        return Reply::error(400, "Not a search");
+    }
+    let project = match agent_of(project, slug, pane) {
+        Ok((project, _)) => project,
+        Err(reply) => return reply,
+    };
+    let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
+    let agent = match herdr.agent_list() {
+        Ok(agents) => agents.into_iter().find(|a| a.pane_id == pane),
+        Err(err) => return Reply::error(502, &format!("Couldn't reach the agent: {err}")),
+    };
+    let Some(kind) = (agent.as_ref().and_then(crate::chat::source::kind)).filter(|k| model_menu::opens(*k)) else {
+        return Reply::error(404, "No agent with a model menu runs there");
+    };
+    let sent = match row.is_empty() {
+        true => {
+            let erased = vec!["backspace"; erase as usize];
+            (if erased.is_empty() { Ok(()) } else { herdr.send_keys(pane, &erased) })
+                .and_then(|()| match typed.is_empty() {
+                    true => Ok(()),
+                    false => herdr.send_text(pane, typed),
+                })
+        }
+        false => crate::chat::screen_rows(&mut herdr, pane, MENU_ROWS).and_then(|rows| {
+            let now = model_menu::read(kind, &rows).ok_or("the agent's menu closed")?;
+            let keys = model_menu::keys_to(&now, row).ok_or("the agent's menu doesn't show it")?;
+            herdr.send_keys(pane, &keys)
+        }),
+    };
+    match sent {
+        Ok(()) => Reply::json(&json!({ "said": [] })),
+        Err(why) if row.is_empty() => Reply::error(502, &format!("Couldn't reach the agent: {why}")),
+        Err(why) => Reply::error(409, &format!("Couldn't pick {row}: {why}")),
+    }
+}
+
+/// The model menu agent `kind` in `pane` shows, as the page draws it
+/// (`{ask, rows: [{label, detail, at}], sideways}`), or null; and the
+/// model its screen says it is on. Nothing for an agent without one.
+fn pane_menu(herdr: &mut Herdr, pane: &str, kind: Option<AgentKind>) -> (Value, Option<String>) {
+    let Some(kind) = kind.filter(|k| model_menu::opens(*k)) else {
+        return (Value::Null, None);
+    };
+    let rows = match crate::chat::screen_rows(herdr, pane, MENU_ROWS) {
+        Ok(rows) => rows,
+        Err(why) => {
+            tracing::debug!("phone: the model menu of pane {pane}: {why}");
+            return (Value::Null, None);
+        }
+    };
+    let texts: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
+    let now = model_menu::now(kind, &texts);
+    let menu = model_menu::read(kind, &rows).map(|m| {
+        let rows: Vec<Value> = (m.choices.iter())
+            .map(|c| json!({ "label": c.label, "detail": c.detail, "at": c.picked }))
+            .collect();
+        let ask: Vec<&str> = m.ask.iter().map(|(text, _)| text.as_str()).collect();
+        // Codex's menu has no search: its digits pick.
+        let search = kind != AgentKind::Codex;
+        json!({ "ask": ask, "rows": rows, "sideways": m.sideways, "search": search })
+    });
+    (menu.unwrap_or(Value::Null), now)
 }
 
 /// What a new feature can be started on: each project with a workspace
@@ -1368,6 +1454,18 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
         _ => None,
     };
     let cursor = agent_kind == Some(AgentKind::Cursor);
+    // An agent picking its model in a menu of its own: the menu while it
+    // shows, the model it is on, a button that opens the menu.
+    let (picker, on) = pane_menu(&mut herdr, pane, agent_kind);
+    let menu = agent_kind.is_some_and(model_menu::opens);
+    let with_menu = |mut reply: Value| {
+        reply["picker"] = picker.clone();
+        reply["menu"] = json!(menu);
+        if menu {
+            reply["model"] = json!(on);
+        }
+        reply
+    };
     // How full its context is, as gerdr's chat head says it.
     let context = (agent.as_ref())
         .and_then(|agent| {
@@ -1387,7 +1485,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
                 let [models, model, model_id] =
                     pane_models(agent_kind, transcript.as_deref(), &cursor);
                 let reply = json!({ "label": label, "title": title, "text": text, "more": false, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "models": models, "model": model, "model_id": model_id, "said": said, "context": context });
-                Reply::json(&reply)
+                Reply::json(&with_menu(reply))
             }
             Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
         };
@@ -1410,7 +1508,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
             let (modes, mode) = modes(&text);
             let [models, model, model_id] = pane_models(agent_kind, transcript.as_deref(), &cursor);
             let reply = json!({ "label": label, "title": title, "text": text, "more": more, "ask": ask, "working": working, "sides": sides, "suggestion": suggestion, "modes": modes, "mode": mode, "models": models, "model": model, "model_id": model_id, "said": said, "context": context });
-            Reply::json(&reply)
+            Reply::json(&with_menu(reply))
         }
         Err(err) => Reply::error(502, &format!("Couldn't read the pane: {err}")),
     }
@@ -1480,8 +1578,9 @@ mod tests {
             BODY_LIMIT + 1
         );
         assert_eq!(read_request(big.as_bytes()), None);
-        // An image may be bigger, only on its own route.
-        let image = |n: u64| format!("POST /api/image HTTP/1.1\r\nContent-Length: {n}\r\n\r\n");
+        // A file may be bigger, only on its own route.
+        let image =
+            |n: u64| format!("POST /api/file?name=a HTTP/1.1\r\nContent-Length: {n}\r\n\r\n");
         let fits = format!(
             "{}{}",
             image(BODY_LIMIT + 1),
@@ -1491,17 +1590,13 @@ mod tests {
             read_request(fits.as_bytes()).expect("image").body.len() as u64,
             BODY_LIMIT + 1
         );
-        assert_eq!(read_request(image(IMAGE_LIMIT + 1).as_bytes()), None);
+        assert_eq!(read_request(image(FILE_LIMIT + 1).as_bytes()), None);
     }
 
     #[test]
     fn a_press_needs_a_body_and_a_known_route() {
         assert_eq!(act("/api/press", b"nope", "localhost", "").status, 400);
         assert_eq!(act("/api/nope", b"{}", "localhost", "").status, 404);
-        assert_eq!(
-            act("/api/image", b"not an image", "localhost", "").status,
-            400
-        );
         assert_eq!(
             act("/api/agent", br#"{"p":"no-such","s":"x"}"#, "localhost", "").status,
             404
@@ -1511,6 +1606,17 @@ mod tests {
             act("/api/agent", br#"{"p":"no-such","s":""}"#, "localhost", "").status,
             404
         );
+    }
+
+    #[test]
+    fn a_model_menus_search_is_letters_only() {
+        let typed = |body: &[u8]| act("/api/agent", body, "localhost", "").status;
+        assert_eq!(typed(br#"{"p":"no-such","s":"","pane":"w1:p1","type":"son\r"}"#), 400);
+        assert_eq!(typed(br#"{"p":"no-such","s":"","pane":"w1:p1","type":"\u001b[A"}"#), 400);
+        assert_eq!(typed(br#"{"p":"no-such","s":"","pane":"w1:p1","erase":1000}"#), 400);
+        // Fine words, for an agent that isn't there.
+        assert_eq!(typed(br#"{"p":"no-such","s":"","pane":"w1:p1","type":"son"}"#), 404);
+        assert_eq!(typed(br#"{"p":"no-such","s":"","pane":"w1:p1","pick":"GPT-6"}"#), 404);
     }
 
     #[test]

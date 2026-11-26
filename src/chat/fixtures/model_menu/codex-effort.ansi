@@ -1,0 +1,40 @@
+[2m╭───────────────────────────────────────────────────────────────╮[0m
+[2m│ [0;1m[38;2;99;168;248m✨ Update available![0m [1m0.171.0 -> 0.172.0[0;2m                       │[0m
+[2m│ [0mSee [4m[38;2;99;168;248m]8;;https://github.com/openai/codex\https://github.com/openai/codex[0m]8;;\ for installation options.[2m │[0m
+[2m│                                                               │[0m
+[2m│ [0mSee full release notes:[2m                                       │[0m
+[2m│ [0;4m[38;2;99;168;248m]8;;https://github.com/openai/codex/releases/latest\https://github.com/openai/codex/releases/latest[0;2m]8;;\               │[0m
+[2m╰───────────────────────────────────────────────────────────────╯[0m
+
+
+  [38;2;99;168;248m>_ [1m[39mOpenAI Codex[0;2m (v0.171.0)[0m
+     [2m~/Personal/gerdr[0m
+
+[2m• [0mModel changed to gpt-6.2-astra ultra for this conversation
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  [1mSelect Reasoning Level for GPT-6.2-Astra[0m
+
+
+  1. Low (default)              [2mFast responses with lighter reasoning[0m
+  2. Medium                     [2mBalances speed and reasoning depth for everyday tasks[0m
+  3. High                       [2mGreater reasoning depth for complex problems[0m
+  4. Extra high                 [2mExtra high reasoning depth for complex problems[0m
+[1;7m› 5. More reasoning… (current)  [0;7mMax and Ultra consume usage limits faster[1m
+[0m
+  [1menter[0;2m select · [0;1mesc[0;2m back

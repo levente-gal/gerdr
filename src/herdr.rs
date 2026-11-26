@@ -52,6 +52,17 @@ const LINE_TRIES: u32 = 6;
 /// How many lines at the screen's end are the agent's input box and what is
 /// around it.
 const LINE_BOX: usize = 14;
+/// How long an agent gets to close its plan menu once asked.
+const PLAN_MENU_WAIT: Duration = Duration::from_millis(1500);
+/// The menus agents wait on under a plan they suggest, where Enter starts
+/// building it: the menu's question, its choice to keep planning, and the
+/// key that takes that choice (herdr's name). Probed: Cursor 2026.11.22's
+/// `p` opens a box for how to revise the plan; Codex 0.171's Esc goes back
+/// to its input box, still in Plan mode.
+const PLAN_MENUS: [(&str, &str, &str); 2] = [
+    ("Ready to build?", "No, propose changes", "p"),
+    ("Implement this plan?", "No, stay in Plan mode", "esc"),
+];
 /// herdr's caller context, inherited when gerdr itself runs inside herdr; it
 /// must not leak into gerdr's children.
 const INHERITED: [&str; 7] = [
@@ -649,10 +660,12 @@ pub enum LineCheck {
 /// Cursor leaves one whose Enter it read along with it while busy: long ones
 /// as `[Pasted text #1 +1 lines]` behind its `→`. One the agent just answered
 /// may match too, which costs an Enter on an empty box. A side question's
-/// panel (`/btw`) shows the line too, taken: Enter would close it.
+/// panel (`/btw`) shows the line too, taken: Enter would close it. So does
+/// the history above an agent's model menu (`/model`): Enter would pick the
+/// model under its arrow.
 fn line_left_in_box(screen: &str, line: &str) -> bool {
     let rows: Vec<&str> = screen.lines().collect();
-    if crate::chat::btw::panel(&rows).is_some() {
+    if crate::chat::btw::panel(&rows).is_some() || crate::chat::model_menu::shows(screen) {
         return false;
     }
     let tail: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -666,6 +679,20 @@ fn line_left_in_box(screen: &str, line: &str) -> bool {
     let bare = |text: &str| -> String { text.chars().filter(|c| !c.is_whitespace()).collect() };
     let head: String = bare(line).chars().take(30).collect();
     !head.is_empty() && bare(&tail.join("")).contains(&head)
+}
+
+/// The key that leaves the plan menu `screen` ends on (`PLAN_MENUS`), if it
+/// waits on one: Enter there builds the plan as is, and Cursor's letters
+/// pick too (`b` builds). Cursor draws the same menu under the plans of past
+/// turns, but with the agent's later work below, not just its input box.
+fn plan_menu_key(screen: &str) -> Option<&'static str> {
+    let rows: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = &rows[rows.len().saturating_sub(LINE_BOX)..];
+    PLAN_MENUS.iter().find_map(|&(asks, stay, key)| {
+        let at = tail.iter().rposition(|l| l.contains(stay))?;
+        let mut above = tail[..at].iter().rev().take(4);
+        above.any(|l| l.contains(asks)).then_some(key)
+    })
 }
 
 impl Herdr {
@@ -1116,11 +1143,13 @@ impl Herdr {
     }
 
     /// Type `text` into the agent CLI running in pane `pane_id`, then press
-    /// Enter apart from it. Cursor (2026.11.05, probed) keeps text and Enter
+    /// Enter apart from it; on a plan menu, after leaving it to keep planning
+    /// (`leave_plan_menu`). Cursor (2026.11.05, probed) keeps text and Enter
     /// that come together in its input box and runs nothing, and it reads
     /// them together however far apart they are sent while it is busy: see
     /// `check_agent_lines`.
     pub fn send_agent_line(&mut self, pane_id: &str, text: &str) -> Result<(), String> {
+        self.leave_plan_menu(pane_id)?;
         self.call(
             "pane.send_input",
             json!({"pane_id": pane_id, "text": text, "keys": []}),
@@ -1136,6 +1165,30 @@ impl Herdr {
             },
         );
         Ok(())
+    }
+
+    /// Leave the plan menu pane `pane_id` shows, if any, by its choice to
+    /// keep planning (`PLAN_MENUS`): a line typed then goes to the agent as
+    /// how to change the plan, or a question on it, where on the menu its
+    /// Enter would build the plan as is. Gives up before anything is typed
+    /// into a menu that stays.
+    fn leave_plan_menu(&mut self, pane_id: &str) -> Result<(), String> {
+        // Unread, the line goes as before: sending it says what is wrong.
+        let screen = self.pane_read(pane_id, "visible", LINE_BOX * 4);
+        let Some(key) = screen.ok().as_deref().and_then(plan_menu_key) else {
+            return Ok(());
+        };
+        // As a key: Cursor's menu doesn't take a `p` typed as text (probed).
+        self.send_keys(pane_id, &[key])?;
+        let until = Instant::now() + PLAN_MENU_WAIT;
+        while Instant::now() < until {
+            std::thread::sleep(ENTER_AFTER);
+            let screen = self.pane_read(pane_id, "visible", LINE_BOX * 4)?;
+            if plan_menu_key(&screen).is_none() {
+                return Ok(());
+            }
+        }
+        Err("the agent's plan menu didn't close".into())
     }
 
     /// Whether a line typed to the agent in pane `pane_id` isn't seen taken
@@ -1221,6 +1274,14 @@ impl Herdr {
             tracing::warn!("clearing the input line of pane {pane_id}: {err}");
         }
         self.send_line(pane_id, line)
+    }
+
+    /// Type `text` into pane `pane_id`, nothing pressed after it: letters
+    /// for an agent's menu's search. As typed: Antigravity's search (1.5.17,
+    /// probed) takes no text `pane.send_input` sends.
+    pub fn send_text(&mut self, pane_id: &str, text: &str) -> Result<(), String> {
+        self.call("pane.send_text", json!({"pane_id": pane_id, "text": text}))
+            .map(drop)
     }
 
     /// Press `keys` in pane `pane_id`, as typed on its terminal: `ctrl+c`
@@ -1753,37 +1814,93 @@ mod tests {
 
     #[test]
     fn an_agents_line_gets_its_enter_apart() {
-        use std::os::unix::net::UnixListener;
         let socket = std::env::temp_dir().join(format!("gerdr-enter-{}", std::process::id()));
-        let _ = std::fs::remove_file(&socket);
-        let listener = UnixListener::bind(&socket).unwrap();
-        let server = std::thread::spawn(move || {
-            let mut asked = Vec::new();
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let mut line = String::new();
-                BufReader::new(&stream).read_line(&mut line).unwrap();
-                let request: Value = serde_json::from_str(&line).unwrap();
-                stream.write_all(b"{\"result\":{}}\n").unwrap();
-                asked.push((request, Instant::now()));
-            }
-            asked
-        });
+        let server = herdr_answering(&socket, vec![read_reply(" → \n"), json!({}), json!({})]);
 
         let sent = Herdr::on_socket(socket.clone()).send_agent_line("p1", "/summarize");
         let _ = std::fs::remove_file(&socket);
         sent.unwrap();
 
         let asked = server.join().unwrap();
-        let (typed, typed_at) = &asked[0];
+        assert_eq!(asked[0].0["method"], "pane.read");
+        let (typed, typed_at) = &asked[1];
         assert_eq!(typed["method"], "pane.send_input");
         assert_eq!(typed["params"]["text"], "/summarize");
         assert_eq!(typed["params"]["keys"], json!([]));
-        let (enter, enter_at) = &asked[1];
+        let (enter, enter_at) = &asked[2];
         assert_eq!(enter["method"], "pane.send_keys");
         assert_eq!(enter["params"]["pane_id"], "p1");
         assert_eq!(enter["params"]["keys"], json!(["Enter"]));
         assert!(*enter_at - *typed_at >= ENTER_AFTER);
+    }
+
+    #[test]
+    fn a_line_on_a_plan_menu_goes_after_leaving_it() {
+        let socket = std::env::temp_dir().join(format!("gerdr-revise-{}", std::process::id()));
+        let menu = "│ Ready to build? │\n│ → 1. Yes, build locally (b) │\n\
+            │   2. No, propose changes (p or Esc) │\n └───┘\n → \n";
+        let revising = " → Describe how to revise the plan (Enter to submit, Esc to cancel)\n";
+        // The menu is still up at the first look after `p`.
+        let (menu, revising) = (read_reply(menu), read_reply(revising));
+        let replies = vec![
+            menu.clone(),
+            json!({}),
+            menu,
+            revising,
+            json!({}),
+            json!({}),
+        ];
+        let server = herdr_answering(&socket, replies);
+
+        let sent = Herdr::on_socket(socket.clone()).send_agent_line("p1", "use sqlite");
+        let _ = std::fs::remove_file(&socket);
+        sent.unwrap();
+
+        let asked: Vec<Value> = server.join().unwrap().into_iter().map(|(r, _)| r).collect();
+        let said = |r: &Value| {
+            let p = &r["params"];
+            format!("{} {}", r["method"], p.get("text").unwrap_or(&p["keys"]))
+        };
+        let said: Vec<String> = asked.iter().map(said).collect();
+        assert_eq!(
+            said,
+            [
+                "\"pane.read\" null",
+                "\"pane.send_keys\" [\"p\"]",
+                "\"pane.read\" null",
+                "\"pane.read\" null",
+                "\"pane.send_input\" \"use sqlite\"",
+                "\"pane.send_keys\" [\"Enter\"]",
+            ]
+        );
+    }
+
+    /// A herdr stand-in on `socket` giving `replies` in turn, one request
+    /// per connection; the requests asked, and when.
+    fn herdr_answering(
+        socket: &Path,
+        replies: Vec<Value>,
+    ) -> std::thread::JoinHandle<Vec<(Value, Instant)>> {
+        use std::os::unix::net::UnixListener;
+        let _ = std::fs::remove_file(socket);
+        let listener = UnixListener::bind(socket).unwrap();
+        std::thread::spawn(move || {
+            let mut asked = Vec::new();
+            for reply in replies {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                BufReader::new(&stream).read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let answer = json!({"id": request["id"], "result": reply});
+                stream.write_all(format!("{answer}\n").as_bytes()).unwrap();
+                asked.push((request, Instant::now()));
+            }
+            asked
+        })
+    }
+
+    fn read_reply(text: &str) -> Value {
+        json!({"read": {"text": text}})
     }
 
     /// Needs a scratch herdr server and `GERDR_PROBE_PANE` running a CLI
@@ -1826,6 +1943,27 @@ mod tests {
         // Antigravity's side panel says the question: it took it.
         let side = " ┃ /btw list the numbers\n ┃\n ┃ ⣾  Working... (Enter/Esc to cancel)\n────\n>\n";
         assert!(!line_left_in_box(side, "/btw list the numbers"));
+        // Over a model menu the line opened, as Antigravity keeps it in its
+        // history: an Enter would pick a model.
+        let menu = "> /model\n  \u{23bf}  Exited /model command\n> /model\nSwitch Model\n  Search: son\n> Claude Sonnet 4.6 (Thinking)\nKeyboard: \u{2191}/\u{2193} Navigate  enter Select  esc Clear search\n";
+        assert!(!line_left_in_box(menu, "/model"));
+        assert!(line_left_in_box("> /model\n", "/model"));
+    }
+
+    #[test]
+    fn a_plan_menu_is_read_only_at_the_end() {
+        let menu = "│ Plan body │\n│ Ready to build? │\n│\n│ → 1. Yes, build locally (b) │\n\
+            │   2. No, propose changes (p or Esc) │\n└──────┘\n ▄▄▄▄\n → Plan, search, build anything\n \
+            ▀▀▀▀\n  Plan (shift+tab to cycle)\n  Auto\n  /tmp/x · main\n";
+        assert_eq!(plan_menu_key(menu), Some("p"));
+        let later: String = (0..20).map(|n| format!("working {n}\n")).collect();
+        assert_eq!(plan_menu_key(&format!("{menu}{later}")), None);
+        assert_eq!(plan_menu_key(" → Plan, search, build anything\n"), None);
+        // Codex 0.171, as it drew it.
+        let codex = "  Implement this plan?\n\n\n› 1. Yes, implement this plan          Switch to Default and start coding\n\
+            \x20 2. Yes, clear context and implement  Start a fresh thread\n\
+            \x20 3. No, stay in Plan mode             Continue planning with the model\n\n  enter select · esc back\n";
+        assert_eq!(plan_menu_key(codex), Some("esc"));
     }
 
     #[test]

@@ -1046,6 +1046,7 @@ mod tests {
             bold,
             dim,
             ground: false,
+            bg: None,
         };
         let dim = Style {
             dim: true,

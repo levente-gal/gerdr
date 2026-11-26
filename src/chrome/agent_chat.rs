@@ -91,6 +91,9 @@ pub struct ChatView {
     pub since: Option<u64>,
     /// The `/` menu over the reply box, while it shows.
     pub slash: Option<SlashView>,
+    /// What the chips of the files attached to the reply say, over the
+    /// reply box.
+    pub attached: Vec<String>,
     /// The modes its agent offers (`chat::mode::offered`), under the reply
     /// box; none for an agent without.
     pub modes: Vec<String>,
@@ -106,6 +109,10 @@ pub struct ChatView {
     /// The user's picks on the card of the ask's questions, while it asks
     /// some.
     pub card: Option<CardView>,
+    /// The agent's own model menu, read off its screen while it shows
+    /// (`chat::model_menu`): in the waiting panel's place, its rows picked
+    /// with the arrows.
+    pub picker: Option<Arc<Menu>>,
 }
 
 /// The `/` menu's rows in sight, as painted.
@@ -125,6 +132,7 @@ impl SlashView {
         let rows = (shown.iter().map(|i| &slash.all[*i]))
             .map(|c| {
                 let name = match c.hint.is_empty() {
+                    _ if slash.files.is_some() => c.name.clone(),
                     true => format!("/{}", c.name),
                     false => format!("/{} {}", c.name, c.hint),
                 };
@@ -167,11 +175,13 @@ impl PartialEq for ChatView {
             && self.ask == other.ask
             && self.since == other.since
             && self.slash == other.slash
+            && self.attached == other.attached
             && self.modes == other.modes
             && self.mode == other.mode
             && self.model == other.model
             && self.context == other.context
             && self.card == other.card
+            && self.picker == other.picker
     }
 }
 
@@ -187,6 +197,9 @@ pub enum WaitKey {
     Enter,
     /// A menu choice, 1 to 9.
     Digit(u8),
+    /// A row of the agent's model menu, from 1: its arrow moved onto it,
+    /// then Enter.
+    Row(u8),
 }
 
 /// What is under the pointer in a chat.
@@ -207,6 +220,10 @@ pub enum ChatHit {
     /// The reply box.
     Composer,
     Send,
+    /// The Attach button, left of Send: opens the file picker.
+    Attach,
+    /// A file attached to the reply, by its chip's place: takes it off.
+    Attached(usize),
     /// "Show screen", where the chat couldn't be found or read, and on the
     /// ask's card.
     ShowScreen,
@@ -278,6 +295,12 @@ impl ChatLayout {
         }
         if on(self.send) {
             return Some(ChatHit::Send);
+        }
+        if on(parts.attach) {
+            return Some(ChatHit::Attach);
+        }
+        if let Some(i) = parts.chips.iter().position(|r| on(*r)) {
+            return Some(ChatHit::Attached(i));
         }
         if on(self.composer) {
             return Some(ChatHit::Composer);
@@ -691,7 +714,7 @@ fn key_label(key: WaitKey) -> String {
         WaitKey::Left => "←".into(),
         WaitKey::Right => "→".into(),
         WaitKey::Enter => "Enter".into(),
-        WaitKey::Digit(d) => d.to_string(),
+        WaitKey::Digit(d) | WaitKey::Row(d) => d.to_string(),
     }
 }
 
@@ -716,6 +739,10 @@ struct Parts {
     answers: Vec<(ChatHit, Rect)>,
     composer: Rect,
     send: Rect,
+    /// The Attach button, between the reply box and Send.
+    attach: Rect,
+    /// The chips of the files attached, in rows over the reply box.
+    chips: Vec<Rect>,
     hints: Rect,
     /// The `/` menu's rows, hanging over the reply box, and how many of
     /// its first rows don't fit above them (the picked one always shows).
@@ -727,6 +754,14 @@ struct Parts {
     modes: Vec<(usize, Rect)>,
     /// The model's button, at the right end of the modes' row.
     model: Option<Rect>,
+}
+
+/// What ends a file's chip: a press on it takes the file off the reply.
+const CHIP_X: &str = "\u{00d7}";
+
+/// How wide the chip of a file attached is, saying `label` then `CHIP_X`.
+fn chip_width(label: &str) -> i32 {
+    key_width(&format!("{label}  {CHIP_X}"))
 }
 
 /// How wide a key button labelled `label` is.
@@ -758,7 +793,8 @@ fn parts(view: &ChatView) -> Parts {
         (r.size.w, hints_height()).into(),
     );
     let send_w = button_width("Send");
-    let field_w = (w - send_w - FIELD_GAP).max(0);
+    let attach_w = button_width("Attach");
+    let field_w = (w - send_w - attach_w - 2 * FIELD_GAP).max(0);
     let field_h = wrap_field_height(&view.draft, field_w);
     // As many of the modes as fit across, on a track as high as a button,
     // left of the model's button.
@@ -790,16 +826,37 @@ fn parts(view: &ChatView) -> Parts {
         (x, hints.loc.y - PART_GAP - modes_h - field_h).into(),
         (field_w, field_h).into(),
     );
-    let send = Rectangle::new(
-        (
-            x + field_w + FIELD_GAP,
-            composer.loc.y + field_h - quit_button(),
-        )
-            .into(),
-        (send_w, quit_button()).into(),
+    let attach = rect(
+        x + field_w + FIELD_GAP,
+        composer.loc.y + field_h - quit_button(),
+        attach_w,
+        quit_button(),
     );
+    let send = rect(
+        attach.loc.x + attach_w + FIELD_GAP,
+        attach.loc.y,
+        send_w,
+        quit_button(),
+    );
+    // The chips, left to right in rows over the reply box, a long name cut
+    // short; what is above stands on the first row.
+    let mut chips = Vec::new();
+    let (mut cx, mut row) = (x, 0);
+    for label in &view.attached {
+        let cw = chip_width(label).min(w);
+        if cx > x && cx + cw > x + w {
+            (cx, row) = (x, row + 1);
+        }
+        chips.push((cx, row, cw));
+        cx += cw + PART_GAP / 2;
+    }
+    let rows_h = |n: i32| n * (row_button() + PART_GAP / 2);
+    let box_top = composer.loc.y - chips.last().map_or(0, |(_, row, _)| rows_h(row + 1));
+    let chips = (chips.into_iter())
+        .map(|(cx, row, cw)| rect(cx, box_top + rows_h(row), cw, row_button()))
+        .collect();
     let list_top = head.loc.y + head.size.h;
-    let mut end = composer.loc.y - PART_GAP;
+    let mut end = box_top - PART_GAP;
     let (mut waiting, mut menu, mut rows, mut keys) = (None, None, Rect::default(), Vec::new());
     let (mut card, mut answers) = (None, Vec::new());
     let frame = 3 * PART_GAP + row_button();
@@ -835,9 +892,14 @@ fn parts(view: &ChatView) -> Parts {
         card = Some((at, laid));
         waiting = Some(panel);
         end = panel.loc.y - PART_GAP;
-    } else if let Some(screen) = &view.waiting {
+    } else if view.waiting.is_some() || view.picker.is_some() {
         let room = (end - list_top - 3 * card_row() - frame - PART_GAP).max(0);
-        let laid = menu_laid(screen, inner, room);
+        let laid = match (&view.picker, &view.waiting) {
+            (Some(m), _) => picker_laid(m, inner, room),
+            (None, Some(screen)) => menu_laid(screen, inner, room),
+            (None, None) => None,
+        };
+        let screen = view.waiting.as_deref().map_or(&[][..], Vec::as_slice);
         let (body, shown_keys) = match &laid {
             Some((laid, tabs)) => {
                 let keys = MENU_KEYS.iter().copied();
@@ -885,7 +947,7 @@ fn parts(view: &ChatView) -> Parts {
     );
     // As many rows as fit between the head and the reply box.
     let n = view.slash.as_ref().map_or(0, |s| s.rows.len()) as i32;
-    let n = n.min((composer.loc.y - PART_GAP / 2 - list_top - 2 * SLASH_BORDER) / suggestion_row());
+    let n = n.min((box_top - PART_GAP / 2 - list_top - 2 * SLASH_BORDER) / suggestion_row());
     let n = n.max(0);
     let slash_skip = view
         .slash
@@ -893,7 +955,7 @@ fn parts(view: &ChatView) -> Parts {
         .map_or(0, |s| (s.picked + 1).saturating_sub(n as usize));
     let slash = (0..n)
         .map(|i| {
-            let y = composer.loc.y - PART_GAP / 2 - SLASH_BORDER - (n - i) * suggestion_row();
+            let y = box_top - PART_GAP / 2 - SLASH_BORDER - (n - i) * suggestion_row();
             rect(x, y, w, suggestion_row())
         })
         .collect();
@@ -910,6 +972,8 @@ fn parts(view: &ChatView) -> Parts {
         answers,
         composer,
         send,
+        attach,
+        chips,
         hints,
         slash,
         slash_skip,
@@ -949,9 +1013,44 @@ fn menu_laid(screen: &Arc<ChatRows>, w: i32, room: i32) -> Option<(Rc<Laid>, boo
     laid
 }
 
+/// The agent's model menu `m` laid out for `w` (as `menu_laid`), in
+/// `room`: what its rows say more goes first, then the rows farthest from
+/// its arrow's, so that one always shows.
+fn picker_laid(m: &Arc<Menu>, w: i32, room: i32) -> Option<(Rc<Laid>, bool)> {
+    type Kept = (Arc<Menu>, i32, i32, Option<(Rc<Laid>, bool)>);
+    thread_local! {
+        static PICKER: RefCell<(u32, Option<Kept>)> = const { RefCell::new((0, None)) };
+    }
+    let kept = PICKER.with_borrow_mut(|memo| {
+        (super::sized(memo).as_ref())
+            .filter(|(menu, mw, mr, _)| Arc::ptr_eq(menu, m) && *mw == w && *mr == room)
+            .map(|(.., laid)| laid.clone())
+    });
+    if let Some(laid) = kept {
+        return laid;
+    }
+    let fits = |laid: &Laid| laid.h <= room;
+    let mut shown = Menu::clone(m);
+    let mut laid = Some(lay_menu(&shown, w, true)).filter(fits);
+    while laid.is_none() {
+        laid = Some(lay_menu(&shown, w, false)).filter(fits);
+        if laid.is_some() || shown.choices.len() <= 1 {
+            break;
+        }
+        let at = shown.choices.iter().position(|c| c.picked).unwrap_or(0);
+        match at * 2 < shown.choices.len() {
+            true => shown.choices.pop(),
+            false => Some(shown.choices.remove(0)),
+        };
+    }
+    let laid = laid.map(|laid| (Rc::new(laid), m.sideways));
+    PICKER.with_borrow_mut(|memo| *super::sized(memo) = Some((m.clone(), w, room, laid.clone())));
+    laid
+}
+
 /// A menu laid out from `(0, 0)` for `w`: its questions' tabs, what it
 /// asks, and its choices, each a press on its key, with what they say
-/// more when `more`.
+/// more when `more`. An agent's model menu's choices have no numbers.
 fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
     let mut l = Laid::default();
     let size = Font::Body.size();
@@ -974,7 +1073,9 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
         y += h + PART_GAP / 2;
     }
     y += PART_GAP / 2;
-    let tw = (w - CHOICE_NUM).max(1);
+    // An agent's model menu has no numbers to make room for.
+    let num_w = if m.arrows { 0 } else { CHOICE_NUM };
+    let tw = (w - num_w).max(1);
     for choice in &m.choices {
         let top = y;
         // A check box's choice: the box, then its label.
@@ -1001,11 +1102,12 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
             mark: Mark::Text,
             centred: false,
         };
-        let label_x = ROW_INSET + CHOICE_NUM + box_w;
-        let mut bits = vec![
-            (rect(ROW_INSET, y, CHOICE_NUM, card_row()), num),
-            (rect(label_x, y, tw - ROW_INSET, card_row()), label),
-        ];
+        let label_x = ROW_INSET + num_w + box_w;
+        let mut bits = Vec::new();
+        if !m.arrows {
+            bits.push((rect(ROW_INSET, y, CHOICE_NUM, card_row()), num));
+        }
+        bits.push((rect(label_x, y, tw - ROW_INSET, card_row()), label));
         if let Some(on) = choice.checked {
             let at = rect(ROW_INSET + CHOICE_NUM, y, CHECKBOX_SIZE, card_row());
             bits.push((at, Bit::Checkbox(on)));
@@ -1028,7 +1130,9 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
         for (r, bit) in bits {
             l.put(r, bit);
         }
-        if (1..=9).contains(&choice.n) {
+        if m.arrows {
+            l.spots.push((ground, Spot::Key(WaitKey::Row(choice.n))));
+        } else if (1..=9).contains(&choice.n) {
             l.spots.push((ground, Spot::Key(WaitKey::Digit(choice.n))));
         }
         y += STEP_GAP / 2;
@@ -2621,10 +2725,26 @@ impl Painter {
             .unwrap_or_else(|| format!("Reply to {}…", agent_name(&view.label)));
         let composer = here(parts.composer);
         self.wrap_field(&mut c, &view.draft, &hint, composer, focused, scale, p);
-        let style = match view.paused || view.draft.text.trim().is_empty() {
+        let empty = view.draft.text.trim().is_empty() && view.attached.is_empty();
+        let style = match view.paused || empty {
             true => ButtonStyle::Off,
             false => ButtonStyle::Primary,
         };
+        let lit = view.hover == Some(ChatHit::Attach);
+        let attach = here(parts.attach);
+        self.button(
+            &mut c,
+            "Attach",
+            attach,
+            (lit, false),
+            ButtonStyle::Plain,
+            scale,
+            p,
+        );
+        for (i, (label, rect)) in view.attached.iter().zip(&parts.chips).enumerate() {
+            let lit = view.hover == Some(ChatHit::Attached(i));
+            self.chat_chip(&mut c, label, here(*rect), lit, scale, p);
+        }
         let lit = view.hover == Some(ChatHit::Send);
         self.button(
             &mut c,
@@ -2671,6 +2791,29 @@ impl Painter {
         let spots = hint_spots(&hints, here(parts.hints));
         self.hints(&mut c, &hints, &spots, None, scale, p);
         c.into_buffer(true)
+    }
+
+    /// A file attached to the reply: a plain button's frame, its `label`
+    /// cut short to leave room for the `CHIP_X` at its right end.
+    fn chat_chip(
+        &self,
+        c: &mut Canvas,
+        label: &str,
+        rect: Rect,
+        lit: bool,
+        scale: f64,
+        p: &Palette,
+    ) {
+        self.button(c, "", rect, (lit, false), ButtonStyle::Plain, scale, p);
+        let (start, end) = phys(rect, scale);
+        let pad = (f64::from(KEY_PAD) * scale) as f32;
+        let size = font_size();
+        let x_w = (width_in(CHIP_X, Face::Ui, size) as f64 * scale) as f32;
+        let band = band(rect, scale);
+        let x_at = end - pad - x_w;
+        let label_end = x_at - pad / 2.0;
+        self.text(c, label, size, start + pad, label_end, band, scale, p.text);
+        self.text(c, CHIP_X, size, x_at, end, band, scale, p.placeholder);
     }
 
     /// The `/` menu in a box over the reply box, as the folder suggestions
@@ -2939,11 +3082,13 @@ pub(super) mod tests {
             ask: None,
             since: Some(1_000),
             slash: None,
+            attached: Vec::new(),
             modes: Vec::new(),
             mode: None,
             model: None,
             context: None,
             card: None,
+            picker: None,
         }
     }
 
@@ -3138,6 +3283,58 @@ pub(super) mod tests {
         );
     }
 
+    /// Antigravity's model menu as `chat::model_menu` reads it off its
+    /// screen: its effort slider shows, the arrow on the second row.
+    pub(in crate::chrome) fn model_menu() -> Arc<Menu> {
+        let ansi = include_str!("../chat/fixtures/model_menu/agy.ansi");
+        let rows = crate::scrollback::parse_ansi(ansi);
+        let m = crate::chat::model_menu::read(crate::ai_work::AgentKind::Antigravity, &rows);
+        Arc::new(m.expect("its model menu"))
+    }
+
+    #[test]
+    fn an_agents_model_menu_takes_the_waiting_panels_place_its_rows_to_click() {
+        let mut v = view();
+        v.picker = Some(model_menu());
+        let p = parts(&v);
+        let panel = p.waiting.expect("the menu's panel");
+        let (at, laid) = p.menu.clone().expect("its rows");
+        assert!(inside(panel, at));
+        // Every row is a click, by its place; no numbers drawn.
+        let rows: Vec<WaitKey> = (laid.spots.iter())
+            .filter_map(|(_, spot)| match spot {
+                Spot::Key(key) => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows, (1..=8).map(WaitKey::Row).collect::<Vec<_>>());
+        assert!(!laid.bits.iter().any(|(_, bit)| matches!(bit, Bit::Label { text, .. } if text == "1.")));
+        let layout = chat_layout(&v);
+        let second = Rectangle::new(laid.spots[1].0.loc + at.loc, laid.spots[1].0.size);
+        assert_eq!(layout.hit(&v, middle(second)), Some(ChatHit::Key(WaitKey::Row(2))));
+        // Its effort moves with Left and Right.
+        let keys: Vec<WaitKey> = p.keys.iter().map(|(key, _)| *key).collect();
+        assert!(keys.contains(&WaitKey::Left) && keys.contains(&WaitKey::Enter));
+        let mut plain = Menu::clone(v.picker.as_deref().unwrap());
+        plain.sideways = false;
+        v.picker = Some(Arc::new(plain));
+        let keys: Vec<WaitKey> = parts(&v).keys.iter().map(|(key, _)| *key).collect();
+        assert!(!keys.contains(&WaitKey::Left));
+        // A short pane shows the rows round the arrow's.
+        v.rect.size.h = 420;
+        let (_, laid) = parts(&v).menu.expect("some rows");
+        let shown: Vec<WaitKey> = (laid.spots.iter())
+            .filter_map(|(_, spot)| match spot {
+                Spot::Key(key) => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert!(shown.len() < 8 && shown.contains(&WaitKey::Row(2)), "{shown:?}");
+        // It goes before what the agent waits on.
+        v.waiting = Some(screen());
+        assert_eq!(parts(&v).menu.map(|(_, l)| l.spots.len()), Some(shown.len()));
+    }
+
     #[test]
     fn a_menu_on_the_screen_shows_as_choices_to_press() {
         let mut v = view();
@@ -3207,6 +3404,33 @@ pub(super) mod tests {
                 "Type something."
             ]
         );
+    }
+
+    #[test]
+    fn attached_files_sit_in_rows_over_the_reply_box_and_take_presses() {
+        let long = "a-name-so-long-it-takes-more-than-the-whole-width-of-the-chat.pdf".repeat(3);
+        let v = ChatView {
+            attached: vec!["src/a.rs".into(), long, "b.txt".into()],
+            ..view()
+        };
+        let p = parts(&v);
+        assert_eq!(p.chips.len(), 3);
+        // The long one is cut to the width, on a row of its own.
+        let (a, long, b) = (p.chips[0], p.chips[1], p.chips[2]);
+        assert!(long.size.w <= p.column.1);
+        assert!(a.loc.y < long.loc.y && long.loc.y < b.loc.y);
+        assert!(b.loc.y + b.size.h <= p.composer.loc.y);
+        assert!(p.list.loc.y + p.list.size.h < a.loc.y);
+        // Attach sits between the reply box and Send.
+        assert!(p.composer.loc.x + p.composer.size.w < p.attach.loc.x);
+        assert!(p.attach.loc.x + p.attach.size.w < p.send.loc.x);
+        let layout = chat_layout(&v);
+        assert_eq!(layout.hit(&v, middle(p.attach)), Some(ChatHit::Attach));
+        assert_eq!(layout.hit(&v, middle(b)), Some(ChatHit::Attached(2)));
+        // None attached: no row, the list reaches down to the reply box.
+        let none = parts(&view());
+        assert!(none.chips.is_empty());
+        assert!(none.list.size.h > p.list.size.h);
     }
 
     #[test]
