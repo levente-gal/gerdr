@@ -7907,7 +7907,7 @@ impl Painter {
             Piece::Doc(piece) => self.doc_piece(c, rect, piece, scale, p),
             Piece::OutputLine(text) => {
                 let ground = mix(p.background, p.text, OUTPUT_GROUND);
-                self.code_line(c, rect, text, ground, scale, p);
+                self.code_line(c, rect, (text, &[]), ground, scale, p);
             }
             Piece::YourComment => {
                 let (x, y, w, h) = rect_px(rect, scale);

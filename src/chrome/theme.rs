@@ -533,6 +533,7 @@ mod tests {
                 ("added lit", lit(added)),
                 ("removed", removed),
                 ("removed lit", lit(removed)),
+                ("doc code block", super::super::doc_layout::code_ground(p)),
             ];
             let kinds = [
                 Kind::Keyword,

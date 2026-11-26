@@ -9,6 +9,10 @@
 
 use std::ops::Range;
 
+use crate::{
+    highlight::{self, GRAMMAR_LINES},
+    syntax::Spans,
+};
 use comrak::{
     Arena, Options,
     nodes::{AstNode, ListType, NodeValue},
@@ -140,14 +144,35 @@ pub enum DocBlock {
         mark: ItemMark,
         text: Styled,
     },
-    /// A code block's lines.
-    Code(Vec<String>),
+    /// A code block's lines, and their colours for the language its fence
+    /// names (one `Spans` a line; none when it names none gerdr knows).
+    Code {
+        lines: Vec<String>,
+        syntax: Vec<Spans>,
+    },
     Quote(Styled),
     /// A table's rows of cells, the first its header.
     Table(Vec<Vec<Styled>>),
     Rule,
     /// What gerdr says in the file's place: it isn't the file's own text.
     Note(String),
+}
+
+/// A code block of `lines` in language `lang` (a fence's `rust`, `py`, `sh`):
+/// coloured by `highlight`, plain for a language it doesn't know or none.
+pub fn code_block(lang: &str, lines: Vec<String>) -> DocBlock {
+    let syntax = match lang {
+        "" => None,
+        lang => highlight::lines(
+            lang,
+            lines.iter().map(String::as_str),
+            &mut GRAMMAR_LINES.clone(),
+        ),
+    };
+    DocBlock::Code {
+        lines,
+        syntax: syntax.unwrap_or_default(),
+    }
 }
 
 /// `text`'s blocks, in order.
@@ -232,7 +257,8 @@ fn block<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut Vec<DocBlock>) {
         }
         NodeValue::CodeBlock(code) => {
             let lines = code.literal.lines().map(str::to_owned).collect();
-            out.push(DocBlock::Code(lines));
+            let lang = code.info.split_whitespace().next().unwrap_or("");
+            out.push(code_block(lang, lines));
         }
         NodeValue::BlockQuote => {
             for child in node.children() {
@@ -507,13 +533,30 @@ mod tests {
     #[test]
     fn code_keeps_its_lines_as_they_are() {
         assert_eq!(
-            blocks("```rust\nlet a = 1;\n\n    b();\n```\n"),
-            [DocBlock::Code(vec![
-                "let a = 1;".into(),
-                String::new(),
-                "    b();".into(),
-            ])]
+            blocks("```\nlet a = 1;\n\n    b();\n```\n"),
+            [DocBlock::Code {
+                lines: vec!["let a = 1;".into(), String::new(), "    b();".into()],
+                syntax: Vec::new(),
+            }]
         );
+    }
+
+    /// A fence's language colours its lines; one gerdr doesn't know, or
+    /// none, leaves them plain.
+    #[test]
+    fn a_fences_language_colours_its_code() {
+        let syntax = |md: &str| match blocks(md).pop() {
+            Some(DocBlock::Code { syntax, .. }) => syntax,
+            other => panic!("a code block, not {other:?}"),
+        };
+        let rust = syntax("```rust\nfn main() {}\n```\n");
+        assert_eq!(rust.len(), 1);
+        assert!(
+            rust[0].contains(&(0..2, crate::syntax::Kind::Keyword)),
+            "{rust:?}"
+        );
+        assert!(syntax("```\nfn main() {}\n```\n").is_empty());
+        assert!(syntax("```nolang\nfn main() {}\n```\n").is_empty());
     }
 
     #[test]

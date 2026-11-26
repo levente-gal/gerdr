@@ -1166,7 +1166,7 @@ fn blocks_text(blocks: &[DocBlock]) -> String {
             };
             format!("{}{mark}{}", "  ".repeat(usize::from(*depth)), text.text)
         }
-        DocBlock::Code(lines) => format!("```\n{}\n```", lines.join("\n")),
+        DocBlock::Code { lines, .. } => format!("```\n{}\n```", lines.join("\n")),
         DocBlock::Quote(text) => format!("> {}", text.text),
         DocBlock::Table(rows) => {
             let row = |cells: Vec<&str>| format!("| {} |", cells.join(" | "));
