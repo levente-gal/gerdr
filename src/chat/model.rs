@@ -7,28 +7,29 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use crate::{ai_work::AgentKind, stage_models::Offer};
+use crate::{
+    ai_work::AgentKind,
+    integrations::{ModelSwitch, of},
+    stage_models::Offer,
+};
 
 /// Whether a chat with agent `kind` offers to switch its model.
 pub fn picks(kind: AgentKind) -> bool {
-    matches!(kind, AgentKind::Claude | AgentKind::Cursor)
+    matches!(of(kind).model_switch(), ModelSwitch::Typed { .. })
 }
 
 /// The command `kind`'s CLI runs as, as the stage picker names it (for
 /// `Flavor::of` and the read of Cursor's models).
 pub fn base(kind: AgentKind) -> &'static str {
-    match kind {
-        AgentKind::Cursor => "cursor-agent",
+    match of(kind).model_switch() {
+        ModelSwitch::Typed { cli } => cli,
         _ => "claude",
     }
 }
 
 /// What `kind`'s CLI is called, for the picker's rows.
 pub fn name(kind: AgentKind) -> &'static str {
-    match kind {
-        AgentKind::Cursor => "Cursor",
-        _ => "Claude Code",
-    }
+    of(kind).label()
 }
 
 /// What gerdr types to switch an agent to model `id`.
@@ -39,11 +40,7 @@ pub fn line(id: &str) -> String {
 /// What a chat offers for agent `kind`: Claude Code's aliases, `cursor`
 /// (Cursor's models, as last read) for Cursor.
 pub fn offers(kind: AgentKind, cursor: &[Offer]) -> Vec<Offer> {
-    match kind {
-        AgentKind::Claude => crate::stage_models::claude_offers(),
-        AgentKind::Cursor => cursor.to_vec(),
-        _ => Vec::new(),
-    }
+    of(kind).offers(cursor)
 }
 
 /// Claude model id `id` as people call it: `claude-opus-5-5` is "Opus 5.5",

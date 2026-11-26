@@ -25,7 +25,7 @@ pub struct Command {
 // shortcut: built-ins are hard-coded as the CLIs were here (Claude Code
 // 2.1.331, OpenCode 2.3.0, Cursor 2026.11.22, Codex 0.171.0, pi 1.6.0,
 // Antigravity CLI 1.5.15); refresh them when the agents change.
-const CLAUDE: &[(&str, &str)] = &[
+pub(crate) const CLAUDE: &[(&str, &str)] = &[
     ("add-dir", "Add a working folder"),
     ("agents", "Manage agent configurations"),
     ("btw", "Ask a side question"),
@@ -75,7 +75,7 @@ const CLAUDE: &[(&str, &str)] = &[
     ("schedule", "Schedule a cloud agent"),
 ];
 
-const OPENCODE: &[(&str, &str)] = &[
+pub(crate) const OPENCODE: &[(&str, &str)] = &[
     ("agents", "Pick the agent"),
     ("btw", "Ask a side question"),
     ("cd", "Change the folder"),
@@ -108,7 +108,7 @@ const OPENCODE: &[(&str, &str)] = &[
     ("variants", "Pick the thinking effort"),
 ];
 
-const CURSOR: &[(&str, &str)] = &[
+pub(crate) const CURSOR: &[(&str, &str)] = &[
     ("add-dir", "Add a working folder"),
     ("ask", "Ask without changes"),
     ("btw", "Ask a side question"),
@@ -138,7 +138,7 @@ const CURSOR: &[(&str, &str)] = &[
     ("vim", "Toggle vim keys"),
 ];
 
-const CODEX: &[(&str, &str)] = &[
+pub(crate) const CODEX: &[(&str, &str)] = &[
     ("compact", "Compact the conversation"),
     ("diff", "Show the changes"),
     ("exit", "Quit"),
@@ -158,7 +158,7 @@ const CODEX: &[(&str, &str)] = &[
     ("usage", "Show usage"),
 ];
 
-const PI: &[(&str, &str)] = &[
+pub(crate) const PI: &[(&str, &str)] = &[
     ("bug", "Write a bug report"),
     ("changelog", "Show the changelog"),
     ("clone", "Copy the session"),
@@ -187,7 +187,7 @@ const PI: &[(&str, &str)] = &[
     ("trust", "Trust this project"),
 ];
 
-const ANTIGRAVITY: &[(&str, &str)] = &[
+pub(crate) const ANTIGRAVITY: &[(&str, &str)] = &[
     ("add-dir", "Add a working folder"),
     ("agents", "Open the agent manager"),
     ("artifact", "Review the artifacts"),
@@ -237,16 +237,7 @@ const ANTIGRAVITY: &[(&str, &str)] = &[
 
 /// Whether agent `kind` takes side questions: a `/btw` of its own.
 pub fn asks_aside(kind: AgentKind) -> bool {
-    let builtin = match kind {
-        AgentKind::Claude => CLAUDE,
-        AgentKind::OpenCode => OPENCODE,
-        AgentKind::Cursor => CURSOR,
-        AgentKind::Codex => CODEX,
-        AgentKind::Pi => PI,
-        AgentKind::Antigravity => ANTIGRAVITY,
-        AgentKind::T3 | AgentKind::Unknown => &[],
-    };
-    builtin.iter().any(|(name, _)| *name == "btw")
+    crate::integrations::of(kind).caps().side
 }
 
 /// The commands agent `kind` takes in folder `cwd`, by name: the project's
@@ -254,87 +245,9 @@ pub fn asks_aside(kind: AgentKind) -> bool {
 /// are left out.
 pub fn list(kind: AgentKind, cwd: &Path, homes: &Homes, config: &Path) -> Vec<Command> {
     let mut found = Vec::new();
-    let builtin = match kind {
-        AgentKind::Claude => {
-            claude_commands(&cwd.join(".claude/commands"), &mut found);
-            skills(&cwd.join(".claude/skills"), "", &mut found);
-            for home in &homes.claude {
-                claude_commands(&home.join("commands"), &mut found);
-                skills(&home.join("skills"), "", &mut found);
-                synced(&home.join("skills/synced"), &mut found);
-                plugins(home, &mut found);
-            }
-            CLAUDE
-        }
-        AgentKind::OpenCode => {
-            for root in [cwd.join(".opencode"), config.join("opencode")] {
-                for dir in ["command", "commands"] {
-                    tree(&root.join(dir), "", &mut found);
-                }
-                opencode_json(&root.join("opencode.json"), &mut found);
-            }
-            OPENCODE
-        }
-        AgentKind::Cursor => {
-            let home = homes.cursor.parent().unwrap_or(Path::new("/"));
-            for root in [cwd.to_owned(), home.to_owned()] {
-                for dir in [".cursor/commands", ".claude/commands"] {
-                    cursor_commands(&root.join(dir), &mut found);
-                }
-            }
-            for dir in [
-                cwd.join(".cursor/skills"),
-                cwd.join(".claude/skills"),
-                homes.cursor.join("skills"),
-                homes.cursor.join("skills-cursor"),
-            ] {
-                skills(&dir, "", &mut found);
-            }
-            CURSOR
-        }
-        AgentKind::Codex => {
-            for (name, path) in md_files(&homes.codex.join("prompts")) {
-                found.push(read_md(&path, format!("prompts:{name}")));
-            }
-            CODEX
-        }
-        AgentKind::Pi => {
-            // shortcut: commands that extensions add are left out (they are
-            // code); add them if pi ever lists them on disk.
-            let agent = homes.pi.parent().unwrap_or(Path::new("/"));
-            let home = homes.cursor.parent();
-            for dir in [cwd.join(".pi/prompts"), agent.join("prompts")] {
-                pi_prompts(&dir, &mut found);
-            }
-            let mut dirs = vec![cwd.join(".pi/skills"), cwd.join(".agents/skills")];
-            dirs.push(agent.join("skills"));
-            dirs.extend(home.map(|home| home.join(".agents/skills")));
-            for dir in dirs {
-                named_skills(&dir, "skill:", &mut found);
-            }
-            PI
-        }
-        AgentKind::Antigravity => {
-            // shortcut: every plugin's skills show, enabled or not.
-            let cli = &homes.antigravity;
-            let gemini = cli.parent().unwrap_or(Path::new("/"));
-            let mut dirs = vec![cwd.join(".agents/skills"), cwd.join(".agent/skills")];
-            dirs.push(gemini.join("config/skills"));
-            dirs.push(cli.join("skills"));
-            dirs.push(gemini.join("skills"));
-            for plugins in [cwd.join(".agents/plugins"), gemini.join("config/plugins")] {
-                dirs.extend(sub_dirs(&plugins).into_iter().map(|(_, p)| p.join("skills")));
-            }
-            dirs.push(cli.join("builtin/skills"));
-            let builtin = sub_dirs(&cli.join("builtin/plugins"));
-            dirs.extend(builtin.into_iter().map(|(_, p)| p.join("skills")));
-            for dir in dirs {
-                named_skills(&dir, "", &mut found);
-            }
-            ANTIGRAVITY
-        }
-        AgentKind::T3 | AgentKind::Unknown => return Vec::new(),
-    };
+    let agent = crate::integrations::of(kind);
+    agent.disk_commands(cwd, homes, config, &mut found);
+    let builtin = agent.builtins();
     found.extend(builtin.iter().map(|(name, about)| Command {
         name: (*name).to_owned(),
         about: (*about).to_owned(),
@@ -344,6 +257,93 @@ pub fn list(kind: AgentKind, cwd: &Path, homes: &Homes, config: &Path) -> Vec<Co
     found.retain(|c| seen.insert(c.name.clone()));
     found.sort_by(|a, b| a.name.cmp(&b.name));
     found
+}
+
+/// Claude Code's commands and skills on disk, the project's and each config
+/// folder's, with its synced skills and plugins.
+pub(crate) fn claude_disk(cwd: &Path, homes: &Homes, found: &mut Vec<Command>) {
+    claude_commands(&cwd.join(".claude/commands"), found);
+    skills(&cwd.join(".claude/skills"), "", found);
+    for home in &homes.claude {
+        claude_commands(&home.join("commands"), found);
+        skills(&home.join("skills"), "", found);
+        synced(&home.join("skills/synced"), found);
+        plugins(home, found);
+    }
+}
+
+/// OpenCode's command folders and `opencode.json`, the project's and the
+/// config's.
+pub(crate) fn opencode_disk(cwd: &Path, config: &Path, found: &mut Vec<Command>) {
+    for root in [cwd.join(".opencode"), config.join("opencode")] {
+        for dir in ["command", "commands"] {
+            tree(&root.join(dir), "", found);
+        }
+        opencode_json(&root.join("opencode.json"), found);
+    }
+}
+
+/// Cursor's `.cursor` and `.claude` commands on disk, the project's and the
+/// home's, and their skills.
+pub(crate) fn cursor_disk(cwd: &Path, homes: &Homes, found: &mut Vec<Command>) {
+    let home = homes.cursor.parent().unwrap_or(Path::new("/"));
+    for root in [cwd.to_owned(), home.to_owned()] {
+        for dir in [".cursor/commands", ".claude/commands"] {
+            cursor_commands(&root.join(dir), found);
+        }
+    }
+    for dir in [
+        cwd.join(".cursor/skills"),
+        cwd.join(".claude/skills"),
+        homes.cursor.join("skills"),
+        homes.cursor.join("skills-cursor"),
+    ] {
+        skills(&dir, "", found);
+    }
+}
+
+/// Codex's commands on disk: its `prompts/`.
+pub(crate) fn codex_disk(homes: &Homes, found: &mut Vec<Command>) {
+    for (name, path) in md_files(&homes.codex.join("prompts")) {
+        found.push(read_md(&path, format!("prompts:{name}")));
+    }
+}
+
+/// pi's prompts and skills on disk.
+pub(crate) fn pi_disk(cwd: &Path, homes: &Homes, found: &mut Vec<Command>) {
+    // shortcut: commands that extensions add are left out (they are
+    // code); add them if pi ever lists them on disk.
+    let agent = homes.pi.parent().unwrap_or(Path::new("/"));
+    let home = homes.cursor.parent();
+    for dir in [cwd.join(".pi/prompts"), agent.join("prompts")] {
+        pi_prompts(&dir, found);
+    }
+    let mut dirs = vec![cwd.join(".pi/skills"), cwd.join(".agents/skills")];
+    dirs.push(agent.join("skills"));
+    dirs.extend(home.map(|home| home.join(".agents/skills")));
+    for dir in dirs {
+        named_skills(&dir, "skill:", found);
+    }
+}
+
+/// The Antigravity CLI's skills on disk, its plugins' too.
+pub(crate) fn antigravity_disk(cwd: &Path, homes: &Homes, found: &mut Vec<Command>) {
+    // shortcut: every plugin's skills show, enabled or not.
+    let cli = &homes.antigravity;
+    let gemini = cli.parent().unwrap_or(Path::new("/"));
+    let mut dirs = vec![cwd.join(".agents/skills"), cwd.join(".agent/skills")];
+    dirs.push(gemini.join("config/skills"));
+    dirs.push(cli.join("skills"));
+    dirs.push(gemini.join("skills"));
+    for plugins in [cwd.join(".agents/plugins"), gemini.join("config/plugins")] {
+        dirs.extend(sub_dirs(&plugins).into_iter().map(|(_, p)| p.join("skills")));
+    }
+    dirs.push(cli.join("builtin/skills"));
+    let builtin = sub_dirs(&cli.join("builtin/plugins"));
+    dirs.extend(builtin.into_iter().map(|(_, p)| p.join("skills")));
+    for dir in dirs {
+        named_skills(&dir, "", found);
+    }
 }
 
 /// The commands agent `kind` takes in folder `cwd`, on this machine.

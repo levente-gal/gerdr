@@ -13,6 +13,7 @@ use crate::{
     },
     feature::Stage,
     herdr::AgentInfo,
+    integrations,
 };
 
 /// Said when the pane's chat can't be found.
@@ -47,14 +48,7 @@ pub fn named(agent: &AgentInfo) -> bool {
 /// Whether gerdr can find the chats of agent `kind` with no help from
 /// herdr: by folder and start time.
 pub fn guessable(kind: AgentKind) -> bool {
-    matches!(
-        kind,
-        AgentKind::Codex
-            | AgentKind::OpenCode
-            | AgentKind::Cursor
-            | AgentKind::Pi
-            | AgentKind::Antigravity
-    )
+    integrations::of(kind).guesses()
 }
 
 /// The chat of the agent in a pane, as herdr knows it; else why there is
@@ -64,7 +58,8 @@ pub fn find(agent: &AgentInfo, homes: &Homes) -> Result<Source, String> {
     let Some(kind) = kind(agent) else {
         return Err(NOT_FOUND.into());
     };
-    if !(kind == AgentKind::Claude || guessable(kind)) {
+    let agent_of = integrations::of(kind);
+    if !agent_of.caps().chat {
         let name = (agent.agent.as_deref()).or(session.map(|s| s.agent.as_str()));
         let shown = agent
             .display_agent
@@ -78,45 +73,19 @@ pub fn find(agent: &AgentInfo, homes: &Homes) -> Result<Source, String> {
     };
     match session.kind.as_str() {
         "path" => {
-            let path = match kind {
-                AgentKind::Claude => claude_transcript(&session.value, &homes.claude),
-                AgentKind::Codex => codex_rollout(&session.value, &homes.codex),
-                AgentKind::Pi => {
-                    transcript(&session.value, std::slice::from_ref(&homes.pi), |_| true)
-                }
-                AgentKind::Antigravity => antigravity_transcript(&session.value, homes),
-                _ => None,
-            };
-            let unwritten = |under: &[PathBuf]| not_written(&session.value, under);
-            let path = match (path, kind) {
-                (Some(path), _) => path,
+            let path = match agent_of.transcript_at(&session.value, homes) {
+                Some(path) => path,
                 // Claude names its chat at start, before writing a line.
-                (None, AgentKind::Claude) if unwritten(&claude_projects(&homes.claude)) => {
+                None if not_written(&session.value, &agent_of.transcripts_under(homes)) => {
                     return Err(NOT_YET.into());
                 }
-                (None, AgentKind::Codex) if unwritten(&[homes.codex.join("sessions")]) => {
-                    return Err(NOT_YET.into());
-                }
-                (None, AgentKind::Pi) if unwritten(std::slice::from_ref(&homes.pi)) => {
-                    return Err(NOT_YET.into());
-                }
-                (None, AgentKind::Antigravity) if unwritten(&[homes.antigravity.join("brain")]) => {
-                    return Err(NOT_YET.into());
-                }
-                (None, _) => return Err(NOT_FOUND.into()),
+                None => return Err(NOT_FOUND.into()),
             };
             let stem = (path.file_stem().and_then(|s| s.to_str())).ok_or(NOT_FOUND)?;
             // A rollout is `rollout-<yyyy-mm-ddThh-mm-ss>-<id>`, a pi session
             // `<time>_<id>`, an Antigravity transcript in
             // `brain/<id>/.system_generated/logs/`.
-            let id = match kind {
-                AgentKind::Codex => stem.get("rollout-".len() + 20..).unwrap_or(stem),
-                AgentKind::Pi => stem.split_once('_').map_or(stem, |(_, id)| id),
-                AgentKind::Antigravity => (path.ancestors().nth(3))
-                    .and_then(|dir| dir.file_name()?.to_str())
-                    .unwrap_or(stem),
-                _ => stem,
-            };
+            let id = agent_of.id_in_path(stem, &path);
             Ok(Source {
                 agent: kind,
                 id: id.to_owned(),
@@ -232,11 +201,8 @@ fn locate(
     claimed: &HashSet<String>,
 ) -> Result<Option<Source>, String> {
     let chat = chat(kind, id, run);
-    let found = match (kind, id) {
-        (AgentKind::Cursor, None) => locate::cursor_by_time(homes, &chat, claimed, span),
-        _ => locate::find_in(homes, &chat, claimed, span)
-            .map_err(|err| format!("Couldn't read this agent's chats: {err}"))?,
-    };
+    let found = (integrations::of(kind).find_pane(homes, &chat, claimed, span))
+        .map_err(|err| format!("Couldn't read this agent's chats: {err}"))?;
     Ok(found.map(|found| Source {
         agent: kind,
         id: found.id,
@@ -248,7 +214,7 @@ fn locate(
 /// The whole transcript of the Antigravity CLI conversation whose
 /// transcript is at `path` (herdr's hook names the cut one), if it is one
 /// under its home's `brain/`.
-fn antigravity_transcript(path: &str, homes: &Homes) -> Option<PathBuf> {
+pub(crate) fn antigravity_transcript(path: &str, homes: &Homes) -> Option<PathBuf> {
     let brain = homes.antigravity.join("brain");
     let real = transcript(path, std::slice::from_ref(&brain), |_| true)?;
     let full = real.with_file_name("transcript_full.jsonl");
@@ -257,12 +223,12 @@ fn antigravity_transcript(path: &str, homes: &Homes) -> Option<PathBuf> {
 
 /// `path` as it really is, if it is a Claude transcript: a regular
 /// `.jsonl` file under `projects/` of one of the config folders `homes`.
-fn claude_transcript(path: &str, homes: &[PathBuf]) -> Option<PathBuf> {
+pub(crate) fn claude_transcript(path: &str, homes: &[PathBuf]) -> Option<PathBuf> {
     transcript(path, &claude_projects(homes), |_| true)
 }
 
 /// Where Claude keeps its transcripts under each of its `homes`.
-fn claude_projects(homes: &[PathBuf]) -> Vec<PathBuf> {
+pub(crate) fn claude_projects(homes: &[PathBuf]) -> Vec<PathBuf> {
     homes.iter().map(|home| home.join("projects")).collect()
 }
 
@@ -299,7 +265,7 @@ fn not_written(path: &str, under: &[PathBuf]) -> bool {
 
 /// `path` as it really is, if it is a Codex rollout: a regular
 /// `rollout-*.jsonl` file under `sessions/` of Codex's home `codex`.
-fn codex_rollout(path: &str, codex: &Path) -> Option<PathBuf> {
+pub(crate) fn codex_rollout(path: &str, codex: &Path) -> Option<PathBuf> {
     transcript(path, &[codex.join("sessions")], |name| {
         name.starts_with("rollout-")
     })
@@ -308,7 +274,11 @@ fn codex_rollout(path: &str, codex: &Path) -> Option<PathBuf> {
 /// `path` as it really is, if it is a regular `.jsonl` file under one of
 /// folders `under` whose name passes `name_ok`. The path comes from herdr's
 /// socket, which another process writes: no `..` or link leads out.
-fn transcript(path: &str, under: &[PathBuf], name_ok: impl Fn(&str) -> bool) -> Option<PathBuf> {
+pub(crate) fn transcript(
+    path: &str,
+    under: &[PathBuf],
+    name_ok: impl Fn(&str) -> bool,
+) -> Option<PathBuf> {
     let path = Path::new(path);
     if !path.is_absolute() {
         return None;

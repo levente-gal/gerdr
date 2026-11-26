@@ -157,21 +157,7 @@ pub fn find_in(
     if chat.id.is_some() && id.is_none() {
         return Err(format!("{:?} isn't a chat id", chat.id));
     }
-    Ok(match (chat.agent, id) {
-        (AgentKind::Claude, Some(id)) => claude(homes, id),
-        (AgentKind::Cursor, Some(id)) => cursor(homes, id),
-        (AgentKind::Codex, Some(id)) => codex_by_id(&homes.codex, id),
-        (AgentKind::Codex, None) => codex_by_time(&homes.codex, chat, claimed, span),
-        (AgentKind::OpenCode, _) => opencode(&homes.opencode, chat, claimed, span)?,
-        (AgentKind::T3, Some(id)) => t3(homes, chat, id)?,
-        (AgentKind::Pi, Some(id)) => pi_by_id(&homes.pi, id),
-        (AgentKind::Pi, None) => pi_by_time(&homes.pi, chat, claimed, span),
-        (AgentKind::Antigravity, Some(id)) => antigravity_by_id(&homes.antigravity, id),
-        (AgentKind::Antigravity, None) => {
-            antigravity_by_time(&homes.antigravity, chat, claimed, span)
-        }
-        _ => None,
-    })
+    crate::integrations::of(chat.agent).find(homes, chat, id, claimed, span)
 }
 
 /// Whether `id` can go into a path and a script as it is.
@@ -240,7 +226,7 @@ pub fn claude(homes: &Homes, id: &str) -> Option<Found> {
 const CURSOR_EXTRAS: [&str; 3] = ["meta.json", "prompt_history.json", "pasted_text.json"];
 
 /// Cursor CLI chat `id`: `chats/<folder>/<id>/store.db`.
-fn cursor(homes: &Homes, id: &str) -> Option<Found> {
+pub(crate) fn cursor(homes: &Homes, id: &str) -> Option<Found> {
     let folders = std::fs::read_dir(homes.cursor.join("chats")).ok()?;
     let main = (folders.flatten())
         .map(|dir| dir.path().join(id).join("store.db"))
@@ -284,7 +270,7 @@ fn rollouts(day: &Path) -> Vec<PathBuf> {
 }
 
 /// Codex chat `id`: `sessions/<y>/<m>/<d>/rollout-<time>-<id>.jsonl`.
-fn codex_by_id(codex: &Path, id: &str) -> Option<Found> {
+pub(crate) fn codex_by_id(codex: &Path, id: &str) -> Option<Found> {
     let end = format!("-{id}.jsonl");
     let years = subdirs(&codex.join("sessions"));
     let days = (years.iter().rev())
@@ -367,7 +353,7 @@ fn first_line(path: &Path) -> Option<String> {
 }
 
 /// The Codex chat of `chat`'s run, by folder and time.
-fn codex_by_time(
+pub(crate) fn codex_by_time(
     codex: &Path,
     chat: &Chat,
     claimed: &HashSet<String>,
@@ -412,7 +398,7 @@ fn pi_sessions(sessions: &Path) -> Vec<(PathBuf, u64)> {
 }
 
 /// pi chat `id`: `sessions/--<folder>--/<time>_<id>.jsonl`.
-fn pi_by_id(sessions: &Path, id: &str) -> Option<Found> {
+pub(crate) fn pi_by_id(sessions: &Path, id: &str) -> Option<Found> {
     let end = format!("_{id}.jsonl");
     let (main, _) = (pi_sessions(sessions).into_iter())
         .find(|(path, _)| path.to_str().is_some_and(|p| p.ends_with(&end)))?;
@@ -421,7 +407,7 @@ fn pi_by_id(sessions: &Path, id: &str) -> Option<Found> {
 
 /// The pi chat of `chat`'s run, by folder and time: its first line says
 /// where it runs (`{"type":"session","id","timestamp","cwd"}`).
-fn pi_by_time(
+pub(crate) fn pi_by_time(
     sessions: &Path,
     chat: &Chat,
     claimed: &HashSet<String>,
@@ -459,7 +445,7 @@ pub fn antigravity_transcript(home: &Path, id: &str) -> PathBuf {
 }
 
 /// Antigravity CLI conversation `id`.
-fn antigravity_by_id(home: &Path, id: &str) -> Option<Found> {
+pub(crate) fn antigravity_by_id(home: &Path, id: &str) -> Option<Found> {
     let main = antigravity_transcript(home, id);
     main.is_file()
         .then(|| found(AgentKind::Antigravity, id, main, Form::Lines))
@@ -469,7 +455,7 @@ fn antigravity_by_id(home: &Path, id: &str) -> Option<Found> {
 /// its `history.jsonl` has a line per prompt typed, with the conversation
 /// and the folder (`{timestamp, workspace, conversationId}`); a
 /// conversation begins with its first.
-fn antigravity_by_time(
+pub(crate) fn antigravity_by_time(
     home: &Path,
     chat: &Chat,
     claimed: &HashSet<String>,
@@ -621,7 +607,7 @@ fn pretty(value: &Value) -> Vec<u8> {
 /// The OpenCode chat of `chat`: by its id, or by folder and time. Its
 /// schema isn't known for sure, so it is asked first; a database not as
 /// expected finds nothing.
-fn opencode(
+pub(crate) fn opencode(
     db: &Path,
     chat: &Chat,
     claimed: &HashSet<String>,
@@ -743,7 +729,7 @@ type T3Rows = (Vec<Value>, Vec<Value>, Vec<Value>);
 
 /// T3 Code thread `id`: its row, runs and agent threads, then the chat of
 /// the agent it ran (Claude, Codex or Cursor) when that is found.
-fn t3(homes: &Homes, chat: &Chat, id: &str) -> Result<Option<Found>, String> {
+pub(crate) fn t3(homes: &Homes, chat: &Chat, id: &str) -> Result<Option<Found>, String> {
     let Some(home) = &homes.t3 else {
         return Ok(None);
     };
@@ -855,9 +841,14 @@ pub fn script(chat: &Chat) -> Option<String> {
     if id.is_some_and(|id| !plain_id(id)) {
         return None;
     }
-    let body = match (chat.agent, id) {
-        (AgentKind::Claude, Some(id)) => format!(
-            r#"id='{id}'
+    let body = crate::integrations::of(chat.agent).remote_script(chat, id)?;
+    Some(format!("{SAY}{body}exit 0\n"))
+}
+
+/// The body of `script` for Claude Code chat `id`.
+pub(crate) fn claude_script(id: &str) -> String {
+    format!(
+        r#"id='{id}'
 for d in "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" "$HOME/.claude"; do
   for f in "$d"/projects/*/"$id.jsonl"; do
     [ -f "$f" ] || continue
@@ -871,9 +862,13 @@ for d in "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" "$HOME/.claude"; do
   done
 done
 "#
-        ),
-        (AgentKind::Cursor, Some(id)) => format!(
-            r#"id='{id}'
+    )
+}
+
+/// The body of `script` for Cursor chat `id`.
+pub(crate) fn cursor_script(id: &str) -> String {
+    format!(
+        r#"id='{id}'
 for f in "$HOME"/.cursor/chats/*/"$id"/store.db; do
   [ -f "$f" ] || continue
   say M '' "$f"
@@ -883,15 +878,20 @@ for f in "$HOME"/.cursor/chats/*/"$id"/store.db; do
   exit 0
 done
 "#,
-            extras = CURSOR_EXTRAS.join(" ")
-        ),
-        (AgentKind::Codex, Some(id)) => format!(
+        extras = CURSOR_EXTRAS.join(" ")
+    )
+}
+
+/// The body of `script` for Codex chat `id`, else `chat`'s by time.
+pub(crate) fn codex_script(chat: &Chat, id: Option<&str>) -> String {
+    match id {
+        Some(id) => format!(
             r#"for f in "${{CODEX_HOME:-$HOME/.codex}}"/sessions/*/*/*/rollout-*-'{id}'.jsonl; do
   [ -f "$f" ] && say M '' "$f" && exit 0
 done
 "#
         ),
-        (AgentKind::Codex, None) => {
+        None => {
             let days = codex_days(chat.started).join(" ");
             format!(
                 r#"for day in {days}; do
@@ -904,9 +904,7 @@ done
 "#
             )
         }
-        _ => return None,
-    };
-    Some(format!("{SAY}{body}exit 0\n"))
+    }
 }
 
 /// Whether `rel` stays inside the folder it is a path in.
@@ -954,7 +952,7 @@ pub fn read_listing(chat: &Chat, out: &str, claimed: &HashSet<String>) -> Option
     }
     let (main, id) = match (main, &chat.id) {
         (Some(main), Some(id)) => (main, id.clone()),
-        (None, None) if chat.agent == AgentKind::Codex => {
+        (None, None) if crate::integrations::of(chat.agent).remote_guesses() => {
             let at = codex_pick(
                 chat,
                 Span::of(chat.started),
@@ -978,9 +976,9 @@ pub fn read_listing(chat: &Chat, out: &str, claimed: &HashSet<String>) -> Option
 /// Where a pulled chat's files go in its staging folder: the transcript or
 /// `store.db` (its `-wal` beside it), and `extra/<rel>`.
 pub fn staged_main(agent: AgentKind, staging: &Path) -> PathBuf {
-    match agent {
-        AgentKind::Cursor => staging.join("store.db"),
-        _ => staging.join("transcript.jsonl"),
+    match crate::integrations::of(agent).staged_store() {
+        true => staging.join("store.db"),
+        false => staging.join("transcript.jsonl"),
     }
 }
 
@@ -990,9 +988,9 @@ pub fn staged(agent: AgentKind, id: &str, staging: &Path) -> Option<Found> {
     if !main.is_file() {
         return None;
     }
-    let form = match agent {
-        AgentKind::Cursor => Form::Store,
-        _ => Form::Lines,
+    let form = match crate::integrations::of(agent).staged_store() {
+        true => Form::Store,
+        false => Form::Lines,
     };
     let mut chat = found(agent, id, main, form);
     chat.extra = files_under(&staging.join("extra"), &[""])

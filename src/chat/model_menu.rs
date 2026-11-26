@@ -15,10 +15,7 @@ pub const LINE: &str = "/model";
 
 /// Whether agent `kind` picks its model in a menu of its own on `LINE`.
 pub fn opens(kind: AgentKind) -> bool {
-    matches!(
-        kind,
-        AgentKind::Codex | AgentKind::OpenCode | AgentKind::Pi | AgentKind::Antigravity
-    )
+    crate::integrations::of(kind).model_switch() == crate::integrations::ModelSwitch::OwnMenu
 }
 
 // shortcut: the menus' words and marks are as the CLIs drew them here
@@ -27,13 +24,7 @@ pub fn opens(kind: AgentKind) -> bool {
 /// The model menu agent `kind`'s screen `rows` show at their bottom, as a
 /// menu picked with the arrows (`Menu::arrows`); none when they show none.
 pub fn read(kind: AgentKind, rows: &[(String, Styled)]) -> Option<Menu> {
-    let mut m = match kind {
-        AgentKind::Codex => codex(rows),
-        AgentKind::OpenCode => opencode(rows),
-        AgentKind::Pi => pi(rows),
-        AgentKind::Antigravity => antigravity(rows),
-        _ => None,
-    }?;
+    let mut m = crate::integrations::of(kind).model_menu(rows)?;
     m.arrows = true;
     for (i, choice) in m.choices.iter_mut().enumerate() {
         choice.n = u8::try_from(i + 1).unwrap_or(u8::MAX);
@@ -46,14 +37,7 @@ pub fn read(kind: AgentKind, rows: &[(String, Styled)]) -> Option<Menu> {
 /// now would pick a model.
 pub fn shows(screen: &str) -> bool {
     let rows = crate::scrollback::parse_ansi(screen);
-    [
-        AgentKind::Codex,
-        AgentKind::OpenCode,
-        AgentKind::Pi,
-        AgentKind::Antigravity,
-    ]
-    .into_iter()
-    .any(|kind| read(kind, &rows).is_some())
+    (crate::integrations::ALL.iter()).any(|agent| read(agent.kind(), &rows).is_some())
 }
 
 /// The keys that pick the row labelled `label` in menu `m`, as herdr names
@@ -76,39 +60,51 @@ pub fn now(kind: AgentKind, rows: &[&str]) -> Option<String> {
         .filter(|row| !row.is_empty())
         .take(6)
         .collect();
-    let said = match kind {
-        // "GPT-6.1 Terra medium · ~/folder": the effort after the model.
-        AgentKind::Codex => rows.iter().find_map(|row| {
-            let (model, place) = row.split_once(" · ")?;
-            if !place.starts_with(['~', '/']) {
-                return None;
-            }
-            let effort = model.rsplit_once(' ').filter(|(_, e)| EFFORTS.contains(e));
-            Some(effort.map_or(model, |(model, _)| model))
-        })?,
-        // "┃  Build · GPT-5.6 Sol OpenAI · high" under its reply box.
-        AgentKind::OpenCode => rows.iter().find_map(|row| {
-            let row = row.strip_prefix('┃')?;
-            row.split(" · ").nth(1)
-        })?,
-        // "(anthropic) claude-opus-5-5 • medium" at the right of its last row.
-        AgentKind::Pi => rows.iter().take(2).find_map(|row| {
-            let right = row.rsplit("  ").next()?.trim();
-            let (_, model) = right.strip_prefix('(')?.split_once(") ")?;
-            Some(model.split(" • ").next().unwrap_or(model))
-        })?,
-        // "auto · model · effort" at the right of its last row: its
-        // default mode leaves the mode out, a model without efforts the
-        // effort.
-        AgentKind::Antigravity => rows.iter().take(2).find_map(|row| {
-            let right = row.rsplit("  ").next()?.trim();
-            let mut parts = right.split(" · ").peekable();
-            parts.next_if(|p| ["auto", "plan", "accept-edits"].contains(p));
-            parts.next().filter(|_| right.contains(" · "))
-        })?,
-        _ => return None,
-    };
+    let said = crate::integrations::of(kind).model_on_screen(&rows)?;
     Some(said.trim().to_owned()).filter(|said| !said.is_empty())
+}
+
+/// Codex's: "GPT-6.1 Terra medium · ~/folder", the effort after the model;
+/// `rows` as `now` gives them.
+pub(crate) fn codex_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
+    rows.iter().find_map(|row| {
+        let (model, place) = row.split_once(" · ")?;
+        if !place.starts_with(['~', '/']) {
+            return None;
+        }
+        let effort = model.rsplit_once(' ').filter(|(_, e)| EFFORTS.contains(e));
+        Some(effort.map_or(model, |(model, _)| model))
+    })
+}
+
+/// OpenCode's: "┃  Build · GPT-5.6 Sol OpenAI · high" under its reply box.
+pub(crate) fn opencode_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
+    rows.iter().find_map(|row| {
+        let row = row.strip_prefix('┃')?;
+        row.split(" · ").nth(1)
+    })
+}
+
+/// pi's: "(anthropic) claude-opus-5-5 • medium" at the right of its last
+/// row.
+pub(crate) fn pi_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
+    rows.iter().take(2).find_map(|row| {
+        let right = row.rsplit("  ").next()?.trim();
+        let (_, model) = right.strip_prefix('(')?.split_once(") ")?;
+        Some(model.split(" • ").next().unwrap_or(model))
+    })
+}
+
+/// The Antigravity CLI's: "auto · model · effort" at the right of its last
+/// row: its default mode leaves the mode out, a model without efforts the
+/// effort.
+pub(crate) fn antigravity_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
+    rows.iter().take(2).find_map(|row| {
+        let right = row.rsplit("  ").next()?.trim();
+        let mut parts = right.split(" · ").peekable();
+        parts.next_if(|p| ["auto", "plan", "accept-edits"].contains(p));
+        parts.next().filter(|_| right.contains(" · "))
+    })
 }
 
 /// The reasoning efforts Codex writes after its model.
@@ -117,7 +113,7 @@ const EFFORTS: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", 
 /// Codex's: "Select Model and Effort", then the effort of the model picked
 /// ("Select Reasoning Level for …", "Advanced Reasoning"): numbered rows,
 /// the arrow (›) on one, what each is for after it.
-fn codex(rows: &[(String, Styled)]) -> Option<Menu> {
+pub(crate) fn codex(rows: &[(String, Styled)]) -> Option<Menu> {
     const TITLES: [&str; 3] = [
         "Select Model",
         "Select Reasoning Level",
@@ -135,7 +131,7 @@ fn codex(rows: &[(String, Styled)]) -> Option<Menu> {
 /// OpenCode's dialog over its chat: "Select model … esc", its search
 /// field, then models under headings (Recent, each provider); the current
 /// one marked ●, the arrow's on a ground of its own.
-fn opencode(rows: &[(String, Styled)]) -> Option<Menu> {
+pub(crate) fn opencode(rows: &[(String, Styled)]) -> Option<Menu> {
     let top = rows.iter().rposition(|(t, _)| {
         let t = t.trim();
         t.starts_with("Select model") && t.ends_with("esc")
@@ -185,7 +181,7 @@ fn opencode(rows: &[(String, Styled)]) -> Option<Menu> {
 /// pi's selector under its chat: its search line (">"), the models (→ on
 /// the arrow's, ✓ on the current one, the provider in brackets), "(3/65)",
 /// and its keys ("Enter to select").
-fn pi(rows: &[(String, Styled)]) -> Option<Menu> {
+pub(crate) fn pi(rows: &[(String, Styled)]) -> Option<Menu> {
     let keys = (rows.iter()).rposition(|(t, _)| t.contains("Enter to select"))?;
     let field = (rows[..keys].iter()).rposition(|(t, _)| t.trim_start().starts_with('>'))?;
     // The models end at a blank row, its count ("(3/65)", only while they
@@ -235,7 +231,7 @@ fn pi(rows: &[(String, Styled)]) -> Option<Menu> {
 /// Antigravity's: "Switch Model", "Search:", the models (> on the arrow's,
 /// "(current)" after the current one), and an effort slider (◉ over its
 /// level) that ←/→ move while no search is typed.
-fn antigravity(rows: &[(String, Styled)]) -> Option<Menu> {
+pub(crate) fn antigravity(rows: &[(String, Styled)]) -> Option<Menu> {
     let top = (rows.iter()).rposition(|(t, _)| t.trim() == "Switch Model")?;
     let mut search = String::new();
     let mut choices = Vec::new();

@@ -1139,15 +1139,9 @@ const NONE: &str = "–";
 /// How an agent named `agent` (as a run records it) is called here.
 pub(crate) fn agent_name(agent: &str) -> String {
     match AgentKind::of(agent) {
-        AgentKind::Claude => "Claude Code".into(),
-        AgentKind::Cursor => "Cursor".into(),
-        AgentKind::Codex => "Codex".into(),
-        AgentKind::OpenCode => "OpenCode".into(),
-        AgentKind::T3 => "T3 Code".into(),
-        AgentKind::Pi => "pi".into(),
-        AgentKind::Antigravity => "Antigravity".into(),
         AgentKind::Unknown if agent.is_empty() => NONE.into(),
         AgentKind::Unknown => agent.to_owned(),
+        kind => crate::integrations::of(kind).label().into(),
     }
 }
 

@@ -268,13 +268,12 @@ impl Chats {
     /// none.
     fn find(&mut self, agent: &AgentInfo) -> Result<Source, String> {
         let found = source::find(agent, &self.homes);
-        let Some(kind) = source::kind(agent).filter(|kind| *kind != AgentKind::Unknown) else {
-            return found;
-        };
+        let kind = source::kind(agent);
         // herdr's name for the integration: the agent's, but Antigravity's.
-        let target = match kind {
-            AgentKind::Antigravity => "antigravity-cli",
-            _ => kind.name(),
+        let Some((kind, target)) =
+            kind.and_then(|kind| Some((kind, crate::integrations::of(kind).herdr_target()?)))
+        else {
+            return found;
         };
         if source::named(agent) {
             crate::problems::clear_at(PROBLEMS, target);
@@ -613,7 +612,7 @@ fn first_line(path: &Path) -> Option<String> {
 
 /// Whether chats of agent `kind` are kept in a database.
 fn in_database(kind: AgentKind) -> bool {
-    matches!(kind, AgentKind::OpenCode | AgentKind::Cursor)
+    crate::integrations::of(kind).store() == Some(crate::integrations::Store::Database)
 }
 
 /// What the user said in `source`'s chat, oldest first, as the end of it
@@ -689,11 +688,7 @@ impl Chat {
         if self.sent.as_deref().map(Vec::as_slice) != Some(now) {
             let items = Arc::new(now.to_vec());
             self.sent = Some(items.clone());
-            let model = match self.source.agent {
-                AgentKind::Claude => self.reader.model().map(str::to_owned),
-                AgentKind::Cursor => super::model::cursor_now(),
-                _ => None,
-            };
+            let model = crate::integrations::of(self.source.agent).model_in_chat(&self.reader);
             let context = crate::ai_work::context::read(self.source.agent, &self.source.path);
             out.push(Event::Items {
                 pane_id: pane_id.to_owned(),

@@ -63,58 +63,72 @@ fn claude_window(model: &str) -> u64 {
 
 /// The context of `agent`'s chat whose transcript ends with `tail`. A line
 /// cut where the tail starts isn't JSON: it is passed over.
+#[cfg(test)]
 pub fn context(agent: AgentKind, tail: &[u8]) -> Option<Context> {
-    let mut lines = (tail.split(|b| *b == b'\n').rev())
-        .filter_map(|line| serde_json::from_slice::<Value>(line).ok());
-    let num = |v: &Value| v.as_u64().unwrap_or(0);
-    match agent {
-        AgentKind::Claude => lines.find_map(|v| {
-            let msg = &v["message"];
-            let model = msg["model"].as_str()?;
-            let main = v["type"] == "assistant" && v["isSidechain"] != true;
-            if !main || model.is_empty() || model == "<synthetic>" {
-                return None;
-            }
-            let u = &msg["usage"];
-            let used = num(&u["input_tokens"])
-                + num(&u["cache_creation_input_tokens"])
-                + num(&u["cache_read_input_tokens"]);
-            // More than the window the name gives: it runs on the large one.
-            let window = Some(claude_window(model)).map(|w| match used > w {
-                true => LARGE_WINDOW.max(w),
-                false => w,
-            });
-            (used > 0).then_some(Context { used, window })
-        }),
-        AgentKind::Codex => lines.find_map(|v| {
-            let p = &v["payload"];
-            let counted = v["type"] == "event_msg" && p["type"] == "token_count";
-            let info = &p["info"];
-            if !counted || !info.is_object() {
-                return None;
-            }
-            // Its input tokens count the cached ones too.
-            let used = num(&info["last_token_usage"]["input_tokens"]);
-            let window = info["model_context_window"].as_u64();
-            (used > 0).then_some(Context { used, window })
-        }),
-        // Each assistant message says what its request sent; pi names no
-        // window.
-        AgentKind::Pi => lines.find_map(|v| {
-            let m = &v["message"];
-            if v["type"] != "message" || m["role"] != "assistant" {
-                return None;
-            }
-            let u = &m["usage"];
-            let used = num(&u["input"]) + num(&u["cacheRead"]) + num(&u["cacheWrite"]);
-            (used > 0).then_some(Context { used, window: None })
-        }),
-        AgentKind::Cursor
-        | AgentKind::OpenCode
-        | AgentKind::T3
-        | AgentKind::Antigravity
-        | AgentKind::Unknown => None,
-    }
+    crate::integrations::of(agent).context_in(tail)
+}
+
+/// The JSON lines of `tail`, last first; a line cut where the tail starts
+/// isn't JSON: it is passed over.
+fn lines_back(tail: &[u8]) -> impl Iterator<Item = Value> + '_ {
+    (tail.split(|b| *b == b'\n').rev())
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+}
+
+fn num(v: &Value) -> u64 {
+    v.as_u64().unwrap_or(0)
+}
+
+/// Claude Code's, as `context` reads it.
+pub(crate) fn claude_context(tail: &[u8]) -> Option<Context> {
+    lines_back(tail).find_map(|v| {
+        let msg = &v["message"];
+        let model = msg["model"].as_str()?;
+        let main = v["type"] == "assistant" && v["isSidechain"] != true;
+        if !main || model.is_empty() || model == "<synthetic>" {
+            return None;
+        }
+        let u = &msg["usage"];
+        let used = num(&u["input_tokens"])
+            + num(&u["cache_creation_input_tokens"])
+            + num(&u["cache_read_input_tokens"]);
+        // More than the window the name gives: it runs on the large one.
+        let window = Some(claude_window(model)).map(|w| match used > w {
+            true => LARGE_WINDOW.max(w),
+            false => w,
+        });
+        (used > 0).then_some(Context { used, window })
+    })
+}
+
+/// Codex's, as `context` reads it.
+pub(crate) fn codex_context(tail: &[u8]) -> Option<Context> {
+    lines_back(tail).find_map(|v| {
+        let p = &v["payload"];
+        let counted = v["type"] == "event_msg" && p["type"] == "token_count";
+        let info = &p["info"];
+        if !counted || !info.is_object() {
+            return None;
+        }
+        // Its input tokens count the cached ones too.
+        let used = num(&info["last_token_usage"]["input_tokens"]);
+        let window = info["model_context_window"].as_u64();
+        (used > 0).then_some(Context { used, window })
+    })
+}
+
+/// pi's, as `context` reads it: each assistant message says what its
+/// request sent; pi names no window.
+pub(crate) fn pi_context(tail: &[u8]) -> Option<Context> {
+    lines_back(tail).find_map(|v| {
+        let m = &v["message"];
+        if v["type"] != "message" || m["role"] != "assistant" {
+            return None;
+        }
+        let u = &m["usage"];
+        let used = num(&u["input"]) + num(&u["cacheRead"]) + num(&u["cacheWrite"]);
+        (used > 0).then_some(Context { used, window: None })
+    })
 }
 
 /// The last `TAIL` bytes of the file at `path`.
@@ -139,10 +153,7 @@ pub fn read_contexts(feature: &Feature, dir: &Path) -> BTreeMap<Stage, (u32, Con
         .filter(|(_, run)| run.live() && run.machine.is_none())
         .filter_map(|(stage, run)| {
             let chat = observe::chat(feature, *stage, run, run.session());
-            if !matches!(
-                chat.agent,
-                AgentKind::Claude | AgentKind::Codex | AgentKind::Cursor | AgentKind::Pi
-            ) {
+            if !crate::integrations::of(chat.agent).caps().context {
                 return None;
             }
             let claimed = thread::claimed(dir, &chat);
@@ -156,10 +167,7 @@ pub fn read_contexts(feature: &Feature, dir: &Path) -> BTreeMap<Stage, (u32, Con
 /// The context of `agent`'s chat kept at `path`: its transcript, or a
 /// Cursor chat's `store.db`. Reads the file.
 pub fn read(agent: AgentKind, path: &Path) -> Option<Context> {
-    match agent {
-        AgentKind::Cursor => cursor_context(path),
-        agent => context(agent, &tail_of(path)?),
-    }
+    crate::integrations::of(agent).context(path)
 }
 
 /// The context of the Cursor chat whose `store.db` is `db`, as its latest
@@ -167,7 +175,7 @@ pub fn read(agent: AgentKind, path: &Path) -> Option<Context> {
 /// field 5 holds the tokens used (1) and the window (2), what Cursor's own
 /// `/context` shows. Cursor doesn't document it: a root that doesn't read
 /// so (another layout, or encrypted) says nothing.
-fn cursor_context(db: &Path) -> Option<Context> {
+pub(crate) fn cursor_context(db: &Path) -> Option<Context> {
     let conn = crate::cursor_agents::open_read_only(db).ok()?;
     let one = |sql: &str, key: &str| conn.query_row(sql, [key], |r| r.get::<_, Vec<u8>>(0)).ok();
     let hex = one("SELECT CAST(value AS BLOB) FROM meta WHERE key = ?1", "0")?;

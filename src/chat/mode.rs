@@ -27,13 +27,7 @@ const SCREEN_ROWS: usize = 40;
 /// for one without (pi). Claude's Auto shows only where its account has it,
 /// and OpenCode's own agents of the user's come after Plan.
 pub fn modes(kind: AgentKind) -> &'static [&'static str] {
-    match kind {
-        AgentKind::Claude => &["Auto", "Manual", "Edits", "Plan"],
-        AgentKind::OpenCode | AgentKind::Codex => &["Build", "Plan"],
-        AgentKind::Cursor => &["Agent", "Plan", "Debug", "Ask"],
-        AgentKind::Antigravity => &["Auto", "Plan", "Default", "Edits"],
-        _ => &[],
-    }
+    crate::integrations::of(kind).modes()
 }
 
 /// The mode agent `kind`'s screen shows on its last `rows`, by `modes`'s
@@ -45,51 +39,64 @@ pub fn shown(kind: AgentKind, rows: &[&str]) -> Option<String> {
         .filter(|row| !row.is_empty())
         .take(8)
         .collect();
-    let last = |n: usize| rows.iter().take(n).copied();
-    let cycle = "(shift+tab to cycle)";
-    let word = match kind {
-        AgentKind::Claude => last(3).find_map(|row| {
-            [
-                ("plan mode on", "Plan"),
-                ("accept edits on", "Edits"),
-                ("auto mode on", "Auto"),
-                ("manual mode on", "Manual"),
-                ("bypass permissions on", "Bypass"),
-            ]
-            .into_iter()
-            .find_map(|(says, mode)| row.contains(says).then(|| mode.to_owned()))
-        })?,
-        // The agent's name heads the line under the prompt: "Build · model".
-        AgentKind::OpenCode => last(8).find_map(|row| {
-            let (name, _) = row.strip_prefix('┃')?.split_once(" · ")?;
-            Some(name.trim().to_owned()).filter(|name| !name.is_empty())
-        })?,
-        // Its default says nothing.
-        AgentKind::Cursor => last(4)
-            .find_map(|row| Some(row.split_once(cycle)?.0.trim().to_owned()))
-            .unwrap_or_else(|| "Agent".into()),
-        AgentKind::Codex => last(3)
-            .find_map(|row| {
-                let said = row.split_once(cycle)?.0.trim().strip_suffix(" mode")?;
-                Some(said.rsplit("  ").next()?.trim().to_owned())
-            })
-            .unwrap_or_else(|| "Build".into()),
-        // "auto · model · effort" at the right of its last row; its
-        // default leaves the model first.
-        AgentKind::Antigravity => {
-            let row = last(2).find(|row| row.contains(" · "))?;
-            let said = row.split_once(" · ")?.0.split_whitespace().last()?;
-            match said {
-                "auto" => "Auto",
-                "plan" => "Plan",
-                "accept-edits" => "Edits",
-                _ => "Default",
-            }
-            .to_owned()
-        }
-        _ => return None,
+    crate::integrations::of(kind).mode_shown(&rows)
+}
+
+/// What Codex and Cursor say after their mode.
+const CYCLE: &str = "(shift+tab to cycle)";
+
+/// The mode Claude Code's `rows` (as `shown` gives them) show.
+pub(crate) fn claude_shown(rows: &[&str]) -> Option<String> {
+    rows.iter().take(3).find_map(|row| {
+        [
+            ("plan mode on", "Plan"),
+            ("accept edits on", "Edits"),
+            ("auto mode on", "Auto"),
+            ("manual mode on", "Manual"),
+            ("bypass permissions on", "Bypass"),
+        ]
+        .into_iter()
+        .find_map(|(says, mode)| row.contains(says).then(|| mode.to_owned()))
+    })
+}
+
+/// OpenCode's: the agent's name heads the line under the prompt, "Build ·
+/// model".
+pub(crate) fn opencode_shown(rows: &[&str]) -> Option<String> {
+    rows.iter().take(8).find_map(|row| {
+        let (name, _) = row.strip_prefix('┃')?.split_once(" · ")?;
+        Some(name.trim().to_owned()).filter(|name| !name.is_empty())
+    })
+}
+
+/// Cursor's: its default says nothing.
+pub(crate) fn cursor_shown(rows: &[&str]) -> Option<String> {
+    let mut said = rows.iter().take(4);
+    let said = said.find_map(|row| Some(row.split_once(CYCLE)?.0.trim().to_owned()));
+    Some(said.unwrap_or_else(|| "Agent".into()))
+}
+
+/// Codex's: its default says nothing.
+pub(crate) fn codex_shown(rows: &[&str]) -> Option<String> {
+    let said = rows.iter().take(3).find_map(|row| {
+        let said = row.split_once(CYCLE)?.0.trim().strip_suffix(" mode")?;
+        Some(said.rsplit("  ").next()?.trim().to_owned())
+    });
+    Some(said.unwrap_or_else(|| "Build".into()))
+}
+
+/// The Antigravity CLI's: "auto · model · effort" at the right of its last
+/// row; its default leaves the model first.
+pub(crate) fn antigravity_shown(rows: &[&str]) -> Option<String> {
+    let row = rows.iter().take(2).find(|row| row.contains(" · "))?;
+    let said = row.split_once(" · ")?.0.split_whitespace().last()?;
+    let mode = match said {
+        "auto" => "Auto",
+        "plan" => "Plan",
+        "accept-edits" => "Edits",
+        _ => "Default",
     };
-    Some(word)
+    Some(mode.to_owned())
 }
 
 /// The mode agent `kind` shows on `ansi`, a pane's text with its escape

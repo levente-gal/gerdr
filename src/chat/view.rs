@@ -1376,7 +1376,8 @@ fn follow_side(
 /// Claude Code whose turn ended.
 pub(crate) fn suggests(agent: &AgentInfo) -> bool {
     matches!(agent.agent_status, AgentStatus::Idle | AgentStatus::Done)
-        && super::source::kind(agent) == Some(crate::ai_work::AgentKind::Claude)
+        && super::source::kind(agent)
+            .is_some_and(|kind| crate::integrations::of(kind).caps().suggests)
 }
 
 /// What Claude Code suggests saying next, as its screen shows it: the

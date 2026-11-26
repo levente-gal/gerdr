@@ -49,15 +49,7 @@ pub struct Message {
 /// The messages of transcript `raw` of `agent`. Lines that aren't what
 /// it writes are passed over. Cursor's `raw` is its `store.db`.
 pub fn read(agent: AgentKind, raw: &[u8]) -> Vec<Message> {
-    match agent {
-        AgentKind::Claude => claude(raw),
-        AgentKind::Codex => codex(raw),
-        AgentKind::Cursor => cursor(raw),
-        AgentKind::Pi => pi(raw),
-        AgentKind::OpenCode | AgentKind::T3 | AgentKind::Antigravity | AgentKind::Unknown => {
-            Vec::new()
-        }
-    }
+    crate::integrations::of(agent).usage(raw)
 }
 
 /// The JSON lines of `raw`, each with its number.
@@ -73,7 +65,7 @@ fn num(v: &Value) -> u64 {
 
 /// pi's session: each assistant message says what its request used, its
 /// cached input apart.
-fn pi(raw: &[u8]) -> Vec<Message> {
+pub(crate) fn pi(raw: &[u8]) -> Vec<Message> {
     (json_lines(raw))
         .filter_map(|(_, line)| {
             let m = &line["message"];
@@ -101,7 +93,7 @@ fn pi(raw: &[u8]) -> Vec<Message> {
 
 /// Claude Code's transcript: a line per content block of an assistant
 /// message, each repeating the message's usage.
-fn claude(raw: &[u8]) -> Vec<Message> {
+pub(crate) fn claude(raw: &[u8]) -> Vec<Message> {
     struct Seen {
         message: Message,
         tools: HashSet<String>,
@@ -196,7 +188,7 @@ struct Turn {
 /// Codex's rollout: each turn's `token_count` events hold the chat's
 /// running totals, so a turn costs its last total less the turn before's.
 /// A turn is one message, at its start.
-fn codex(raw: &[u8]) -> Vec<Message> {
+pub(crate) fn codex(raw: &[u8]) -> Vec<Message> {
     let mut out = Vec::new();
     let mut model = String::new();
     let mut before = Totals::default();
@@ -263,7 +255,7 @@ fn codex(raw: &[u8]) -> Vec<Message> {
 /// Cursor CLI's chat database: its messages are JSON blobs with a role.
 /// It says no tokens and no times. The kept copy is read in memory, so
 /// the chat never lands in a temp file other users can read.
-fn cursor(raw: &[u8]) -> Vec<Message> {
+pub(crate) fn cursor(raw: &[u8]) -> Vec<Message> {
     cursor_conn(raw)
         .and_then(|conn| cursor_rows(&conn))
         .unwrap_or_else(|err| {

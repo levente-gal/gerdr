@@ -121,10 +121,7 @@ impl Reader {
     /// gets its result.
     pub fn feed(&mut self, lines: &[u8]) {
         // OpenCode's and Cursor's are read with `snapshot`.
-        if !matches!(
-            self.agent,
-            AgentKind::Claude | AgentKind::Codex | AgentKind::Pi | AgentKind::Antigravity
-        ) {
+        if crate::integrations::of(self.agent).store() != Some(crate::integrations::Store::Lines) {
             return;
         }
         self.rest.extend_from_slice(lines);

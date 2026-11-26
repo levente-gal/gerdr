@@ -11,7 +11,7 @@ use smithay::reexports::calloop::{
 
 use super::{
     Answer, Answers, AskReply, Changed, HeldAsk, LiveEvent, PHONE_SIGHT, PendingAsk, SOURCE, What,
-    antigravity, ask_wait, claude, opencode,
+    ask_wait,
 };
 use crate::{
     Gerdr, ai_work::AgentKind, chat::view::chat_mut, herdr::AgentInfo, herdr::AgentSession,
@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// pi's extension, as gerdr writes it to `~/.pi/agent/extensions/`.
-const PI_EXTENSION: &str = include_str!("../../../assets/pi/gerdr-live.ts");
+pub(crate) const PI_EXTENSION: &str = include_str!("../../../assets/pi/gerdr-live.ts");
 
 /// How often a waiting ask looks whether its chat is still in sight.
 const ASK_LOOK: std::time::Duration = std::time::Duration::from_secs(1);
@@ -389,44 +389,8 @@ impl Gerdr {
             Ok(None) => {}
             Err(err) => failed.push(err),
         };
-        if home.join(".claude").is_dir() {
-            take(
-                super::hook_command(claude::HOOK_COMMAND).and_then(|command| {
-                    super::install(&home.join(".claude/settings.json"), |text| {
-                        claude::merged(text, &command)
-                    })
-                }),
-            );
-        }
-        // Cursor's CLI runs the hooks Cursor's IDE does.
-        if home.join(".cursor").is_dir() {
-            take(
-                super::hook_command(crate::cursor_agents::HOOK_COMMAND).and_then(|command| {
-                    super::install(&home.join(".cursor/hooks.json"), |text| {
-                        crate::cursor_agents::merge_hooks(text, &command)
-                    })
-                }),
-            );
-        }
-        let config = home.join(".config/opencode");
-        if config.is_dir() {
-            for (path, merge) in opencode::files(&config) {
-                take(super::install(&path, merge));
-            }
-        }
-        // pi loads every extension in its folder: gerdr's goes beside herdr's.
-        if home.join(".pi/agent").is_dir() {
-            let path = home.join(".pi/agent/extensions/gerdr-live.ts");
-            take(super::install(&path, |_| Ok(PI_EXTENSION.to_owned())));
-        }
-        if home.join(".gemini/config").is_dir() {
-            take(
-                super::hook_command(antigravity::HOOK_COMMAND).and_then(|command| {
-                    super::install(&home.join(".gemini/config/hooks.json"), |text| {
-                        antigravity::merged(text, &command)
-                    })
-                }),
-            );
+        for agent in crate::integrations::ALL {
+            agent.install_live(&home).into_iter().for_each(&mut take);
         }
         for err in &failed {
             tracing::warn!("agent live: adding gerdr's hooks: {err}");

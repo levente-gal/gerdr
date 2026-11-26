@@ -59,7 +59,7 @@ const PLAN_MENU_WAIT: Duration = Duration::from_millis(1500);
 /// key that takes that choice (herdr's name). Probed: Cursor 2026.11.22's
 /// `p` opens a box for how to revise the plan; Codex 0.171's Esc goes back
 /// to its input box, still in Plan mode.
-const PLAN_MENUS: [(&str, &str, &str); 2] = [
+pub(crate) const PLAN_MENUS: [(&str, &str, &str); 2] = [
     ("Ready to build?", "No, propose changes", "p"),
     ("Implement this plan?", "No, stay in Plan mode", "esc"),
 ];
@@ -688,7 +688,8 @@ fn line_left_in_box(screen: &str, line: &str) -> bool {
 fn plan_menu_key(screen: &str) -> Option<&'static str> {
     let rows: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
     let tail = &rows[rows.len().saturating_sub(LINE_BOX)..];
-    PLAN_MENUS.iter().find_map(|&(asks, stay, key)| {
+    let mut menus = (crate::integrations::ALL.iter()).filter_map(|agent| agent.plan_menu());
+    menus.find_map(|(asks, stay, key)| {
         let at = tail.iter().rposition(|l| l.contains(stay))?;
         let mut above = tail[..at].iter().rev().take(4);
         above.any(|l| l.contains(asks)).then_some(key)

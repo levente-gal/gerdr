@@ -29,7 +29,7 @@ use crate::herdr::AgentSession;
 pub mod antigravity;
 pub mod claude;
 pub mod opencode;
-mod serve;
+pub(crate) mod serve;
 
 /// How long an ask waits for an answer from the chat before the agent's TUI
 /// asks itself.
