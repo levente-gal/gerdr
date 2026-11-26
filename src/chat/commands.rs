@@ -8,8 +8,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde_json::Value;
-
 use crate::ai_work::{AgentKind, locate::Homes};
 
 /// A command offered: typed as `/<name>`.
@@ -25,85 +23,6 @@ pub struct Command {
 // shortcut: built-ins are hard-coded as the CLIs were here (Claude Code
 // 2.1.331, OpenCode 2.3.0, Cursor 2026.11.22, Codex 0.171.0, pi 1.6.0,
 // Antigravity CLI 1.5.15); refresh them when the agents change.
-pub(crate) const CLAUDE: &[(&str, &str)] = &[
-    ("add-dir", "Add a working folder"),
-    ("agents", "Manage agent configurations"),
-    ("btw", "Ask a side question"),
-    ("clear", "Clear the conversation"),
-    ("compact", "Compact the conversation, keeping a summary"),
-    ("config", "Open the settings"),
-    ("context", "Show what fills the context"),
-    ("copy", "Copy the last reply"),
-    ("cost", "Show the session's cost"),
-    ("diff", "Show the changes made"),
-    ("effort", "Set the reasoning effort"),
-    ("exit", "Quit"),
-    ("export", "Export the conversation"),
-    ("fast", "Toggle fast mode"),
-    ("feedback", "Send feedback"),
-    ("fork", "Fork the conversation"),
-    ("help", "Show help"),
-    ("hooks", "Manage hooks"),
-    ("ide", "Connect to an IDE"),
-    ("init", "Write a CLAUDE.md for the project"),
-    ("login", "Sign in"),
-    ("logout", "Sign out"),
-    ("mcp", "Manage MCP servers"),
-    ("memory", "Edit memory files"),
-    ("model", "Pick the model"),
-    ("output-style", "Pick the output style"),
-    ("permissions", "Manage permissions"),
-    ("plan", "Enter plan mode"),
-    ("plugin", "Manage plugins"),
-    ("recap", "Recap the session"),
-    ("reload-plugins", "Reload plugins"),
-    ("rename", "Rename the session"),
-    ("resume", "Resume a conversation"),
-    ("review", "Review a pull request"),
-    ("security-review", "Review the changes for security"),
-    ("skills", "List skills"),
-    ("status", "Show the status"),
-    ("statusline", "Set up the status line"),
-    ("tasks", "List background tasks"),
-    ("terminal-setup", "Set up terminal keys"),
-    ("theme", "Pick the theme"),
-    ("usage", "Show plan usage"),
-    ("version", "Show the version"),
-    ("code-review", "Review the current diff"),
-    ("simplify", "Simplify the changed code"),
-    ("loop", "Run a prompt on an interval"),
-    ("schedule", "Schedule a cloud agent"),
-];
-
-pub(crate) const PI: &[(&str, &str)] = &[
-    ("bug", "Write a bug report"),
-    ("changelog", "Show the changelog"),
-    ("clone", "Copy the session"),
-    ("compact", "Compact the context"),
-    ("copy", "Copy the last answer"),
-    ("export", "Export the session"),
-    ("fork", "Start a session from an earlier message"),
-    ("hotkeys", "Show the shortcuts"),
-    ("import", "Import a session"),
-    ("llama", "Manage llama.cpp models"),
-    ("login", "Sign in to a provider"),
-    ("logout", "Sign out of a provider"),
-    ("mcp", "Manage MCP servers"),
-    ("model", "Pick the model"),
-    ("name", "Name the session"),
-    ("new", "Start a new session"),
-    ("quit", "Quit"),
-    ("reload", "Reload extensions, skills and templates"),
-    ("resume", "Resume a session"),
-    ("scoped-models", "Pick the models to cycle"),
-    ("session", "Show the session"),
-    ("settings", "Open the settings"),
-    ("share", "Share the session"),
-    ("thinking", "Set the thinking level"),
-    ("tree", "Go through the session tree"),
-    ("trust", "Trust this project"),
-];
-
 /// Whether agent `kind` takes side questions: a `/btw` of its own.
 pub fn asks_aside(kind: AgentKind) -> bool {
     crate::integrations::of(kind).caps().side
@@ -126,36 +45,6 @@ pub fn list(kind: AgentKind, cwd: &Path, homes: &Homes, config: &Path) -> Vec<Co
     found.retain(|c| seen.insert(c.name.clone()));
     found.sort_by(|a, b| a.name.cmp(&b.name));
     found
-}
-
-/// Claude Code's commands and skills on disk, the project's and each config
-/// folder's, with its synced skills and plugins.
-pub(crate) fn claude_disk(cwd: &Path, homes: &Homes, found: &mut Vec<Command>) {
-    claude_commands(&cwd.join(".claude/commands"), found);
-    skills(&cwd.join(".claude/skills"), "", found);
-    for home in &homes.claude {
-        claude_commands(&home.join("commands"), found);
-        skills(&home.join("skills"), "", found);
-        synced(&home.join("skills/synced"), found);
-        plugins(home, found);
-    }
-}
-
-/// pi's prompts and skills on disk.
-pub(crate) fn pi_disk(cwd: &Path, homes: &Homes, found: &mut Vec<Command>) {
-    // shortcut: commands that extensions add are left out (they are
-    // code); add them if pi ever lists them on disk.
-    let agent = homes.pi.parent().unwrap_or(Path::new("/"));
-    let home = homes.cursor.parent();
-    for dir in [cwd.join(".pi/prompts"), agent.join("prompts")] {
-        pi_prompts(&dir, found);
-    }
-    let mut dirs = vec![cwd.join(".pi/skills"), cwd.join(".agents/skills")];
-    dirs.push(agent.join("skills"));
-    dirs.extend(home.map(|home| home.join(".agents/skills")));
-    for dir in dirs {
-        named_skills(&dir, "skill:", found);
-    }
 }
 
 /// The commands agent `kind` takes in folder `cwd`, on this machine.
@@ -307,15 +196,6 @@ pub(crate) fn sub_dirs(dir: &Path) -> Vec<(String, PathBuf)> {
     dirs
 }
 
-/// Claude Code's command files in `dir`: those in a subfolder `ns` are
-/// `ns:name`.
-fn claude_commands(dir: &Path, found: &mut Vec<Command>) {
-    tree(dir, "", found);
-    for (ns, sub) in sub_dirs(dir) {
-        tree(&sub, &format!("{ns}:"), found);
-    }
-}
-
 /// The `*.md` files in `dir` as commands named `<prefix><name>`.
 pub(crate) fn tree(dir: &Path, prefix: &str, found: &mut Vec<Command>) {
     for (name, path) in md_files(dir) {
@@ -345,57 +225,6 @@ pub(crate) fn named_skills(dir: &Path, prefix: &str, found: &mut Vec<Command>) {
         }
         let name = front.get("name").and_then(|v| v.as_str()).unwrap_or(&folder);
         found.push(read_md(&path, format!("{prefix}{name}")));
-    }
-}
-
-/// pi's prompt templates in `dir`: with no `description`, the first line
-/// after the front matter says what they do.
-fn pi_prompts(dir: &Path, found: &mut Vec<Command>) {
-    for (name, path) in md_files(dir) {
-        let mut command = read_md(&path, name);
-        if command.about.is_empty() {
-            let text = fs::read_to_string(&path).unwrap_or_default();
-            let body = (text.strip_prefix("---"))
-                .and_then(|rest| rest.split_once("\n---"))
-                .map_or(text.as_str(), |(_, body)| body);
-            let first = body.lines().map(str::trim).find(|l| !l.is_empty());
-            command.about = one_line(first.unwrap_or(""));
-        }
-        found.push(command);
-    }
-}
-
-/// Claude Code's skills synced from claude.ai: `<id>/<name>/SKILL.md`.
-fn synced(dir: &Path, found: &mut Vec<Command>) {
-    for (_, sub) in sub_dirs(dir) {
-        skills(&sub, "anthropic-skills:", found);
-    }
-}
-
-/// The commands and skills of Claude Code's plugins enabled in `home`'s
-/// settings, as `<plugin>:<name>`.
-fn plugins(home: &Path, found: &mut Vec<Command>) {
-    let json = |path: PathBuf| -> Value {
-        (fs::read_to_string(path).ok())
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
-    };
-    let enabled = json(home.join("settings.json"));
-    let installed = json(home.join("plugins/installed_plugins.json"));
-    let Some(installed) = installed["plugins"].as_object() else {
-        return;
-    };
-    for (id, installs) in installed {
-        if enabled["enabledPlugins"][id] != Value::Bool(true) {
-            continue;
-        }
-        let Some(path) = installs[0]["installPath"].as_str() else {
-            continue;
-        };
-        let plugin = id.split('@').next().unwrap_or(id);
-        let root = Path::new(path);
-        tree(&root.join("commands"), &format!("{plugin}:"), found);
-        skills(&root.join("skills"), &format!("{plugin}:"), found);
     }
 }
 
@@ -435,9 +264,7 @@ pub(crate) fn one_line(text: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -451,67 +278,24 @@ mod tests {
         }
     }
 
-    fn scratch(name: &str) -> PathBuf {
+    pub(crate) fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gerdr-cmds-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    fn write(path: &Path, text: &str) {
+    pub(crate) fn write(path: &Path, text: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, text).unwrap();
     }
 
-    fn names(list: &[Command]) -> Vec<&str> {
+    pub(crate) fn names(list: &[Command]) -> Vec<&str> {
         list.iter().map(|c| c.name.as_str()).collect()
     }
 
-    fn find<'a>(list: &'a [Command], name: &str) -> &'a Command {
+    pub(crate) fn find<'a>(list: &'a [Command], name: &str) -> &'a Command {
         list.iter().find(|c| c.name == name).unwrap()
-    }
-
-    #[test]
-    fn claude_reads_commands_skills_and_enabled_plugins() {
-        let tmp = scratch("claude");
-        let (home, cwd) = (tmp.join("home"), tmp.join("work"));
-        let homes = Homes::under(&home);
-        let claude = home.join(".claude");
-        write(
-            &cwd.join(".claude/commands/ship.md"),
-            "---\ndescription: >\n  Ship it\n  now\nargument-hint: \"[pr]\"\n---\nbody",
-        );
-        write(&claude.join("commands/ship.md"), "---\ndescription: home one\n---\n");
-        write(&claude.join("commands/git/push.md"), "no front matter");
-        write(&claude.join("skills/graph/SKILL.md"), "---\nname: graph\ndescription: Graphs\n---\n");
-        write(&claude.join("skills/synced/abc/docx/SKILL.md"), "---\ndescription: Word\n---\n");
-        let (on, off) = (tmp.join("on"), tmp.join("off"));
-        write(&on.join("commands/init.md"), "---\ndescription: Init it\n---\n");
-        write(&on.join("skills/review/SKILL.md"), "---\ndescription: Review\n---\n");
-        write(&off.join("commands/gone.md"), "");
-        let plugin = |path: &Path| json!([{ "installPath": path }]);
-        write(
-            &claude.join("plugins/installed_plugins.json"),
-            &json!({ "plugins": { "cave@m": plugin(&on), "off@m": plugin(&off) } }).to_string(),
-        );
-        write(
-            &claude.join("settings.json"),
-            &json!({ "enabledPlugins": { "cave@m": true, "off@m": false } }).to_string(),
-        );
-
-        let list = list(AgentKind::Claude, &cwd, &homes, &home.join(".config"));
-        let ship = find(&list, "ship");
-        assert_eq!((ship.about.as_str(), ship.hint.as_str()), ("Ship it now", "[pr]"));
-        assert_eq!(find(&list, "git:push").about, "");
-        assert_eq!(find(&list, "graph").about, "Graphs");
-        assert_eq!(find(&list, "anthropic-skills:docx").about, "Word");
-        assert_eq!(find(&list, "cave:init").about, "Init it");
-        assert_eq!(find(&list, "cave:review").about, "Review");
-        assert!(!names(&list).contains(&"off:gone"));
-        assert!(!names(&list).contains(&"synced"));
-        // A built-in, once, and all in name order.
-        assert_eq!(names(&list).iter().filter(|n| **n == "compact").count(), 1);
-        assert!(names(&list).is_sorted());
     }
 
     #[test]

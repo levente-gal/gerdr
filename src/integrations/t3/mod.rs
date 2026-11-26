@@ -1,12 +1,15 @@
-//! T3 Code: its threads are found, with the chat of the agent each ran;
-//! gerdr shows no chat of its own for it.
+//! T3 Code. Its threads are rows of its database (`userdata/statev2.sqlite`),
+//! found with the chat of the agent each ran; gerdr shows no chat of its
+//! own for it, and hears no live word from it.
+
+mod find;
 
 use std::collections::HashSet;
 
 use super::Integration;
 use crate::ai_work::{
     AgentKind, Chat,
-    locate::{self, Found, Homes, Span},
+    locate::{Found, Homes, Span},
 };
 
 pub struct T3;
@@ -29,7 +32,7 @@ impl Integration for T3 {
         _span: Span,
     ) -> Result<Option<Found>, String> {
         match id {
-            Some(id) => locate::t3(homes, chat, id),
+            Some(id) => find::thread(homes, chat, id),
             None => Ok(None),
         }
     }

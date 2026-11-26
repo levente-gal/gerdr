@@ -144,7 +144,7 @@ fn read_pane(socket: PathBuf, pane_id: &str) -> PaneRead {
     let mut herdr = herdr::Herdr::on_socket(socket);
     let (text, from_bottom) = herdr.pane_scrollback(pane_id)?;
     if herdr.pane_scrollback_rows(pane_id) == Ok(0)
-        && let Some(chat) = stats_panel::claude_chat(&mut herdr, pane_id)
+        && let Some(chat) = crate::integrations::claude::find::claude_chat(&mut herdr, pane_id)
     {
         return Ok((stats_panel::chat_and_screen(&chat, &text), 0, String::new()));
     }

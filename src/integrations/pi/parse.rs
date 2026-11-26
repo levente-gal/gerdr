@@ -13,11 +13,13 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::{Item, ToolOut, gist};
-use crate::integrations::{
-    Parser,
-    common::build::{
-        Builder, CHAT_COMPACTED, INTERRUPTED, cap, change, edit_or_tool, flat_edits, input_text,
+use crate::{
+    chat::{Item, ToolOut, parse::gist},
+    integrations::{
+        Parser,
+        common::build::{
+            Builder, CHAT_COMPACTED, INTERRUPTED, cap, change, edit_or_tool, flat_edits, input_text,
+        },
     },
 };
 

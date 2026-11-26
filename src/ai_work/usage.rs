@@ -3,7 +3,7 @@
 //! count once by `message.id`; Codex's turn ends with its count; Cursor
 //! says no tokens.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 
 use serde_json::Value;
 
@@ -57,102 +57,6 @@ pub(crate) fn json_lines(raw: &[u8]) -> impl Iterator<Item = (usize, Value)> + '
     (raw.split(|b| *b == b'\n').enumerate())
         .filter(|(_, line)| !line.iter().all(u8::is_ascii_whitespace))
         .filter_map(|(i, line)| Some((i, serde_json::from_slice(line).ok()?)))
-}
-
-fn num(v: &Value) -> u64 {
-    v.as_u64().unwrap_or(0)
-}
-
-/// pi's session: each assistant message says what its request used, its
-/// cached input apart.
-pub(crate) fn pi(raw: &[u8]) -> Vec<Message> {
-    (json_lines(raw))
-        .filter_map(|(_, line)| {
-            let m = &line["message"];
-            if line["type"] != "message" || m["role"] != "assistant" {
-                return None;
-            }
-            let u = &m["usage"];
-            let parts = m["content"].as_array().into_iter().flatten();
-            Some(Message {
-                at_ms: num(&m["timestamp"]),
-                model: m["model"].as_str().unwrap_or_default().to_owned(),
-                sidechain: false,
-                usage: Usage {
-                    messages: 1,
-                    tool_calls: parts.filter(|p| p["type"] == "toolCall").count() as u64,
-                    input: num(&u["input"]),
-                    output: num(&u["output"]),
-                    cache_create: num(&u["cacheWrite"]),
-                    cache_read: num(&u["cacheRead"]),
-                },
-            })
-        })
-        .collect()
-}
-
-/// Claude Code's transcript: a line per content block of an assistant
-/// message, each repeating the message's usage.
-pub(crate) fn claude(raw: &[u8]) -> Vec<Message> {
-    struct Seen {
-        message: Message,
-        tools: HashSet<String>,
-        unnamed_tools: u64,
-    }
-    let mut order = Vec::new();
-    let mut seen: HashMap<String, Seen> = HashMap::new();
-    for (i, line) in json_lines(raw) {
-        if line["type"] != "assistant" {
-            continue;
-        }
-        let msg = &line["message"];
-        let model = msg["model"].as_str().unwrap_or_default();
-        if model == "<synthetic>" {
-            continue;
-        }
-        let key = (msg["id"].as_str().or(line["requestId"].as_str()))
-            .map_or_else(|| format!("line {i}"), str::to_owned);
-        let entry = seen.entry(key.clone()).or_insert_with(|| {
-            order.push(key);
-            Seen {
-                message: Message {
-                    at_ms: line["timestamp"].as_str().and_then(iso_ms).unwrap_or(0),
-                    model: model.to_owned(),
-                    sidechain: line["isSidechain"].as_bool().unwrap_or(false),
-                    usage: Usage {
-                        messages: 1,
-                        ..Usage::default()
-                    },
-                },
-                tools: HashSet::new(),
-                unnamed_tools: 0,
-            }
-        });
-        // The same on every line of a message, but for output that may grow
-        // as it streams: the most said counts.
-        let usage = &msg["usage"];
-        let u = &mut entry.message.usage;
-        u.input = u.input.max(num(&usage["input_tokens"]));
-        u.output = u.output.max(num(&usage["output_tokens"]));
-        u.cache_create = (u.cache_create).max(num(&usage["cache_creation_input_tokens"]));
-        u.cache_read = u.cache_read.max(num(&usage["cache_read_input_tokens"]));
-        let blocks = msg["content"].as_array().into_iter().flatten();
-        for block in blocks.filter(|b| b["type"] == "tool_use") {
-            match block["id"].as_str() {
-                Some(id) => {
-                    entry.tools.insert(id.to_owned());
-                }
-                None => entry.unnamed_tools += 1,
-            }
-        }
-    }
-    (order.into_iter())
-        .filter_map(|key| seen.remove(&key))
-        .map(|mut s| {
-            s.message.usage.tool_calls = s.tools.len() as u64 + s.unnamed_tools;
-            s.message
-        })
-        .collect()
 }
 
 /// The bytes `hex` spells.
@@ -256,75 +160,6 @@ fn run_of(m: &Message, starts: &[u64]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn claude_line(id: &str, at: &str, tool_id: Option<&str>) -> String {
-        let content = match tool_id {
-            Some(t) => format!(r#"[{{"type":"tool_use","id":"{t}","name":"Read"}}]"#),
-            None => r#"[{"type":"text","text":"hi"}]"#.to_owned(),
-        };
-        format!(
-            r#"{{"type":"assistant","requestId":"req_{id}","timestamp":"{at}","isSidechain":false,"message":{{"id":"msg_{id}","model":"claude-opus-5-5","usage":{{"input_tokens":2,"cache_creation_input_tokens":100,"cache_read_input_tokens":1000,"output_tokens":50}},"content":{content}}}}}"#
-        )
-    }
-
-    #[test]
-    fn claude_usage_counts_once_per_message() {
-        let raw = [
-            r#"{"type":"user","message":{"content":"go"}}"#.to_owned(),
-            claude_line("a", "2026-11-03T10:28:06.709Z", None),
-            claude_line("a", "2026-11-03T10:28:06.718Z", Some("t1")),
-            claude_line("a", "2026-11-03T10:28:06.720Z", Some("t2")),
-            claude_line("b", "2026-11-03T10:28:10.000Z", Some("t3")),
-            r#"{"type":"assistant","message":{"id":"x","model":"<synthetic>","usage":{"input_tokens":9}}}"#.to_owned(),
-            r#"{"type":"assistant","isSidechain":true,"timestamp":"2026-11-03T10:28:11Z","message":{"model":"claude-haiku","usage":{"output_tokens":7}}}"#.to_owned(),
-            "not json".to_owned(),
-        ]
-        .join("\n");
-        let got = read(AgentKind::Claude, raw.as_bytes());
-        assert_eq!(got.len(), 3);
-        assert_eq!(got[0].at_ms, 1_793_701_686_709);
-        assert_eq!(
-            got[0].usage,
-            Usage {
-                messages: 1,
-                tool_calls: 2,
-                input: 2,
-                output: 50,
-                cache_create: 100,
-                cache_read: 1000,
-            }
-        );
-        assert_eq!(got[1].usage.tool_calls, 1);
-        assert!(got[2].sidechain);
-        assert_eq!(got[2].model, "claude-haiku");
-        assert_eq!(got[2].usage.output, 7);
-        let total = got.iter().fold(Usage::default(), |mut t, m| {
-            t.add(&m.usage);
-            t
-        });
-        assert_eq!(total.input, 4);
-        assert_eq!(total.output, 107);
-    }
-
-    #[test]
-    fn pi_messages_say_their_own_usage() {
-        let raw = concat!(
-            r#"{"type":"session","id":"s"}"#,
-            "\n",
-            r#"{"type":"message","message":{"role":"user","content":"hi","timestamp":1}}"#,
-            "\n",
-            r#"{"type":"message","message":{"role":"assistant","model":"m1","timestamp":2,"#,
-            r#""content":[{"type":"toolCall"},{"type":"text"}],"#,
-            r#""usage":{"input":10,"output":3,"cacheRead":100,"cacheWrite":7}}}"#,
-            "\n",
-        );
-        let got = read(AgentKind::Pi, raw.as_bytes());
-        assert_eq!(got.len(), 1);
-        assert_eq!((got[0].at_ms, got[0].model.as_str()), (2, "m1"));
-        let u = &got[0].usage;
-        assert_eq!((u.messages, u.tool_calls, u.input, u.output), (1, 1, 10, 3));
-        assert_eq!((u.cache_create, u.cache_read), (7, 100));
-    }
 
     #[test]
     fn iso_times_read_with_their_offset() {

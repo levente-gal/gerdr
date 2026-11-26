@@ -211,17 +211,6 @@ fn locate(
     }))
 }
 
-/// `path` as it really is, if it is a Claude transcript: a regular
-/// `.jsonl` file under `projects/` of one of the config folders `homes`.
-pub(crate) fn claude_transcript(path: &str, homes: &[PathBuf]) -> Option<PathBuf> {
-    transcript(path, &claude_projects(homes), |_| true)
-}
-
-/// Where Claude keeps its transcripts under each of its `homes`.
-pub(crate) fn claude_projects(homes: &[PathBuf]) -> Vec<PathBuf> {
-    homes.iter().map(|home| home.join("projects")).collect()
-}
-
 /// Whether `path` names a `.jsonl` file not written yet under one of
 /// folders `under`: the folders on its way that are there lead into one
 /// (no link or `..` out), and the file isn't there.

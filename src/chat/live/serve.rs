@@ -18,9 +18,6 @@ use crate::{
     menu::MenuAction,
 };
 
-/// pi's extension, as gerdr writes it to `~/.pi/agent/extensions/`.
-pub(crate) const PI_EXTENSION: &str = include_str!("../../../assets/pi/gerdr-live.ts");
-
 /// How often a waiting ask looks whether its chat is still in sight.
 const ASK_LOOK: std::time::Duration = std::time::Duration::from_secs(1);
 
@@ -462,12 +459,6 @@ fn live_session<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pis_extension_names_the_socket_as_gerdr_does() {
-        assert!(PI_EXTENSION.contains("gerdr-live-${hash}.sock"));
-        assert!(PI_EXTENSION.contains("digest(\"hex\").slice(0, 16)"));
-    }
 
     #[test]
     fn a_session_heard_beats_herdrs_when_it_is_the_running_agents() {

@@ -1440,27 +1440,6 @@ pub(crate) fn readable(path: &Path) -> Result<String, String> {
 /// screen: its end, the turns that scrolled away.
 const CHAT_TAIL: u64 = 2 * 1024 * 1024;
 
-/// The transcript of the Claude Code chat running in herdr pane `pane`, if
-/// herdr knows its id and it is on disk. Claude Code draws on the
-/// alternate screen, where herdr keeps no scrollback: this stands for it.
-pub(crate) fn claude_chat(herdr: &mut crate::herdr::Herdr, pane: &str) -> Option<PathBuf> {
-    let agent = herdr
-        .agent_list()
-        .ok()?
-        .into_iter()
-        .find(|a| a.pane_id == pane)?;
-    let session = agent
-        .agent_session
-        .filter(|s| s.agent == "claude" && s.kind == "id")?;
-    // It goes into a path: an id, not a way out of the folder.
-    let plain = (session.value.chars()).all(|c| c.is_ascii_alphanumeric() || c == '-');
-    let homes = ai_work::locate::Homes::here()?;
-    plain
-        .then(|| ai_work::locate::claude(&homes, &session.value))
-        .flatten()
-        .map(|f| f.main)
-}
-
 /// The end of transcript `path` as who said what, a rule, then `screen`:
 /// a Claude Code pane's output, for want of its scrollback.
 pub(crate) fn chat_and_screen(path: &Path, screen: &str) -> String {

@@ -26,7 +26,6 @@ use sha2::{Digest, Sha256};
 use super::Item;
 use crate::herdr::AgentSession;
 
-pub mod claude;
 pub(crate) mod serve;
 
 /// How long an ask waits for an answer from the chat before the agent's TUI

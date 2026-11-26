@@ -1380,17 +1380,12 @@ pub(crate) fn suggests(agent: &AgentInfo) -> bool {
             .is_some_and(|kind| crate::integrations::of(kind).caps().suggests)
 }
 
-/// What Claude Code suggests saying next, as its screen shows it: the
-/// last `❯` line, its reply box, holding dim text only (what the user
-/// types there is plain).
-pub(crate) fn suggestion(rows: &[(String, crate::scrollback::Styled)]) -> Option<String> {
-    let (text, styles) = rows.iter().rev().find(|(text, _)| text.starts_with('❯'))?;
-    let chars: Vec<char> = text.chars().collect();
-    let start = (chars.iter()).take_while(|c| **c == '❯' || c.is_whitespace()).count();
-    let dim = |i: usize| (styles.iter()).any(|(at, style)| at.contains(&i) && style.dim);
-    let words: String = chars[start..].iter().collect::<String>().trim_end().to_owned();
-    let ghost = (start..chars.len()).all(|i| chars[i].is_whitespace() || dim(i));
-    (ghost && !words.is_empty()).then_some(words)
+/// What `kind`'s screen `rows` suggest saying next.
+pub(crate) fn suggestion(
+    kind: AgentKind,
+    rows: &[(String, crate::scrollback::Styled)],
+) -> Option<String> {
+    crate::integrations::of(kind).suggestion(rows)
 }
 
 /// How a chat's list scrolls: in pixels, from its top to as far as its
@@ -1814,7 +1809,7 @@ impl Gerdr {
             // asked again every second for ever.
             chat.suggest_reads = chat.suggest_reads.saturating_add(1);
             match rows {
-                Ok(rows) => chat.suggestion = suggestion(&rows),
+                Ok(rows) => chat.suggestion = kind.and_then(|kind| suggestion(kind, &rows)),
                 Err(err) => tracing::warn!("the suggestion in pane {pane_id}: {err}"),
             }
             return;
@@ -3352,22 +3347,6 @@ mod tests {
             .collect();
         assert!(!others.contains(&MODEL_KEYS[0].chord));
         assert!(crate::keys::hint_key(MODEL_KEYS[0].chord).is_some());
-    }
-
-    #[test]
-    fn a_suggestion_is_the_dim_text_of_the_reply_line_only() {
-        let read = |ansi: &str| suggestion(&crate::scrollback::parse_ansi(ansi));
-        // As Claude Code 2.1.332 drew it under herdr: the chat's own `❯`
-        // lines above, then its reply box.
-        let rule = "\x1b[0m\x1b[38;2;138;138;138m────\x1b[0m\r\n";
-        let screen = format!(
-            "❯ Create hello.txt\r\n● Done.\r\n{rule}❯\u{a0}\x1b[0m\x1b[2mcommit this\x1b[0m\r\n{rule}  \x1b[0m\x1b[38;2;150;108;30m⏵⏵ auto mode on\x1b[0m\n"
-        );
-        assert_eq!(read(&screen).as_deref(), Some("commit this"));
-        // Typed by the user: plain. Nothing in the box: none.
-        assert_eq!(read("❯\u{a0}com\r\n"), None);
-        assert_eq!(read("❯\u{a0}\r\n"), None);
-        assert_eq!(read("❯ \x1b[2mcom\x1b[0mmit\r\n"), None);
     }
 
     #[test]
