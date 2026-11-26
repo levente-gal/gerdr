@@ -2754,7 +2754,8 @@ impl Gerdr {
             }
             ChatHit::AskPlan => {
                 if let Some(i) = show_plan(chat) {
-                    let to = chrome::chat_item_span(&view, i).map_or(0, |(y, _)| y);
+                    let to = chrome::chat_item_span(&view, i).map_or(0, |(y, _)| y)
+                        - chrome::chat_pin_room(&view, i);
                     self.chat_scroll_to(&pane_id, Some(f64::from(to)));
                 }
             }
@@ -2818,9 +2819,11 @@ impl Gerdr {
         let Some((y, h)) = chrome::chat_item_span(&view, i) else {
             return;
         };
+        // Above, it shows under the bar of the user's words.
+        let room = chrome::chat_pin_room(&view, i);
         let (y, h, shown) = (
-            f64::from(y),
-            f64::from(h),
+            f64::from(y - room),
+            f64::from(h + room),
             f64::from(chrome::chat_layout(&view).list.size.h),
         );
         let to = match () {

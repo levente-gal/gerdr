@@ -449,6 +449,28 @@ pub fn chat_item_span(view: &ChatView, i: usize) -> Option<(i32, i32)> {
     items.get(i).map(|(y, laid)| (*y, laid.h))
 }
 
+/// How much of the list's top the bar of the user's words would cover
+/// with row `i` scrolled up to it: the bar of the last words before the
+/// row, else nothing. A row scrolled into sight starts under it.
+pub fn chat_pin_room(view: &ChatView, i: usize) -> i32 {
+    let parts = parts(view);
+    let rows = rows::rows(&view.items, &view.unfolded);
+    let said = (rows.iter().take(i).rev()).find_map(|row| match row {
+        Row::Item(j) => match &view.items[*j] {
+            Item::User { text, .. } => Some(text),
+            _ => None,
+        },
+        _ => None,
+    });
+    let room = said.map_or(0, |text| lay_pinned(text, parts.column.1).h + PART_GAP);
+    // As `pinned`: no bar over half the list.
+    if room <= parts.list.size.h / 2 {
+        room
+    } else {
+        0
+    }
+}
+
 /// The footer's key hints (K3), as the chat's key tables say them.
 pub fn chat_hints(view: &ChatView) -> Vec<(&str, &str)> {
     super::hint_strs(&view.hints)
@@ -4269,6 +4291,22 @@ pub(super) mod tests {
             questions: Vec::new(),
             since: std::time::Instant::now(),
         }
+    }
+
+    #[test]
+    fn a_row_scrolled_up_leaves_room_for_the_bar_of_the_users_words() {
+        let mut v = view();
+        let mut items = (*v.items).clone();
+        let plan = crate::chat::parse::plan_item("pl".into(), None, "# Plan\n\nDo it.");
+        items.push(plan);
+        v.items = Arc::new(items);
+        let rows = rows::rows(&v.items, &v.unfolded);
+        // The user's words open the chat: nothing before them to pin.
+        assert!(matches!(rows[0], Row::Item(0)) && matches!(v.items[0], Item::User { .. }));
+        assert_eq!(chat_pin_room(&v, 0), 0);
+        let plan = rows.len() - 1;
+        let bar = lay_pinned("Add a retry to the upload client", parts(&v).column.1).h;
+        assert_eq!(chat_pin_room(&v, plan), bar + PART_GAP);
     }
 
     #[test]
