@@ -81,7 +81,9 @@ impl DocMode {
     /// evidence and the fix plan have no page but this, so theirs have all.
     pub fn choices(file: DocFile) -> &'static [DocMode] {
         match file {
-            DocFile::Stage(_) => &[DocMode::Review, DocMode::Split],
+            // A chat's plan reads as a card in its chat: Split shows its
+            // page beside its comments.
+            DocFile::Stage(_) | DocFile::ChatPlan(_) => &[DocMode::Review, DocMode::Split],
             DocFile::Evidence
             | DocFile::Decisions
             | DocFile::Research(_)
@@ -108,7 +110,10 @@ impl DocMode {
     /// file is reviewed, the evidence is read.
     pub fn default_for(file: DocFile) -> DocMode {
         match file {
-            DocFile::Stage(_) | DocFile::FixPlan | DocFile::ConflictPlan(_) => DocMode::Review,
+            DocFile::Stage(_)
+            | DocFile::FixPlan
+            | DocFile::ConflictPlan(_)
+            | DocFile::ChatPlan(_) => DocMode::Review,
             DocFile::Evidence | DocFile::Decisions | DocFile::Research(_) | DocFile::Findings => {
                 DocMode::Preview
             }
@@ -501,6 +506,14 @@ impl Gerdr {
         self.refresh_pointer_focus();
     }
 
+    /// Show plan item `item_id` of pane `pane_id`'s chat in a file's tab of
+    /// the pane's workspace, to comment on and send back
+    /// (`chat::plan_review`): one already open as it stands.
+    pub(crate) fn open_chat_plan(&mut self, pane_id: &str, item_id: &str) {
+        // Wave A fills this in.
+        let _ = (pane_id, item_id);
+    }
+
     /// The panels a tab coming to show would sit under close, the
     /// repositories panel kept as it was.
     pub(crate) fn close_panels_for_tab(&mut self) {
@@ -539,9 +552,10 @@ impl Gerdr {
     /// Where it went.
     fn insert_doc_tab(&mut self, w: usize, doc: DocOf, text: String, mode: DocMode) -> usize {
         let review = match doc.file {
-            DocFile::Stage(_) | DocFile::FixPlan | DocFile::ConflictPlan(_) => {
-                review::load_file(&doc.comments)
-            }
+            DocFile::Stage(_)
+            | DocFile::FixPlan
+            | DocFile::ConflictPlan(_)
+            | DocFile::ChatPlan(_) => review::load_file(&doc.comments),
             DocFile::Evidence
             | DocFile::Decisions
             | DocFile::Research(_)

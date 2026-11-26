@@ -38,6 +38,7 @@ impl Gerdr {
                     ask,
                     reply: AskReply::Pass,
                     answers: None,
+                    message: None,
                 },
             );
         }
@@ -146,7 +147,7 @@ impl Gerdr {
                 if !question && !self.ask_in_sight(&pane) {
                     let reply = AskReply::Pass;
                     let answers = None;
-                    return super::answer(&mut stream, &Answer { ask, reply, answers });
+                    return super::answer(&mut stream, &Answer { ask, reply, answers, message: None });
                 }
                 let claimed: Vec<String> = (self.chats.live.asks.values())
                     .filter_map(|held| held.call.clone())
@@ -223,16 +224,28 @@ impl Gerdr {
     /// Answer ask `ask` with `reply`, if it still waits, and take its card
     /// away.
     pub(crate) fn live_answer(&mut self, ask: &str, reply: AskReply) {
-        self.live_reply(ask, reply, None);
+        self.live_reply(ask, reply, None, None);
+    }
+
+    /// Deny ask `ask` telling its agent `message` why, if it still waits,
+    /// and take its card away.
+    pub(crate) fn live_deny(&mut self, ask: &str, message: String) {
+        self.live_reply(ask, AskReply::Deny, None, Some(message));
     }
 
     /// Answer the questions of ask `ask` with `answers`, if it still waits,
     /// and take its card away.
     pub(crate) fn live_answers(&mut self, ask: &str, answers: Answers) {
-        self.live_reply(ask, AskReply::Allow, Some(answers));
+        self.live_reply(ask, AskReply::Allow, Some(answers), None);
     }
 
-    fn live_reply(&mut self, ask: &str, reply: AskReply, answers: Option<Answers>) {
+    fn live_reply(
+        &mut self,
+        ask: &str,
+        reply: AskReply,
+        answers: Option<Answers>,
+        message: Option<String>,
+    ) {
         let Some(mut held) = self.chats.live.asks.remove(ask) else {
             return;
         };
@@ -243,6 +256,7 @@ impl Gerdr {
                 ask: ask.clone(),
                 reply,
                 answers,
+                message,
             },
         );
         self.live_clear_card(&held.pane, &ask);
@@ -342,7 +356,7 @@ impl Gerdr {
     ) -> bool {
         let waits = (self.chats.live.asks.get(ask)).is_some_and(|held| held.pane == pane);
         if waits {
-            self.live_reply(ask, reply, answers);
+            self.live_reply(ask, reply, answers, None);
         }
         waits
     }

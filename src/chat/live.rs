@@ -155,6 +155,10 @@ pub struct Answer {
     /// For an ask with questions, allowed: what the user answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answers: Option<Answers>,
+    /// Denied: what the agent is told why, in place of the plain refusal
+    /// (a plan sent back with the user's comments).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// A tool an agent runs now, as its hooks said.
@@ -695,6 +699,7 @@ mod tests {
                     ask,
                     reply: AskReply::Deny,
                     answers: None,
+                    message: None,
                 },
             );
         });

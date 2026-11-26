@@ -81,6 +81,11 @@ pub enum DocFile {
     /// by gerdr as it opens: only read, as the evidence is; they are
     /// decided on AI review's page.
     Findings,
+    /// A plan card of an agent chat, by `chat::plan_review::key` of its
+    /// item: a snapshot of its text, only commented on, its comments sent
+    /// to the pane's agent (see `DocOf::chat`). It has no feature: every
+    /// feature path returns first for it.
+    ChatPlan(u64),
 }
 
 impl DocFile {
@@ -95,6 +100,8 @@ impl DocFile {
             DocFile::ConflictPlan(_) => Stage::Ship,
             DocFile::DraftChanges(stage, _) => stage,
             DocFile::Findings => Stage::AiReview,
+            // Never read for it: its paths return before any stage lookup.
+            DocFile::ChatPlan(_) => Stage::Plan,
         }
     }
 
@@ -108,6 +115,8 @@ impl DocFile {
             // It takes none, but must not share the brief's.
             DocFile::Decisions => dir.join("decisions-comments.json"),
             DocFile::Findings => dir.join("findings-comments.json"),
+            // Not under a feature's dir: by its key, as its snapshot is.
+            DocFile::ChatPlan(key) => crate::chat::plan_review::comments_path(key),
             DocFile::Research(id) => dir.join(format!("research-R{id}-comments.json")),
             _ => comments_path(dir, self.stage()),
         }
@@ -125,7 +134,7 @@ impl DocFile {
             DocFile::Suggestions => artifacts::name(Stage::Plan),
             DocFile::Findings => Some(review_import::FINDINGS),
             // Named by its turn or its number: its path says it.
-            DocFile::ConflictPlan(_) | DocFile::Research(_) => None,
+            DocFile::ConflictPlan(_) | DocFile::Research(_) | DocFile::ChatPlan(_) => None,
         }
     }
 
@@ -150,6 +159,8 @@ impl DocFile {
                 Some(review) => format!("review {}", review.n),
                 None => "no review yet".into(),
             },
+            // Said from the pane's live ask, not a feature (`chat_plan_state`).
+            DocFile::ChatPlan(_) => String::new(),
         }
     }
 
@@ -170,6 +181,7 @@ impl DocFile {
             DocFile::FixPlan => fix_plan_locked(feature),
             DocFile::ConflictPlan(n) => (conflict_plan_open(feature, n).is_none())
                 .then_some(CONFLICT_PLAN_PAST),
+            DocFile::ChatPlan(_) => Some(CHAT_PLAN_READ_ONLY),
         }
     }
 
@@ -207,6 +219,7 @@ impl DocFile {
             DocFile::ConflictPlan(n) => Some(dir.join(format!("conflicts-{n}.md"))),
             DocFile::Research(id) => Some(artifacts::research_path(dir, id)),
             DocFile::Findings => Some(findings_path(dir)),
+            DocFile::ChatPlan(key) => Some(crate::chat::plan_review::path(key)),
             _ => Some(dir.join(self.name()?)),
         }
     }
@@ -226,6 +239,9 @@ impl DocFile {
         matches!(self, DocFile::PlanChanges | DocFile::DraftChanges(..))
     }
 }
+
+/// Why a chat's plan can't be edited in its review.
+pub const CHAT_PLAN_READ_ONLY: &str = "A chat's plan takes comments only";
 
 /// Why a plan of conflicts no agent waits on any more takes no comment.
 pub const CONFLICT_PLAN_PAST: &str = "This plan of the conflicts is past: only read";
@@ -770,6 +786,7 @@ impl Gerdr {
                     DocFile::ConflictPlan(_) => {
                         Failed::Warning("The plan isn't written yet".into())
                     }
+                    DocFile::ChatPlan(_) => Failed::Error("The plan's copy is gone".into()),
                     DocFile::Stage(_) | DocFile::FixPlan => {
                         Failed::Error(format!("No {name} yet for \u{201c}{title}\u{201d}"))
                     }
@@ -802,6 +819,7 @@ impl Gerdr {
             // Laid on the plan once it is read (`place_suggestions`).
             suggestions: (file == DocFile::Suggestions)
                 .then(|| crate::plan_doc::SuggestionsOf::of(Some(feature), None)),
+            chat: None,
         };
         Ok((doc, text))
     }

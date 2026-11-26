@@ -15,6 +15,7 @@ pub mod menu;
 pub mod mode;
 pub mod model;
 pub mod parse;
+pub mod plan_review;
 pub mod rows;
 pub mod source;
 pub mod live;

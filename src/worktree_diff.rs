@@ -142,6 +142,17 @@ pub struct DocOf {
     /// Plan review's suggestions flagged on the plan, as the record had them
     /// last (`DocFile::Suggestions`); none for any other file.
     pub suggestions: Option<crate::plan_doc::SuggestionsOf>,
+    /// The chat's plan card it is (`DocFile::ChatPlan`): none for a
+    /// feature's file.
+    pub chat: Option<ChatPlanOf>,
+}
+
+/// Which chat's plan card a review shows: the agent's pane and the plan's
+/// item (`chat::Item::Plan`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatPlanOf {
+    pub pane_id: String,
+    pub item_id: String,
 }
 
 /// What Plan review's suggestions flagged on the plan are called: the
@@ -162,7 +173,7 @@ impl DocOf {
             // One name for the view: its button's, tab's and heading's.
             DocFile::Suggestions => REVIEW_IN_PLAN,
             DocFile::ConflictPlan(_) => "Conflicts plan",
-            DocFile::Stage(Stage::Plan) => "Plan",
+            DocFile::Stage(Stage::Plan) | DocFile::ChatPlan(_) => "Plan",
             DocFile::Stage(Stage::PlanReview) => "Final plan",
             DocFile::Stage(_) => "Brief",
         }
@@ -3497,6 +3508,7 @@ pub(crate) mod tests {
             current: Some(Stage::Discover),
             base: None,
             suggestions: None,
+            chat: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Brief\nUsers log in.\nWith a password.\n".into()), ENV);
@@ -3519,6 +3531,7 @@ pub(crate) mod tests {
             current: Some(Stage::Discover),
             base: Some("# Brief\nOld.\nGone.\n".into()),
             suggestions: None,
+            chat: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Brief\nNew.\n".into()), ENV);
@@ -4387,6 +4400,7 @@ pub(crate) mod tests {
             current: Some(Stage::Verify),
             base: None,
             suggestions: None,
+            chat: None,
         };
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok("# Evidence\napi: npm test failed\n".into()), ENV);

@@ -131,6 +131,7 @@ fn questions_of(input: &Value) -> Vec<Question> {
 /// kept; any other allow gives the input back as it was, as Claude runs
 /// `ExitPlanMode` only with one (a bare allow leaves its menu up).
 fn decision(answer: Answer, input: &Value) -> Option<String> {
+    let message = (answer.message).unwrap_or_else(|| "Denied from gerdr's chat".into());
     let decision = match (answer.reply, answer.answers) {
         (AskReply::Allow, Some(answers)) => {
             let mut input = input.clone();
@@ -139,7 +140,7 @@ fn decision(answer: Answer, input: &Value) -> Option<String> {
         }
         (AskReply::Allow, None) => json!({ "behavior": "allow", "updatedInput": input }),
         (AskReply::Deny, _) => {
-            json!({ "behavior": "deny", "message": "Denied from gerdr's chat" })
+            json!({ "behavior": "deny", "message": message })
         }
         (AskReply::Pass, _) => return None,
     };
@@ -304,6 +305,7 @@ mod tests {
             ask: "q1".into(),
             reply: AskReply::Allow,
             answers: Some([("Pick fruits".into(), "Apple, Grape".into())].into()),
+            message: None,
         };
         let input = &payload["tool_input"];
         let out: Value = serde_json::from_str(&decision(answers, input).unwrap()).unwrap();
@@ -323,6 +325,7 @@ mod tests {
             ask: "q1".into(),
             reply,
             answers: None,
+            message: None,
         };
         let out: Value =
             serde_json::from_str(&decision(reply(AskReply::Allow), &input).unwrap()).unwrap();
@@ -333,7 +336,16 @@ mod tests {
         assert_eq!(out, allow);
         let out = decision(reply(AskReply::Deny), &input).unwrap();
         assert!(out.contains(r#""behavior":"deny""#), "{out}");
+        assert!(out.contains("Denied from gerdr's chat"), "{out}");
         assert_eq!(decision(reply(AskReply::Pass), &input), None);
+        // A plan sent back: the comments are why.
+        let back = Answer {
+            message: Some("- step 2: use the cache".into()),
+            ..reply(AskReply::Deny)
+        };
+        let out: Value = serde_json::from_str(&decision(back, &input).unwrap()).unwrap();
+        let decided = &out["hookSpecificOutput"]["decision"];
+        assert_eq!(decided["message"], "- step 2: use the cache");
     }
 
     #[test]
