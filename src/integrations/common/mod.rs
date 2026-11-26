@@ -2,4 +2,5 @@
 
 pub mod build;
 pub mod files;
+pub mod hook;
 pub mod pick;
