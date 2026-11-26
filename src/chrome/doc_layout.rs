@@ -27,6 +27,11 @@ const DOC_QUOTE_BAR: i32 = 3;
 pub(super) const DOC_CODE_PAD: i32 = 8;
 const DOC_DEPTH_MAX: u8 = 4;
 const DOC_RULE: i32 = 13;
+/// A table's cells: the room around their words, and the widest a
+/// column's longest word holds it open (past that the word breaks).
+const DOC_CELL_PAD_X: i32 = 8;
+const DOC_CELL_PAD_Y: i32 = 4;
+const DOC_CELL_WORD_MAX: i32 = 160;
 /// How far off a line's width added up by word may be from it measured
 /// whole, in logical pixels: kerning and rounding at each space.
 const DOC_WIDTH_SLACK: f32 = 8.0;
@@ -51,6 +56,13 @@ pub(super) enum DocPiece {
     QuoteBar,
     /// A thematic break.
     Rule,
+    /// A table cell's ground and lines: its top and left, and its right
+    /// and bottom on the table's edge. The header's is filled.
+    Cell {
+        head: bool,
+        right: bool,
+        bottom: bool,
+    },
 }
 
 /// How a line's run `on` is set, the line bold or not.
@@ -188,11 +200,13 @@ fn number_mark(n: usize) -> String {
     format!("{n}.")
 }
 
-/// A column being laid out, from its top.
+/// A column being laid out, from its top. A table too wide for it may
+/// reach out to `room`'s left and right.
 struct Column {
     x: i32,
     w: i32,
     y: i32,
+    room: (i32, i32),
     pieces: Vec<(Rect, DocPiece)>,
 }
 
@@ -238,6 +252,76 @@ impl Column {
         body(self);
         self.x = x;
         self.w = w;
+    }
+
+    /// A table's rows, its cells' words wrapped in them: as wide as its
+    /// words, up to the column; wider, out into `room` centred on it, and
+    /// wrapped to fit that.
+    fn table(&mut self, rows: &[Vec<Styled>]) {
+        let n = rows.iter().map(Vec::len).max().unwrap_or(0);
+        if n == 0 {
+            return;
+        }
+        let size = Font::Small.size();
+        let measure = |t: &Styled, bold: bool| {
+            line_width(&t.text, &t.runs, bold, |t, f| width_in(t, f, size)).ceil() as i32
+        };
+        // Each column's widest line, and its longest word.
+        let (mut most, mut least) = (vec![1; n], vec![1; n]);
+        for (i, row) in rows.iter().enumerate() {
+            for (j, cell) in row.iter().enumerate() {
+                let mut at = 0;
+                for part in cell.text.split('\n') {
+                    let line = cell.slice(at..at + part.len());
+                    most[j] = most[j].max(measure(&line, i == 0));
+                    at += part.len() + 1;
+                }
+                for word in cell.text.split_whitespace() {
+                    let at = word.as_ptr() as usize - cell.text.as_ptr() as usize;
+                    let wide = measure(&cell.slice(at..at + word.len()), i == 0);
+                    least[j] = least[j].max(wide.min(DOC_CELL_WORD_MAX));
+                }
+            }
+        }
+        let pads = n as i32 * 2 * DOC_CELL_PAD_X;
+        let whole = most.iter().sum::<i32>() + pads;
+        let (x, widths) = if whole <= self.w {
+            (self.x, most)
+        } else {
+            let (left, right) = self.room;
+            let tw = whole.min(right - left);
+            let x = (self.x + (self.w - tw) / 2).min(right - tw).max(left);
+            (x, fitted(&most, &least, tw - pads))
+        };
+        let (x0, w0) = (self.x, self.w);
+        for (i, row) in rows.iter().enumerate() {
+            let (top, from) = (self.y, self.pieces.len());
+            let mut bottom = top + DOC_CELL_PAD_Y + small_line();
+            let mut cells = Vec::with_capacity(n);
+            let mut cx = x;
+            for (j, &cw) in widths.iter().enumerate() {
+                (self.x, self.w, self.y) = (cx + DOC_CELL_PAD_X, cw, top + DOC_CELL_PAD_Y);
+                if let Some(cell) = row.get(j) {
+                    self.text(cell, Font::Small, Ink::Text, i == 0, small_line());
+                }
+                bottom = bottom.max(self.y);
+                cells.push((cx, cw + 2 * DOC_CELL_PAD_X));
+                cx += cw + 2 * DOC_CELL_PAD_X;
+            }
+            let h = bottom + DOC_CELL_PAD_Y - top;
+            // Under the row's words, so painted first.
+            let grounds = cells.into_iter().enumerate().map(|(j, (cx, cw))| {
+                let cell = DocPiece::Cell {
+                    head: i == 0,
+                    right: j + 1 == n,
+                    bottom: i + 1 == rows.len(),
+                };
+                (Rectangle::new((cx, top).into(), (cw, h).into()), cell)
+            });
+            self.pieces.splice(from..from, grounds);
+            self.y = top + h;
+        }
+        (self.x, self.w) = (x0, w0);
     }
 
     /// A list item, its text hanging right of its mark.
@@ -302,11 +386,7 @@ impl Column {
                     Rectangle::new((self.x, top).into(), (DOC_QUOTE_BAR, self.y - top).into());
                 self.pieces.push((bar, DocPiece::QuoteBar));
             }
-            DocBlock::Table(rows) => {
-                for (i, row) in rows.iter().enumerate() {
-                    self.text(row, Font::Small, Ink::Text, i == 0, small_line());
-                }
-            }
+            DocBlock::Table(rows) => self.table(rows),
             DocBlock::Rule => {
                 self.put(DOC_RULE, DocPiece::Rule);
             }
@@ -314,12 +394,32 @@ impl Column {
     }
 }
 
-/// A file's blocks laid out for a column `w` wide, from `(0, 0)`.
-fn stack(blocks: &[DocBlock], w: i32) -> Column {
+/// Columns' widths adding up to `room` or less: each as wide as its
+/// longest word (`least`) first, what is left shared by how much wider
+/// each would be whole (`most`). Short of even that, all shrink alike and
+/// their words break.
+fn fitted(most: &[i32], least: &[i32], room: i32) -> Vec<i32> {
+    let room = room.max(most.len() as i32);
+    let low: i32 = least.iter().sum();
+    if low >= room {
+        return least.iter().map(|l| (l * room / low).max(1)).collect();
+    }
+    let want: i32 = most.iter().zip(least).map(|(m, l)| m - l).sum();
+    let spare = (room - low).min(want);
+    let more = |m: i32, l: i32| if want > 0 { (m - l) * spare / want } else { 0 };
+    (most.iter().zip(least))
+        .map(|(&m, &l)| l + more(m, l))
+        .collect()
+}
+
+/// A file's blocks laid out for a column `w` wide, from `(0, 0)`, a table
+/// reaching out to `room` at most.
+fn stack(blocks: &[DocBlock], w: i32, room: (i32, i32)) -> Column {
     let mut s = Column {
         x: 0,
         w,
         y: 0,
+        room,
         pieces: Vec::new(),
     };
     for (i, block) in blocks.iter().enumerate() {
@@ -367,7 +467,7 @@ pub(super) fn laid_out(blocks: &Arc<Vec<DocBlock>>, w: i32) -> (Rc<Vec<(Rect, Do
         let entry = match found {
             Some(i) => memo.remove(i),
             None => {
-                let s = stack(blocks, w);
+                let s = stack(blocks, w, (0, w));
                 DocMemo {
                     blocks: blocks.clone(),
                     w,
@@ -386,7 +486,17 @@ pub(super) fn laid_out(blocks: &Arc<Vec<DocBlock>>, w: i32) -> (Rc<Vec<(Rect, Do
 /// `blocks` laid out for a column `w` wide as `laid_out` does, not kept:
 /// for what keeps its own (a chat's items).
 pub(super) fn stack_of(blocks: &[DocBlock], w: i32) -> (Vec<(Rect, DocPiece)>, i32) {
-    let s = stack(blocks, w);
+    stack_in(blocks, w, (0, w))
+}
+
+/// `stack_of`, a table too wide for `w` reaching out to `room`'s left and
+/// right (`(0, w)` is the column's own).
+pub(super) fn stack_in(
+    blocks: &[DocBlock],
+    w: i32,
+    room: (i32, i32),
+) -> (Vec<(Rect, DocPiece)>, i32) {
+    let s = stack(blocks, w, room);
     (s.pieces, s.y)
 }
 
@@ -483,6 +593,26 @@ impl Painter {
                     s.ceil() as i32,
                     p.border,
                 );
+            }
+            DocPiece::Cell {
+                head,
+                right,
+                bottom,
+            } => {
+                let (x, y, w, h) = rect_px(rect, scale);
+                let (x, y, w, h) = (x as i32, y as i32, w as i32, h as i32);
+                let t = s.ceil() as i32;
+                if *head {
+                    c.fill(x, y, w, h, p.element);
+                }
+                c.fill(x, y, w, t, p.border);
+                c.fill(x, y, t, h, p.border);
+                if *right {
+                    c.fill(x + w - t, y, t, h, p.border);
+                }
+                if *bottom {
+                    c.fill(x, y + h - t, w, t, p.border);
+                }
             }
         }
     }
@@ -645,7 +775,7 @@ mod tests {
             text: long.as_str().into(),
         };
         let blocks = [item(0, ItemMark::Bullet), item(1, ItemMark::Number(3))];
-        let s = stack(&blocks, 300);
+        let s = stack(&blocks, 300, (0, 300));
         let marks: Vec<Rect> = (s.pieces.iter())
             .filter(|(_, p)| matches!(p, DocPiece::ItemMark(_)))
             .map(|(r, _)| *r)
@@ -709,5 +839,49 @@ mod tests {
         let (top, down) = (lit((0, 0)), lit((10, 20)));
         assert!(!top.is_empty() && top.iter().all(|&y| y < h));
         assert_eq!(down, top.iter().map(|y| y + 20).collect::<Vec<_>>());
+    }
+    #[test]
+    fn columns_get_their_longest_word_then_share_what_is_left() {
+        assert_eq!(fitted(&[100, 50], &[20, 10], 90), [60, 30]);
+        assert_eq!(fitted(&[100, 50], &[60, 40], 50), [30, 20]);
+    }
+
+    #[test]
+    fn a_tables_cells_sit_side_by_side_and_wrap_to_fit() {
+        let table = [DocBlock::Table(vec![
+            vec!["Case".into(), "Reply".into()],
+            vec![
+                "a long cell of many words that has to wrap".into(),
+                "401".into(),
+            ],
+        ])];
+        let texts = |pieces: &[(Rect, DocPiece)]| -> Vec<(Rect, String, bool)> {
+            (pieces.iter())
+                .filter_map(|(r, p)| match p {
+                    DocPiece::Text { text, bold, .. } => Some((*r, text.clone(), *bold)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let cells = |pieces: &[(Rect, DocPiece)]| {
+            (pieces.iter())
+                .filter(|(_, p)| matches!(p, DocPiece::Cell { .. }))
+                .count()
+        };
+        let (wide, wide_h) = stack_of(&table, 2000);
+        let words = texts(&wide);
+        assert_eq!(words.len(), 4, "{words:?}");
+        assert_eq!(cells(&wide), 4);
+        // The header bold, and its cells on one line.
+        assert!(words[0].2 && words[1].2 && !words[2].2);
+        assert_eq!(words[0].0.loc.y, words[1].0.loc.y);
+        assert!(words[1].0.loc.x > words[0].0.loc.x);
+        let (narrow, narrow_h) = stack_of(&table, 200);
+        assert!(texts(&narrow).len() > 4);
+        assert!(narrow_h > wide_h);
+        let edge = (narrow.iter()).map(|(r, _)| r.loc.x + r.size.w).max();
+        assert!(edge <= Some(200), "{edge:?}");
+        // Cells' grounds come before the words on them.
+        assert!(matches!(narrow[0].1, DocPiece::Cell { head: true, .. }));
     }
 }

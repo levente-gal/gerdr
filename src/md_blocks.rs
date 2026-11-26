@@ -143,15 +143,12 @@ pub enum DocBlock {
     /// A code block's lines.
     Code(Vec<String>),
     Quote(Styled),
-    /// A table's rows with their cells joined, the first its header.
-    Table(Vec<Styled>),
+    /// A table's rows of cells, the first its header.
+    Table(Vec<Vec<Styled>>),
     Rule,
     /// What gerdr says in the file's place: it isn't the file's own text.
     Note(String),
 }
-
-/// What joins a table's cells.
-const CELL_GAP: &str = " \u{b7} ";
 
 /// `text`'s blocks, in order.
 pub fn blocks(text: &str) -> Vec<DocBlock> {
@@ -246,10 +243,9 @@ fn block<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut Vec<DocBlock>) {
             }
         }
         NodeValue::Table(_) => {
-            let rows = node.children().map(|row| {
-                let cells: Vec<Styled> = row.children().map(inline).collect();
-                joined(&cells, CELL_GAP)
-            });
+            let rows = node
+                .children()
+                .map(|row| row.children().map(inline).collect());
             out.push(DocBlock::Table(rows.collect()));
         }
         NodeValue::ThematicBreak => out.push(DocBlock::Rule),
@@ -453,8 +449,8 @@ mod tests {
         assert_eq!(
             blocks("| a | b |\n|---|---|\n| 1 | **2** |\n"),
             [DocBlock::Table(vec![
-                "a \u{b7} b".into(),
-                styled("1 \u{b7} 2", &[("2", Inline::Bold)]),
+                vec!["a".into(), "b".into()],
+                vec!["1".into(), styled("2", &[("2", Inline::Bold)])],
             ])]
         );
     }

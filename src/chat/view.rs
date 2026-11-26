@@ -1168,9 +1168,16 @@ fn blocks_text(blocks: &[DocBlock]) -> String {
         }
         DocBlock::Code(lines) => format!("```\n{}\n```", lines.join("\n")),
         DocBlock::Quote(text) => format!("> {}", text.text),
-        DocBlock::Table(rows) => (rows.iter().map(|r| r.text.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n"),
+        DocBlock::Table(rows) => {
+            let row = |cells: Vec<&str>| format!("| {} |", cells.join(" | "));
+            let mut lines: Vec<String> = (rows.iter())
+                .map(|r| row(r.iter().map(|c| c.text.as_str()).collect()))
+                .collect();
+            if let Some(head) = rows.first() {
+                lines.insert(1, row(vec!["---"; head.len()]));
+            }
+            lines.join("\n")
+        }
         DocBlock::Rule => "---".to_owned(),
         DocBlock::Note(text) => text.clone(),
     };
@@ -3245,6 +3252,12 @@ mod tests {
             blocks: Arc::new(crate::md_blocks::blocks("# Done\n\nIt **works**.\n\n- one")),
         };
         assert_eq!(item_text(&said), "# Done\n\nIt works.\n\n- one");
+        let table = Item::Assistant {
+            id: "t".into(),
+            at: None,
+            blocks: Arc::new(crate::md_blocks::blocks("| a | b |\n|---|---|\n| 1 | 2 |")),
+        };
+        assert_eq!(item_text(&table), "| a | b |\n| --- | --- |\n| 1 | 2 |");
     }
 
     #[test]
