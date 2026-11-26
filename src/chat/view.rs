@@ -2699,6 +2699,13 @@ impl Gerdr {
                 }
             }
             ChatHit::Path(i) => self.chat_open_path(&pane_id, i),
+            ChatHit::CopyCode(item, k) => {
+                if let Some(text) = chrome::chat_code(&view, item, k) {
+                    let note = crate::page_text::copied_note(&text);
+                    self.copy_text(text);
+                    self.show_success(note);
+                }
+            }
             ChatHit::Earlier => self.chat_earlier(&pane_id),
             ChatHit::Key(key) => self.chat_wait_key(&pane_id, key),
             ChatHit::Composer => {

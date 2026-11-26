@@ -142,6 +142,16 @@ impl Gerdr {
                         at => Some(at.outcome()),
                     })
             }
+            FeatureTabHit::CopyCode(k) => {
+                let text = (self.feature_tab_parts())
+                    .and_then(|(_, layout)| layout.code_text(k).map(str::to_owned));
+                if let Some(text) = text {
+                    let note = crate::page_text::copied_note(&text);
+                    self.copy_text(text);
+                    self.show_success(note);
+                }
+                None
+            }
             // A summary's pill: its tag's first card takes the keys, in view.
             FeatureTabHit::Jump(tag) => {
                 let key = (feature.project.clone(), feature.slug.clone());

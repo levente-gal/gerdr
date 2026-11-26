@@ -3550,7 +3550,7 @@ fn doc_blocks() -> Vec<crate::md_blocks::DocBlock> {
         ),
         DocBlock::Quote("Nobody asked for a second factor yet, and this doesn't add one.".into()),
         crate::md_blocks::code_block(
-            "rust",
+            Some("rust"),
             vec![
                 "// Too many tries: wait.".into(),
                 "fn login(email: &str) -> Result<Token, Error> {".into(),
@@ -6844,12 +6844,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xfe631416ff8a726a, // tab_fixing_1180
         0x4557b19df663481c, // tab_fixed_code_1180
         0x75d914171e4d41b1, // tab_fixed_code_860
-        0x6a8918bce03e33ff, // tab_approved_1180
-        0xcc8109917650816f, // tab_locked_1180
-        0xb0cd4ebdcd977a81, // tab_start_over_1180
-        0xa8c9338fc717fe85, // tab_discover_brief_1180
-        0xa2c61a5133ca2255, // tab_discover_brief_860
-        0xd91d1bbfcdb83e4a, // tab_plan_long_1180
+        0xde214e0acf7d2c64, // tab_approved_1180
+        0x65656991e8411f70, // tab_locked_1180
+        0xf385da4562bf54f9, // tab_start_over_1180
+        0x9d880eb5c3d60f6d, // tab_discover_brief_1180
+        0xe97d6dfc63128925, // tab_discover_brief_860
+        0x418b27d9f55e191f, // tab_plan_long_1180
         0x0b214bda6b3e0445, // tab_manual_test_1180
         0xfeffbb22941e4803, // tab_manual_note_860
         0x845eeaaddaa14ba2, // tab_review_rounds_1180
@@ -6882,9 +6882,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0x0d29fb85dd2ec61f, // tab_ship_checking_1180
         0xd79f2ae07b504dcb, // tab_verify_regressed_1180
         0x4b2e2423c7e42e6c, // tab_verify_machine_860
-        0x00c9836df5a28d50, // tab_discover_decisions_860
-        0xb4025bbbdde99f6f, // tab_discover_research_1180
-        0x13456e419459254e, // tab_discover_research_860
+        0xeb1af482f45cddf0, // tab_discover_decisions_860
+        0xaea78460a8920f2f, // tab_discover_research_1180
+        0x4c4b60c3bc165c16, // tab_discover_research_860
     ],
     // Dark at 2
     [
@@ -6924,12 +6924,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xc5af43845efbbd0a, // tab_fixing_1180
         0x11c447d3ca9faf40, // tab_fixed_code_1180
         0xcbf66f0aa859084e, // tab_fixed_code_860
-        0xd52cabddb383888e, // tab_approved_1180
-        0x7942ec3406500656, // tab_locked_1180
-        0x986a5dd3604f34dd, // tab_start_over_1180
-        0x170bf47892364928, // tab_discover_brief_1180
-        0x0df2b1135793a890, // tab_discover_brief_860
-        0xc8a452fb29abe895, // tab_plan_long_1180
+        0x9c7149c537b7afb7, // tab_approved_1180
+        0xffab9055cc22e617, // tab_locked_1180
+        0x802b7dadcd8ae608, // tab_start_over_1180
+        0x85810f2985f7cfb1, // tab_discover_brief_1180
+        0x375a866f1cd15ff0, // tab_discover_brief_860
+        0x989be96be1ce68c7, // tab_plan_long_1180
         0x0e23b2d60cac83bb, // tab_manual_test_1180
         0x84f84a785822fb5f, // tab_manual_note_860
         0xe95dc57e85689675, // tab_review_rounds_1180
@@ -6962,9 +6962,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0x7bf7bd484bd1418c, // tab_ship_checking_1180
         0xb57df7a155554e8c, // tab_verify_regressed_1180
         0x6be6e8dccf97d26e, // tab_verify_machine_860
-        0xc46e85534a26903a, // tab_discover_decisions_860
-        0x2050f98574ccc037, // tab_discover_research_1180
-        0xf0c9bcb9b92ed79c, // tab_discover_research_860
+        0xafedb488089a7472, // tab_discover_decisions_860
+        0xd26bac196ac93f37, // tab_discover_research_1180
+        0xb9591d9e4c7b88dc, // tab_discover_research_860
     ],
     // Light at 1
     [
@@ -7004,12 +7004,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xabe0576b6b74ca5d, // tab_fixing_1180
         0x1e5cfaad2f0deae0, // tab_fixed_code_1180
         0x815a0155066889a5, // tab_fixed_code_860
-        0xef85f0c3fef63234, // tab_approved_1180
-        0xc8aa9a31b5fa17a9, // tab_locked_1180
-        0x86e6a367f4dd020d, // tab_start_over_1180
-        0xd8656d0be2c65dcc, // tab_discover_brief_1180
-        0x682457a752262ef2, // tab_discover_brief_860
-        0xb5628bd7926c3c48, // tab_plan_long_1180
+        0x72b8478e1c10fdff, // tab_approved_1180
+        0x58b001040cbbaf4a, // tab_locked_1180
+        0xe3c887a64e4f3ecd, // tab_start_over_1180
+        0x868efe487911f16c, // tab_discover_brief_1180
+        0xe4a1e71109829cda, // tab_discover_brief_860
+        0x445f72bc6dd41c1d, // tab_plan_long_1180
         0x1b64f6d06930bdb7, // tab_manual_test_1180
         0xd9031b2f93e41891, // tab_manual_note_860
         0xb9053095cee7e231, // tab_review_rounds_1180
@@ -7042,9 +7042,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xb095820b01c1f30f, // tab_ship_checking_1180
         0xfcff387c15772795, // tab_verify_regressed_1180
         0x5d49ce354f5d4282, // tab_verify_machine_860
-        0x7b56842fac332026, // tab_discover_decisions_860
-        0xf35bbebc7aef97cf, // tab_discover_research_1180
-        0x446d183362b9ee91, // tab_discover_research_860
+        0x54edf08548a531b6, // tab_discover_decisions_860
+        0x20dd2af4ec09a9cf, // tab_discover_research_1180
+        0xed566c706d4911e9, // tab_discover_research_860
     ],
     // Light at 2
     [
@@ -7084,12 +7084,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xe3d9cba5348d3167, // tab_fixing_1180
         0x477e5a5bec46210a, // tab_fixed_code_1180
         0xdf43b26432f54d2d, // tab_fixed_code_860
-        0x70997dd7ae40c747, // tab_approved_1180
-        0xb7c3fb12cf42d182, // tab_locked_1180
-        0xf057f5b9e48056c0, // tab_start_over_1180
-        0x74ff4c07f5d2e72d, // tab_discover_brief_1180
-        0xf1f601e63e79c653, // tab_discover_brief_860
-        0x5276ac799c386cfd, // tab_plan_long_1180
+        0x8b53de442546c9d1, // tab_approved_1180
+        0xf221368fe39b3844, // tab_locked_1180
+        0xf582135947ffe735, // tab_start_over_1180
+        0x733878d947321a38, // tab_discover_brief_1180
+        0x2f9719691abf4153, // tab_discover_brief_860
+        0xee5cf905a8d5549c, // tab_plan_long_1180
         0x8394e4a5692e0044, // tab_manual_test_1180
         0x5778ee0ab01e5928, // tab_manual_note_860
         0xe6c794c1d80467ba, // tab_review_rounds_1180
@@ -7122,9 +7122,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xfb149b0388901b80, // tab_ship_checking_1180
         0x3ffeb089fc4e2b3e, // tab_verify_regressed_1180
         0x42271a11cd38aa76, // tab_verify_machine_860
-        0xccf8ae6f4d74e304, // tab_discover_decisions_860
-        0xb98fbac03b6ab84b, // tab_discover_research_1180
-        0xde709bd4a69a6ed5, // tab_discover_research_860
+        0xf70d1295bd4fbb74, // tab_discover_decisions_860
+        0x90beb6a0543deb4b, // tab_discover_research_1180
+        0xf77ba9210192257d, // tab_discover_research_860
     ],
 ];
 
@@ -8231,7 +8231,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
         0xf2ed7f905e36a836, // doc_suggestions_1180
         0xa2d01c7198efce5a, // doc_suggestions_850
         0xef29518e2dc79076, // finding_dialog_reject
-        0x3032806d4971379c, // tab_plan_review_final_1180
+        0x6e21482f94bd0e09, // tab_plan_review_final_1180
         0x24898c7773397449, // doc_chat_plan_1180
     ],
     // Dark at 2
@@ -8242,7 +8242,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
         0x4a3da7479ece1f73, // doc_suggestions_1180
         0xd0ff3ff64d0737ab, // doc_suggestions_850
         0xb606ef86798ca204, // finding_dialog_reject
-        0x5facf6c761ee6880, // tab_plan_review_final_1180
+        0x5392c567d7573504, // tab_plan_review_final_1180
         0xe91a16683836648b, // doc_chat_plan_1180
     ],
     // Light at 1
@@ -8253,7 +8253,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
         0x5fb392f855584e45, // doc_suggestions_1180
         0x2d929b2a87c88b65, // doc_suggestions_850
         0x6b76f1508ea97daa, // finding_dialog_reject
-        0xc4efdd3f02a4a8e2, // tab_plan_review_final_1180
+        0x02a82092abebe83c, // tab_plan_review_final_1180
         0xdc713deadf09a62a, // doc_chat_plan_1180
     ],
     // Light at 2
@@ -8264,7 +8264,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
         0x2d7a66fa40ec984f, // doc_suggestions_1180
         0x99b85378c2ada16f, // doc_suggestions_850
         0x31b7feb26a182cfc, // finding_dialog_reject
-        0xdea5eb192c6fe0ce, // tab_plan_review_final_1180
+        0x2b3a80d4c6b8923f, // tab_plan_review_final_1180
         0x90f049b49dd93e07, // doc_chat_plan_1180
     ],
 ];
@@ -9994,7 +9994,8 @@ fn chat_view(i: usize) -> super::ChatView {
                 Retry it with a growing wait.\n\n## Steps\n\n\
                 1. Add `retry` to `upload.rs`\n2. Wait 200 ms, then double it\n\
                 3. Stop after 5 tries\n4. Log each retry at debug\n\n\
-                ## Verification\n\n- `cargo test upload`\n- Upload to a server that fails twice\n\
+                ## Verification\n\n```sh\ncargo test upload\n```\n\n\
+                - Upload to a server that fails twice\n\
                 - Check the log\n- Check the wait doubles\n- Check it stops\n";
             let mut items = (*v.items).clone();
             items.push(crate::chat::Item::Plan {
@@ -10179,8 +10180,8 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
         0x7f88523887899fe1, // chat_suggested
         0xa7603553713e7c66, // chat_modes
         0x8009f466f4efb1bc, // chat_side
-        0x618b1d06929c08bc, // chat_plan
-        0x5d5f9d5f75f592ae, // chat_plan_open
+        0xe92ee73d3a27ea1c, // chat_plan
+        0x8fe291584fc35a9a, // chat_plan_open
         0x3ae26f49a32456a9, // chat_plan_ask
         0x59029832d62dd7fd, // chat_model
         0x0d9d640a038fcfed, // chat_pinned
@@ -10206,8 +10207,8 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
         0x4d25b58bf6add3bc, // chat_suggested
         0x5f78544330c66ed9, // chat_modes
         0x0ca5a15678b84e87, // chat_side
-        0x704192ff87c671ab, // chat_plan
-        0x987a9e2b2b999bff, // chat_plan_open
+        0x0a7deed37e12f5a6, // chat_plan
+        0xb799b71c9ed1ee9c, // chat_plan_open
         0x687bcf5f00a1e5b4, // chat_plan_ask
         0x540eb1c26667c705, // chat_model
         0x81a83e3228349375, // chat_pinned
@@ -10233,8 +10234,8 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
         0xd04a5402c3f08ca6, // chat_suggested
         0xabf29f5ba37b6fe7, // chat_modes
         0xe7deedef9f56f42f, // chat_side
-        0xbde7ee687bda406d, // chat_plan
-        0xcdf2132aafa8cbc4, // chat_plan_open
+        0xb7783b636d4ebfe6, // chat_plan
+        0xb2986b36868eb40b, // chat_plan_open
         0x24ade1aaa9d5d729, // chat_plan_ask
         0xbf0516a4fc5d07c6, // chat_model
         0xbc341c99b133556d, // chat_pinned
@@ -10260,8 +10261,8 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
         0x5876be43da1ae84d, // chat_suggested
         0xc95d98ad3777feaa, // chat_modes
         0x72a8fc9a637a56e0, // chat_side
-        0x0d32c8add8c96800, // chat_plan
-        0x17b1b907ee86a15a, // chat_plan_open
+        0xf378a59a16f8dd07, // chat_plan
+        0x3c2e8a210ab90828, // chat_plan_open
         0xc997e09d481140d0, // chat_plan_ask
         0x11ddf9e2d02a7f24, // chat_model
         0x86ff847aaa2d3229, // chat_pinned

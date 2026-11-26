@@ -61,6 +61,10 @@ pub(super) enum DocPiece {
     /// The room above (`top`) or below a code block's lines, with the
     /// ground's rounded corners.
     CodeEdge { top: bool },
+    /// A file's code block's top, as `CodeEdge`'s, with the language its
+    /// fence names on the left and "Copy" on the right (`copy_spot`), a
+    /// press on which copies `text`, the block's lines.
+    CodeHead { lang: String, text: String },
     /// The rounded ground behind an inline code span, as other markdown
     /// views have it: put before its line, so a pick or a find paints on it.
     CodeGround,
@@ -75,6 +79,18 @@ pub(super) enum DocPiece {
         right: bool,
         bottom: bool,
     },
+}
+
+/// What a code block's head offers, to copy its lines.
+pub(super) const COPY_CODE: &str = "Copy";
+
+/// Where a press on code block head `rect`'s "Copy" copies it: the word and
+/// the block's room around it, the head's height.
+pub(super) fn copy_spot(rect: Rect) -> Rect {
+    let wide = width_in(COPY_CODE, Face::Ui, Font::Small.size()).ceil() as i32 + 2 * DOC_CODE_PAD;
+    let wide = wide.min(rect.size.w);
+    let x = rect.loc.x + rect.size.w - wide;
+    Rectangle::new((x, rect.loc.y).into(), (wide, rect.size.h).into())
 }
 
 /// A code block's ground, as an inline code span's: off `element` too, as
@@ -438,10 +454,20 @@ impl Column {
                 );
             }
             DocBlock::Item { depth, mark, text } => self.item(*depth, *mark, text),
-            DocBlock::Code { lines, syntax } => {
+            DocBlock::Code {
+                lang,
+                lines,
+                syntax,
+            } => {
                 let edge =
                     |s: &mut Column, top| s.put(DOC_CODE_PAD / 2, DocPiece::CodeEdge { top });
-                edge(self, true);
+                match lang {
+                    Some(lang) => {
+                        let (lang, text) = (lang.clone(), lines.join("\n"));
+                        self.put(small_line(), DocPiece::CodeHead { lang, text });
+                    }
+                    None => edge(self, true),
+                }
                 for (i, code) in lines.iter().enumerate() {
                     let spans = syntax.get(i).cloned().unwrap_or_default();
                     self.put(small_line(), DocPiece::CodeLine(code.clone(), spans));
@@ -656,22 +682,17 @@ impl Painter {
             DocPiece::CodeLine(text, spans) => {
                 self.code_line(c, rect, (text, spans), code_ground(p), scale, p);
             }
-            DocPiece::CodeEdge { top } => {
-                // The ground a corner's room taller, cut to the edge: its
-                // corners round, its side to the lines square.
-                // Up from its bottom: a page's band paints a piece reaching
-                // in from above at a negative top, which rounds the other
-                // way (`rect_px`), and the corners would move a pixel.
-                let (x, y, w, h) = rect_px(rect, scale);
-                let bottom = (y + h) as i32;
-                let h = (f64::from(rect.size.h) * scale).round() as i32;
-                let (x, y, w) = (x as i32, bottom - h, w as i32);
-                let r = (super::CAP_RADIUS * s).round() as i32;
-                let from = if *top { y } else { y - r };
-                c.clipped(x, y, w, h, |c| {
-                    let (x, from, w, h) = (x as f32, from as f32, w as f32, (h + r) as f32);
-                    c.rounded(x, from, w, h, r as f32, code_ground(p));
-                });
+            DocPiece::CodeEdge { top } => code_edge(c, rect, *top, scale, p),
+            DocPiece::CodeHead { lang, .. } => {
+                code_edge(c, rect, true, scale, p);
+                let (x, end) = super::phys(rect, scale);
+                let b = band(rect, scale);
+                let size = Font::Small.size();
+                let pad = (f64::from(DOC_CODE_PAD) * scale) as f32;
+                let copy = super::phys(copy_spot(rect), scale).0;
+                self.text(c, lang, size, x + pad, copy, b, scale, p.text);
+                let from = end - pad - width_in(COPY_CODE, Face::Ui, size) * s;
+                self.text(c, COPY_CODE, size, from, end, b, scale, p.text);
             }
             DocPiece::CodeGround => {
                 let (x, y, w, h) = rect_px(rect, scale);
@@ -750,6 +771,25 @@ impl Painter {
         }
         paint(at, usize::MAX, p.text);
     }
+}
+
+/// A code block's room above (`top`) or below its lines: its ground a
+/// corner's room taller, cut to the edge, so its corners round and its side
+/// to the lines is square. Up from its bottom: a page's band paints a piece
+/// reaching in from above at a negative top, which rounds the other way
+/// (`rect_px`), and the corners would move a pixel.
+fn code_edge(c: &mut Canvas, rect: Rect, top: bool, scale: f64, p: &Palette) {
+    let s = scale as f32;
+    let (x, y, w, h) = rect_px(rect, scale);
+    let bottom = (y + h) as i32;
+    let h = (f64::from(rect.size.h) * scale).round() as i32;
+    let (x, y, w) = (x as i32, bottom - h, w as i32);
+    let r = (super::CAP_RADIUS * s).round() as i32;
+    let from = if top { y } else { y - r };
+    c.clipped(x, y, w, h, |c| {
+        let (x, from, w, h) = (x as f32, from as f32, w as f32, (h + r) as f32);
+        c.rounded(x, from, w, h, r as f32, code_ground(p));
+    });
 }
 
 #[cfg(test)]

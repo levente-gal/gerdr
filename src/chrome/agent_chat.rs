@@ -257,6 +257,9 @@ pub enum ChatHit {
     Model,
     /// A part of the card of the ask's questions.
     Card(CardHit),
+    /// "Copy" on code block `.1` of item `.0` (its place among the item's
+    /// blocks with a head), or of the ask's card's plan with no item.
+    CopyCode(Option<usize>, usize),
 }
 
 /// What is under the pointer on the card of an ask's questions.
@@ -325,6 +328,7 @@ impl ChatLayout {
                 Spot::Card(hit) => ChatHit::Card(*hit),
                 Spot::Plan => ChatHit::AskPlan,
                 Spot::Review => ChatHit::AskReview,
+                Spot::Copy(k) => ChatHit::CopyCode(None, *k),
                 _ => ChatHit::AskFold,
             });
         }
@@ -379,9 +383,24 @@ impl ChatLayout {
             Some(Spot::Card(hit)) => ChatHit::Card(hit),
             Some(Spot::Plan) => ChatHit::AskPlan,
             Some(Spot::Review) => ChatHit::ReviewPlan(i),
+            Some(Spot::Copy(k)) => ChatHit::CopyCode(Some(i), k),
             None => ChatHit::Item(i),
         })
     }
+}
+
+/// What "Copy" on code block `k` copies (`ChatHit::CopyCode`): of item
+/// `item`, or of the ask's card with none.
+pub fn chat_code(view: &ChatView, item: Option<usize>, k: usize) -> Option<String> {
+    let parts = parts(view);
+    let codes = match item {
+        None => parts.card?.1.codes,
+        Some(i) => {
+            let (items, _) = stacked(view, parts.column.1);
+            items.get(i)?.1.codes.clone()
+        }
+    };
+    codes.into_iter().nth(k)
 }
 
 /// Where `view`'s parts go.
@@ -1773,6 +1792,8 @@ enum Spot {
     Plan,
     /// A plan's "Review": opens it in a file's tab.
     Review,
+    /// A code block's "Copy": copies `Laid::codes`' that one.
+    Copy(usize),
 }
 
 /// A colour of a card's words.
@@ -1863,6 +1884,8 @@ enum Bit {
 struct Laid {
     bits: Vec<(Rect, Bit)>,
     spots: Vec<(Rect, Spot)>,
+    /// Its code blocks' lines, as their "Copy" copies them (`Spot::Copy`).
+    codes: Vec<String>,
     h: i32,
 }
 
@@ -1971,10 +1994,13 @@ impl Laid {
     /// `pieces` laid out from `(0, 0)` put with that at `at`.
     fn doc(&mut self, pieces: Vec<(Rect, DocPiece)>, at: (i32, i32)) {
         for (rect, piece) in pieces {
-            self.put(
-                Rectangle::new(rect.loc + Point::from(at), rect.size),
-                Bit::Doc(piece),
-            );
+            let rect = Rectangle::new(rect.loc + Point::from(at), rect.size);
+            if let DocPiece::CodeHead { text, .. } = &piece {
+                let spot = doc_layout::copy_spot(rect);
+                self.spots.push((spot, Spot::Copy(self.codes.len())));
+                self.codes.push(text.clone());
+            }
+            self.put(rect, Bit::Doc(piece));
         }
     }
 
@@ -2078,7 +2104,7 @@ impl Laid {
         let lines: Vec<String> = (text.lines().take(cut))
             .map(|line| line.replace('\t', "    "))
             .collect();
-        let (pieces, _) = doc_layout::stack_of(&[crate::md_blocks::code_block("", lines)], w);
+        let (pieces, _) = doc_layout::stack_of(&[crate::md_blocks::code_block(None, lines)], w);
         let top = self.below();
         self.doc(pieces, (x, top));
         let n = text.lines().count();
@@ -3662,6 +3688,54 @@ pub(super) mod tests {
             (list.loc.y + list.size.h - PART_GAP - 4) as f64,
         ));
         assert_eq!(layout.hit(&parts_v, at), Some(ChatHit::ShowAll(1)));
+    }
+
+    /// A code block in the agent's words has "Copy" on its head, which
+    /// copies its lines; a tool's output has no head.
+    #[test]
+    fn a_code_blocks_copy_copies_its_lines() {
+        let mut v = view();
+        let md = "Run:\n\n```sh\ncargo build\ncargo test\n```\n\nThen:\n\n```\nls\n```\n";
+        v.items = Arc::new(vec![Item::Assistant {
+            id: "said".into(),
+            at: None,
+            blocks: Arc::new(crate::md_blocks::blocks(md)),
+        }]);
+        v.top = f64::MAX;
+        v.status = AgentStatus::Idle;
+        let layout = chat_layout(&v);
+        let p = parts(&v);
+        let (shown, _) = stacked(&v, p.column.1);
+        let (top, said) = &shown[0];
+        assert_eq!(said.codes, ["cargo build\ncargo test", "ls"]);
+        let (spot, _) = (said.spots.iter())
+            .find(|(_, s)| *s == Spot::Copy(1))
+            .expect("the second block's Copy");
+        let content = stacked(&v, p.column.1).1;
+        let scrolled = top_of(&v, content, layout.list.size.h);
+        let at = Point::from((
+            (p.column.0 + spot.loc.x + spot.size.w / 2) as f64,
+            (layout.list.loc.y + top + spot.loc.y + spot.size.h / 2 - scrolled) as f64,
+        ));
+        let hit = layout.hit(&v, at);
+        assert_eq!(hit, Some(ChatHit::CopyCode(Some(0), 1)));
+        assert_eq!(chat_code(&v, Some(0), 1).as_deref(), Some("ls"));
+
+        let tool = Item::Tool {
+            id: "t".into(),
+            name: "Bash".into(),
+            gist: "ls".into(),
+            input: String::new(),
+            output: Some(ToolOut {
+                text: "a\nb\n".into(),
+                failed: false,
+                ms: None,
+            }),
+        };
+        let open = ["t".to_owned(), rows::steps_key("t")].into();
+        let ran = laid(&tool, (500, 0), 0, &open, None);
+        assert!(ran.codes.is_empty());
+        assert!(!ran.spots.iter().any(|(_, s)| matches!(s, Spot::Copy(_))));
     }
 
     #[test]

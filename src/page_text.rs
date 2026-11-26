@@ -50,7 +50,7 @@ fn reach(home: (TextSpot, TextSpot), to: (TextSpot, TextSpot)) -> (TextSpot, Tex
 }
 
 /// What a selection copied says it copied.
-fn copied_note(text: &str) -> String {
+pub(crate) fn copied_note(text: &str) -> String {
     match text.lines().count() {
         n @ 2.. => format!("Copied {n} lines"),
         _ => "Copied 1 line".into(),

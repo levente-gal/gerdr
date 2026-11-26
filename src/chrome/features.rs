@@ -1476,6 +1476,9 @@ pub enum FeatureTabHit {
     ShotDelete(usize, usize),
     /// A review summary's pill: go to the first card with its tag.
     Jump(FindingTag),
+    /// "Copy" on the head of a code block in a file on the page, by the
+    /// head's place among the page's pieces: copies the block's lines.
+    CopyCode(usize),
     /// A part of the criteria's search, heading their list on the page.
     Search(super::SearchPart),
     /// A row of the strip of work running, as `FeatureTabView::running`.
@@ -1747,6 +1750,14 @@ impl FeatureTabLayout {
                         })
                     })
                     .or_else(|| {
+                        (self.pieces[TabColumn::Page as usize].iter())
+                            .position(|(r, piece)| {
+                                matches!(piece, Piece::Doc(DocPiece::CodeHead { .. }))
+                                    && doc_layout::copy_spot(*r).contains(at)
+                            })
+                            .map(FeatureTabHit::CopyCode)
+                    })
+                    .or_else(|| {
                         // The × over a screenshot before the screenshot.
                         let (k, n, delete) = self.pieces[TabColumn::Page as usize]
                             .iter()
@@ -1896,6 +1907,15 @@ impl FeatureTabLayout {
     pub fn line_text(&self, line: usize) -> Option<&str> {
         let t = self.texts.get(line)?;
         piece_text(&self.pieces[TabColumn::Page as usize].get(t.piece)?.1).map(|(text, ..)| text)
+    }
+
+    /// What "Copy" on the code block head at page piece `k` copies
+    /// (`FeatureTabHit::CopyCode`).
+    pub fn code_text(&self, k: usize) -> Option<&str> {
+        match self.pieces[TabColumn::Page as usize].get(k)? {
+            (_, Piece::Doc(DocPiece::CodeHead { text, .. })) => Some(text),
+            _ => None,
+        }
     }
 
     /// The web link a file's text on the page has at `pos`, if any.
@@ -9873,6 +9893,26 @@ mod tests {
             here: false,
         });
         view
+    }
+
+    /// "Copy" on a file's code block is hit as that block's, and copies its
+    /// lines.
+    #[test]
+    fn a_code_blocks_copy_is_hit_for_its_lines() {
+        let mut view = tab_view();
+        view.page.sections.clear();
+        let blocks = crate::md_blocks::blocks("```sh\ncargo build\ncargo test\n```\n");
+        let view = with_doc(view, blocks);
+        let l = tab_at(&view, 1200);
+        let (k, (r, _)) = (l.pieces[TabColumn::Page as usize].iter().enumerate())
+            .find(|(_, (_, p))| matches!(p, Piece::Doc(DocPiece::CodeHead { .. })))
+            .expect("the block's head");
+        let hit = l.hit(&view, centre(doc_layout::copy_spot(*r)));
+        assert_eq!(hit, Some(FeatureTabHit::CopyCode(k)));
+        assert_eq!(l.code_text(k), Some("cargo build\ncargo test"));
+        // Its language's side copies nothing.
+        let left = Point::from((r.loc.x + 2, r.loc.y + r.size.h / 2));
+        assert_ne!(l.hit(&view, left), Some(FeatureTabHit::CopyCode(k)));
     }
 
     fn says(piece: &Piece, what: &str) -> bool {

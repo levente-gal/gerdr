@@ -146,7 +146,10 @@ pub enum DocBlock {
     },
     /// A code block's lines, and their colours for the language its fence
     /// names (one `Spans` a line; none when it names none gerdr knows).
+    /// `lang` is what the fence names, empty for none; `None` for a block
+    /// that isn't a file's (a tool's output), which has no head to copy it.
     Code {
+        lang: Option<String>,
         lines: Vec<String>,
         syntax: Vec<Spans>,
     },
@@ -158,18 +161,20 @@ pub enum DocBlock {
     Note(String),
 }
 
-/// A code block of `lines` in language `lang` (a fence's `rust`, `py`, `sh`):
-/// coloured by `highlight`, plain for a language it doesn't know or none.
-pub fn code_block(lang: &str, lines: Vec<String>) -> DocBlock {
+/// A code block of `lines` in language `lang` (a fence's `rust`, `py`, `sh`;
+/// see `DocBlock::Code`): coloured by `highlight`, plain for a language it
+/// doesn't know or none.
+pub fn code_block(lang: Option<&str>, lines: Vec<String>) -> DocBlock {
     let syntax = match lang {
-        "" => None,
-        lang => highlight::lines(
+        None | Some("") => None,
+        Some(lang) => highlight::lines(
             lang,
             lines.iter().map(String::as_str),
             &mut GRAMMAR_LINES.clone(),
         ),
     };
     DocBlock::Code {
+        lang: lang.map(str::to_owned),
         lines,
         syntax: syntax.unwrap_or_default(),
     }
@@ -258,7 +263,7 @@ fn block<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut Vec<DocBlock>) {
         NodeValue::CodeBlock(code) => {
             let lines = code.literal.lines().map(str::to_owned).collect();
             let lang = code.info.split_whitespace().next().unwrap_or("");
-            out.push(code_block(lang, lines));
+            out.push(code_block(Some(lang), lines));
         }
         NodeValue::BlockQuote => {
             for child in node.children() {
@@ -535,6 +540,7 @@ mod tests {
         assert_eq!(
             blocks("```\nlet a = 1;\n\n    b();\n```\n"),
             [DocBlock::Code {
+                lang: Some(String::new()),
                 lines: vec!["let a = 1;".into(), String::new(), "    b();".into()],
                 syntax: Vec::new(),
             }]
