@@ -33,14 +33,15 @@ use smithay::{
 
 use crate::{
     Drag, Gerdr, Tab, TabKind,
+    chat::plan_review,
     chrome::{
         self, DOCK_MIN_WIDTH, DOCK_SHARE_MAX, DOCK_SHARE_MIN, DetailView, ModeSwitch, Rect,
         ReposButton, ReposView,
     },
-    doc_review::{DocFile, Failed},
+    doc_review::{self, DocFile, Failed},
     md_preview::{self, NO_EXTENSION},
     review::{self, Review},
-    worktree_diff::{DRAFT_OPEN, DocOf, Env, WorktreeDiff},
+    worktree_diff::{ChatPlanOf, DRAFT_OPEN, DocOf, Env, WorktreeDiff},
 };
 
 /// How far, in lines, the review may move before its page follows.
@@ -128,7 +129,12 @@ impl DocMode {
     /// as it is reviewed. Too narrow, no page starts unseen.
     pub fn opens_on(file: DocFile, wide: bool) -> DocMode {
         match file {
-            DocFile::Stage(_) | DocFile::FixPlan | DocFile::ConflictPlan(_) if wide => {
+            DocFile::Stage(_)
+            | DocFile::FixPlan
+            | DocFile::ConflictPlan(_)
+            | DocFile::ChatPlan(_)
+                if wide =>
+            {
                 DocMode::Split
             }
             _ => Self::default_for(file),
@@ -510,8 +516,35 @@ impl Gerdr {
     /// the pane's workspace, to comment on and send back
     /// (`chat::plan_review`): one already open as it stands.
     pub(crate) fn open_chat_plan(&mut self, pane_id: &str, item_id: &str) {
-        // Wave A fills this in.
-        let _ = (pane_id, item_id);
+        let Some(text) = self.chat_plan_text(pane_id, item_id) else {
+            return self.show_warning("That plan is gone from the chat".into());
+        };
+        let Some((w, _)) = self.herdr_pane_place(pane_id) else {
+            return self.show_warning("That agent's pane is gone".into());
+        };
+        let key = plan_review::key(item_id);
+        let file = DocFile::ChatPlan(key);
+        let open = self.doc_tab_in(w, file);
+        if open.is_none()
+            && let Err(err) = plan_review::snapshot(key, &text)
+        {
+            tracing::warn!("keeping plan {item_id} of pane {pane_id}: {err}");
+            return self.show_error(format!("Couldn't keep a copy of the plan: {err}"));
+        }
+        self.close_panels_for_tab();
+        let t = open.unwrap_or_else(|| {
+            let chat = ChatPlanOf {
+                pane_id: pane_id.into(),
+                item_id: item_id.into(),
+                waits: self.plan_ask_waits(pane_id, item_id),
+            };
+            let project = self.project.clone().unwrap_or_default();
+            let doc = doc_review::chat_plan_doc(&project, key, chat, &text);
+            self.insert_doc_tab(w, doc, text, DocMode::opens_on(file, self.doc_wide()))
+        });
+        self.switch_workspace(w);
+        self.switch_tab(t);
+        self.refresh_pointer_focus();
     }
 
     /// The panels a tab coming to show would sit under close, the
@@ -581,6 +614,11 @@ impl Gerdr {
     /// Bring back the file's tab `saved` as tab `t` of workspace `w`, if
     /// its feature and file are still there. Whether it came.
     pub(crate) fn restore_doc_tab(&mut self, w: usize, saved: DocRecord, t: usize) -> bool {
+        // A chat's plan isn't brought back: its card opens it again, its
+        // comments kept.
+        if let DocFile::ChatPlan(_) = saved.file {
+            return false;
+        }
         let (Some(project), Some(slug)) = (
             self.project.clone(),
             self.workspace_feature(w).map(|f| f.slug.clone()),
@@ -849,6 +887,15 @@ mod tests {
             DocMode::opens_on(DocFile::Evidence, false),
             DocMode::Preview
         );
+    }
+
+    #[test]
+    fn a_chat_plan_has_review_and_split_and_opens_beside_its_page() {
+        let plan = DocFile::ChatPlan(7);
+        assert_eq!(DocMode::choices(plan), [DocMode::Review, DocMode::Split]);
+        assert_eq!(DocMode::opens_on(plan, true), DocMode::Split);
+        assert_eq!(DocMode::opens_on(plan, false), DocMode::Review);
+        assert_eq!(DocMode::Preview.of(plan), DocMode::Review);
     }
 
     #[test]

@@ -157,6 +157,9 @@ pub enum Then {
     MakeFixes { project: String, slug: String },
     /// Drop this feature's open fix plan (see `Gerdr::drop_fix_plan`).
     DropFixPlan { project: String, slug: String },
+    /// Allow the plan of this chat item its pane's agent waits on, its
+    /// review comments deleted unsent (see `Gerdr::allow_chat_plan_now`).
+    AllowChatPlan { pane_id: String, item_id: String },
     ApproveStage {
         project: String,
         slug: String,
@@ -250,6 +253,7 @@ impl Then {
                 | Then::FixHere { .. }
                 | Then::MakeFixes { .. }
                 | Then::ApproveStage { .. }
+                | Then::AllowChatPlan { .. }
                 | Then::ReopenStage { .. }
                 | Then::SkipPlanReview { .. }
                 | Then::ChangeDecisions { .. }
@@ -786,6 +790,19 @@ impl Gerdr {
         self.ask(title, body, "Approve", then);
     }
 
+    /// Ask before allowing the plan of chat item `item_id` while `count`
+    /// review comments on it are unsent (see `Gerdr::doc_approve`).
+    pub fn ask_allow_plan_unsent(&mut self, pane_id: String, item_id: String, count: usize) {
+        let title = match count {
+            1 => "Approve with 1 comment unsent?".to_owned(),
+            n => format!("Approve with {n} comments unsent?"),
+        };
+        let body = "The comments on the plan are deleted, not sent to its agent. \
+                    Send back sends them.";
+        let then = Then::AllowChatPlan { pane_id, item_id };
+        self.ask(title, body.into(), "Approve", then);
+    }
+
     /// Ask before making the fixes of feature `slug`'s plan while `count`
     /// review comments on it are unsent (see `Gerdr::doc_approve`).
     /// `back`: whether Send back can still send them; not once the agent
@@ -966,6 +983,9 @@ impl Gerdr {
             Then::StopResolving { project, slug } => self.stop_resolving(&project, &slug),
             Then::MakeFixes { project, slug } => self.make_fixes_now(&project, &slug),
             Then::DropFixPlan { project, slug } => self.drop_fix_plan(&project, &slug),
+            Then::AllowChatPlan { pane_id, item_id } => {
+                self.allow_chat_plan_now(&pane_id, &item_id)
+            }
             Then::ApproveStage {
                 project,
                 slug,

@@ -42,7 +42,7 @@ use crate::{
     features::{Job, lock_why},
     review::{self, Review},
     toast::Level,
-    worktree_diff::{DocOf, EVIDENCE_READ_ONLY},
+    worktree_diff::{ChatPlanOf, DocOf, EVIDENCE_READ_ONLY},
 };
 
 /// Which of a feature's files a review shows.
@@ -133,8 +133,10 @@ impl DocFile {
             DocFile::DraftChanges(stage, _) => artifacts::name(stage),
             DocFile::Suggestions => artifacts::name(Stage::Plan),
             DocFile::Findings => Some(review_import::FINDINGS),
+            // Its snapshot is named by its key: its comments say plan.md.
+            DocFile::ChatPlan(_) => Some(CHAT_PLAN_NAME),
             // Named by its turn or its number: its path says it.
-            DocFile::ConflictPlan(_) | DocFile::Research(_) | DocFile::ChatPlan(_) => None,
+            DocFile::ConflictPlan(_) | DocFile::Research(_) => None,
         }
     }
 
@@ -242,6 +244,53 @@ impl DocFile {
 
 /// Why a chat's plan can't be edited in its review.
 pub const CHAT_PLAN_READ_ONLY: &str = "A chat's plan takes comments only";
+/// What a chat's plan is called in its review and its comments.
+const CHAT_PLAN_NAME: &str = "plan.md";
+/// What Approve does to a chat's plan nothing waits on: it refuses.
+pub const CHAT_PLAN_NOTHING_WAITS: &str =
+    "Nothing waits on this plan: Send back sends your comments";
+
+/// The header's state of a chat's plan whose agent `waits` on it or not:
+/// what Approve and Send back come to.
+pub fn chat_plan_state(waits: bool) -> String {
+    match waits {
+        true => "waiting for your answer".into(),
+        false => "comments go to the agent as a message".into(),
+    }
+}
+
+/// The title of a chat's plan `text`: its first heading, else "Plan".
+pub fn chat_plan_title(text: &str) -> String {
+    (text.lines())
+        .find(|line| line.starts_with('#'))
+        .map(|line| line.trim_start_matches('#').trim())
+        .filter(|title| !title.is_empty())
+        .unwrap_or("Plan")
+        .to_owned()
+}
+
+/// The review of plan item `chat.item_id` of a chat in `project`'s
+/// workspace, its snapshot at `key`: only commented on, never closed, of no
+/// feature.
+pub fn chat_plan_doc(project: &str, key: u64, chat: ChatPlanOf, text: &str) -> DocOf {
+    let file = DocFile::ChatPlan(key);
+    DocOf {
+        project: project.to_owned(),
+        slug: String::new(),
+        file,
+        path: crate::chat::plan_review::path(key),
+        comments: crate::chat::plan_review::comments_path(key),
+        title: chat_plan_title(text),
+        state: chat_plan_state(chat.waits),
+        text: None,
+        locked: Some(CHAT_PLAN_READ_ONLY),
+        standing: Standing::Open,
+        current: None,
+        base: None,
+        suggestions: None,
+        chat: Some(chat),
+    }
+}
 
 /// Why a plan of conflicts no agent waits on any more takes no comment.
 pub const CONFLICT_PLAN_PAST: &str = "This plan of the conflicts is past: only read";
@@ -726,6 +775,18 @@ impl Gerdr {
         let Some(doc) = self.doc_of() else {
             return;
         };
+        // A chat's plan stands by its agent's ask, not a feature.
+        if let Some(chat) = &doc.chat {
+            let waits = self.plan_ask_waits(&chat.pane_id, &chat.item_id);
+            if let Some(doc) = self.wd_mut().and_then(|wd| wd.doc.as_mut())
+                && let Some(chat) = doc.chat.as_mut()
+                && chat.waits != waits
+            {
+                chat.waits = waits;
+                doc.state = chat_plan_state(waits);
+            }
+            return;
+        }
         let stands = self.doc_stands(&doc.project, &doc.slug, doc.file);
         if let Some(doc) = self.wd_mut().and_then(|wd| wd.doc.as_mut()) {
             doc.state = stands.state;
@@ -742,6 +803,10 @@ impl Gerdr {
         slug: &str,
         file: DocFile,
     ) -> Result<(DocOf, String), Failed> {
+        // Of no feature: it opens from its chat (`open_chat_plan`).
+        if let DocFile::ChatPlan(_) = file {
+            return Err(Failed::Warning("A chat's plan opens from its chat".into()));
+        }
         let dir = store::dir(None, project, slug);
         let Some(path) = file.path(&dir) else {
             let stage = file.stage().label();
@@ -921,6 +986,17 @@ impl Gerdr {
         let Some(doc) = wd.doc.clone() else {
             return;
         };
+        // A chat's plan: allowed as the chat's Allow, while its agent waits.
+        if let Some(chat) = doc.chat {
+            if !self.plan_ask_waits(&chat.pane_id, &chat.item_id) {
+                return self.show_warning(CHAT_PLAN_NOTHING_WAITS.into());
+            }
+            let count = wd.diff.review.comments.len();
+            if count > 0 {
+                return self.ask_allow_plan_unsent(chat.pane_id, chat.item_id, count);
+            }
+            return self.allow_chat_plan_now(&chat.pane_id, &chat.item_id);
+        }
         if doc.file == DocFile::FixPlan {
             let count = wd.diff.review.comments.len();
             if count > 0 {
@@ -939,6 +1015,27 @@ impl Gerdr {
             return self.approve_conflict_plan(&doc.project, &doc.slug, doc.file);
         }
         self.approve_doc(&doc.project, &doc.slug, doc.file.stage());
+    }
+
+    /// Allow the plan of item `item_id` pane `pane_id`'s agent waits on,
+    /// from its review: its comments deleted, the pane's tab shown.
+    pub(crate) fn allow_chat_plan_now(&mut self, pane_id: &str, item_id: &str) {
+        if !self.plan_ask_waits(pane_id, item_id) {
+            return self.show_warning(CHAT_PLAN_NOTHING_WAITS.into());
+        }
+        self.allow_plan(pane_id);
+        self.chat_plan_done(item_id);
+    }
+
+    /// The comments on plan item `item_id` went to its agent, or were let
+    /// go: deleted, as a feature's file's are once done with (`doc_done`).
+    fn chat_plan_done(&mut self, item_id: &str) {
+        let file = DocFile::ChatPlan(crate::chat::plan_review::key(item_id));
+        let project = (self.workspaces.iter().flat_map(|ws| &ws.tabs))
+            .filter_map(|tab| tab.review()?.wd.doc.as_ref())
+            .find(|d| d.file == file)
+            .map(|d| d.project.clone());
+        self.doc_done(&project.unwrap_or_default(), "", file);
     }
 
     /// Approve `stage`'s file of feature `slug`, from its review or from
@@ -1021,6 +1118,17 @@ impl Gerdr {
         let Some(doc) = self.doc_of().cloned() else {
             return;
         };
+        // A chat's plan: to its agent, as why its ask is denied or a line.
+        // One refused keeps the comments.
+        if let Some(chat) = doc.chat {
+            return match self.send_plan_back(&chat.pane_id, &chat.item_id, &comments) {
+                Ok(()) => self.chat_plan_done(&chat.item_id),
+                Err(why) => {
+                    tracing::warn!("sending plan {} back: {why}", chat.item_id);
+                    self.show_error(format!("Couldn't send the comments: {why}"))
+                }
+            };
+        }
         let sent = (self.wd())
             .map(|wd| drafts_comments(&wd.diff.review))
             .unwrap_or_default();
@@ -1039,6 +1147,10 @@ impl Gerdr {
         comments: String,
         sent: Vec<crate::feature::fix_round::Asked>,
     ) {
+        // Of no feature: its review sends it (`doc_send_back`).
+        if let DocFile::ChatPlan(_) = file {
+            return;
+        }
         if file == DocFile::FixPlan {
             return self.fix_plan_send_back(project, slug, comments);
         }
@@ -1083,8 +1195,17 @@ impl Gerdr {
             }
         }
         if self.doc_of().is_some_and(is_it) {
+            let chat = self.doc_of().and_then(|d| d.chat.clone());
             self.doc_review_read();
-            self.show_feature_tab(project, slug);
+            // A chat's plan gives way to its agent's pane.
+            match chat {
+                Some(chat) => {
+                    self.show_herdr_pane(&chat.pane_id);
+                }
+                None => {
+                    self.show_feature_tab(project, slug);
+                }
+            }
         }
     }
 
@@ -1305,6 +1426,30 @@ mod tests {
         assert_eq!(locked(Some(&f)), None);
         f.status = Status::Abandoned;
         assert_eq!(locked(Some(&f)), Some("The feature is closed"));
+    }
+
+    #[test]
+    fn a_chat_plan_is_of_no_feature_and_says_what_its_comments_come_to() {
+        let chat = |waits| ChatPlanOf {
+            pane_id: "w1-1".into(),
+            item_id: "toolu_1".into(),
+            waits,
+        };
+        let doc = chat_plan_doc("p", 7, chat(false), "Intro\n## Cache the tokens\n");
+        assert_eq!(doc.file, DocFile::ChatPlan(7));
+        assert_eq!((doc.project.as_str(), doc.slug.as_str()), ("p", ""));
+        assert_eq!(doc.title, "Cache the tokens");
+        assert_eq!(doc.state, "comments go to the agent as a message");
+        assert_eq!(doc.locked, Some(CHAT_PLAN_READ_ONLY));
+        assert_eq!(doc.standing, Standing::Open);
+        assert_eq!(doc.path, crate::chat::plan_review::path(7));
+        assert_eq!(doc.comments, crate::chat::plan_review::comments_path(7));
+        assert_eq!(doc.name(), "plan.md");
+        assert!(!doc.only_read() && !doc.closed());
+        let waiting = chat_plan_doc("p", 7, chat(true), "");
+        assert_eq!(waiting.state, "waiting for your answer");
+        assert_eq!(waiting.title, "Plan");
+        assert_eq!(chat_plan_title("#\n# \n"), "Plan");
     }
 
     #[test]

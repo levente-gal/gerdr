@@ -153,6 +153,9 @@ pub struct DocOf {
 pub struct ChatPlanOf {
     pub pane_id: String,
     pub item_id: String,
+    /// Its agent waits on the user's answer to it: Approve allows it, as
+    /// the chat's Allow does. Kept current with its state (`doc_stand`).
+    pub waits: bool,
 }
 
 /// What Plan review's suggestions flagged on the plan are called: the
@@ -329,6 +332,12 @@ const KEYS: &[Binding<WorktreeDiff, WtKey>] = &[
     },
     Binding {
         chord: APPROVE_KEY,
+        does: |w| w.chat_plan().is_some().then_some(WtKey::Approve),
+        footer: true,
+        f1: "allow the plan the agent waits on",
+    },
+    Binding {
+        chord: APPROVE_KEY,
         does: |w| w.doc.is_some().then_some(WtKey::Approve),
         footer: true,
         f1: "approve the file as it is",
@@ -371,6 +380,12 @@ const KEYS: &[Binding<WorktreeDiff, WtKey>] = &[
         does: |w| (w.doc.is_some() && w.suggestions().is_some()).then_some(WtKey::SendBack),
         footer: true,
         f1: "ask the reviewer about your comments",
+    },
+    Binding {
+        chord: SEND_BACK_KEY,
+        does: |w| w.chat_plan().is_some().then_some(WtKey::SendBack),
+        footer: true,
+        f1: "send your comments to the agent",
     },
     Binding {
         chord: SEND_BACK_KEY,
@@ -1078,6 +1093,11 @@ impl WorktreeDiff {
             .is_some_and(|d| d.file == DocFile::FixPlan)
     }
 
+    /// The chat's plan card it shows, if it shows one (`DocFile::ChatPlan`).
+    fn chat_plan(&self) -> Option<&ChatPlanOf> {
+        self.doc.as_ref()?.chat.as_ref()
+    }
+
     /// Whether its lines take no comments: a commit's, the evidence, a
     /// file whose stage is done.
     fn read_only(&self) -> bool {
@@ -1634,6 +1654,8 @@ impl WorktreeDiff {
             },
             false => hint(ReposButton::Approve, APPROVE_KEY),
         };
+        // A chat's plan is approved only while its agent waits on it.
+        let go = (self.chat_plan()).is_none_or(|c| c.waits).then_some(go);
         view.title_buttons.push(hint(
             ReposButton::CommentFile,
             key_name(ReposButton::CommentFile),
@@ -1642,8 +1664,10 @@ impl WorktreeDiff {
         // is written, else Approve.
         let back = (!stopped).then(|| hint(ReposButton::SendBack, SEND_BACK_KEY));
         match back {
-            Some(back) if self.diff.review.own() > 0 => view.title_buttons.extend([go, back]),
-            back => view.title_buttons.extend(back.into_iter().chain([go])),
+            Some(back) if self.diff.review.own() > 0 => {
+                view.title_buttons.extend(go.into_iter().chain([back]))
+            }
+            back => view.title_buttons.extend(back.into_iter().chain(go)),
         }
     }
 
@@ -1799,7 +1823,10 @@ impl WorktreeDiff {
             buttons.push(B::NextComment);
         }
         if self.reviewed() {
-            buttons.push(B::Approve);
+            // As on the header: a chat's plan nothing waits on has no Approve.
+            if self.chat_plan().is_none_or(|c| c.waits) {
+                buttons.push(B::Approve);
+            }
             if flagged.is_none_or(|of| of.asks()) {
                 buttons.push(B::SendBack);
             }
@@ -2691,8 +2718,15 @@ impl crate::Gerdr {
                 let of = self.wd().and_then(|wd| wd.doc.clone());
                 let writing = self.wd().is_some_and(|wd| wd.diff.editing.is_some());
                 let id = self.tab().map(|tab| tab.id).filter(|_| !writing);
-                if let Some(of) = of {
-                    self.show_feature_tab(&of.project, &of.slug);
+                // A chat's plan: back to the tab of its agent's pane.
+                match of.as_ref().map(|of| (of, of.chat.as_ref())) {
+                    Some((_, Some(chat))) => {
+                        self.show_herdr_pane(&chat.pane_id);
+                    }
+                    Some((of, None)) => {
+                        self.show_feature_tab(&of.project, &of.slug);
+                    }
+                    None => {}
                 }
                 if let Some((w, t)) = id.and_then(|id| self.tab_place(id)) {
                     self.close_tab_in(w, t);
@@ -2724,8 +2758,9 @@ impl crate::Gerdr {
                 None
             }
             Done::Reopen => {
+                // A chat's plan is never closed: nothing to reopen.
                 let of = self.wd().and_then(|wd| wd.doc.clone());
-                if let Some(of) = of {
+                if let Some(of) = of.filter(|of| of.chat.is_none()) {
                     self.reopen_stage(&of.project, &of.slug, of.file.stage());
                 } else if let Some(fe) = self.feature_of() {
                     let (project, slug) = (fe.project.clone(), fe.slug.clone());
@@ -4254,6 +4289,53 @@ pub(crate) mod tests {
                 .iter()
                 .all(|(_, what, _)| !what.contains("delete from the file"))
         );
+    }
+
+    /// A chat's plan under review, its agent waiting on it or not.
+    fn chat_plan(waits: bool) -> WorktreeDiff {
+        let chat = ChatPlanOf {
+            pane_id: "w1-1".into(),
+            item_id: "toolu_1".into(),
+            waits,
+        };
+        let text = "# Cache the tokens\nStep one.\n";
+        let doc = crate::doc_review::chat_plan_doc("p", 7, chat, text);
+        let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
+        wd.set_doc(Ok(text.into()), ENV);
+        wd
+    }
+
+    #[test]
+    fn a_chat_plan_takes_comments_never_edits_and_approves_only_while_it_waits() {
+        let buttons = |wd: &WorktreeDiff| -> Vec<ReposButton> {
+            let view = wd.view(ENV);
+            view.title_buttons.iter().map(|h| h.button).collect()
+        };
+        let mut wd = chat_plan(false);
+        assert_eq!(wd.heading(), "Plan · plan.md");
+        assert_eq!(
+            wd.summary(),
+            "\u{201c}Cache the tokens\u{201d} · comments go to the agent as a message"
+        );
+        use ReposButton::{Approve, CommentFile, SendBack};
+        assert_eq!(buttons(&wd), [CommentFile, SendBack]);
+        assert!(wd.hints().iter().all(|h| h.button != Approve));
+        let key = |wd: &mut WorktreeDiff, sym: Keysym| wd.key(&none(), sym, sym, ENV);
+        let why = crate::doc_review::CHAT_PLAN_READ_ONLY;
+        let why = Some(Done::Diff(Outcome::Notice(why)));
+        let row = texts(&wd).iter().position(|t| t == "Step one.").unwrap();
+        wd.click(ReposHit::DiffRow(row), ENV);
+        key(&mut wd, Keysym::d);
+        assert_eq!(key(&mut wd, Keysym::d), why);
+        assert_eq!(key(&mut wd, Keysym::x), why);
+        // Its keys say what they do to a chat's plan.
+        let help = wd.help_lines();
+        let says = |text: &str| help.iter().any(|(_, what, _)| what == text);
+        assert!(says("allow the plan the agent waits on"), "{help:?}");
+        assert!(says("send your comments to the agent"), "{help:?}");
+        assert!(!says("approve the file as it is"), "{help:?}");
+        let wd = chat_plan(true);
+        assert_eq!(buttons(&wd), [CommentFile, SendBack, Approve]);
     }
 
     /// The review of the brief with its stage done, the feature at Plan.
