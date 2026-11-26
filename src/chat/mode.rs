@@ -45,21 +45,6 @@ pub fn shown(kind: AgentKind, rows: &[&str]) -> Option<String> {
 /// What Codex and Cursor say after their mode.
 const CYCLE: &str = "(shift+tab to cycle)";
 
-/// The mode Claude Code's `rows` (as `shown` gives them) show.
-pub(crate) fn claude_shown(rows: &[&str]) -> Option<String> {
-    rows.iter().take(3).find_map(|row| {
-        [
-            ("plan mode on", "Plan"),
-            ("accept edits on", "Edits"),
-            ("auto mode on", "Auto"),
-            ("manual mode on", "Manual"),
-            ("bypass permissions on", "Bypass"),
-        ]
-        .into_iter()
-        .find_map(|(says, mode)| row.contains(says).then(|| mode.to_owned()))
-    })
-}
-
 /// OpenCode's: the agent's name heads the line under the prompt, "Build ·
 /// model".
 pub(crate) fn opencode_shown(rows: &[&str]) -> Option<String> {

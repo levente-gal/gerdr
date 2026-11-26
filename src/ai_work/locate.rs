@@ -21,7 +21,7 @@ const CODEX_BEFORE: u64 = 60;
 /// A Codex chat found by time began this long after its run at most.
 const CODEX_AFTER: u64 = 600;
 /// The most of a rollout's first line read: its `session_meta`.
-const FIRST_LINE: u64 = 1 << 20;
+pub(crate) const FIRST_LINE: u64 = 1 << 20;
 
 /// When a chat found by folder and time began: from `from` to `to`, the
 /// one begun nearest `near` picked.
@@ -172,7 +172,7 @@ pub fn plain_id(id: &str) -> bool {
 
 /// The files under `base`'s folders `subs`, by their path from `base`, in
 /// order. Links aren't followed.
-fn files_under(base: &Path, subs: &[&str]) -> Vec<(String, PathBuf)> {
+pub(crate) fn files_under(base: &Path, subs: &[&str]) -> Vec<(String, PathBuf)> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -199,7 +199,7 @@ fn files_under(base: &Path, subs: &[&str]) -> Vec<(String, PathBuf)> {
     files
 }
 
-fn found(agent: AgentKind, id: &str, main: PathBuf, form: Form) -> Found {
+pub(crate) fn found(agent: AgentKind, id: &str, main: PathBuf, form: Form) -> Found {
     Found {
         agent,
         id: id.to_owned(),
@@ -208,21 +208,6 @@ fn found(agent: AgentKind, id: &str, main: PathBuf, form: Form) -> Found {
         form,
         rows: Vec::new(),
     }
-}
-
-/// Claude Code chat `id`: `projects/<folder>/<id>.jsonl` of a config
-/// folder, and its `<id>/tool-results` and `<id>/subagents`.
-pub fn claude(homes: &Homes, id: &str) -> Option<Found> {
-    let name = format!("{id}.jsonl");
-    homes.claude.iter().find_map(|config| {
-        let folders = std::fs::read_dir(config.join("projects")).ok()?;
-        let main = (folders.flatten())
-            .map(|dir| dir.path().join(&name))
-            .find(|path| path.is_file())?;
-        let mut chat = found(AgentKind::Claude, id, main.clone(), Form::Lines);
-        chat.extra = files_under(&main.with_extension(""), &["tool-results", "subagents"]);
-        Some(chat)
-    })
 }
 
 /// What a Cursor chat's folder holds beside its `store.db`.
@@ -244,7 +229,7 @@ pub(crate) fn cursor(homes: &Homes, id: &str) -> Option<Found> {
 }
 
 /// The folders of `dir`, by name in order.
-fn subdirs(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn subdirs(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -344,68 +329,6 @@ pub(crate) fn codex_by_time(
     )?;
     let (main, meta) = &metas[at];
     Some(found(AgentKind::Codex, &meta.id, main.clone(), Form::Lines))
-}
-
-/// pi's sessions under `sessions`, with when each began by its name
-/// (`<yyyy-mm-ddThh-mm-ss-mmmZ>_<id>.jsonl`), in a folder per working
-/// folder.
-fn pi_sessions(sessions: &Path) -> Vec<(PathBuf, u64)> {
-    (subdirs(sessions).iter())
-        .flat_map(|dir| std::fs::read_dir(dir).into_iter().flatten().flatten())
-        .filter_map(|entry| {
-            let path = entry.path();
-            let name = path.file_name()?.to_str()?;
-            let (time, _) = name.strip_suffix(".jsonl")?.split_once('_')?;
-            // `2026-11-24T19-27-30-349Z` as ISO: its clock's dashes as colons.
-            let (date, clock) = time.split_once('T')?;
-            let mut parts = clock.trim_end_matches('Z').split('-');
-            let (h, m, s) = (parts.next()?, parts.next()?, parts.next()?);
-            let at = super::usage::iso_ms(&format!("{date}T{h}:{m}:{s}Z"))? / 1000;
-            Some((path, at))
-        })
-        .collect()
-}
-
-/// pi chat `id`: `sessions/--<folder>--/<time>_<id>.jsonl`.
-pub(crate) fn pi_by_id(sessions: &Path, id: &str) -> Option<Found> {
-    let end = format!("_{id}.jsonl");
-    let (main, _) = (pi_sessions(sessions).into_iter())
-        .find(|(path, _)| path.to_str().is_some_and(|p| p.ends_with(&end)))?;
-    Some(found(AgentKind::Pi, id, main, Form::Lines))
-}
-
-/// The pi chat of `chat`'s run, by folder and time: its first line says
-/// where it runs (`{"type":"session","id","timestamp","cwd"}`).
-pub(crate) fn pi_by_time(
-    sessions: &Path,
-    chat: &Chat,
-    claimed: &HashSet<String>,
-    span: Span,
-) -> Option<Found> {
-    let metas: Vec<(PathBuf, Begun)> = (pi_sessions(sessions).into_iter())
-        .filter(|(_, at)| (span.from..=span.to).contains(at))
-        .filter_map(|(path, _)| {
-            let head: Value =
-                serde_json::from_str(first_line(&path, FIRST_LINE, false)?.trim()).ok()?;
-            if head["type"] != "session" {
-                return None;
-            }
-            let meta = Begun {
-                id: head["id"].as_str()?.to_owned(),
-                cwd: PathBuf::from(head["cwd"].as_str()?),
-                started: super::usage::iso_ms(head["timestamp"].as_str()?)? / 1000,
-            };
-            Some((path, meta))
-        })
-        .collect();
-    let at = nearest(
-        chat,
-        span,
-        claimed,
-        (metas.iter().enumerate()).map(|(i, (_, m))| (i, m)),
-    )?;
-    let (main, meta) = &metas[at];
-    plain_id(&meta.id).then(|| found(AgentKind::Pi, &meta.id, main.clone(), Form::Lines))
 }
 
 /// The Antigravity CLI's transcript of conversation `id`, the whole one:
@@ -541,7 +464,11 @@ fn cell(name: &str, value: rusqlite::types::ValueRef) -> Value {
 }
 
 /// The rows `sql` gives for `arg`, each as a JSON object by column.
-fn rows_json(conn: &rusqlite::Connection, sql: &str, arg: &str) -> rusqlite::Result<Vec<Value>> {
+pub(crate) fn rows_json(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    arg: &str,
+) -> rusqlite::Result<Vec<Value>> {
     rows_of(conn, sql, [arg])
 }
 
@@ -564,13 +491,13 @@ pub(crate) fn rows_of(
 }
 
 /// The columns of table `table`; none when it isn't there.
-fn columns(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<Vec<String>> {
+pub(crate) fn columns(conn: &rusqlite::Connection, table: &str) -> rusqlite::Result<Vec<String>> {
     let mut query = conn.prepare("SELECT name FROM pragma_table_info(?1)")?;
     let names = query.query_map([table], |row| row.get(0))?;
     names.collect()
 }
 
-fn pretty(value: &Value) -> Vec<u8> {
+pub(crate) fn pretty(value: &Value) -> Vec<u8> {
     serde_json::to_vec_pretty(value).unwrap_or_default()
 }
 
@@ -694,87 +621,6 @@ fn opencode_session(
         .min_by_key(|row| row["time_created"].as_u64().unwrap_or(0).abs_diff(near)))
 }
 
-/// A T3 Code thread's rows: the thread, its runs, its agents' threads.
-type T3Rows = (Vec<Value>, Vec<Value>, Vec<Value>);
-
-/// T3 Code thread `id`: its row, runs and agent threads, then the chat of
-/// the agent it ran (Claude, Codex or Cursor) when that is found.
-pub(crate) fn t3(homes: &Homes, chat: &Chat, id: &str) -> Result<Option<Found>, String> {
-    let Some(home) = &homes.t3 else {
-        return Ok(None);
-    };
-    let db = home.join(crate::t3_agents::DB);
-    if !db.is_file() {
-        return Ok(None);
-    }
-    let read = || -> rusqlite::Result<Option<T3Rows>> {
-        let conn = crate::t3_agents::open_read_only(&db)?;
-        conn.busy_timeout(std::time::Duration::from_secs(2))?;
-        let threads = rows_json(
-            &conn,
-            "SELECT * FROM orchestration_v2_projection_threads WHERE thread_id = ?1",
-            id,
-        )?;
-        if threads.is_empty() {
-            return Ok(None);
-        }
-        let runs = rows_json(
-            &conn,
-            "SELECT * FROM orchestration_v2_projection_runs WHERE thread_id = ?1 ORDER BY ordinal",
-            id,
-        )?;
-        // Newer than the schema gerdr reads threads by: missing is no error.
-        let agents = rows_json(
-            &conn,
-            "SELECT * FROM orchestration_v2_projection_provider_threads WHERE thread_id = ?1 \
-             ORDER BY updated_at",
-            id,
-        )
-        .unwrap_or_default();
-        Ok(Some((threads, runs, agents)))
-    };
-    let Some((threads, runs, agents)) =
-        read().map_err(|err| format!("reading {}: {err}", db.display()))?
-    else {
-        return Ok(None);
-    };
-    let rows = vec![
-        ("t3/thread.json".to_owned(), pretty(&Value::Array(threads))),
-        ("t3/runs.json".to_owned(), pretty(&Value::Array(runs))),
-        (
-            "t3/agent-threads.json".to_owned(),
-            pretty(&Value::Array(agents.clone())),
-        ),
-    ];
-    let native = agents.iter().rev().find_map(|row| {
-        let native = &row["payload_json"]["nativeThreadRef"];
-        let driver = native["driver"].as_str().or(row["provider"].as_str())?;
-        let native_id = native["nativeId"].as_str()?;
-        let agent = match AgentKind::of(driver) {
-            AgentKind::Claude => (AgentKind::Claude, native_id),
-            AgentKind::Codex => (AgentKind::Codex, native_id),
-            AgentKind::Cursor => (AgentKind::Cursor, native_id.trim_start_matches("agent-")),
-            _ => return None,
-        };
-        plain_id(agent.1).then(|| (agent.0, agent.1.to_owned()))
-    });
-    let theirs = native.and_then(|(agent, native_id)| {
-        let inner = Chat {
-            agent,
-            id: Some(native_id),
-            ..chat.clone()
-        };
-        // The thread's rows are kept all the same.
-        (find(homes, &inner, &HashSet::new()))
-            .inspect_err(|err| tracing::warn!("finding the chat of T3 thread {id}: {err}"))
-            .ok()
-            .flatten()
-    });
-    let mut kept = theirs.unwrap_or_else(|| found(AgentKind::T3, id, db.clone(), Form::Nothing));
-    kept.rows.extend(rows);
-    Ok(Some(kept))
-}
-
 /// One file a script found there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Remote {
@@ -813,26 +659,6 @@ pub fn script(chat: &Chat) -> Option<String> {
     }
     let body = crate::integrations::of(chat.agent).remote_script(chat, id)?;
     Some(format!("{SAY}{body}exit 0\n"))
-}
-
-/// The body of `script` for Claude Code chat `id`.
-pub(crate) fn claude_script(id: &str) -> String {
-    format!(
-        r#"id='{id}'
-for d in "${{CLAUDE_CONFIG_DIR:-$HOME/.claude}}" "$HOME/.claude"; do
-  for f in "$d"/projects/*/"$id.jsonl"; do
-    [ -f "$f" ] || continue
-    say M '' "$f"
-    b="${{f%.jsonl}}"
-    for s in tool-results subagents; do
-      [ -d "$b/$s" ] || continue
-      find "$b/$s" -type f | while IFS= read -r x; do say X "${{x#"$b/"}}" "$x"; done
-    done
-    exit 0
-  done
-done
-"#
-    )
 }
 
 /// The body of `script` for Cursor chat `id`.
@@ -1025,11 +851,16 @@ fn iso_secs(text: &str) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{ai_work::write::tests::scratch, feature::Stage};
 
-    fn chat(agent: AgentKind, id: Option<&str>, started: u64, folders: &[&Path]) -> Chat {
+    pub(crate) fn chat(
+        agent: AgentKind,
+        id: Option<&str>,
+        started: u64,
+        folders: &[&Path],
+    ) -> Chat {
         Chat {
             agent,
             id: id.map(str::to_owned),
@@ -1041,7 +872,7 @@ mod tests {
         }
     }
 
-    fn put(path: &Path, text: &str) {
+    pub(crate) fn put(path: &Path, text: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
@@ -1132,28 +963,6 @@ mod tests {
             codex_days(1_787_741_925),
             vec!["2026/08/25", "2026/08/26", "2026/08/27"]
         );
-    }
-
-    #[test]
-    fn a_claude_chat_is_found_with_its_extras() {
-        let home = scratch("locate-claude");
-        let homes = Homes::under(&home);
-        let folder = home.join(".claude/projects/-work-app");
-        put(&folder.join("abc-1.jsonl"), "{}\n");
-        put(&folder.join("abc-1/tool-results/t1.txt"), "out");
-        put(&folder.join("abc-1/subagents/agent-x.jsonl"), "{}\n");
-        put(&folder.join("abc-1/other/skip.txt"), "no");
-        put(&home.join(".claude/projects/-other/zzz.jsonl"), "{}\n");
-        let c = chat(AgentKind::Claude, Some("abc-1"), 0, &[]);
-        let f = find(&homes, &c, &HashSet::new()).unwrap().unwrap();
-        assert_eq!(f.main, folder.join("abc-1.jsonl"));
-        assert_eq!(f.form, Form::Lines);
-        let rels: Vec<&str> = f.extra.iter().map(|(rel, _)| rel.as_str()).collect();
-        assert_eq!(rels, ["subagents/agent-x.jsonl", "tool-results/t1.txt"]);
-        let gone = chat(AgentKind::Claude, Some("nope"), 0, &[]);
-        assert_eq!(find(&homes, &gone, &HashSet::new()).unwrap(), None);
-        let bad = chat(AgentKind::Claude, Some("../x"), 0, &[]);
-        assert!(find(&homes, &bad, &HashSet::new()).is_err());
     }
 
     #[test]
@@ -1454,53 +1263,5 @@ mod tests {
             find(&homes, &c, &HashSet::new()).unwrap().unwrap().id,
             "ses_new"
         );
-    }
-
-    #[test]
-    fn a_t3_thread_leads_to_its_claude_chat() {
-        let home = scratch("locate-t3");
-        let mut homes = Homes::under(&home);
-        let t3 = home.join(".t3");
-        homes.t3 = Some(t3.clone());
-        let db = t3.join(crate::t3_agents::DB);
-        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-        let conn = rusqlite::Connection::open(&db).unwrap();
-        conn.execute_batch(include_str!("../t3_schema.sql"))
-            .unwrap();
-        conn.execute_batch(
-            "INSERT INTO orchestration_v2_projection_threads (thread_id, project_id, title, \
-               default_provider, runtime_mode, interaction_mode, created_at, updated_at, payload_json) \
-             VALUES ('th-1', 'p', 'T', 'claudeAgent', 'full', 'default', 'a', 'b', '{}');
-             INSERT INTO orchestration_v2_projection_runs (run_id, thread_id, ordinal, provider, status, \
-               requested_at, payload_json) VALUES ('r1', 'th-1', 1, 'claudeAgent', 'completed', 'a', '{}');",
-        )
-        .unwrap();
-        let missing = columns(&conn, "orchestration_v2_projection_provider_threads")
-            .unwrap()
-            .is_empty();
-        if missing {
-            conn.execute_batch(
-                "CREATE TABLE orchestration_v2_projection_provider_threads (provider_thread_id TEXT, \
-                   thread_id TEXT, provider TEXT, updated_at TEXT, payload_json TEXT);",
-            )
-            .unwrap();
-        }
-        conn.execute(
-            "INSERT INTO orchestration_v2_projection_provider_threads (provider_thread_id, thread_id, \
-               provider, updated_at, payload_json) VALUES ('pt', 'th-1', 'claudeAgent', 'c', ?1)",
-            [r#"{"nativeThreadRef":{"driver":"claudeAgent","nativeId":"cl-9"}}"#],
-        )
-        .unwrap();
-        drop(conn);
-        let c = chat(AgentKind::T3, Some("th-1"), 0, &[]);
-        // Its Claude chat isn't there yet: the thread's rows alone.
-        let f = find(&homes, &c, &HashSet::new()).unwrap().unwrap();
-        assert_eq!((f.agent, f.form.clone()), (AgentKind::T3, Form::Nothing));
-        assert_eq!(f.rows.len(), 3);
-        put(&home.join(".claude/projects/-w/cl-9.jsonl"), "{}\n");
-        let f = find(&homes, &c, &HashSet::new()).unwrap().unwrap();
-        assert_eq!((f.agent, f.id.as_str()), (AgentKind::Claude, "cl-9"));
-        let runs: Value = serde_json::from_slice(&f.rows[1].1).unwrap();
-        assert_eq!(runs[0]["run_id"], "r1");
     }
 }

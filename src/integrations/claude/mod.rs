@@ -1,25 +1,31 @@
-//! Claude Code.
+//! Claude Code (`claude`). Its chats are JSON lines under each config
+//! folder's `projects/<folder>/<id>.jsonl`, its subagents' in files beside
+//! them. Its live word comes from its hooks in `~/.claude/settings.json`,
+//! which run `gerdr claude-hook`.
+
+mod commands;
+pub(crate) mod find;
+mod live;
+pub(crate) mod parse;
+mod screen;
+mod stats;
+mod subagents;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
 };
 
 use super::{Integration, ModelSwitch, Parser, PlanReply, Store, common::files::SubFiles};
 use crate::{
     ai_work::{
-        AgentKind, Chat, context,
+        AgentKind, Chat,
         context::Context,
-        locate::{self, Found, Homes, Span},
-        usage::{self, Message},
+        locate::{Found, Homes, Span},
+        usage::Message,
     },
-    chat::{
-        Source, commands,
-        commands::Command,
-        live, mode,
-        parse::{self, Reader},
-        source,
-    },
+    chat::{Source, commands::Command, live::Changed, parse::Reader},
+    scrollback::Styled,
     stage_models::Offer,
 };
 
@@ -39,7 +45,7 @@ impl Integration for Claude {
     }
 
     fn parser(&self) -> Box<dyn Parser> {
-        Box::<parse::claude::Claude>::default()
+        Box::<parse::Claude>::default()
     }
 
     fn find(
@@ -50,25 +56,21 @@ impl Integration for Claude {
         _claimed: &HashSet<String>,
         _span: Span,
     ) -> Result<Option<Found>, String> {
-        Ok(id.and_then(|id| locate::claude(homes, id)))
+        Ok(id.and_then(|id| find::by_id(homes, id)))
     }
 
     fn transcript_at(&self, path: &str, homes: &Homes) -> Option<PathBuf> {
-        source::claude_transcript(path, &homes.claude)
+        find::transcript(path, &homes.claude)
     }
 
     fn transcripts_under(&self, homes: &Homes) -> Vec<PathBuf> {
-        source::claude_projects(&homes.claude)
+        find::projects(&homes.claude)
     }
 
     fn remote_script(&self, _chat: &Chat, id: Option<&str>) -> Option<String> {
-        id.map(locate::claude_script)
+        id.map(find::script)
     }
 
-    /// What Claude Code's subagents wrote since the last read, each in its
-    /// own file beside the chat's (`<chat>/subagents/agent-<id>.jsonl`), the
-    /// call that started it named in its `.meta.json`. Only those whose
-    /// call was read: their work has a place to show.
     fn subagents(
         &self,
         chat: &Source,
@@ -76,32 +78,7 @@ impl Integration for Claude {
         files: &mut SubFiles,
         chunk: u64,
     ) -> std::io::Result<()> {
-        let dir = chat.path.with_extension("").join("subagents");
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err),
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(agent) = (path.file_name().and_then(|n| n.to_str()))
-                .and_then(|n| n.strip_prefix("agent-")?.strip_suffix(".jsonl"))
-                .map(str::to_owned)
-            else {
-                continue;
-            };
-            let Some(call) = started_by(&mut files.noted, &path) else {
-                continue;
-            };
-            if !reader.knows_call(&call) {
-                continue;
-            }
-            if let Err(err) = files.read(reader, &path, &agent, &call, chunk) {
-                // One subagent unread leaves the chat as it is.
-                tracing::warn!("agent chat: can't read {}: {err}", path.display());
-            }
-        }
-        Ok(())
+        subagents::read(chat, reader, files, chunk)
     }
 
     fn model_in_chat(&self, reader: &Reader) -> Option<String> {
@@ -113,11 +90,11 @@ impl Integration for Claude {
     }
 
     fn context_in(&self, tail: &[u8]) -> Option<Context> {
-        context::claude_context(tail)
+        stats::context(tail)
     }
 
     fn usage(&self, raw: &[u8]) -> Vec<Message> {
-        usage::claude(raw)
+        stats::usage(raw)
     }
 
     fn modes(&self) -> &'static [&'static str] {
@@ -125,7 +102,7 @@ impl Integration for Claude {
     }
 
     fn mode_shown(&self, rows: &[&str]) -> Option<String> {
-        mode::claude_shown(rows)
+        screen::mode_shown(rows)
     }
 
     fn model_switch(&self) -> ModelSwitch {
@@ -144,6 +121,10 @@ impl Integration for Claude {
         true
     }
 
+    fn suggestion(&self, rows: &[(String, Styled)]) -> Option<String> {
+        screen::suggestion(rows)
+    }
+
     fn asks(&self) -> bool {
         true
     }
@@ -153,44 +134,22 @@ impl Integration for Claude {
     }
 
     fn builtins(&self) -> &'static [(&'static str, &'static str)] {
-        commands::CLAUDE
+        commands::BUILTINS
     }
 
     fn disk_commands(&self, cwd: &Path, homes: &Homes, _config: &Path, found: &mut Vec<Command>) {
-        commands::claude_disk(cwd, homes, found);
+        commands::on_disk(cwd, homes, found);
     }
 
     fn hook_command(&self) -> Option<&'static str> {
-        Some(live::claude::HOOK_COMMAND)
+        Some(live::HOOK_COMMAND)
     }
 
     fn run_hook(&self) {
-        live::claude::run_hook();
+        live::run_hook();
     }
 
-    fn install_live(&self, home: &Path) -> Vec<Result<Option<live::Changed>, String>> {
-        if !home.join(".claude").is_dir() {
-            return Vec::new();
-        }
-        vec![
-            live::hook_command(live::claude::HOOK_COMMAND).and_then(|command| {
-                live::install(&home.join(".claude/settings.json"), |text| {
-                    live::claude::merged(text, &command)
-                })
-            }),
-        ]
+    fn install_live(&self, home: &Path) -> Vec<Result<Option<Changed>, String>> {
+        live::install(home)
     }
-}
-
-/// The call that started the subagent of file `path`, as its meta file
-/// says (kept in `noted`); asked again until it says.
-fn started_by(noted: &mut HashMap<PathBuf, String>, path: &Path) -> Option<String> {
-    if let Some(call) = noted.get(path) {
-        return Some(call.clone());
-    }
-    let meta = std::fs::read(path.with_extension("meta.json")).ok()?;
-    let meta: serde_json::Value = serde_json::from_slice(&meta).ok()?;
-    let call = meta["toolUseId"].as_str()?.to_owned();
-    noted.insert(path.to_owned(), call.clone());
-    Some(call)
 }

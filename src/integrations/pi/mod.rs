@@ -1,4 +1,13 @@
-//! pi.
+//! pi (`pi`). Its chats are session files of JSON lines under
+//! `~/.pi/agent/sessions/--<folder>--/`, each entry a node of a tree. Its
+//! live word comes from gerdr's extension in pi's extensions folder.
+
+mod commands;
+mod find;
+mod live;
+mod parse;
+mod screen;
+mod stats;
 
 use std::{
     collections::HashSet,
@@ -8,12 +17,12 @@ use std::{
 use super::{Integration, ModelSwitch, Parser, Store};
 use crate::{
     ai_work::{
-        AgentKind, Chat, context,
+        AgentKind, Chat,
         context::Context,
-        locate::{self, Found, Homes, Span},
-        usage::{self, Message},
+        locate::{Found, Homes, Span},
+        usage::Message,
     },
-    chat::{commands, commands::Command, live, menu::Menu, model_menu, parse, source},
+    chat::{commands::Command, live::Changed, menu::Menu, source},
     scrollback::Styled,
 };
 
@@ -33,7 +42,7 @@ impl Integration for Pi {
     }
 
     fn parser(&self) -> Box<dyn Parser> {
-        Box::<parse::pi::Pi>::default()
+        Box::<parse::Pi>::default()
     }
 
     fn guesses(&self) -> bool {
@@ -49,8 +58,8 @@ impl Integration for Pi {
         span: Span,
     ) -> Result<Option<Found>, String> {
         Ok(match id {
-            Some(id) => locate::pi_by_id(&homes.pi, id),
-            None => locate::pi_by_time(&homes.pi, chat, claimed, span),
+            Some(id) => find::by_id(&homes.pi, id),
+            None => find::by_time(&homes.pi, chat, claimed, span),
         })
     }
 
@@ -72,11 +81,11 @@ impl Integration for Pi {
     }
 
     fn context_in(&self, tail: &[u8]) -> Option<Context> {
-        context::pi_context(tail)
+        stats::context(tail)
     }
 
     fn usage(&self, raw: &[u8]) -> Vec<Message> {
-        usage::pi(raw)
+        stats::usage(raw)
     }
 
     fn model_switch(&self) -> ModelSwitch {
@@ -84,29 +93,22 @@ impl Integration for Pi {
     }
 
     fn model_menu(&self, rows: &[(String, Styled)]) -> Option<Menu> {
-        model_menu::pi(rows)
+        screen::model_menu(rows)
     }
 
     fn model_on_screen<'a>(&self, rows: &[&'a str]) -> Option<&'a str> {
-        model_menu::pi_now(rows)
+        screen::model_now(rows)
     }
 
     fn builtins(&self) -> &'static [(&'static str, &'static str)] {
-        commands::PI
+        commands::BUILTINS
     }
 
     fn disk_commands(&self, cwd: &Path, homes: &Homes, _config: &Path, found: &mut Vec<Command>) {
-        commands::pi_disk(cwd, homes, found);
+        commands::on_disk(cwd, homes, found);
     }
 
-    /// pi loads every extension in its folder: gerdr's goes beside herdr's.
-    fn install_live(&self, home: &Path) -> Vec<Result<Option<live::Changed>, String>> {
-        if !home.join(".pi/agent").is_dir() {
-            return Vec::new();
-        }
-        let path = home.join(".pi/agent/extensions/gerdr-live.ts");
-        vec![live::install(&path, |_| {
-            Ok(live::serve::PI_EXTENSION.to_owned())
-        })]
+    fn install_live(&self, home: &Path) -> Vec<Result<Option<Changed>, String>> {
+        live::install(home)
     }
 }

@@ -29,9 +29,11 @@ use crate::{
     feature_agents::{self, Gate},
     feature_workspace::feature_on,
     herdr::{self, AgentInfo, AgentStatus, Herdr, WorkspaceInfo},
-    inbox_sources, md_preview, phone_control, phone_devices,
+    inbox_sources,
+    integrations::claude::find::claude_chat,
+    md_preview, phone_control, phone_devices,
     projects::{self, Project, WorkspaceRecord},
-    stats_panel::{chat_and_screen, claude_chat},
+    stats_panel::chat_and_screen,
     web_push,
 };
 
@@ -547,9 +549,8 @@ fn pane_models(kind: Option<AgentKind>, chat: Option<&Path>, cursor: &Value) -> 
     let mut offers = model::offers(kind, &cursor);
     let now = match kind {
         AgentKind::Cursor => model::cursor_now(),
-        _ => {
-            (chat.and_then(crate::ai_work::context::tail_of)).and_then(|tail| model::last_in(&tail))
-        }
+        _ => (chat.and_then(crate::ai_work::context::tail_of))
+            .and_then(|tail| crate::integrations::claude::parse::last_in(&tail)),
     };
     let picked = now.as_deref().and_then(|now| model::picked(&offers, now));
     // Claude Code's own choice, as the desktop's Default row.
@@ -1382,9 +1383,9 @@ fn commands(project: &str, slug: &str, pane: &str) -> Reply {
 
 /// What the idle Claude Code in `pane` suggests saying next, read off the
 /// bottom of its screen as gerdr's chat reads it.
-fn pane_suggestion(herdr: &mut Herdr, pane: &str) -> Option<String> {
+fn pane_suggestion(herdr: &mut Herdr, pane: &str, kind: AgentKind) -> Option<String> {
     match herdr.pane_screen_styled(pane, SUGGEST_ROWS) {
-        Ok(text) => crate::chat::suggestion(&crate::scrollback::parse_ansi(&text)),
+        Ok(text) => crate::chat::suggestion(kind, &crate::scrollback::parse_ansi(&text)),
         Err(why) => {
             tracing::debug!("phone: the suggestion in pane {pane}: {why}");
             None
@@ -1422,7 +1423,8 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     let title = agent.as_ref().and_then(|a| a.shown_title());
     let suggestion = (agent.as_ref())
         .filter(|a| crate::chat::suggests(a))
-        .and_then(|_| pane_suggestion(&mut herdr, pane));
+        .and_then(crate::chat::source::kind)
+        .and_then(|kind| pane_suggestion(&mut herdr, pane, kind));
     let agent_kind = agent.as_ref().and_then(crate::chat::source::kind);
     let kind = agent_kind.filter(|kind| !mode::modes(*kind).is_empty());
     // The modes it offers and the one `screen` (its last rows) shows.

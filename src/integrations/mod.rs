@@ -25,7 +25,7 @@ use crate::{
 };
 
 mod antigravity;
-mod claude;
+pub(crate) mod claude;
 mod codex;
 pub mod common;
 mod cursor;
@@ -245,6 +245,10 @@ pub trait Integration: Sync {
     /// Whether its screen suggests what to say next.
     fn suggests(&self) -> bool {
         false
+    }
+    /// What its screen `rows` suggest saying next.
+    fn suggestion(&self, _rows: &[(String, Styled)]) -> Option<String> {
+        None
     }
     /// Whether its asks can be allowed or denied from the chat.
     fn asks(&self) -> bool {
