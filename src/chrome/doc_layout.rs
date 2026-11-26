@@ -26,6 +26,11 @@ const DOC_QUOTE: i32 = 12;
 const DOC_QUOTE_BAR: i32 = 3;
 pub(super) const DOC_CODE_PAD: i32 = 8;
 const DOC_DEPTH_MAX: u8 = 4;
+/// An inline code span's ground: the room in it on each side of the
+/// words, how high it is for its font, and how far it is toward the text.
+const DOC_SPAN_PAD: f32 = 4.0;
+const DOC_SPAN_HIGH: f32 = 1.4;
+pub(super) const DOC_SPAN_TINT: f32 = 0.08;
 const DOC_RULE: i32 = 13;
 /// A table's cells: the room around their words, and the widest a
 /// column's longest word holds it open (past that the word breaks).
@@ -52,6 +57,9 @@ pub(super) enum DocPiece {
     /// A line of a code block, cut where the column ends, on the block's
     /// ground; an empty one is the block's edge.
     CodeLine(String),
+    /// The rounded ground behind an inline code span, as other markdown
+    /// views have it: put before its line, so a pick or a find paints on it.
+    CodeGround,
     /// The bar beside a quote.
     QuoteBar,
     /// A thematic break.
@@ -84,8 +92,17 @@ pub(super) fn width_in(text: &str, face: Face, size: f32) -> f32 {
     }
 }
 
+/// The room run `on` has on each side of its words: a code span's in its
+/// ground.
+pub(super) fn run_pad(on: Option<&Inline>) -> f32 {
+    match on {
+        Some(Inline::Code) => DOC_SPAN_PAD,
+        _ => 0.0,
+    }
+}
+
 /// How wide line `text` with `runs` is, bold or not, each run measured by
-/// `width` in its face.
+/// `width` in its face, with its room (`run_pad`).
 pub(super) fn line_width(
     text: &str,
     runs: &[(Range<usize>, Inline)],
@@ -93,8 +110,21 @@ pub(super) fn line_width(
     width: impl Fn(&str, Face) -> f32,
 ) -> f32 {
     (spans(text, runs))
-        .map(|(range, on)| width(&text[range], face(on, bold)))
+        .map(|(range, on)| width(&text[range], face(on, bold)) + 2.0 * run_pad(on))
         .sum()
+}
+
+/// How far into line `text` with `runs` its byte `at` is, as `line_width`
+/// measures: inside a run, past the room before it only.
+pub(super) fn x_at(
+    text: &str,
+    runs: &[(Range<usize>, Inline)],
+    bold: bool,
+    at: usize,
+    width: impl Fn(&str, Face) -> f32,
+) -> f32 {
+    let inside = (runs.iter()).find(|(r, _)| r.start < at && at < r.end);
+    line_width(&text[..at], runs, bold, width) - run_pad(inside.map(|(_, on)| on))
 }
 
 /// The web link `x` logical pixels into line `text` with `runs`, in `font`,
@@ -108,7 +138,7 @@ pub(super) fn link_at<'a>(
 ) -> Option<&'a str> {
     let mut pen = 0.0;
     for (range, on) in spans(text, runs) {
-        pen += width_in(&text[range], face(on, bold), font.size());
+        pen += width_in(&text[range], face(on, bold), font.size()) + 2.0 * run_pad(on);
         if x < pen {
             return match on {
                 Some(Inline::Link(url)) => Some(url),
@@ -127,7 +157,17 @@ pub(super) fn link_at<'a>(
 /// `DOC_WIDTH_SLACK` of the edge.
 fn doc_lines(text: &Styled, width: i32, measure: impl Fn(&Styled) -> f32) -> Vec<Styled> {
     let width = width as f32;
-    let space = measure(&"a a".into()) - 2.0 * measure(&"a".into());
+    // A space between two words of run `on`: in its face, and no room
+    // between them (`run_pad`).
+    let joined = |on: Option<&Inline>| {
+        let of = |t: &str| {
+            let mut text = Styled::default();
+            text.push(t, on);
+            measure(&text)
+        };
+        of("a a") - 2.0 * of("a")
+    };
+    let space = joined(None);
     let mut lines = Vec::new();
     let mut line = Styled::default();
     let mut used = 0.0;
@@ -139,14 +179,9 @@ fn doc_lines(text: &Styled, width: i32, measure: impl Fn(&Styled) -> f32) -> Vec
         let wide = measure(&word);
         if !line.text.is_empty() {
             let gap = text.at(last).filter(|on| text.at(at) == Some(*on));
-            // A space inside a run is in its face: a code span's is wider.
             let space = match gap {
                 None => space,
-                Some(_) => {
-                    let mut spaced = Styled::default();
-                    spaced.push(" ", gap);
-                    measure(&spaced)
-                }
+                Some(_) => joined(gap),
             };
             let about = used + space + wide;
             if about < width - DOC_WIDTH_SLACK {
@@ -230,6 +265,7 @@ impl Column {
             from += part.len() + 1;
         }
         for Styled { text, runs } in lines {
+            self.code_grounds(&text, &runs, size, bold, h);
             self.put(
                 h,
                 DocPiece::Text {
@@ -240,6 +276,30 @@ impl Column {
                     bold,
                 },
             );
+        }
+    }
+
+    /// The grounds of line `text`'s code spans, `h` high, at the line.
+    fn code_grounds(
+        &mut self,
+        text: &str,
+        runs: &[(Range<usize>, Inline)],
+        size: f32,
+        bold: bool,
+        h: i32,
+    ) {
+        let high = ((size * DOC_SPAN_HIGH).ceil() as i32).min(h);
+        let y = self.y + (h - high) / 2;
+        let mut pen: f32 = 0.0;
+        for (range, on) in spans(text, runs) {
+            let wide = width_in(&text[range], face(on, bold), size) + 2.0 * run_pad(on);
+            if on == Some(&Inline::Code) {
+                let from = pen.floor() as i32;
+                let to = ((pen + wide).ceil() as i32).min(self.w);
+                let rect = Rectangle::new((self.x + from, y).into(), (to - from, high).into());
+                self.pieces.push((rect, DocPiece::CodeGround));
+            }
+            pen += wide;
         }
     }
 
@@ -549,7 +609,10 @@ impl Painter {
                         _ => color,
                     };
                     pen = match face(on, *bold) {
-                        Face::Mono => self.mono_text(c, run, size, pen, end, b, scale, color),
+                        Face::Mono => {
+                            let pad = run_pad(on) * s;
+                            pad + self.mono_text(c, run, size, pen + pad, end, b, scale, color)
+                        }
                         Face::Bold => self.bold_text(c, run, size, pen, end, b, scale, color),
                         _ => self.text(c, run, size, pen, end, b, scale, color),
                     };
@@ -580,6 +643,12 @@ impl Painter {
                 }
             }
             DocPiece::CodeLine(text) => self.code_line(c, rect, text, p.element, scale, p),
+            DocPiece::CodeGround => {
+                let (x, y, w, h) = rect_px(rect, scale);
+                // Off `element` too: a plan's card in the chat is on it.
+                let ground = super::theme::mix(p.element, p.text, DOC_SPAN_TINT);
+                c.rounded(x, y, w, h, super::CAP_RADIUS * s, ground);
+            }
             DocPiece::QuoteBar => {
                 let (x, y, w, h) = rect_px(rect, scale);
                 c.rounded(x, y, w, h, w / 2.0, p.border);
@@ -675,10 +744,11 @@ mod tests {
     /// measured in the monospace font.
     #[test]
     fn spaces_inside_code_count_at_their_own_width() {
-        // 20 words and 19 spaces, two units each: 78 wide.
+        // 20 words and 19 spaces, two units each, and the span's room on
+        // both sides: 86 wide.
         let line = format!("`{}`", ["a"; 20].join(" "));
-        assert_eq!(styled_lines(&line, 78).len(), 1);
-        assert_eq!(styled_lines(&line, 70).len(), 2);
+        assert_eq!(styled_lines(&line, 86).len(), 1);
+        assert_eq!(styled_lines(&line, 78).len(), 2);
     }
 
     #[test]
@@ -734,12 +804,13 @@ mod tests {
     #[test]
     fn a_runs_face_sets_how_much_fits() {
         let code = Inline::Code;
+        // `cd` is 4 wide and its room 4 on each side: 12.
         assert_eq!(
-            styled_lines("ab `cd` ef", 7),
+            styled_lines("ab `cd` ef", 15),
             [run("ab cd", &[(3..5, code.clone())]), run("ef", &[])]
         );
         assert_eq!(lines("ab cd ef", 7), ["ab cd", "ef"]);
-        assert_eq!(styled_lines("ab `cd` ef", 6).len(), 3);
+        assert_eq!(styled_lines("ab `cd` ef", 14).len(), 3);
         assert_eq!(lines("ab cd ef", 6).len(), 2);
     }
 

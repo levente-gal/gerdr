@@ -670,6 +670,10 @@ mod tests {
             let pill = super::mix(p.panel, p.warning, 0.12);
             let ratio = contrast(p.warning, pill);
             assert!(ratio >= 4.5, "{name}: warning pill is {ratio:.2}:1");
+            // Inline code's words on its ground, on a page and on a card.
+            let span = super::mix(p.element, p.text, super::super::doc_layout::DOC_SPAN_TINT);
+            let ratio = contrast(p.text, span);
+            assert!(ratio >= 4.5, "{name}: inline code is {ratio:.2}:1");
         }
     }
 

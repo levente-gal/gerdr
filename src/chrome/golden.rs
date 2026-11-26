@@ -6838,12 +6838,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xfe631416ff8a726a, // tab_fixing_1180
         0x4557b19df663481c, // tab_fixed_code_1180
         0x75d914171e4d41b1, // tab_fixed_code_860
-        0x91d17ac99ff8630a, // tab_approved_1180
-        0x381cd890ec3b263e, // tab_locked_1180
-        0x94b9a0ee477d7d98, // tab_start_over_1180
-        0x1f6cf8457234d36c, // tab_discover_brief_1180
-        0x24a3f9187f0081e8, // tab_discover_brief_860
-        0xdd371236991be170, // tab_plan_long_1180
+        0x198ab8ddcaff712a, // tab_approved_1180
+        0x70ccc7687608b5b2, // tab_locked_1180
+        0x5d54988dfd0cb3ac, // tab_start_over_1180
+        0xe5fc68ceae9b6c00, // tab_discover_brief_1180
+        0x9b7152eeae92f82d, // tab_discover_brief_860
+        0x1f81014f9d5df408, // tab_plan_long_1180
         0x0b214bda6b3e0445, // tab_manual_test_1180
         0xfeffbb22941e4803, // tab_manual_note_860
         0x845eeaaddaa14ba2, // tab_review_rounds_1180
@@ -6876,7 +6876,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0x0d29fb85dd2ec61f, // tab_ship_checking_1180
         0xd79f2ae07b504dcb, // tab_verify_regressed_1180
         0x4b2e2423c7e42e6c, // tab_verify_machine_860
-        0x5b43b23a54a582da, // tab_discover_decisions_860
+        0xd8aa7848c1a9c180, // tab_discover_decisions_860
         0xa28f174ba97bfb8f, // tab_discover_research_1180
         0x4b808b0d704b00ae, // tab_discover_research_860
     ],
@@ -6918,12 +6918,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xc5af43845efbbd0a, // tab_fixing_1180
         0x11c447d3ca9faf40, // tab_fixed_code_1180
         0xcbf66f0aa859084e, // tab_fixed_code_860
-        0xe8ae6630d632ac70, // tab_approved_1180
-        0x5506773037919898, // tab_locked_1180
-        0xe422bdd7a0e20785, // tab_start_over_1180
-        0x4f96caa3ce4d21ec, // tab_discover_brief_1180
-        0x57c990b36c1b9ecc, // tab_discover_brief_860
-        0x3e2d0f9c66ef501e, // tab_plan_long_1180
+        0x8d51fa65fa922a75, // tab_approved_1180
+        0x7e3bf5039a81bd49, // tab_locked_1180
+        0x8fa8df1eaacafa1c, // tab_start_over_1180
+        0x089d398659bfaa29, // tab_discover_brief_1180
+        0x4aec7444f98b5950, // tab_discover_brief_860
+        0x34ad1b1fe491ba2f, // tab_plan_long_1180
         0x0e23b2d60cac83bb, // tab_manual_test_1180
         0x84f84a785822fb5f, // tab_manual_note_860
         0xe95dc57e85689675, // tab_review_rounds_1180
@@ -6956,7 +6956,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0x7bf7bd484bd1418c, // tab_ship_checking_1180
         0xb57df7a155554e8c, // tab_verify_regressed_1180
         0x6be6e8dccf97d26e, // tab_verify_machine_860
-        0x72e798e808e69b3f, // tab_discover_decisions_860
+        0x4e4c164acecd46b2, // tab_discover_decisions_860
         0x1adf3524f6168b77, // tab_discover_research_1180
         0x363f14ffc0caefe4, // tab_discover_research_860
     ],
@@ -6998,12 +6998,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xabe0576b6b74ca5d, // tab_fixing_1180
         0x1e5cfaad2f0deae0, // tab_fixed_code_1180
         0x815a0155066889a5, // tab_fixed_code_860
-        0x911f95935235a955, // tab_approved_1180
-        0x4355cee3ccd8d6d0, // tab_locked_1180
-        0xb39ed0b6e2c9e289, // tab_start_over_1180
-        0x7990f200a865e4e4, // tab_discover_brief_1180
-        0x8b3e447d86e42054, // tab_discover_brief_860
-        0x56f19a2181626d7b, // tab_plan_long_1180
+        0x6ff44cf774f3fb4a, // tab_approved_1180
+        0xeb78ab479e47899f, // tab_locked_1180
+        0xb9b97af6c0224dd2, // tab_start_over_1180
+        0x29f35d335b11e917, // tab_discover_brief_1180
+        0xc2064ff57af4066a, // tab_discover_brief_860
+        0xcf8ada1ea1c71194, // tab_plan_long_1180
         0x1b64f6d06930bdb7, // tab_manual_test_1180
         0xd9031b2f93e41891, // tab_manual_note_860
         0xb9053095cee7e231, // tab_review_rounds_1180
@@ -7036,7 +7036,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xb095820b01c1f30f, // tab_ship_checking_1180
         0xfcff387c15772795, // tab_verify_regressed_1180
         0x5d49ce354f5d4282, // tab_verify_machine_860
-        0xde86bf37b4b6a0de, // tab_discover_decisions_860
+        0x4710eaa293ef2fae, // tab_discover_decisions_860
         0xe2d9cc0b14cdeb2f, // tab_discover_research_1180
         0xf8df2b2bd9bbc8c1, // tab_discover_research_860
     ],
@@ -7078,12 +7078,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xe3d9cba5348d3167, // tab_fixing_1180
         0x477e5a5bec46210a, // tab_fixed_code_1180
         0xdf43b26432f54d2d, // tab_fixed_code_860
-        0x78850d4adf46d375, // tab_approved_1180
-        0x53b1c62b43226340, // tab_locked_1180
-        0xe850b525955c0709, // tab_start_over_1180
-        0x78df817fd4170ae4, // tab_discover_brief_1180
-        0xaeeba506d149481b, // tab_discover_brief_860
-        0x5dbe211a0e6bc418, // tab_plan_long_1180
+        0x74a1459977523511, // tab_approved_1180
+        0x3847e93a10996530, // tab_locked_1180
+        0x15e4242dd60ba6cd, // tab_start_over_1180
+        0xc8f64d05b837d3d4, // tab_discover_brief_1180
+        0x971bea3049c232e3, // tab_discover_brief_860
+        0xeee022dcfd690b17, // tab_plan_long_1180
         0x8394e4a5692e0044, // tab_manual_test_1180
         0x5778ee0ab01e5928, // tab_manual_note_860
         0xe6c794c1d80467ba, // tab_review_rounds_1180
@@ -7116,7 +7116,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xfb149b0388901b80, // tab_ship_checking_1180
         0x3ffeb089fc4e2b3e, // tab_verify_regressed_1180
         0x42271a11cd38aa76, // tab_verify_machine_860
-        0x10a83cb19a3617c7, // tab_discover_decisions_860
+        0x292d5f40702b9e54, // tab_discover_decisions_860
         0xf57d6286219a938b, // tab_discover_research_1180
         0xbb31065b5e7d194d, // tab_discover_research_860
     ],
@@ -8225,7 +8225,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
         0xf2ed7f905e36a836, // doc_suggestions_1180
         0xa2d01c7198efce5a, // doc_suggestions_850
         0xef29518e2dc79076, // finding_dialog_reject
-        0x9cf661cac4daf2d9, // tab_plan_review_final_1180
+        0xb2676d54c2d11d8d, // tab_plan_review_final_1180
         0x24898c7773397449, // doc_chat_plan_1180
     ],
     // Dark at 2
@@ -8236,7 +8236,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
         0x4a3da7479ece1f73, // doc_suggestions_1180
         0xd0ff3ff64d0737ab, // doc_suggestions_850
         0xb606ef86798ca204, // finding_dialog_reject
-        0x4e6dc69d3697dded, // tab_plan_review_final_1180
+        0xcddcaf8d16243ef4, // tab_plan_review_final_1180
         0xe91a16683836648b, // doc_chat_plan_1180
     ],
     // Light at 1
@@ -8247,7 +8247,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
         0x5fb392f855584e45, // doc_suggestions_1180
         0x2d929b2a87c88b65, // doc_suggestions_850
         0x6b76f1508ea97daa, // finding_dialog_reject
-        0x526cf661c1f4cfb2, // tab_plan_review_final_1180
+        0x195b283dac992a81, // tab_plan_review_final_1180
         0xdc713deadf09a62a, // doc_chat_plan_1180
     ],
     // Light at 2
@@ -8258,7 +8258,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
         0x2d7a66fa40ec984f, // doc_suggestions_1180
         0x99b85378c2ada16f, // doc_suggestions_850
         0x31b7feb26a182cfc, // finding_dialog_reject
-        0xc9f61f2abc1be731, // tab_plan_review_final_1180
+        0x39f4525f2309ffb5, // tab_plan_review_final_1180
         0x90f049b49dd93e07, // doc_chat_plan_1180
     ],
 ];
@@ -10160,108 +10160,108 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
     [
         0x0a7677a974e281be, // chat_finding
         0x7a9fcfede9da1605, // chat_missing
-        0xe8aeb9625db9c337, // chat
-        0x5853079495b72161, // chat_waiting
-        0x023f73da62d93e8e, // chat_composer
-        0x652931f0953d2b60, // chat_picked
+        0x8cd5d31c65224028, // chat
+        0xeebe00d66241c59a, // chat_waiting
+        0xfcee252b39911591, // chat_composer
+        0x918bc15a90f2a175, // chat_picked
         0x5a321b65d112e749, // chat_scrolled
-        0x1f1fde08ec661efe, // chat_question
-        0xb7547e4231335094, // chat_slash
-        0x2902dd99ecb5418e, // chat_question_card
-        0x4b58aada3de87f04, // chat_question_radio
-        0x5b93b834ca2e95d6, // chat_question_ticks
-        0x936247169ea0234e, // chat_suggested
-        0xc0eb11ff27714f31, // chat_modes
+        0xf9a5a7f03876422d, // chat_question
+        0x0299287f7cba64cb, // chat_slash
+        0x1caf1aea42bd8dd5, // chat_question_card
+        0x953f16739f5f2d23, // chat_question_radio
+        0x3f61186b8c8c9551, // chat_question_ticks
+        0x7f88523887899fe1, // chat_suggested
+        0xa7603553713e7c66, // chat_modes
         0x8009f466f4efb1bc, // chat_side
-        0xb88aed30e33ec577, // chat_plan
-        0x555d598a00b6be41, // chat_plan_open
-        0xea97bae6c12f13ee, // chat_plan_ask
-        0xf0790d3617fe581a, // chat_model
+        0x618b1d06929c08bc, // chat_plan
+        0x5d5f9d5f75f592ae, // chat_plan_open
+        0x3ae26f49a32456a9, // chat_plan_ask
+        0x59029832d62dd7fd, // chat_model
         0x0d9d640a038fcfed, // chat_pinned
         0xf6bf32aab503d121, // chat_start
-        0xa1665f97e511d52c, // chat_model_menu
-        0x8f775fce7ee2c03d, // chat_files
+        0x9d46099149c7521b, // chat_model_menu
+        0xb4e6941a645e46de, // chat_files
         0xe4886dc64a7203b3, // chat_table
     ],
     // Dark at 2
     [
         0x4a86fd0e1e2f44ef, // chat_finding
         0x0f61142377a0643c, // chat_missing
-        0xdacc321e4bb78cab, // chat
-        0xb6283bfecaf433e7, // chat_waiting
-        0xd38e46e29e90491b, // chat_composer
-        0xab992e69f9837fa7, // chat_picked
+        0x6ca1121a35bb0379, // chat
+        0x2166d4ce59f2555d, // chat_waiting
+        0x7a31fcad10540eb9, // chat_composer
+        0xe773843c6244d059, // chat_picked
         0x71662f6445e4e130, // chat_scrolled
-        0x7c1247c57aff1bf8, // chat_question
-        0xbc5b3654d8b78f6c, // chat_slash
-        0x0d4130ff5179ffa8, // chat_question_card
-        0x4cbfd8432bce3b9b, // chat_question_radio
-        0x4dcae86f1b2de31f, // chat_question_ticks
-        0xf5c96f41082a29fa, // chat_suggested
-        0xd5e31e31282c17ff, // chat_modes
+        0x6cc207eb955ce5aa, // chat_question
+        0xfb316e571dc4e08a, // chat_slash
+        0x427193ac86b60d1a, // chat_question_card
+        0x98d34f07c5196b99, // chat_question_radio
+        0x352bb09da6275b39, // chat_question_ticks
+        0x4d25b58bf6add3bc, // chat_suggested
+        0x5f78544330c66ed9, // chat_modes
         0x0ca5a15678b84e87, // chat_side
-        0x4d089b9975c92001, // chat_plan
-        0x8a0be02d1b56831d, // chat_plan_open
-        0x37e5f910ca26d6ca, // chat_plan_ask
-        0xeaf037ca8b89965f, // chat_model
+        0x704192ff87c671ab, // chat_plan
+        0x987a9e2b2b999bff, // chat_plan_open
+        0x687bcf5f00a1e5b4, // chat_plan_ask
+        0x540eb1c26667c705, // chat_model
         0x81a83e3228349375, // chat_pinned
         0xdb2c5ac8f62ce1cc, // chat_start
-        0x999d27764f2b5ea6, // chat_model_menu
-        0x097c0ef5d7cb9ae8, // chat_files
+        0xfd239912a53a3cf4, // chat_model_menu
+        0x71f900cb53bc021a, // chat_files
         0xf31cc7ab03ca5e67, // chat_table
     ],
     // Light at 1
     [
         0xac583ef579dff97f, // chat_finding
         0x6aa135b94a597f5f, // chat_missing
-        0x615c6f1ad3368351, // chat
-        0x320eba1d1cb6f694, // chat_waiting
-        0x1b271769bfda5100, // chat_composer
-        0xcf70f5014c0eb90d, // chat_picked
+        0x57fb346c48a1c5e1, // chat
+        0x6393738317e10388, // chat_waiting
+        0x7625d29c81f371e4, // chat_composer
+        0xaf7b42d65db5fcd6, // chat_picked
         0xb477c1f381a377d9, // chat_scrolled
-        0xe9d9bdded091310b, // chat_question
-        0xd1791eb9e3dc6f62, // chat_slash
-        0xd60cb90da53caaa5, // chat_question_card
-        0x62f6e4343845f331, // chat_question_radio
-        0x427e23ef8499a8ef, // chat_question_ticks
-        0xe5ff509255e7f7a2, // chat_suggested
-        0xeedcddd366c8b23b, // chat_modes
+        0x39b40f48d6fd048f, // chat_question
+        0x8775ca7354326156, // chat_slash
+        0x655c3a24e3dd6e91, // chat_question_card
+        0x70bb8b4a0ca77a65, // chat_question_radio
+        0x74976d35a63caeeb, // chat_question_ticks
+        0xd04a5402c3f08ca6, // chat_suggested
+        0xabf29f5ba37b6fe7, // chat_modes
         0xe7deedef9f56f42f, // chat_side
-        0x71e52f415e7a0c2a, // chat_plan
-        0xd0def890647b11cb, // chat_plan_open
-        0x471b935dca3886e5, // chat_plan_ask
-        0xf157fe71b5b21e42, // chat_model
+        0xbde7ee687bda406d, // chat_plan
+        0xcdf2132aafa8cbc4, // chat_plan_open
+        0x24ade1aaa9d5d729, // chat_plan_ask
+        0xbf0516a4fc5d07c6, // chat_model
         0xbc341c99b133556d, // chat_pinned
         0xdc5cb64f2ae77c68, // chat_start
-        0xeda143c519b4b418, // chat_model_menu
-        0xa33ec17ccd843a30, // chat_files
+        0x40d01b84708b7e1c, // chat_model_menu
+        0xae2d4968fbca1ce4, // chat_files
         0xebd9bfddd16bcdc3, // chat_table
     ],
     // Light at 2
     [
         0xda45ba16191a45b1, // chat_finding
         0xe51e01ed1f9a96fe, // chat_missing
-        0xfeb138f9481156d3, // chat
-        0x8973e8883ebaa0c8, // chat_waiting
-        0x9abcf828e93bfab9, // chat_composer
-        0x806a8657e8cf88e1, // chat_picked
+        0x8925263dacc371df, // chat
+        0x065e5e77cbce0654, // chat_waiting
+        0xd302a097e3ce9b59, // chat_composer
+        0xc12b47a19d405351, // chat_picked
         0x8acc322b85f49c62, // chat_scrolled
-        0xd80303a3965e996d, // chat_question
-        0xd9f06f9f4e01d85b, // chat_slash
-        0xdaceb0b04cd0c236, // chat_question_card
-        0xa6fe1f598a8d65d1, // chat_question_radio
-        0x6bfab3232f143a4a, // chat_question_ticks
-        0x6b1ac424698fd8ed, // chat_suggested
-        0xbb323716a3715c4a, // chat_modes
+        0xc411a86462f1e191, // chat_question
+        0xb9f32e749c0a5b3b, // chat_slash
+        0x571c5fd765e45202, // chat_question_card
+        0x5aaeee82edcd433d, // chat_question_radio
+        0x7a0920582ef203fe, // chat_question_ticks
+        0x5876be43da1ae84d, // chat_suggested
+        0xc95d98ad3777feaa, // chat_modes
         0x72a8fc9a637a56e0, // chat_side
-        0x6ee941c24129186d, // chat_plan
-        0xe869f2a394dbf91f, // chat_plan_open
-        0x2ddd8abdc594d734, // chat_plan_ask
-        0x5b60f8a986a62104, // chat_model
+        0x0d32c8add8c96800, // chat_plan
+        0x17b1b907ee86a15a, // chat_plan_open
+        0xc997e09d481140d0, // chat_plan_ask
+        0x11ddf9e2d02a7f24, // chat_model
         0x86ff847aaa2d3229, // chat_pinned
         0x30c5847e6d3cbc0b, // chat_start
-        0x6344a6722574f680, // chat_model_menu
-        0x20948fbc740c0467, // chat_files
+        0x91dd6af6606f7220, // chat_model_menu
+        0xdd94da6ab7198e47, // chat_files
         0xe8309b7e36a93063, // chat_table
     ],
 ];
