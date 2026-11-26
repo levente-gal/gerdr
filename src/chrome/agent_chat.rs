@@ -109,6 +109,10 @@ pub struct ChatView {
     /// The user's picks on the card of the ask's questions, while it asks
     /// some.
     pub card: Option<CardView>,
+    /// The agent's own model menu, read off its screen while it shows
+    /// (`chat::model_menu`): in the waiting panel's place, its rows picked
+    /// with the arrows.
+    pub picker: Option<Arc<Menu>>,
 }
 
 /// The `/` menu's rows in sight, as painted.
@@ -177,6 +181,7 @@ impl PartialEq for ChatView {
             && self.model == other.model
             && self.context == other.context
             && self.card == other.card
+            && self.picker == other.picker
     }
 }
 
@@ -192,6 +197,9 @@ pub enum WaitKey {
     Enter,
     /// A menu choice, 1 to 9.
     Digit(u8),
+    /// A row of the agent's model menu, from 1: its arrow moved onto it,
+    /// then Enter.
+    Row(u8),
 }
 
 /// What is under the pointer in a chat.
@@ -694,7 +702,7 @@ fn key_label(key: WaitKey) -> String {
         WaitKey::Left => "←".into(),
         WaitKey::Right => "→".into(),
         WaitKey::Enter => "Enter".into(),
-        WaitKey::Digit(d) => d.to_string(),
+        WaitKey::Digit(d) | WaitKey::Row(d) => d.to_string(),
     }
 }
 
@@ -872,9 +880,14 @@ fn parts(view: &ChatView) -> Parts {
         card = Some((at, laid));
         waiting = Some(panel);
         end = panel.loc.y - PART_GAP;
-    } else if let Some(screen) = &view.waiting {
+    } else if view.waiting.is_some() || view.picker.is_some() {
         let room = (end - list_top - 3 * card_row() - frame - PART_GAP).max(0);
-        let laid = menu_laid(screen, inner, room);
+        let laid = match (&view.picker, &view.waiting) {
+            (Some(m), _) => picker_laid(m, inner, room),
+            (None, Some(screen)) => menu_laid(screen, inner, room),
+            (None, None) => None,
+        };
+        let screen = view.waiting.as_deref().map_or(&[][..], Vec::as_slice);
         let (body, shown_keys) = match &laid {
             Some((laid, tabs)) => {
                 let keys = MENU_KEYS.iter().copied();
@@ -988,9 +1001,44 @@ fn menu_laid(screen: &Arc<ChatRows>, w: i32, room: i32) -> Option<(Rc<Laid>, boo
     laid
 }
 
+/// The agent's model menu `m` laid out for `w` (as `menu_laid`), in
+/// `room`: what its rows say more goes first, then the rows farthest from
+/// its arrow's, so that one always shows.
+fn picker_laid(m: &Arc<Menu>, w: i32, room: i32) -> Option<(Rc<Laid>, bool)> {
+    type Kept = (Arc<Menu>, i32, i32, Option<(Rc<Laid>, bool)>);
+    thread_local! {
+        static PICKER: RefCell<(u32, Option<Kept>)> = const { RefCell::new((0, None)) };
+    }
+    let kept = PICKER.with_borrow_mut(|memo| {
+        (super::sized(memo).as_ref())
+            .filter(|(menu, mw, mr, _)| Arc::ptr_eq(menu, m) && *mw == w && *mr == room)
+            .map(|(.., laid)| laid.clone())
+    });
+    if let Some(laid) = kept {
+        return laid;
+    }
+    let fits = |laid: &Laid| laid.h <= room;
+    let mut shown = Menu::clone(m);
+    let mut laid = Some(lay_menu(&shown, w, true)).filter(fits);
+    while laid.is_none() {
+        laid = Some(lay_menu(&shown, w, false)).filter(fits);
+        if laid.is_some() || shown.choices.len() <= 1 {
+            break;
+        }
+        let at = shown.choices.iter().position(|c| c.picked).unwrap_or(0);
+        match at * 2 < shown.choices.len() {
+            true => shown.choices.pop(),
+            false => Some(shown.choices.remove(0)),
+        };
+    }
+    let laid = laid.map(|laid| (Rc::new(laid), m.sideways));
+    PICKER.with_borrow_mut(|memo| *super::sized(memo) = Some((m.clone(), w, room, laid.clone())));
+    laid
+}
+
 /// A menu laid out from `(0, 0)` for `w`: its questions' tabs, what it
 /// asks, and its choices, each a press on its key, with what they say
-/// more when `more`.
+/// more when `more`. An agent's model menu's choices have no numbers.
 fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
     let mut l = Laid::default();
     let size = Font::Body.size();
@@ -1013,7 +1061,9 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
         y += h + PART_GAP / 2;
     }
     y += PART_GAP / 2;
-    let tw = (w - CHOICE_NUM).max(1);
+    // An agent's model menu has no numbers to make room for.
+    let num_w = if m.arrows { 0 } else { CHOICE_NUM };
+    let tw = (w - num_w).max(1);
     for choice in &m.choices {
         let top = y;
         // A check box's choice: the box, then its label.
@@ -1040,11 +1090,12 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
             mark: Mark::Text,
             centred: false,
         };
-        let label_x = ROW_INSET + CHOICE_NUM + box_w;
-        let mut bits = vec![
-            (rect(ROW_INSET, y, CHOICE_NUM, card_row()), num),
-            (rect(label_x, y, tw - ROW_INSET, card_row()), label),
-        ];
+        let label_x = ROW_INSET + num_w + box_w;
+        let mut bits = Vec::new();
+        if !m.arrows {
+            bits.push((rect(ROW_INSET, y, CHOICE_NUM, card_row()), num));
+        }
+        bits.push((rect(label_x, y, tw - ROW_INSET, card_row()), label));
         if let Some(on) = choice.checked {
             let at = rect(ROW_INSET + CHOICE_NUM, y, CHECKBOX_SIZE, card_row());
             bits.push((at, Bit::Checkbox(on)));
@@ -1067,7 +1118,9 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
         for (r, bit) in bits {
             l.put(r, bit);
         }
-        if (1..=9).contains(&choice.n) {
+        if m.arrows {
+            l.spots.push((ground, Spot::Key(WaitKey::Row(choice.n))));
+        } else if (1..=9).contains(&choice.n) {
             l.spots.push((ground, Spot::Key(WaitKey::Digit(choice.n))));
         }
         y += STEP_GAP / 2;
@@ -3004,6 +3057,7 @@ pub(super) mod tests {
             model: None,
             context: None,
             card: None,
+            picker: None,
         }
     }
 
@@ -3196,6 +3250,58 @@ pub(super) mod tests {
                 .iter()
                 .all(|(_, key)| inside(p.waiting.unwrap(), *key))
         );
+    }
+
+    /// Antigravity's model menu as `chat::model_menu` reads it off its
+    /// screen: its effort slider shows, the arrow on the second row.
+    pub(in crate::chrome) fn model_menu() -> Arc<Menu> {
+        let ansi = include_str!("../chat/fixtures/model_menu/agy.ansi");
+        let rows = crate::scrollback::parse_ansi(ansi);
+        let m = crate::chat::model_menu::read(crate::ai_work::AgentKind::Antigravity, &rows);
+        Arc::new(m.expect("its model menu"))
+    }
+
+    #[test]
+    fn an_agents_model_menu_takes_the_waiting_panels_place_its_rows_to_click() {
+        let mut v = view();
+        v.picker = Some(model_menu());
+        let p = parts(&v);
+        let panel = p.waiting.expect("the menu's panel");
+        let (at, laid) = p.menu.clone().expect("its rows");
+        assert!(inside(panel, at));
+        // Every row is a click, by its place; no numbers drawn.
+        let rows: Vec<WaitKey> = (laid.spots.iter())
+            .filter_map(|(_, spot)| match spot {
+                Spot::Key(key) => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows, (1..=8).map(WaitKey::Row).collect::<Vec<_>>());
+        assert!(!laid.bits.iter().any(|(_, bit)| matches!(bit, Bit::Label { text, .. } if text == "1.")));
+        let layout = chat_layout(&v);
+        let second = Rectangle::new(laid.spots[1].0.loc + at.loc, laid.spots[1].0.size);
+        assert_eq!(layout.hit(&v, middle(second)), Some(ChatHit::Key(WaitKey::Row(2))));
+        // Its effort moves with Left and Right.
+        let keys: Vec<WaitKey> = p.keys.iter().map(|(key, _)| *key).collect();
+        assert!(keys.contains(&WaitKey::Left) && keys.contains(&WaitKey::Enter));
+        let mut plain = Menu::clone(v.picker.as_deref().unwrap());
+        plain.sideways = false;
+        v.picker = Some(Arc::new(plain));
+        let keys: Vec<WaitKey> = parts(&v).keys.iter().map(|(key, _)| *key).collect();
+        assert!(!keys.contains(&WaitKey::Left));
+        // A short pane shows the rows round the arrow's.
+        v.rect.size.h = 420;
+        let (_, laid) = parts(&v).menu.expect("some rows");
+        let shown: Vec<WaitKey> = (laid.spots.iter())
+            .filter_map(|(_, spot)| match spot {
+                Spot::Key(key) => Some(*key),
+                _ => None,
+            })
+            .collect();
+        assert!(shown.len() < 8 && shown.contains(&WaitKey::Row(2)), "{shown:?}");
+        // It goes before what the agent waits on.
+        v.waiting = Some(screen());
+        assert_eq!(parts(&v).menu.map(|(_, l)| l.spots.len()), Some(shown.len()));
     }
 
     #[test]

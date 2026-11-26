@@ -408,6 +408,9 @@ pub struct Chats {
     /// pane, and the panes whose agent is being switched to another.
     pub modes: HashMap<String, String>,
     pub switching: HashSet<String>,
+    /// The panes whose agent's own model menu was asked for (`/model`
+    /// sent), when: their screen is read often till it shows.
+    pub model_asked: HashMap<String, std::time::Instant>,
     /// Where those switches come back to, as (pane, mode, how it went).
     pub mode_tx: Option<channel::Sender<ModeSwitched>>,
 }

@@ -1,0 +1,40 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[0m[38;5;4m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+
+[0m[38;5;3mOnly showing models from configured providers. Use /login to add providers.[0m                                                                                                                                                                                                                       
+
+> opus-5-5[0m[7m [0m                                                                                                                                                                                                                                                                                       
+
+[0m[38;5;5m→ [0m  [0m[38;5;5mclaude-opus-5-5[0m [0m[2m[anthropic][0m                                                                                                                                                                                                                                                                   
+    claude-sonnet-5-5 [0m[2m[anthropic][0m                                                                                                                                                                                                                                                                 
+    claude-sonnet-4-5-20250929 [0m[2m[anthropic][0m                                                                                                                                                                                                                                                        
+    claude-opus-4-5-20251101 [0m[2m[anthropic][0m                                                                                                                                                                                                                                                          
+    claude-opus-5 [0m[2m[anthropic][0m                                                                                                                                                                                                                                                                     
+    claude-sonnet-5 [0m[2m[anthropic][0m                                                                                                                                                                                                                                                                   
+    claude-opus-4-5[0m[2m (Claude Opus 4.5 (latest))[0m [0m[2m[anthropic][0m                                                                                                                                                                                                                                        
+    claude-sonnet-4-5[0m[2m (Claude Sonnet 4.5 (latest))[0m [0m[2m[anthropic][0m                                                                                                                                                                                                                                    
+
+[0m[2m  Model Name: Claude Opus 5.5[0m                                                                                                                                                                                                                                                                     
+
+[0m[38;5;2m  Model catalogs refreshed.[0m                                                                                                                                                                                                                                                                       
+
+[0m[2m  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel[0m                                                                                                                                                                                                                            
+[0m[38;5;4m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[0m[2m~/Personal/gerdr (main)[0m
+[0m[2m$0.000 (sub) 0.0%/1.0M (auto)                                                                                                                                                                                                                                (anthropic) claude-haiku-5-5 • medium[0m

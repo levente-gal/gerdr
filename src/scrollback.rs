@@ -463,6 +463,9 @@ pub struct Style {
     /// On a background colour, or in reverse: what a menu lights its
     /// current tab with. Not painted.
     pub ground: bool,
+    /// The background colour, when one is set: what OpenCode lights its
+    /// menu's current row with, on its dialog's own ground. Not painted.
+    pub bg: Option<Ink>,
 }
 
 /// A colour as the terminal names it: one of its 256 (the first 16 its
@@ -1762,7 +1765,8 @@ fn sgr(params: &str, style: &mut Style) {
             Some(2) => style.dim = true,
             Some(22) => (style.bold, style.dim) = (false, false),
             Some(7) => style.ground = true,
-            Some(27 | 49) => style.ground = false,
+            Some(27) => style.ground = false,
+            Some(49) => (style.ground, style.bg) = (false, None),
             Some(c @ 30..=37) => style.fg = Some(Ink::Index((c - 30) as u8)),
             Some(c @ 90..=97) => style.fg = Some(Ink::Index((c - 90 + 8) as u8)),
             Some(39) => style.fg = None,
@@ -1777,7 +1781,7 @@ fn sgr(params: &str, style: &mut Style) {
                 };
                 match c {
                     38 if ink.is_some() => style.fg = ink,
-                    48 => style.ground = ink.is_some(),
+                    48 => (style.ground, style.bg) = (ink.is_some(), ink),
                     _ => {}
                 }
                 i += by;
@@ -2091,10 +2095,11 @@ mod tests {
             lines[1].1,
             [(6..7, fg(Ink::Index(208))), (7..8, fg(Ink::Rgb([1, 2, 3])))]
         );
-        // Colons, a colour space among them; the ground's colour only
-        // said to be one; a style going on past the line's end.
+        // Colons, a colour space among them; the ground's colour kept;
+        // a style going on past the line's end.
         let ground = Style {
             ground: true,
+            bg: Some(Ink::Index(3)),
             ..Default::default()
         };
         let bright = Style {
@@ -2102,15 +2107,20 @@ mod tests {
             bold: true,
             dim: true,
             ground: true,
+            bg: Some(Ink::Index(3)),
         };
         assert_eq!(lines[2].0, "zwvu");
         assert_eq!(
             lines[2].1,
             [(0..1, fg(Ink::Rgb([4, 5, 6]))), (1..2, ground), (2..3, bright)]
         );
-        // Reverse is a ground too, till it ends.
+        // Reverse is a ground too, of no colour, till it ends.
         let rev = parse_ansi("\x1b[7ma\x1b[27mb");
-        assert_eq!(rev[0].1, [(0..1, ground)]);
+        let reverse = Style {
+            ground: true,
+            ..Default::default()
+        };
+        assert_eq!(rev[0].1, [(0..1, reverse)]);
         let on = parse_ansi("\x1b[33ma\nb\x1b[0m");
         assert_eq!(on[1].1, [(0..1, fg(Ink::Index(3)))]);
     }

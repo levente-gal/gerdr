@@ -649,10 +649,12 @@ pub enum LineCheck {
 /// Cursor leaves one whose Enter it read along with it while busy: long ones
 /// as `[Pasted text #1 +1 lines]` behind its `→`. One the agent just answered
 /// may match too, which costs an Enter on an empty box. A side question's
-/// panel (`/btw`) shows the line too, taken: Enter would close it.
+/// panel (`/btw`) shows the line too, taken: Enter would close it. So does
+/// the history above an agent's model menu (`/model`): Enter would pick the
+/// model under its arrow.
 fn line_left_in_box(screen: &str, line: &str) -> bool {
     let rows: Vec<&str> = screen.lines().collect();
-    if crate::chat::btw::panel(&rows).is_some() {
+    if crate::chat::btw::panel(&rows).is_some() || crate::chat::model_menu::shows(screen) {
         return false;
     }
     let tail: Vec<&str> = screen.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -1221,6 +1223,14 @@ impl Herdr {
             tracing::warn!("clearing the input line of pane {pane_id}: {err}");
         }
         self.send_line(pane_id, line)
+    }
+
+    /// Type `text` into pane `pane_id`, nothing pressed after it: letters
+    /// for an agent's menu's search. As typed: Antigravity's search (1.5.17,
+    /// probed) takes no text `pane.send_input` sends.
+    pub fn send_text(&mut self, pane_id: &str, text: &str) -> Result<(), String> {
+        self.call("pane.send_text", json!({"pane_id": pane_id, "text": text}))
+            .map(drop)
     }
 
     /// Press `keys` in pane `pane_id`, as typed on its terminal: `ctrl+c`
@@ -1826,6 +1836,11 @@ mod tests {
         // Antigravity's side panel says the question: it took it.
         let side = " ┃ /btw list the numbers\n ┃\n ┃ ⣾  Working... (Enter/Esc to cancel)\n────\n>\n";
         assert!(!line_left_in_box(side, "/btw list the numbers"));
+        // Over a model menu the line opened, as Antigravity keeps it in its
+        // history: an Enter would pick a model.
+        let menu = "> /model\n  \u{23bf}  Exited /model command\n> /model\nSwitch Model\n  Search: son\n> Claude Sonnet 4.6 (Thinking)\nKeyboard: \u{2191}/\u{2193} Navigate  enter Select  esc Clear search\n";
+        assert!(!line_left_in_box(menu, "/model"));
+        assert!(line_left_in_box("> /model\n", "/model"));
     }
 
     #[test]

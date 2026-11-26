@@ -30,7 +30,7 @@ use super::{
     menu::{self, ChoiceKind, Menu},
     questions::Card,
     mode,
-    model,
+    model, model_menu,
     rows::{rows, unread},
     tail::Tail,
 };
@@ -62,6 +62,21 @@ const SIDE_MISSES: u32 = 10;
 /// How often a chat's screen is read for its agent's mode otherwise: the
 /// agent changes it by itself too (Claude leaving plan mode).
 const MODE_EVERY: Duration = Duration::from_secs(3);
+/// How long an agent's model menu may take to show once `/model` went: its
+/// screen is read often till then.
+const MENU_TAKES: Duration = Duration::from_secs(5);
+/// When the screen is first read for it: OpenCode's dialog showed in
+/// under half a second.
+const MENU_SHOWS: Duration = Duration::from_millis(400);
+
+/// What goes to an agent's model menu from its chat's keys.
+#[derive(Debug)]
+enum Press<'a> {
+    /// A key, by herdr's name.
+    Key(&'static str),
+    /// Letters typed.
+    Text(&'a str),
+}
 /// How many times, `WAITING_EVERY` apart, an idle Claude Code's screen is
 /// read for its suggestion before gerdr gives up until its next turn: it
 /// comes a few seconds after the turn, or never when it is turned off.
@@ -578,6 +593,71 @@ fn unattaches(chat: &PaneChat) -> bool {
     !chat.attached.is_empty() && line.caret == 0 && line.anchor == 0
 }
 
+/// The keys of the agent's own model menu while the chat shows it
+/// (`model_menu`): they come before all the chat's others, and go to the
+/// agent's menu as pressed, the letters typed too (its search). Left and
+/// Right only where they change something (`Menu::sideways`).
+const PICKER_KEYS: &[Binding<bool, &'static str>] = &[
+    Binding {
+        chord: "Down",
+        does: |_| Some("Down"),
+        footer: true,
+        f1: "move the arrow of the agent's model menu",
+    },
+    key_table::alias("Ctrl+J", |_| Some("Down")),
+    Binding {
+        chord: "Up",
+        does: |_| Some("Up"),
+        footer: true,
+        f1: "move the arrow of the agent's model menu",
+    },
+    key_table::alias("Ctrl+K", |_| Some("Up")),
+    Binding {
+        chord: "Left",
+        does: |&side| side.then_some("Left"),
+        footer: true,
+        f1: "lower the effort of the model under the arrow",
+    },
+    Binding {
+        chord: "Right",
+        does: |&side| side.then_some("Right"),
+        footer: true,
+        f1: "raise the effort of the model under the arrow",
+    },
+    Binding {
+        chord: "Enter",
+        does: |_| Some("Enter"),
+        footer: true,
+        f1: "pick the model under the arrow",
+    },
+    Binding {
+        chord: "BackSpace",
+        does: |_| Some("backspace"),
+        footer: true,
+        f1: "take back a letter of the menu's search (letters typed search it)",
+    },
+    Binding {
+        chord: "Esc",
+        does: |_| Some("esc"),
+        footer: true,
+        f1: "close the agent's model menu, or clear its search first",
+    },
+];
+
+/// The footer's key hints while the agent's model menu shows (checklist K3).
+pub(crate) fn picker_footer(sideways: bool) -> Vec<(String, String)> {
+    key_table::joined(key_table::hints(PICKER_KEYS, &sideways, |k| {
+        match *k {
+            "Up" | "Down" => "move",
+            "Left" | "Right" => "effort",
+            "Enter" => "pick",
+            "backspace" => "erase",
+            _ => "close",
+        }
+        .to_owned()
+    }))
+}
+
 /// The `/` menu's keys: they come before the reply box's while it shows.
 const SLASH_KEYS: &[Binding<(), SlashKey>] = &[
     Binding {
@@ -743,6 +823,9 @@ fn chat_footer(chat: &PaneChat, modes: bool, models: bool) -> Vec<(String, Strin
         }
         _ => Vec::new(),
     };
+    if let Some(m) = &chat.picker {
+        return picker_footer(m.sideways);
+    }
     let rest = match chat.slash.as_ref().filter(|s| s.open()) {
         Some(menu) => slash_footer(menu.files.is_some()),
         None => {
@@ -791,6 +874,10 @@ enum ChatDo {
     PickModel,
     /// Open the file picker, to attach files to the reply.
     PickFiles,
+    /// Press this key in the agent's own model menu (herdr's name), or
+    /// type these letters into its search.
+    MenuKey(&'static str),
+    MenuText(String),
 }
 
 /// A key of the reply box, while it has the keys.
@@ -872,6 +959,15 @@ fn chat_key(
     sym: Keysym,
     typed: Keysym,
 ) -> Option<ChatDo> {
+    // The agent's own menu has every key while it shows.
+    if let Some(m) = &chat.picker {
+        return match key_table::press(PICKER_KEYS, &m.sideways, mods, sym) {
+            Some(key) => Some(ChatDo::MenuKey(key)),
+            None => (types(mods, typed))
+                .then(|| typed.key_char().map(|c| ChatDo::MenuText(c.to_string())))
+                .flatten(),
+        };
+    }
     let questions = (chat.live.ask.as_ref()).is_some_and(|a| !a.questions.is_empty());
     if questions
         && chat.focus == ChatFocus::List
@@ -1069,7 +1165,7 @@ fn wait_key_name(key: WaitKey) -> String {
         WaitKey::Left => "Left".into(),
         WaitKey::Right => "Right".into(),
         WaitKey::Enter => "Enter".into(),
-        WaitKey::Digit(d) => d.to_string(),
+        WaitKey::Digit(d) | WaitKey::Row(d) => d.to_string(),
     }
 }
 
@@ -1169,7 +1265,11 @@ fn last_rows(mut rows: ChatRows, n: usize) -> ChatRows {
 
 /// Pane `pane_id`'s last `n` screen rows with their colours, read from
 /// herdr off the UI thread.
-fn screen_rows(herdr: &mut Herdr, pane_id: &str, n: usize) -> Result<ChatRows, String> {
+pub(crate) fn screen_rows(
+    herdr: &mut Herdr,
+    pane_id: &str,
+    n: usize,
+) -> Result<ChatRows, String> {
     let text = herdr.pane_styled(pane_id, n)?;
     // An app on the alternate screen has no scrollback: its screen, plainly.
     let text = match text.trim().is_empty() {
@@ -1550,7 +1650,11 @@ impl Gerdr {
             .map(|a| a.pane_id.as_str())
             .collect();
         let mut suggesting = Vec::new();
+        let mut picking = HashSet::new();
         for (pane_id, chat) in chats_mut(&mut self.workspaces) {
+            if chat.picker.is_some() {
+                picking.insert(pane_id.to_owned());
+            }
             if !blocked.contains(pane_id) {
                 chat.waiting = None;
             }
@@ -1568,9 +1672,20 @@ impl Gerdr {
             .filter(|a| !blocked.contains(a.pane_id.as_str()))
             .filter(|a| super::source::kind(a).is_some_and(|k| !mode::modes(k).is_empty()))
             .map(|a| (a.pane_id.as_str(), MODE_EVERY));
+        // Those that pick their model in a menu of their own, for the model
+        // they are on; often while the menu shows or was just asked for.
+        let asked = |id: &str| (self.chats.model_asked.get(id)).is_some_and(|at| at.elapsed() < MENU_TAKES);
+        let menus = (wanted.iter())
+            .filter(|a| super::source::kind(a).is_some_and(model_menu::opens))
+            .map(|a| a.pane_id.as_str())
+            .map(|id| match picking.contains(id) || asked(id) {
+                true => (id, WAITING_EVERY),
+                false => (id, MODE_EVERY),
+            });
         let due: Vec<String> = (blocked.iter().map(|id| (*id, WAITING_EVERY)))
             .chain(suggesting.iter().map(|id| (id.as_str(), WAITING_EVERY)))
             .chain(moded)
+            .chain(menus)
             .filter(|(id, every)| {
                 (self.chats.read_at.get(*id)).is_none_or(|at| at.elapsed() >= *every)
             })
@@ -1637,6 +1752,9 @@ impl Gerdr {
             return;
         };
         let (status, kind) = (Some(agent.agent_status), super::source::kind(agent));
+        if let (Some(kind), Ok(rows)) = (kind.filter(|k| model_menu::opens(*k)), &rows) {
+            self.chat_take_picker(&pane_id, kind, rows);
+        }
         if status != Some(AgentStatus::Blocked) {
             match (kind, &rows) {
                 (Some(kind), Ok(rows)) => self.chat_take_mode(&pane_id, kind, rows),
@@ -1742,6 +1860,8 @@ impl Gerdr {
             Some(ChatDo::NextMode) => self.chat_next_mode(&pane_id),
             Some(ChatDo::PickModel) => self.chat_open_model_picker(&pane_id),
             Some(ChatDo::PickFiles) => self.chat_pick_files(&pane_id),
+            Some(ChatDo::MenuKey(key)) => self.chat_menu_press(&pane_id, Press::Key(key)),
+            Some(ChatDo::MenuText(text)) => self.chat_menu_press(&pane_id, Press::Text(&text)),
             Some(ChatDo::Top) => self.chat_scroll_to(&pane_id, Some(0.0)),
             Some(ChatDo::Bottom) => self.chat_scroll_to(&pane_id, None),
             Some(ChatDo::Page(by)) => {
@@ -1972,6 +2092,27 @@ impl Gerdr {
         herdr.send_agent_line(pane_id, line)
     }
 
+    /// The model menu pane `pane_id`'s agent of `kind` shows on its screen
+    /// `rows`, if any, and the model they say it is on; one that doesn't
+    /// say keeps the last it said.
+    fn chat_take_picker(&mut self, pane_id: &str, kind: AgentKind, rows: &ChatRows) {
+        let picker = model_menu::read(kind, rows);
+        let texts: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
+        let now = model_menu::now(kind, &texts);
+        if picker.is_some() {
+            self.chats.model_asked.remove(pane_id);
+        }
+        let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
+            return;
+        };
+        if chat.picker.as_deref() != picker.as_ref() {
+            chat.picker = picker.map(Arc::new);
+        }
+        if now.is_some() {
+            chat.model = now;
+        }
+    }
+
     /// The mode pane `pane_id`'s agent of `kind` is in, as its screen
     /// `rows` say; one that doesn't say keeps the last it said.
     fn chat_take_mode(&mut self, pane_id: &str, kind: AgentKind, rows: &ChatRows) {
@@ -2095,6 +2236,10 @@ impl Gerdr {
     /// Open the picker of pane `pane_id`'s agent's model, on the one its
     /// chat says it is on; nothing for an agent gerdr can't switch.
     pub(crate) fn chat_open_model_picker(&mut self, pane_id: &str) {
+        let kind = self.chat_agent(pane_id).and_then(super::source::kind);
+        if kind.is_some_and(model_menu::opens) {
+            return self.chat_open_model_menu(pane_id);
+        }
         let Some(slot) = self.chat_model_slot(pane_id) else {
             return;
         };
@@ -2102,6 +2247,73 @@ impl Gerdr {
             pane: pane_id.to_owned(),
         };
         self.open_model_picker(of, slot);
+    }
+
+    /// Open pane `pane_id`'s agent's own model menu, its `/model` typed:
+    /// the chat shows it once its screen does (`model_menu`).
+    fn chat_open_model_menu(&mut self, pane_id: &str) {
+        if chat_mut(&mut self.workspaces, pane_id).is_some_and(|chat| chat.picker.is_some()) {
+            return;
+        }
+        let sent = (self.mode_key_goes(pane_id))
+            .and_then(|()| self.send_to_agent(pane_id, model_menu::LINE));
+        if let Err(why) = sent {
+            tracing::warn!("opening the model menu of the agent in pane {pane_id}: {why}");
+            return self.show_error(format!("Couldn't open the agent's model menu: {why}"));
+        }
+        (self.chats.model_asked).insert(pane_id.to_owned(), Instant::now());
+        self.read_rows(pane_id.to_owned(), MENU_SHOWS);
+    }
+
+    /// Press `press` in pane `pane_id`'s agent's model menu, from its
+    /// chat's keys; its screen is read again soon, as the menu moves.
+    fn chat_menu_press(&mut self, pane_id: &str, press: Press) {
+        if self.pane_paused(pane_id) {
+            return self.show_error("Couldn't press the key: the agent is paused".into());
+        }
+        let Some(herdr) = self.session.herdr.as_mut() else {
+            return self.show_error("Couldn't press the key: herdr isn't connected".into());
+        };
+        let sent = match press {
+            Press::Key(key) => herdr.send_keys(pane_id, &[key]),
+            Press::Text(text) => herdr.send_text(pane_id, text),
+        };
+        if let Err(err) = sent {
+            tracing::warn!("pressing {press:?} in pane {pane_id}'s model menu: {err}");
+            return self.show_error(format!("Couldn't press the key in the agent's pane: {err}"));
+        }
+        self.read_rows(pane_id.to_owned(), mode::READ_EVERY);
+    }
+
+    /// Pick row `n` (from 1) of pane `pane_id`'s agent's model menu, as the
+    /// chat shows it: its arrow moved onto it on the screen as it is now,
+    /// then Enter.
+    fn chat_pick_row(&mut self, pane_id: &str, n: u8) {
+        let kind = self.chat_agent(pane_id).and_then(super::source::kind);
+        let shown = chat_mut(&mut self.workspaces, pane_id).and_then(|chat| chat.picker.clone());
+        let (Some(kind), Some(shown)) = (kind, shown) else {
+            return;
+        };
+        let Some(label) = (shown.choices.get(usize::from(n).wrapping_sub(1)))
+            .map(|c| c.label.clone())
+        else {
+            return;
+        };
+        if self.pane_paused(pane_id) {
+            return self.show_error(format!("Couldn't pick {label}: the agent is paused"));
+        }
+        let Some(herdr) = self.session.herdr.as_mut() else {
+            return self.show_error(format!("Couldn't pick {label}: herdr isn't connected"));
+        };
+        let keys = screen_rows(herdr, pane_id, WAITING_ROWS).and_then(|rows| {
+            let now = model_menu::read(kind, &rows).ok_or("the agent's menu closed")?;
+            model_menu::keys_to(&now, &label).ok_or_else(|| "the agent's menu doesn't show it".to_owned())
+        });
+        if let Err(why) = keys.and_then(|keys| herdr.send_keys(pane_id, &keys)) {
+            tracing::warn!("picking {label} in pane {pane_id}'s model menu: {why}");
+            self.show_error(format!("Couldn't pick {label}: {why}"));
+        }
+        self.read_rows(pane_id.to_owned(), mode::READ_EVERY);
     }
 
     /// The agent of pane `pane_id`'s chat, for the picker of its model;
@@ -2173,6 +2385,7 @@ impl Gerdr {
     /// digit typed as a menu's choice, without Enter (see `choice_keys`).
     fn chat_wait_key(&mut self, pane_id: &str, key: WaitKey) {
         let keys = match key {
+            WaitKey::Row(n) => return self.chat_pick_row(pane_id, n),
             WaitKey::Digit(n) => {
                 let m = (self.chats.waiting.get(pane_id)).and_then(|rows| menu::menu(rows));
                 choice_keys(m.as_ref(), n)
@@ -2204,7 +2417,7 @@ impl Gerdr {
             }
         }
         // Its screen read again soon, as the menu moves.
-        self.chats.read_at.remove(pane_id);
+        self.read_rows(pane_id.to_owned(), mode::READ_EVERY);
     }
 
     /// Open the file edit or plan `i` of pane `pane_id`'s chat wrote, in the
@@ -2293,7 +2506,7 @@ impl Gerdr {
                 }
                 // Its model's button: what its chat says it is on.
                 let model = (super::source::kind(agent))
-                    .filter(|kind| model::picks(*kind))
+                    .filter(|kind| model::picks(*kind) || model_menu::opens(*kind))
                     .map(|_| chat.model.clone().unwrap_or_else(|| "Model".to_owned()));
                 let modes = (super::source::kind(agent))
                     .filter(|kind| !mode::modes(*kind).is_empty())
@@ -2314,7 +2527,10 @@ impl Gerdr {
                     focus: chat.focus,
                     focused: focused == Some(id),
                     draft: chat.draft.line(),
-                    waiting: self.chats.waiting.get(pane_id).cloned(),
+                    // The agent's model menu takes the waiting panel's place.
+                    waiting: (chat.picker.is_none())
+                        .then(|| self.chats.waiting.get(pane_id).cloned())
+                        .flatten(),
                     suggestion: chat.suggestion.clone(),
                     hints: chat_footer(chat, !modes.is_empty(), model.is_some()),
                     slash: (chat.slash.as_ref())
@@ -2338,6 +2554,7 @@ impl Gerdr {
                     mode: self.chats.modes.get(pane_id).cloned(),
                     model,
                     context: chat.context.map(|c| c.said()),
+                    picker: chat.picker.clone(),
                 };
                 view.hover = pointer
                     .filter(|pos| view.rect.to_f64().contains(*pos))
@@ -2980,6 +3197,44 @@ mod tests {
         assert_eq!(got, rows(&["b", "c"]));
         assert_eq!(wait_key_name(WaitKey::Esc), "esc");
         assert_eq!(wait_key_name(WaitKey::Digit(2)), "2");
+    }
+
+    #[test]
+    fn the_agents_model_menu_takes_every_key_while_it_shows() {
+        let mut chat = with_items(vec![user("u1", "one")]);
+        chat.focus = ChatFocus::Composer;
+        chat.draft.set("kept");
+        chat.picker = Some(Arc::new(Menu {
+            arrows: true,
+            ..Menu::default()
+        }));
+        assert_eq!(press(&mut chat, "Down", 'j'), Some(ChatDo::MenuKey("Down")));
+        assert_eq!(press(&mut chat, "Ctrl+K", 'k'), Some(ChatDo::MenuKey("Up")));
+        assert_eq!(press(&mut chat, "Enter", '\r'), Some(ChatDo::MenuKey("Enter")));
+        assert_eq!(press(&mut chat, "Esc", '\u{1b}'), Some(ChatDo::MenuKey("esc")));
+        assert_eq!(
+            press(&mut chat, "BackSpace", '\u{8}'),
+            Some(ChatDo::MenuKey("backspace"))
+        );
+        // Letters search it, the reply kept as it was.
+        assert_eq!(press(&mut chat, "S", 's'), Some(ChatDo::MenuText("s".into())));
+        assert_eq!(press(&mut chat, "Shift+Tab", '\t'), None);
+        assert_eq!(chat.draft, "kept");
+        // Left and Right only where they change its effort.
+        assert_eq!(press(&mut chat, "Left", '\0'), None);
+        let hinted = |chat: &PaneChat| chat_footer(chat, true, true);
+        assert!(!hinted(&chat).iter().any(|(_, said)| said == "effort"));
+        assert!(!hinted(&chat).iter().any(|(_, said)| said == "send"));
+        chat.picker = Some(Arc::new(Menu {
+            arrows: true,
+            sideways: true,
+            ..Menu::default()
+        }));
+        assert_eq!(press(&mut chat, "Right", '\0'), Some(ChatDo::MenuKey("Right")));
+        assert!(hinted(&chat).iter().any(|(k, said)| k == "Left / Right" && said == "effort"));
+        // Gone with the menu.
+        chat.picker = None;
+        assert_eq!(press(&mut chat, "Enter", '\r'), Some(ChatDo::Send));
     }
 
     #[test]

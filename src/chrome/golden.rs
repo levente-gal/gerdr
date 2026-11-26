@@ -9735,9 +9735,10 @@ fn dump_ship_squash() {
 /// Claude Code's suggestion in the reply box, the agent's modes under it,
 /// side questions (`/btw`) answered and being answered, a plan on its
 /// card, cut and whole, plan mode asking to go ahead with it, and the
-/// model's button right of the modes, hovered, and the user's words kept
-/// on top of a list scrolled up past them.
-const CHATS: [&str; 22] = [
+/// model's button right of the modes, hovered, the user's words kept on
+/// top of a list scrolled up past them, and an agent's own model menu in
+/// the waiting panel's place, a row hovered.
+const CHATS: [&str; 23] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9759,6 +9760,7 @@ const CHATS: [&str; 22] = [
     "chat_model",
     "chat_pinned",
     "chat_start",
+    "chat_model_menu",
     "chat_files",
 ];
 
@@ -10016,9 +10018,20 @@ fn chat_view(i: usize) -> super::ChatView {
             hover: Some(ChatHit::ShowScreen),
             ..v
         },
+        // Antigravity's model menu, read off its screen, a row hovered.
+        21 => super::ChatView {
+            status: AgentStatus::Idle,
+            hints: crate::chat::picker_footer(true),
+            modes: ["Auto", "Plan", "Default", "Edits"].map(String::from).into(),
+            mode: Some("Auto".into()),
+            model: Some("Gemini 4 Hydrogen".into()),
+            picker: Some(super::agent_chat::tests::model_menu()),
+            hover: Some(ChatHit::Key(WaitKey::Row(3))),
+            ..v
+        },
         // Two files attached, the first's chip under the pointer, and the
         // `@` menu of the agent's files over them.
-        21 => {
+        22 => {
             let text = "read @src/ma";
             let row = |name: &str| (name.to_owned(), String::new());
             super::ChatView {
@@ -10065,7 +10078,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 22]; 4] = [
+const GOLDEN_CHATS: [[u64; 23]; 4] = [
     // Dark at 1
     [
         0x0a7677a974e281be, // chat_finding
@@ -10089,6 +10102,7 @@ const GOLDEN_CHATS: [[u64; 22]; 4] = [
         0xf0790d3617fe581a, // chat_model
         0x0d9d640a038fcfed, // chat_pinned
         0xf6bf32aab503d121, // chat_start
+        0xa1665f97e511d52c, // chat_model_menu
         0x8f775fce7ee2c03d, // chat_files
     ],
     // Dark at 2
@@ -10114,6 +10128,7 @@ const GOLDEN_CHATS: [[u64; 22]; 4] = [
         0xeaf037ca8b89965f, // chat_model
         0x81a83e3228349375, // chat_pinned
         0xdb2c5ac8f62ce1cc, // chat_start
+        0x999d27764f2b5ea6, // chat_model_menu
         0x097c0ef5d7cb9ae8, // chat_files
     ],
     // Light at 1
@@ -10139,6 +10154,7 @@ const GOLDEN_CHATS: [[u64; 22]; 4] = [
         0xf157fe71b5b21e42, // chat_model
         0xbc341c99b133556d, // chat_pinned
         0xdc5cb64f2ae77c68, // chat_start
+        0xeda143c519b4b418, // chat_model_menu
         0xa33ec17ccd843a30, // chat_files
     ],
     // Light at 2
@@ -10164,6 +10180,7 @@ const GOLDEN_CHATS: [[u64; 22]; 4] = [
         0x5b60f8a986a62104, // chat_model
         0x86ff847aaa2d3229, // chat_pinned
         0x30c5847e6d3cbc0b, // chat_start
+        0x6344a6722574f680, // chat_model_menu
         0x20948fbc740c0467, // chat_files
     ],
 ];
