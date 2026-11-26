@@ -546,7 +546,7 @@ fn pane_models(kind: Option<AgentKind>, chat: Option<&Path>, cursor: &Value) -> 
         .collect();
     let mut offers = model::offers(kind, &cursor);
     let now = match kind {
-        AgentKind::Cursor => model::cursor_now(),
+        AgentKind::Cursor => crate::integrations::cursor::stats::cursor_now(),
         _ => {
             (chat.and_then(crate::ai_work::context::tail_of)).and_then(|tail| model::last_in(&tail))
         }

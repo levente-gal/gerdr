@@ -6,10 +6,12 @@
 
 use serde_json::Value;
 
-use super::{Item, ToolOut, gist};
-use crate::integrations::{
-    Parser,
-    common::build::{Builder, COMPACTED, cap, change, edit_or_tool, input_text, tag, texts},
+use crate::{
+    chat::{Item, ToolOut, parse::gist},
+    integrations::{
+        Parser,
+        common::build::{Builder, COMPACTED, cap, change, edit_or_tool, input_text, tag, texts},
+    },
 };
 
 /// A reader of Cursor's: it keeps nothing of its own.
@@ -22,7 +24,7 @@ impl Parser for Cursor {
     }
 }
 
-/// Read message `row`, the `n`th of the chat (see `super::snapshot`).
+/// Read message `row`, the `n`th of the chat (see `chat::parse::snapshot`).
 fn cursor_row(b: &mut Builder, n: usize, row: &Value) {
     match row["role"].as_str().unwrap_or_default() {
         "user" => {

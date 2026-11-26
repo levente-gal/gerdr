@@ -1,4 +1,12 @@
-//! Codex.
+//! Codex. Its chats are rollouts, JSON lines under
+//! `~/.codex/sessions/<y>/<m>/<d>/`, read as they grow. It has no live
+//! hook: its word reaches gerdr only through its rollout and its screen.
+
+mod commands;
+pub(crate) mod find;
+mod parse;
+mod screen;
+mod stats;
 
 use std::{
     collections::HashSet,
@@ -8,12 +16,12 @@ use std::{
 use super::{Integration, ModelSwitch, Parser, Store};
 use crate::{
     ai_work::{
-        AgentKind, Chat, context,
+        AgentKind, Chat,
         context::Context,
-        locate::{self, Found, Homes, Span},
-        usage::{self, Message},
+        locate::{Found, Homes, Span},
+        usage::Message,
     },
-    chat::{commands, commands::Command, menu::Menu, mode, model_menu, parse, source},
+    chat::{commands::Command, menu::Menu},
     scrollback::Styled,
 };
 
@@ -33,7 +41,7 @@ impl Integration for Codex {
     }
 
     fn parser(&self) -> Box<dyn Parser> {
-        Box::new(parse::codex::Codex)
+        Box::new(parse::Codex)
     }
 
     fn guesses(&self) -> bool {
@@ -49,13 +57,13 @@ impl Integration for Codex {
         span: Span,
     ) -> Result<Option<Found>, String> {
         Ok(match id {
-            Some(id) => locate::codex_by_id(&homes.codex, id),
-            None => locate::codex_by_time(&homes.codex, chat, claimed, span),
+            Some(id) => find::codex_by_id(&homes.codex, id),
+            None => find::codex_by_time(&homes.codex, chat, claimed, span),
         })
     }
 
     fn transcript_at(&self, path: &str, homes: &Homes) -> Option<PathBuf> {
-        source::codex_rollout(path, &homes.codex)
+        find::codex_rollout(path, &homes.codex)
     }
 
     fn transcripts_under(&self, homes: &Homes) -> Vec<PathBuf> {
@@ -68,7 +76,7 @@ impl Integration for Codex {
     }
 
     fn remote_script(&self, chat: &Chat, id: Option<&str>) -> Option<String> {
-        Some(locate::codex_script(chat, id))
+        Some(find::codex_script(chat, id))
     }
 
     fn remote_guesses(&self) -> bool {
@@ -80,11 +88,11 @@ impl Integration for Codex {
     }
 
     fn context_in(&self, tail: &[u8]) -> Option<Context> {
-        context::codex_context(tail)
+        stats::codex_context(tail)
     }
 
     fn usage(&self, raw: &[u8]) -> Vec<Message> {
-        usage::codex(raw)
+        stats::codex(raw)
     }
 
     fn modes(&self) -> &'static [&'static str] {
@@ -92,7 +100,7 @@ impl Integration for Codex {
     }
 
     fn mode_shown(&self, rows: &[&str]) -> Option<String> {
-        mode::codex_shown(rows)
+        screen::codex_shown(rows)
     }
 
     fn model_switch(&self) -> ModelSwitch {
@@ -100,15 +108,15 @@ impl Integration for Codex {
     }
 
     fn model_menu(&self, rows: &[(String, Styled)]) -> Option<Menu> {
-        model_menu::codex(rows)
+        screen::codex(rows)
     }
 
     fn model_on_screen<'a>(&self, rows: &[&'a str]) -> Option<&'a str> {
-        model_menu::codex_now(rows)
+        screen::codex_now(rows)
     }
 
     fn plan_menu(&self) -> Option<(&'static str, &'static str, &'static str)> {
-        Some(crate::herdr::PLAN_MENUS[1])
+        Some(screen::PLAN_MENU)
     }
 
     fn builtins(&self) -> &'static [(&'static str, &'static str)] {

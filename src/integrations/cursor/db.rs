@@ -1,5 +1,5 @@
-//! A database chat (OpenCode's, Cursor's) read by what changed since the
-//! last read, not whole each time.
+//! A Cursor chat in its `store.db`, read by what changed since the last
+//! read: a blob is named by its content, so only new ones are read.
 
 use std::{
     borrow::Cow,

@@ -1425,7 +1425,7 @@ pub(crate) fn readable(path: &Path) -> Result<String, String> {
     };
     // A Cursor chat is kept as its database: its messages are read out.
     if plain.ends_with(".db") {
-        let messages = ai_work::usage::cursor_messages(&bytes)?;
+        let messages = crate::integrations::cursor::stats::cursor_messages(&bytes)?;
         let lines: Vec<String> = messages.iter().map(Value::to_string).collect();
         return Ok(chat_text(&lines.join("\n")));
     }

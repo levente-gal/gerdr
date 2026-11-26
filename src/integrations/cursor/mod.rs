@@ -1,22 +1,27 @@
-//! The Cursor CLI.
+//! The Cursor CLI (`cursor-agent`). Its chats are `store.db` databases
+//! under `~/.cursor/chats/<folder>/<id>/`, read by what changed since. Its
+//! live word comes from the hooks in `~/.cursor/hooks.json` (`live`), which
+//! it shares with Cursor's IDE.
+
+mod commands;
+mod db;
+mod find;
+pub(crate) mod live;
+mod parse;
+mod screen;
+pub(crate) mod stats;
 
 use std::{collections::HashSet, path::Path};
 
 use super::{DbChat, Integration, ModelSwitch, Parser, Store};
 use crate::{
     ai_work::{
-        AgentKind, Chat, context,
+        AgentKind, Chat,
         context::Context,
         locate::{self, Found, Homes, Span},
-        usage::{self, Message},
+        usage::Message,
     },
-    chat::{
-        commands,
-        commands::Command,
-        live, mode,
-        parse::{self, Reader},
-        tail,
-    },
+    chat::{commands::Command, live as hub, parse::Reader},
     stage_models::Offer,
 };
 
@@ -36,11 +41,11 @@ impl Integration for Cursor {
     }
 
     fn parser(&self) -> Box<dyn Parser> {
-        Box::new(parse::cursor::Cursor)
+        Box::new(parse::Cursor)
     }
 
     fn db(&self) -> Option<Box<dyn DbChat>> {
-        Some(Box::<tail::db::CursorDb>::default())
+        Some(Box::<db::CursorDb>::default())
     }
 
     fn guesses(&self) -> bool {
@@ -55,7 +60,7 @@ impl Integration for Cursor {
         _claimed: &HashSet<String>,
         _span: Span,
     ) -> Result<Option<Found>, String> {
-        Ok(id.and_then(|id| locate::cursor(homes, id)))
+        Ok(id.and_then(|id| find::cursor(homes, id)))
     }
 
     /// One without an id is found by folder and time in a pane only.
@@ -67,13 +72,13 @@ impl Integration for Cursor {
         span: Span,
     ) -> Result<Option<Found>, String> {
         match chat.id {
-            None => Ok(locate::cursor_by_time(homes, chat, claimed, span)),
+            None => Ok(find::cursor_by_time(homes, chat, claimed, span)),
             Some(_) => locate::find_in(homes, chat, claimed, span),
         }
     }
 
     fn remote_script(&self, _chat: &Chat, id: Option<&str>) -> Option<String> {
-        id.map(locate::cursor_script)
+        id.map(find::cursor_script)
     }
 
     fn staged_store(&self) -> bool {
@@ -81,7 +86,7 @@ impl Integration for Cursor {
     }
 
     fn model_in_chat(&self, _reader: &Reader) -> Option<String> {
-        crate::chat::model::cursor_now()
+        stats::cursor_now()
     }
 
     fn has_context(&self) -> bool {
@@ -89,11 +94,11 @@ impl Integration for Cursor {
     }
 
     fn context(&self, path: &Path) -> Option<Context> {
-        context::cursor_context(path)
+        stats::cursor_context(path)
     }
 
     fn usage(&self, raw: &[u8]) -> Vec<Message> {
-        usage::cursor(raw)
+        stats::cursor(raw)
     }
 
     fn modes(&self) -> &'static [&'static str] {
@@ -101,7 +106,7 @@ impl Integration for Cursor {
     }
 
     fn mode_shown(&self, rows: &[&str]) -> Option<String> {
-        mode::cursor_shown(rows)
+        screen::cursor_shown(rows)
     }
 
     fn model_switch(&self) -> ModelSwitch {
@@ -115,7 +120,7 @@ impl Integration for Cursor {
     }
 
     fn plan_menu(&self) -> Option<(&'static str, &'static str, &'static str)> {
-        Some(crate::herdr::PLAN_MENUS[0])
+        Some(screen::PLAN_MENU)
     }
 
     fn builtins(&self) -> &'static [(&'static str, &'static str)] {
@@ -127,24 +132,22 @@ impl Integration for Cursor {
     }
 
     fn hook_command(&self) -> Option<&'static str> {
-        Some(crate::cursor_agents::HOOK_COMMAND)
+        Some(live::HOOK_COMMAND)
     }
 
     fn run_hook(&self) {
-        crate::cursor_agents::run_hook();
+        live::run_hook();
     }
 
     /// Cursor's CLI runs the hooks Cursor's IDE does.
-    fn install_live(&self, home: &Path) -> Vec<Result<Option<live::Changed>, String>> {
+    fn install_live(&self, home: &Path) -> Vec<Result<Option<hub::Changed>, String>> {
         if !home.join(".cursor").is_dir() {
             return Vec::new();
         }
-        vec![
-            live::hook_command(crate::cursor_agents::HOOK_COMMAND).and_then(|command| {
-                live::install(&home.join(".cursor/hooks.json"), |text| {
-                    crate::cursor_agents::merge_hooks(text, &command)
-                })
-            }),
-        ]
+        vec![hub::hook_command(live::HOOK_COMMAND).and_then(|command| {
+            hub::install(&home.join(".cursor/hooks.json"), |text| {
+                live::merge_hooks(text, &command)
+            })
+        })]
     }
 }

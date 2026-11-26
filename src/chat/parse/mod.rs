@@ -8,8 +8,6 @@
 //! they stay the same when it is read again and folds keep.
 
 pub(crate) mod claude;
-pub(crate) mod codex;
-pub(crate) mod cursor;
 pub(crate) mod patch;
 pub(crate) mod pi;
 

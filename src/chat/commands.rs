@@ -75,56 +75,6 @@ pub(crate) const CLAUDE: &[(&str, &str)] = &[
     ("schedule", "Schedule a cloud agent"),
 ];
 
-pub(crate) const CURSOR: &[(&str, &str)] = &[
-    ("add-dir", "Add a working folder"),
-    ("ask", "Ask without changes"),
-    ("btw", "Ask a side question"),
-    ("changes", "Show the changes"),
-    ("clear", "Start a new chat"),
-    ("commit", "Commit the changes"),
-    ("config", "Open the settings"),
-    ("context", "Show the context"),
-    ("copy", "Copy the last reply"),
-    ("exit", "Quit"),
-    ("fast", "Toggle fast mode"),
-    ("feedback", "Send feedback"),
-    ("fork", "Fork the chat"),
-    ("help", "Show help"),
-    ("logout", "Sign out"),
-    ("max-mode", "Toggle max mode"),
-    ("mcp", "Manage MCP servers"),
-    ("model", "Pick the model"),
-    ("plan", "Plan first"),
-    ("rename", "Rename the chat"),
-    ("resume", "Resume a chat"),
-    ("rewind", "Go back to a message"),
-    ("rule", "Add a rule"),
-    ("skills", "List skills"),
-    ("summarize", "Summarize the chat"),
-    ("usage", "Show usage"),
-    ("vim", "Toggle vim keys"),
-];
-
-pub(crate) const CODEX: &[(&str, &str)] = &[
-    ("compact", "Compact the conversation"),
-    ("diff", "Show the changes"),
-    ("exit", "Quit"),
-    ("fork", "Fork the conversation"),
-    ("init", "Write AGENTS.md"),
-    ("mcp", "List MCP tools"),
-    ("mention", "Mention a file"),
-    ("model", "Pick the model"),
-    ("new", "Start a new conversation"),
-    ("permissions", "Set what it may do"),
-    ("plan", "Plan first"),
-    ("rename", "Rename the conversation"),
-    ("resume", "Resume a conversation"),
-    ("review", "Review the changes"),
-    ("skills", "List skills"),
-    ("status", "Show the status"),
-    ("usage", "Show usage"),
-];
-
 pub(crate) const PI: &[(&str, &str)] = &[
     ("bug", "Write a bug report"),
     ("changelog", "Show the changelog"),
@@ -188,32 +138,6 @@ pub(crate) fn claude_disk(cwd: &Path, homes: &Homes, found: &mut Vec<Command>) {
         skills(&home.join("skills"), "", found);
         synced(&home.join("skills/synced"), found);
         plugins(home, found);
-    }
-}
-
-/// Cursor's `.cursor` and `.claude` commands on disk, the project's and the
-/// home's, and their skills.
-pub(crate) fn cursor_disk(cwd: &Path, homes: &Homes, found: &mut Vec<Command>) {
-    let home = homes.cursor.parent().unwrap_or(Path::new("/"));
-    for root in [cwd.to_owned(), home.to_owned()] {
-        for dir in [".cursor/commands", ".claude/commands"] {
-            cursor_commands(&root.join(dir), found);
-        }
-    }
-    for dir in [
-        cwd.join(".cursor/skills"),
-        cwd.join(".claude/skills"),
-        homes.cursor.join("skills"),
-        homes.cursor.join("skills-cursor"),
-    ] {
-        skills(&dir, "", found);
-    }
-}
-
-/// Codex's commands on disk: its `prompts/`.
-pub(crate) fn codex_disk(homes: &Homes, found: &mut Vec<Command>) {
-    for (name, path) in md_files(&homes.codex.join("prompts")) {
-        found.push(read_md(&path, format!("prompts:{name}")));
     }
 }
 
@@ -354,7 +278,7 @@ impl Slash {
 }
 
 /// The `*.md` files right in `dir`, by name without `.md`, in name order.
-fn md_files(dir: &Path) -> Vec<(String, PathBuf)> {
+pub(crate) fn md_files(dir: &Path) -> Vec<(String, PathBuf)> {
     let Ok(read) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -400,7 +324,7 @@ pub(crate) fn tree(dir: &Path, prefix: &str, found: &mut Vec<Command>) {
 }
 
 /// The skills in `dir` (`<name>/SKILL.md`) as commands `<prefix><name>`.
-fn skills(dir: &Path, prefix: &str, found: &mut Vec<Command>) {
+pub(crate) fn skills(dir: &Path, prefix: &str, found: &mut Vec<Command>) {
     for (name, sub) in sub_dirs(dir) {
         let path = sub.join("SKILL.md");
         if path.is_file() {
@@ -475,23 +399,9 @@ fn plugins(home: &Path, found: &mut Vec<Command>) {
     }
 }
 
-/// Cursor's command files in `dir`: their first line says what they do (it
-/// reads no front matter).
-fn cursor_commands(dir: &Path, found: &mut Vec<Command>) {
-    for (name, path) in md_files(dir) {
-        let text = fs::read_to_string(&path).unwrap_or_default();
-        let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-        found.push(Command {
-            name,
-            about: one_line(first.trim_start_matches('#')),
-            hint: String::new(),
-        });
-    }
-}
-
 /// Command `name` from markdown file `path`, with what its front matter
 /// says: `description` and `argument-hint`.
-fn read_md(path: &Path, name: String) -> Command {
+pub(crate) fn read_md(path: &Path, name: String) -> Command {
     let text = fs::read_to_string(path).unwrap_or_default();
     let front = front_matter(&text);
     let field = |key: &str| {

@@ -43,7 +43,7 @@ pub fn shown(kind: AgentKind, rows: &[&str]) -> Option<String> {
 }
 
 /// What Codex and Cursor say after their mode.
-const CYCLE: &str = "(shift+tab to cycle)";
+pub(crate) const CYCLE: &str = "(shift+tab to cycle)";
 
 /// The mode Claude Code's `rows` (as `shown` gives them) show.
 pub(crate) fn claude_shown(rows: &[&str]) -> Option<String> {
@@ -58,22 +58,6 @@ pub(crate) fn claude_shown(rows: &[&str]) -> Option<String> {
         .into_iter()
         .find_map(|(says, mode)| row.contains(says).then(|| mode.to_owned()))
     })
-}
-
-/// Cursor's: its default says nothing.
-pub(crate) fn cursor_shown(rows: &[&str]) -> Option<String> {
-    let mut said = rows.iter().take(4);
-    let said = said.find_map(|row| Some(row.split_once(CYCLE)?.0.trim().to_owned()));
-    Some(said.unwrap_or_else(|| "Agent".into()))
-}
-
-/// Codex's: its default says nothing.
-pub(crate) fn codex_shown(rows: &[&str]) -> Option<String> {
-    let said = rows.iter().take(3).find_map(|row| {
-        let said = row.split_once(CYCLE)?.0.trim().strip_suffix(" mode")?;
-        Some(said.rsplit("  ").next()?.trim().to_owned())
-    });
-    Some(said.unwrap_or_else(|| "Build".into()))
 }
 
 /// The mode agent `kind` shows on `ansi`, a pane's text with its escape

@@ -26,9 +26,9 @@ use crate::{
 
 pub(crate) mod antigravity;
 mod claude;
-mod codex;
+pub(crate) mod codex;
 pub mod common;
-mod cursor;
+pub(crate) mod cursor;
 pub(crate) mod opencode;
 mod pi;
 mod plain;
