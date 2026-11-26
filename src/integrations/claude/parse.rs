@@ -14,7 +14,7 @@ use crate::{
     integrations::{
         Parser,
         common::build::{
-            Builder, INTERRUPTED, Sub, cant_show, cap, change, edit_or_tool, flat_edits,
+            Builder, COMPACTED, INTERRUPTED, Sub, cant_show, cap, change, edit_or_tool, flat_edits,
             is_plan_file, tag, texts,
         },
     },
@@ -72,7 +72,9 @@ impl Parser for Claude {
             "user" => self.user(b, line, at),
             "assistant" => self.assistant(b, line, at),
             "system" if line["isMeta"] != true => {
-                if let Some(text) = line["content"].as_str() {
+                // Compaction says what every agent's chat says of it.
+                let compacted = line["subtype"] == "compact_boundary";
+                if let Some(text) = compacted.then_some(COMPACTED).or(line["content"].as_str()) {
                     let id = id(b, line, 0);
                     b.push_some(told(text, id, at, false));
                 }
@@ -842,7 +844,7 @@ mod tests {
             typed("c1.0", "/model opus"),
             note("o1.0", "Set model to opus"),
             note("i1.0", "Interrupted by the user"),
-            note("b1.0", "Conversation compacted"),
+            note("b1.0", COMPACTED),
             note("e1.0", "API Error: overloaded"),
             typed("q2.0", "and also this"),
         ];
