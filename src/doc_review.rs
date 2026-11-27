@@ -86,6 +86,9 @@ pub enum DocFile {
     /// to the pane's agent (see `DocOf::chat`). It has no feature: every
     /// feature path returns first for it.
     ChatPlan(u64),
+    /// A shipped feature's retro (`feature_retro::FILE`): Approve makes it a
+    /// new feature, Send back has its agent write it again.
+    Retro,
 }
 
 impl DocFile {
@@ -100,6 +103,7 @@ impl DocFile {
             DocFile::ConflictPlan(_) => Stage::Ship,
             DocFile::DraftChanges(stage, _) => stage,
             DocFile::Findings => Stage::AiReview,
+            DocFile::Retro => Stage::Ship,
             // Never read for it: its paths return before any stage lookup.
             DocFile::ChatPlan(_) => Stage::Plan,
         }
@@ -115,6 +119,7 @@ impl DocFile {
             // It takes none, but must not share the brief's.
             DocFile::Decisions => dir.join("decisions-comments.json"),
             DocFile::Findings => dir.join("findings-comments.json"),
+            DocFile::Retro => dir.join("retro-comments.json"),
             // Not under a feature's dir: by its key, as its snapshot is.
             DocFile::ChatPlan(key) => crate::chat::plan_review::comments_path(key),
             DocFile::Research(id) => dir.join(format!("research-R{id}-comments.json")),
@@ -133,6 +138,7 @@ impl DocFile {
             DocFile::DraftChanges(stage, _) => artifacts::name(stage),
             DocFile::Suggestions => artifacts::name(Stage::Plan),
             DocFile::Findings => Some(review_import::FINDINGS),
+            DocFile::Retro => Some(crate::features::retro::FILE),
             // Its snapshot is named by its key: its comments say "your plan".
             DocFile::ChatPlan(_) => Some(CHAT_PLAN_NAME),
             // Named by its turn or its number: its path says it.
@@ -163,6 +169,7 @@ impl DocFile {
             },
             // Said from the pane's live ask, not a feature (`chat_plan_state`).
             DocFile::ChatPlan(_) => String::new(),
+            DocFile::Retro => crate::features::retro::state(feature),
         }
     }
 
@@ -185,6 +192,7 @@ impl DocFile {
                 (conflict_plan_open(feature, n).is_none()).then_some(CONFLICT_PLAN_PAST)
             }
             DocFile::ChatPlan(_) => Some(CHAT_PLAN_READ_ONLY),
+            DocFile::Retro => crate::features::retro::locked(feature),
         }
     }
 
@@ -855,6 +863,7 @@ impl Gerdr {
                     DocFile::ConflictPlan(_) => {
                         Failed::Warning("The plan isn't written yet".into())
                     }
+                    DocFile::Retro => Failed::Warning(crate::features::retro::NONE_YET.into()),
                     DocFile::ChatPlan(_) => {
                         Failed::Warning("A chat's plan opens from its chat".into())
                     }
@@ -1022,6 +1031,10 @@ impl Gerdr {
         if let DocFile::ConflictPlan(_) = doc.file {
             return self.approve_conflict_plan(&doc.project, &doc.slug, doc.file);
         }
+        // A retro approved: a new feature.
+        if doc.file == DocFile::Retro {
+            return self.approve_retro(&doc.project, &doc.slug);
+        }
         self.approve_doc(&doc.project, &doc.slug, doc.file.stage());
     }
 
@@ -1168,6 +1181,9 @@ impl Gerdr {
         }
         if let DocFile::ConflictPlan(_) = file {
             return self.send_back_conflict_plan(project, slug, file, comments);
+        }
+        if file == DocFile::Retro {
+            return self.send_back_retro(project, slug, comments);
         }
         // One no longer waiting is refused there: the comments stay.
         let waiting = self

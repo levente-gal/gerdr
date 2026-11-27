@@ -669,6 +669,43 @@ fn a_blocked_ship_says_what_stops_it() {
 }
 
 #[test]
+fn removing_the_worktrees_says_no_retro_follows() {
+    let mut f = feature("s", vec![repo("api", true)], 8);
+    f.ship_plan.remove_worktrees = true;
+    let mut found = check(&[], &["api"], &[]).unwrap();
+    found.repos[0].merged = true;
+    let ready = probe(Some(found));
+    let remove_note = |retro_offered| {
+        let state = PanelState {
+            probe: Some(&ready),
+            ctx: RowCtx {
+                retro_offered,
+                ..RowCtx::default()
+            },
+            ..PanelState::default()
+        };
+        let page = stage_page(&f, Stage::Ship, &state, &[], 2_000);
+        let row = (page.sections.iter())
+            .find_map(|s| match s {
+                PageSection::ShipGroup(g) if g.head == "Afterwards" => g
+                    .steps
+                    .iter()
+                    .find(|r| r.label.starts_with("Remove"))
+                    .cloned(),
+                _ => None,
+            })
+            .expect("a Remove row");
+        assert!(row.ticked && !row.off, "ticked, and still a choice");
+        row.detail.map(|d| d.text)
+    };
+    assert_eq!(
+        remove_note(true).as_deref(),
+        Some(super::ship_page::NO_RETRO)
+    );
+    assert_eq!(remove_note(false), None);
+}
+
+#[test]
 fn the_agent_taking_on_conflicts_has_its_own_card_on_ship() {
     let mut f = feature("s", vec![repo("api", true)], 8);
     f.shipping.resolving = Some(crate::feature::Resolving {
@@ -3113,4 +3150,40 @@ fn discover_warns_of_missing_skills_with_a_button_to_install_them() {
     // All installed: neither card nor button.
     let none = page_actions(&f, Stage::Discover, RowCtx::default());
     assert!(!none.iter().any(|(_, o)| *o == PanelOutcome::InstallSkills));
+}
+
+/// A done feature's Ship page offers its retro, then its review once it is
+/// written; none once it became a feature, while open, or with its
+/// project's `retro` off.
+#[test]
+fn a_done_feature_offers_its_retro_then_its_review() {
+    let mut f = feature("s", vec![repo("api", true)], 0);
+    f.status = Status::Done;
+    let labels = |f: &Feature, ctx: RowCtx| {
+        (page_actions(f, Stage::Ship, ctx).into_iter())
+            .filter(|(_, o)| matches!(o, PanelOutcome::StartRetro | PanelOutcome::ReviewRetro))
+            .map(|(b, _)| b.label)
+            .collect::<Vec<_>>()
+    };
+    let ctx = RowCtx {
+        retro_offered: true,
+        ..RowCtx::default()
+    };
+    assert_eq!(labels(&f, ctx), ["Retro"]);
+    let written = RowCtx {
+        retro_written: true,
+        ..ctx
+    };
+    assert_eq!(labels(&f, written), ["Review retro", "Retro again"]);
+    assert!(labels(&f, RowCtx::default()).is_empty());
+    f.retro_into = Some("retro-s".into());
+    assert!(labels(&f, written).is_empty());
+    assert!(crate::features::retro::locked(Some(&f)).is_some());
+    assert_eq!(
+        crate::features::retro::state(Some(&f)),
+        "made into feature retro-s"
+    );
+    f.retro_into = None;
+    f.status = Status::Open;
+    assert!(labels(&f, ctx).is_empty());
 }

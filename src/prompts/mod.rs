@@ -37,6 +37,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "conflicts-plan" => (include_str!("../../assets/prompts/conflicts-plan.md"), 1),
         "sandbox-fix" => (include_str!("../../assets/prompts/sandbox-fix.md"), 1),
         "ship-fix" => (include_str!("../../assets/prompts/ship-fix.md"), 1),
+        "retro" => (include_str!("../../assets/prompts/retro.md"), 1),
         _ => return None,
     })
 }
@@ -66,6 +67,8 @@ mod tests {
     fn build_vars(multi: bool, comments: &str, evidence: &str) -> render::Vars {
         [
             ("feature.title", "Bulk edit"),
+            ("retro.path", "/data/bulk-edit/retro.md"),
+            ("retro.comments", "/data/bulk-edit/retro-comments.md"),
             ("pr.number", ""),
             ("pr.author", ""),
             ("pr.url", ""),
@@ -162,6 +165,11 @@ mod tests {
         let none = render_builtin("discover", &v).unwrap();
         assert!(!none.contains("Skills installed"), "{none}");
         v.insert("skills".into(), "- `grilling`".into());
+        v.insert("retro.path".into(), "/data/bulk-edit/retro.md".into());
+        v.insert(
+            "retro.comments".into(),
+            "/data/bulk-edit/retro-comments.md".into(),
+        );
         let some = render_builtin("discover", &v).unwrap();
         assert!(
             some.contains("- `grilling`") && some.contains("come first"),
@@ -197,6 +205,7 @@ mod tests {
             "conflicts-plan",
             "sandbox-fix",
             "ship-fix",
+            "retro",
             "decisions",
             "research",
         ] {

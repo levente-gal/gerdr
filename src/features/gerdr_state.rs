@@ -638,7 +638,14 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Create);
                 match (self.features.phone_new).remove(&(project.clone(), slug.clone())) {
                     Some(asked) => self.phone_created(asked, project, title, slug, root, result),
-                    None => self.feature_created(project, title, slug, root, result),
+                    None => {
+                        match (self.features.retro_new).remove(&(project.clone(), slug.clone())) {
+                            Some(from) => {
+                                self.retro_created(from, project, title, slug, root, result)
+                            }
+                            None => self.feature_created(project, title, slug, root, result),
+                        }
+                    }
                 }
             }
             Done::Touched {
@@ -1045,6 +1052,8 @@ impl Gerdr {
             dirty: (self.feature_reading(&feature.project, &feature.slug))
                 .is_some_and(|r| !r.dirty.is_empty()),
             skills_missing: last.is_some_and(|p| !p.skills.missing.is_empty()),
+            retro_offered: self.retro_setting(feature) != crate::projects::Retro::Off,
+            retro_written: docs.is_some_and(|d| d.retro),
         }
     }
 }

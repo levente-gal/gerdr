@@ -65,6 +65,8 @@ pub struct Docs {
     /// Its summary (`SUMMARY_FILE`) and when it was last written, once there;
     /// why it couldn't be read, if so.
     pub summary: Option<(Result<String, String>, u64)>,
+    /// Whether its retro is written (`features::retro::FILE`).
+    pub retro: bool,
     /// The comments the user left in the feature's diff: they go to Build
     /// with AI review's fixes, or wait for Code review. After them, flagged
     /// sent, those the latest of Code review's fix rounds took (`round_notes`).
@@ -249,6 +251,7 @@ pub fn read_docs(data: &Path) -> Docs {
     docs.decisions = read_decisions(data);
     docs.plan = fix_round::path(data).exists();
     docs.summary = read_summary(data);
+    docs.retro = data.join(crate::features::retro::FILE).is_file();
     docs.changed = (docs.written.iter().copied())
         .filter(|stage| artifacts::changed_since_approved(data, *stage))
         .collect();

@@ -269,6 +269,34 @@ pub fn page_actions(
     if stage == own_page(feature) {
         out.extend(own_actions(feature));
     }
+    // Done, what it taught: proposed by its retro agent, then reviewed.
+    if stage == Stage::Ship && super::retro::offers_retro(feature, ctx) {
+        match ctx.retro_written {
+            true => {
+                out.push((
+                    PageButton {
+                        label: "Review retro".to_owned(),
+                        style: ButtonStyle::Primary,
+                    },
+                    PanelOutcome::ReviewRetro,
+                ));
+                out.push((
+                    PageButton {
+                        label: "Retro again".to_owned(),
+                        style: ButtonStyle::Quiet,
+                    },
+                    PanelOutcome::StartRetro,
+                ));
+            }
+            false => out.push((
+                PageButton {
+                    label: "Retro".to_owned(),
+                    style: ButtonStyle::Plain,
+                },
+                PanelOutcome::StartRetro,
+            )),
+        }
+    }
     if stage == Stage::Discover {
         out.extend(research_actions(feature));
         if ctx.skills_missing {

@@ -175,6 +175,7 @@ impl DocOf {
             // One name for the view: its button's, tab's and heading's.
             DocFile::Suggestions => REVIEW_IN_PLAN,
             DocFile::ConflictPlan(_) => "Conflicts plan",
+            DocFile::Retro => "Retro",
             DocFile::Stage(Stage::Plan) | DocFile::ChatPlan(_) => "Plan",
             DocFile::Stage(Stage::PlanReview) => "Final plan",
             DocFile::Stage(_) => "Brief",

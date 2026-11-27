@@ -82,6 +82,7 @@ mod panel;
 mod phone_page;
 #[cfg(test)]
 mod pr_page_tests;
+pub(crate) mod retro;
 mod review_page;
 mod rows;
 mod ship_page;
@@ -166,6 +167,9 @@ pub struct Features {
     /// `skills` CLI's name for the agent, as last checked
     /// (`Probe::skills_there`): their stages' prompts name only those.
     pub(crate) skills_there: BTreeMap<(String, String), Vec<String>>,
+    /// The features being made from an approved retro, by project and new
+    /// slug: the slug of the feature whose retro it is.
+    pub(crate) retro_new: BTreeMap<(String, String), String>,
     /// What was last said of this gerdr's own panes, and when.
     pub(crate) live_last: Option<(feature::view::Live, u64)>,
     /// How the code of those shown here stands, by project and slug.
@@ -1514,6 +1518,10 @@ pub enum PanelOutcome {
     /// Install the skills its stages name that its agents lack, in a new
     /// terminal tab (see `skills::install_line`).
     InstallSkills,
+    /// Start the done feature's retro agent (see `retro::start_retro`).
+    StartRetro,
+    /// Review the retro its agent wrote (`DocFile::Retro`).
+    ReviewRetro,
     /// Pick the next agent this agent stage's chips offer.
     CycleAgent(Stage),
     /// Build with a fresh agent per milestone, or one through them all.

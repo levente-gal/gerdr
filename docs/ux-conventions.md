@@ -226,6 +226,21 @@ and Ctrl+C or `y` copies what it says.
   machine's agent is told the skills last found there: past Discover, gerdr
   asks each machine a stage is placed on once after it starts. A missing
   skill is only left out of the stage's prompt: nothing waits for it.
+- A done feature's Ship page offers its retro (Retro): an agent of its own,
+  on AI review's agent CLI, reads what gerdr kept of the feature (findings
+  and why they were dismissed, review comments, fix rounds, Manual test,
+  the evidence, `Blocked:` notes) and writes `retro.md`, shaped as a brief:
+  each proposal in scope, with its acceptance criteria and the evidence
+  behind it, a check before a line of guidance. Review retro opens it as a
+  stage's file is reviewed: Send back has a new retro agent write it again
+  with the comments; Approve makes it a new feature, "Retro: <title>", of
+  the repositories the feature touched, in its project and the projects it
+  links, its brief the retro and Discover approved (ADR 0001). Retro again writes it afresh. A retro made into a
+  feature only reads. The project's `retro` is `offer` by default; `auto`
+  starts it as the feature ships (its workspace opens again for it), unless
+  its worktrees are removed then; `off` offers none. Its page is its
+  workspace's tab, so removing the worktrees ends the retro: where retros
+  are offered, the Ship page's Remove row and the Ship confirm say so.
 - A later AI review reads only what changed since the last one, in the
   feature's own files, and leaves out the repositories that didn't change.
   When no finding waits to be checked and only the base came in (the

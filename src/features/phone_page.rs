@@ -478,7 +478,7 @@ fn phone_touched(root: &layout::Root, named: &[String]) -> Result<Vec<String>, S
 /// Feature `slug`'s root as the new feature dialog finds it from `from`,
 /// with each base origin says where the project's settings set none, and
 /// the repositories the phone named of it.
-fn phone_root(
+pub(super) fn phone_root(
     from: &Path,
     search: &(Vec<PathBuf>, Vec<String>, Vec<(String, String)>),
     others: &[PathBuf],

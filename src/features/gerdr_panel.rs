@@ -435,6 +435,8 @@ impl Gerdr {
             PanelOutcome::TakeOver => {}
             PanelOutcome::HandBack => self.hand_back(&project, &slug),
             PanelOutcome::InstallSkills => self.install_skills(&project, &slug),
+            PanelOutcome::StartRetro => self.start_retro(&project, &slug, None),
+            PanelOutcome::ReviewRetro => self.open_doc_tab(&project, &slug, DocFile::Retro),
             PanelOutcome::Tick => self.tick_current(&project, &slug),
             PanelOutcome::Ship | PanelOutcome::Finish => self.ask_ship_feature(&project, &slug),
             PanelOutcome::ShipRoute(repo, route) => {
