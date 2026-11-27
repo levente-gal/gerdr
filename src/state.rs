@@ -82,6 +82,9 @@ pub struct Mouse {
     pub pane_drop: Option<pane_drag::PaneDrop>,
     /// The workspace row or tab held, while the left button holds it.
     pub reorder: Option<Reorder>,
+    /// The web pane whose bar's Reload is held, and since when: let go
+    /// soon, it reloads; held on, it opens a menu (see `pane_bar_click`).
+    pub reload_hold: Option<(u32, Instant)>,
     /// The cursor shape gerdr last set over its chrome.
     pub chrome_cursor: CursorIcon,
     /// Where the pointer is, in window coordinates.

@@ -560,7 +560,8 @@ impl Gerdr {
                     self.mouse.repos_editor_drag = false;
                     self.overlays.scrollback_release();
                     self.release_page_text();
-                    if self.mouse.thumb_drag.take().is_some()
+                    if self.release_reload()
+                        || self.mouse.thumb_drag.take().is_some()
                         || self.chats.bar_drag.take().is_some()
                     {
                         return;

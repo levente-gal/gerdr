@@ -234,6 +234,9 @@ enum ToBrowser<'a> {
     },
     Reload {
         pane: String,
+        /// Past the browser's cache, as Ctrl+Shift+R does.
+        #[serde(rename = "bypassCache", skip_serializing_if = "std::ops::Not::not")]
+        bypass_cache: bool,
     },
     /// Keep T3 Code's app at `origin` in the pane's tab to the projects
     /// under `dirs`: the tab at another site is let be.
@@ -301,6 +304,8 @@ pub enum WebStep {
     Back,
     Forward,
     Reload,
+    /// Again where it is, past the browser's cache.
+    HardReload,
 }
 
 /// Whether a web pane's tab can go back and forward, as its page last said:
@@ -948,7 +953,14 @@ impl Gerdr {
         let message = match step {
             WebStep::Back => ToBrowser::Back { pane: pane_id },
             WebStep::Forward => ToBrowser::Forward { pane: pane_id },
-            WebStep::Reload => ToBrowser::Reload { pane: pane_id },
+            WebStep::Reload => ToBrowser::Reload {
+                pane: pane_id,
+                bypass_cache: false,
+            },
+            WebStep::HardReload => ToBrowser::Reload {
+                pane: pane_id,
+                bypass_cache: true,
+            },
         };
         self.send_to_browser(pane, &message)
     }
@@ -1408,7 +1420,14 @@ mod tests {
         let steps = [
             ToBrowser::Back { pane: "1.2".into() },
             ToBrowser::Forward { pane: "1.2".into() },
-            ToBrowser::Reload { pane: "1.2".into() },
+            ToBrowser::Reload {
+                pane: "1.2".into(),
+                bypass_cache: false,
+            },
+            ToBrowser::Reload {
+                pane: "1.2".into(),
+                bypass_cache: true,
+            },
         ]
         .map(|message| serde_json::to_string(&message).unwrap());
         assert_eq!(
@@ -1417,6 +1436,7 @@ mod tests {
                 r#"{"type":"back","pane":"1.2"}"#,
                 r#"{"type":"forward","pane":"1.2"}"#,
                 r#"{"type":"reload","pane":"1.2"}"#,
+                r#"{"type":"reload","pane":"1.2","bypassCache":true}"#,
             ]
         );
     }
