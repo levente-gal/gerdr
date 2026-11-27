@@ -5,8 +5,9 @@
 //! A brief needs `## Outcome`, `## In scope`, `## Out of scope` and
 //! `## Acceptance criteria` sections, none empty, and at least one
 //! criterion in Given/When/Then form. A plan needs `## Milestones` with
-//! at least one checkbox item, `## Repositories` and `## Merge order`
-//! sections, none empty, and a `Migrations:` line; `named_repos` tells
+//! at least one checkbox item, each with a `Seam:` line under it,
+//! `## Repositories` and `## Merge order` sections, none empty, and a
+//! `Migrations:` line; `named_repos` tells
 //! whether it names the touched repositories. Headings match at any
 //! level, case-insensitively; fenced code doesn't count.
 //!
@@ -284,6 +285,10 @@ pub fn check(stage: Stage, text: &str) -> Result<(), Vec<String>> {
             {
                 lacks.push("no milestone as a checkbox item (“- [ ] …”)".into());
             }
+            let body = doc.get("Milestones").unwrap_or_default();
+            for milestone in milestones_lacking(&body, "Seam") {
+                lacks.push(format!("milestone “{milestone}” has no “Seam:” line"));
+            }
             doc.need("Repositories", &mut lacks);
             doc.need("Merge order", &mut lacks);
             if !doc.lines.iter().any(|line| migrations_line(line)) {
@@ -305,6 +310,31 @@ pub fn check(stage: Stage, text: &str) -> Result<(), Vec<String>> {
         _ => {}
     }
     if lacks.is_empty() { Ok(()) } else { Err(lacks) }
+}
+
+/// The milestones of Milestones section `body`, by their text, with no
+/// `label:` line among the lines under them (up to the next milestone).
+fn milestones_lacking(body: &[&str], label: &str) -> Vec<String> {
+    let mut lacking = Vec::new();
+    let mut current: Option<(String, bool)> = None;
+    for line in body {
+        if let Some(mark) = checkbox(line) {
+            lacking.extend(
+                current
+                    .take()
+                    .filter(|(_, seen)| !seen)
+                    .map(|(name, _)| name),
+            );
+            let rest = list_item(line).unwrap_or(line);
+            current = Some((rest[mark.len()..].trim().to_owned(), false));
+        } else if let Some((_, seen)) = current.as_mut()
+            && labelled(line, label).is_some()
+        {
+            *seen = true;
+        }
+    }
+    lacking.extend(current.filter(|(_, seen)| !seen).map(|(name, _)| name));
+    lacking
 }
 
 /// The checkbox items of `text`'s Milestones section: how many are ticked
@@ -1000,7 +1030,7 @@ mod tests {
         );
     }
 
-    const PLAN: &str = "## Milestones\n- [ ] API\n- [x] UI\n\n## Repositories\n- api: endpoint\n- web: form\n\n## Merge order\napi then web\n\n**Migrations:** none\n";
+    const PLAN: &str = "## Milestones\n- [ ] API\n  Seam: `POST /rows`\n- [x] UI\n  - **Seam:** none: styles only\n\n## Repositories\n- api: endpoint\n- web: form\n\n## Merge order\napi then web\n\n**Migrations:** none\n";
 
     #[test]
     fn names_follow_the_stages() {
@@ -1049,6 +1079,24 @@ mod tests {
         assert_eq!(check(Stage::Discover, &fenced).unwrap_err().len(), 4);
         // Nor does a hashtag.
         assert!(check(Stage::Discover, "#Outcome\nx").is_err());
+    }
+
+    #[test]
+    fn each_milestone_of_a_plan_needs_a_seam_line() {
+        let plan = PLAN.replace("  Seam: `POST /rows`\n", "  Check: rows.test.ts\n");
+        assert_eq!(
+            check(Stage::Plan, &plan),
+            Err(vec!["milestone “API” has no “Seam:” line".to_owned()])
+        );
+        // An empty one doesn't count; the last milestone is checked too.
+        let plan = PLAN.replace("none: styles only", "");
+        assert_eq!(
+            check(
+                Stage::PlanReview,
+                &format!("{plan}## Review changes\n- none\n")
+            ),
+            Err(vec!["milestone “UI” has no “Seam:” line".to_owned()])
+        );
     }
 
     #[test]

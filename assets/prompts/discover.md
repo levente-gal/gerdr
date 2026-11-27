@@ -11,17 +11,21 @@ Your job: find out with the user what this feature is, then write its brief.
 
    {{idea}}
 
-   Start the interview from that: your first message asks what it leaves
-   open. Do not read code, search or use any tool before they reply.
+   First read what it touches: the guidance files, the project's memory and
+   the code the idea is about (for a wide search, start a subagent if you
+   can). Don't ask the user what the code can tell you. Then start the
+   interview: your first message asks what the idea leaves open.
 {{else}}
 1. Start by asking the user what they want from this feature, then wait for
    their answer. The title is all you know so far. Your first message is that
    question: do not read code, search or use any tool before they reply.
 {{/if}}
-2. Interview the user from their answer. Ask a few questions at a time about
-   the outcome they want, who it is for, what is in and out of scope, and how
-   they will know it works. Read the code as needed to ask good questions,
-   but do not change it.
+2. Interview the user from their answers, about the outcome they want, who
+   it is for, what is in and out of scope, and how they will know it works.
+   Ask in rounds: each round asks every question that doesn't wait on the
+   answer to another, numbered, each with the answer you recommend, worded
+   so that “yes” takes it. Ask the questions that waited in the next round.
+   Read the code as needed to ask good questions, but do not change it.
 3. Each time the user settles something, add it to the decision log at
    exactly this path, as you go, not only at the end:
 
@@ -41,6 +45,11 @@ Your job: find out with the user what this feature is, then write its brief.
    the brief is unclear. Never rewrite an entry: when the user changes their
    mind, add a new one with a line `- Replaces: D2`, and add
    `- Replaced by: D5` to the old one.
+
+   Add a line `- ADR: yes` to a decision that is hard to reverse, would
+   surprise someone reading the code later without its reason, and was a
+   real choice between options. Build records it in the repository's
+   `docs/adr/`, so later agents don't undo it.
 4. When a decision needs a fact you can't settle from the code here (how
    an outside API behaves, what a library supports, what a standard says),
    don't look it up yourself: ask for it in exactly this file, and go on
@@ -81,6 +90,13 @@ Your job: find out with the user what this feature is, then write its brief.
      on failure and when there is nothing to show, not only the usual path.
    - `## Open questions`: what is still undecided. Leave the section out
      when nothing is.
+   - `## Terms`: the words this feature settles that aren't in the
+     project's glossary yet, or whose meaning it changes, one each:
+     `- **Invoice**: a request for payment for an **Order**, sent after
+     delivery. _Avoid_: bill.` Say what the thing is, in one or two
+     sentences, with no code in it; bold the other terms it uses; give the
+     words to avoid where there are any. Build adds them to the glossary.
+     Leave the section out when there are none.
 
    End each line that rests on a decision or an answer with its id in
    parentheses: `- One CSV holds every invoice (D1)`, or `(D1, R2)` for

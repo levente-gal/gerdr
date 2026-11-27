@@ -4054,7 +4054,7 @@ mod tests {
 
     const BRIEF: &str = "## Outcome\nx\n## In scope\n- a\n## Out of scope\n- b\n## Acceptance criteria\n- Given a, when b, then c\n";
     const PLAN: &str =
-        "## Milestones\n- [ ] one\n## Repositories\n- api\n## Merge order\napi\nMigrations: none\n";
+        "## Milestones\n- [ ] one\n  Seam: none: docs\n## Repositories\n- api\n## Merge order\napi\nMigrations: none\n";
 
     fn run(ready: Option<u64>) -> StageRun {
         StageRun {
