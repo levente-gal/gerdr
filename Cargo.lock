@@ -926,6 +926,7 @@ dependencies = [
  "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
+ "unicode-script",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",

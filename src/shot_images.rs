@@ -99,8 +99,60 @@ fn svg(path: &Path) -> Option<usvg::Tree> {
     // Only an SVG with text waits for the system's fonts to be read.
     if data.windows(5).any(|w| w == b"<text") {
         options.fontdb = SVG_FONTS.clone();
+        options.font_resolver.select_fallback = Box::new(fallback);
     }
     usvg::Tree::from_data(&data, &options).ok()
+}
+
+/// The font to draw `c` in when the fonts in `used` lack it. usvg's own
+/// pick is the first font on the system that has it (Comfortaa for an
+/// arrow here); this walks cosmic-text's lists, the ones gerdr's own text
+/// falls back through, keeping the style and nearest weight.
+// shortcut: usvg draws the whole text in the fallback font when that font
+// has all of it, so a serif line with an arrow turns Noto Sans; per-glyph
+// fallback needs usvg's shaping changed.
+fn fallback(
+    c: char,
+    used: &[usvg::fontdb::ID],
+    fonts: &mut std::sync::Arc<usvg::fontdb::Database>,
+) -> Option<usvg::fontdb::ID> {
+    use cosmic_text::Fallback;
+    use unicode_script::UnicodeScript;
+    let base = fonts.face(*used.first()?)?;
+    let lists = cosmic_text::PlatformFallback;
+    let locale = std::env::var("LANG").unwrap_or_default();
+    let mut names = lists
+        .script_fallback(c.script(), &locale)
+        .iter()
+        .chain(lists.common_fallback());
+    let picked = names.find_map(|name| {
+        fonts
+            .faces()
+            .filter(|face| {
+                !used.contains(&face.id)
+                    && face.families.iter().any(|(family, _)| family == name)
+                    && has_char(fonts, face.id, c)
+            })
+            .min_by_key(|face| {
+                (
+                    face.style != base.style,
+                    face.weight.0.abs_diff(base.weight.0),
+                )
+            })
+            .map(|face| face.id)
+    });
+    picked.or_else(|| (usvg::FontResolver::default_fallback_selector())(c, used, fonts))
+}
+
+/// Whether the font `id` has a glyph for `c`.
+fn has_char(fonts: &usvg::fontdb::Database, id: usvg::fontdb::ID, c: char) -> bool {
+    use cosmic_text::skrifa::{FontRef, MetadataProvider};
+    fonts
+        .with_face_data(id, |data, index| {
+            FontRef::from_index(data, index).ok()?.charmap().map(c)
+        })
+        .flatten()
+        .is_some()
 }
 
 /// The system's fonts for an SVG's text, read once.
@@ -329,6 +381,23 @@ mod tests {
         .unwrap();
         let (_, _, rgba) = picture(&text, 40).unwrap().scaled(40);
         assert!(rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0));
+        // A character the font lacks is drawn from cosmic-text's fallback
+        // lists, not from whichever system font comes first.
+        let mut fonts = SVG_FONTS.clone();
+        let query = usvg::fontdb::Query {
+            families: &[usvg::fontdb::Family::Serif],
+            ..Default::default()
+        };
+        let serif = fonts.query(&query).unwrap();
+        let arrow = fallback('→', &[serif], &mut fonts).unwrap();
+        let family = fonts.face(arrow).unwrap().families[0].0.clone();
+        use cosmic_text::Fallback;
+        assert!(
+            cosmic_text::PlatformFallback
+                .common_fallback()
+                .contains(&family.as_str()),
+            "{family}"
+        );
         let other = dir.join("a.bmp");
         std::fs::write(&other, b"BM").unwrap();
         assert_eq!(size(&other), None);
