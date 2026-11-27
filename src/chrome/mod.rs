@@ -1053,6 +1053,9 @@ struct Cached<K> {
     key: Option<K>,
     buffer: Option<MemoryRenderBuffer>,
     text: u32,
+    /// Drawn while a picture was decoding: redrawn once the worker has done
+    /// more than this many (`shot_images::drawing`).
+    waits: Option<u64>,
 }
 
 impl<K> Default for Cached<K> {
@@ -1061,6 +1064,7 @@ impl<K> Default for Cached<K> {
             key: None,
             buffer: None,
             text: 0,
+            waits: None,
         }
     }
 }
@@ -1068,10 +1072,17 @@ impl<K> Default for Cached<K> {
 impl<K: PartialEq> Cached<K> {
     fn get(&mut self, key: K, draw: impl FnOnce(&K) -> MemoryRenderBuffer) -> &MemoryRenderBuffer {
         let text = text_size().to_bits();
-        if self.key.as_ref() != Some(&key) || self.text != text {
+        let came = self
+            .waits
+            .is_some_and(|done| crate::shot_images::done() != done);
+        if self.key.as_ref() != Some(&key) || self.text != text || came {
             self.buffer = None;
         }
-        let buffer = self.buffer.get_or_insert_with(|| draw(&key));
+        let buffer = self.buffer.get_or_insert_with(|| {
+            let (buffer, waits) = crate::shot_images::drawing(|| draw(&key));
+            self.waits = waits;
+            buffer
+        });
         self.key = Some(key);
         self.text = text;
         buffer
