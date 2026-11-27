@@ -636,6 +636,89 @@ mod tests {
         );
     }
 
+    /// The agents of the doc's launch table: those of a chat, and T3 Code.
+    const STARTS: [(AgentKind, &str); 7] = [
+        (AgentKind::Claude, "Claude"),
+        (AgentKind::Codex, "Codex"),
+        (AgentKind::OpenCode, "OpenCode"),
+        (AgentKind::Cursor, "Cursor"),
+        (AgentKind::Pi, "pi"),
+        (AgentKind::Antigravity, "agy"),
+        (AgentKind::T3, "T3"),
+    ];
+
+    /// How `agent` starts, as the doc's launch table says it.
+    fn launch_rows(agent: &dyn Integration) -> Vec<(&'static str, String)> {
+        let yes = |on: bool| if on { "✓" } else { "—" }.to_owned();
+        let command = agent.command().map_or("—".to_owned(), |c| format!("`{c}`"));
+        vec![
+            ("`command`: its program and `[agents]` key", command),
+            (
+                "`in_app`: starts as a draft in its app",
+                yes(agent.in_app()),
+            ),
+            (
+                "`adds_dirs`: `--add-dir`, told its first message",
+                yes(agent.adds_dirs()),
+            ),
+            (
+                "`adds_roots`: each repository a folder of its own",
+                yes(agent.adds_roots()),
+            ),
+            (
+                "`asks_trust`: started with `--trust`",
+                yes(agent.asks_trust()),
+            ),
+            (
+                "`takes_model`: started on `--model`",
+                yes(agent.takes_model()),
+            ),
+            (
+                "`picks_model`: a stage's model is picked",
+                yes(agent.picks_model()),
+            ),
+            (
+                "`models_read`: its CLI lists its models",
+                yes(agent.models_read()),
+            ),
+            ("`resumes`: its chat is gone back to", yes(agent.resumes())),
+            (
+                "`retells_model`: told its model again then",
+                yes(agent.retells_model()),
+            ),
+            (
+                "`runs_stages`: offered for a feature's stages",
+                yes(agent.runs_stages()),
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_chat_doc_says_how_agents_start() {
+        const DOC: &str = include_str!("../../docs/chat-agents.md");
+        let mut table = String::from("| Starting it |");
+        for (_, name) in STARTS {
+            table += &format!(" {name} |");
+        }
+        table += &format!("\n|---|{}\n", "---|".repeat(STARTS.len()));
+        let rows: Vec<_> = STARTS.map(|(kind, _)| launch_rows(of(kind))).into();
+        for (i, (method, _)) in rows[0].iter().enumerate() {
+            table += &format!("| {method} |");
+            for row in &rows {
+                table += &format!(" {} |", row[i].1);
+            }
+            table += "\n";
+        }
+        let block = (DOC.split_once("<!-- launch:begin -->\n"))
+            .and_then(|(_, rest)| rest.split_once("<!-- launch:end -->"))
+            .map(|(block, _)| block);
+        assert!(
+            block == Some(table.as_str()),
+            "docs/chat-agents.md's launch table isn't what the code says; put this \
+             between its launch:begin and launch:end lines:\n{table}"
+        );
+    }
+
     /// The files of the chat's UI, desktop and phone, and the shared
     /// readers of what an agent's screen shows: they read `Caps`, items,
     /// live events, menus and side panels, and name no agent.

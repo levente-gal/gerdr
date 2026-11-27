@@ -2,10 +2,10 @@
 
 What gerdr's chat view does for each agent CLI. This doc is partly
 generated. The `Caps` table is rendered from each agent's
-`integrations::of(kind).caps()`, and a test fails when it differs from the
-code. The rest was read from the code on 2026-11-26, on branch
-`agent-integrations`. Nothing here was tried in a live gerdr. How the agents
-are built is in `docs/agent-integrations.md`.
+`integrations::of(kind).caps()`, and the launch table from the methods that
+start it; a test fails when either differs from the code. The rest was read
+from the code on 2026-11-27. Nothing here was tried in a live gerdr. How the
+agents are built is in `docs/agent-integrations.md`.
 
 Six agents have a chat: Claude Code, Codex, OpenCode, Cursor, pi and the
 Antigravity CLI (agy). T3 has none. Its `store` is `None`, so its pane says
@@ -61,6 +61,46 @@ These work the same for all six: image paste, file attach, pinned prompt, the
 apart. The phone shows the same rows through `src/phone.rs`, gated by the same
 checks.
 
+## Starting the agent
+
+What gerdr does when it starts each agent: from the launcher, from a feature
+stage, or from Discover (`src/cli_agents.rs`, `src/feature/agents.rs`,
+`src/feature_agents.rs`, `src/switcher.rs`). T3 Code has a column here: it
+has no chat, but stages run in it. Don't edit this table by hand: run
+`the_chat_doc_says_how_agents_start` in `src/integrations/mod.rs` and paste
+the table it prints.
+
+<!-- launch:begin -->
+| Starting it | Claude | Codex | OpenCode | Cursor | pi | agy | T3 |
+|---|---|---|---|---|---|---|---|
+| `command`: its program and `[agents]` key | `claude` | `codex` | `opencode` | `cursor-agent` | `pi` | `agy` | `t3` |
+| `in_app`: starts as a draft in its app | — | — | — | — | — | — | ✓ |
+| `adds_dirs`: `--add-dir`, told its first message | ✓ | ✓ | — | ✓ | — | — | — |
+| `adds_roots`: each repository a folder of its own | — | — | — | ✓ | — | — | — |
+| `asks_trust`: started with `--trust` | — | — | — | ✓ | — | — | — |
+| `takes_model`: started on `--model` | ✓ | — | — | ✓ | — | — | — |
+| `picks_model`: a stage's model is picked | ✓ | — | — | ✓ | — | — | ✓ |
+| `models_read`: its CLI lists its models | — | — | — | ✓ | — | — | — |
+| `resumes`: its chat is gone back to | ✓ | — | — | ✓ | — | — | — |
+| `retells_model`: told its model again then | — | — | — | ✓ | — | — | — |
+| `runs_stages`: offered for a feature's stages | ✓ | — | — | ✓ | — | — | ✓ |
+<!-- launch:end -->
+
+| Feature | Claude | Codex | OpenCode | Cursor | pi | agy | T3 |
+|---|---|---|---|---|---|---|---|
+| Offered by the launcher once installed | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | once it ran here |
+| Can run Discover (told what to do as it starts) | ✓ | ✓ | — | ✓ | — | — | — |
+| Allowed into a feature's folders | `--settings` folders | `--add-dir` | docs link | `--add-dir`, plus each repository | docs link | docs link | — |
+| How its chat's id is kept | `--session-id` of a new uuid | — | — | `create-chat` | — | — | its thread |
+| Stage card names the model its chat ran on | ✓ (transcript) | — | — | ✓ (`store.db`) | — | — | its thread |
+| Stage model picker offers | the aliases (Fable, Opus, Sonnet, Haiku) | — | — | `cursor-agent --list-models` | — | — | its threads' models, then its model list |
+| A rerun leaves out its launcher's words | — | — | — | ✓ (node's flags and script) | — | — | — |
+| Known by another name | — | — | `opencode.exe` | `agent`, by where it leads | — | — | — |
+
+The agents gerdr has no integration of (Copilot, Amp, Qwen Code, Kimi, Grok,
+Kiro, Cline, Mastra, Droid, Aider, Goose, Crush) start as OpenCode, pi and
+agy do: their first message as the last argument, and no flag.
+
 ## Where each row is decided
 
 Each row comes from `Integration` methods (`src/integrations/mod.rs`),
@@ -87,6 +127,11 @@ shared engine reads what they give. `<agent>/` below is any agent's folder.
 | Model picker | `model_switch`, `offers`, `own_model`, `models_read`, `model_menu`, `model_on_screen` | `<agent>/screen.rs` | `src/chat/model.rs`, `src/chat/model_menu.rs`, `src/integrations/common/screen.rs` |
 | Modes | `modes`, `mode_shown` | `<agent>/screen.rs` | `src/chat/mode.rs` |
 | Context | `has_context`, `context_in`, `context` | `<agent>/stats.rs` | `src/ai_work/context.rs` |
+| Launcher | `command`, `label`, `in_app` | `<agent>/mod.rs` | `src/cli_agents.rs` (`known`) |
+| Command line of a stage | `adds_dirs`, `add_dirs`, `adds_roots`, `asks_trust`, `takes_model`, `new_chat` | `claude/launch.rs`, `cursor/launch.rs` | `src/feature/agents.rs` (`command_line`, `allowed_into`), `src/integrations/common/launch.rs` |
+| Going back to a chat | `resumes`, `retells_model`, `launcher_script` | `cursor/launch.rs` | `src/feature/agents.rs` (`resume_base`, `rerun_argv`) |
+| Stage chips and Discover | `runs_stages`, `picks_model`, `adds_dirs` | | `src/feature_agents.rs` |
+| Stage model picker | `offers`, `models_read`, `list_models`, `model_hint`, `reading_hint`, `run_model` | `claude/launch.rs`, `cursor/launch.rs`, `t3/launch.rs` | `src/switcher.rs`, `src/stage_models.rs` |
 
 ## Gaps
 
