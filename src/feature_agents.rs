@@ -422,6 +422,17 @@ pub(crate) fn validate(
     if stage == Stage::Discover {
         lacks.extend(artifacts::citation_lacks(text, data));
     }
+    if stage == Stage::Build && lacks.is_empty() {
+        let log = std::fs::read_to_string(data.join(artifacts::DECISIONS)).unwrap_or_default();
+        // shortcut: a repository's per-context `docs/adr/` (under `src/<ctx>/`)
+        // isn't looked in; add it if a project keeps them there.
+        let mut dirs: Vec<PathBuf> = feature
+            .touched()
+            .map(|r| r.worktree.join("docs/adr"))
+            .collect();
+        dirs.push(data.join(feature::memory::DIR).join("adr"));
+        lacks.extend(feature::memory::adr_lacks(&log, &feature.slug, &dirs));
+    }
     if let Some(review) = review {
         for id in plan_review::unmapped(review, text) {
             lacks.push(format!("Review changes doesn't name {id}"));
@@ -1187,6 +1198,12 @@ pub(crate) fn vars(
         (
             "evidence.path",
             data.join(verify::EVIDENCE).display().to_string(),
+        ),
+        // Where Build keeps the memory that spans repositories, put into the
+        // home folder at ship (`feature::memory`).
+        (
+            "memory.path",
+            data.join(feature::memory::DIR).display().to_string(),
         ),
         ("branch", feature.branch()),
         (

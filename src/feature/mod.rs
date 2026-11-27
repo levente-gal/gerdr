@@ -35,6 +35,7 @@ pub mod hook;
 pub mod layout;
 pub mod lease;
 pub mod manual;
+pub mod memory;
 pub mod page;
 pub mod patch;
 pub mod plan_review;

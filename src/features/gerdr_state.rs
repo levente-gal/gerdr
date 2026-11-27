@@ -832,6 +832,11 @@ impl Gerdr {
                 self.unbusy(&project, &slug, Job::Ship);
                 self.bases_pushed(&project, &slug, results, finishing);
             }
+            Done::MemoryKept {
+                project,
+                slug,
+                result,
+            } => self.memory_kept(&project, &slug, result),
             Done::ShippedLosses {
                 project,
                 slug,
@@ -929,6 +934,32 @@ impl Gerdr {
             } => self.check_turn(&project, &slug, n, index, turn),
             Done::AiStats { scope, result } => self.ai_stats_read(scope, result),
             Done::AiWork(report) => self.ai_work_done(report),
+        }
+    }
+
+    /// Feature `slug`'s memory went into the home folder, or couldn't:
+    /// said, and logged on the feature.
+    fn memory_kept(&mut self, project: &str, slug: &str, result: Result<Option<String>, String>) {
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let title = feature.title.clone();
+        let line = match &result {
+            Ok(None) => return,
+            Ok(Some(did)) => format!("Shipped: {did}"),
+            Err(why) => format!("Couldn't add to the project's memory: {why}"),
+        };
+        feature.log(feature::now(), line);
+        self.save_feature(project, slug);
+        match result {
+            Ok(Some(did)) => self.show_success(format!("\u{201c}{title}\u{201d} {did}")),
+            Err(why) => {
+                tracing::warn!("feature {project}/{slug}: project memory: {why}");
+                self.show_error(format!(
+                    "Couldn't add \u{201c}{title}\u{201d}'s terms and decisions to the project's memory: {why}"
+                ));
+            }
+            Ok(None) => {}
         }
     }
 

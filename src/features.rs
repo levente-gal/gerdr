@@ -784,6 +784,13 @@ pub(crate) enum Done {
         /// They are what finishes Ship: what follows it runs after.
         finishing: bool,
     },
+    /// What putting a shipped feature's memory into the home folder did
+    /// (`feature::memory::apply`).
+    MemoryKept {
+        project: String,
+        slug: String,
+        result: Result<Option<String>, String>,
+    },
     /// What removing a shipped feature's worktrees loses, as ticked.
     ShippedLosses {
         project: String,
