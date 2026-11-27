@@ -228,8 +228,10 @@ impl ThereJob {
         };
         let links = self.feature.links.iter().map(|l| l.root.clone());
         let mains = self.feature.repos.iter().map(|r| r.main.clone());
-        let roots: Vec<std::path::PathBuf> =
-            (std::iter::once(self.feature.root.clone()).chain(links).chain(mains)).collect();
+        let roots: Vec<std::path::PathBuf> = (std::iter::once(self.feature.root.clone())
+            .chain(links)
+            .chain(mains))
+        .collect();
         let feature = &self.feature;
         (sandbox::stacks_under(&containers, &roots).into_iter())
             .filter(|stack| {
@@ -324,11 +326,12 @@ impl AfarJob {
         let Some((reach, _, dir)) = &self.writer else {
             return;
         };
-        let told = (self.ask_json())
-            .and_then(|json| {
-                let script = lease::sandbox_told_script(dir, &json);
-                reach.script(&script, &never).map_err(|t| t.text().to_owned())
-            });
+        let told = (self.ask_json()).and_then(|json| {
+            let script = lease::sandbox_told_script(dir, &json);
+            reach
+                .script(&script, &never)
+                .map_err(|t| t.text().to_owned())
+        });
         if let Err(why) = told {
             tracing::warn!("leaving word of a sandbox on its writer: {why}");
         }
@@ -346,7 +349,9 @@ impl AfarJob {
                 .map_err(|t| t.text().to_owned())?;
             if said.trim().is_empty() {
                 let script = lease::record_script(dir, lease::SANDBOX_ANSWER);
-                let said = reach.script(&script, &never).map_err(|t| t.text().to_owned())?;
+                let said = reach
+                    .script(&script, &never)
+                    .map_err(|t| t.text().to_owned())?;
                 return Ok(match serde_json::from_str::<lease::SandboxRefusal>(&said) {
                     Ok(refusal) => AskEnd::Refused(refusal.why),
                     Err(_) => AskEnd::Taken,
@@ -355,7 +360,10 @@ impl AfarJob {
             std::thread::sleep(ASK_EVERY);
         }
         if let Err(trouble) = reach.script(&lease::sandbox_unask_script(dir), &never) {
-            tracing::warn!("taking back what was asked of a sandbox: {}", trouble.text());
+            tracing::warn!(
+                "taking back what was asked of a sandbox: {}",
+                trouble.text()
+            );
         }
         Ok(AskEnd::NoAnswer)
     }
@@ -414,9 +422,11 @@ fn left_records(id: &str) -> Vec<(std::path::PathBuf, Feature)> {
     let entries = std::fs::read_dir(dir).into_iter().flatten().flatten();
     (entries.map(|entry| entry.path()))
         .filter_map(|file| {
-            let read = std::fs::read(&file).map_err(|err| err.to_string()).and_then(|raw| {
-                serde_json::from_slice::<Feature>(&raw).map_err(|err| err.to_string())
-            });
+            let read = std::fs::read(&file)
+                .map_err(|err| err.to_string())
+                .and_then(|raw| {
+                    serde_json::from_slice::<Feature>(&raw).map_err(|err| err.to_string())
+                });
             match read {
                 Ok(feature) => Some((file, feature)),
                 Err(why) => {
@@ -454,7 +464,9 @@ impl SandboxRemoval {
         sandbox_run::stop(&self.run, dir, true, host)?;
         if let (Host::There(reach), Some(script)) = (host, &self.forget) {
             let never = AtomicBool::new(false);
-            reach.script(script, &never).map_err(|t| t.text().to_owned())?;
+            reach
+                .script(script, &never)
+                .map_err(|t| t.text().to_owned())?;
         }
         Ok(())
     }
@@ -756,7 +768,11 @@ impl Drop for SandboxView {
 /// Start `port` here, reaching it in the namespace `holder` keeps on `reach`.
 fn relay_over(reach: &Reach, holder: i32, port: u16, missing: Missing) -> io::Result<Relay> {
     let reach = reach.clone();
-    start_relay(port, move || reach.relay(&relay_command(holder, port)), missing)
+    start_relay(
+        port,
+        move || reach.relay(&relay_command(holder, port)),
+        missing,
+    )
 }
 
 /// Whether `ws`'s tabs show a page on `localhost`, or are about to.
@@ -968,7 +984,13 @@ impl Gerdr {
 
     /// Feature `slug`, written on machine `writer`: do `what` to its sandbox from
     /// here, off the thread.
-    pub(crate) fn stop_from_afar(&mut self, project: &str, slug: &str, what: StopFor, writer: &str) {
+    pub(crate) fn stop_from_afar(
+        &mut self,
+        project: &str,
+        slug: &str,
+        what: StopFor,
+        writer: &str,
+    ) {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
@@ -1024,9 +1046,9 @@ impl Gerdr {
         let name = writer.map_or_else(String::new, |id| self.machines.machine_name(&id));
         match result {
             Ok(StopAfar::Asked) => self.show_success(format!("gerdr on {name} is doing that")),
-            Ok(StopAfar::Told) => self.show_success(format!(
-                "That's done, and gerdr on {name} is told"
-            )),
+            Ok(StopAfar::Told) => {
+                self.show_success(format!("That's done, and gerdr on {name} is told"))
+            }
             Err(why) => {
                 tracing::warn!("a sandbox from another machine: {why}");
                 self.show_error(format!("The sandbox is as it was: {why}"));
@@ -1056,7 +1078,11 @@ impl Gerdr {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
-        if feature.sandbox.as_ref().is_none_or(|run| run.started != ask.started) {
+        if feature
+            .sandbox
+            .as_ref()
+            .is_none_or(|run| run.started != ask.started)
+        {
             return;
         }
         let name = ask.name.clone();
@@ -1150,7 +1176,12 @@ impl Gerdr {
 
     /// Do what another machine asked of feature `slug`'s sandbox, as if pressed.
     /// While it starts, it stops when that's the point.
-    pub(crate) fn answer_sandbox_ask(&mut self, project: &str, slug: &str, ask: &lease::SandboxAsk) {
+    pub(crate) fn answer_sandbox_ask(
+        &mut self,
+        project: &str,
+        slug: &str,
+        ask: &lease::SandboxAsk,
+    ) {
         let key = (project.to_owned(), slug.to_owned());
         if let Some(stop) = self.features.build.sandbox_stops.get(&key) {
             if matches!(ask.what, StopFor::Stop | StopFor::Remove) {
@@ -1176,8 +1207,8 @@ impl Gerdr {
     /// Ask each machine how the sandboxes on it stand, those not asked of through
     /// the machine writing them, and put what's known in their records.
     pub(crate) fn sandbox_places_tick(&mut self) {
-        let features = (self.features.all.values().flatten())
-            .chain(self.features.viewed.values().flatten());
+        let features =
+            (self.features.all.values().flatten()).chain(self.features.viewed.values().flatten());
         let mut asked: BTreeMap<String, Vec<(String, String, SandboxRun)>> = BTreeMap::new();
         let mut wanted: BTreeSet<(String, String)> = BTreeSet::new();
         for feature in features.filter(|f| f.status == Status::Open) {
@@ -1194,7 +1225,10 @@ impl Gerdr {
             wanted.insert(key.clone());
             if sandbox_run::to_ask_there(run) {
                 let (project, slug) = key;
-                asked.entry(id.to_owned()).or_default().push((project, slug, run.clone()));
+                asked
+                    .entry(id.to_owned())
+                    .or_default()
+                    .push((project, slug, run.clone()));
             }
         }
         let links = (self.machines.links.values()).filter_map(|link| link.work.as_ref());
@@ -1215,7 +1249,11 @@ impl Gerdr {
             if feature.writer.is_some() && feature.writer == run.machine {
                 continue;
             }
-            run.elsewhere = Some(known.get(&key).map_or_else(Elsewhere::default, |(_, there)| there.clone()));
+            run.elsewhere = Some(
+                known
+                    .get(&key)
+                    .map_or_else(Elsewhere::default, |(_, there)| there.clone()),
+            );
         }
     }
 
@@ -1234,7 +1272,9 @@ impl Gerdr {
             })
             .map(|f| (f.project.clone(), f.slug.clone()))
             .collect();
-        self.machines.sandboxes.retain(|key, _| wanted.contains(key));
+        self.machines
+            .sandboxes
+            .retain(|key, _| wanted.contains(key));
         for (project, slug) in wanted {
             self.follow_sandbox(&project, &slug);
         }
@@ -1362,11 +1402,7 @@ impl Gerdr {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        net::Shutdown,
-        os::unix::process::ExitStatusExt,
-        process::Stdio,
-    };
+    use std::{net::Shutdown, os::unix::process::ExitStatusExt, process::Stdio};
 
     use super::*;
 
@@ -1569,7 +1605,11 @@ mod tests {
             })
         };
         let mut view = SandboxView::new("t", 1);
-        let newly: Vec<u16> = view.follow(&reach(), &[1, 2], &start).into_iter().map(|(p, _)| p).collect();
+        let newly: Vec<u16> = view
+            .follow(&reach(), &[1, 2], &start)
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
         assert_eq!(newly, [2]);
         assert_eq!(view.relays.keys().copied().collect::<Vec<_>>(), [1]);
         // Still taken: said once.

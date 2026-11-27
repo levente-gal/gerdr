@@ -2149,8 +2149,9 @@ impl Panel {
         for k in order {
             self.push_repo(&mut rows, k, items);
         }
-        let (shipped, live): (Vec<_>, Vec<_>) =
-            groups(items).into_iter().partition(|(first, _)| items[*first].shipped);
+        let (shipped, live): (Vec<_>, Vec<_>) = groups(items)
+            .into_iter()
+            .partition(|(first, _)| items[*first].shipped);
         for (_, members) in live {
             self.push_group(&mut rows, members, items);
         }
@@ -2161,7 +2162,8 @@ impl Panel {
             }
         }
         // The shipped features last, folded away unless asked for.
-        let any = |(_, members): &(usize, Vec<usize>)| members.iter().any(|&k| self.matches(&items[k]));
+        let any =
+            |(_, members): &(usize, Vec<usize>)| members.iter().any(|&k| self.matches(&items[k]));
         if shipped.iter().any(any) {
             rows.push(Row::Shipped);
             if filtering || self.shipped_open {
@@ -2176,8 +2178,13 @@ impl Panel {
     /// A feature's heading over those of its worktrees `members` that
     /// show, then their lines while it is unfolded; nothing when none show.
     fn push_group(&self, rows: &mut Vec<Row>, members: Vec<usize>, items: &[RepoItem]) {
-        let members: Vec<usize> = members.into_iter().filter(|&k| self.shows(&items[k])).collect();
-        let Some(&first) = members.first() else { return };
+        let members: Vec<usize> = members
+            .into_iter()
+            .filter(|&k| self.shows(&items[k]))
+            .collect();
+        let Some(&first) = members.first() else {
+            return;
+        };
         rows.push(Row::Group(first));
         if self.filtering() || self.group_open(&items[first]) {
             for k in members {
@@ -2719,9 +2726,10 @@ impl Panel {
     /// stash's commit as its Stashes list was read, else how many stashes
     /// the last status read counted (no git runs here, on the UI thread).
     fn stash_seen(&self, item: &RepoItem, n: usize) -> crate::git_ops::StashSeen {
-        let listed = self.detail.as_ref().filter(|(key, _)| {
-            key.tab == DetailTab::Stashes && key.root == item.root
-        });
+        let listed = self
+            .detail
+            .as_ref()
+            .filter(|(key, _)| key.tab == DetailTab::Stashes && key.root == item.root);
         match listed.and_then(|_| self.log_oids.get(n).cloned().flatten()) {
             Some(oid) => crate::git_ops::StashSeen::Oid(oid),
             None => crate::git_ops::StashSeen::Count(item.status.stashes),
@@ -3731,7 +3739,9 @@ impl Panel {
                 };
                 let ks: Vec<usize> = (0..items.len()).filter(|&k| held(&items[k])).collect();
                 if ks.is_empty() {
-                    return Err(Why::other("Only a main worktree takes a branch from another"));
+                    return Err(Why::other(
+                        "Only a main worktree takes a branch from another",
+                    ));
                 }
                 run(BatchKind::TakeHere(names), ks)
             }
@@ -3926,7 +3936,11 @@ impl Panel {
                     BatchKind::TakeHere(names) => {
                         let names = names.join(" / ");
                         let other = status
-                            .and_then(|s| s.worktrees.iter().find(|w| names.split(" / ").any(|n| w.branch.as_deref() == Some(n))))
+                            .and_then(|s| {
+                                s.worktrees.iter().find(|w| {
+                                    names.split(" / ").any(|n| w.branch.as_deref() == Some(n))
+                                })
+                            })
                             .map_or("its worktree".to_owned(), |w| w.path.display().to_string());
                         format!("check {names} out here: {other} is left detached")
                     }
@@ -4520,7 +4534,9 @@ impl Panel {
 
     /// Something is typed in the filter.
     fn filtering(&self) -> bool {
-        self.filter.as_ref().is_some_and(|f| !f.line().text.trim().is_empty())
+        self.filter
+            .as_ref()
+            .is_some_and(|f| !f.line().text.trim().is_empty())
     }
 
     /// A key for the tree: Up/Down and the pages move with either focus,
@@ -5364,9 +5380,10 @@ impl Panel {
             let running = ctx.background.iter().find(|b| b.runs_in(&item.root));
             let run = running.or(ctx.batch).and_then(|b| b.run(&item.root));
             let state = match run.map(|r| (&r.state, r.since)) {
-                Some((RunState::Running(what), Some(since))) => {
-                    LineState::Busy(format!("{what} {}", crate::clock::took(ctx.now.duration_since(since).unwrap_or_default())))
-                }
+                Some((RunState::Running(what), Some(since))) => LineState::Busy(format!(
+                    "{what} {}",
+                    crate::clock::took(ctx.now.duration_since(since).unwrap_or_default())
+                )),
                 Some((RunState::Running(what), None)) => LineState::Busy(what.clone()),
                 Some((RunState::Queued, _)) => LineState::Busy("waiting…".into()),
                 _ if chip
@@ -5458,7 +5475,10 @@ impl Panel {
             "fetching…".into()
         } else {
             match items.iter().filter_map(|i| i.status.fetched).max() {
-                Some(at) => format!("fetched {} ago", crate::clock::age(ctx.now.duration_since(at).unwrap_or_default())),
+                Some(at) => format!(
+                    "fetched {} ago",
+                    crate::clock::age(ctx.now.duration_since(at).unwrap_or_default())
+                ),
                 None => "never fetched".into(),
             }
         });
@@ -5758,7 +5778,10 @@ impl Panel {
                             Some(Verdict::Unmerged(n)) => {
                                 unmerged += 1;
                                 let lost = count(*n, "commit");
-                                (format!("unmerged: {lost} in no other branch"), Tone::Warning)
+                                (
+                                    format!("unmerged: {lost} in no other branch"),
+                                    Tone::Warning,
+                                )
                             }
                             Some(Verdict::Blocked(why)) => {
                                 blocked += 1;
@@ -5899,7 +5922,10 @@ impl Panel {
             let mut buttons = Vec::new();
             // How long it has run, and a button to stop it.
             if !batch.finished() {
-                text = format!("{text} · {}", crate::clock::took(ctx.now.duration_since(batch.started).unwrap_or_default()));
+                text = format!(
+                    "{text} · {}",
+                    crate::clock::took(ctx.now.duration_since(batch.started).unwrap_or_default())
+                );
                 if !batch.stopping {
                     buttons.push(ReposButton::Stop);
                 }
@@ -5955,7 +5981,9 @@ impl Panel {
             sheet: self.sheet_view(ctx),
             empty: match self.filtering() {
                 true => "No repository's name, feature or branch says that".into(),
-                false => "No git repositories in this project: add a workspace in a git checkout".into(),
+                false => {
+                    "No git repositories in this project: add a workspace in a git checkout".into()
+                }
             },
             density: ctx.density,
             tree_share: ctx.tree_share,
@@ -7620,7 +7648,16 @@ mod tests {
         // Folded at first: its worktrees neither show nor are acted on.
         assert_eq!(
             indented(&panel, &ctx),
-            ["gerdr", "  src/git.rs", "  notes.md", "zed", "  old.rs → new.rs", "Clean · 1", "herdr", "Shipped · 1"]
+            [
+                "gerdr",
+                "  src/git.rs",
+                "  notes.md",
+                "zed",
+                "  old.rs → new.rs",
+                "Clean · 1",
+                "herdr",
+                "Shipped · 1"
+            ]
         );
         press(&mut panel, ctrl(), Keysym::a, &ctx);
         assert_eq!(panel.picked(&items), [0, 1, 2]);
@@ -8337,7 +8374,10 @@ mod tests {
         let view = panel.view("p", &ctx);
         let line = repo_lines(&view).into_iter().find(|l| l.label == "api-wt");
         let tip = line.and_then(|l| l.chip.clone()).unwrap().tip;
-        assert_eq!(tip, "Not on feature/f: Take branch back switches back to it");
+        assert_eq!(
+            tip,
+            "Not on feature/f: Take branch back switches back to it"
+        );
         assert_eq!(panel.click(back, &ctx), None);
         assert!(panel.click(back, &ctx).is_some());
         // Out in another worktree: it stays there.
@@ -8354,7 +8394,10 @@ mod tests {
 
     #[test]
     fn a_guarded_push_goes_past_ship_when_asked() {
-        let items = vec![repo("api", "feature/f", vec![]), repo("web", "feature/f", vec![])];
+        let items = vec![
+            repo("api", "feature/f", vec![]),
+            repo("web", "feature/f", vec![]),
+        ];
         let mut panel = Panel::new(&items);
         let refused = Failure::Guarded("feature/f".into());
         let b = batch(
@@ -11367,7 +11410,9 @@ mod tests {
         // A feature's worktree shows under its heading, unfolded.
         type_text(&mut panel, "api", &ctx);
         assert_eq!(indented(&panel, &ctx), ["login", "  api", "    src/a.rs"]);
-        let TreeLine::Repo(head) = &panel.view("p", &ctx).lines[0] else { panic!() };
+        let TreeLine::Repo(head) = &panel.view("p", &ctx).lines[0] else {
+            panic!()
+        };
         assert_eq!(head.expanded, Some(true));
         assert_eq!(panel.view("p", &ctx).tree_filter.unwrap().count, "1 repo");
         // By branch: the feature's, with its heading's sums over them.
@@ -11375,7 +11420,10 @@ mod tests {
             press(&mut panel, none(), Keysym::BackSpace, &ctx);
         }
         type_text(&mut panel, "LOGIN", &ctx);
-        assert_eq!(panel.view("p", &ctx).tree_filter.unwrap().count, "No matches");
+        assert_eq!(
+            panel.view("p", &ctx).tree_filter.unwrap().count,
+            "No matches"
+        );
         assert!(panel.view("p", &ctx).lines.is_empty());
         for _ in 0..5 {
             press(&mut panel, none(), Keysym::BackSpace, &ctx);
@@ -11399,7 +11447,10 @@ mod tests {
         assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), None);
         assert!(panel.filter.is_none());
         assert_eq!(panel.picked(&items), [0, 1]);
-        assert_eq!(press(&mut panel, none(), Keysym::Escape, &ctx), Some(Outcome::Close));
+        assert_eq!(
+            press(&mut panel, none(), Keysym::Escape, &ctx),
+            Some(Outcome::Close)
+        );
         // In the field, Esc clears what is typed, then closes it.
         panel.click(ReposHit::Filter(SearchPart::Open), &ctx);
         type_text(&mut panel, "zed", &ctx);

@@ -357,7 +357,9 @@ impl WebControl {
         let mut codes = CODES.lock().unwrap_or_else(PoisonError::into_inner);
         let claimed = claim(&mut codes, id, said)?;
         drop(codes);
-        let pane = claimed.inspect_err(|why| tracing::warn!("web extension: {why}")).ok()?;
+        let pane = claimed
+            .inspect_err(|why| tracing::warn!("web extension: {why}"))
+            .ok()?;
         if self.panes.insert(pane, id) != Some(id) {
             let told = ToBrowser::Pane {
                 code: said,
@@ -404,7 +406,11 @@ fn random_hex() -> String {
     }
     // Keyed by the system's randomness too, should `/proc` be unreadable.
     use std::hash::{BuildHasher, Hasher};
-    let half = || std::collections::hash_map::RandomState::new().build_hasher().finish();
+    let half = || {
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+    };
     format!("{:016x}{:016x}", half(), half())
 }
 
@@ -460,7 +466,9 @@ fn claim(
     let (&pane, code) = codes.iter_mut().find(|(_, c)| c.code == said)?;
     Some(match code.claimer {
         Some(by) if by == id => Ok(pane),
-        Some(_) => Err(format!("pane {pane}'s code came again, from another connection")),
+        Some(_) => Err(format!(
+            "pane {pane}'s code came again, from another connection"
+        )),
         None if code.made.elapsed() >= CODE_WAIT => {
             Err(format!("pane {pane}'s code came too late"))
         }
@@ -596,7 +604,11 @@ pub fn run_host(socket: &Path) {
         return;
     };
     std::thread::spawn(move || {
-        pass_messages(&mut std::io::stdin().lock(), &mut to_gerdr, FROM_BROWSER_MAX);
+        pass_messages(
+            &mut std::io::stdin().lock(),
+            &mut to_gerdr,
+            FROM_BROWSER_MAX,
+        );
         std::process::exit(0);
     });
     // Unbuffered: the browser waits for each message whole.
@@ -1157,7 +1169,10 @@ mod tests {
     fn the_boot_page_carries_the_page_encoded() {
         let url = boot_url(3, "https://github.com/cli/cli/pulls?q=is:open#top");
         let pane = boot_code(3);
-        assert!(!url.contains(&pane_token(3)), "its token shows in the browser's command line");
+        assert!(
+            !url.contains(&pane_token(3)),
+            "its token shows in the browser's command line"
+        );
         assert_eq!(
             url,
             format!(
@@ -1175,7 +1190,10 @@ mod tests {
     #[test]
     fn messages_are_framed_by_their_size() {
         let mut bytes: &[u8] = &framed(b"{}");
-        assert_eq!(read_message(&mut bytes, MESSAGE_MAX).as_deref(), Some(&b"{}"[..]));
+        assert_eq!(
+            read_message(&mut bytes, MESSAGE_MAX).as_deref(),
+            Some(&b"{}"[..])
+        );
         assert_eq!(read_message(&mut bytes, MESSAGE_MAX), None);
         // One too big ends it.
         let mut bytes: &[u8] = &framed(b"{\"a\":1}");
@@ -1190,13 +1208,28 @@ mod tests {
         assert_eq!(base64_decoded("T!=="), None);
         assert_eq!(png_of("data:image/png;base64,TWFu"), Ok(b"Man".to_vec()));
         assert!(png_of("data:image/jpeg;base64,TWFu").is_err());
-        let shot: FromBrowser =
-            serde_json::from_str(r#"{"type":"shot","pane":"1.2","data":"data:image/png;base64,TQ=="}"#)
-                .unwrap();
-        assert!(matches!(shot, FromBrowser::Shot { data: Some(_), error: None, .. }));
+        let shot: FromBrowser = serde_json::from_str(
+            r#"{"type":"shot","pane":"1.2","data":"data:image/png;base64,TQ=="}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            shot,
+            FromBrowser::Shot {
+                data: Some(_),
+                error: None,
+                ..
+            }
+        ));
         let failed: FromBrowser =
             serde_json::from_str(r#"{"type":"shot","pane":"1.2","error":"no"}"#).unwrap();
-        assert!(matches!(failed, FromBrowser::Shot { data: None, error: Some(_), .. }));
+        assert!(matches!(
+            failed,
+            FromBrowser::Shot {
+                data: None,
+                error: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1230,7 +1263,14 @@ mod tests {
             r#"{"type":"selected","pane":"1.2","url":"http://x","elements":[{"tag":"div","selector":"div"}],"error":"no"}"#,
         )
         .unwrap();
-        assert!(matches!(bare, FromBrowser::Selected { data: None, error: Some(_), .. }));
+        assert!(matches!(
+            bare,
+            FromBrowser::Selected {
+                data: None,
+                error: Some(_),
+                ..
+            }
+        ));
         let stopped: FromBrowser =
             serde_json::from_str(r#"{"type":"unselected","pane":"1.2","reason":"cancelled"}"#)
                 .unwrap();

@@ -117,9 +117,13 @@ pub fn watch_views(
     while !stop.load(Ordering::Relaxed) {
         if touched.elapsed() >= crate::machine_reach::TOUCH_EVERY {
             touched = Instant::now();
-            let touch = own_id().and_then(|own| crate::machine_reach::touch_script(&place.there.data, &own));
+            let touch = own_id()
+                .and_then(|own| crate::machine_reach::touch_script(&place.there.data, &own));
             if let Some(Err(why)) = touch.map(|script| place.reach.script(&script, &stop)) {
-                tracing::warn!("machine {}: touching what says this gerdr is around: {why:?}", place.id);
+                tracing::warn!(
+                    "machine {}: touching what says this gerdr is around: {why:?}",
+                    place.id
+                );
             }
         }
         let asked = ask.lock().map(|a| a.clone()).unwrap_or_default();
@@ -217,7 +221,8 @@ fn code_round(
     // What's over there, or gone, goes here. A record that couldn't be read says
     // nothing of that.
     let over = |slug: &String| {
-        !with.contains(slug) || (features.iter()).any(|f| f.slug == *slug && f.status != Status::Open)
+        !with.contains(slug)
+            || (features.iter()).any(|f| f.slug == *slug && f.status != Status::Open)
     };
     for slug in view::placed_slugs(&place.root, project) {
         if asked.holding.contains(&slug) {
@@ -312,7 +317,10 @@ fn view_round(
             std::fs::create_dir_all(&local).map_err(|err| Trouble::Work(err.to_string()))?;
             let file = format!("{there}/{}", view::LIVE);
             // Its gerdr may never have said: the page says that, by what's missing.
-            if let Err(trouble) = place.reach.pull_file(&local.join(view::LIVE), &file, cancel) {
+            if let Err(trouble) = place
+                .reach
+                .pull_file(&local.join(view::LIVE), &file, cancel)
+            {
                 tracing::debug!("{project}: what {file} says: {}", trouble.text());
             }
         }
@@ -399,7 +407,9 @@ fn ask_sandboxes(
     }
     let asked = (features.iter().filter(running))
         .filter_map(|f| Some((f.slug.as_str(), f.sandbox.as_ref()?)));
-    let said = place.reach.script(&sandbox_run::there_script(asked), cancel)?;
+    let said = place
+        .reach
+        .script(&sandbox_run::there_script(asked), cancel)?;
     for feature in features {
         let here = Some(place.id.as_str());
         if let Some(run) = (feature.sandbox.as_mut())
@@ -558,9 +568,11 @@ impl Gerdr {
         let mut features = self.rivals(id, &project, features);
         // One running on this very machine: its numbers mean what they say here.
         for feature in &mut features {
-            if let Some(run) = feature.sandbox.as_mut().filter(|run| {
-                run.machine.as_deref().is_some_and(Self::is_this_machine)
-            }) {
+            if let Some(run) = feature
+                .sandbox
+                .as_mut()
+                .filter(|run| run.machine.as_deref().is_some_and(Self::is_this_machine))
+            {
                 run.machine = None;
                 run.elsewhere = None;
                 // Kept here when it moved: its tabs are this gerdr's own.
@@ -750,7 +762,8 @@ impl Gerdr {
                 let root = view::root(&data, f.writer.as_deref()?);
                 let dir = store::dir(Some(&root), project, &f.slug);
                 // Just moved away, its copy isn't here yet: its files still are.
-                dir.is_dir().then(|| ((project.clone(), f.slug.clone()), dir))
+                dir.is_dir()
+                    .then(|| ((project.clone(), f.slug.clone()), dir))
             })
             .collect();
         store::set_seen(seen);
@@ -780,8 +793,7 @@ impl Gerdr {
                 .entry(id.clone())
                 .or_insert_with(|| place.name.clone());
             for project in &projects {
-                let (features, panes, names) =
-                    self.read_kept(&root, &place, &id, project, &home);
+                let (features, panes, names) = self.read_kept(&root, &place, &id, project, &home);
                 if features.is_empty() {
                     continue;
                 }
@@ -899,11 +911,16 @@ impl Gerdr {
         let Some(project) = self.project.clone() else {
             return;
         };
-        let all = self.features.all.get(&project).map_or(&[][..], Vec::as_slice);
+        let all = self
+            .features
+            .all
+            .get(&project)
+            .map_or(&[][..], Vec::as_slice);
         // Sandboxes running here for features written elsewhere now: their
         // writers show the tabs by what this says.
-        let kept: Vec<&lease::Kept> =
-            (self.features.kept.values()).filter(|k| k.project == project).collect();
+        let kept: Vec<&lease::Kept> = (self.features.kept.values())
+            .filter(|k| k.project == project)
+            .collect();
         if all.is_empty() && kept.is_empty() {
             return;
         }
@@ -982,8 +999,7 @@ impl Gerdr {
         };
         let now = feature::now();
         let due = (self.features.live_last.as_ref()).is_none_or(|(last, at)| {
-            *last != live
-                || (!live.panes.is_empty() && now.saturating_sub(*at) >= view::LIVE_EVERY)
+            *last != live || (!live.panes.is_empty() && now.saturating_sub(*at) >= view::LIVE_EVERY)
         });
         if !due {
             return;
@@ -1023,7 +1039,13 @@ impl Gerdr {
         let root = view::root(&crate::projects::data_dir(), id);
         let spawned = std::thread::Builder::new()
             .name("forget a machine".into())
-            .spawn(move || view::forget_machine(&root, &[crate::machine_sandbox::LEFT], &AtomicBool::new(false)));
+            .spawn(move || {
+                view::forget_machine(
+                    &root,
+                    &[crate::machine_sandbox::LEFT],
+                    &AtomicBool::new(false),
+                )
+            });
         if let Err(err) = spawned {
             tracing::warn!("removing what's kept of a machine: {err}");
         }
@@ -1047,7 +1069,10 @@ impl Gerdr {
         let key = (f.project.clone(), f.slug.clone());
         match self.features.code_here.get(&key) {
             Some(CodeHere::Failed(why)) => {
-                return Some((format!("Written on {name}. Its code didn't come: {why}"), true));
+                return Some((
+                    format!("Written on {name}. Its code didn't come: {why}"),
+                    true,
+                ));
             }
             Some(CodeHere::Coming) => {
                 return Some((format!("Written on {name}. Its code is on its way"), false));
@@ -1136,7 +1161,14 @@ mod tests {
         let out = read_copy(&raw, &dir, &side, &side, &BTreeMap::new(), "m1").unwrap();
         assert_eq!(out.history, f.history);
         // The record alone has none.
-        let bare = read_copy(&raw, Path::new("/nowhere"), &side, &side, &BTreeMap::new(), "m1");
+        let bare = read_copy(
+            &raw,
+            Path::new("/nowhere"),
+            &side,
+            &side,
+            &BTreeMap::new(),
+            "m1",
+        );
         assert!(bare.unwrap().history.is_empty());
         // What is beside it changes without the record: the stamp tells.
         let kept = view::read_record(&t, "p", "a").unwrap();

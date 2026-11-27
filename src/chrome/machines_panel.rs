@@ -531,9 +531,17 @@ pub fn machines_layout(view: &MachinesPanelView, output: Size<i32, Logical>) -> 
         false => (list_w, detail_inner(width)),
     };
     let total = if placing { 0 } else { view.rows.len() + 1 };
-    let shown = if placing { 0 } else { machines_shown(total, output) };
+    let shown = if placing {
+        0
+    } else {
+        machines_shown(total, output)
+    };
     let first = view.first.min(total - shown);
-    let list_h = if placing { 0 } else { 2 * LIST_PAD + stack_h(shown) };
+    let list_h = if placing {
+        0
+    } else {
+        2 * LIST_PAD + stack_h(shown)
+    };
     let (runs_total, runs_shown) = view.detail.as_ref().map_or((0, 0), |d| {
         let n = d.runs.len();
         (

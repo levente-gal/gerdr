@@ -692,11 +692,17 @@ fn agent_mode(project: &str, slug: &str, pane: &str, want: &str, from: &str) -> 
         return Reply::error(404, "No agent runs there any more");
     };
     // The key would answer its menu.
-    let waits = agent.as_ref().is_some_and(|a| a.agent_status == AgentStatus::Blocked);
+    let waits = agent
+        .as_ref()
+        .is_some_and(|a| a.agent_status == AgentStatus::Blocked);
     let went = match waits {
         true => Err("the agent waits on an answer first".to_owned()),
         false => {
-            let mut agent = mode::InPane { herdr: &mut herdr, pane, kind };
+            let mut agent = mode::InPane {
+                herdr: &mut herdr,
+                pane,
+                kind,
+            };
             let n = mode::modes(kind).len();
             let was = Some(from).filter(|f| !f.is_empty());
             mode::switch(&mut agent, n, was, want, mode::READ_EVERY)
@@ -749,7 +755,10 @@ fn agent_model(project: &str, slug: &str, pane: &str, id: &str) -> Reply {
 /// Enter; or take back `erase` letters of its search and type `typed`.
 fn agent_menu(project: &str, slug: &str, pane: &str, row: &str, typed: &str, erase: u64) -> Reply {
     // Letters only: they go to the agent's terminal as typed.
-    if typed.chars().count() > SEARCH_MAX || typed.chars().any(char::is_control) || erase > SEARCH_MAX as u64 {
+    if typed.chars().count() > SEARCH_MAX
+        || typed.chars().any(char::is_control)
+        || erase > SEARCH_MAX as u64
+    {
         return Reply::error(400, "Not a search");
     }
     let project = match agent_of(project, slug, pane) {
@@ -768,11 +777,15 @@ fn agent_menu(project: &str, slug: &str, pane: &str, row: &str, typed: &str, era
     let sent = match row.is_empty() {
         true => {
             let erased = vec!["backspace"; erase as usize];
-            (if erased.is_empty() { Ok(()) } else { herdr.send_keys(pane, &erased) })
-                .and_then(|()| match typed.is_empty() {
-                    true => Ok(()),
-                    false => herdr.send_text(pane, typed),
-                })
+            (if erased.is_empty() {
+                Ok(())
+            } else {
+                herdr.send_keys(pane, &erased)
+            })
+            .and_then(|()| match typed.is_empty() {
+                true => Ok(()),
+                false => herdr.send_text(pane, typed),
+            })
         }
         false => crate::chat::screen_rows(&mut herdr, pane, MENU_ROWS).and_then(|rows| {
             let now = model_menu::read(kind, &rows).ok_or("the agent's menu closed")?;
@@ -782,7 +795,9 @@ fn agent_menu(project: &str, slug: &str, pane: &str, row: &str, typed: &str, era
     };
     match sent {
         Ok(()) => Reply::json(&json!({ "said": [] })),
-        Err(why) if row.is_empty() => Reply::error(502, &format!("Couldn't reach the agent: {why}")),
+        Err(why) if row.is_empty() => {
+            Reply::error(502, &format!("Couldn't reach the agent: {why}"))
+        }
         Err(why) => Reply::error(409, &format!("Couldn't pick {row}: {why}")),
     }
 }
@@ -1408,8 +1423,8 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     };
     let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
     // Its title, for the page's head, and what it suggests saying next.
-    let agent = (herdr.agent_list().ok())
-        .and_then(|agents| agents.into_iter().find(|a| a.pane_id == pane));
+    let agent =
+        (herdr.agent_list().ok()).and_then(|agents| agents.into_iter().find(|a| a.pane_id == pane));
     let title = agent.as_ref().and_then(|a| a.shown_title());
     let suggestion = (agent.as_ref())
         .filter(|a| crate::chat::suggests(a))
@@ -1428,7 +1443,14 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     // The user's last words in its chat: the page keeps the last of them
     // scrolled past on top.
     let said = agent.as_ref().map_or(Value::Array(Vec::new()), |agent| {
-        json!(pane_said(agent).into_iter().rev().take(SAID).rev().collect::<Vec<_>>())
+        json!(
+            pane_said(agent)
+                .into_iter()
+                .rev()
+                .take(SAID)
+                .rev()
+                .collect::<Vec<_>>()
+        )
     });
     let all = lines == "all";
     let want = lines
@@ -1599,12 +1621,27 @@ mod tests {
     #[test]
     fn a_model_menus_search_is_letters_only() {
         let typed = |body: &[u8]| act("/api/agent", body, "localhost", "").status;
-        assert_eq!(typed(br#"{"p":"no-such","s":"","pane":"w1:p1","type":"son\r"}"#), 400);
-        assert_eq!(typed(br#"{"p":"no-such","s":"","pane":"w1:p1","type":"\u001b[A"}"#), 400);
-        assert_eq!(typed(br#"{"p":"no-such","s":"","pane":"w1:p1","erase":1000}"#), 400);
+        assert_eq!(
+            typed(br#"{"p":"no-such","s":"","pane":"w1:p1","type":"son\r"}"#),
+            400
+        );
+        assert_eq!(
+            typed(br#"{"p":"no-such","s":"","pane":"w1:p1","type":"\u001b[A"}"#),
+            400
+        );
+        assert_eq!(
+            typed(br#"{"p":"no-such","s":"","pane":"w1:p1","erase":1000}"#),
+            400
+        );
         // Fine words, for an agent that isn't there.
-        assert_eq!(typed(br#"{"p":"no-such","s":"","pane":"w1:p1","type":"son"}"#), 404);
-        assert_eq!(typed(br#"{"p":"no-such","s":"","pane":"w1:p1","pick":"GPT-6"}"#), 404);
+        assert_eq!(
+            typed(br#"{"p":"no-such","s":"","pane":"w1:p1","type":"son"}"#),
+            404
+        );
+        assert_eq!(
+            typed(br#"{"p":"no-such","s":"","pane":"w1:p1","pick":"GPT-6"}"#),
+            404
+        );
     }
 
     #[test]

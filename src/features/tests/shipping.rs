@@ -212,7 +212,9 @@ fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
     );
     // Its base read as current: that passes too.
     let mut current = ready.clone();
-    current.bases.insert("api".into(), ship::BaseState::default());
+    current
+        .bases
+        .insert("api".into(), ship::BaseState::default());
     assert_eq!(
         check_lines(&f, Some(&current), false, 2_060)[1].text,
         "\u{2713} checks passed \u{b7} review done \u{b7} base current \u{b7} no conflicts"
@@ -233,7 +235,10 @@ fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
                 "api: origin/main has 8 new commits that conflict: take them in first",
                 CheckTone::Blocker
             ),
-            ("\u{2713} checks passed \u{b7} review done", CheckTone::Ready),
+            (
+                "\u{2713} checks passed \u{b7} review done",
+                CheckTone::Ready
+            ),
             ("api pushes to origin", CheckTone::Note)
         ]
     );
@@ -249,7 +254,10 @@ fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
                 "api: origin/main has 8 new commits that conflict: take them in first",
                 CheckTone::Blocker
             ),
-            ("\u{2713} checks passed \u{b7} review done", CheckTone::Ready)
+            (
+                "\u{2713} checks passed \u{b7} review done",
+                CheckTone::Ready
+            )
         ]
     );
     // One commit: said as one.
@@ -275,7 +283,10 @@ fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
     assert_eq!(squash("export.py")[0], conflict);
     assert_eq!(
         squash("export.py, cli.py")[..2],
-        ["api: squashing into main conflicts in export.py, cli.py", conflict]
+        [
+            "api: squashing into main conflicts in export.py, cli.py",
+            conflict
+        ]
     );
     // Nothing to do: what would stop shipping stops nothing.
     let nothing = probe(check(
@@ -336,7 +347,10 @@ fn the_ship_check_shows_what_stops_it_or_that_it_is_ready() {
             CheckTone::Note
         )]
     );
-    assert!(matches!(ship_ask(&resolving, Some(&current)), ShipAsk::Blocked(_)));
+    assert!(matches!(
+        ship_ask(&resolving, Some(&current)),
+        ShipAsk::Blocked(_)
+    ));
 }
 
 #[test]
@@ -464,9 +478,8 @@ fn space_ticks_the_row_and_enter_presses_the_page_s_button() {
     let mods = ModifiersState::default();
     let mut panel = FeaturePanel::default();
     let none = RowCtx::default();
-    let press = |panel: &mut FeaturePanel, sym, ctx| {
-        panel.key(&mods, sym, &f, &[], ctx, &[], &ships, &[])
-    };
+    let press =
+        |panel: &mut FeaturePanel, sym, ctx| panel.key(&mods, sym, &f, &[], ctx, &[], &ships, &[]);
     // From the rail, Tab goes to the rows.
     assert_eq!(press(&mut panel, Keysym::Tab, none), None);
     assert_eq!(panel.focus, TabArea::Findings);
@@ -883,9 +896,7 @@ fn the_setup_holds_its_own_buttons() {
     });
     let sections = setup_sections(&f, &state, &actions);
     assert!(matches!(&sections[0], PageSection::Lines { label, .. } if label == "Setup"));
-    assert!(
-        matches!(&sections[1], PageSection::Toolbar { groups } if groups[0].1 == vec![1, 2])
-    );
+    assert!(matches!(&sections[1], PageSection::Toolbar { groups } if groups[0].1 == vec![1, 2]));
 }
 
 #[test]
@@ -1328,9 +1339,7 @@ fn an_approved_brief_reopens_until_the_plan_is_written() {
     assert!(!hints(locked).contains(&reopen));
     // The plan's page offers what frees it.
     let plan = page_actions(&f, Stage::Plan, locked);
-    assert!(
-        labels(&plan).contains(&("Start over\u{2026}", PanelOutcome::StartOver(Stage::Plan)))
-    );
+    assert!(labels(&plan).contains(&("Start over\u{2026}", PanelOutcome::StartOver(Stage::Plan))));
     // Plan's Restart doesn't reopen the brief: it stays locked.
     assert!(
         labels(&plan)
@@ -1942,7 +1951,11 @@ fn the_recap_shows_the_summary_and_who_writes_it() {
 
 #[test]
 fn while_the_first_ship_check_runs_each_repository_shows_a_card_checking() {
-    let f = feature("s", vec![repo("api", true), repo("web", true), repo("docs", false)], 8);
+    let f = feature(
+        "s",
+        vec![repo("api", true), repo("web", true), repo("docs", false)],
+        8,
+    );
     let unchecked = probe(None);
     for probe in [None, Some(&unchecked)] {
         let state = PanelState {

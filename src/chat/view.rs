@@ -28,9 +28,8 @@ use super::{
     files,
     live::{Answers, AskReply, PendingAsk, Question},
     menu::{self, ChoiceKind, Menu},
+    mode, model, model_menu,
     questions::Card,
-    mode,
-    model, model_menu,
     rows::{rows, unread},
     tail::Tail,
 };
@@ -230,7 +229,8 @@ fn review_target(chat: &PaneChat) -> Option<String> {
 /// row, to scroll to; `None` and nothing changed without one.
 fn show_plan(chat: &mut PaneChat) -> Option<usize> {
     let shown = rows(&chat.items, &chat.unfolded);
-    let i = (shown.iter()).rposition(|row| matches!(row.item(&chat.items), Some(Item::Plan { .. })))?;
+    let i =
+        (shown.iter()).rposition(|row| matches!(row.item(&chat.items), Some(Item::Plan { .. })))?;
     if let Some(id) = shown[i].fold_key(&chat.items) {
         chat.unfolded.insert(id);
     }
@@ -1315,11 +1315,7 @@ fn last_rows(mut rows: ChatRows, n: usize) -> ChatRows {
 
 /// Pane `pane_id`'s last `n` screen rows with their colours, read from
 /// herdr off the UI thread.
-pub(crate) fn screen_rows(
-    herdr: &mut Herdr,
-    pane_id: &str,
-    n: usize,
-) -> Result<ChatRows, String> {
+pub(crate) fn screen_rows(herdr: &mut Herdr, pane_id: &str, n: usize) -> Result<ChatRows, String> {
     let text = herdr.pane_styled(pane_id, n)?;
     // An app on the alternate screen has no scrollback: its screen, plainly.
     let text = match text.trim().is_empty() {
@@ -1372,7 +1368,11 @@ fn follow_side(
             tracing::warn!("pressing {keys:?} for a side question in pane {pane_id}: {err}");
         }
         // The loop is gone only as gerdr quits.
-        if follow.side != was && tx.send((pane_id.to_owned(), n, follow.side.clone())).is_err() {
+        if follow.side != was
+            && tx
+                .send((pane_id.to_owned(), n, follow.side.clone()))
+                .is_err()
+        {
             return;
         }
         if matches!(step, btw::Step::Close(_) | btw::Step::Done) {
@@ -1721,7 +1721,8 @@ impl Gerdr {
             .map(|a| (a.pane_id.as_str(), MODE_EVERY));
         // Those that pick their model in a menu of their own, for the model
         // they are on; often while the menu shows or was just asked for.
-        let asked = |id: &str| (self.chats.model_asked.get(id)).is_some_and(|at| at.elapsed() < MENU_TAKES);
+        let asked =
+            |id: &str| (self.chats.model_asked.get(id)).is_some_and(|at| at.elapsed() < MENU_TAKES);
         let menus = (wanted.iter())
             .filter(|a| {
                 super::source::kind(a).is_some_and(|k| caps(k).model == ModelSwitch::OwnMenu)
@@ -2030,7 +2031,12 @@ impl Gerdr {
     /// its answer. Nothing goes while its side panel shows: that would take
     /// the keys (Cursor's closes on any).
     pub(crate) fn send_line(&mut self, pane_id: &str, line: &str) -> Result<(), String> {
-        let sides = self.chats.sides.get(pane_id).map(Vec::as_slice).unwrap_or_default();
+        let sides = self
+            .chats
+            .sides
+            .get(pane_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         if (sides.iter()).any(|side| side.state == SideState::Answering) {
             return Err("its agent is still answering a side question".into());
         }
@@ -2105,7 +2111,12 @@ impl Gerdr {
             tracing::warn!("the side question in pane {pane_id}: {why}");
         }
         // Too late: its pane's agent is gone.
-        let Some(slot) = self.chats.sides.get_mut(&pane_id).and_then(|l| l.get_mut(n)) else {
+        let Some(slot) = self
+            .chats
+            .sides
+            .get_mut(&pane_id)
+            .and_then(|l| l.get_mut(n))
+        else {
             return;
         };
         *slot = side;
@@ -2114,7 +2125,12 @@ impl Gerdr {
 
     /// Pane `pane_id`'s chat with its side questions' rows as they stand.
     fn chat_put_sides(&mut self, pane_id: &str) {
-        let sides = self.chats.sides.get(pane_id).map(Vec::as_slice).unwrap_or_default();
+        let sides = self
+            .chats
+            .sides
+            .get(pane_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
             chat.items = btw::with_sides(&chat.items, sides);
         }
@@ -2123,7 +2139,12 @@ impl Gerdr {
     /// The side questions asked of pane `pane_id`'s agent this run, for
     /// the phone's card: each answer as HTML.
     pub(crate) fn phone_sides(&self, pane_id: &str) -> serde_json::Value {
-        let sides = self.chats.sides.get(pane_id).map(Vec::as_slice).unwrap_or_default();
+        let sides = self
+            .chats
+            .sides
+            .get(pane_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         (sides.iter())
             .map(|side| {
                 let html = crate::md_preview::render(&btw::answer_md(&side.lines));
@@ -2255,9 +2276,7 @@ impl Gerdr {
     /// thing (pi's thinking level), or while one is being switched.
     fn chat_next_mode(&mut self, pane_id: &str) {
         let kind = self.chat_agent(pane_id).and_then(super::source::kind);
-        if kind.is_none_or(|kind| !caps(kind).modes)
-            || self.chats.switching.contains(pane_id)
-        {
+        if kind.is_none_or(|kind| !caps(kind).modes) || self.chats.switching.contains(pane_id) {
             return;
         }
         let pressed = self.mode_key_goes(pane_id).and_then(|()| {
@@ -2348,8 +2367,8 @@ impl Gerdr {
         let (Some(kind), Some(shown)) = (kind, shown) else {
             return;
         };
-        let Some(label) = (shown.choices.get(usize::from(n).wrapping_sub(1)))
-            .map(|c| c.label.clone())
+        let Some(label) =
+            (shown.choices.get(usize::from(n).wrapping_sub(1))).map(|c| c.label.clone())
         else {
             return;
         };
@@ -2361,7 +2380,8 @@ impl Gerdr {
         };
         let keys = screen_rows(herdr, pane_id, WAITING_ROWS).and_then(|rows| {
             let now = model_menu::read(kind, &rows).ok_or("the agent's menu closed")?;
-            model_menu::keys_to(&now, &label).ok_or_else(|| "the agent's menu doesn't show it".to_owned())
+            model_menu::keys_to(&now, &label)
+                .ok_or_else(|| "the agent's menu doesn't show it".to_owned())
         });
         if let Err(why) = keys.and_then(|keys| herdr.send_keys(pane_id, &keys)) {
             tracing::warn!("picking {label} in pane {pane_id}'s model menu: {why}");
@@ -2480,7 +2500,12 @@ impl Gerdr {
         };
         let shown = rows(&chat.items, &chat.unfolded);
         let path = match shown.get(i).and_then(|row| row.item(&chat.items)) {
-            Some(Item::Edit { path, .. } | Item::Plan { path: Some(path), .. }) => path,
+            Some(
+                Item::Edit { path, .. }
+                | Item::Plan {
+                    path: Some(path), ..
+                },
+            ) => path,
             _ => return,
         };
         let mut file = PathBuf::from(path);
@@ -2632,7 +2657,10 @@ impl Gerdr {
     pub(crate) fn chat_tip(&self, pos: Point<f64, Logical>) -> Option<crate::tooltip::Tooltip> {
         let (_, _, view) = self.chat_place_at(pos)?;
         if let Some((i, rect)) = chrome::chat_mode_at(&view, pos) {
-            let tip = format!("Switch the agent to {}, or to its next mode with", view.modes[i]);
+            let tip = format!(
+                "Switch the agent to {}, or to its next mode with",
+                view.modes[i]
+            );
             return Some(crate::tooltip::Tooltip::new(&tip, rect).key(MODE_KEYS[0].chord));
         }
         if let Some(bar) = chrome::chat_pinned(&view).filter(|bar| bar.to_f64().contains(pos)) {
@@ -3027,7 +3055,10 @@ mod tests {
         assert!(take_event([("w1:p1", &mut one)], missing));
         assert_eq!(one.reading, Reading::Missing("no chat".into()));
         assert_eq!(one.model, None);
-        assert_eq!(two.context.map(|c| c.said()).as_deref(), Some("context 84k / 1M"));
+        assert_eq!(
+            two.context.map(|c| c.said()).as_deref(),
+            Some("context 84k / 1M")
+        );
         let gone = Event::Failed {
             pane_id: "w1:p9".into(),
             error: "x".into(),
@@ -3297,14 +3328,23 @@ mod tests {
         }));
         assert_eq!(press(&mut chat, "Down", 'j'), Some(ChatDo::MenuKey("Down")));
         assert_eq!(press(&mut chat, "Ctrl+K", 'k'), Some(ChatDo::MenuKey("Up")));
-        assert_eq!(press(&mut chat, "Enter", '\r'), Some(ChatDo::MenuKey("Enter")));
-        assert_eq!(press(&mut chat, "Esc", '\u{1b}'), Some(ChatDo::MenuKey("esc")));
+        assert_eq!(
+            press(&mut chat, "Enter", '\r'),
+            Some(ChatDo::MenuKey("Enter"))
+        );
+        assert_eq!(
+            press(&mut chat, "Esc", '\u{1b}'),
+            Some(ChatDo::MenuKey("esc"))
+        );
         assert_eq!(
             press(&mut chat, "BackSpace", '\u{8}'),
             Some(ChatDo::MenuKey("backspace"))
         );
         // Letters search it, the reply kept as it was.
-        assert_eq!(press(&mut chat, "S", 's'), Some(ChatDo::MenuText("s".into())));
+        assert_eq!(
+            press(&mut chat, "S", 's'),
+            Some(ChatDo::MenuText("s".into()))
+        );
         assert_eq!(press(&mut chat, "Shift+Tab", '\t'), None);
         assert_eq!(chat.draft, "kept");
         // Left and Right only where they change its effort.
@@ -3317,8 +3357,15 @@ mod tests {
             sideways: true,
             ..Menu::default()
         }));
-        assert_eq!(press(&mut chat, "Right", '\0'), Some(ChatDo::MenuKey("Right")));
-        assert!(hinted(&chat).iter().any(|(k, said)| k == "Left / Right" && said == "effort"));
+        assert_eq!(
+            press(&mut chat, "Right", '\0'),
+            Some(ChatDo::MenuKey("Right"))
+        );
+        assert!(
+            hinted(&chat)
+                .iter()
+                .any(|(k, said)| k == "Left / Right" && said == "effort")
+        );
         // Gone with the menu.
         chat.picker = None;
         assert_eq!(press(&mut chat, "Enter", '\r'), Some(ChatDo::Send));
@@ -3389,12 +3436,16 @@ mod tests {
         assert!(footer_of(&chat).contains(&("Left".into(), "fill in".into())));
         // From the list it fills the reply and goes there, to send or change.
         press(&mut chat, "Left", '\0');
-        assert_eq!((&*chat.draft, chat.focus), ("commit this", ChatFocus::Composer));
+        assert_eq!(
+            (&*chat.draft, chat.focus),
+            ("commit this", ChatFocus::Composer)
+        );
         assert_eq!(press(&mut chat, "Enter", '\r'), Some(ChatDo::Send));
         // In a reply written, Left moves the caret as ever.
         chat.draft.set("ab");
         press(&mut chat, "Left", '\0');
-        chat.draft.key(&ModifiersState::default(), Keysym::x, Keysym::x);
+        chat.draft
+            .key(&ModifiersState::default(), Keysym::x, Keysym::x);
         assert_eq!(chat.draft, "axb");
         assert!(!footer_of(&chat).iter().any(|(k, _)| k == "Left"));
         // The empty reply box takes it too.
@@ -3433,7 +3484,10 @@ mod tests {
         assert_eq!(show_plan(&mut chat), Some(1));
         assert!(chat.unfolded.contains("p"));
         // The panel's peek folds: the card shows the plan.
-        assert!(!chrome::ask_open(chat.live.ask.as_ref().unwrap(), &chat.unfolded));
+        assert!(!chrome::ask_open(
+            chat.live.ask.as_ref().unwrap(),
+            &chat.unfolded
+        ));
         assert_eq!((chat.picked, chat.focus), (Some(1), ChatFocus::List));
     }
 

@@ -432,7 +432,10 @@ pub(super) fn file_card(
 
 /// The card of Discover's decision log, holding `n` decisions, with its
 /// Open in `actions`; none while it holds none.
-pub(super) fn decisions_card(n: usize, actions: &[(PageButton, PanelOutcome)]) -> Option<PageSection> {
+pub(super) fn decisions_card(
+    n: usize,
+    actions: &[(PageButton, PanelOutcome)],
+) -> Option<PageSection> {
     if n == 0 {
         return None;
     }
@@ -1718,7 +1721,10 @@ pub(super) fn ship_base_actions(
             _ => "the bases",
         };
         out.push((
-            button(&format!("Merge {base} into all\u{2026}"), ButtonStyle::Plain),
+            button(
+                &format!("Merge {base} into all\u{2026}"),
+                ButtonStyle::Plain,
+            ),
             PanelOutcome::UpdateAllBases,
         ));
     }

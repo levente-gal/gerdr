@@ -318,7 +318,9 @@ impl Gerdr {
                 stage,
             } => self.phone_offer(&project, &slug, stage),
             Request::Cards { features } => self.phone_cards(&features),
-            Request::Ask { pane, read_models, .. } => {
+            Request::Ask {
+                pane, read_models, ..
+            } => {
                 let asked = self.phone_ask(&pane).map(|a| {
                     // A plan reads as its markdown, rendered here.
                     let plan = a.plan.then(|| crate::md_preview::render(&a.input));
@@ -483,7 +485,12 @@ mod tests {
         );
         let offer: Request =
             serde_json::from_str(r#"{"op":"new-offer","projects":["p"]}"#).expect("offer");
-        assert_eq!(offer, Request::NewOffer { projects: vec!["p".into()] });
+        assert_eq!(
+            offer,
+            Request::NewOffer {
+                projects: vec!["p".into()]
+            }
+        );
     }
 
     #[test]

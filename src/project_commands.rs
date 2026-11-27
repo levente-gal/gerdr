@@ -218,7 +218,11 @@ fn page_lines(workflow: &Workflow) -> Vec<String> {
 
 /// The ports `workflow` leads out of its sandboxes, a line each.
 fn port_lines(workflow: &Workflow) -> Vec<String> {
-    workflow.sandbox_outside.iter().map(u16::to_string).collect()
+    workflow
+        .sandbox_outside
+        .iter()
+        .map(u16::to_string)
+        .collect()
 }
 
 /// The ports in `text`, one a line, in order and each once; else why not,

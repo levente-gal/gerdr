@@ -511,10 +511,7 @@ pub fn generate(config: &Value, input: Input) -> Result<Generated, String> {
             .ok_or("the compose file has a service that isn't a mapping")?;
         fields.remove("container_name");
         rewrite_ports(name, fields, &mut taken, &mut forwards, input.next_port)?;
-        let mut own = Map::from_iter([(
-            LABEL.to_owned(),
-            Value::String(input.label.to_owned()),
-        )]);
+        let mut own = Map::from_iter([(LABEL.to_owned(), Value::String(input.label.to_owned()))]);
         if !input.owner.is_empty() {
             own.insert(OWNER.to_owned(), Value::String(input.owner.to_owned()));
         }

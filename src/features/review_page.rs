@@ -12,8 +12,8 @@
 //! Each kind's words are `review_items::Words`; the cards are
 //! `review_cards`'.
 
-use crate::feature::review_items::words_in;
 use super::*;
+use crate::feature::review_items::words_in;
 use crate::{
     chrome::ReviewSummary,
     feature::review_items::Standing,
@@ -232,7 +232,10 @@ fn review_notes(
         )),
         _ => {}
     }
-    let review = feature.plan_review.as_ref().filter(|_| stage == Stage::PlanReview);
+    let review = feature
+        .plan_review
+        .as_ref()
+        .filter(|_| stage == Stage::PlanReview);
     let writing = review.is_some_and(|r| r.writing);
     if writing && plan_review_open(feature, stage) {
         // Once written it is no longer being written: it waits for review.
@@ -349,8 +352,7 @@ pub(super) fn review_page_actions(
         }
         // Skipping is for a review not worth deciding: not once all is
         // decided, nor while the final plan is written or waits.
-        let all_decided =
-            deciding.is_some_and(|r| r.open() == 0 && !r.suggestions.is_empty());
+        let all_decided = deciding.is_some_and(|r| r.open() == 0 && !r.suggestions.is_empty());
         if !writing && !all_decided {
             out.push((button("Skip review", true), PanelOutcome::SkipPlanReview));
         }

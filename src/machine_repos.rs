@@ -144,7 +144,10 @@ pub struct Paired {
 
 /// The one clone in `clones` that `of` is the same as: by a remote first, by a
 /// first commit only when no remote fits. Several that fit are `Err`.
-fn match_in<'a>(of: &Found, clones: &'a BTreeMap<String, Found>) -> Result<Option<&'a Found>, Vec<String>> {
+fn match_in<'a>(
+    of: &Found,
+    clones: &'a BTreeMap<String, Found>,
+) -> Result<Option<&'a Found>, Vec<String>> {
     let by_url: Vec<&Found> = (clones.values())
         .filter(|c| !of.urls.is_disjoint(&c.urls))
         .collect();
@@ -269,7 +272,14 @@ impl Gerdr {
                 .chain(f.context.iter().map(|c| c.main.clone()))
                 .collect()
         };
-        for feature in self.features.all.get(project).into_iter().flatten().filter(open) {
+        for feature in self
+            .features
+            .all
+            .get(project)
+            .into_iter()
+            .flatten()
+            .filter(open)
+        {
             used.extend(mains(feature).into_iter().filter(|dir| is_repo(dir)));
         }
         let seen: BTreeSet<PathBuf> = (self.viewed_of(project).iter())
@@ -354,7 +364,9 @@ impl Gerdr {
         if !new.is_empty() {
             if self.projects.file_changed(project) {
                 // Asked again once the file is read back.
-                self.machines.repos_looked.remove(&(id.to_owned(), project.to_owned()));
+                self.machines
+                    .repos_looked
+                    .remove(&(id.to_owned(), project.to_owned()));
                 self.show_warning(format!(
                     "The project's file changed outside gerdr: reload it, and gerdr pairs its repositories on {name} again"
                 ));
@@ -366,7 +378,11 @@ impl Gerdr {
             }
             let said: Vec<String> = (new.iter())
                 .map(|(here, there)| {
-                    format!("{} is {}", tilde(here, &home_here), tilde(there, &home_there))
+                    format!(
+                        "{} is {}",
+                        tilde(here, &home_here),
+                        tilde(there, &home_there)
+                    )
                 })
                 .collect();
             tracing::info!("{project}: paired on {name}: {new:?}");
@@ -411,7 +427,10 @@ mod tests {
             assert_eq!(same_url(url), one, "{url}");
         }
         assert_eq!(same_url("/srv/git/app.git"), "/srv/git/app");
-        assert_ne!(same_url("git@github.com:o/a.git"), same_url("git@github.com:o/b.git"));
+        assert_ne!(
+            same_url("git@github.com:o/a.git"),
+            same_url("git@github.com:o/b.git")
+        );
     }
 
     fn clone(path: &str, urls: &[&str], roots: &[&str]) -> (String, Found) {
@@ -437,8 +456,16 @@ mod tests {
     fn a_repository_used_here_is_paired_with_its_clone_there() {
         let here = BTreeMap::from([clone("/home/lg/Work/AssetTag/platform", &[ORIGIN], &["r1"])]);
         let there = BTreeMap::from([
-            clone("/home/zb/Work/Asset-Track", &["https://github.com/o/platform"], &["r1"]),
-            clone("/home/zb/Work/other", &["git@github.com:o/other.git"], &["r9"]),
+            clone(
+                "/home/zb/Work/Asset-Track",
+                &["https://github.com/o/platform"],
+                &["r1"],
+            ),
+            clone(
+                "/home/zb/Work/other",
+                &["git@github.com:o/other.git"],
+                &["r9"],
+            ),
             // What gerdr made where it thought it goes: no commits, no remote.
             clone("/home/zb/Work/AssetTag/platform", &[], &[]),
         ]);
@@ -446,7 +473,10 @@ mod tests {
         let paired = pair(&used, &[], &here, &there, &paths());
         assert_eq!(
             paired.pairs,
-            [("/home/lg/Work/AssetTag/platform".into(), "/home/zb/Work/Asset-Track".into())]
+            [(
+                "/home/lg/Work/AssetTag/platform".into(),
+                "/home/zb/Work/Asset-Track".into()
+            )]
         );
         assert!(paired.unsure.is_empty());
     }
@@ -458,7 +488,13 @@ mod tests {
             clone("/home/zb/Work/app", &[ORIGIN], &["r1"]),
             clone("/home/zb/old/app", &[ORIGIN], &["r1"]),
         ]);
-        let paired = pair(&[PathBuf::from("/home/lg/Work/app")], &[], &here, &there, &paths());
+        let paired = pair(
+            &[PathBuf::from("/home/lg/Work/app")],
+            &[],
+            &here,
+            &there,
+            &paths(),
+        );
         assert_eq!(paired, Paired::default());
     }
 
@@ -479,13 +515,20 @@ mod tests {
         assert!(paired.pairs.is_empty());
         assert_eq!(
             paired.unsure,
-            [("/home/lg/app".into(), vec!["/home/zb/code/app".into(), "/home/zb/fork/app".into()])]
+            [(
+                "/home/lg/app".into(),
+                vec!["/home/zb/code/app".into(), "/home/zb/fork/app".into()]
+            )]
         );
         // A remote in common goes over first commits only.
         let here = BTreeMap::from([clone("/home/lg/app", &[ORIGIN], &["r1"])]);
         let both = BTreeMap::from([
             clone("/home/zb/code/app", &[ORIGIN], &["r1"]),
-            clone("/home/zb/fork/app", &["git@github.com:me/platform.git"], &["r1"]),
+            clone(
+                "/home/zb/fork/app",
+                &["git@github.com:me/platform.git"],
+                &["r1"],
+            ),
         ]);
         assert_eq!(
             pair(&used, &[], &here, &both, &paths()).pairs,
@@ -502,7 +545,10 @@ mod tests {
         let paired = pair(&[], &seen, &here, &there, &paths());
         assert_eq!(
             paired.pairs,
-            [("/home/lg/Work/AssetTag/platform".into(), "/home/zb/Work/Asset-Track".into())]
+            [(
+                "/home/lg/Work/AssetTag/platform".into(),
+                "/home/zb/Work/Asset-Track".into()
+            )]
         );
     }
 
@@ -518,9 +564,30 @@ mod tests {
         let app = home.join("Work/team/app");
         std::fs::create_dir_all(&app).unwrap();
         git(&app, &["init", "-q"]);
-        git(&app, &["-c", "user.name=a", "-c", "user.email=a@b", "commit", "-q", "--allow-empty", "-m", "one"]);
+        git(
+            &app,
+            &[
+                "-c",
+                "user.name=a",
+                "-c",
+                "user.email=a@b",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "one",
+            ],
+        );
         git(&app, &["remote", "add", "origin", ORIGIN]);
-        git(&app, &["remote", "add", "mine", "https://github.com/me/platform.git"]);
+        git(
+            &app,
+            &[
+                "remote",
+                "add",
+                "mine",
+                "https://github.com/me/platform.git",
+            ],
+        );
         // Not looked in, and not a project's clone.
         let hidden = home.join("Work/team/app/node_modules/dep");
         std::fs::create_dir_all(&hidden).unwrap();
@@ -530,7 +597,13 @@ mod tests {
         git(&empty, &["init", "-q"]);
         let outside = t.0.join("elsewhere");
         let never = AtomicBool::new(false);
-        let script = scan_script(&home.to_string_lossy(), &[app.to_string_lossy().into_owned(), outside.to_string_lossy().into_owned()]);
+        let script = scan_script(
+            &home.to_string_lossy(),
+            &[
+                app.to_string_lossy().into_owned(),
+                outside.to_string_lossy().into_owned(),
+            ],
+        );
         let found = parse_scan(&remote::local_script(&script, &never).unwrap());
         let paths: Vec<&str> = found.keys().map(String::as_str).collect();
         let app_key = app.to_string_lossy().into_owned();
@@ -539,7 +612,10 @@ mod tests {
         let app = &found[&app_key];
         assert_eq!(
             app.urls,
-            BTreeSet::from([same_url(ORIGIN), same_url("https://github.com/me/platform.git")])
+            BTreeSet::from([
+                same_url(ORIGIN),
+                same_url("https://github.com/me/platform.git")
+            ])
         );
         assert_eq!(app.roots.len(), 1);
         assert!(found[&empty_key].roots.is_empty() && found[&empty_key].urls.is_empty());

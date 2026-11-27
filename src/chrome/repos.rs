@@ -1554,7 +1554,11 @@ fn line_chip_rects(
         let advance = measure_mono("0", code_font_size())
             .filter(|a| *a > 0.0)
             .unwrap_or(code_font_size() * 0.6);
-        let chars: usize = line.text.chars().map(|c| if c == '\t' { 4 } else { 1 }).sum();
+        let chars: usize = line
+            .text
+            .chars()
+            .map(|c| if c == '\t' { 4 } else { 1 })
+            .sum();
         let text_end = rect.loc.x
             + DIFF_INSET
             + gutter_width(gutter, plain)
@@ -1872,9 +1876,11 @@ fn filter_spots(
     open: bool,
 ) -> (Vec<(SearchPart, Rect)>, Option<Rect>) {
     let y = tree.loc.y + (repos_detail_title() - row_button_px()) / 2;
-    let right = tools.first().map_or(tree.loc.x + tree.size.w - HELP_PADDING, |(_, r)| {
-        r.loc.x - REPOS_TOOL_GAP
-    });
+    let right = tools
+        .first()
+        .map_or(tree.loc.x + tree.size.w - HELP_PADDING, |(_, r)| {
+            r.loc.x - REPOS_TOOL_GAP
+        });
     let square = |x: i32| Rectangle::new((x, y).into(), (row_button_px(), row_button_px()).into());
     if !open {
         return (
@@ -6617,7 +6623,10 @@ mod tests {
             let tree = Rectangle::new((0, 0).into(), (w, 400).into());
             let tools = tree_tools(tree, false);
             let (closed, none) = filter_spots(tree, &tools, false);
-            assert_eq!(closed.iter().map(|(p, _)| *p).collect::<Vec<_>>(), [SearchPart::Open]);
+            assert_eq!(
+                closed.iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+                [SearchPart::Open]
+            );
             assert!(none.is_none() && closed[0].1.loc.x + row_button_px() < tools[0].1.loc.x);
             let (open, count) = filter_spots(tree, &tools, true);
             let field = open[0].1;
@@ -6642,7 +6651,10 @@ mod tests {
             let l = repos_layout(&view, size);
             assert!(!l.tree_filter.is_empty());
             for &(part, r) in &l.tree_filter {
-                let at = Point::from(((r.loc.x + r.size.w / 2) as f64, (r.loc.y + r.size.h / 2) as f64));
+                let at = Point::from((
+                    (r.loc.x + r.size.w / 2) as f64,
+                    (r.loc.y + r.size.h / 2) as f64,
+                ));
                 assert_eq!(repos_hit(&l, at), Some(ReposHit::Filter(part)), "{part:?}");
             }
         }
@@ -7073,7 +7085,7 @@ mod tests {
             empty: view.empty,
             branch: view.branch,
             tree_share: view.tree_share,
-        tree_note: view.tree_note.clone(),
+            tree_note: view.tree_note.clone(),
             grouping: view.grouping,
             part: view.part,
             over: view.over,

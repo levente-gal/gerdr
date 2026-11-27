@@ -224,7 +224,9 @@ impl Integration for Cursor {
         // Tried on 2026.10.22: its first message saves `--model` as the
         // default of every chat of it, as its own `/model` does.
         Some(match of {
-            PickedFor::Stage => "Model for this stage's next start; Cursor keeps it as its default…",
+            PickedFor::Stage => {
+                "Model for this stage's next start; Cursor keeps it as its default…"
+            }
             PickedFor::Start | PickedFor::Chat => {
                 "Model for this agent; Cursor keeps it as its default…"
             }

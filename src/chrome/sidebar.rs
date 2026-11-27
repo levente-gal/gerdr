@@ -639,12 +639,16 @@ impl AgentView {
     /// model. A name starting with its kind ("claude · Plan") says it.
     pub fn label(&self) -> String {
         let named = (self.name.as_ref()).is_some_and(|n| n.starts_with(self.kind.as_str()));
-        [(!named).then_some(&self.kind), self.name.as_ref(), self.model.as_ref()]
-            .into_iter()
-            .flatten()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(" · ")
+        [
+            (!named).then_some(&self.kind),
+            self.name.as_ref(),
+            self.model.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" · ")
     }
 
     /// Whether it is busy: working, waiting on the user mid-run, or a

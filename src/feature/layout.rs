@@ -466,7 +466,13 @@ pub fn link_more(
             Err(err) => {
                 let mut failed = Vec::new();
                 for repo in &repos {
-                    take_down_repo(&feature.branch(), repo, true, &mut failed, feature.pull_of(&repo.key()));
+                    take_down_repo(
+                        &feature.branch(),
+                        repo,
+                        true,
+                        &mut failed,
+                        feature.pull_of(&repo.key()),
+                    );
                 }
                 if !failed.is_empty() {
                     tracing::warn!("taking repositories out again: {}", failed.join("; "));
@@ -743,7 +749,10 @@ type PrChosen<'a> = (&'a Found, &'a PullRef, String, bool);
 
 /// The repositories of `root` that `picks` (repository name, pull request)
 /// name, once each pull request is fetched; or why one can't be had.
-fn pr_chosen<'a>(root: &'a Root, picks: &'a [(String, PullRef)]) -> Result<Vec<PrChosen<'a>>, String> {
+fn pr_chosen<'a>(
+    root: &'a Root,
+    picks: &'a [(String, PullRef)],
+) -> Result<Vec<PrChosen<'a>>, String> {
     let mut chosen = Vec::new();
     for (repo, pull) in picks {
         let Some(found) = root.repos.iter().find(|r| r.name == *repo) else {
@@ -888,7 +897,9 @@ pub fn add_review(feature: &Feature, adds: &[PrAdd]) -> Result<MoreLinked, Strin
         let link = (add.project.as_ref()).map(|p| feature.links.iter().find(|l| l.project == *p));
         let result = match (&add.project, link.flatten()) {
             (None, _) => add_pr_repos(&add.root, &feature.dir, &add.picks, None).map(Err),
-            (Some(p), Some(link)) => add_pr_repos(&add.root, &link.dir, &add.picks, Some(p)).map(Err),
+            (Some(p), Some(link)) => {
+                add_pr_repos(&add.root, &link.dir, &add.picks, Some(p)).map(Err)
+            }
             (Some(p), None) => create_pr_in(&add.root, &add.picks, &feature.slug, Some(p))
                 .map(|created| Ok((link_of(p, &add.root, &created), created))),
         };
@@ -996,7 +1007,9 @@ pub fn update_pr(repo: &Repo, pull: &PullRef, to: &super::pr::Remote) -> Result<
     }
     let status = git(dir, &["status", "--porcelain", "--untracked-files=no"])?;
     if !status.trim().is_empty() {
-        return Err(format!("{name} has uncommitted changes: commit or drop them first"));
+        return Err(format!(
+            "{name} has uncommitted changes: commit or drop them first"
+        ));
     }
     if !pull.own() {
         let range = format!("{}..HEAD", pull.head_sha);
@@ -1047,14 +1060,8 @@ const FETCH_TIME: Duration = Duration::from_secs(120);
 
 fn fetch_pull(main: &Path, pull: &PullRef) -> Result<(), String> {
     let head = format!("+refs/pull/{}/head:{}", pull.number, pull.fetch_ref());
-    let base = format!(
-        "+refs/heads/{0}:refs/remotes/origin/{0}",
-        pull.base_ref
-    );
-    let own = format!(
-        "+refs/heads/{0}:refs/remotes/origin/{0}",
-        pull.head_ref
-    );
+    let base = format!("+refs/heads/{0}:refs/remotes/origin/{0}", pull.base_ref);
+    let own = format!("+refs/heads/{0}:refs/remotes/origin/{0}", pull.head_ref);
     let mut args = vec!["fetch", "-q", "origin", &head, &base];
     if pull.own() {
         args.push(&own);
@@ -1062,12 +1069,8 @@ fn fetch_pull(main: &Path, pull: &PullRef) -> Result<(), String> {
     git_within(main, &args, FETCH_TIME)
         .map_err(|err| format!("couldn't fetch #{}: {err}", pull.number))?;
     let spec = format!("{}^{{commit}}", pull.head_sha);
-    git(main, &["rev-parse", "--verify", "--quiet", &spec]).map_err(|_| {
-        format!(
-            "#{} moved on while it was fetched: try again",
-            pull.number
-        )
-    })?;
+    git(main, &["rev-parse", "--verify", "--quiet", &spec])
+        .map_err(|_| format!("#{} moved on while it was fetched: try again", pull.number))?;
     Ok(())
 }
 
@@ -1701,7 +1704,14 @@ pub fn remove(feature: &Feature, force: bool) -> Result<(), String> {
     let mut failed = Vec::new();
     for (project, dir) in feature.folders() {
         let repos: Vec<&Repo> = feature.repos_of(project).collect();
-        take_down(&feature.branch(), &repos, dir, force, &mut failed, feature.pulls());
+        take_down(
+            &feature.branch(),
+            &repos,
+            dir,
+            force,
+            &mut failed,
+            feature.pulls(),
+        );
     }
     if failed.is_empty() {
         Ok(())
@@ -1783,14 +1793,20 @@ fn keep_repo(repo: &Repo, branch: &str, sha: &str, title: &str) -> Result<Option
     let name = repo.key();
     git(&repo.main, &["update-ref", &kept_ref(branch), sha])
         .map_err(|err| format!("{name}: couldn't keep its commit: {err}"))?;
-    let status = git(&repo.worktree, &["status", "--porcelain", "--untracked-files=all"])
-        .map_err(|err| format!("{name}: {err}"))?;
+    let status = git(
+        &repo.worktree,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )
+    .map_err(|err| format!("{name}: {err}"))?;
     if status.trim().is_empty() {
         return Ok(None);
     }
     let message = format!("gerdr: {title} abandoned");
-    git(&repo.worktree, &["stash", "push", "-q", "--include-untracked", "-m", &message])
-        .map_err(|err| format!("{name}: couldn't keep its changes: {err}"))?;
+    git(
+        &repo.worktree,
+        &["stash", "push", "-q", "--include-untracked", "-m", &message],
+    )
+    .map_err(|err| format!("{name}: couldn't keep its changes: {err}"))?;
     let kept = git(&repo.worktree, &["rev-parse", "refs/stash"])
         .map(|sha| sha.trim().to_owned())
         .and_then(|sha| {
@@ -1997,7 +2013,8 @@ pub fn removal_losses(feature: &Feature, keys: &[String]) -> Result<Vec<String>,
         if !repo.touched || !repo.worktree.is_dir() {
             continue;
         }
-        let n = commits_of(repo, feature.pull_of(&repo.key())).map_err(|err| format!("{}: {err}", repo.key()))?;
+        let n = commits_of(repo, feature.pull_of(&repo.key()))
+            .map_err(|err| format!("{}: {err}", repo.key()))?;
         if n > 0 {
             return Err(format!(
                 "{} has {n} {} not in {}",
@@ -2007,7 +2024,10 @@ pub fn removal_losses(feature: &Feature, keys: &[String]) -> Result<Vec<String>,
             ));
         }
     }
-    Ok(repos.into_iter().filter_map(|r| loss(r, feature.pull_of(&r.key()))).collect())
+    Ok(repos
+        .into_iter()
+        .filter_map(|r| loss(r, feature.pull_of(&r.key())))
+        .collect())
 }
 
 /// Take repositories `keys` out of `feature`: their worktrees and branches
@@ -2029,7 +2049,13 @@ pub fn remove_repos(
                 Some(lost) => Err(format!("it would lose work, so it was left: {lost}")),
                 None => {
                     let mut failed = Vec::new();
-                    take_down_repo(&branch, repo, force, &mut failed, feature.pull_of(&repo.key()));
+                    take_down_repo(
+                        &branch,
+                        repo,
+                        force,
+                        &mut failed,
+                        feature.pull_of(&repo.key()),
+                    );
                     if failed.is_empty() {
                         Ok(())
                     } else {
@@ -2075,7 +2101,9 @@ fn take_down(
 ) {
     let mut left = false;
     for repo in repos {
-        let pull = pulls.iter().find(|p| p.repo == repo.key() || p.repo.is_empty());
+        let pull = pulls
+            .iter()
+            .find(|p| p.repo == repo.key() || p.repo.is_empty());
         left |= !take_down_repo(branch, repo, force, failed, pull);
     }
     if !left {
@@ -2371,14 +2399,24 @@ mod tests {
     fn a_fetch_that_hangs_is_stopped() {
         let t = Temp::new();
         let (app, _) = pull_seed(&t);
-        run(&app, &["config", "remote.origin.uploadpack", "sleep 30; git-upload-pack"]);
+        run(
+            &app,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                "sleep 30; git-upload-pack",
+            ],
+        );
         let start = std::time::Instant::now();
         let stopped = git_within(&app, &["fetch", "-q", "origin"], Duration::from_secs(1));
         assert_eq!(stopped, Err("git fetch: no answer in 1s".into()));
         assert!(start.elapsed() < Duration::from_secs(10));
         // Answering, it fetches as `git` does.
         run(&app, &["config", "--unset", "remote.origin.uploadpack"]);
-        assert_eq!(git_within(&app, &["fetch", "-q", "origin"], FETCH_TIME), Ok(String::new()));
+        assert_eq!(
+            git_within(&app, &["fetch", "-q", "origin"], FETCH_TIME),
+            Ok(String::new())
+        );
         assert!(git_within(&app, &["fetch", "-q", "nowhere"], FETCH_TIME).is_err());
     }
 
@@ -2408,10 +2446,13 @@ mod tests {
         commit(&feature.repos[0].worktree, "c", "mine");
         let lost = losses(&feature);
         assert!(lost[0].contains("1 commit not in #7"), "{lost:?}");
-        assert_eq!(create_pr(&root, "app", &pull, "pr-7").map(|_| ()), Err(format!(
-            "{} already exists",
-            shown(&app.join(".features/pr-7"))
-        )));
+        assert_eq!(
+            create_pr(&root, "app", &pull, "pr-7").map(|_| ()),
+            Err(format!(
+                "{} already exists",
+                shown(&app.join(".features/pr-7"))
+            ))
+        );
         remove(&feature, true).unwrap();
         assert!(!branch_exists(&app, "gerdr/pr-7"));
         assert!(git(&app, &["rev-parse", "--verify", "-q", "refs/gerdr/pr/7"]).is_err());
@@ -2426,7 +2467,10 @@ mod tests {
             run(&origin, &["checkout", "-q", "-b", "fix"]);
             commit(&origin, "b", "the fix");
             let sha = run(&origin, &["rev-parse", "HEAD"]).trim().to_owned();
-            run(&origin, &["update-ref", &format!("refs/pull/{n}/head"), &sha]);
+            run(
+                &origin,
+                &["update-ref", &format!("refs/pull/{n}/head"), &sha],
+            );
             run(&origin, &["checkout", "-q", "main"]);
             let to = format!("work/{name}");
             run(&t.0, &["clone", "-q", &format!("{name}-origin"), &to]);
@@ -2439,13 +2483,19 @@ mod tests {
         let dirs = [t.0.join("work/api"), t.0.join("work/web")];
         let root = find_root(&dirs[0], &dirs, &[], &[]).unwrap();
         assert!(root.multi);
-        let picks = [("api".to_owned(), api.clone()), ("web".to_owned(), web.clone())];
+        let picks = [
+            ("api".to_owned(), api.clone()),
+            ("web".to_owned(), web.clone()),
+        ];
         let (created, linked) = create_review(&root, &picks, &[], "pr-fix").unwrap();
         assert!(linked.is_empty());
         let names: Vec<(&str, Option<&str>)> = (created.repos.iter())
             .map(|r| (r.name.as_str(), r.branch.as_deref()))
             .collect();
-        assert_eq!(names, vec![("api", Some("gerdr/pr-7")), ("web", Some("gerdr/pr-8"))]);
+        assert_eq!(
+            names,
+            vec![("api", Some("gerdr/pr-7")), ("web", Some("gerdr/pr-8"))]
+        );
         let head = |dir: &Path| run(dir, &["rev-parse", "HEAD"]).trim().to_owned();
         assert_eq!(head(&t.0.join("work/.features/pr-fix/web")), web.head_sha);
         assert!(hook::guarded(&dirs[1], "gerdr/pr-8"));
@@ -2466,7 +2516,12 @@ mod tests {
             picks: vec![("web".into(), gone)],
         }];
         let failed = create_review(&alone, &[("api".into(), api)], &links, "pr-again");
-        assert!(failed.as_ref().is_err_and(|e| e.starts_with("Other: web: ")), "{failed:?}");
+        assert!(
+            failed
+                .as_ref()
+                .is_err_and(|e| e.starts_with("Other: web: ")),
+            "{failed:?}"
+        );
         assert!(!dirs[0].join(".features/pr-again").exists());
         assert!(!branch_exists(&dirs[0], "gerdr/pr-7"));
     }
@@ -2480,7 +2535,10 @@ mod tests {
             run(&origin, &["checkout", "-q", "-b", "fix"]);
             commit(&origin, "b", "the fix");
             let sha = run(&origin, &["rev-parse", "HEAD"]).trim().to_owned();
-            run(&origin, &["update-ref", &format!("refs/pull/{n}/head"), &sha]);
+            run(
+                &origin,
+                &["update-ref", &format!("refs/pull/{n}/head"), &sha],
+            );
             run(&origin, &["checkout", "-q", "main"]);
             let to = format!("work/{name}");
             run(&t.0, &["clone", "-q", &format!("{name}-origin"), &to]);
@@ -2492,7 +2550,8 @@ mod tests {
         let (api, web) = (seed("api", 7), seed("web", 8));
         let dirs = [t.0.join("work/api"), t.0.join("work/web")];
         let root = find_root(&dirs[0], &dirs, &[], &[]).unwrap();
-        let (created, _) = create_review(&root, &[("api".into(), api.clone())], &[], "pr-7").unwrap();
+        let (created, _) =
+            create_review(&root, &[("api".into(), api.clone())], &[], "pr-7").unwrap();
         let details = super::super::pr::Details {
             pull: api.clone(),
             state: "OPEN".into(),
@@ -2530,7 +2589,13 @@ mod tests {
         let gone = remove_repos(&whole, &["web".to_owned()], false);
         assert_eq!(gone, vec![("web".to_owned(), Ok(()))]);
         assert!(!branch_exists(&dirs[1], "gerdr/pr-8"));
-        assert!(git(&dirs[1], &["rev-parse", "--verify", "-q", "refs/gerdr/pr/8"]).is_err());
+        assert!(
+            git(
+                &dirs[1],
+                &["rev-parse", "--verify", "-q", "refs/gerdr/pr/8"]
+            )
+            .is_err()
+        );
         assert!(branch_exists(&dirs[0], "gerdr/pr-7"));
     }
 
@@ -2545,7 +2610,10 @@ mod tests {
         // The author pushes a fix, rewriting what came before.
         let origin = t.0.join("origin");
         run(&origin, &["checkout", "-q", "fix"]);
-        run(&origin, &["commit", "-q", "--amend", "-m", "the fix, again"]);
+        run(
+            &origin,
+            &["commit", "-q", "--amend", "-m", "the fix, again"],
+        );
         commit(&origin, "c", "more");
         let new = run(&origin, &["rev-parse", "HEAD"]).trim().to_owned();
         run(&origin, &["update-ref", "refs/pull/7/head", &new]);

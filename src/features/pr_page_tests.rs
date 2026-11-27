@@ -264,9 +264,7 @@ fn at_its_head_verify_goes_by_githubs_checks() {
     let sections = ci_sections(&f, ctx, &actions);
     assert!(matches!(&sections[0], PageSection::Lines { label, lines }
         if label == "GitHub checks" && lines[1].text == "job 1: failed"));
-    assert!(
-        matches!(&sections[1], PageSection::Toolbar { groups } if groups[0].1 == vec![run])
-    );
+    assert!(matches!(&sections[1], PageSection::Toolbar { groups } if groups[0].1 == vec![run]));
     with_checks(&mut f, &[]);
     assert_eq!(page_enter(&f, Stage::Verify, ctx), Some(PanelOutcome::Tick));
 }

@@ -46,7 +46,11 @@ impl Reached {
     /// What to connect to it as: its user at the address it came from, or at
     /// its name when the address isn't known.
     pub fn target(&self) -> String {
-        let host = if self.from.is_empty() { &self.name } else { &self.from };
+        let host = if self.from.is_empty() {
+            &self.name
+        } else {
+            &self.from
+        };
         match self.user.is_empty() {
             true => host.clone(),
             false => format!("{}@{host}", self.user),
@@ -203,7 +207,11 @@ fn to_offer(
 
 /// What the toast offering to add `reached` says.
 fn offer_text(reached: &Reached) -> String {
-    let name = if reached.name.is_empty() { "Another machine" } else { &reached.name };
+    let name = if reached.name.is_empty() {
+        "Another machine"
+    } else {
+        &reached.name
+    };
     format!("{name} connected to this machine: add it here too, to see its features")
 }
 
@@ -280,13 +288,22 @@ mod tests {
             (reached("known", now), false),
         ];
         let offered = to_offer(found, Some("me"), &["known".to_owned()], now);
-        assert_eq!(offered.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["new"]);
+        assert_eq!(
+            offered.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["new"]
+        );
     }
 
     #[test]
     fn the_list_there_is_read_back() {
         let list = parse_list("ab12\t1700000000\tlaptop\nbad id\t1\tx\ncd34\tnot a time\t\n");
-        assert_eq!(list, [Reached { name: "laptop".into(), ..reached("ab12", 1_700_000_000) }]);
+        assert_eq!(
+            list,
+            [Reached {
+                name: "laptop".into(),
+                ..reached("ab12", 1_700_000_000)
+            }]
+        );
     }
 
     #[test]
@@ -308,7 +325,10 @@ mod tests {
         mark_told(&dir, "cd34");
         let found = read_dir(&dir);
         assert_eq!(found.len(), 2);
-        assert_eq!((found[0].0.target().as_str(), found[0].1), ("ana@1.2.3.4", false));
+        assert_eq!(
+            (found[0].0.target().as_str(), found[0].1),
+            ("ana@1.2.3.4", false)
+        );
         assert_eq!((found[1].0.name.as_str(), found[1].1), ("desk", true));
         assert!(found[0].0.around(crate::clock::now_secs()));
         let _ = std::fs::remove_dir_all(&dir);

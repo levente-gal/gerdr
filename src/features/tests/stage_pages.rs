@@ -77,9 +77,12 @@ fn a_shipped_feature_ships_more_from_its_page() {
     let card = group.card.as_ref().unwrap();
     assert_eq!(card.state.text, "1 step to run");
     // Its rows say what ran: no log repeats them.
-    assert!(!page.sections.iter().any(|s| {
-        matches!(s, PageSection::Lines { label, .. } if label == "Ship log")
-    }));
+    assert!(
+        !page
+            .sections
+            .iter()
+            .any(|s| { matches!(s, PageSection::Lines { label, .. } if label == "Ship log") })
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -276,9 +279,12 @@ fn what_followed_shipping_shows_with_its_undo() {
     let named = actions.iter().find(|(_, o)| *o == push).unwrap();
     assert_eq!(named.0.label, "Undo push\u{2026}");
     // Its cards and Afterwards say what ran: the log isn't shown again.
-    assert!(!page.sections.iter().any(|s| {
-        matches!(s, PageSection::Lines { label, .. } if label == "Ship log")
-    }));
+    assert!(
+        !page
+            .sections
+            .iter()
+            .any(|s| { matches!(s, PageSection::Lines { label, .. } if label == "Ship log") })
+    );
     let log = ship_log_lines(&f, 2_000);
     assert_eq!(log[0].text, "just now \u{b7} closed the workspace");
     // Alt+Z: off the rows, the latest; on api's, its push.
@@ -576,8 +582,8 @@ fn ships_buttons_have_keys_that_follow_the_selected_repository() {
     for row in [None, Some("api"), Some("web")] {
         let keys = ship_keys(&f, ctx, Some(&p), row);
         assert!(
-            keys.iter()
-                .any(|k| k.chord == "Ctrl+Shift+Del" && matches!(k.outcome, PanelOutcome::StopResolving(_))),
+            keys.iter().any(|k| k.chord == "Ctrl+Shift+Del"
+                && matches!(k.outcome, PanelOutcome::StopResolving(_))),
             "{row:?}"
         );
     }
@@ -1509,7 +1515,10 @@ fn an_open_agents_card_says_how_full_its_context_is() {
         })
     };
     let said = |what: &str| Some(format!("Build agent \u{b7} next fixes: this agent{what}"));
-    assert_eq!(status(&f, &probe(n, 84_002)), said(" \u{b7} context 84k / 1M"));
+    assert_eq!(
+        status(&f, &probe(n, 84_002)),
+        said(" \u{b7} context 84k / 1M")
+    );
     assert_eq!(
         status(&f, &probe(n, 850_000)),
         said(" \u{b7} context 850k / 1M, nearly full")
@@ -1687,7 +1696,12 @@ fn fix_pages_pick_the_agent_fixes_go_to_and_ship_picks_its_own() {
     assert_eq!(f.current(), Some(Stage::Ship));
     assert_eq!(
         cards(&f, Stage::Ship),
-        [(Stage::Ship, String::new(), "Summary and conflicts agent".into(), 2)]
+        [(
+            Stage::Ship,
+            String::new(),
+            "Summary and conflicts agent".into(),
+            2
+        )]
     );
     assert_eq!(keys::keyed_stage(&f, Stage::Ship, false), Some(Stage::Ship));
 }
@@ -1822,7 +1836,10 @@ fn the_model_button_and_its_key_show_where_gerdr_can_tell_a_model() {
     );
     assert_eq!(model_label(None), "Model: default");
     assert_eq!(model_label(Some("opus")), "Model: opus");
-    assert_eq!(model_label(Some("claudeAgent/claude-haiku-5-5")), "Model: claude-haiku-5-5");
+    assert_eq!(
+        model_label(Some("claudeAgent/claude-haiku-5-5")),
+        "Model: claude-haiku-5-5"
+    );
 
     let panel = FeaturePanel {
         slug: "a".into(),
@@ -2144,9 +2161,7 @@ fn a_fix_round_card_folds_and_opens_by_its_button_and_all_by_alt_e() {
     for (i, (_, outcome)) in actions.iter().enumerate() {
         if matches!(
             outcome,
-            PanelOutcome::ReviewFixPlan
-                | PanelOutcome::ResendFixes
-                | PanelOutcome::RoundDiff(_)
+            PanelOutcome::ReviewFixPlan | PanelOutcome::ResendFixes | PanelOutcome::RoundDiff(_)
         ) {
             assert!(held.contains(&i), "{outcome:?} isn't on a card");
         }
@@ -2374,9 +2389,7 @@ fn plan_reviews_final_plan_shows_first_holding_its_diff_and_no_run_cards() {
     let got = plan_review::import(
         &mut review,
         1,
-        raws(
-            r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "A?", "why": "w"}]}"#,
-        ),
+        raws(r#"{"suggestions": [{"kind": "question", "plan": "M1", "title": "A?", "why": "w"}]}"#),
     );
     plan_review::keep_run(
         &mut review,
@@ -2533,8 +2546,8 @@ fn a_review_recaps_its_own_stages_on_ship() {
     }]);
     let state = PanelState::default();
     let page = stage_page(&f, Stage::Ship, &state, &[], 2_060);
-    let Some(PageSection::Recap(recap)) = (page.sections.iter())
-        .find(|s| matches!(s, PageSection::Recap(_)))
+    let Some(PageSection::Recap(recap)) =
+        (page.sections.iter()).find(|s| matches!(s, PageSection::Recap(_)))
     else {
         panic!("no recap: {:?}", page.sections);
     };

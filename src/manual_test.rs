@@ -232,9 +232,9 @@ fn rows(
                     .map_or_else(String::new, |k| k.note.clone()),
                 sent: check.is_some_and(|k| k.state == Verdict::Fail && k.sent),
                 made: check.is_some_and(manual::Check::fix_made),
-                earlier: (test.zip(check)).zip(patch).is_some_and(|((t, k), p)| {
-                    manual::tried_on(t, k) != p
-                }),
+                earlier: (test.zip(check))
+                    .zip(patch)
+                    .is_some_and(|((t, k), p)| manual::tried_on(t, k) != p),
                 retest: (test.filter(|_| check.is_none()))
                     .and_then(|t| t.retest.get(&c.id).copied()),
                 open: folds.is_some_and(|f| f.open.contains(&c.text)),
@@ -1308,8 +1308,8 @@ impl Gerdr {
                 let Some(f) = self.feature_mut(&project, &slug) else {
                     return;
                 };
-                let passed = manual::check(f.manual.as_ref(), c)
-                    .is_some_and(|k| k.state == Verdict::Pass);
+                let passed =
+                    manual::check(f.manual.as_ref(), c).is_some_and(|k| k.state == Verdict::Pass);
                 let text = c.text.clone();
                 // Marked, it was read; passed, it folds: what is left to try
                 // is what stays open.
@@ -1372,7 +1372,12 @@ impl Gerdr {
                         reading.dirty.join(", ")
                     ));
                 }
-                let rows = rows(feature.manual.as_ref(), &criteria, Some(&reading.patch), None);
+                let rows = rows(
+                    feature.manual.as_ref(),
+                    &criteria,
+                    Some(&reading.patch),
+                    None,
+                );
                 // On someone else's pull request what failed goes with the
                 // review: only what wasn't tried holds it up.
                 let left = match feature.posts_review() {

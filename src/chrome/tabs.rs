@@ -1435,9 +1435,10 @@ pub fn tab_zoom_rect(view: &TabStripView, layout: &TabLayout, i: usize, h: i32) 
 #[cfg(test)]
 mod tests {
     use super::{
-        CHIP_GAP, CLOSE, EDGE, NAV_WIDTH, PILL, PINNED_TAB_WIDTH, PINNED_TINT, PLUS_GAP, StripParts, TAB_MAX_WIDTH, TAB_MIN_WIDTH,
-        TabHit, TabStripView, TabView, WATCH_WIDTH, tab_blinkers, tab_layout, tab_layout_at,
-        tab_rename_field, tab_slot, tab_strip_hit, tab_zoom_rect,
+        CHIP_GAP, CLOSE, EDGE, NAV_WIDTH, PILL, PINNED_TAB_WIDTH, PINNED_TINT, PLUS_GAP,
+        StripParts, TAB_MAX_WIDTH, TAB_MIN_WIDTH, TabHit, TabStripView, TabView, WATCH_WIDTH,
+        tab_blinkers, tab_layout, tab_layout_at, tab_rename_field, tab_slot, tab_strip_hit,
+        tab_zoom_rect,
     };
     use crate::agent_icons::AgentIcon;
     use crate::chrome::{
@@ -2152,12 +2153,7 @@ mod tests {
             ..TabView::default()
         };
         assert!(super::tab_badge(&checks).is_none());
-        let view = TabStripView::plain(
-            vec![TabView::default(), checks],
-            0,
-            false,
-            ThemeMode::Dark,
-        );
+        let view = TabStripView::plain(vec![TabView::default(), checks], 0, false, ThemeMode::Dark);
         let dots = tab_blinkers(&view, size);
         let l = tab_layout(2, size, false, false, false, false);
         assert_eq!(dots.len(), 1);

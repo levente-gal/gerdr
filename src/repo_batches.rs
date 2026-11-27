@@ -35,8 +35,8 @@ use crate::{
     git::{self, Change, GitStatus, InProgress},
     git_ops::{self, Failed, Failure, Head, Integrate, OpResult, Pull, Ran, Turn, Verdict},
     repos::{
-        Batch, BatchKind, Ctx, Found, Job, MarkAt, MarkCommits, Outcome, Panel, RepoEvent,
-        RepoDir, RepoItem, RepoRun, Repos, RunState,
+        Batch, BatchKind, Ctx, Found, Job, MarkAt, MarkCommits, Outcome, Panel, RepoDir, RepoEvent,
+        RepoItem, RepoRun, Repos, RunState,
     },
     review,
     toast::Level,
@@ -826,7 +826,10 @@ impl Gerdr {
         self.repos.panel = Some(panel);
         if let Some(panel) = self.repos.panel.as_mut() {
             panel.grouping = self.projects.repo_grouping;
-            let open = self.project.as_ref().and_then(|p| self.projects.open_feature_groups.get(p));
+            let open = self
+                .project
+                .as_ref()
+                .and_then(|p| self.projects.open_feature_groups.get(p));
             panel.open_groups = open.into_iter().flatten().cloned().collect();
         }
         self.repos_refresh();
@@ -962,7 +965,8 @@ impl Gerdr {
     /// Keep the project's features unfolded in the panel for the next
     /// start.
     fn repos_save_folds(&mut self) {
-        let (Some(panel), Some(project)) = (self.repos.panel.as_ref(), self.project.as_ref()) else {
+        let (Some(panel), Some(project)) = (self.repos.panel.as_ref(), self.project.as_ref())
+        else {
             return;
         };
         let open: BTreeSet<String> = panel.open_groups.iter().cloned().collect();
@@ -2920,7 +2924,10 @@ pub(crate) fn search_tip(layout: &chrome::ReposLayout, part: SearchPart) -> Opti
 fn filter_tip(layout: &chrome::ReposLayout, part: SearchPart) -> Option<Tooltip> {
     let (_, rect) = layout.tree_filter.iter().find(|(p, _)| *p == part)?;
     let (text, key) = match part {
-        SearchPart::Open => ("Filter the repositories by name, feature or branch", "Ctrl+F"),
+        SearchPart::Open => (
+            "Filter the repositories by name, feature or branch",
+            "Ctrl+F",
+        ),
         SearchPart::Close => ("Close the filter, every repository shown", "Esc"),
         SearchPart::Field | SearchPart::Prev | SearchPart::Next => return None,
     };
@@ -3167,9 +3174,14 @@ mod tests {
     #[test]
     fn a_features_worktrees_follow_the_workspaces_named_after_it() {
         use crate::features::tests::{feature, repo};
-        let bulk = feature("bulk", vec![repo("api", true), repo("web", true), repo("docs", false)], 0);
+        let bulk = feature(
+            "bulk",
+            vec![repo("api", true), repo("web", true), repo("docs", false)],
+            0,
+        );
         let mut git = crate::state::GitWatch::default();
-        git.status.insert("/work/api".into(), status("/work/api", false));
+        git.status
+            .insert("/work/api".into(), status("/work/api", false));
         for name in ["api", "web", "docs"] {
             let wt = format!("/work/.features/bulk/{name}");
             git.status.insert(wt.clone().into(), status(&wt, false));

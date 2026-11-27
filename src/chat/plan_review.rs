@@ -24,8 +24,8 @@ use std::{
 
 use crate::{
     Gerdr,
-    herdr::AgentStatus,
     chat::{Item, PaneChat},
+    herdr::AgentStatus,
     prompts,
 };
 

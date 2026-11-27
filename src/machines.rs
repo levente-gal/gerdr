@@ -1541,7 +1541,11 @@ impl Gerdr {
         let last = &mut self.projects.machine_last;
         let mut changed = last.get(name).is_none_or(|t| t != target);
         last.insert(name.to_owned(), target.to_owned());
-        let ids = self.projects.machine_ids.entry(name.to_owned()).or_default();
+        let ids = self
+            .projects
+            .machine_ids
+            .entry(name.to_owned())
+            .or_default();
         if !id.is_empty() && !ids.iter().any(|i| i == id) {
             ids.push(id.to_owned());
             changed = true;
@@ -1565,7 +1569,11 @@ impl Gerdr {
     pub(crate) fn merge_remembered(&mut self, keep: &str, drop: &str) {
         let had_last = self.projects.machine_last.remove(drop).is_some();
         let dropped = self.projects.machine_ids.remove(drop).unwrap_or_default();
-        let ids = self.projects.machine_ids.entry(keep.to_owned()).or_default();
+        let ids = self
+            .projects
+            .machine_ids
+            .entry(keep.to_owned())
+            .or_default();
         for id in &dropped {
             if !ids.contains(id) {
                 ids.push(id.clone());

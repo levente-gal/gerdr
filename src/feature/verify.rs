@@ -60,12 +60,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use super::{
-    Feature, PerProject,
-    layout::git,
-    now, patch,
-    setup::minutes,
-};
+use super::{Feature, PerProject, layout::git, now, patch, setup::minutes};
 use crate::desktop::shell_quote;
 use crate::process::kill_group;
 

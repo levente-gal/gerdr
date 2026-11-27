@@ -28,9 +28,9 @@ use crate::{
         zst,
     },
     chrome::{self, StatsColumn, StatsFocus, StatsHit, StatsRow, StatsView},
+    clock::ago,
     features::Done,
     input::Overlay,
-    clock::ago,
     key_table::{self, Binding, alias},
     scrollback::{Scrollback, Source},
     text_field::{Edit, PASTE, TextField},
@@ -2543,7 +2543,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sessions").join("claude-1")).unwrap();
         std::fs::write(dir.join("events-m1.jsonl"), [0; 100]).unwrap();
-        std::fs::write(dir.join("sessions").join("claude-1").join("meta.json"), [0; 20]).unwrap();
+        std::fs::write(
+            dir.join("sessions").join("claude-1").join("meta.json"),
+            [0; 20],
+        )
+        .unwrap();
         assert_eq!(kept_bytes(&dir), 120);
         assert_eq!(kept_bytes(&dir.join("gone")), 0);
         let _ = std::fs::remove_dir_all(&dir);

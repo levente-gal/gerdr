@@ -1688,7 +1688,11 @@ impl Feature {
     pub fn agent_dirs_for(&self, base: &str, data: &Path) -> Vec<PathBuf> {
         let mut dirs = self.agent_dirs(data);
         if crate::integrations::by_command(base).adds_roots() {
-            dirs.extend(layout::others_in_root(self).into_iter().map(|(_, main)| main));
+            dirs.extend(
+                layout::others_in_root(self)
+                    .into_iter()
+                    .map(|(_, main)| main),
+            );
             let roots = self.repos.iter().map(|r| &r.worktree).filter(|worktree| {
                 **worktree != self.dir && !dirs.contains(*worktree) && worktree.is_dir()
             });

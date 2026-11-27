@@ -915,7 +915,10 @@ pub(crate) fn items_count(feature: &Feature, stage: Stage) -> String {
     let said = |n: usize, what: &str| (n > 0).then(|| format!("{n} {what}"));
     [
         said(state(FindingState::Open), "to decide"),
-        said(state(FindingState::Fix), words_in(ItemOf::Finding, review.posts).wanted),
+        said(
+            state(FindingState::Fix),
+            words_in(ItemOf::Finding, review.posts).wanted,
+        ),
         said(
             state(FindingState::Sent) - made,
             review_import::sent_word(

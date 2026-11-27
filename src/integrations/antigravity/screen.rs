@@ -110,7 +110,12 @@ fn level(slider: &str, levels: &str) -> Option<String> {
 /// has so far, and a footer of how to see more (Tab), a row above its
 /// "Enter/Esc to dismiss" on a narrow pane.
 pub(crate) const SIDE_PANEL: SidePanel = SidePanel {
-    footers: &["to dismiss", "to scroll", "Tab to expand", "Tab to collapse"],
+    footers: &[
+        "to dismiss",
+        "to scroll",
+        "Tab to expand",
+        "Tab to collapse",
+    ],
     frame: "┃│",
     question_end: None,
     scroll_marks: &[],

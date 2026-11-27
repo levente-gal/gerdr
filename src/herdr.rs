@@ -1933,7 +1933,8 @@ mod tests {
         assert!(!line_left_in_box(&far, "/summarize"));
         assert!(!line_left_in_box("anything", ""));
         // Antigravity's side panel says the question: it took it.
-        let side = " ┃ /btw list the numbers\n ┃\n ┃ ⣾  Working... (Enter/Esc to cancel)\n────\n>\n";
+        let side =
+            " ┃ /btw list the numbers\n ┃\n ┃ ⣾  Working... (Enter/Esc to cancel)\n────\n>\n";
         assert!(!line_left_in_box(side, "/btw list the numbers"));
         // Over a model menu the line opened, as Antigravity keeps it in its
         // history: an Enter would pick a model.

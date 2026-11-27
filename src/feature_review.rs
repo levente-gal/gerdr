@@ -288,7 +288,9 @@ impl Gerdr {
         if !still || self.review_may_skip(project, slug).is_none() {
             return;
         }
-        let pull = self.feature(project, slug).is_some_and(|f| f.pull().is_some());
+        let pull = self
+            .feature(project, slug)
+            .is_some_and(|f| f.pull().is_some());
         let (since, why, reopen) = match result {
             Ok(since) if since.base_only() => (
                 since,

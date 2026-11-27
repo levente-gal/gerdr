@@ -974,9 +974,8 @@ impl Gerdr {
         // What its worktrees left outside them goes with them (`workflow.cleanup`).
         let cleanup = self.projects.workflows(&feature, |w| w.cleanup.clone());
         let venv = self.feature_venv(project, slug);
-        let cleanup_log = crate::feature::setup::cleanup_log_path(&feature::store::dir(
-            None, project, slug,
-        ));
+        let cleanup_log =
+            crate::feature::setup::cleanup_log_path(&feature::store::dir(None, project, slug));
         let shipped = feature.status == crate::feature::Status::Done;
         self.t3_forget_project(&feature.dir, shipped);
         // A shipped feature's threads go with its project, stopped.
@@ -1056,7 +1055,8 @@ impl Gerdr {
         feature.log(feature::now(), format!("cleanup failed: {failed}"));
         let title = feature.title.clone();
         self.save_feature(project, slug);
-        let log = crate::feature::setup::cleanup_log_path(&feature::store::dir(None, project, slug));
+        let log =
+            crate::feature::setup::cleanup_log_path(&feature::store::dir(None, project, slug));
         self.show_warning(format!(
             "Cleanup of \u{201c}{title}\u{201d} failed: {failed}; its output is in {}",
             crate::paths::display(&log, crate::home_dir().as_deref(), 60)

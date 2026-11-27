@@ -181,8 +181,9 @@ impl DocFile {
             DocFile::DraftChanges(..) => Some(DRAFT_CHANGES_READ_ONLY),
             DocFile::Suggestions => Some(SUGGESTIONS_READ_ONLY),
             DocFile::FixPlan => fix_plan_locked(feature),
-            DocFile::ConflictPlan(n) => (conflict_plan_open(feature, n).is_none())
-                .then_some(CONFLICT_PLAN_PAST),
+            DocFile::ConflictPlan(n) => {
+                (conflict_plan_open(feature, n).is_none()).then_some(CONFLICT_PLAN_PAST)
+            }
             DocFile::ChatPlan(_) => Some(CHAT_PLAN_READ_ONLY),
         }
     }
@@ -510,7 +511,8 @@ pub fn changed_file(name: &str, old: &str, new: &str) -> FileDiff {
 /// Why an edit, a comment or Send back do nothing on an approved file.
 pub const APPROVED_FILE: &str = "An approved file can't be edited: reopen it first";
 /// Why those do nothing on a file of a feature another machine writes.
-pub const WRITTEN_ELSEWHERE: &str = "This feature is written on another machine: take it over on its page to change it";
+pub const WRITTEN_ELSEWHERE: &str =
+    "This feature is written on another machine: take it over on its page to change it";
 /// Why those, and Reopen, do nothing on a locked one.
 pub const LOCKED_FILE: &str = "This file is locked: start over the stages after it first";
 
@@ -1405,7 +1407,10 @@ mod tests {
         let mut seen = f.clone();
         seen.writer = Some("m1".into());
         let file = DocFile::Stage(Stage::Discover);
-        assert!(matches!(file.standing(Some(&seen), &docs), Standing::Locked(_)));
+        assert!(matches!(
+            file.standing(Some(&seen), &docs),
+            Standing::Locked(_)
+        ));
         assert_eq!(file.locked(Some(&seen), &docs), Some(WRITTEN_ELSEWHERE));
     }
 

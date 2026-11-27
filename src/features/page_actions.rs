@@ -960,7 +960,6 @@ pub(crate) fn short_folder(path: &Path) -> String {
     paths::display(path, home_dir().as_deref(), 60)
 }
 
-
 /// What a done stage's row says of its mark.
 pub(super) fn mark_detail(mark: &feature::Mark, now: u64) -> String {
     let when = crate::clock::ago(now, mark.at);

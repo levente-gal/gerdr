@@ -753,7 +753,12 @@ pub fn checkout_in_main(main: &Path, w: &Worktree) -> Result<(), String> {
 /// was on before it took `branch`, else to `fallback`; when main isn't on
 /// `branch`, `w` only switches to it. Changes to tracked files either side
 /// stop it; main takes `branch` again if `w` can't.
-pub fn give_back(main: &Path, w: &Path, branch: &str, fallback: Option<&str>) -> Result<(), String> {
+pub fn give_back(
+    main: &Path,
+    w: &Path,
+    branch: &str,
+    fallback: Option<&str>,
+) -> Result<(), String> {
     for dir in [main, w] {
         let edited = git(dir, &["status", "--porcelain", "--untracked-files=no"])
             .ok_or_else(|| format!("couldn't read {}", dir.display()))?;
@@ -765,7 +770,13 @@ pub fn give_back(main: &Path, w: &Path, branch: &str, fallback: Option<&str>) ->
     if on.as_deref().map(str::trim) != Some(branch) {
         return git_run(w, &["switch", branch]).map(drop);
     }
-    let local = |b: &String| git(main, &["show-ref", "--verify", "-q", &format!("refs/heads/{b}")]).is_some();
+    let local = |b: &String| {
+        git(
+            main,
+            &["show-ref", "--verify", "-q", &format!("refs/heads/{b}")],
+        )
+        .is_some()
+    };
     let before = git(main, &["rev-parse", "--abbrev-ref", "@{-1}"])
         .map(|b| b.trim().to_owned())
         .filter(|b| b != branch && local(b));
@@ -1095,8 +1106,8 @@ fn code(xy: &str) -> char {
 mod tests {
     use super::{
         Change, GitStatus, InProgress, Worktree, bring_untracked, checkout_check, checkout_in_main,
-        clashes, give_back, parse, parse_worktrees, pick_remote, remote_to_web, remove_worktree, squash_check,
-        status, untracked,
+        clashes, give_back, parse, parse_worktrees, pick_remote, remote_to_web, remove_worktree,
+        squash_check, status, untracked,
     };
     use std::{
         path::{Path, PathBuf},

@@ -61,8 +61,7 @@ fn a_review_picks_a_pull_request_per_repository() {
     dkey(&mut d, key(Keysym::Down));
     dkey(&mut d, key(Keysym::Return));
     assert!(d.choosing.is_none());
-    let Some(DialogOutcome::Review { picks, title, .. }) = dkey(&mut d, key(Keysym::Return))
-    else {
+    let Some(DialogOutcome::Review { picks, title, .. }) = dkey(&mut d, key(Keysym::Return)) else {
         panic!("a review")
     };
     assert!(title.is_empty());
@@ -141,8 +140,7 @@ fn a_review_changes_its_pull_requests_in_the_dialog() {
     assert_eq!(view.create, chrome::SAVE_PULLS);
     assert_eq!(view.repos[0].place, "@bob");
     assert_eq!(view.repos[0].base.as_deref(), Some("#12"));
-    let Some(DialogOutcome::Review { picks, into, .. }) = dkey(&mut d, key(Keysym::Return))
-    else {
+    let Some(DialogOutcome::Review { picks, into, .. }) = dkey(&mut d, key(Keysym::Return)) else {
         panic!("a change")
     };
     assert_eq!(into.as_deref(), Some("pr-12"));
@@ -344,12 +342,7 @@ fn sandbox_elsewhere(alive: bool) -> Feature {
 }
 
 /// The footer's hints of `panel` over `f` on `stage`, as `ctx` has it.
-fn hints_at(
-    panel: &FeaturePanel,
-    f: &Feature,
-    stage: Stage,
-    ctx: RowCtx,
-) -> Vec<(String, String)> {
+fn hints_at(panel: &FeaturePanel, f: &Feature, stage: Stage, ctx: RowCtx) -> Vec<(String, String)> {
     let choices = AgentChoices::default();
     tab_hints(panel, f, stage, &[], ctx, choices, &[], &[], &[])
 }
@@ -523,17 +516,7 @@ fn each_table_of_the_tab_hints_what_it_presses() {
         for stage in Stage::ALL {
             let ctxs: Vec<keys::TabCtx> = (tabs.iter())
                 .map(|p| {
-                    keys::TabCtx::new(
-                        p,
-                        &f,
-                        stage,
-                        &slugs,
-                        RowCtx::default(),
-                        &[],
-                        &[],
-                        &[],
-                        None,
-                    )
+                    keys::TabCtx::new(p, &f, stage, &slugs, RowCtx::default(), &[], &[], &[], None)
                 })
                 .collect();
             for link in keys::chain() {

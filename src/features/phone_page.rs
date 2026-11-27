@@ -68,7 +68,10 @@ fn phone_may(outcome: &PanelOutcome) -> bool {
             | O::DecideFinding(..)
             | O::DeleteFindingComment(_)
             | O::DeleteOwnFinding(_)
-            | O::OnSuggestion(_, ItemAct::Decide(_) | ItemAct::DeleteComment | ItemAct::DeleteOwn)
+            | O::OnSuggestion(
+                _,
+                ItemAct::Decide(_) | ItemAct::DeleteComment | ItemAct::DeleteOwn
+            )
             | O::ChangeDecisions
             | O::SkipCheck { .. }
             | O::PickAgent(..)
@@ -199,7 +202,9 @@ impl PhonePage {
 
     /// The buttons it adds to section `i`.
     fn added(&self, i: usize) -> impl Iterator<Item = &PhoneButton> {
-        (self.extra.iter()).filter(move |(at, _)| *at == Some(i)).map(|(_, b)| b)
+        (self.extra.iter())
+            .filter(move |(at, _)| *at == Some(i))
+            .map(|(_, b)| b)
     }
 
     /// The page's rare buttons, in the `⋯` menu at its top right as on the
@@ -224,7 +229,9 @@ impl PhonePage {
             }
         }
         held.extend(&self.view.page.menu);
-        let approve = (self.extra.iter()).filter(|(at, _)| at.is_none()).map(|(_, b)| b);
+        let approve = (self.extra.iter())
+            .filter(|(at, _)| at.is_none())
+            .map(|(_, b)| b);
         let rest = (self.buttons.iter().enumerate())
             .filter(|(i, _)| !held.contains(&i))
             .filter_map(|(_, b)| b.as_ref());
@@ -240,7 +247,11 @@ impl PhonePage {
                 let (models, picks): (Vec<&PhoneButton>, Vec<&PhoneButton>) =
                     (self.added(i)).partition(|b| matches!(b.outcome, PanelOutcome::PickModel(_)));
                 value["buttons"] = self.at(buttons).into();
-                value["picks"] = picks.into_iter().map(PhoneButton::json).collect::<Vec<_>>().into();
+                value["picks"] = picks
+                    .into_iter()
+                    .map(PhoneButton::json)
+                    .collect::<Vec<_>>()
+                    .into();
                 value["model"] = models.first().map(|b| b.json()).into();
                 let pane = self.panes.iter().find(|(at, _)| *at == i);
                 value["pane"] = pane.map(|(_, pane)| pane.as_str()).into();
@@ -254,7 +265,11 @@ impl PhonePage {
             }
             S::Round(r) => value["buttons"] = self.at(&r.buttons).into(),
             S::MilestoneMode { .. } => {
-                value["buttons"] = self.added(i).map(PhoneButton::json).collect::<Vec<_>>().into();
+                value["buttons"] = self
+                    .added(i)
+                    .map(PhoneButton::json)
+                    .collect::<Vec<_>>()
+                    .into();
             }
             _ => {}
         }
@@ -440,7 +455,10 @@ fn phone_touched(root: &layout::Root, named: &[String]) -> Result<Vec<String>, S
     if named.is_empty() {
         return Err("Pick a repository it changes".into());
     }
-    match named.iter().find(|n| !root.repos.iter().any(|r| &r.name == *n)) {
+    match named
+        .iter()
+        .find(|n| !root.repos.iter().any(|r| &r.name == *n))
+    {
         Some(name) => Err(format!("{} has no repository {name}", root.path.display())),
         None => Ok(named.to_vec()),
     }
@@ -687,12 +705,14 @@ impl Gerdr {
         let pane_of = |buttons: &[usize]| {
             buttons.iter().find_map(|i| match &actions.get(*i)?.1 {
                 PanelOutcome::ShowAgent(s) => feature.runs.get(s)?.pane.clone(),
-                PanelOutcome::ShowOwnAgent(n) => {
-                    (feature.own_agents.iter()).find(|a| a.n == *n)?.pane.clone()
-                }
-                PanelOutcome::ShowResearch(id) => {
-                    (feature.research.iter()).find(|r| r.id == *id)?.pane.clone()
-                }
+                PanelOutcome::ShowOwnAgent(n) => (feature.own_agents.iter())
+                    .find(|a| a.n == *n)?
+                    .pane
+                    .clone(),
+                PanelOutcome::ShowResearch(id) => (feature.research.iter())
+                    .find(|r| r.id == *id)?
+                    .pane
+                    .clone(),
                 _ => None,
             })
         };
@@ -782,7 +802,10 @@ impl Gerdr {
             let ran = !name.is_empty()
                 && matches!(
                     dot,
-                    chrome::Dot::Working | chrome::Dot::Blocked | chrome::Dot::Idle | chrome::Dot::Done
+                    chrome::Dot::Working
+                        | chrome::Dot::Blocked
+                        | chrome::Dot::Idle
+                        | chrome::Dot::Done
                 );
             if ran && !next_fixes {
                 continue;
@@ -836,7 +859,9 @@ impl Gerdr {
         let send_back = (review_waiting(feature))
             .filter(|_| page.shown == own_page(feature) && elsewhere.is_none())
             .map(|file| {
-                let comments = self.doc_comments(project, slug, file).map(|r| comments_json(&r));
+                let comments = self
+                    .doc_comments(project, slug, file)
+                    .map(|r| comments_json(&r));
                 json!({
                     "name": file.name(),
                     "comments": comments.as_ref().ok(),
@@ -935,7 +960,8 @@ impl Gerdr {
                 };
                 // Off with a reason, it presses all the same: gerdr says why.
                 let pressable = |b: &&PhoneButton| !b.off || b.why.is_some();
-                let Some(button) = page.all().filter(pressable).find(|b| b.id() == id).cloned() else {
+                let Some(button) = page.all().filter(pressable).find(|b| b.id() == id).cloned()
+                else {
                     return json!({ "error": "That button isn't on its page any more" });
                 };
                 let shown = page.shown;
@@ -1091,11 +1117,17 @@ mod tests {
         assert!(!phone_may(&PanelOutcome::TakeOver));
         assert!(!phone_may(&PanelOutcome::Remove));
         assert!(!phone_may(&PanelOutcome::EditCommands(Default::default())));
-        assert!(phone_may(&PanelOutcome::PickAgent(Stage::Plan, "Codex".into())));
+        assert!(phone_may(&PanelOutcome::PickAgent(
+            Stage::Plan,
+            "Codex".into()
+        )));
         assert!(phone_may(&PanelOutcome::FreshMilestones(true)));
         let accept = PanelOutcome::OnSuggestion("s1-1".into(), ItemAct::Decide(Decision::Fix));
         assert!(phone_may(&accept));
-        assert!(!phone_may(&PanelOutcome::OnSuggestion("s1-1".into(), ItemAct::OpenCode)));
+        assert!(!phone_may(&PanelOutcome::OnSuggestion(
+            "s1-1".into(),
+            ItemAct::OpenCode
+        )));
         // Criteria are marked from the phone, at once; what went wrong is asked.
         let pass = PanelOutcome::Manual(Manual::Toggle(0));
         assert!(phone_may(&pass) && phone_quick(&pass));
@@ -1104,7 +1136,10 @@ mod tests {
         assert!(!phone_may(&PanelOutcome::Manual(Manual::EditComment(0))));
         assert!(phone_asks(&PanelOutcome::Manual(Manual::Write(0))).is_some());
         // Picks press at once; Start over is confirmed by gerdr alone.
-        assert!(phone_quick(&PanelOutcome::PickAgent(Stage::Plan, "Codex".into())));
+        assert!(phone_quick(&PanelOutcome::PickAgent(
+            Stage::Plan,
+            "Codex".into()
+        )));
         assert!(phone_quick(&PanelOutcome::StartOver(Stage::Build)));
         assert!(!phone_quick(&PanelOutcome::RunChecks));
     }
@@ -1147,6 +1182,9 @@ mod tests {
         };
         assert!(phone_touched(&multi, &[]).is_err());
         assert!(phone_touched(&multi, &["nope".into()]).is_err());
-        assert_eq!(phone_touched(&multi, &["web".into()]), Ok(vec!["web".into()]));
+        assert_eq!(
+            phone_touched(&multi, &["web".into()]),
+            Ok(vec!["web".into()])
+        );
     }
 }

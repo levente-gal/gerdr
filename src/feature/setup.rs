@@ -1065,7 +1065,12 @@ fn run_into(
 /// log at `log`. What failed, a line each: one failing stops only its
 /// repository's, and nothing stops the removal, as what is left behind is
 /// only outside the worktree.
-pub fn cleanup(feature: &Feature, commands: &PerRepo, venv: &VenvSetting, log: &Path) -> Vec<String> {
+pub fn cleanup(
+    feature: &Feature,
+    commands: &PerRepo,
+    venv: &VenvSetting,
+    log: &Path,
+) -> Vec<String> {
     let mut repos: Vec<&Repo> = (feature.repos.iter())
         .filter(|r| r.worktree.is_dir() && !lines_of(commands, r).is_empty())
         .collect();
@@ -1073,8 +1078,12 @@ pub fn cleanup(feature: &Feature, commands: &PerRepo, venv: &VenvSetting, log: &
         return Vec::new();
     }
     repos.sort_by_key(|r| r.key());
-    let opened = (log.parent().map_or(Ok(()), std::fs::create_dir_all))
-        .and_then(|()| std::fs::OpenOptions::new().create(true).append(true).open(log));
+    let opened = (log.parent().map_or(Ok(()), std::fs::create_dir_all)).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+    });
     let mut file = match opened {
         Ok(file) => file,
         Err(err) => return vec![format!("couldn't open {}: {err}", shown(log))],
@@ -1472,7 +1481,11 @@ mod tests {
         assert!(!f.repos[0].worktree.join("never").exists());
         let slug = std::fs::read_to_string(f.repos[2].worktree.join("slug")).unwrap();
         assert_eq!(slug.trim(), f.slug);
-        assert!(std::fs::read_to_string(&log).unwrap().starts_with("== Cleanup "));
+        assert!(
+            std::fs::read_to_string(&log)
+                .unwrap()
+                .starts_with("== Cleanup ")
+        );
         // With none to run, nothing is written.
         let quiet = t.0.join("data/quiet.log");
         assert!(cleanup(&f, &none(), &VenvSetting::Auto, &quiet).is_empty());

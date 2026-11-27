@@ -366,7 +366,6 @@ fn check_outcome(o: &crate::feature::verify::Outcome) -> Outcome {
     }
 }
 
-
 impl TestRun {
     /// Working while it runs; done once finished, until seen, then idle.
     pub fn status(&self) -> AgentStatus {

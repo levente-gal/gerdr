@@ -149,7 +149,15 @@ impl Gerdr {
                 if !question && !self.ask_in_sight(&pane) {
                     let reply = AskReply::Pass;
                     let answers = None;
-                    return super::answer(&mut stream, &Answer { ask, reply, answers, message: None });
+                    return super::answer(
+                        &mut stream,
+                        &Answer {
+                            ask,
+                            reply,
+                            answers,
+                            message: None,
+                        },
+                    );
                 }
                 let claimed: Vec<String> = (self.chats.live.asks.values())
                     .filter_map(|held| held.call.clone())
@@ -422,10 +430,7 @@ impl Gerdr {
     /// Put back the files `install_live_hooks` changed, and don't add the
     /// hooks again: `[ui] agent_hooks = false` in the settings file (S3).
     pub(crate) fn undo_live_hooks(&mut self, changed: &[Changed]) {
-        let failed: Vec<String> = changed
-            .iter()
-            .filter_map(|c| undo(c).err())
-            .collect();
+        let failed: Vec<String> = changed.iter().filter_map(|c| undo(c).err()).collect();
         self.settings.agent_hooks = false;
         if let Err(err) = crate::config::write_bool("ui", "agent_hooks", false) {
             tracing::warn!("agent live: [ui] agent_hooks: {err}");

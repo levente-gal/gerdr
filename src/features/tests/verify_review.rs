@@ -402,13 +402,13 @@ fn code_reviews_rounds_show_as_cards_with_the_comments_they_took() {
         probe: Some(&probe),
         ..PanelState::default()
     };
-    let cards: Vec<chrome::RoundCard> =
-        (round_cards(&f, Stage::CodeReview, &state, &[], 4_000).into_iter())
-            .filter_map(|s| match s {
-                PageSection::Round(card) => Some(card),
-                _ => None,
-            })
-            .collect();
+    let cards: Vec<chrome::RoundCard> = (round_cards(&f, Stage::CodeReview, &state, &[], 4_000)
+        .into_iter())
+    .filter_map(|s| match s {
+        PageSection::Round(card) => Some(card),
+        _ => None,
+    })
+    .collect();
     let labels: Vec<&str> = cards.iter().map(|c| c.label.as_str()).collect();
     assert_eq!(labels, ["Fix round 2", "Fix round 1"]);
     let asked = |card: &chrome::RoundCard| -> Vec<(String, String, Option<String>)> {
@@ -928,8 +928,7 @@ fn work_that_changes_the_code_waits_for_the_checks() {
     assert!(!offered(&running, PanelOutcome::MakeFixes));
     assert!(offered(&running, PanelOutcome::ReviewFixPlan));
     running.fix_round = None;
-    running.last_fix_round =
-        in_round(verified(true), Stage::Verify, FixPhase::Fixing).fix_round;
+    running.last_fix_round = in_round(verified(true), Stage::Verify, FixPhase::Fixing).fix_round;
     assert!(!offered(&running, PanelOutcome::MakeFixes));
     assert!(offered(&running, PanelOutcome::ReviewFixPlan));
     // On Build's page too: a setup would change the worktrees under them.

@@ -385,14 +385,23 @@ pub fn in_way(said: &str) -> Option<String> {
             Some(lock) => format!(
                 "A git lock file is in the way in {folder}: if no git command runs there, delete {lock} and try again"
             ),
-            None => format!("Another git command holds a lock in {folder}: try again once it is done"),
+            None => {
+                format!("Another git command holds a lock in {folder}: try again once it is done")
+            }
         });
     }
-    let changes = ["would be overwritten", "Your local changes", "untracked working tree files"];
+    let changes = [
+        "would be overwritten",
+        "Your local changes",
+        "untracked working tree files",
+    ];
     if git.trim().is_empty() || changes.iter().any(|c| git.contains(c)) {
         return Some(format!("changes in {folder} are in the way of what came"));
     }
-    Some(format!("{folder} couldn't be put at what came: {}", git_ops::why(&git, "")))
+    Some(format!(
+        "{folder} couldn't be put at what came: {}",
+        git_ops::why(&git, "")
+    ))
 }
 
 /// The script setting up the worktrees there once the code is pushed: each on
@@ -1119,10 +1128,7 @@ impl Reach {
                     main: place.local_main.to_string_lossy().into_owned(),
                     ..place.clone()
                 };
-                local_script(
-                    &ensure_script(&[(here, root.trim().to_owned())]),
-                    cancel,
-                )?;
+                local_script(&ensure_script(&[(here, root.trim().to_owned())]), cancel)?;
             }
             let head_at = if head.is_empty() { base } else { head };
             let head_ref = view_head_ref(&feature.slug, &place.key);
@@ -1448,15 +1454,21 @@ mod tests {
             in_way(&format!("INWAY /w\n{lines}")).unwrap()
         };
         assert_eq!(
-            said("fatal: Unable to create '/r/.git/worktrees/w/index.lock': File exists.\n\nAnother git process seems to be running in this repository"),
+            said(
+                "fatal: Unable to create '/r/.git/worktrees/w/index.lock': File exists.\n\nAnother git process seems to be running in this repository"
+            ),
             "A git lock file is in the way in /w: if no git command runs there, delete /r/.git/worktrees/w/index.lock and try again"
         );
         assert_eq!(
-            said("error: Your local changes to the following files would be overwritten by checkout:\n\ta.py"),
+            said(
+                "error: Your local changes to the following files would be overwritten by checkout:\n\ta.py"
+            ),
             "changes in /w are in the way of what came"
         );
         assert_eq!(
-            said("error: The following untracked working tree files would be overwritten by checkout:\n\tb.py"),
+            said(
+                "error: The following untracked working tree files would be overwritten by checkout:\n\tb.py"
+            ),
             "changes in /w are in the way of what came"
         );
         assert_eq!(said(""), "changes in /w are in the way of what came");
@@ -1732,7 +1744,10 @@ mod tests {
         std::fs::write(tmp.0.join("other/notes"), "n").unwrap();
         place.main = tmp.path("other");
         let out = sh(&ensure_script(&[(place, root)]));
-        assert!(String::from_utf8_lossy(&out.stdout).contains("OCCUPIED"), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("OCCUPIED"),
+            "{out:?}"
+        );
     }
 
     #[test]
@@ -1747,7 +1762,10 @@ mod tests {
         let cancel = AtomicBool::new(false);
         local_script(&script, &cancel).unwrap();
         let wt = worktree.to_string_lossy().into_owned();
-        assert_eq!(git(&wt, "rev-parse HEAD"), git(&main, &format!("rev-parse {name}")));
+        assert_eq!(
+            git(&wt, "rev-parse HEAD"),
+            git(&main, &format!("rev-parse {name}"))
+        );
         assert_eq!(git(&main, "rev-parse --abbrev-ref HEAD"), "main");
         assert_eq!(git(&wt, "rev-parse --abbrev-ref HEAD"), "HEAD");
         assert_eq!(git(&main, "status --porcelain"), "");
@@ -1801,7 +1819,10 @@ mod tests {
         };
         // Here: where its branch met main.
         assert_eq!(super::super::layout::base_ref(&repo), root);
-        git(&main, &format!("update-ref {} HEAD", view_base_ref("feature/x")));
+        git(
+            &main,
+            &format!("update-ref {} HEAD", view_base_ref("feature/x")),
+        );
         assert_eq!(
             super::super::layout::base_ref(&repo),
             "refs/gerdr/view-base/feature/x"

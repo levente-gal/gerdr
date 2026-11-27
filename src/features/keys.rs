@@ -191,7 +191,9 @@ pub(super) const SUBMIT_KEYS: &[Binding<Feature, PanelOutcome>] = &[
         chord: "Ctrl+Enter",
         does: |f| {
             submits(f).filter(|p| !p.mine)?;
-            Some(PanelOutcome::SubmitReview(feature::pr_submit::Event::Approve))
+            Some(PanelOutcome::SubmitReview(
+                feature::pr_submit::Event::Approve,
+            ))
         },
         footer: true,
         f1: "reviewing someone else's pull request, on Ship's page: approve it, after asking (Enter comments, or approves with nothing to post)",
@@ -200,7 +202,9 @@ pub(super) const SUBMIT_KEYS: &[Binding<Feature, PanelOutcome>] = &[
         chord: "Ctrl+Shift+Enter",
         does: |f| {
             submits(f).filter(|p| !p.mine)?;
-            Some(PanelOutcome::SubmitReview(feature::pr_submit::Event::RequestChanges))
+            Some(PanelOutcome::SubmitReview(
+                feature::pr_submit::Event::RequestChanges,
+            ))
         },
         footer: true,
         f1: "reviewing someone else's pull request, on Ship's page: request changes, after asking",
@@ -262,7 +266,10 @@ mod tests {
         let f = Feature::default();
         key_table::check(SUBMIT_KEYS, &[f]);
         let f = Feature::default();
-        key_table::check(SHIP_KEYS, &[ShipCtx::new(&f, RowCtx::default(), None, None)]);
+        key_table::check(
+            SHIP_KEYS,
+            &[ShipCtx::new(&f, RowCtx::default(), None, None)],
+        );
     }
 }
 

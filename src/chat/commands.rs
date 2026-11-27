@@ -156,7 +156,10 @@ impl Slash {
     /// picked one among them.
     pub fn in_sight(&self) -> (usize, &[usize]) {
         let first = (self.picked + 1).saturating_sub(ROWS);
-        (first, &self.shown[first..(first + ROWS).min(self.shown.len())])
+        (
+            first,
+            &self.shown[first..(first + ROWS).min(self.shown.len())],
+        )
     }
 }
 
@@ -201,7 +204,10 @@ pub(crate) mod tests {
     fn a_command_file_wins_over_a_builtin_of_its_name() {
         let tmp = scratch("builtin");
         let homes = Homes::under(&tmp);
-        write(&tmp.join("w/.claude/commands/review.md"), "---\ndescription: Mine\n---\n");
+        write(
+            &tmp.join("w/.claude/commands/review.md"),
+            "---\ndescription: Mine\n---\n",
+        );
         let list = list(AgentKind::Claude, &tmp.join("w"), &homes, &tmp);
         assert_eq!(find(&list, "review").about, "Mine");
     }
@@ -212,7 +218,10 @@ pub(crate) mod tests {
         let (home, cwd) = (tmp.join("home"), tmp.join("work"));
         let homes = Homes::under(&home);
         let config = home.join(".config");
-        write(&config.join("opencode/commands/tidy.md"), "---\ndescription: Tidy up\n---\n");
+        write(
+            &config.join("opencode/commands/tidy.md"),
+            "---\ndescription: Tidy up\n---\n",
+        );
         write(&cwd.join(".opencode/command/ci/fix.md"), "");
         write(
             &config.join("opencode/opencode.json"),
@@ -225,13 +234,22 @@ pub(crate) mod tests {
         // Only files right in the folder.
         assert!(!names(&open).iter().any(|n| n.contains("fix")));
 
-        write(&cwd.join(".cursor/commands/lint.md"), "# Lint the code\n\nmore");
-        write(&home.join(".cursor/skills-cursor/create-rule/SKILL.md"), "---\ndescription: Rule\n---\n");
+        write(
+            &cwd.join(".cursor/commands/lint.md"),
+            "# Lint the code\n\nmore",
+        );
+        write(
+            &home.join(".cursor/skills-cursor/create-rule/SKILL.md"),
+            "---\ndescription: Rule\n---\n",
+        );
         let cursor = list(AgentKind::Cursor, &cwd, &homes, &config);
         assert_eq!(find(&cursor, "lint").about, "Lint the code");
         assert_eq!(find(&cursor, "create-rule").about, "Rule");
 
-        write(&home.join(".codex/prompts/draft.md"), "---\ndescription: Draft\n---\n");
+        write(
+            &home.join(".codex/prompts/draft.md"),
+            "---\ndescription: Draft\n---\n",
+        );
         let codex = list(AgentKind::Codex, &cwd, &homes, &config);
         assert_eq!(find(&codex, "prompts:draft").about, "Draft");
 
@@ -254,11 +272,20 @@ pub(crate) mod tests {
         let agent = home.join(".pi/agent");
         let review = "---\nargument-hint: \"[focus]\"\n---\n\nReview it\n";
         write(&agent.join("prompts/review.md"), review);
-        write(&cwd.join(".pi/prompts/ship.md"), "---\ndescription: Ship\n---\n");
-        write(&home.join(".agents/skills/pdf/SKILL.md"), "---\nname: pdf-tools\n---\n");
+        write(
+            &cwd.join(".pi/prompts/ship.md"),
+            "---\ndescription: Ship\n---\n",
+        );
+        write(
+            &home.join(".agents/skills/pdf/SKILL.md"),
+            "---\nname: pdf-tools\n---\n",
+        );
         let pi = list(AgentKind::Pi, &cwd, &homes, &tmp);
         let review = find(&pi, "review");
-        assert_eq!((review.about.as_str(), review.hint.as_str()), ("Review it", "[focus]"));
+        assert_eq!(
+            (review.about.as_str(), review.hint.as_str()),
+            ("Review it", "[focus]")
+        );
         assert_eq!(find(&pi, "ship").about, "Ship");
         assert!(names(&pi).contains(&"skill:pdf-tools"));
         assert!(names(&pi).contains(&"tree"));
@@ -266,9 +293,18 @@ pub(crate) mod tests {
         let cli = home.join(".gemini/antigravity-cli");
         let guide = "---\nname: antigravity-guide\ndescription: Ask\n---\n";
         write(&cli.join("builtin/skills/guide/SKILL.md"), guide);
-        write(&cli.join("builtin/skills/pane/SKILL.md"), "---\ndisable-slash-command: true\n---\n");
-        write(&home.join(".gemini/config/plugins/dart/skills/test/SKILL.md"), "");
-        write(&cwd.join(".agents/skills/deploy/SKILL.md"), "---\ndescription: Deploy\n---\n");
+        write(
+            &cli.join("builtin/skills/pane/SKILL.md"),
+            "---\ndisable-slash-command: true\n---\n",
+        );
+        write(
+            &home.join(".gemini/config/plugins/dart/skills/test/SKILL.md"),
+            "",
+        );
+        write(
+            &cwd.join(".agents/skills/deploy/SKILL.md"),
+            "---\ndescription: Deploy\n---\n",
+        );
         let agy = list(AgentKind::Antigravity, &cwd, &homes, &tmp);
         assert_eq!(find(&agy, "antigravity-guide").about, "Ask");
         assert_eq!(find(&agy, "deploy").about, "Deploy");

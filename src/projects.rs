@@ -3176,7 +3176,10 @@ mod tests {
         b.save();
         let (reread, _) = Store::load_from(&root, || None);
         // A's removal stays removed; both adds and B's width are kept.
-        assert_eq!(reread.machine_last.keys().collect::<Vec<_>>(), ["ZenBook", "a", "b"]);
+        assert_eq!(
+            reread.machine_last.keys().collect::<Vec<_>>(),
+            ["ZenBook", "a", "b"]
+        );
         assert_eq!(reread.sidebar_width, Some(300));
         assert_eq!(b.machine_last, reread.machine_last);
         // Lists both changed merge item by item, theirs first.
@@ -3213,11 +3216,17 @@ mod tests {
         mode(0o600);
         assert!(path.is_file(), "not set aside");
         let (kept, _) = Store::load_from(&root, || None);
-        assert_eq!(kept.machine_last.keys().collect::<Vec<_>>(), ["ZenBook", "old"]);
+        assert_eq!(
+            kept.machine_last.keys().collect::<Vec<_>>(),
+            ["ZenBook", "old"]
+        );
         assert_eq!(kept.sidebar_width, Some(280), "nothing written over it");
         b.save();
         let (merged, _) = Store::load_from(&root, || None);
-        assert_eq!(merged.machine_last.keys().collect::<Vec<_>>(), ["ZenBook", "old"]);
+        assert_eq!(
+            merged.machine_last.keys().collect::<Vec<_>>(),
+            ["ZenBook", "old"]
+        );
         assert_eq!(merged.sidebar_width, Some(300));
         let _ = std::fs::remove_dir_all(&root);
     }

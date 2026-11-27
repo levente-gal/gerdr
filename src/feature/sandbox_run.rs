@@ -242,7 +242,9 @@ impl SandboxRun {
         if self.on_another_machine() {
             // Their addresses aren't brought here: none counts as wide.
             return match loopback {
-                true => (self.elsewhere.iter()).flat_map(|there| there.ports.clone()).collect(),
+                true => (self.elsewhere.iter())
+                    .flat_map(|there| there.ports.clone())
+                    .collect(),
                 false => Vec::new(),
             };
         }
@@ -432,7 +434,10 @@ fn end_inside(holder: &Proc) {
 
 /// The ports listening in the text of a `/proc/<pid>/net/tcp`.
 fn listening_in(table: &str) -> Vec<u16> {
-    listening_rows(table).into_iter().map(|(port, _)| port).collect()
+    listening_rows(table)
+        .into_iter()
+        .map(|(port, _)| port)
+        .collect()
 }
 
 /// `listening_in`, each port with whether its row is bound to loopback.
@@ -533,7 +538,9 @@ impl Host {
         stop: &AtomicBool,
     ) -> Result<(), String> {
         let script = format!("{PATH_THERE}{script}");
-        (reach.script_for(&script, limit, what, stop)).map(drop).map_err(|t| t.text().to_owned())
+        (reach.script_for(&script, limit, what, stop))
+            .map(drop)
+            .map_err(|t| t.text().to_owned())
     }
 
     fn said(reach: &Reach, script: &str, stop: &AtomicBool) -> Result<String, String> {
@@ -694,10 +701,12 @@ impl Host {
             return start_holder();
         };
         let said = Self::said(reach, HOLDER_SCRIPT, &NEVER);
-        said.ok().and_then(|said| started_proc(&said)).ok_or_else(|| {
-            // Most likely this system doesn't let a user make namespaces.
-            "Couldn't start its network: unshare made no namespace".to_owned()
-        })
+        said.ok()
+            .and_then(|said| started_proc(&said))
+            .ok_or_else(|| {
+                // Most likely this system doesn't let a user make namespaces.
+                "Couldn't start its network: unshare made no namespace".to_owned()
+            })
     }
 
     /// Start pasta, the proxy leading `forwards`' ports inside to the host.
@@ -707,7 +716,8 @@ impl Host {
         };
         let log = dir.join("pasta.log");
         let script = pasta_script(&pasta_args(holder.pid, forwards), &log.to_string_lossy());
-        let said = Self::said(reach, &script, &NEVER).map_err(|why| format!("Couldn't start pasta: {why}"))?;
+        let said = Self::said(reach, &script, &NEVER)
+            .map_err(|why| format!("Couldn't start pasta: {why}"))?;
         started_proc(&said).ok_or_else(|| {
             let text = self.read(&log).unwrap_or_default();
             format!("pasta stopped: {}", last_lines(&text, "no reason given"))
@@ -741,7 +751,9 @@ impl Host {
             };
         };
         let script = format!("rm -rf -- {}\n", shell_quote(&dir.to_string_lossy()));
-        Self::said(reach, &script, &NEVER).map(drop).map_err(|why| format!("{shown}: {why}"))
+        Self::said(reach, &script, &NEVER)
+            .map(drop)
+            .map_err(|why| format!("{shown}: {why}"))
     }
 }
 
@@ -1275,9 +1287,7 @@ fn out_of_reach_of(job: &Job, containers: &[sandbox::Container]) -> Vec<String> 
         .repos
         .iter()
         .filter_map(|repo| job.host.read(&repo.worktree.join(".env")))
-        .flat_map(|text| {
-            sandbox::out_of_reach(&sandbox_pairs(&text, job.env), containers, &roots)
-        })
+        .flat_map(|text| sandbox::out_of_reach(&sandbox_pairs(&text, job.env), containers, &roots))
         .collect();
     found.sort();
     found.dedup();
@@ -1395,7 +1405,11 @@ fn compose_config(stack: &Stack, job: &Job) -> Result<Value, String> {
     }
     if let Some(env) = &stack.env_file {
         owned.push("--env-file".to_owned());
-        owned.push(in_feature(job.host, env, job.repos).to_string_lossy().into_owned());
+        owned.push(
+            in_feature(job.host, env, job.repos)
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
     for file in &stack.config_files {
         let file = config_file(job.host, file, &stack.working_dir);
@@ -2151,10 +2165,12 @@ fn run_inside_there(
     let quoted = shell_quote(&log.to_string_lossy());
     // Where this run's output starts: the log keeps the earlier runs'.
     let mark = format!("wc -c < {quoted} 2>/dev/null || echo 0\n");
-    let from: usize = (job.host.output("sh", &["-c", &mark], THERE_TIMEOUT, job.stop))
-        .ok()
-        .and_then(|said| said.trim().parse().ok())
-        .unwrap_or(0);
+    let from: usize = (job
+        .host
+        .output("sh", &["-c", &mark], THERE_TIMEOUT, job.stop))
+    .ok()
+    .and_then(|said| said.trim().parse().ok())
+    .unwrap_or(0);
     let command = inside_line(holder, job, line);
     let ran = Host::run_logged(reach, &command, dir, log, job.stop);
     ran.map_err(|why| {
@@ -2653,10 +2669,7 @@ mod tests {
             ..Elsewhere::default()
         };
         assert!(!there(off.clone()).may_run_there());
-        let on = Elsewhere {
-            alive: true,
-            ..off
-        };
+        let on = Elsewhere { alive: true, ..off };
         assert!(there(on.clone()).may_run_there());
         let stopped = SandboxRun {
             stopped: true,
@@ -2752,7 +2765,8 @@ mod tests {
 ";
         let wide = [(9229, true), (8080, true), (4200, false), (80, false)];
         assert_eq!(listening_rows(table), wide);
-        let six = "  sl  local_address                         remote_address                        st
+        let six =
+            "  sl  local_address                         remote_address                        st
    0: 00000000000000000000000001000000:240D 00000000000000000000000000000000:0000 0A
    1: 0000000000000000FFFF00000100007F:1F90 00000000000000000000000000000000:0000 0A
    2: 00000000000000000000000000000000:1068 00000000000000000000000000000000:0000 0A
@@ -3248,7 +3262,10 @@ To fix them run 'python manage.py makemigrations --merge'\n";
         assert!(out.status.success(), "{out:?}");
         assert!(ended(&mut pasta), "the proxy stays");
         assert!(ended(&mut holder), "the holder stays");
-        assert!(bystander.try_wait().unwrap().is_none(), "ended another's process");
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "ended another's process"
+        );
         bystander.kill().unwrap();
         bystander.wait().unwrap();
     }
@@ -3282,10 +3299,17 @@ To fix them run 'python manage.py makemigrations --merge'\n";
         let began = Instant::now();
         let out = sh(&network_end_script(&run));
         assert!(out.status.success(), "{out:?}");
-        assert!(began.elapsed() < Duration::from_secs(10), "{:?}", began.elapsed());
+        assert!(
+            began.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            began.elapsed()
+        );
         assert!(ended(&mut plain), "what's inside stays");
         assert!(ended(&mut deaf), "what ignores the first signal stays");
-        assert!(bystander.try_wait().unwrap().is_none(), "ended another's process");
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "ended another's process"
+        );
         bystander.kill().unwrap();
         bystander.wait().unwrap();
     }
@@ -3303,7 +3327,10 @@ To fix them run 'python manage.py makemigrations --merge'\n";
         let out = sh(&network_end_script(&run));
         assert!(out.status.success(), "{out:?}");
         std::thread::sleep(Duration::from_millis(100));
-        assert!(other.try_wait().unwrap().is_none(), "ended another's process");
+        assert!(
+            other.try_wait().unwrap().is_none(),
+            "ended another's process"
+        );
         other.kill().unwrap();
         other.wait().unwrap();
     }
@@ -3332,7 +3359,10 @@ To fix them run 'python manage.py makemigrations --merge'\n";
         let proc = started_proc(&said).expect(&said);
         assert!(proc.alive());
         let own = fs::read_link("/proc/self/ns/net").unwrap();
-        assert_ne!(fs::read_link(format!("/proc/{}/ns/net", proc.pid)).unwrap(), own);
+        assert_ne!(
+            fs::read_link(format!("/proc/{}/ns/net", proc.pid)).unwrap(),
+            own
+        );
         // It outlives the shell that started it, in a session of its own.
         let run = SandboxRun {
             holder: Some(proc.clone()),

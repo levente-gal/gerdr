@@ -183,7 +183,11 @@ impl Gerdr {
     /// The feature whose workspace `ws` is, if any.
     pub(crate) fn feature_of_workspace(&self, ws: &Workspace) -> Option<&Feature> {
         let project = self.project.as_ref()?;
-        let own = self.features.all.get(project).map(|all| feature_on(all, &ws.dir));
+        let own = self
+            .features
+            .all
+            .get(project)
+            .map(|all| feature_on(all, &ws.dir));
         own.flatten()
             .or_else(|| feature_on(self.viewed_of(project), &ws.dir))
     }

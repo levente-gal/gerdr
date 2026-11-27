@@ -624,7 +624,11 @@ fn hook_refused(command: &str, stderr: &str, stdout: &str) -> Option<&'static st
 fn guarded(text: &str) -> Option<String> {
     text.lines().find_map(|l| {
         let rest = l.trim().strip_prefix("gerdr: ")?;
-        Some(rest.split_once(" is a gerdr feature's branch")?.0.to_owned())
+        Some(
+            rest.split_once(" is a gerdr feature's branch")?
+                .0
+                .to_owned(),
+        )
     })
 }
 
@@ -660,7 +664,9 @@ pub(crate) fn why(stderr: &str, stdout: &str) -> String {
         .unwrap_or("");
     let said = || {
         lines().find(|l| {
-            !l.starts_with("To ") && !l.starts_with("error: failed to push") && !l.starts_with("hint:")
+            !l.starts_with("To ")
+                && !l.starts_with("error: failed to push")
+                && !l.starts_with("hint:")
         })
     };
     let marked = match marked.starts_with("error: failed to push some refs") {
@@ -1544,7 +1550,10 @@ pub fn blob_diff(dir: &Path, from: &str, to: &str, path: &str) -> Option<FileDif
     let out = exec(&top(dir), &args, Reach::Read);
     // The review then shows the file's whole diff: nothing is lost.
     if out.code != Some(0) {
-        tracing::warn!("diff of {path} since viewed: {}", why(&out.stderr, &out.stdout));
+        tracing::warn!(
+            "diff of {path} since viewed: {}",
+            why(&out.stderr, &out.stdout)
+        );
         return None;
     }
     let mut file = diff::parse(&cap(out.stdout, REPO_DIFF_LINES))
@@ -3047,11 +3056,7 @@ mod tests {
         commit(dir, "f", "three");
         let failed = push(dir, None, false).unwrap_err();
         assert_eq!(failed.failure, Failure::Rejected);
-        assert!(
-            failed.why.starts_with("! [rejected]"),
-            "{}",
-            failed.why
-        );
+        assert!(failed.why.starts_with("! [rejected]"), "{}", failed.why);
         git(dir, &["fetch", "-q"]);
         commit(dir, "f", "four");
         assert_eq!(failure(push(dir, None, false)), Failure::Rejected);

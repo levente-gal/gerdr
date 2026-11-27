@@ -3,11 +3,7 @@
 //! line, so gerdr types that line. The others open a menu of their own on
 //! `/model`, so their chats offer no model.
 
-use crate::{
-    ai_work::AgentKind,
-    integrations::of,
-    stage_models::Offer,
-};
+use crate::{ai_work::AgentKind, integrations::of, stage_models::Offer};
 
 /// The command `kind`'s CLI runs as, as the stage picker names it (for
 /// `integrations::by_command` and the read of the models it lists).

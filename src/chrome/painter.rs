@@ -873,7 +873,14 @@ impl Painter {
                 let (x, y, w, h) = rect_px(rect, scale);
                 let r = ROW_HIGHLIGHT_RADIUS * s;
                 c.rounded(x, y, w, h, r, p.accent);
-                c.rounded(x + b, y + b, w - 2.0 * b, h - 2.0 * b, (r - b).max(0.0), p.selected);
+                c.rounded(
+                    x + b,
+                    y + b,
+                    w - 2.0 * b,
+                    h - 2.0 * b,
+                    (r - b).max(0.0),
+                    p.selected,
+                );
                 continue;
             }
             let fill = if hover == Some(i) && !off.contains(&i) {

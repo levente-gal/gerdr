@@ -275,7 +275,9 @@ pub const ZOOM_STEP: u16 = 10;
 
 /// A zoom as written (`1.25`) in percent, kept within what can be shown.
 fn zoom_percent(zoom: f64) -> u16 {
-    (zoom * 100.0).round().clamp(ZOOM_MIN.into(), ZOOM_MAX.into()) as u16
+    (zoom * 100.0)
+        .round()
+        .clamp(ZOOM_MIN.into(), ZOOM_MAX.into()) as u16
 }
 
 /// `with_bool` for any value; no value takes the key out, what else the
@@ -1500,7 +1502,10 @@ impl Gerdr {
         }
         // Read again whole, as `toggle_terminal_reload` does.
         let _ = self.apply_settings();
-        let text = format!("Drawn at {}% \u{b7} [ui] zoom in Settings", self.settings.zoom);
+        let text = format!(
+            "Drawn at {}% \u{b7} [ui] zoom in Settings",
+            self.settings.zoom
+        );
         self.show_success(text);
     }
 

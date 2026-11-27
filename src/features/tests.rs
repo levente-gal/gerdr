@@ -142,10 +142,7 @@ fn type_into(d: &mut NewFeatureDialog, text: &str) {
     }
 }
 
-fn dkey(
-    d: &mut NewFeatureDialog,
-    (mods, sym): (ModifiersState, Keysym),
-) -> Option<DialogOutcome> {
+fn dkey(d: &mut NewFeatureDialog, (mods, sym): (ModifiersState, Keysym)) -> Option<DialogOutcome> {
     d.key(&mods, sym, sym, 8)
 }
 

@@ -503,8 +503,7 @@ fn the_last_review_stays_once_its_fixes_change_the_code() {
     assert_eq!(labels_of(&view, cards[0]), ["Show in diff"]);
     assert_eq!(labels_of(&view, cards[1]), ["Show in diff"]);
     let said = summary_line(&view.page.sections).is_some_and(|(label, lines)| {
-        label.starts_with("Findings")
-            && lines.iter().any(|l| l.text.contains("code has changed"))
+        label.starts_with("Findings") && lines.iter().any(|l| l.text.contains("code has changed"))
     });
     assert!(said, "{:?}", view.page.sections);
 }

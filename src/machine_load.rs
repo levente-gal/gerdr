@@ -12,7 +12,11 @@
 //! for a setup asks where to go once that's over, and by then the setup itself has
 //! made that machine look busy: it would go on to the next, and set up there too.
 
-use crate::{Gerdr, feature::{Feature, Stage, now}, machine_work::Placed};
+use crate::{
+    Gerdr,
+    feature::{Feature, Stage, now},
+    machine_work::Placed,
+};
 
 /// What a stage's place says for whichever is least busy: in a feature's pick,
 /// and in the project file's `machines`.
@@ -75,7 +79,8 @@ impl Seat {
 fn choose(here: &Seat, machines: &[Seat]) -> Option<String> {
     let rank = |seat: &&Seat| seat.score().unwrap_or(f32::INFINITY);
     let least = |seats: &mut dyn Iterator<Item = &'_ Seat>| -> Option<String> {
-        let best = seats.min_by(|a, b| (rank(a).total_cmp(&rank(b))).then_with(|| a.id.cmp(&b.id)))?;
+        let best =
+            seats.min_by(|a, b| (rank(a).total_cmp(&rank(b))).then_with(|| a.id.cmp(&b.id)))?;
         Some(best.id.clone())
     };
     let mut roomy = (machines.iter()).filter(|seat| seat.set_up && rank(seat) < FULL);
@@ -110,7 +115,9 @@ impl Gerdr {
         let mut count = 0;
         for feature in self.features.all.values().flatten() {
             let runs = feature.runs.values();
-            count += runs.filter(|r| r.machine.as_deref() == id && r.started >= since).count();
+            count += runs
+                .filter(|r| r.machine.as_deref() == id && r.started >= since)
+                .count();
             if let Some(run) = feature.verify.as_ref()
                 && run.machine.as_deref() == id
                 && run.started >= since
@@ -173,7 +180,13 @@ mod tests {
     #[test]
     fn what_a_machine_says_of_its_load_is_read() {
         let load = parse_load("@load 1.50 8\n@holder x\n").unwrap();
-        assert_eq!(load, Load { average: 1.5, cores: 8 });
+        assert_eq!(
+            load,
+            Load {
+                average: 1.5,
+                cores: 8
+            }
+        );
         assert_eq!(parse_load("nothing\n"), None);
         assert_eq!(parse_load("@load x 8\n"), None);
     }
@@ -233,7 +246,10 @@ mod tests {
         let machines = [free.clone(), set_up.clone()];
         assert_eq!(choose(&here, &machines).as_deref(), Some("set"));
         // Full, it isn't worth waiting for.
-        set_up.load = Some(Load { average: 8.0, cores: 8 });
+        set_up.load = Some(Load {
+            average: 8.0,
+            cores: 8,
+        });
         let machines = [free, set_up];
         assert_eq!(choose(&here, &machines).as_deref(), Some("free"));
     }

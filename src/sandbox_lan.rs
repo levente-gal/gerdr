@@ -25,8 +25,8 @@ use crate::{
     Gerdr,
     feature::Status,
     feature_sandbox,
-    port_holder,
     machine_sandbox::{Missing, Relay, relay_script, start_relay_on},
+    port_holder,
 };
 
 /// What is said when this machine has no network to open a sandbox on.
@@ -400,7 +400,11 @@ mod tests {
         let newly = open.follow(&[port]);
         assert_eq!(newly.iter().map(|(p, _)| *p).collect::<Vec<_>>(), [port]);
         // This test holds it, so it is named.
-        assert!(newly[0].1.contains(&format!("(pid {}", std::process::id())), "{}", newly[0].1);
+        assert!(
+            newly[0].1.contains(&format!("(pid {}", std::process::id())),
+            "{}",
+            newly[0].1
+        );
         assert!(open.follow(&[port]).is_empty(), "said once");
         assert_eq!(open.seen().taken, [port]);
         // No longer listened on in the sandbox: no longer said.

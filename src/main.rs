@@ -25,18 +25,18 @@ mod agent_icons;
 mod agent_pause;
 mod agent_tell;
 mod agents;
-mod chat;
 mod ai_work;
 mod anim;
 mod app_icons;
 mod bench;
+mod chat;
 mod checkout;
 mod chrome;
 mod ci;
 mod ci_watch;
-mod clock;
 mod cli_agents;
 mod clipboard;
+mod clock;
 mod config;
 mod confirm;
 mod criteria_strip;
@@ -59,30 +59,20 @@ mod feature_research;
 mod feature_review;
 mod feature_sandbox;
 mod feature_workspace;
-mod ship_summary;
-mod ship_ci;
-mod ship_fix;
-mod ship_conflicts;
-mod ship_after;
-mod ship_undo;
-mod ship_update;
-mod shot_images;
-mod shot_viewer;
-mod sound;
 mod features;
 mod file_tree;
 mod find;
 mod finding_dialog;
 mod frecency;
 mod fuzzy;
-mod highlight;
 mod git;
 mod git_identity;
 mod git_ops;
 mod handlers;
 mod herdr;
-mod host_idle;
+mod highlight;
 mod hooks;
+mod host_idle;
 mod inbox;
 mod inbox_panel;
 mod inbox_sources;
@@ -92,8 +82,8 @@ mod input;
 mod integrations;
 mod issues;
 mod keep;
-mod keyring;
 mod key_table;
+mod keyring;
 mod keys;
 mod launch;
 mod layout;
@@ -105,20 +95,11 @@ mod machine_load;
 mod machine_reach;
 mod machine_repos;
 mod machine_sandbox;
-mod sandbox_lan;
 mod machine_views;
 mod machine_work;
 mod machines;
 mod machines_panel;
 mod manual_test;
-mod page_text;
-mod phone;
-mod phone_control;
-mod phone_devices;
-mod web_push;
-mod pr_review;
-mod pr_post;
-mod pr_watch;
 mod md_blocks;
 mod md_preview;
 mod menu;
@@ -126,12 +107,19 @@ mod nav;
 mod nav_history;
 mod notify;
 mod overlay;
+mod page_text;
 mod pane_control;
 mod pane_drag;
 mod pane_moves;
 mod paths;
+mod phone;
+mod phone_control;
+mod phone_devices;
 mod plan_doc;
 mod port_holder;
+mod pr_post;
+mod pr_review;
+mod pr_watch;
 mod prepare;
 mod problems;
 mod process;
@@ -151,6 +139,7 @@ mod repos;
 mod restart;
 mod review;
 mod review_cards;
+mod sandbox_lan;
 mod scroll;
 mod scrollback;
 mod scrollback_panel;
@@ -159,7 +148,17 @@ mod scrolling;
 mod service_errors;
 mod service_watch;
 mod services;
+mod ship_after;
+mod ship_ci;
+mod ship_conflicts;
+mod ship_fix;
+mod ship_summary;
+mod ship_undo;
+mod ship_update;
+mod shot_images;
+mod shot_viewer;
 mod sidebar;
+mod sound;
 mod stage_lock;
 mod stage_models;
 mod state;
@@ -179,6 +178,7 @@ mod toast;
 mod tooltip;
 mod web_control;
 mod web_pages;
+mod web_push;
 mod welcome;
 mod worktree_diff;
 mod worktrees;
@@ -197,7 +197,8 @@ use std::{
 
 use chrome::{
     AgentView, BarButton, Chrome, ChromeView, Density, Help, HelpHit, HelpPress, PlaceholderView,
-    SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, at_text, from_text, Theme, ThemeMode, WorkspaceView,
+    SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH, TabView, Theme, ThemeMode, WorkspaceView,
+    at_text, from_text,
 };
 use frecency::Frecency;
 use hooks::Hook;
@@ -5702,7 +5703,8 @@ impl Gerdr {
         if unzoomed {
             self.arrange();
         }
-        let surface = (window.filter(|_| !chat)).and_then(|w| Some(w.toplevel()?.wl_surface().clone()));
+        let surface =
+            (window.filter(|_| !chat)).and_then(|w| Some(w.toplevel()?.wl_surface().clone()));
         let keyboard = self
             .seat
             .get_keyboard()
@@ -7597,10 +7599,8 @@ fn new_gerdr(
         active_workspace: 0,
         chrome: Chrome::new(),
         inotify: inotify_limit::Watch::default(),
-        sidebar_width: at_text(store.sidebar_width.unwrap_or(SIDEBAR_WIDTH)).clamp(
-            at_text(SIDEBAR_MIN_WIDTH),
-            at_text(SIDEBAR_MAX_WIDTH),
-        ),
+        sidebar_width: at_text(store.sidebar_width.unwrap_or(SIDEBAR_WIDTH))
+            .clamp(at_text(SIDEBAR_MIN_WIDTH), at_text(SIDEBAR_MAX_WIDTH)),
         machines: machines::Machines::default(),
         features: features::Features::default(),
         code_reviews: Default::default(),
@@ -8086,7 +8086,10 @@ fn shut_down(mut state: Gerdr, event_loop: &mut EventLoop<'static, Gerdr>) {
 /// when it is one.
 fn zed_n_folder(command: &str) -> Option<&Path> {
     let word = command.strip_prefix("zed -n ")?;
-    let folder = word.strip_prefix('\'').and_then(|w| w.strip_suffix('\'')).unwrap_or(word);
+    let folder = word
+        .strip_prefix('\'')
+        .and_then(|w| w.strip_suffix('\''))
+        .unwrap_or(word);
     let dir = Path::new(folder);
     (crate::desktop::shell_quote(folder) == word && dir.is_dir()).then_some(dir)
 }
@@ -8102,7 +8105,10 @@ mod tests {
         assert_eq!(zed_n_folder(&plain), Some(tmp.as_path()));
         let spaced = tmp.join("a b");
         std::fs::create_dir_all(&spaced).unwrap();
-        let quoted = format!("zed -n {}", crate::desktop::shell_quote(&spaced.to_string_lossy()));
+        let quoted = format!(
+            "zed -n {}",
+            crate::desktop::shell_quote(&spaced.to_string_lossy())
+        );
         assert_eq!(zed_n_folder(&quoted), Some(spaced.as_path()));
         let _ = std::fs::remove_dir(&spaced);
         // A file, two folders, flags or another program aren't.

@@ -215,15 +215,27 @@ mod tests {
         assert_eq!(shows(AgentKind::Claude, claude).as_deref(), Some("Auto"));
         let plan = "  Opus 5.5 · master\n  ⏸ plan mode on (shift+tab to cycle) · ← for agents";
         assert_eq!(shows(AgentKind::Claude, plan).as_deref(), Some("Plan"));
-        assert_eq!(shows(AgentKind::Claude, "  ⏸ manual mode on").as_deref(), Some("Manual"));
-        assert_eq!(shows(AgentKind::Claude, "  ⏵⏵ accept edits on").as_deref(), Some("Edits"));
+        assert_eq!(
+            shows(AgentKind::Claude, "  ⏸ manual mode on").as_deref(),
+            Some("Manual")
+        );
+        assert_eq!(
+            shows(AgentKind::Claude, "  ⏵⏵ accept edits on").as_deref(),
+            Some("Edits")
+        );
         // A screen without the line doesn't say (a dialog over it).
         assert_eq!(shows(AgentKind::Claude, "❯ 1. Yes\n  2. No"), None);
 
         let opencode = "  ┃\n  ┃  Ask anything… \"Fix a TODO\"\n  ┃\n  ┃  Plan · GPT-5.6 Sol OpenAI · high\n  ╹▀▀▀▀\n  /…/modeprobe:master  shift+tab agents  ctrl+p commands\n      2.3.0";
-        assert_eq!(shows(AgentKind::OpenCode, opencode).as_deref(), Some("Plan"));
+        assert_eq!(
+            shows(AgentKind::OpenCode, opencode).as_deref(),
+            Some("Plan")
+        );
         let own = "  ┃  Cavecrew-Builder · GPT-5.6 Sol OpenAI · high\n  ╹▀▀▀▀";
-        assert_eq!(shows(AgentKind::OpenCode, own).as_deref(), Some("Cavecrew-Builder"));
+        assert_eq!(
+            shows(AgentKind::OpenCode, own).as_deref(),
+            Some("Cavecrew-Builder")
+        );
 
         let cursor = " ▀▀▀▀\n  Debug (shift+tab to cycle)\n  Auto            Run Everything\n  /tmp/modeprobe · master";
         assert_eq!(shows(AgentKind::Cursor, cursor).as_deref(), Some("Debug"));
@@ -235,10 +247,21 @@ mod tests {
         let build = "› Ask Codex to do anything\n  GPT-6.1 Terra medium · /tmp/m\n  ← for agents · ? for shortcuts";
         assert_eq!(shows(AgentKind::Codex, build).as_deref(), Some("Build"));
 
-        let agy = |mode: &str| format!("> \n────\n? for shortcuts            {mode}Gemini 4 Hydrogen · high");
-        assert_eq!(shows(AgentKind::Antigravity, &agy("plan · ")).as_deref(), Some("Plan"));
-        assert_eq!(shows(AgentKind::Antigravity, &agy("accept-edits · ")).as_deref(), Some("Edits"));
-        assert_eq!(shows(AgentKind::Antigravity, &agy("")).as_deref(), Some("Default"));
+        let agy = |mode: &str| {
+            format!("> \n────\n? for shortcuts            {mode}Gemini 4 Hydrogen · high")
+        };
+        assert_eq!(
+            shows(AgentKind::Antigravity, &agy("plan · ")).as_deref(),
+            Some("Plan")
+        );
+        assert_eq!(
+            shows(AgentKind::Antigravity, &agy("accept-edits · ")).as_deref(),
+            Some("Edits")
+        );
+        assert_eq!(
+            shows(AgentKind::Antigravity, &agy("")).as_deref(),
+            Some("Default")
+        );
 
         assert_eq!(shows(AgentKind::Pi, "anything"), None);
         assert!(modes(AgentKind::Pi).is_empty());
@@ -296,8 +319,14 @@ mod tests {
 
     #[test]
     fn a_mode_of_the_users_own_is_offered_too() {
-        assert_eq!(offered(AgentKind::OpenCode, Some("Plan")), ["Build", "Plan"]);
-        assert_eq!(offered(AgentKind::OpenCode, Some("Docs")), ["Build", "Plan", "Docs"]);
+        assert_eq!(
+            offered(AgentKind::OpenCode, Some("Plan")),
+            ["Build", "Plan"]
+        );
+        assert_eq!(
+            offered(AgentKind::OpenCode, Some("Docs")),
+            ["Build", "Plan", "Docs"]
+        );
         assert_eq!(offered(AgentKind::Codex, None), ["Build", "Plan"]);
     }
 

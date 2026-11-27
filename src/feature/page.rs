@@ -446,8 +446,8 @@ fn span_stat(worktree: &Path, from: &str, to: &str) -> Result<(usize, Stat), Str
     // Not `git_ops::count_commits`: its 0 on failure would be kept for good.
     let range = format!("{from}..{to}");
     let count = git(worktree, &["rev-list", "--count", &range])?;
-    let commits = (count.trim().parse())
-        .map_err(|err| format!("counting commits in {range}: {err}"))?;
+    let commits =
+        (count.trim().parse()).map_err(|err| format!("counting commits in {range}: {err}"))?;
     Ok((
         commits,
         Stat {
@@ -509,10 +509,8 @@ mod comment_fix_tests {
     };
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "gerdr-comment-fixes-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("gerdr-comment-fixes-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("prompts")).unwrap();
         dir
@@ -580,7 +578,11 @@ mod comment_fix_tests {
         let data = scratch("archive");
         keep(&data, 1, &["Mine"]);
         std::fs::write(fix_round::path(&data), "## Fixes\n### Someone else's\n").unwrap();
-        std::fs::write(fix_round::archive_path(&data, 1), "## Fixes\n### C1: mine\n").unwrap();
+        std::fs::write(
+            fix_round::archive_path(&data, 1),
+            "## Fixes\n### C1: mine\n",
+        )
+        .unwrap();
         let docs = Docs::default().with_comment_fixes(&data, &feature_with(&[1], 2));
         let blocks = format!("{:?}", docs.comment_plan.unwrap());
         assert!(blocks.contains("C1: mine"), "{blocks}");

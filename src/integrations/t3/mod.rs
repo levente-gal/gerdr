@@ -9,11 +9,11 @@ pub(crate) mod launch;
 use std::collections::HashSet;
 
 use super::{Integration, PickedFor};
-use crate::stage_models::Offer;
 use crate::ai_work::{
     AgentKind, Chat,
     locate::{Found, Homes, Span},
 };
+use crate::stage_models::Offer;
 
 pub struct T3;
 

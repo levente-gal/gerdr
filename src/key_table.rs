@@ -67,9 +67,7 @@ fn same_key(pressed: Keysym, key: Keysym) -> bool {
         Keysym::KP_Page_Up => Keysym::Page_Up,
         Keysym::KP_Page_Down => Keysym::Page_Down,
         sym => match sym.key_char() {
-            Some(c) if c.is_ascii_uppercase() => {
-                Keysym::from_char(c.to_ascii_lowercase())
-            }
+            Some(c) if c.is_ascii_uppercase() => Keysym::from_char(c.to_ascii_lowercase()),
             _ => sym,
         },
     };
@@ -142,7 +140,11 @@ pub fn joined<W: AsRef<str>>(
 #[cfg(test)]
 pub fn check<C, A>(table: &[Binding<C, A>], ctxs: &[C]) {
     for b in table {
-        assert!(crate::keys::hint_key(b.chord).is_some(), "{} doesn't parse", b.chord);
+        assert!(
+            crate::keys::hint_key(b.chord).is_some(),
+            "{} doesn't parse",
+            b.chord
+        );
         let alias = !b.footer && b.f1.is_empty();
         assert!(
             alias || table.iter().any(|o| o.chord == b.chord && !o.f1.is_empty()),
@@ -153,7 +155,10 @@ pub fn check<C, A>(table: &[Binding<C, A>], ctxs: &[C]) {
     for ctx in ctxs {
         for (chord, _) in hints(table, ctx, |_| String::new()) {
             let (mods, sym) = crate::keys::hint_key(chord).expect(chord);
-            assert!(press(table, ctx, &mods, sym).is_some(), "{chord} is hinted but does nothing");
+            assert!(
+                press(table, ctx, &mods, sym).is_some(),
+                "{chord} is hinted but does nothing"
+            );
         }
     }
 }
@@ -190,7 +195,10 @@ mod tests {
     #[test]
     fn a_row_presses_only_while_offered() {
         let (mods, sym) = crate::keys::hint_key("Shift+E").unwrap();
-        assert_eq!(press(TABLE, &Ctx { open: true }, &mods, sym), Some(Act::Edit));
+        assert_eq!(
+            press(TABLE, &Ctx { open: true }, &mods, sym),
+            Some(Act::Edit)
+        );
         assert_eq!(press(TABLE, &Ctx { open: false }, &mods, sym), None);
         // A press gives Shift+E as its own symbol `e` (K8), or `E` on some
         // layouts: both are the key.
@@ -199,7 +207,10 @@ mod tests {
             Some(Act::Edit)
         );
         let label = |a: &Act| format!("{a:?}");
-        assert_eq!(hints(TABLE, &Ctx { open: false }, label), [("Esc", "Close".to_owned())]);
+        assert_eq!(
+            hints(TABLE, &Ctx { open: false }, label),
+            [("Esc", "Close".to_owned())]
+        );
         check(TABLE, &[Ctx { open: true }, Ctx { open: false }]);
     }
 }

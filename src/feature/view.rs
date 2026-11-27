@@ -410,7 +410,10 @@ pub fn forget_placed(root: &Path, project: &str, slug: &str) {
 /// Feature `slug` moved from machine `from` to machine `to` (both as `root` gives
 /// them): what is here of its code is looked at from that one now.
 pub fn move_placed(from: &Path, to: &Path, project: &str, slug: &str) {
-    let (old, new) = (placed_file(from, project, slug), placed_file(to, project, slug));
+    let (old, new) = (
+        placed_file(from, project, slug),
+        placed_file(to, project, slug),
+    );
     if !old.exists() {
         return;
     }
@@ -484,7 +487,10 @@ pub fn forget_machine(root: &Path, keep: &[&str], cancel: &AtomicBool) {
             }
         }
     }
-    let kept = |path: &Path| keep.iter().any(|name| path.file_name() == Some(name.as_ref()));
+    let kept = |path: &Path| {
+        keep.iter()
+            .any(|name| path.file_name() == Some(name.as_ref()))
+    };
     let entries = std::fs::read_dir(root).into_iter().flatten().flatten();
     for path in entries.map(|e| e.path()).filter(|path| !kept(path)) {
         let removed = match path.is_dir() {

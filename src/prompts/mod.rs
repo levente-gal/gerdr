@@ -135,9 +135,15 @@ mod tests {
             ("sandbox.step", "python manage.py migrate"),
             ("sandbox.dir", "/w/bulk-edit/api"),
             ("sandbox.line", "sh -c 'python manage.py migrate'"),
-            ("sandbox.excerpt", "CommandError: Conflicting migrations detected"),
+            (
+                "sandbox.excerpt",
+                "CommandError: Conflicting migrations detected",
+            ),
             ("sandbox.log", "/d/bulk-edit/sandbox/prepare.log"),
-            ("ship.why", "Couldn't push dev of api: pre-push hook declined"),
+            (
+                "ship.why",
+                "Couldn't push dev of api: pre-push hook declined",
+            ),
             ("ship.log", "/s/gerdr/git.log"),
             ("ship.bases", "- api: dev in /w/api"),
             ("ship.plan", "yes"),
@@ -345,7 +351,10 @@ mod tests {
             let line = render_builtin(name, &v).unwrap();
             assert!(!line.trim_end().contains('\n'), "{line}");
             assert!(line.contains("`Criteria: AC-1, AC-3, C1`"), "{line}");
-            assert!(line.contains("Run the linter on the files you change"), "{line}");
+            assert!(
+                line.contains("Run the linter on the files you change"),
+                "{line}"
+            );
         }
         // Lint errors are the agent's to fix before Verify, as tests are.
         assert!(named.contains("linter on the files you changed"), "{named}");

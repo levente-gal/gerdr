@@ -88,7 +88,9 @@ pub struct Panel {
 
 /// Every agent's side panel: the marks of a screen whose agent isn't known.
 fn any() -> Vec<SidePanel> {
-    (integrations::ALL.iter()).filter_map(|agent| agent.side_panel()).collect()
+    (integrations::ALL.iter())
+        .filter_map(|agent| agent.side_panel())
+        .collect()
 }
 
 /// Whether `line` is what an agent of `marks` draws while it answers, in
@@ -161,7 +163,10 @@ fn read(marks: &[SidePanel], rows: &[&str]) -> Option<Panel> {
         .collect();
     trimmed(&mut lines);
     // An agent may draw the answer as it comes, its spinner under it.
-    let working = [lines.first(), lines.last()].into_iter().flatten().any(|l| spinner(marks, l));
+    let working = [lines.first(), lines.last()]
+        .into_iter()
+        .flatten()
+        .any(|l| spinner(marks, l));
     // Its rows down to the panel's end: a narrow pane wraps it.
     let footer = footer.map(|i| {
         let rest = rows[i..].iter().take(3).take_while(|row| !is_rule(row));
@@ -170,9 +175,9 @@ fn read(marks: &[SidePanel], rows: &[&str]) -> Option<Panel> {
     if footer.is_none() && !working {
         return None;
     }
-    let expand = footer.as_ref().and_then(|f| {
-        (marks.iter()).find_map(|m| m.expand.filter(|(says, _)| f.contains(says)))
-    });
+    let expand = footer
+        .as_ref()
+        .and_then(|f| (marks.iter()).find_map(|m| m.expand.filter(|(says, _)| f.contains(says))));
     Some(Panel {
         question: words(question),
         lines,
@@ -287,7 +292,10 @@ impl Follow {
     /// The rows of `panel` past the question: a long one wraps onto them.
     fn answer(&self, panel: &Panel) -> Vec<String> {
         let all = words(&self.side.question);
-        let mut rest = all.strip_prefix(panel.question.as_str()).unwrap_or("").trim();
+        let mut rest = all
+            .strip_prefix(panel.question.as_str())
+            .unwrap_or("")
+            .trim();
         let mut lines = panel.lines.as_slice();
         while let Some(line) = lines.first().filter(|_| !rest.is_empty()) {
             let line = words(line);
@@ -319,7 +327,9 @@ impl Follow {
             return match self.seen {
                 // Closed in the pane: what was read stays.
                 true if !self.side.lines.is_empty() => self.end(SideState::Answered),
-                true => self.end(SideState::Failed("its panel closed before it answered".into())),
+                true => self.end(SideState::Failed(
+                    "its panel closed before it answered".into(),
+                )),
                 false if now - self.since >= SHOW_WAIT => {
                     self.end(SideState::Failed("no answer showed in its pane".into()))
                 }
@@ -565,7 +575,11 @@ mod tests {
         assert_eq!(p.question, "does this work?");
         assert_eq!(
             p.lines,
-            lines(&["It came as a /btw side question.", "", "/btw shows it on the side."])
+            lines(&[
+                "It came as a /btw side question.",
+                "",
+                "/btw shows it on the side."
+            ])
         );
     }
 
@@ -575,7 +589,11 @@ mod tests {
         assert_eq!(p.question, "what is 2+2? answer in two short paragraphs");
         assert_eq!(
             p.lines,
-            lines(&["2 + 2 is 4.", "", "This is basic arithmetic: adding two to two gives four."])
+            lines(&[
+                "2 + 2 is 4.",
+                "",
+                "This is basic arithmetic: adding two to two gives four."
+            ])
         );
         assert!(!p.working && !p.scrolls && !p.cut);
 
@@ -697,10 +715,12 @@ mod tests {
             assert_eq!(take(&mut f, CLAUDE_LONG, t), Step::Wait);
         }
         assert_eq!(take(&mut f, CLAUDE_LONG, t), Step::Press(DOWN));
-        let next = CLAUDE_LONG.replace("    one\n    two\n", "    two\n").replace(
-            "    three                                                      ↓",
-            "    three\n    four",
-        );
+        let next = CLAUDE_LONG
+            .replace("    one\n    two\n", "    two\n")
+            .replace(
+                "    three                                                      ↓",
+                "    three\n    four",
+            );
         assert_eq!(take(&mut f, &next, t), Step::Press(DOWN));
         assert_eq!(take(&mut f, &next, t), Step::Wait);
         assert_eq!(take(&mut f, &next, t), Step::Close("esc"));
@@ -718,7 +738,10 @@ mod tests {
     #[test]
     fn a_panel_closed_or_never_shown_ends_it() {
         let t = Instant::now();
-        let mut f = Follow::new(Side::new("what is 2+2? answer in two short paragraphs", 1), t);
+        let mut f = Follow::new(
+            Side::new("what is 2+2? answer in two short paragraphs", 1),
+            t,
+        );
         assert_eq!(take(&mut f, CLAUDE_DONE, t), Step::Wait);
         // A read that misses it once is no close.
         for _ in 1..GONE {
@@ -728,7 +751,10 @@ mod tests {
         assert_eq!(f.side.state, SideState::Answered);
 
         let mut f = Follow::new(Side::new("q", 1), t);
-        assert_eq!(f.took(None, t + SHOW_WAIT - Duration::from_secs(1)), Step::Wait);
+        assert_eq!(
+            f.took(None, t + SHOW_WAIT - Duration::from_secs(1)),
+            Step::Wait
+        );
         assert_eq!(f.took(None, t + SHOW_WAIT), Step::Done);
         assert!(matches!(f.side.state, SideState::Failed(_)));
         // Another question's panel is none of its.
@@ -743,7 +769,13 @@ mod tests {
   does that say about sunsets
     Light scatters.
   Esc to close";
-        let f = Follow::new(Side::new("why is the sky blue and what does that say about sunsets", 1), Instant::now());
+        let f = Follow::new(
+            Side::new(
+                "why is the sky blue and what does that say about sunsets",
+                1,
+            ),
+            Instant::now(),
+        );
         let p = panel(&rows(screen)).expect("panel");
         assert!(f.ours(&p));
         assert_eq!(f.answer(&p), lines(&["Light scatters."]));
@@ -775,7 +807,10 @@ mod tests {
              answer contains the command word.  \n- next"
         );
         // Short rows are its own lines, as a list of words is.
-        assert_eq!(answer_md(&lines(&["twenty-two", "twenty-three"])), "twenty-two  \ntwenty-three");
+        assert_eq!(
+            answer_md(&lines(&["twenty-two", "twenty-three"])),
+            "twenty-two  \ntwenty-three"
+        );
     }
 
     fn user(id: &str, at: u64) -> Item {

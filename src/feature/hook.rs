@@ -250,7 +250,12 @@ pub fn allow(dir: &Path, branch: &str, commit: &str) -> Result<(), String> {
 /// Run `push` of `branch` of the repository `dir` is in past its guard:
 /// allowed for commit `head` alone, and guarded again after, whatever came
 /// of it.
-pub fn past_guard<T>(dir: &Path, branch: &str, head: &str, push: impl FnOnce() -> T) -> Result<T, String> {
+pub fn past_guard<T>(
+    dir: &Path,
+    branch: &str,
+    head: &str,
+    push: impl FnOnce() -> T,
+) -> Result<T, String> {
     allow(dir, branch, head)?;
     let pushed = push();
     if let Err(err) = guard(dir, branch) {
@@ -359,7 +364,12 @@ mod tests {
         // Guarded again after, and after a failed push too.
         commit(&wt, "h", "again");
         assert!(push(&wt).is_err());
-        let failed = past_guard(&wt, "feature/x", "0123456789012345678901234567890123456789", || push(&wt));
+        let failed = past_guard(
+            &wt,
+            "feature/x",
+            "0123456789012345678901234567890123456789",
+            || push(&wt),
+        );
         assert!(failed.unwrap().is_err());
         assert!(guarded(&app, "feature/x"));
         let file = guard_file(&app, "feature/x").unwrap();

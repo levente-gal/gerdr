@@ -854,8 +854,7 @@ mod tests {
                 pid: 7,
                 name: name.into(),
                 argv: vec![name.into()],
-                ..serde_json::from_value(serde_json::json!({"pid": 7, "name": name}))
-                    .unwrap()
+                ..serde_json::from_value(serde_json::json!({"pid": 7, "name": name})).unwrap()
             }],
         };
         assert_eq!(

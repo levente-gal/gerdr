@@ -143,10 +143,12 @@ impl Integration for Antigravity {
         if !home.join(".gemini/config").is_dir() {
             return Vec::new();
         }
-        vec![install::hook_command(live::HOOK_COMMAND).and_then(|command| {
-            install::install(&home.join(".gemini/config/hooks.json"), |text| {
-                live::merged(text, &command)
-            })
-        })]
+        vec![
+            install::hook_command(live::HOOK_COMMAND).and_then(|command| {
+                install::install(&home.join(".gemini/config/hooks.json"), |text| {
+                    live::merged(text, &command)
+                })
+            }),
+        ]
     }
 }

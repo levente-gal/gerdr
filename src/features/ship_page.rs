@@ -268,8 +268,15 @@ pub(super) fn check_lines(
 /// passed \u{b7} review done \u{b7} base current \u{b7} no conflicts"), as
 /// `check` and `probe` read it; none when it passes none of them. Those it
 /// fails say so on lines of their own, above it.
-fn passed_checks(feature: &Feature, check: &ship::ShipCheck, probe: Option<&Probe>) -> Option<CheckLine> {
-    let stale = check.blockers.iter().any(|b| b.starts_with("Code changed since"));
+fn passed_checks(
+    feature: &Feature,
+    check: &ship::ShipCheck,
+    probe: Option<&Probe>,
+) -> Option<CheckLine> {
+    let stale = check
+        .blockers
+        .iter()
+        .any(|b| b.starts_with("Code changed since"));
     let bases = probe.map(|p| &p.bases);
     let open = (feature.review.as_ref()).map_or(0, |r| r.open());
     let reviews = [Stage::AiReview, Stage::CodeReview, Stage::ManualTest];
@@ -277,7 +284,9 @@ fn passed_checks(feature: &Feature, check: &ship::ShipCheck, probe: Option<&Prob
         && check.repos.iter().all(|r| {
             r.merged
                 || (!r.pulls_base()
-                    && bases.and_then(|b| b.get(&r.key)).is_some_and(|b| b.behind == 0))
+                    && bases
+                        .and_then(|b| b.get(&r.key))
+                        .is_some_and(|b| b.behind == 0))
         });
     let clean = feature.shipping.resolving.is_none()
         && check.repos.iter().all(|r| {
@@ -286,11 +295,18 @@ fn passed_checks(feature: &Feature, check: &ship::ShipCheck, probe: Option<&Prob
         });
     let named = [
         (feature.is_done(Stage::Verify) && !stale, "checks passed"),
-        (reviews.iter().all(|s| feature.is_done(*s)) && open == 0 && !stale, "review done"),
+        (
+            reviews.iter().all(|s| feature.is_done(*s)) && open == 0 && !stale,
+            "review done",
+        ),
         (current, "base current"),
         (clean, "no conflicts"),
     ];
-    let ok: Vec<&str> = named.iter().filter(|(ok, _)| *ok).map(|(_, w)| *w).collect();
+    let ok: Vec<&str> = named
+        .iter()
+        .filter(|(ok, _)| *ok)
+        .map(|(_, w)| *w)
+        .collect();
     (!ok.is_empty()).then(|| CheckLine {
         text: format!("\u{2713} {}", ok.join(" \u{b7} ")),
         tone: CheckTone::Ready,
@@ -1080,7 +1096,8 @@ pub(super) fn ship_log_lines(feature: &Feature, now: u64) -> Vec<CheckLine> {
             feature::AfterStep::CloseTabs => "closed its other tabs",
             feature::AfterStep::Remove => "removed the worktrees",
         };
-        let undone = (done.undone).map(|at| format!(" \u{b7} undone {}", crate::clock::ago(now, at)));
+        let undone =
+            (done.undone).map(|at| format!(" \u{b7} undone {}", crate::clock::ago(now, at)));
         let text = format!(
             "{} \u{b7} {said}{}",
             crate::clock::ago(now, done.at),

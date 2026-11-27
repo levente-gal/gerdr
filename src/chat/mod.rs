@@ -12,16 +12,16 @@ pub mod btw;
 pub mod commands;
 pub mod files;
 pub mod images;
+pub mod live;
 pub mod menu;
 pub mod mode;
 pub mod model;
 pub mod model_menu;
 pub mod parse;
 pub mod plan_review;
+pub mod questions;
 pub mod rows;
 pub mod source;
-pub mod live;
-pub mod questions;
 pub mod tail;
 mod view;
 

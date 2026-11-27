@@ -179,8 +179,10 @@ impl Gerdr {
             return false;
         };
         let hit = layout.hit(&view, pos.to_i32_round());
-        matches!(hit, Some(FeatureTabHit::Column(TabColumn::Page) | FeatureTabHit::Finding(_)))
-            && layout.text_at(&view, pos.to_i32_round(), false).is_some()
+        matches!(
+            hit,
+            Some(FeatureTabHit::Column(TabColumn::Page) | FeatureTabHit::Finding(_))
+        ) && layout.text_at(&view, pos.to_i32_round(), false).is_some()
     }
 
     /// A press on the feature tab at `pos`, after it did what it does:
@@ -189,7 +191,10 @@ impl Gerdr {
     /// Shift, what was selected reaches there instead. Anywhere else, what
     /// was selected goes.
     pub(crate) fn press_page_text(&mut self, pos: Point<f64, Logical>) {
-        let spot = self.on_page_text(pos).then(|| self.feature_tab_parts()).flatten();
+        let spot = self
+            .on_page_text(pos)
+            .then(|| self.feature_tab_parts())
+            .flatten();
         let spot = spot.and_then(|(view, layout)| {
             let at = layout.text_at(&view, pos.to_i32_round(), false)?;
             Some((at, layout.line_text(at.line)?.to_owned()))
@@ -488,7 +493,10 @@ mod tests {
         assert_eq!(reach(home, home), (at(0, 4), at(0, 7)));
         // By lines, to a line below: the first whole, to the other's end.
         let home = span(text, at(0, 5), Grain::Line);
-        assert_eq!(reach(home, span("two", at(2, 1), Grain::Line)), (at(0, 0), at(2, 3)));
+        assert_eq!(
+            reach(home, span("two", at(2, 1), Grain::Line)),
+            (at(0, 0), at(2, 3))
+        );
         // By chars, as the pointer goes.
         let home = (at(1, 3), at(1, 3));
         assert_eq!(reach(home, (at(0, 2), at(0, 2))), (at(1, 3), at(0, 2)));

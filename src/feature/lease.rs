@@ -35,12 +35,7 @@ use std::{path::Path, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use super::{
-    Feature,
-    remote::Paths,
-    setup::SetupRun,
-    store, view,
-};
+use super::{Feature, remote::Paths, setup::SetupRun, store, view};
 use crate::{desktop::shell_quote, machine_work::HERE};
 
 /// In a feature's folder there: the request to let go.
@@ -95,7 +90,11 @@ pub fn left_here(dir: &Path) -> Option<(Vec<u8>, String)> {
 /// Whether the move `HANDED_TO` says in folder `dir` was told of here already.
 pub fn told(dir: &Path) -> bool {
     let read = |file| std::fs::read_to_string(dir.join(file)).ok();
-    let at = |file| std::fs::metadata(dir.join(file)).and_then(|m| m.modified()).ok();
+    let at = |file| {
+        std::fs::metadata(dir.join(file))
+            .and_then(|m| m.modified())
+            .ok()
+    };
     read(TOLD).is_some_and(|said| Some(said) == read(HANDED_TO)) && at(TOLD) >= at(HANDED_TO)
 }
 
@@ -249,7 +248,10 @@ pub fn hand_back_waits_script(dir: &str) -> String {
 
 /// The script taking a hand back back, nobody having taken it up.
 pub fn hand_back_unask_script(dir: &str) -> String {
-    format!("cd {} || exit 0\nrm -f {HAND_BACK}\nexit 0\n", shell_quote(dir))
+    format!(
+        "cd {} || exit 0\nrm -f {HAND_BACK}\nexit 0\n",
+        shell_quote(dir)
+    )
 }
 
 /// How long a gerdr open on the writer gets to answer.
@@ -352,9 +354,8 @@ pub fn taken(
     let mut value = serde_json::to_value(record).map_err(|err| err.to_string())?;
     view::translate(&mut value, paths);
     let mut out: Feature = serde_json::from_value(value).map_err(|err| err.to_string())?;
-    let elsewhere = |pane: &str| {
-        crate::machine_work::split_pane(pane).is_some_and(|(id, _)| id != me)
-    };
+    let elsewhere =
+        |pane: &str| crate::machine_work::split_pane(pane).is_some_and(|(id, _)| id != me);
     let cut = |pane: &mut Option<String>| {
         if pane.as_deref().is_some_and(|p| !elsewhere(p)) {
             *pane = None;
@@ -759,7 +760,10 @@ mod tests {
         assert_eq!(kept_of(&f), None);
         f.sandbox = Some(sandbox(&["w1:p4"]));
         let kept = kept_of(&f).unwrap();
-        assert_eq!((kept.started, kept.panes.as_slice()), (7, &["w1:p4".to_owned()][..]));
+        assert_eq!(
+            (kept.started, kept.panes.as_slice()),
+            (7, &["w1:p4".to_owned()][..])
+        );
         f.sandbox.as_mut().unwrap().machine = Some("w9".into());
         assert_eq!(kept_of(&f), None);
         let mut stopped = sandbox(&[]);
@@ -782,7 +786,11 @@ mod tests {
         };
         let json = serde_json::to_string(&kept).unwrap();
         let script = kept_script(&dir.to_string_lossy(), &json);
-        let ran = std::process::Command::new("sh").arg("-c").arg(&script).status().unwrap();
+        let ran = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .unwrap();
         assert!(ran.success());
         assert_eq!(read_kept(&dir), Some(kept));
     }
@@ -863,7 +871,8 @@ mod tests {
     #[test]
     fn what_this_machine_did_as_a_worker_is_its_own_now() {
         let mut f = record();
-        f.runs.insert(Stage::Plan, run(Some("me/w1:p1"), Some("me")));
+        f.runs
+            .insert(Stage::Plan, run(Some("me/w1:p1"), Some("me")));
         f.stage_machines.insert(Stage::Build, "me".into());
         f.stage_machines.insert(Stage::Plan, "w9".into());
         f.stage_machines.insert(Stage::Verify, HERE.into());
@@ -1174,7 +1183,10 @@ mod tests {
         assert!(!t.0.join(SANDBOX_ANSWER).exists());
         sh(&sandbox_told_script(&dir, &json));
         let raw = std::fs::read(t.0.join(SANDBOX_TOLD)).unwrap();
-        assert_eq!(serde_json::from_slice::<SandboxAsk>(&raw).unwrap().started, 7);
+        assert_eq!(
+            serde_json::from_slice::<SandboxAsk>(&raw).unwrap().started,
+            7
+        );
     }
 
     #[test]
@@ -1212,7 +1224,14 @@ mod tests {
         let wt = t.0.join("w");
         git(
             &main,
-            &["worktree", "add", "-q", "--detach", &wt.to_string_lossy(), &two],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                &wt.to_string_lossy(),
+                &two,
+            ],
         );
         (main, wt, one, two)
     }
@@ -1221,7 +1240,13 @@ mod tests {
     fn a_worktree_looked_at_goes_on_its_branch() {
         let t = Temp::new();
         let (main, wt, _, two) = placed(&t);
-        sh(&branch_script(&main, &wt, "feature/x", "refs/gerdr/head", 9));
+        sh(&branch_script(
+            &main,
+            &wt,
+            "feature/x",
+            "refs/gerdr/head",
+            9,
+        ));
         assert_eq!(git(&wt, &["symbolic-ref", "HEAD"]), "refs/heads/feature/x");
         assert_eq!(git(&wt, &["rev-parse", "HEAD"]), two);
     }
@@ -1231,7 +1256,13 @@ mod tests {
         let t = Temp::new();
         let (main, wt, one, two) = placed(&t);
         git(&main, &["branch", "feature/x", &one]);
-        sh(&branch_script(&main, &wt, "feature/x", "refs/gerdr/head", 9));
+        sh(&branch_script(
+            &main,
+            &wt,
+            "feature/x",
+            "refs/gerdr/head",
+            9,
+        ));
         assert_eq!(git(&wt, &["rev-parse", "feature/x"]), two);
     }
 
@@ -1241,7 +1272,13 @@ mod tests {
         let (main, wt, one, two) = placed(&t);
         git(&main, &["branch", "feature/x", &two]);
         git(&main, &["update-ref", "refs/gerdr/head", &one]);
-        sh(&branch_script(&main, &wt, "feature/x", "refs/gerdr/head", 9));
+        sh(&branch_script(
+            &main,
+            &wt,
+            "feature/x",
+            "refs/gerdr/head",
+            9,
+        ));
         assert_eq!(git(&wt, &["symbolic-ref", "HEAD"]), "refs/heads/feature/x");
         assert_eq!(git(&wt, &["rev-parse", "HEAD"]), two);
     }
@@ -1254,7 +1291,13 @@ mod tests {
         git(&main, &["commit", "-q", "--allow-empty", "-m", "other"]);
         let other = git(&main, &["rev-parse", "HEAD"]);
         git(&main, &["branch", "feature/x", &other]);
-        sh(&branch_script(&main, &wt, "feature/x", "refs/gerdr/head", 9));
+        sh(&branch_script(
+            &main,
+            &wt,
+            "feature/x",
+            "refs/gerdr/head",
+            9,
+        ));
         assert_eq!(git(&wt, &["rev-parse", "HEAD"]), two);
         assert_eq!(git(&main, &["rev-parse", "feature/x-aside-9"]), other);
     }
@@ -1268,7 +1311,10 @@ mod tests {
         std::fs::write(&lock, "").unwrap();
         let script = branch_script(&main, &wt, "feature/x", "refs/gerdr/head", 9);
         let never = std::sync::atomic::AtomicBool::new(false);
-        let why = crate::feature::remote::local_script(&script, &never).unwrap_err().text().to_owned();
+        let why = crate::feature::remote::local_script(&script, &never)
+            .unwrap_err()
+            .text()
+            .to_owned();
         assert!(why.contains(&lock.display().to_string()), "{why}");
         assert!(why.starts_with("A git lock file is in the way"), "{why}");
         assert!(!why.contains("changes"), "{why}");

@@ -1548,7 +1548,10 @@ mod tests {
         let got = import(&mut review, 2, vec![again, same], &repos(), &diff());
         assert_eq!((got.new, got.again), (0, 2));
         let f = review.finding("r1-1").unwrap();
-        assert_eq!((f.state, f.run, f.changed), (FindingState::Dismissed, 2, true));
+        assert_eq!(
+            (f.state, f.run, f.changed),
+            (FindingState::Dismissed, 2, true)
+        );
         // Raised again in the same words: not changed.
         assert!(!review.finding("r1-2").unwrap().changed);
         assert_eq!(sent_word(false, true), "in fix plan");

@@ -27,6 +27,7 @@ mod drop;
 mod features;
 mod finding_dialog;
 mod footer;
+mod glyphs;
 #[cfg(test)]
 mod golden;
 mod help;
@@ -37,7 +38,6 @@ mod layers;
 mod machines;
 mod machines_panel;
 mod menu;
-mod glyphs;
 mod painter;
 mod pane_bar;
 mod placeholder;
@@ -76,6 +76,7 @@ use crate::{
 
 // One surface per module; the rest of gerdr reaches all of it as
 // `chrome::X`. The canvas and the shapes stay inside.
+pub use agent_chat::*;
 pub use badge::*;
 use canvas::*;
 pub use checkout::*;
@@ -98,7 +99,6 @@ pub use menu::*;
 pub use painter::*;
 pub use pane_bar::*;
 pub use placeholder::*;
-pub use agent_chat::*;
 pub use project_commands::*;
 pub use project_menu::*;
 pub use quit::*;
@@ -537,7 +537,8 @@ impl Chrome {
                 }
                 Kind::NewFeature => {
                     let dialog = view.new_feature.take().map(|v| {
-                        let layout = new_feature_layout(output, v.slots, v.error.is_some(), &v.reviewers);
+                        let layout =
+                            new_feature_layout(output, v.slots, v.error.is_some(), &v.reviewers);
                         let (loc, size) = shadowed(layout.panel);
                         ((v, output, theme, scale), loc, size)
                     });

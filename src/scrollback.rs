@@ -2112,7 +2112,11 @@ mod tests {
         assert_eq!(lines[2].0, "zwvu");
         assert_eq!(
             lines[2].1,
-            [(0..1, fg(Ink::Rgb([4, 5, 6]))), (1..2, ground), (2..3, bright)]
+            [
+                (0..1, fg(Ink::Rgb([4, 5, 6]))),
+                (1..2, ground),
+                (2..3, bright)
+            ]
         );
         // Reverse is a ground too, of no colour, till it ends.
         let rev = parse_ansi("\x1b[7ma\x1b[27mb");

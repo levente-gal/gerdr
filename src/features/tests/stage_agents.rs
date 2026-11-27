@@ -152,8 +152,7 @@ fn fixes_waiting_on_a_done_build_can_be_sent_from_its_page() {
     // Its tab closed: it can still open again from there.
     f.runs.insert(Stage::Build, held_run(None));
     assert!(
-        page_outcomes(&f, Stage::Build)
-            .contains(&PanelOutcome::StartAgent(Stage::Build, false))
+        page_outcomes(&f, Stage::Build).contains(&PanelOutcome::StartAgent(Stage::Build, false))
     );
 }
 

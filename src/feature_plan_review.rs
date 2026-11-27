@@ -636,7 +636,10 @@ impl Gerdr {
         let mut n = 0;
         let done = self.change_plan_review(project, slug, |review| {
             for id in ids {
-                if review.suggestion(id).is_some_and(|s| s.state == State::Accepted) {
+                if review
+                    .suggestion(id)
+                    .is_some_and(|s| s.state == State::Accepted)
+                {
                     plan_review::decide(review, id, Decision::Clear)?;
                     n += 1;
                 }

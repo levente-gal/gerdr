@@ -36,7 +36,10 @@ pub(super) fn stage_page(
             feature.marks.get(&stage).map(|m| {
                 let wait = pr_wait(feature, state.probe).unwrap_or_default();
                 let when = crate::clock::ago(now, m.at);
-                line(format!("Shipped {when} by {}: {wait}", m.by), CheckTone::Note)
+                line(
+                    format!("Shipped {when} by {}: {wait}", m.by),
+                    CheckTone::Note,
+                )
             })
         }
         StageMark::Done => feature.marks.get(&stage).map(|m| {
@@ -583,8 +586,7 @@ pub(crate) fn place_buttons(page: &mut StagePage) {
                 buttons.retain(|i| !menu.contains(i));
                 rows.push(buttons.clone());
             }
-            PageSection::File { buttons, .. }
-            | PageSection::Milestones { buttons, .. } => {
+            PageSection::File { buttons, .. } | PageSection::Milestones { buttons, .. } => {
                 buttons.retain(|i| !gone(i));
                 rows.push(buttons.clone());
             }

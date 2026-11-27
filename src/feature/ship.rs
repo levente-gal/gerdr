@@ -590,14 +590,19 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
     let branch = feature.branch();
     // The user's own pull request's branch is theirs to push from anywhere.
     let guards = (feature.touched())
-        .filter(|repo| !feature.pull_of(&repo.key()).is_some_and(super::pr::PullRef::own))
+        .filter(|repo| {
+            !feature
+                .pull_of(&repo.key())
+                .is_some_and(super::pr::PullRef::own)
+        })
         .map(|repo| {
             let branch = repo.branch.clone().unwrap_or_else(|| branch.clone());
             (repo.key(), guard_of(repo, &branch))
         })
         .collect();
     // A pull request's review submits it instead (`pr_post`).
-    let ship = (feature.ships() && feature.pull().is_none()).then(|| check(feature, &reading, modes));
+    let ship =
+        (feature.ships() && feature.pull().is_none()).then(|| check(feature, &reading, modes));
     let merged =
         feature.shipping.squash_at.is_some() && reading.as_ref().is_ok_and(|r| merged(feature, r));
     Probe {
@@ -780,7 +785,9 @@ fn check(feature: &Feature, reading: &Result<Reading, String>, modes: &Modes) ->
             no_origin: git(&repo.main, &["remote", "get-url", "origin"])
                 .is_err()
                 .then(|| format!("{} has no origin remote", repo.key())),
-            no_merge: (!merged).then(|| squash_blocker(repo, &branch, at)).flatten(),
+            no_merge: (!merged)
+                .then(|| squash_blocker(repo, &branch, at))
+                .flatten(),
             merged,
             head,
             pushed: tracking(repo, &branch),
@@ -812,7 +819,10 @@ fn reattachable(repo: &Repo, branch: &str) -> Result<(), String> {
     if git(&repo.worktree, &["rev-parse", "-q", "--verify", &name]).is_err() {
         return Ok(());
     }
-    let held = git(&repo.worktree, &["merge-base", "--is-ancestor", &name, "HEAD"]);
+    let held = git(
+        &repo.worktree,
+        &["merge-base", "--is-ancestor", &name, "HEAD"],
+    );
     held.map(|_| ()).map_err(|_| {
         format!(
             "{} is on no branch, and {branch} has commits it lacks: switch it to {branch}",
@@ -843,7 +853,10 @@ fn tracking(repo: &Repo, branch: &str) -> Option<String> {
 /// What stops repository `name`'s squash into `base` that conflicts in
 /// `files`.
 pub fn squash_conflicts(name: &str, base: &str, files: &[String]) -> String {
-    format!("{name}: squashing into {base} conflicts in {}", files.join(", "))
+    format!(
+        "{name}: squashing into {base} conflicts in {}",
+        files.join(", ")
+    )
 }
 
 fn squash_blocker(repo: &Repo, branch: &str, at: &str) -> Option<String> {
@@ -1145,7 +1158,10 @@ pub fn update_from_base(
     };
     if let Err(failed) = git_ops::integrate(dir, &onto, how) {
         // Not stopped part way, say on one the user had going: theirs stays.
-        let own = matches!(failed.failure, git_ops::Failure::Conflict(_) | git_ops::Failure::Timeout);
+        let own = matches!(
+            failed.failure,
+            git_ops::Failure::Conflict(_) | git_ops::Failure::Timeout
+        );
         if !own {
             return Err(format!("{key}: couldn't take {onto} in: {}", failed.why));
         }

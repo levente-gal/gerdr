@@ -401,7 +401,8 @@ pub struct CommentFix {
 /// Where the comments round `n` took from Code review are kept, under feature
 /// data dir `dir`.
 pub fn comments_copy(dir: &Path, n: u32) -> PathBuf {
-    dir.join("prompts").join(format!("fix-plan-{n}-comments.json"))
+    dir.join("prompts")
+        .join(format!("fix-plan-{n}-comments.json"))
 }
 
 /// How many lines saying why a check failed a `VerifyFix` keeps.
@@ -843,11 +844,17 @@ pub fn mark_criteria_made(test: &mut ManualTest, round: &FixRound, left: &[Strin
     };
     let mut changed = false;
     for k in &mut test.checks {
-        let sent = checks.iter().any(|(id, text)| *id == k.id && *text == k.text);
+        let sent = checks
+            .iter()
+            .any(|(id, text)| *id == k.id && *text == k.text);
         if !sent || !k.sent || k.state != Verdict::Fail {
             continue;
         }
-        let mut named = round.items.iter().filter(|item| names(item, &k.id)).peekable();
+        let mut named = round
+            .items
+            .iter()
+            .filter(|item| names(item, &k.id))
+            .peekable();
         let made = named.peek().is_some() && !named.any(|item| left.contains(item));
         changed |= k.made != made;
         k.made = made;

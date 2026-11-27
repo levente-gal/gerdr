@@ -164,7 +164,8 @@ pub fn pane_bar_field(bar: Rect, kind: BarButtons, zoom: Option<bool>) -> Option
     let h = bar.size.h - 2 * inset;
     let w = (right - left).min(FIELD_MAX);
     let left = left + (right - left - w) / 2;
-    (w >= BAR_BUTTON && h > 0).then(|| Rectangle::new((left, bar.loc.y + inset).into(), (w, h).into()))
+    (w >= BAR_BUTTON && h > 0)
+        .then(|| Rectangle::new((left, bar.loc.y + inset).into(), (w, h).into()))
 }
 
 /// The zoom button of a bar whose pane is zoomed (`Some(true)`) or can be
@@ -445,7 +446,14 @@ impl Painter {
         let buttons = pane_bar_buttons(bar, view.buttons, view.zoom);
         if let Some(field) = pane_bar_field(bar, view.buttons, view.zoom) {
             let (x, y, w, h) = rect_px(field, scale);
-            c.rounded(x, y, w, h, ROW_HIGHLIGHT_RADIUS * scale as f32, field_fill(p));
+            c.rounded(
+                x,
+                y,
+                w,
+                h,
+                ROW_HIGHLIGHT_RADIUS * scale as f32,
+                field_fill(p),
+            );
             let pad = px(8) as f32;
             let band = band(field, scale);
             let (left, right) = (x + pad, x + w - pad);
@@ -901,7 +909,10 @@ mod tests {
         let agent = |chat, waiting| order(BarButtons::Agent { chat, waiting });
         assert_eq!(agent(false, false)[0], BarButton::Chat);
         assert_eq!(agent(true, false)[0], BarButton::Screen);
-        assert_eq!(agent(true, true)[..2], [BarButton::SendPrompt, BarButton::Screen]);
+        assert_eq!(
+            agent(true, true)[..2],
+            [BarButton::SendPrompt, BarButton::Screen]
+        );
         assert_eq!(agent(false, false)[1..], order(BarButtons::Terminal));
     }
 
@@ -1005,7 +1016,10 @@ mod tests {
             let w = 600 * 4;
             let from = (600 - 120) * 4;
             let ends = |bytes: &[u8]| -> Vec<u8> {
-                bytes.chunks(w).flat_map(|row| row[from..].to_vec()).collect()
+                bytes
+                    .chunks(w)
+                    .flat_map(|row| row[from..].to_vec())
+                    .collect()
             };
             assert_eq!(ends(&a), ends(&b));
             let empty = PaneBarView {
@@ -1018,7 +1032,10 @@ mod tests {
                 zoom: Some(false),
                 ..empty.clone()
             };
-            assert_ne!(ends(&drawn(&painter, &empty, theme)), ends(&drawn(&painter, &blank, theme)));
+            assert_ne!(
+                ends(&drawn(&painter, &empty, theme)),
+                ends(&drawn(&painter, &blank, theme))
+            );
         }
     }
 

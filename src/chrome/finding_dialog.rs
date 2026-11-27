@@ -389,7 +389,10 @@ impl Painter {
             self.text(c, text, size, x, end, band(rect, scale), scale, color)
         };
         line(&mut c, &view.title, layout.title, label_font_size(), p.text);
-        for (i, text) in super::confirm_body_rows(&view.about, size).iter().enumerate() {
+        for (i, text) in super::confirm_body_rows(&view.about, size)
+            .iter()
+            .enumerate()
+        {
             let about = layout.about;
             let at = (about.loc.x, about.loc.y + i as i32 * quit_body());
             let rect = Rectangle::new(at.into(), (about.size.w, quit_body()).into());

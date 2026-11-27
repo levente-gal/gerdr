@@ -10,11 +10,7 @@
 //! Nothing is left behind for later: with no gerdr open there on the project,
 //! the hand back is refused at once, and one not taken up in time is taken back.
 
-use std::{
-    path::Path,
-    sync::atomic::AtomicBool,
-    time::Instant,
-};
+use std::{path::Path, sync::atomic::AtomicBool, time::Instant};
 
 use crate::{
     Gerdr,
@@ -57,7 +53,10 @@ impl HandBackJob {
         script(lease::hand_back_script(&self.dir, &json))?;
         let until = Instant::now() + lease::ASK_FOR;
         while Instant::now() < until {
-            if script(lease::hand_back_waits_script(&self.dir))?.trim().is_empty() {
+            if script(lease::hand_back_waits_script(&self.dir))?
+                .trim()
+                .is_empty()
+            {
                 let said = script(lease::record_script(&self.dir, lease::HAND_BACK_ANSWER))?;
                 return match serde_json::from_str::<lease::HandBackAnswer>(&said) {
                     Ok(lease::HandBackAnswer { refused: Some(why) }) => Err(why),
@@ -88,7 +87,9 @@ fn asked_in(data: &Path, project: &str, slug: &str) -> std::path::PathBuf {
 
 /// `script` run there, its trouble as text.
 fn reach_script(reach: &Reach, script: &str, cancel: &AtomicBool) -> Result<String, String> {
-    reach.script(script, cancel).map_err(|trouble| trouble.text().to_owned())
+    reach
+        .script(script, cancel)
+        .map_err(|trouble| trouble.text().to_owned())
 }
 
 /// Write the answer to a hand back in feature folder `dir`, then let go of the
@@ -97,7 +98,9 @@ fn answer(dir: &Path, refused: Option<String>) {
     let answer = lease::HandBackAnswer { refused };
     match serde_json::to_vec(&answer) {
         Ok(bytes) => {
-            if let Err(err) = crate::projects::write_atomic(&dir.join(lease::HAND_BACK_ANSWER), &bytes) {
+            if let Err(err) =
+                crate::projects::write_atomic(&dir.join(lease::HAND_BACK_ANSWER), &bytes)
+            {
                 tracing::warn!("answering a hand back in {}: {err}", dir.display());
             }
         }
@@ -143,7 +146,11 @@ impl Gerdr {
             return;
         };
         let title = feature.title.clone();
-        let Some(id) = feature.came_from.clone().filter(|_| feature.writer.is_none()) else {
+        let Some(id) = feature
+            .came_from
+            .clone()
+            .filter(|_| feature.writer.is_none())
+        else {
             return self.show_warning(format!(
                 "\u{201c}{title}\u{201d} wasn't taken over from another machine"
             ));
@@ -169,11 +176,13 @@ impl Gerdr {
             return self.show_error("gerdr couldn't save this machine's id".to_owned());
         };
         let data = format!("{}/gerdr", work.info.site.data);
-        let project_name = (self.projects.project(project))
-            .map_or_else(|| project.to_owned(), |p| p.name.clone());
+        let project_name =
+            (self.projects.project(project)).map_or_else(|| project.to_owned(), |p| p.name.clone());
         let job = HandBackJob {
             reach: work.reach(),
-            dir: asked_in(Path::new(&data), project, slug).to_string_lossy().into_owned(),
+            dir: asked_in(Path::new(&data), project, slug)
+                .to_string_lossy()
+                .into_owned(),
             data,
             project: project.to_owned(),
             project_name,
@@ -191,7 +200,9 @@ impl Gerdr {
             repo: None,
             what: format!("Handing \u{201c}{title}\u{201d} back to {name}"),
         };
-        self.show_notice(format!("Handing \u{201c}{title}\u{201d} back to {name}\u{2026}"));
+        self.show_notice(format!(
+            "Handing \u{201c}{title}\u{201d} back to {name}\u{2026}"
+        ));
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(Some(busy), move |_| Done::HandBack {
             result: job.go(),
@@ -213,30 +224,36 @@ impl Gerdr {
     /// Take back the features of `project` that the machines writing them hand
     /// back, as asked in their folders here.
     pub(crate) fn answer_hand_backs(&mut self, project: &str) {
-        let asked: Vec<(String, std::path::PathBuf, lease::HandBack)> = (self.viewed_of(project).iter())
-            .filter(|f| f.status == Status::Open)
-            .filter_map(|f| {
-                let dir = asked_in(&crate::projects::data_dir(), project, &f.slug);
-                let file = dir.join(lease::HAND_BACK);
-                let age = std::fs::metadata(&file).ok()?.modified().ok()?.elapsed().ok();
-                let raw = std::fs::read(&file).ok()?;
-                // Nobody waits for that one any more.
-                if age.is_some_and(|age| age > lease::REQUEST_STANDS) {
-                    if let Err(err) = std::fs::remove_file(&file) {
-                        tracing::warn!("removing {}: {err}", file.display());
+        let asked: Vec<(String, std::path::PathBuf, lease::HandBack)> =
+            (self.viewed_of(project).iter())
+                .filter(|f| f.status == Status::Open)
+                .filter_map(|f| {
+                    let dir = asked_in(&crate::projects::data_dir(), project, &f.slug);
+                    let file = dir.join(lease::HAND_BACK);
+                    let age = std::fs::metadata(&file)
+                        .ok()?
+                        .modified()
+                        .ok()?
+                        .elapsed()
+                        .ok();
+                    let raw = std::fs::read(&file).ok()?;
+                    // Nobody waits for that one any more.
+                    if age.is_some_and(|age| age > lease::REQUEST_STANDS) {
+                        if let Err(err) = std::fs::remove_file(&file) {
+                            tracing::warn!("removing {}: {err}", file.display());
+                        }
+                        return None;
                     }
-                    return None;
-                }
-                match serde_json::from_slice(&raw) {
-                    Ok(request) => Some((f.slug.clone(), dir, request)),
-                    Err(err) => {
-                        tracing::warn!("reading {}: {err}", file.display());
-                        answer(&dir, Some("gerdr there couldn't read it".to_owned()));
-                        None
+                    match serde_json::from_slice(&raw) {
+                        Ok(request) => Some((f.slug.clone(), dir, request)),
+                        Err(err) => {
+                            tracing::warn!("reading {}: {err}", file.display());
+                            answer(&dir, Some("gerdr there couldn't read it".to_owned()));
+                            None
+                        }
                     }
-                }
-            })
-            .collect();
+                })
+                .collect();
         for (slug, dir, request) in asked {
             let refused = self.hand_back_refusal(project, &slug, &request);
             let take = refused.is_none();
@@ -316,7 +333,9 @@ mod tests {
         // Shown as it left, with no copy from the laptop since.
         assert_eq!(
             stale(&request(1), Some("lap"), 0, "Desk").as_deref(),
-            Some("Desk has had no news of it from Laptop: connect Laptop on Desk, then hand it back again")
+            Some(
+                "Desk has had no news of it from Laptop: connect Laptop on Desk, then hand it back again"
+            )
         );
     }
 
@@ -325,7 +344,10 @@ mod tests {
         // As the machine handing it back names the folder there.
         let data = "/home/ana/.local/share/gerdr";
         let there = asked_in(Path::new(data), "web", "login");
-        assert_eq!(there, Path::new("/home/ana/.local/share/gerdr/features/web/login"));
+        assert_eq!(
+            there,
+            Path::new("/home/ana/.local/share/gerdr/features/web/login")
+        );
         // As the one asked looks for it: its own record's folder, not the copy.
         let here = asked_in(&crate::projects::data_dir(), "web", "login");
         assert_eq!(here, store::project_dir(None, "web").join("login"));

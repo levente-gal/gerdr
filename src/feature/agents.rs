@@ -463,7 +463,9 @@ fn models_in(
             // T3 Code's thread names it when bound; the others can't be
             // told a chat id to look for.
             let agent = by_command(&run.base);
-            let model = agent.resumes().then(|| agent.run_model(homes, &run.session()?))??;
+            let model = agent
+                .resumes()
+                .then(|| agent.run_model(homes, &run.session()?))??;
             Some((*stage, (run.n, model)))
         })
         .collect()
@@ -879,7 +881,10 @@ mod tests {
             claude,
             "claude --settings '{\"permissions\":{\"additionalDirectories\":[\"/d/my feature\",\"/e\"]}}'"
         );
-        assert_eq!(by_command(&claude).kind(), crate::ai_work::AgentKind::Claude);
+        assert_eq!(
+            by_command(&claude).kind(),
+            crate::ai_work::AgentKind::Claude
+        );
         assert_eq!(allowed_into(&claude, &[]), claude);
         // One with settings of its own keeps --add-dir, told to read their
         // CLAUDE.md, once.

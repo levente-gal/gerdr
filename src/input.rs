@@ -1316,10 +1316,9 @@ impl Gerdr {
         if under.is_none() {
             let over_field = at.is_some_and(|o| {
                 o.grabs() || matches!(o, overlay::Overlay::Features | overlay::Overlay::Criteria)
-            })
-                && self
-                    .field_spot()
-                    .is_some_and(|field| field.area.to_f64().contains(pos))
+            }) && self
+                .field_spot()
+                .is_some_and(|field| field.area.to_f64().contains(pos))
                 || self.on_scrollback_text(pos)
                 || at == Some(overlay::Overlay::Features) && self.on_page_text(pos);
             let hit = self.region_hit(pos, &regions);
@@ -1514,9 +1513,7 @@ impl Gerdr {
             Overlay::Identity => self
                 .identity_key(mods, sym, typed)
                 .map(Intercepted::Identity),
-            Overlay::Machine => self
-                .machine_key(mods, sym, typed)
-                .map(Intercepted::Machine),
+            Overlay::Machine => self.machine_key(mods, sym, typed).map(Intercepted::Machine),
             Overlay::Commands => self
                 .commands_key(mods, sym, typed)
                 .map(Intercepted::Commands),
@@ -1598,9 +1595,7 @@ impl Gerdr {
                 }
                 chrome::feature_tab_field(&self.feature_tab_view()?, self.content_rect(), scale)
             }
-            Overlay::Criteria => {
-                chrome::criteria_strip_field(&self.criteria_strip_view()?, scale)
-            }
+            Overlay::Criteria => chrome::criteria_strip_field(&self.criteria_strip_view()?, scale),
             Overlay::NewFeature => Some(chrome::new_feature_field(
                 &self.new_feature_view()?,
                 size,

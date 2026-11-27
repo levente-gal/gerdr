@@ -1108,10 +1108,7 @@ mod tests {
         // Sent with the failure, after it.
         let (sent, md) = failures_markdown(t.as_ref(), &criteria, "Bulk");
         assert_eq!(sent, 2);
-        assert!(
-            md.starts_with("# Manual test failures and issues"),
-            "{md}"
-        );
+        assert!(md.starts_with("# Manual test failures and issues"), "{md}");
         let at = |s: &str| md.find(s).unwrap();
         assert!(
             at("## AC-1:") < at("## T1: Issue\n\nMake the settings page"),

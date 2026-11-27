@@ -125,7 +125,12 @@ pub(super) fn wheel_rows(
 /// `wheel_rows`).
 pub fn wrap_field_wheel(spot: &FieldSpot, by: isize) -> Option<(usize, usize)> {
     let rows = soft_rows(&spot.line, room(spot.area.size.w));
-    wheel_rows(&spot.line, &rows, shown_rows(&spot.line, spot.area.size.w) as i32, by)
+    wheel_rows(
+        &spot.line,
+        &rows,
+        shown_rows(&spot.line, spot.area.size.w) as i32,
+        by,
+    )
 }
 
 /// How wide the text of a wrapped field `w` wide runs (as `field_text`

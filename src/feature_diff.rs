@@ -703,8 +703,14 @@ impl FeatureOf {
         }
         let left = counts.files - counts.viewed;
         Some(match left {
-            0 => (format!("All {} viewed", plural(counts.files, "file")), Tone::Success),
-            _ => (format!("{left} of {} left", plural(counts.files, "file")), Tone::Warning),
+            0 => (
+                format!("All {} viewed", plural(counts.files, "file")),
+                Tone::Success,
+            ),
+            _ => (
+                format!("{left} of {} left", plural(counts.files, "file")),
+                Tone::Warning,
+            ),
         })
     }
 
@@ -784,8 +790,12 @@ pub(crate) fn since_review(fe: &FeatureOf) -> Vec<(PathBuf, String)> {
     if fe.span.is_some() {
         return Vec::new();
     }
-    let files = (fe.repos.iter())
-        .flat_map(|r| r.since.changes.iter().map(move |c| (r.root.clone(), c.path.clone())));
+    let files = (fe.repos.iter()).flat_map(|r| {
+        r.since
+            .changes
+            .iter()
+            .map(move |c| (r.root.clone(), c.path.clone()))
+    });
     let mut viewed = Vec::new();
     let mut changed = false;
     for (root, path) in files {
@@ -1043,14 +1053,19 @@ pub fn next_step(gate: &Gate, total: usize, changed: usize) -> (String, bool) {
     } else if gate.draft {
         DRAFT_OPEN.into()
     } else {
-        let next = Stage::CodeReview.next().map_or("the next stage", Stage::label);
+        let next = Stage::CodeReview
+            .next()
+            .map_or("the next stage", Stage::label);
         // Its comments wait for the review on GitHub.
         let kept = match gate.comments {
             0 => String::new(),
             n if gate.posts => format!(" \u{b7} {} for GitHub", plural(n, "comment")),
             _ => String::new(),
         };
-        return (format!("{}{kept} \u{b7} Approve to go on to {next}", all()), true);
+        return (
+            format!("{}{kept} \u{b7} Approve to go on to {next}", all()),
+            true,
+        );
     };
     (text, false)
 }
@@ -2232,7 +2247,10 @@ mod tests {
         );
         // A fix changed b.rs, viewed before: a.rs, viewed and the same, folds.
         fe.viewed.0.insert("api/b.rs".into(), "old".into());
-        assert_eq!(since_review(&fe), [(PathBuf::from("/w/api"), "a.rs".to_owned())]);
+        assert_eq!(
+            since_review(&fe),
+            [(PathBuf::from("/w/api"), "a.rs".to_owned())]
+        );
         // A fix round's own diff is only read: nothing folds.
         fe.span = Some(SpanOf::default());
         assert!(since_review(&fe).is_empty());
@@ -3041,13 +3059,12 @@ mod tests {
             .title_buttons
             .into_iter()
             .map(|h| h.button);
-        let title =
-            title.filter(|b| {
-                !matches!(
-                    b,
-                    ReposButton::PrevComment | ReposButton::NextComment | ReposButton::Close
-                )
-            });
+        let title = title.filter(|b| {
+            !matches!(
+                b,
+                ReposButton::PrevComment | ReposButton::NextComment | ReposButton::Close
+            )
+        });
         let hints = wd.hints().into_iter().map(|h| h.button).collect();
         (title.collect(), hints)
     }
@@ -3127,7 +3144,13 @@ mod tests {
         // Going on, or back to it: no comment, no viewed tick.
         let (title, hints) = offered(&wd);
         assert_eq!(title, [B::GoOn, B::Reopen]);
-        for dead in [B::Comment, B::AddComment, B::MarkViewed, B::Approve, B::PlanFixes] {
+        for dead in [
+            B::Comment,
+            B::AddComment,
+            B::MarkViewed,
+            B::Approve,
+            B::PlanFixes,
+        ] {
             assert!(!title.contains(&dead) && !hints.contains(&dead), "{dead:?}");
         }
         let go = (wd.feature_hints().into_iter()).find(|h| h.button == B::GoOn);
@@ -3346,10 +3369,16 @@ mod tests {
         let mut wd = popup(Stage::CodeReview, Vec::new(), Review::default());
         let gate = wd.approve_gate(Some(Stage::CodeReview)).unwrap();
         let why = approve_refusal(&gate);
-        assert!(why.as_deref().is_some_and(|w| w.contains("not viewed")), "{why:?}");
+        assert!(
+            why.as_deref().is_some_and(|w| w.contains("not viewed")),
+            "{why:?}"
+        );
         // The popup's title row and the footer both grey it, saying why.
         let approve = |hints: Vec<Hint>| hints.into_iter().find(|h| h.button == B::Approve);
-        assert_eq!(approve(wd.view(POPUP_ENV).title_buttons).unwrap().disabled, why);
+        assert_eq!(
+            approve(wd.view(POPUP_ENV).title_buttons).unwrap().disabled,
+            why
+        );
         assert_eq!(approve(wd.hints()).unwrap().disabled, why);
         // A read again behind it changes nothing of what shows.
         wd.reading = true;
@@ -3413,7 +3442,13 @@ mod tests {
             not("Code review is done")
         );
         // Whatever it says, Approve is ready exactly when nothing refuses it.
-        for gate in [ready.clone(), Gate { comments: 1, ..ready.clone() }] {
+        for gate in [
+            ready.clone(),
+            Gate {
+                comments: 1,
+                ..ready.clone()
+            },
+        ] {
             assert_eq!(next(&gate).1, approve_refusal(&gate).is_none());
         }
     }
@@ -3950,7 +3985,12 @@ mod posts_tests {
             ],
             ..FeatureOf::default()
         };
-        let buttons = |fe: &FeatureOf| fe.buttons(0).into_iter().map(|(b, _)| b).collect::<Vec<_>>();
+        let buttons = |fe: &FeatureOf| {
+            fe.buttons(0)
+                .into_iter()
+                .map(|(b, _)| b)
+                .collect::<Vec<_>>()
+        };
         assert_eq!(buttons(&fe(Stage::AiReview, true)), vec![B::AddComment]);
         assert!(buttons(&fe(Stage::AiReview, false)).contains(&B::PlanFixes));
         assert_eq!(
@@ -3960,9 +4000,17 @@ mod posts_tests {
         // One to comment waits for the review, not for AI review.
         assert_eq!(fe(Stage::AiReview, true).holding(), 1);
         assert_eq!(fe(Stage::AiReview, false).holding(), 2);
-        assert!(fe(Stage::AiReview, true).decisions().starts_with("1 to comment"));
+        assert!(
+            fe(Stage::AiReview, true)
+                .decisions()
+                .starts_with("1 to comment")
+        );
         let comments = fe(Stage::AiReview, true).finding_comments(&HashMap::new());
-        assert!(comments.iter().all(|c| c.flag.as_ref().is_some_and(|f| f.pr)));
+        assert!(
+            comments
+                .iter()
+                .all(|c| c.flag.as_ref().is_some_and(|f| f.pr))
+        );
     }
 
     #[test]
@@ -3974,10 +4022,16 @@ mod posts_tests {
             ..Gate::default()
         };
         assert!(approve_refusal(&gate).is_some_and(|why| why.contains("plan fixes")));
-        let posts = Gate { posts: true, ..gate };
+        let posts = Gate {
+            posts: true,
+            ..gate
+        };
         assert_eq!(approve_refusal(&posts), None);
         let (text, ready) = next_step(&posts, 3, 0);
         assert!(ready);
-        assert_eq!(text, "All 3 files viewed \u{b7} 2 comments for GitHub \u{b7} Approve to go on to Manual test");
+        assert_eq!(
+            text,
+            "All 3 files viewed \u{b7} 2 comments for GitHub \u{b7} Approve to go on to Manual test"
+        );
     }
 }

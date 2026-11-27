@@ -110,7 +110,10 @@ pub enum Press {
     },
     /// On the Placement page: the open project's `stage` goes to the next
     /// machine, or the one before with `back`.
-    Place { stage: Stage, back: bool },
+    Place {
+        stage: Stage,
+        back: bool,
+    },
 }
 
 /// What the machines panel asks gerdr to do.
@@ -865,7 +868,10 @@ fn placement_key(
         _ => 0,
     };
     let stage = |back| match content.run_presses.get(row)?.first()? {
-        Press::Place { stage, .. } => Some(Outcome::Press(Press::Place { stage: *stage, back })),
+        Press::Place { stage, .. } => Some(Outcome::Press(Press::Place {
+            stage: *stage,
+            back,
+        })),
         _ => None,
     };
     let up = match key_table::press(PLACE_KEYS, &(), mods, sym) {
@@ -1595,7 +1601,10 @@ impl Gerdr {
     /// naming its machine, which goes to the next.
     fn placement_content(&self) -> Content {
         use crate::{machine_load::LEAST_BUSY, machine_work::takes_a_place};
-        let project = self.project.as_deref().and_then(|id| self.projects.project(id));
+        let project = self
+            .project
+            .as_deref()
+            .and_then(|id| self.projects.project(id));
         let Some(project) = project else {
             return Content {
                 detail: Some(placement_detail(
@@ -2269,9 +2278,17 @@ mod tests {
         assert_eq!(next(None, false).as_deref(), Some("b"));
         assert_eq!(next(Some("b"), false).as_deref(), Some("c"));
         assert_eq!(next(Some("c"), false).as_deref(), Some("least busy"));
-        assert_eq!(next(Some("least busy"), false), None, "back to this machine");
+        assert_eq!(
+            next(Some("least busy"), false),
+            None,
+            "back to this machine"
+        );
         assert_eq!(next(None, true).as_deref(), Some("least busy"));
-        assert_eq!(next(Some("gone"), false).as_deref(), Some("b"), "an unsaved name goes on");
+        assert_eq!(
+            next(Some("gone"), false).as_deref(),
+            Some("b"),
+            "an unsaved name goes on"
+        );
     }
 
     #[test]
@@ -2285,12 +2302,21 @@ mod tests {
         let key = |panel: &mut MachinesPanel, focus, sym| {
             placement_key(&c, focus, panel, &ModifiersState::default(), sym)
         };
-        assert_eq!(key(&mut panel, MachinesFocus::Run(0, 0), Keysym::Down), None);
+        assert_eq!(
+            key(&mut panel, MachinesFocus::Run(0, 0), Keysym::Down),
+            None
+        );
         assert_eq!(panel.focus, MachinesFocus::Run(1, 0));
         let left = key(&mut panel, MachinesFocus::Run(1, 0), Keysym::Left);
-        let back = Press::Place { stage: Stage::Verify, back: true };
+        let back = Press::Place {
+            stage: Stage::Verify,
+            back: true,
+        };
         assert_eq!(left, Some(Outcome::Press(back)));
-        assert_eq!(key(&mut panel, MachinesFocus::Run(1, 0), Keysym::Escape), Some(Outcome::Close));
+        assert_eq!(
+            key(&mut panel, MachinesFocus::Run(1, 0), Keysym::Escape),
+            Some(Outcome::Close)
+        );
     }
 
     #[test]

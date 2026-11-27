@@ -127,7 +127,10 @@ struct TakeJob {
 impl TakeJob {
     /// Its folder there.
     fn dir_there(&self) -> String {
-        format!("{}/features/{}/{}", self.there.data, self.project, self.slug)
+        format!(
+            "{}/features/{}/{}",
+            self.there.data, self.project, self.slug
+        )
     }
 
     /// Its folder here, as this machine's: `store::dir` still finds the copy.
@@ -155,8 +158,16 @@ impl TakeJob {
         let paths = Paths::new(&self.there, &self.here, &self.folders, Some(record));
         let keep = self.reach.is_some();
         let (from, me) = (self.from.as_str(), self.me.as_str());
-        let mut out = lease::taken(record, &paths, from, &self.from_name, me, keep, feature::now())
-            .map_err(TakeEnd::Failed)?;
+        let mut out = lease::taken(
+            record,
+            &paths,
+            from,
+            &self.from_name,
+            me,
+            keep,
+            feature::now(),
+        )
+        .map_err(TakeEnd::Failed)?;
         if self.handed {
             out.came_from = None;
         }
@@ -188,7 +199,12 @@ impl TakeJob {
 
     /// `feature`'s repositories, as seen from there.
     fn places(&self, feature: &Feature) -> Vec<remote::Place> {
-        let back = Paths::new(&self.here, &self.there, &flipped(&self.folders), Some(feature));
+        let back = Paths::new(
+            &self.here,
+            &self.there,
+            &flipped(&self.folders),
+            Some(feature),
+        );
         remote::places(feature, &back)
     }
 
@@ -206,9 +222,8 @@ impl TakeJob {
         }
         let dir = self.dir_here();
         feature::layout::settle_taken(feature, &dir);
-        store::save_at(&dir, feature).map_err(|err| {
-            TakeEnd::Failed(format!("Couldn't save the record here: {err}"))
-        })?;
+        store::save_at(&dir, feature)
+            .map_err(|err| TakeEnd::Failed(format!("Couldn't save the record here: {err}")))?;
         // From when it left here last.
         for file in [
             lease::HANDED_TO,
@@ -252,7 +267,8 @@ impl TakeJob {
         let first = self.taken(&record)?;
         let places = self.places(&first);
         if !self.forced {
-            let said = remote::parse_status(&reach.script(&remote::status_script(&places), cancel)?);
+            let said =
+                remote::parse_status(&reach.script(&remote::status_script(&places), cancel)?);
             if let Some(dirty) = said.iter().find(|s| s.dirty) {
                 return Err(TakeEnd::Refused(format!(
                     "{} has changes not committed on {}: commit them there first",
@@ -302,7 +318,11 @@ impl TakeJob {
         // what doesn't get there now is owed, and runs when that machine is back.
         let script = match &finished {
             Err(end) => {
-                tracing::info!("{}/{}: taking it over ended: {end:?}", self.project, self.slug);
+                tracing::info!(
+                    "{}/{}: taking it over ended: {end:?}",
+                    self.project,
+                    self.slug
+                );
                 lease::undo_script(&dir)
             }
             Ok(_) => lease::done_script(&dir),
@@ -316,7 +336,10 @@ impl TakeJob {
                 Some(lease::guarded(&dir, &self.me, &script))
             }
         };
-        owe(&owed_file(&self.root, &self.project, &self.slug), owed.as_deref());
+        owe(
+            &owed_file(&self.root, &self.project, &self.slug),
+            owed.as_deref(),
+        );
         let (record, feature) = finished?;
         step("bringing its ignored files".to_owned());
         let missed = self.bring_ignored(reach, &feature, cancel);
@@ -469,7 +492,10 @@ impl TakeJob {
         store::attach_sides(&copy, &mut record);
         let feature = self.taken(&record)?;
         if let Some(repo) = (feature.repos.iter()).find(|r| !r.worktree.join(".git").exists()) {
-            return Err(TakeEnd::Failed(format!("{}'s code never came here", repo.key())));
+            return Err(TakeEnd::Failed(format!(
+                "{}'s code never came here",
+                repo.key()
+            )));
         }
         let local = self.dir_here();
         remote::copy_data(&copy, &local, cancel)?;
@@ -497,12 +523,7 @@ impl TakeJob {
 impl Gerdr {
     /// The user pressed `press` on a feature another machine writes, or asked for
     /// it as such: start moving it here.
-    pub(crate) fn take_feature(
-        &mut self,
-        project: &str,
-        slug: &str,
-        press: Option<PanelOutcome>,
-    ) {
+    pub(crate) fn take_feature(&mut self, project: &str, slug: &str, press: Option<PanelOutcome>) {
         let key = (project.to_owned(), slug.to_owned());
         let Some(feature) = self.feature(project, slug).cloned() else {
             return;
@@ -540,8 +561,12 @@ impl Gerdr {
                 ));
             }
             let says = match left {
-                Some(blocker) => format!("{}. It goes on there, and nothing here follows it", blocker.why),
-                None => "What was done there since it was last seen is kept aside once it is back".to_owned(),
+                Some(blocker) => format!(
+                    "{}. It goes on there, and nothing here follows it",
+                    blocker.why
+                ),
+                None => "What was done there since it was last seen is kept aside once it is back"
+                    .to_owned(),
             };
             self.features.take_asked.insert(key, press);
             return self.ask(
@@ -657,10 +682,15 @@ impl Gerdr {
                 });
             }
         };
-        if let Err(err) = std::thread::Builder::new().name("take over".into()).spawn(thread) {
+        if let Err(err) = std::thread::Builder::new()
+            .name("take over".into())
+            .spawn(thread)
+        {
             tracing::warn!("taking over {slug}: {err}");
             self.features.taking.remove(&key);
-            self.show_error(format!("\u{201c}{title}\u{201d} can't be taken over: {err}"));
+            self.show_error(format!(
+                "\u{201c}{title}\u{201d} can't be taken over: {err}"
+            ));
         }
         self.sync_feature_page();
     }
@@ -668,31 +698,34 @@ impl Gerdr {
     /// What a take's thread says.
     pub(crate) fn take_event(&mut self, event: TakeEvent) {
         match event {
-            TakeEvent::Step { project, slug, what } => {
+            TakeEvent::Step {
+                project,
+                slug,
+                what,
+            } => {
                 if let Some(taking) = self.features.taking.get_mut(&(project, slug)) {
                     taking.step = what;
                 }
                 self.sync_feature_page();
             }
-            TakeEvent::Ended { project, slug, result } => {
+            TakeEvent::Ended {
+                project,
+                slug,
+                result,
+            } => {
                 self.take_ended(&project, &slug, result);
             }
         }
     }
 
-    fn take_ended(
-        &mut self,
-        project: &str,
-        slug: &str,
-        result: Result<Box<Taken>, TakeEnd>,
-    ) {
+    fn take_ended(&mut self, project: &str, slug: &str, result: Result<Box<Taken>, TakeEnd>) {
         let key = (project.to_owned(), slug.to_owned());
         let Some(taking) = self.features.taking.remove(&key) else {
             return;
         };
         let name = self.machine_name(&taking.from);
-        let title = (self.feature(project, slug))
-            .map_or_else(|| slug.to_owned(), |f| f.title.clone());
+        let title =
+            (self.feature(project, slug)).map_or_else(|| slug.to_owned(), |f| f.title.clone());
         let taken = match result {
             Ok(taken) => taken,
             Err(end) => {
@@ -715,9 +748,7 @@ impl Gerdr {
                     }
                     TakeEnd::Failed(why) => {
                         tracing::warn!("{project}/{slug}: taking it over: {why}");
-                        self.show_error(format!(
-                            "\u{201c}{title}\u{201d} stays on {name}: {why}"
-                        ));
+                        self.show_error(format!("\u{201c}{title}\u{201d} stays on {name}: {why}"));
                     }
                 };
             }
@@ -729,7 +760,10 @@ impl Gerdr {
         } = *taken;
         // What it was seen as goes, what it names is asked of those machines now.
         // The tabs of a sandbox that went on on the writer are still told of there.
-        let still: Vec<String> = view::panes_of(&feature).into_iter().map(str::to_owned).collect();
+        let still: Vec<String> = view::panes_of(&feature)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
         if let Some(list) = self.features.viewed.get_mut(project) {
             if let Some(old) = list.iter().find(|f| f.slug == slug) {
                 let names: Vec<String> = (view::panes_of(old).into_iter())
@@ -749,7 +783,9 @@ impl Gerdr {
         let kept_there = (feature.sandbox.as_ref())
             .is_some_and(|run| run.kept && run.machine.as_deref() == Some(taking.from.as_str()));
         self.features.code_here.remove(&key);
-        self.features.clashes.remove(&(taking.from.clone(), slug.to_owned()));
+        self.features
+            .clashes
+            .remove(&(taking.from.clone(), slug.to_owned()));
         let all = self.features.all.entry(project.to_owned()).or_default();
         all.retain(|f| f.slug != slug);
         all.push(feature);
@@ -782,8 +818,8 @@ impl Gerdr {
         let Some(press) = taking.press else {
             return;
         };
-        let on_it = (self.features.panel.as_ref())
-            .is_some_and(|p| p.project == project && p.slug == slug);
+        let on_it =
+            (self.features.panel.as_ref()).is_some_and(|p| p.project == project && p.slug == slug);
         if !same {
             return self.show_warning(format!(
                 "\u{201c}{title}\u{201d} changed on {name} just before: look, then press again"
@@ -906,7 +942,10 @@ impl Gerdr {
         let at_work = |pane: &str, what: &str| {
             let seen = self.features.seen.get(pane)?;
             let works = seen.alive
-                && matches!(seen.status, Some(AgentStatus::Working | AgentStatus::Blocked));
+                && matches!(
+                    seen.status,
+                    Some(AgentStatus::Working | AgentStatus::Blocked)
+                );
             let stale = !seen.stands(feature::now());
             let on = split_pane(pane).map(|(id, _)| id);
             if on == Some(me) && works {
@@ -917,7 +956,9 @@ impl Gerdr {
             }
             if seen.session.is_some() && works {
                 return Some(Blocker {
-                    why: format!("{what} works in gerdr's own tabs on {name}: wait for it, or stop it there"),
+                    why: format!(
+                        "{what} works in gerdr's own tabs on {name}: wait for it, or stop it there"
+                    ),
                     stale,
                 });
             }
@@ -944,11 +985,15 @@ impl Gerdr {
         }
         if checks_running(feature) {
             let verify = feature.verify.as_ref()?;
-            let unwatched = verify.checks.iter().filter_map(|c| c.pane.as_deref()).find(|pane| {
-                let on = split_pane(pane).map(|(id, _)| id);
-                let seen = self.features.seen.get(*pane);
-                on == Some(me) || seen.is_some_and(|s| s.session.is_some())
-            });
+            let unwatched = verify
+                .checks
+                .iter()
+                .filter_map(|c| c.pane.as_deref())
+                .find(|pane| {
+                    let on = split_pane(pane).map(|(id, _)| id);
+                    let seen = self.features.seen.get(*pane);
+                    on == Some(me) || seen.is_some_and(|s| s.session.is_some())
+                });
             if unwatched.is_some() {
                 return Some(Blocker {
                     why: format!("Its checks run in gerdr's own tabs on {name}: wait for them"),
@@ -973,7 +1018,11 @@ impl Gerdr {
 
     /// Stop taking this feature over (the tasks panel).
     pub(crate) fn stop_take(&mut self, project: &str, slug: &str) {
-        if let Some(taking) = self.features.taking.get(&(project.to_owned(), slug.to_owned())) {
+        if let Some(taking) = self
+            .features
+            .taking
+            .get(&(project.to_owned(), slug.to_owned()))
+        {
             taking.stop.store(true, Ordering::Relaxed);
         }
     }
@@ -1000,9 +1049,15 @@ impl Gerdr {
 
     /// What the page of a feature being taken over says of that.
     pub(crate) fn take_note(&self, f: &Feature) -> Option<(String, bool)> {
-        let taking = self.features.taking.get(&(f.project.clone(), f.slug.clone()))?;
+        let taking = self
+            .features
+            .taking
+            .get(&(f.project.clone(), f.slug.clone()))?;
         let name = self.machine_name(&taking.from);
-        Some((format!("Taking it over from {name}: {}", taking.step), false))
+        Some((
+            format!("Taking it over from {name}: {}", taking.step),
+            false,
+        ))
     }
 
     /// Look for what other machines ask of this gerdr's features, and put back
@@ -1016,7 +1071,12 @@ impl Gerdr {
             .filter(|f| f.status == Status::Open)
             .filter_map(|f| {
                 let file = store::dir(None, &project, &f.slug).join(lease::REQUEST);
-                let age = std::fs::metadata(&file).ok()?.modified().ok()?.elapsed().ok();
+                let age = std::fs::metadata(&file)
+                    .ok()?
+                    .modified()
+                    .ok()?
+                    .elapsed()
+                    .ok();
                 let raw = std::fs::read(&file).ok()?;
                 // Nobody waits for that one any more.
                 if age.is_some_and(|age| age > lease::REQUEST_STANDS) {
@@ -1154,8 +1214,9 @@ impl Gerdr {
         if let Err(err) = std::fs::copy(dir.join(store::FILE), dir.join(lease::LEFT)) {
             tracing::warn!("keeping {slug} as it leaves: {err}");
         }
-        let moved = crate::projects::write_atomic(&dir.join(lease::HANDED_TO), request.machine.as_bytes())
-            .and_then(|()| std::fs::rename(dir.join(store::FILE), &handed));
+        let moved =
+            crate::projects::write_atomic(&dir.join(lease::HANDED_TO), request.machine.as_bytes())
+                .and_then(|()| std::fs::rename(dir.join(store::FILE), &handed));
         if let Err(err) = moved {
             tracing::warn!("handing {slug} over: {err}");
             return say(&Answer {
@@ -1258,9 +1319,8 @@ impl Gerdr {
         self.unbusy(project, slug, Job::Verify);
         // Its stopped sandbox's data stays with nobody's record if it isn't taken
         // away now, and one still running stops with it, unless it goes on.
-        let goes_on = |run: &SandboxRun| {
-            keep_sandbox && !run.stopped && run.failed.is_none() && run.alive()
-        };
+        let goes_on =
+            |run: &SandboxRun| keep_sandbox && !run.stopped && run.failed.is_none() && run.alive();
         if let Some(run) = feature.sandbox.as_ref().filter(|run| run.machine.is_none())
             && goes_on(run)
         {
@@ -1300,7 +1360,11 @@ impl Gerdr {
         from_here: bool,
     ) {
         let name = self.machine_name(to);
-        let kept = match self.features.kept.contains_key(&(project.to_owned(), slug.to_owned())) {
+        let kept = match self
+            .features
+            .kept
+            .contains_key(&(project.to_owned(), slug.to_owned()))
+        {
             true => ". Its sandbox keeps running here",
             false => "",
         };
@@ -1454,7 +1518,10 @@ impl Gerdr {
                 }
                 continue;
             };
-            if modified.elapsed().is_ok_and(|age| age > lease::RESTORE_AFTER) {
+            if modified
+                .elapsed()
+                .is_ok_and(|age| age > lease::RESTORE_AFTER)
+            {
                 match restore_record(&dir) {
                     // Claimed just now: the new writer has it.
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
@@ -1546,7 +1613,9 @@ impl Gerdr {
                 aside.display()
             ),
         );
-        self.features.handing.remove(&(project.to_owned(), slug.to_owned()));
+        self.features
+            .handing
+            .remove(&(project.to_owned(), slug.to_owned()));
         // What won may not know of its sandbox: it stops here, as ever.
         self.leave_feature(project, slug, to, &feature, false);
         let running = feature::view::panes_of(&feature).into_iter().any(|pane| {
@@ -1606,7 +1675,11 @@ impl Gerdr {
     /// to the network, as it was when the feature left: for the caller to open,
     /// once the feature is here.
     fn end_kept(&mut self, project: &str, slug: &str, started_here: Option<u64>) -> bool {
-        let Some(kept) = self.features.kept.remove(&(project.to_owned(), slug.to_owned())) else {
+        let Some(kept) = self
+            .features
+            .kept
+            .remove(&(project.to_owned(), slug.to_owned()))
+        else {
             return false;
         };
         let same = started_here == Some(kept.started);
@@ -1868,8 +1941,13 @@ mod tests {
             for file in [lease::HANDED, lease::HANDED_TO, lease::LEFT] {
                 std::fs::write(dir.join(file), slug).unwrap();
             }
-            let handed = std::fs::File::options().write(true).open(dir.join(lease::HANDED));
-            handed.unwrap().set_modified(SystemTime::now() - age).unwrap();
+            let handed = std::fs::File::options()
+                .write(true)
+                .open(dir.join(lease::HANDED));
+            handed
+                .unwrap()
+                .set_modified(SystemTime::now() - age)
+                .unwrap();
             dir
         };
         let old = lease::RESTORE_AFTER + Duration::from_secs(5);
@@ -1882,13 +1960,19 @@ mod tests {
         let taken = at("taken", old);
         std::fs::rename(taken.join(lease::HANDED), taken.join(lease::TAKEN)).unwrap();
         restore_left_in(&t);
-        assert_eq!(std::fs::read_to_string(gone.join(store::FILE)).unwrap(), "gone");
+        assert_eq!(
+            std::fs::read_to_string(gone.join(store::FILE)).unwrap(),
+            "gone"
+        );
         for file in [lease::HANDED, lease::HANDED_TO, lease::LEFT] {
             assert!(!gone.join(file).exists(), "{file}");
         }
         assert!(fresh.join(lease::HANDED).exists());
         assert!(!fresh.join(store::FILE).exists());
-        assert_eq!(std::fs::read_to_string(back.join(store::FILE)).unwrap(), "mine");
+        assert_eq!(
+            std::fs::read_to_string(back.join(store::FILE)).unwrap(),
+            "mine"
+        );
         assert!(back.join(lease::HANDED).exists());
         assert!(!taken.join(store::FILE).exists());
         assert!(taken.join(lease::TAKEN).exists());

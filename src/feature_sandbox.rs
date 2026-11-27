@@ -155,7 +155,9 @@ pub fn lines_of(
                 let command = command.trim();
                 let words = command.trim_start_matches('#').trim();
                 // Listed under both names, a command runs once.
-                let twice = out.iter().any(|l: &SandboxLine| l.dir == dir && l.words == words);
+                let twice = out
+                    .iter()
+                    .any(|l: &SandboxLine| l.dir == dir && l.words == words);
                 if words.is_empty() || twice {
                     continue;
                 }
@@ -203,7 +205,8 @@ pub(crate) fn sandbox_url(
     if let (None, Some(set)) = (run.pages.get(page), set) {
         return Some(set.to_owned());
     }
-    let guess = |ports: &[u16]| sandbox_run::app_port(ports).map(|port| format!("http://localhost:{port}"));
+    let guess =
+        |ports: &[u16]| sandbox_run::app_port(ports).map(|port| format!("http://localhost:{port}"));
     match run.pages.get(page) {
         // The other pages' ports are theirs: a dev server's is among the rest.
         Some(page) if page.guess => {
@@ -211,7 +214,10 @@ pub(crate) fn sandbox_url(
                 .filter(|p| !p.guess)
                 .filter_map(|p| local_port(&p.url))
                 .collect();
-            let rest: Vec<u16> = (ports.iter()).copied().filter(|p| !theirs.contains(p)).collect();
+            let rest: Vec<u16> = (ports.iter())
+                .copied()
+                .filter(|p| !theirs.contains(p))
+                .collect();
             guess(&rest)
         }
         // A port no one listens on yet would show the browser's error page.
@@ -226,7 +232,9 @@ pub(crate) fn sandbox_url(
 /// What the user hears when page `page` of `run`'s app has nothing listening.
 pub(crate) fn nothing_listens(run: &SandboxRun, page: usize) -> String {
     match run.pages.get(page) {
-        Some(page) if page.guess => format!("Nothing listens in the sandbox yet, for {}", page.name),
+        Some(page) if page.guess => {
+            format!("Nothing listens in the sandbox yet, for {}", page.name)
+        }
         Some(page) => match local_port(&page.url) {
             Some(port) => format!(
                 "Nothing listens on port {port} in the sandbox yet, for {}",
@@ -248,7 +256,8 @@ pub(crate) fn sandbox_pane(feature: &Feature, pane: &str) -> bool {
 /// the sandbox's own inside it. `*.localhost` isn't: T3 Code's pages are named
 /// that way, and its server runs outside.
 pub(crate) fn is_local_page(command: &str) -> bool {
-    host_and_port(command).is_some_and(|(host, _)| matches!(host, "localhost" | "127.0.0.1" | "::1"))
+    host_and_port(command)
+        .is_some_and(|(host, _)| matches!(host, "localhost" | "127.0.0.1" | "::1"))
 }
 
 /// The port a page on `localhost` is at.
@@ -623,8 +632,12 @@ impl Gerdr {
     /// The ports feature's sandbox leads out to its machine: its projects'
     /// `workflow.sandbox_outside`.
     fn sandbox_outside(&self, feature: &Feature) -> Vec<u16> {
-        let set = self.projects.workflows(feature, |w| w.sandbox_outside.clone());
-        let mut ports: Vec<u16> = (set.links.into_values().flatten()).chain(set.home).collect();
+        let set = self
+            .projects
+            .workflows(feature, |w| w.sandbox_outside.clone());
+        let mut ports: Vec<u16> = (set.links.into_values().flatten())
+            .chain(set.home)
+            .collect();
         ports.sort_unstable();
         ports.dedup();
         ports
@@ -730,7 +743,10 @@ impl Gerdr {
             self.show_warning(text);
         }
         if !run.not_there.is_empty() {
-            let name = run.machine.as_deref().map_or_else(String::new, |id| self.machine_name(id));
+            let name = run
+                .machine
+                .as_deref()
+                .map_or_else(String::new, |id| self.machine_name(id));
             self.show_warning(format!(
                 "{} doesn't run on {name}, so the sandbox has no copy of it: start it there first",
                 run.not_there.join(", ")
@@ -1290,7 +1306,10 @@ impl Gerdr {
         } else {
             self.machines.left.insert(machine, stacks.clone());
         }
-        let mut stacks: Vec<LeftStack> = stacks.into_iter().filter(|left| left.from.is_none()).collect();
+        let mut stacks: Vec<LeftStack> = stacks
+            .into_iter()
+            .filter(|left| left.from.is_none())
+            .collect();
         stacks.retain(|left| self.machines.left_told.insert(left.clone()));
         if stacks.is_empty() {
             return;
@@ -1342,7 +1361,11 @@ impl Gerdr {
     }
 
     /// `remove_sandbox_leftovers` ended: what went leaves the tasks panel.
-    pub(crate) fn sandbox_leftovers_removed(&mut self, removed: Vec<LeftStack>, problems: Vec<String>) {
+    pub(crate) fn sandbox_leftovers_removed(
+        &mut self,
+        removed: Vec<LeftStack>,
+        problems: Vec<String>,
+    ) {
         for stacks in self.machines.left.values_mut() {
             stacks.retain(|left| !removed.contains(left));
         }
@@ -1408,7 +1431,9 @@ struct Others<'a> {
 fn feature_known(project: &str, slug: &str, machine: Option<&str>) -> bool {
     let data = crate::projects::data_dir();
     let has = |root: Option<&std::path::Path>| {
-        store::dir(root, project, slug).join("feature.json").exists()
+        store::dir(root, project, slug)
+            .join("feature.json")
+            .exists()
     };
     has(None)
         // Running here for the machine that writes it now.
@@ -1543,12 +1568,20 @@ mod tests {
     fn a_gone_feature_is_this_gerdrs_only_if_its_sandbox_says_so() {
         assert_eq!(
             found(Some("w"), &["p/known"], &no_others()),
-            [of("p/mine", None), of("p/other", Some("them")), of("p/old", Some(""))]
+            [
+                of("p/mine", None),
+                of("p/other", Some("them")),
+                of("p/old", Some(""))
+            ]
         );
         // Here, what started before owners were noted is this gerdr's.
         assert_eq!(
             found(None, &["p/known"], &no_others()),
-            [of("p/mine", None), of("p/other", Some("them")), of("p/old", None)]
+            [
+                of("p/mine", None),
+                of("p/other", Some("them")),
+                of("p/old", None)
+            ]
         );
         let all = ["p/known", "p/mine", "p/other", "p/old"];
         assert!(found(Some("w"), &all, &no_others()).is_empty());
@@ -1557,7 +1590,10 @@ mod tests {
     #[test]
     fn another_gerdr_still_around_answers_for_its_own() {
         let up = ["them".to_owned()];
-        let connected = Others { up: &up, ..no_others() };
+        let connected = Others {
+            up: &up,
+            ..no_others()
+        };
         assert_eq!(
             found(Some("w"), &["p/known"], &connected),
             [of("p/mine", None), of("p/old", Some(""))]
@@ -1568,20 +1604,35 @@ mod tests {
             at: NOW - 60,
             ..Default::default()
         }];
-        let there = Others { reached: Some(&lately), ..no_others() };
+        let there = Others {
+            reached: Some(&lately),
+            ..no_others()
+        };
         assert_eq!(found(Some("w"), &["p/known"], &there).len(), 2);
         let long_ago = [crate::machine_reach::Reached {
             at: NOW - crate::machine_reach::AROUND - 1,
             ..lately[0].clone()
         }];
-        let gone = Others { reached: Some(&long_ago), ..no_others() };
+        let gone = Others {
+            reached: Some(&long_ago),
+            ..no_others()
+        };
         let all = vec![labelled("p/other", "them")];
         let left = left_behind(all, Some("w"), Some("me"), &gone, |_, _| false);
         let from = left[0].from.as_ref().unwrap();
-        assert_eq!((from.name.as_str(), from.seen), ("laptop", Some(long_ago[0].at)));
+        assert_eq!(
+            (from.name.as_str(), from.seen),
+            ("laptop", Some(long_ago[0].at))
+        );
         // Not knowing who was there, another gerdr's isn't offered.
-        let unsure = Others { reached: None, ..no_others() };
-        assert_eq!(found(Some("w"), &["p/known"], &unsure), [of("p/mine", None)]);
+        let unsure = Others {
+            reached: None,
+            ..no_others()
+        };
+        assert_eq!(
+            found(Some("w"), &["p/known"], &unsure),
+            [of("p/mine", None)]
+        );
     }
 
     #[test]
@@ -1629,10 +1680,19 @@ mod tests {
             ..SandboxRun::default()
         };
         let url = |page, ports: &[u16]| sandbox_url(&run, page, ports, None);
-        assert_eq!(url(0, &[9000, 6379, 4200]).as_deref(), Some("http://localhost:4200"));
-        assert_eq!(url(2, &[9000, 4200]).as_deref(), Some("http://localhost:9000/admin/"));
+        assert_eq!(
+            url(0, &[9000, 6379, 4200]).as_deref(),
+            Some("http://localhost:4200")
+        );
+        assert_eq!(
+            url(2, &[9000, 4200]).as_deref(),
+            Some("http://localhost:9000/admin/")
+        );
         assert_eq!(url(0, &[9000]), None);
-        assert_eq!(nothing_listens(&run, 0), "Nothing listens in the sandbox yet, for App");
+        assert_eq!(
+            nothing_listens(&run, 0),
+            "Nothing listens in the sandbox yet, for App"
+        );
     }
 
     #[test]

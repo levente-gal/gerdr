@@ -33,7 +33,10 @@ pub fn of(port: u16) -> Option<Holder> {
     if sockets.is_empty() {
         return None;
     }
-    let names: Vec<String> = sockets.iter().map(|inode| format!("socket:[{inode}]")).collect();
+    let names: Vec<String> = sockets
+        .iter()
+        .map(|inode| format!("socket:[{inode}]"))
+        .collect();
     // A folder that can't be listed has no process to name.
     let mut pids: Vec<i32> = (fs::read_dir("/proc").into_iter().flatten().flatten())
         .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
@@ -41,13 +44,23 @@ pub fn of(port: u16) -> Option<Holder> {
     pids.sort_unstable();
     let pid = pids.into_iter().find(|pid| {
         // Another user's: its open files can't be read, so it isn't told.
-        let fds = fs::read_dir(format!("/proc/{pid}/fd")).into_iter().flatten().flatten();
+        let fds = fs::read_dir(format!("/proc/{pid}/fd"))
+            .into_iter()
+            .flatten()
+            .flatten();
         fds.filter_map(|fd| fs::read_link(fd.path()).ok())
             .any(|link| link.to_str().is_some_and(|l| names.iter().any(|n| n == l)))
     })?;
     let raw = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
     let command = command_line(&raw)
-        .or_else(|| Some(fs::read_to_string(format!("/proc/{pid}/comm")).ok()?.trim().to_owned()))
+        .or_else(|| {
+            Some(
+                fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .ok()?
+                    .trim()
+                    .to_owned(),
+            )
+        })
         .filter(|c| !c.is_empty())?;
     let dir = fs::read_link(format!("/proc/{pid}/cwd")).ok();
     Some(Holder { pid, command, dir })
@@ -74,8 +87,13 @@ fn command_line(raw: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(raw);
     let mut args = text.split('\0').filter(|a| !a.is_empty());
     let program = args.next()?;
-    let program = Path::new(program).file_name().map_or(program.into(), |n| n.to_string_lossy());
-    let line = std::iter::once(program.as_ref()).chain(args).collect::<Vec<_>>().join(" ");
+    let program = Path::new(program)
+        .file_name()
+        .map_or(program.into(), |n| n.to_string_lossy());
+    let line = std::iter::once(program.as_ref())
+        .chain(args)
+        .collect::<Vec<_>>()
+        .join(" ");
     Some(match line.char_indices().nth(COMMAND_CHARS) {
         Some((cut, _)) => format!("{}\u{2026}", line[..cut].trim_end()),
         None => line,
@@ -137,7 +155,11 @@ mod tests {
         let holder = of(port).expect("this test listens on it");
         assert_eq!(holder.pid, std::process::id() as i32);
         assert!(holder.dir.is_some());
-        assert!(holder.named().contains(&format!("(pid {}", holder.pid)), "{}", holder.named());
+        assert!(
+            holder.named().contains(&format!("(pid {}", holder.pid)),
+            "{}",
+            holder.named()
+        );
         drop(held);
         assert_eq!(of(port), None);
     }

@@ -33,8 +33,8 @@ use crate::{
     feature::{
         self, Feature, PerProject, Stage, Status,
         agents::{
-            StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs,
-            session_file, with_model, with_prompt,
+            StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs, session_file,
+            with_model, with_prompt,
         },
         artifacts,
         fix_round::FixPhase,
@@ -969,10 +969,7 @@ pub(crate) fn new_discover_agents(
 ) -> (Vec<String>, Option<String>) {
     let fresh = Feature::default();
     let asks = |name: &str| {
-        (installed.iter()).any(|a| {
-            a.name == name
-                && by_command(a.stage_base()).adds_dirs()
-        })
+        (installed.iter()).any(|a| a.name == name && by_command(a.stage_base()).adds_dirs())
     };
     let chips: Vec<AgentChip> = stage_chips(&fresh, Stage::Discover, workflow, installed)
         .into_iter()
