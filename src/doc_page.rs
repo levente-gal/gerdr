@@ -54,7 +54,9 @@ impl DocPage {
         }
         self.of = Some(of);
         let (blocks, lines) = match text {
-            Ok(text) if text.len() as u64 > FILE_MAX => (vec![DocBlock::Note(TOO_BIG.into())], vec![]),
+            Ok(text) if text.len() as u64 > FILE_MAX => {
+                (vec![DocBlock::Note(TOO_BIG.into())], vec![])
+            }
             Ok(text) => match dir {
                 Some(dir) => md_blocks::lined_in(text, dir),
                 None => md_blocks::lined(text),

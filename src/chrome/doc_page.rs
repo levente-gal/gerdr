@@ -142,7 +142,12 @@ pub fn doc_page_hit(view: &DocPageView, pos: Point<f64, Logical>) -> Option<DocP
 
 impl Painter {
     /// File page `view`, in a buffer its size.
-    pub(super) fn doc_page(&self, view: &DocPageView, scale: f64, p: &Palette) -> MemoryRenderBuffer {
+    pub(super) fn doc_page(
+        &self,
+        view: &DocPageView,
+        scale: f64,
+        p: &Palette,
+    ) -> MemoryRenderBuffer {
         let r = view.rect;
         let mut c = Canvas::new(physical(r.size, scale));
         c.fill(0, 0, c.w, c.h, p.elevated);
@@ -158,12 +163,23 @@ impl Painter {
             let at = Rectangle::new((rect.loc.x + cx, rect.loc.y + cy).into(), rect.size);
             self.doc_piece(&mut c, at, piece, scale, p);
         }
-        let span = |b: usize| laid.spans.get(b).map(|&(top, bottom)| (top + cy, bottom - top));
+        let span = |b: usize| {
+            laid.spans
+                .get(b)
+                .map(|&(top, bottom)| (top + cy, bottom - top))
+        };
         if let Some((top, h)) = view.caret.and_then(span) {
             let bar = f64::from(cx - CARET_GAP - CARET_BAR);
             let (w, h) = (f64::from(CARET_BAR), f64::from(h));
             let (x, y) = (px(bar), px(f64::from(top)));
-            c.rounded(x as f32, y as f32, px(w) as f32, px(h) as f32, px(w / 2.0) as f32, p.accent);
+            c.rounded(
+                x as f32,
+                y as f32,
+                px(w) as f32,
+                px(h) as f32,
+                px(w / 2.0) as f32,
+                p.accent,
+            );
         }
         for (top, _) in view.said.iter().filter_map(|&b| span(b)) {
             let d = f64::from(SAID_DOT);

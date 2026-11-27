@@ -33,8 +33,8 @@ use crate::{
     Drag, Gerdr, Tab, TabKind,
     chat::plan_review,
     chrome::{
-        self, DOCK_MIN_WIDTH, DOCK_SHARE_MAX, DOCK_SHARE_MIN, DetailView, DocPageHit,
-        DocPageView, ModeSwitch, Rect, ReposButton, ReposView,
+        self, DOCK_MIN_WIDTH, DOCK_SHARE_MAX, DOCK_SHARE_MIN, DetailView, DocPageHit, DocPageView,
+        ModeSwitch, Rect, ReposButton, ReposView,
     },
     doc_page::{self, DocPage},
     doc_review::{self, DocFile, Failed},
@@ -473,8 +473,8 @@ impl Gerdr {
         if open.is_none() {
             plan_review::tidy(key);
         }
-        let dir = (self.chat_agent(pane_id).and_then(|a| a.cwd.clone()))
-            .unwrap_or_else(plan_review::dir);
+        let dir =
+            (self.chat_agent(pane_id).and_then(|a| a.cwd.clone())).unwrap_or_else(plan_review::dir);
         self.close_panels_for_tab();
         let t = open.unwrap_or_else(|| {
             let chat = ChatPlanOf {
@@ -754,7 +754,10 @@ impl Gerdr {
         };
         // The page's content starts this far down it.
         let (top, bottom) = (f64::from(top), f64::from(bottom) + chrome::DOC_PAGE_ROOM);
-        let (shown, view) = (tab.doc.top(), f64::from(rect.size.h) - chrome::DOC_PAGE_ROOM);
+        let (shown, view) = (
+            tab.doc.top(),
+            f64::from(rect.size.h) - chrome::DOC_PAGE_ROOM,
+        );
         let to = match () {
             _ if top < shown => top,
             _ if bottom > shown + view => (bottom - view).min(top),
@@ -773,7 +776,9 @@ impl Gerdr {
             return false;
         };
         let (h, _) = chrome::doc_page_spans(&tab.doc.blocks, rect);
-        tab.doc.scroll.tick(now, doc_page::bounds(h, f64::from(rect.size.h)))
+        tab.doc
+            .scroll
+            .tick(now, doc_page::bounds(h, f64::from(rect.size.h)))
     }
 
     /// The wheel or the touchpad moved the shown file's page, if `pos` is
@@ -786,7 +791,11 @@ impl Gerdr {
             return false;
         };
         let (h, _) = chrome::doc_page_spans(&tab.doc.blocks, rect);
-        doc_page::scroll(&mut tab.doc, motion, doc_page::bounds(h, f64::from(rect.size.h)));
+        doc_page::scroll(
+            &mut tab.doc,
+            motion,
+            doc_page::bounds(h, f64::from(rect.size.h)),
+        );
         true
     }
 
@@ -818,7 +827,9 @@ impl Gerdr {
                 false => 0.0,
             },
         };
-        tab.doc.scroll.glide_to(to.clamp(0.0, b.max), Instant::now(), b);
+        tab.doc
+            .scroll
+            .glide_to(to.clamp(0.0, b.max), Instant::now(), b);
         true
     }
 
@@ -993,7 +1004,10 @@ mod tests {
         assert_eq!(page_key(&plain, Keysym::Escape), PageKey::Review);
         assert_eq!(page_key(&plain, Keysym::F1), PageKey::Review);
         assert_eq!(page_key(&mods(true, true), Keysym::V), PageKey::Review);
-        assert_eq!(page_key(&mods(true, false), Keysym::Return), PageKey::Review);
+        assert_eq!(
+            page_key(&mods(true, false), Keysym::Return),
+            PageKey::Review
+        );
         assert_eq!(page_key(&mods(true, true), Keysym::Return), PageKey::Review);
         // The page's own.
         assert_eq!(page_key(&plain, Keysym::Down), PageKey::Lines(1.0));

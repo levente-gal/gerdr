@@ -1357,7 +1357,25 @@ impl WorktreeDiff {
             )],
             false => &[],
         };
-        let own = f1_lines(own.into_iter().chain(list).chain(on_page.iter().copied()));
+        // A file with a Preview: its page's own keys there (`doc_tab::page_key`).
+        let preview = (self.doc.as_ref())
+            .is_some_and(|d| DocMode::choices(d.file).contains(&DocMode::Preview));
+        let page: &[(&str, &str)] = match preview {
+            true => &[
+                (
+                    "Up / Down, Home / End",
+                    "in Preview, scroll the page, to its top or end",
+                ),
+                ("Space / Shift+Space", "in Preview, a page down, up"),
+            ],
+            false => &[],
+        };
+        let own = f1_lines(
+            own.into_iter()
+                .chain(list)
+                .chain(on_page.iter().copied())
+                .chain(page.iter().copied()),
+        );
         own.into_iter().chain(diff).collect()
     }
 
@@ -3877,6 +3895,19 @@ pub(crate) mod tests {
                 .iter()
                 .any(|(_, what, _)| what == "in the review, go to the top, the end, half a page")
         );
+    }
+
+    #[test]
+    fn a_file_with_a_preview_lists_its_page_keys() {
+        let scrolls = |wd: &WorktreeDiff| {
+            (wd.help_lines().iter()).any(|(_, what, _)| what == "in Preview, a page down, up")
+        };
+        let mut wd = doc();
+        assert!(!scrolls(&wd));
+        if let Some(d) = wd.doc.as_mut() {
+            d.file = DocFile::Research(1);
+        }
+        assert!(scrolls(&wd));
     }
 
     #[test]

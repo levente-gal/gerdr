@@ -766,8 +766,9 @@ impl Chrome {
                     ));
                     if let Some(page) = page.filter(|v| v.rect.size.w > 0 && v.rect.size.h > 0) {
                         let rect = page.rect;
-                        let buffer = (self.doc_page)
-                            .get((page, theme, scale), |(v, ..)| painter.doc_page(v, scale, p));
+                        let buffer = (self.doc_page).get((page, theme, scale), |(v, ..)| {
+                            painter.doc_page(v, scale, p)
+                        });
                         parts.push(Part::new(buffer, rect.loc, rect.size, 1.0));
                     }
                 }

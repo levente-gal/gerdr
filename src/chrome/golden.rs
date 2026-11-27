@@ -9094,7 +9094,10 @@ fn doc_pages() -> [(&'static str, super::DocPageView); 2] {
         caret: Some(1),
         said: vec![1, 3],
     };
-    [("doc_page_1180", page(1180, 0.0)), ("doc_page_split", page(560, 60.0))]
+    [
+        ("doc_page_1180", page(1180, 0.0)),
+        ("doc_page_split", page(560, 60.0)),
+    ]
 }
 
 const DOC_PAGE: [&str; 2] = ["doc_page_1180", "doc_page_split"];
@@ -9148,7 +9151,12 @@ fn dump_doc_page() {
         for (name, view) in doc_pages() {
             let width = (view.rect.size.w as f64 * scale).round() as usize;
             let buffer = painter.doc_page(&view, scale, theme.page_palette());
-            dump(&dir, &format!("{name}_{}_{}", theme.name(), scale), buffer, width);
+            dump(
+                &dir,
+                &format!("{name}_{}_{}", theme.name(), scale),
+                buffer,
+                width,
+            );
         }
     }
 }

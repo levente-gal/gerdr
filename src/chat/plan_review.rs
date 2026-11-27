@@ -207,7 +207,10 @@ mod tests {
     fn old_files_are_pruned_and_a_back_file_takes_the_next_name() {
         let dir = std::env::temp_dir().join(format!("gerdr-chat-plans-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let (old, own) = (dir.join("old.md"), dir.join(format!("{:016x}-comments.json", 7)));
+        let (old, own) = (
+            dir.join("old.md"),
+            dir.join(format!("{:016x}-comments.json", 7)),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&old, "x").unwrap();
         std::fs::write(&own, "{}").unwrap();

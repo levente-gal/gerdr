@@ -727,7 +727,16 @@ mod tests {
         assert_eq!(blocks.len(), lines.len());
         assert_eq!(
             lines,
-            [(4, 4), (6, 7), (9, 9), (10, 10), (11, 11), (13, 15), (17, 18), (20, 22)]
+            [
+                (4, 4),
+                (6, 7),
+                (9, 9),
+                (10, 10),
+                (11, 11),
+                (13, 15),
+                (17, 18),
+                (20, 22)
+            ]
         );
         assert!(matches!(blocks[5], DocBlock::Nested { .. }));
     }

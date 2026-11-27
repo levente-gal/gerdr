@@ -275,13 +275,7 @@ pub fn chat_plan_title(text: &str) -> String {
 /// workspace, keyed `key`, its agent in folder `dir`: only commented on,
 /// never closed, of no feature. It is no file: its text is the card's, and
 /// its links go from `dir`.
-pub fn chat_plan_doc(
-    project: &str,
-    key: u64,
-    chat: ChatPlanOf,
-    text: &str,
-    dir: &Path,
-) -> DocOf {
+pub fn chat_plan_doc(project: &str, key: u64, chat: ChatPlanOf, text: &str, dir: &Path) -> DocOf {
     let file = DocFile::ChatPlan(key);
     DocOf {
         project: project.to_owned(),
@@ -861,7 +855,9 @@ impl Gerdr {
                     DocFile::ConflictPlan(_) => {
                         Failed::Warning("The plan isn't written yet".into())
                     }
-                    DocFile::ChatPlan(_) => Failed::Warning("A chat's plan opens from its chat".into()),
+                    DocFile::ChatPlan(_) => {
+                        Failed::Warning("A chat's plan opens from its chat".into())
+                    }
                     DocFile::Stage(_) | DocFile::FixPlan => {
                         Failed::Error(format!("No {name} yet for \u{201c}{title}\u{201d}"))
                     }
