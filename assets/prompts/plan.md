@@ -18,8 +18,12 @@ Your job: turn the approved brief into a plan the Build stage can follow.
 
    It must have these sections, as Markdown `##` headings:
 
-   - `## Milestones`: a checkbox list (`- [ ] …`), each milestone small
-     enough to build and check on its own, in the order to build them.
+   - `## Milestones`: a checkbox list (`- [ ] …`), in the order to build
+     them. Make each one a thin slice that works end to end and can be
+     checked on its own, rather than one layer of the whole feature. Size
+     each so a fresh agent, with only the plan, the build log and the code,
+     can build it without reading far. When a change to the code's shape
+     would make the feature easy, give it its own milestone first.
 {{#if multi_repo}}
      Keep each to one repository where you can, and put what the repositories
      must agree on (an API, a schema) in its own milestone first: milestones
@@ -32,6 +36,10 @@ Your job: turn the approved brief into a plan the Build stage can follow.
 {{/if}}
      `Files:` the files it changes, so Build need not search for them;
      `Covers:` the brief's acceptance criteria it meets;
+     `Seam:` where its test reaches the code: the public function, endpoint
+     or screen the test goes through. Pick one that exists, as far out as
+     it can be, so the test holds while the code behind it changes; or
+     `Seam: none: <why>` when the milestone has nothing to test;
      `Check:` how to tell it works: the one test file or test name to run,
      never a whole test suite.
      Every acceptance criterion is covered by some milestone.

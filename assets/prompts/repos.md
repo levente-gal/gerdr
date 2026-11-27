@@ -68,3 +68,5 @@ The graph doesn't hold them: search them directly.
 If the feature has to change one of them, say so: the user adds it to the
 feature under Repositories on the feature tab (Ctrl+Shift+L).
 {{/if}}
+
+{{> memory}}

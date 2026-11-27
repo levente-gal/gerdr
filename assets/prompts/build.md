@@ -23,8 +23,22 @@ How to work, every time:
 - Commit what you change in every repository you changed, with a message
   that says what it is. Leave nothing uncommitted and no untracked files:
   gerdr checks the code by its commits.
-- Add or update tests for the behaviour you change, and follow the
-  repositories' guidance files (CLAUDE.md, AGENTS.md) where they exist.
+- Test first, at the milestone's `Seam:` in the plan: write the test of the
+  behaviour you are about to change, run it and see it fail, then change the
+  code until it passes. Follow the repositories' guidance files (CLAUDE.md,
+  AGENTS.md) where they exist.
+- Keep the project's memory up to date, in the same commit as the milestone
+  you build: add each term of the brief's `## Terms` that the glossary
+  lacks to `GLOSSARY.md` at the top of the repository it is about (one
+  `**Term**:` entry each, under `## Language`; start the file with a
+  `# <name>` heading and one line on what the project is when it isn't
+  there), and record each decision marked `ADR: yes` in the decision log
+  as `docs/adr/NNNN-<slug>.md` there: the next free number, a `# <title>`
+  heading, one to three sentences on the context, the choice and why, and
+  a last line `Source: {{feature.slug}} D<n>`. Skip those already there.
+  When a repository gets its first glossary or decision, add a short
+  `## Project memory` section naming them to its guidance file (CLAUDE.md,
+  else AGENTS.md), if it has none.
 {{#if checks}}
 - Before you commit, run only the tests of what you changed, with the
   narrowest command the tool has: one test file or one test name. Never run a
@@ -149,7 +163,8 @@ stop:
 
 Rules from gerdr, which runs this feature's stages:
 
-- Write only {{artifact.path}} and the code the plan changes.
+- Write only {{artifact.path}}, the code the plan changes and the
+  project's memory files named above.
 - Use plain words and short sentences in {{artifact.path}}. Say what is
   unknown rather than guess.
 - When you have done all you were asked for here and committed it, say so in

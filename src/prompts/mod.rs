@@ -9,12 +9,12 @@ pub mod render;
 /// version: bumped when its text changes meaning.
 pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
     Some(match name {
-        "discover" => (include_str!("../../assets/prompts/discover.md"), 8),
-        "plan" => (include_str!("../../assets/prompts/plan.md"), 5),
+        "discover" => (include_str!("../../assets/prompts/discover.md"), 9),
+        "plan" => (include_str!("../../assets/prompts/plan.md"), 6),
         "plan-review" => (include_str!("../../assets/prompts/plan-review.md"), 3),
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
         "plan-final" => (include_str!("../../assets/prompts/plan-final.md"), 1),
-        "build" => (include_str!("../../assets/prompts/build.md"), 10),
+        "build" => (include_str!("../../assets/prompts/build.md"), 11),
         "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 6),
         "pr-review" => (include_str!("../../assets/prompts/pr-review.md"), 2),
         "fix-plan" => (include_str!("../../assets/prompts/fix-plan.md"), 3),
@@ -27,7 +27,8 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "start" => (include_str!("../../assets/prompts/start.md"), 1),
         "agent" => (include_str!("../../assets/prompts/agent.md"), 2),
         "rules" => (include_str!("../../assets/prompts/rules.md"), 1),
-        "repos" => (include_str!("../../assets/prompts/repos.md"), 5),
+        "repos" => (include_str!("../../assets/prompts/repos.md"), 6),
+        "memory" => (include_str!("../../assets/prompts/memory.md"), 1),
         "decisions" => (include_str!("../../assets/prompts/decisions.md"), 2),
         "research" => (include_str!("../../assets/prompts/research.md"), 1),
         "summary" => (include_str!("../../assets/prompts/summary.md"), 1),
@@ -172,6 +173,7 @@ mod tests {
             "start",
             "rules",
             "repos",
+            "memory",
             "ai-review",
             "pr-review",
             "summary",
