@@ -376,30 +376,56 @@ impl Chats {
         self.integrations.as_ref()?.1.get(target).cloned()
     }
 
-    /// When the agent in `agent`'s pane began and where it runs: herdr's
-    /// foreground process there, as `/proc` says.
+    /// When the agent in `agent`'s pane began and where it runs.
     fn run_of(&mut self, agent: &AgentInfo) -> Option<Run> {
-        let info = (self.herdr.as_mut()?.process_info(&agent.pane_id))
-            .map_err(|err| tracing::warn!("agent chat of pane {}: {err}", agent.pane_id))
-            .ok()?;
-        let processes = &info.foreground_processes;
-        // The group's leader is what the shell started: the agent.
-        let lead = (processes.iter())
-            .find(|p| Some(p.pid) == info.foreground_process_group_id)
-            .or(processes.first())?;
-        if Some(lead.pid) == info.shell_pid {
-            return None;
-        }
-        let stat = std::fs::read_to_string(format!("/proc/{}/stat", lead.pid)).ok()?;
-        let boot = std::fs::read_to_string("/proc/stat").ok()?;
-        let cwd = (lead.cwd.clone())
-            .or_else(|| agent.foreground_cwd.clone())
-            .or_else(|| agent.cwd.clone())?;
-        Some(Run {
-            started: started_at(&stat, &boot, clock_ticks())?,
-            cwd,
-            pid: u32::try_from(lead.pid).ok()?,
-        })
+        run_in(self.herdr.as_mut()?, agent)
+    }
+}
+
+/// When the agent in `agent`'s pane began and where it runs: herdr's
+/// foreground process there, as `/proc` says.
+pub fn run_in(herdr: &mut Herdr, agent: &AgentInfo) -> Option<Run> {
+    let info = (herdr.process_info(&agent.pane_id))
+        .map_err(|err| tracing::warn!("agent chat of pane {}: {err}", agent.pane_id))
+        .ok()?;
+    let processes = &info.foreground_processes;
+    // The group's leader is what the shell started: the agent.
+    let lead = (processes.iter())
+        .find(|p| Some(p.pid) == info.foreground_process_group_id)
+        .or(processes.first())?;
+    if Some(lead.pid) == info.shell_pid {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{}/stat", lead.pid)).ok()?;
+    let boot = std::fs::read_to_string("/proc/stat").ok()?;
+    let cwd = (lead.cwd.clone())
+        .or_else(|| agent.foreground_cwd.clone())
+        .or_else(|| agent.cwd.clone())?;
+    Some(Run {
+        started: started_at(&stat, &boot, clock_ticks())?,
+        cwd,
+        pid: u32::try_from(lead.pid).ok()?,
+    })
+}
+
+/// The chat of the agent in `agent`'s pane: the one herdr names, else one
+/// found by the agent's folder and start time, as the chat view guesses it.
+// shortcut: claims no other pane's chat, so two agents begun together in one folder can swap; pass the chat view's claims if that shows.
+pub fn find_or_guess(
+    herdr: &mut Herdr,
+    agent: &AgentInfo,
+    homes: &Homes,
+) -> Result<Source, String> {
+    let found = source::find(agent, homes);
+    if source::named(agent) {
+        return found;
+    }
+    let (Some(kind), Some(run)) = (source::kind(agent), run_in(herdr, agent)) else {
+        return found;
+    };
+    match source::by_time(kind, &run, homes, &HashSet::new()) {
+        Ok(Some(guessed)) => Ok(guessed),
+        _ => found,
     }
 }
 

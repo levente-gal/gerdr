@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 
 use crate::{
     ai_work::AgentKind,
-    chat::{mode, model, model_menu},
+    chat::{Source, mode, model, model_menu},
     feature::{Feature, Stage, Status, layout, setup, store},
     feature_agents::{self, Gate},
     feature_workspace::feature_on,
@@ -1534,14 +1534,10 @@ const SAID: usize = 30;
 /// What the user said in `agent`'s chat, as its transcript has it; nothing
 /// when it can't be found or read (the page then pins none).
 // shortcut: reads the transcript's end on each poll; cache by its file's stamp if the phone server shows load.
-fn pane_said(agent: &AgentInfo) -> Vec<String> {
-    let homes = crate::ai_work::locate::Homes::here();
-    let found = homes
-        .ok_or_else(|| "no home folder".to_owned())
-        .and_then(|homes| crate::chat::source::find(agent, &homes))
-        .and_then(crate::chat::tail::said);
+fn pane_said(pane: &str, source: Result<Source, String>) -> Vec<String> {
+    let found = source.and_then(crate::chat::tail::said);
     found.unwrap_or_else(|why| {
-        tracing::debug!("phone: the user's words in pane {}: {why}", agent.pane_id);
+        tracing::debug!("phone: the user's words in pane {pane}: {why}");
         Vec::new()
     })
 }
@@ -1572,9 +1568,14 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     };
     // The user's last words in its chat: the page keeps the last of them
     // scrolled past on top.
-    let said = agent.as_ref().map_or(Value::Array(Vec::new()), |agent| {
+    // Its chat: the one herdr names, else one guessed by folder and time.
+    let source = agent.as_ref().map(|agent| {
+        let homes = crate::ai_work::locate::Homes::here().ok_or("no home folder")?;
+        crate::chat::tail::find_or_guess(&mut herdr, agent, &homes)
+    });
+    let said = source.clone().map_or(Value::Array(Vec::new()), |source| {
         json!(
-            pane_said(agent)
+            pane_said(pane, source)
                 .into_iter()
                 .rev()
                 .take(SAID)
@@ -1624,12 +1625,8 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
         reply
     };
     // How full its context is, as gerdr's chat head says it.
-    let context = (agent.as_ref())
-        .and_then(|agent| {
-            let homes = crate::ai_work::locate::Homes::here()?;
-            let source = crate::chat::source::find(agent, &homes).ok()?;
-            crate::ai_work::context::read(source.agent, &source.path, &source.id)
-        })
+    let context = (source.as_ref().and_then(|s| s.as_ref().ok()))
+        .and_then(|source| crate::ai_work::context::read(source.agent, &source.path, &source.id))
         .map(|context| context.said());
     if let Some(path) = &chat
         && (all || want > PANE_LINES)
