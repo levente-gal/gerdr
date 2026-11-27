@@ -136,7 +136,9 @@ apps = ["cursor"]
 ```
 
 The other sections are `[git]`, `[inbox]`, `[services]`, `[t3]`, `[terminal]`,
-`[fixes]` and `[notifications]`. The comments at the top of `src/config.rs` and
+`[fixes]`, `[notifications]`, `[skills]` (the skills each feature stage's agent is
+told to use, and where Discover's Install skills gets them) and `[effort]`
+(the effort a new feature's stages start Claude Code on). The comments at the top of `src/config.rs` and
 `src/keys.rs` describe every key.
 
 Other files:

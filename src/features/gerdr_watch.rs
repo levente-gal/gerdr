@@ -210,30 +210,75 @@ impl Gerdr {
             probed.fetch_at = Some(now);
         }
         let data = store::dir(None, project, slug);
+        // The first page tells the skills missing, while it is the stage at.
+        // Past it, another machine is asked once since start: the prompts
+        // of its stages name the skills it has.
+        let at_discover = feature.current() == Some(Stage::Discover);
+        let known = &self.features.skills_there;
+        let unknown = |ask: &feature::skills::Ask| match &ask.on {
+            feature::skills::On::There(remote, _) => (crate::integrations::by_command(&ask.base)
+                .skills_agent())
+            .is_some_and(|id| !known.contains_key(&(remote.id.clone(), id.to_owned()))),
+            _ => false,
+        };
+        let skill_asks = match feature.writer {
+            Some(_) => Vec::new(),
+            None => (self.skill_asks(&feature).into_iter())
+                .filter(|ask| at_discover || unknown(ask))
+                .collect(),
+        };
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.feature_work(None, move |_| Done::Probed {
-            probe: Box::new(match feature.writer {
-                Some(_) => Probe {
-                    docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
-                    ..ship::probe_seen(&feature)
-                },
-                None => Probe {
-                    docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
-                    models: feature::agents::read_models(&feature),
-                    contexts: crate::ai_work::context::read_contexts(&feature, &data),
-                    prs: read_prs.then(|| ship::read_prs(&feature, "gh")),
-                    base_ci: read_base_ci.then(|| ship::read_base_ci(&feature, secs)),
-                    bases: match feature.ships() || fetch {
-                        true => ship::read_bases(&feature, fetch),
-                        false => BTreeMap::new(),
+        self.feature_work(None, move |_| {
+            let skills = feature::skills::check(&feature.dir, &skill_asks);
+            Done::Probed {
+                probe: Box::new(match feature.writer {
+                    Some(_) => Probe {
+                        docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
+                        ..ship::probe_seen(&feature)
                     },
-                    resolution: ship::read_resolution(&feature, &data),
-                    ..ship::probe(&feature, &modes)
-                },
-            }),
-            project,
-            slug,
+                    None => Probe {
+                        docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
+                        models: feature::agents::read_models(&feature),
+                        contexts: crate::ai_work::context::read_contexts(&feature, &data),
+                        prs: read_prs.then(|| ship::read_prs(&feature, "gh")),
+                        base_ci: read_base_ci.then(|| ship::read_base_ci(&feature, secs)),
+                        bases: match feature.ships() || fetch {
+                            true => ship::read_bases(&feature, fetch),
+                            false => BTreeMap::new(),
+                        },
+                        resolution: ship::read_resolution(&feature, &data),
+                        skills,
+                        ..ship::probe(&feature, &modes)
+                    },
+                }),
+                project,
+                slug,
+            }
         });
+    }
+
+    /// Install the skills feature `slug`'s stages name that their agents
+    /// lack, as last probed, in a new tab typed at its shell, so what runs
+    /// shows. With no workspace to open it in, the line goes on the
+    /// clipboard. The next probe sees them installed.
+    pub(crate) fn install_skills(&mut self, project: &str, slug: &str) {
+        let key = (project.to_owned(), slug.to_owned());
+        let probed = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
+        let missing = probed.map(|p| p.skills.missing.clone()).unwrap_or_default();
+        if missing.is_empty() {
+            return self.show_notice("Its stages' skills are installed".to_owned());
+        }
+        let lines = feature::skills::install_lines(&self.settings.skills.source, &missing);
+        if self.workspace().is_none() {
+            self.copy_text(lines.join("\n"));
+            let text = "No workspace to install the skills in: its commands are on the clipboard";
+            return self.show_warning(text.to_owned());
+        }
+        let w = self.active_workspace;
+        let dir = self.workspaces[w].dir.clone();
+        for line in lines {
+            self.new_tab_running(w, &dir, line);
+        }
     }
 
     /// Read feature `slug`'s pull requests on GitHub again now, with the
@@ -296,6 +341,7 @@ impl Gerdr {
     /// sends it back, its squash merged makes it done.
     pub(super) fn feature_probed(&mut self, project: &str, slug: &str, mut probe: Probe) {
         self.feature_models_are(project, slug, std::mem::take(&mut probe.models));
+        (self.features.skills_there).append(&mut probe.skills.there);
         let key = (project.to_owned(), slug.to_owned());
         // The diff's comments may be others now: the keyboard stays on its card.
         let on_tab =

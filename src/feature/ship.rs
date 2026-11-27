@@ -386,6 +386,10 @@ pub struct Probe {
     /// The CI of the bases shipping pushed lately, by `Repo::key`, when read
     /// this time (`read_base_ci`): read as often as `prs`.
     pub base_ci: Option<BTreeMap<String, BaseCi>>,
+    /// While Discover is its current stage: what the skills check found of
+    /// the skills its stages name. Past it, only of other machines not yet
+    /// asked since gerdr started.
+    pub skills: super::skills::Checked,
 }
 
 impl Probe {
@@ -633,6 +637,7 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
         bases: BTreeMap::new(),
         resolution: None,
         base_ci: None,
+        skills: Default::default(),
     }
 }
 
@@ -654,6 +659,7 @@ pub fn probe_seen(feature: &Feature) -> Probe {
         bases: BTreeMap::new(),
         resolution: None,
         base_ci: None,
+        skills: Default::default(),
     }
 }
 
@@ -678,6 +684,7 @@ pub fn probe_finished(feature: &Feature) -> Probe {
         bases: BTreeMap::new(),
         resolution: None,
         base_ci: None,
+        skills: Default::default(),
     }
 }
 

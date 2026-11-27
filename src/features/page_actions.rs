@@ -271,6 +271,11 @@ pub fn page_actions(
     }
     if stage == Stage::Discover {
         out.extend(research_actions(feature));
+        if ctx.skills_missing {
+            let label = "Install skills".to_owned();
+            let style = ButtonStyle::Plain;
+            out.push((PageButton { label, style }, PanelOutcome::InstallSkills));
+        }
     }
     manual_order(feature, stage, ctx, &mut out);
     out

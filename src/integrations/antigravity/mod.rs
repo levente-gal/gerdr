@@ -143,6 +143,10 @@ impl Integration for Antigravity {
         commands::on_disk(cwd, homes, found);
     }
 
+    fn skills_agent(&self) -> Option<&'static str> {
+        Some("antigravity-cli")
+    }
+
     fn skill_dirs(&self, cwd: &Path, homes: &Homes, _config: &Path) -> Vec<PathBuf> {
         // shortcut: plugins' skills are left out, as for Claude Code.
         let cli = &homes.antigravity;

@@ -7595,9 +7595,12 @@ fn new_gerdr(
         fixes,
         notifications,
         sounds,
+        skills,
+        effort,
         problems: settings_problems,
     } = settings;
     anim::set_motion(ui.motion);
+    feature::agents::set_effort_defaults(effort);
     chrome::set_text_size(f32::from(ui.text_size));
     let mut state = Gerdr {
         start_time: Instant::now(),
@@ -7697,6 +7700,7 @@ fn new_gerdr(
             show_footer: ui.footer,
             t3_log: false,
             agent_config,
+            skills,
         },
         key_state: state::KeyState {
             suppressed_keys: Vec::new(),

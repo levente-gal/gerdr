@@ -192,6 +192,9 @@ pub struct RowCtx {
     /// Its worktrees have changes not committed, as its code was last read:
     /// the Build agent's chat comes back to commit them, Build locked or not.
     pub dirty: bool,
+    /// Skills its stages name aren't installed for their agents, as last
+    /// probed (`Probe::skills`): Discover's page offers to install them.
+    pub skills_missing: bool,
 }
 
 impl RowCtx {

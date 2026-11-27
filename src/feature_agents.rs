@@ -860,9 +860,20 @@ fn picked_model(feature: &Feature, stage: Stage, agent: &str) -> Option<String> 
     picked_in(&feature.stage_models, stage, agent)
 }
 
-/// The effort picked for `agent` on `stage`, if any.
-fn picked_effort(feature: &Feature, stage: Stage, agent: &str) -> Option<String> {
-    picked_in(&feature.stage_efforts, stage, agent)
+/// The effort `agent` (run by `base`) starts on for `stage`: the one
+/// picked, else gerdr's default where the feature takes them and gerdr can
+/// start it on one; none for its own default.
+fn picked_effort(feature: &Feature, stage: Stage, agent: &str, base: &str) -> Option<String> {
+    match picked_in(&feature.stage_efforts, stage, agent) {
+        // Picked back to the agent's own, over gerdr's default.
+        Some(pick) => Some(pick).filter(|p| !p.is_empty()),
+        None => (feature.effort_defaults && by_command(base).takes_effort())
+            .then(|| {
+                let defaults = feature::agents::effort_defaults();
+                defaults.of(stage, feature.fix_round.is_some()).to_owned()
+            })
+            .filter(|effort| !effort.is_empty()),
+    }
 }
 
 /// What `picks` has for `agent` on `stage`.
@@ -878,8 +889,72 @@ fn picked_in(
 /// `base` of `agent` on `stage` with its picked model and effort.
 fn with_picks(feature: &Feature, stage: Stage, agent: &str, base: &str) -> String {
     let model = picked_model(feature, stage, agent);
-    let effort = picked_effort(feature, stage, agent);
+    let effort = picked_effort(feature, stage, agent, base);
     with_effort(&with_model(base, model.as_deref()), effort.as_deref())
+}
+
+impl Gerdr {
+    /// Each stage of `feature` still to run with skills to name: its agent
+    /// (picker name and command) and those skills, for `skills::missing`.
+    /// An agent in an app is left out: its skills aren't read here.
+    pub(crate) fn skill_asks(&self, feature: &Feature) -> Vec<feature::skills::Ask> {
+        let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
+        let set = self.projects.workflows(feature, |w| w.skills.clone()).home;
+        (Stage::ALL.into_iter())
+            .filter(|stage| fires(feature, *stage))
+            .filter_map(|stage| {
+                let names = feature::skills::wanted(&set, &self.settings.skills, stage);
+                let Pick::Agent(agent, base) =
+                    stage_pick(feature, stage, workflow, &self.launcher.cli_agents)
+                else {
+                    return None;
+                };
+                if names.is_empty() || by_command(&base).in_app() {
+                    return None;
+                }
+                let on = match self.placed(feature, stage) {
+                    Placed::Here => feature::skills::On::Here,
+                    Placed::There(id) => {
+                        let (remote, folders) = self.skills_folders(feature, &id)?;
+                        feature::skills::On::There(remote, folders)
+                    }
+                    Placed::Away(name) => feature::skills::On::Away(name),
+                };
+                Some(feature::skills::Ask {
+                    agent,
+                    base,
+                    names,
+                    on,
+                })
+            })
+            .collect()
+    }
+
+    /// Machine `id`, which is up, as the skills check reaches it, with its
+    /// folders for `feature`.
+    fn skills_folders(
+        &self,
+        feature: &Feature,
+        id: &str,
+    ) -> Option<(feature::skills::Remote, feature::skills::Folders)> {
+        let work = self.machines.work_of(id)?;
+        let cwd = self.machine_paths(id, Some(feature))?.there(&feature.dir);
+        let remote = feature::skills::Remote {
+            id: id.to_owned(),
+            name: self.machines.machine_name(id),
+            target: work.target.clone(),
+            control: work.info.control.clone(),
+        };
+        let site = &work.info.site;
+        let (home, config, env) = (site.home.clone(), site.config.clone(), site.env.clone());
+        let folders = feature::skills::Folders {
+            home,
+            config,
+            cwd,
+            env,
+        };
+        Some((remote, folders))
+    }
 }
 
 /// `stage`'s `ModelSlot`, where its chips show: none on a stage no agent
@@ -913,7 +988,7 @@ pub(crate) fn stage_effort_slot(
 ) -> Option<ModelSlot> {
     let slot = stage_model_slot(feature, stage, workflow, installed)?;
     by_command(&slot.base).takes_effort().then(|| ModelSlot {
-        picked: picked_effort(feature, stage, &slot.agent),
+        picked: picked_effort(feature, stage, &slot.agent, &slot.base),
         ..slot
     })
 }
@@ -1684,7 +1759,7 @@ impl Gerdr {
             Pick::Agent(agent, base) => {
                 run.base != base
                     || run.asked_model != picked_model(feature, stage, &agent)
-                    || run.asked_effort != picked_effort(feature, stage, &agent)
+                    || run.asked_effort != picked_effort(feature, stage, &agent, &base)
             }
             _ => false,
         }
@@ -1931,7 +2006,8 @@ impl Gerdr {
         };
         let efforts = feature.stage_efforts.entry(stage).or_default();
         efforts.retain(|a, _| !a.eq_ignore_ascii_case(agent));
-        if let Some(effort) = effort {
+        // Its own default over gerdr's is an empty pick.
+        if let Some(effort) = effort.or_else(|| feature.effort_defaults.then(String::new)) {
             efforts.insert(agent.to_owned(), effort);
         }
         if efforts.is_empty() {
@@ -2190,7 +2266,7 @@ impl Gerdr {
             _ => (run.agent.clone(), run.base.clone()),
         };
         let model = picked_model(&feature, stage, &agent);
-        let effort = picked_effort(&feature, stage, &agent);
+        let effort = picked_effort(&feature, stage, &agent, &base);
         let moved = run.base != base || run.asked_model != model || run.asked_effort != effort;
         if !moved && let Some(pane) = (run.pane.clone()).filter(|p| self.pane_there(p)) {
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
@@ -2559,15 +2635,21 @@ impl Gerdr {
             "checks".into(),
             checks_list(&verify::checks(&feature, &config)),
         );
-        // shortcut: an agent on another machine is told no skills, as what
-        // is installed there isn't known here.
-        let skills = match machine {
-            None => {
-                let set = self.projects.workflows(&feature, |w| w.skills.clone()).home;
-                let wanted = feature::skills::wanted(&set, stage);
-                feature::skills::installed_for(by_command(&base), &feature.dir, &wanted)
+        let set = self.projects.workflows(&feature, |w| w.skills.clone()).home;
+        let wanted = feature::skills::wanted(&set, &self.settings.skills, stage);
+        let skills = match &machine {
+            None => feature::skills::installed_for(by_command(&base), &feature.dir, &wanted),
+            // shortcut: another machine's are as the probe last found them,
+            // none in the seconds after gerdr starts before it has asked.
+            Some(id) => {
+                let cli = by_command(&base).skills_agent().unwrap_or_default();
+                let found = self
+                    .features
+                    .skills_there
+                    .get(&(id.clone(), cli.to_owned()));
+                let found = found.map_or(&[][..], Vec::as_slice);
+                wanted.into_iter().filter(|n| found.contains(n)).collect()
             }
-            Some(_) => Vec::new(),
         };
         values.insert("skills".into(), feature::skills::listed(&skills));
         for (key, value) in extra {
@@ -2582,7 +2664,7 @@ impl Gerdr {
             .then(|| picked_model(&feature, stage, &agent))
             .flatten();
         let asked_effort = (by_command(&base).takes_effort())
-            .then(|| picked_effort(&feature, stage, &agent))
+            .then(|| picked_effort(&feature, stage, &agent, &base))
             .flatten();
         let asked = (asked_model.as_deref(), asked_effort.as_deref());
         let waiting = takes_new_work(last, &base, asked, extra)
@@ -5523,6 +5605,31 @@ mod tests {
         f.stage_agents.insert(Stage::Plan, "Cursor".into());
         assert_eq!(slot(&f), None);
         assert!(stage_model_slot(&f, Stage::Plan, None, &installed).is_some());
+    }
+
+    #[test]
+    fn a_new_feature_starts_each_stage_on_gerdrs_effort_until_one_is_picked() {
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        f.effort_defaults = true;
+        let effort = |f: &Feature, stage| picked_effort(f, stage, "Claude Code", "claude");
+        assert_eq!(effort(&f, Stage::Plan).as_deref(), Some("medium"));
+        assert_eq!(effort(&f, Stage::AiReview).as_deref(), Some("high"));
+        assert_eq!(effort(&f, Stage::Build).as_deref(), Some("medium"));
+        assert_eq!(
+            with_picks(&f, Stage::PlanReview, "Claude Code", "claude"),
+            "claude --effort high"
+        );
+        // Picked back to the agent's own: none, over gerdr's.
+        (f.stage_efforts.entry(Stage::Plan).or_default()).insert("Claude Code".into(), "".into());
+        assert_eq!(effort(&f, Stage::Plan), None);
+        // Cursor takes none from gerdr.
+        assert_eq!(
+            picked_effort(&f, Stage::AiReview, "Cursor", "cursor-agent"),
+            None
+        );
+        // A feature from before keeps its agents' own.
+        f.effort_defaults = false;
+        assert_eq!(effort(&f, Stage::AiReview), None);
     }
 
     #[test]

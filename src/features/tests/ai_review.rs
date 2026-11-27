@@ -801,6 +801,7 @@ fn probe_with(notes: Vec<Comment>) -> Probe {
         bases: BTreeMap::new(),
         resolution: None,
         base_ci: None,
+        skills: Default::default(),
     }
 }
 

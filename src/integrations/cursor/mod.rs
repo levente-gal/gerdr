@@ -147,6 +147,10 @@ impl Integration for Cursor {
         commands::cursor_disk(cwd, homes, found);
     }
 
+    fn skills_agent(&self) -> Option<&'static str> {
+        Some("cursor")
+    }
+
     fn skill_dirs(&self, cwd: &Path, homes: &Homes, _config: &Path) -> Vec<PathBuf> {
         let mut dirs = vec![
             cwd.join(".cursor/skills"),

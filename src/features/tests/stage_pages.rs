@@ -3058,3 +3058,59 @@ fn a_pushed_bases_ci_shows_on_ship_with_its_failed_runs_to_run_again() {
             .any(|k| k.chord == "Alt+R")
     );
 }
+
+/// Skills its stages name that their agents lack show first on Discover's
+/// page, in the warning colour, with the button installing them, and so
+/// does a machine they weren't checked on; other pages don't say.
+#[test]
+fn discover_warns_of_missing_skills_with_a_button_to_install_them() {
+    use crate::feature::skills::Missing;
+    let f = feature("s", vec![repo("api", true)], 0);
+    let mut probe = probe(None);
+    probe.skills.missing = vec![Missing {
+        agent: "Claude Code".into(),
+        id: "claude-code",
+        names: vec!["grilling".into(), "tdd".into()],
+        there: None,
+    }];
+    probe.skills.unchecked = vec!["Not checked on desk: it isn't connected".into()];
+    let state = PanelState {
+        probe: Some(&probe),
+        ..PanelState::default()
+    };
+    let ctx = RowCtx {
+        skills_missing: true,
+        ..RowCtx::default()
+    };
+    let actions = page_actions(&f, Stage::Discover, ctx);
+    let at = (actions.iter())
+        .position(|(b, o)| *o == PanelOutcome::InstallSkills && b.label == "Install skills")
+        .expect("Install skills");
+    let page = stage_page(&f, Stage::Discover, &state, &actions, 2_000);
+    assert_eq!(
+        page.sections[0],
+        PageSection::File {
+            name: "Skills".into(),
+            state: line(
+                "Not installed for Claude Code: grilling, tdd. \
+                 Not checked on desk: it isn't connected",
+                CheckTone::Blocker
+            ),
+            buttons: vec![at],
+        }
+    );
+    let plan = stage_page(
+        &f,
+        Stage::Plan,
+        &state,
+        &page_actions(&f, Stage::Plan, ctx),
+        2_000,
+    );
+    assert!(
+        !(plan.sections.iter())
+            .any(|s| matches!(s, PageSection::File { name, .. } if name == "Skills"))
+    );
+    // All installed: neither card nor button.
+    let none = page_actions(&f, Stage::Discover, RowCtx::default());
+    assert!(!none.iter().any(|(_, o)| *o == PanelOutcome::InstallSkills));
+}
