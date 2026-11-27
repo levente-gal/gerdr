@@ -1995,7 +1995,9 @@ impl Gerdr {
         // What is kept to give back must be all that was sent. Saved now: once
         // the round is open the review on the page is no longer `wd`.
         self.feature_save_review();
-        if !self.send_to_build(&project, &slug, Stage::CodeReview, "review comments", text) {
+        let again = Some(crate::feature_fix::FixStart::CodeReview(text.clone()));
+        let what = "review comments";
+        if !self.send_to_build(&project, &slug, Stage::CodeReview, what, text, again) {
             return;
         }
         let kept = self.keep_comments(&project, &slug);

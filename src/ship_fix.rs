@@ -149,15 +149,16 @@ impl Gerdr {
             self.save_feature(project, slug);
         }
         let text = hook_text(&title, why, log);
+        let again = Some(crate::feature_fix::FixStart::ShipProblem { planning });
         let started = match planning {
-            true => self.send_to_build(project, slug, Stage::Ship, WHAT, text),
+            true => self.send_to_build(project, slug, Stage::Ship, WHAT, text, again),
             false => {
                 let mut plan = feature::fix_round::header(
                     &title,
                     "a git hook refusing to ship it: the user wrote nothing of their own, so no plan was asked for. Run what the hook runs before you change code.",
                 );
                 plan.push_str(&format!("\n### {why}\n"));
-                (self.fix_input(project, slug, WHAT, &text)).is_some_and(|input| {
+                (self.fix_input(project, slug, WHAT, &text, again)).is_some_and(|input| {
                     self.start_unplanned_fix_round(project, slug, Stage::Ship, WHAT, input, &plan)
                 })
             }

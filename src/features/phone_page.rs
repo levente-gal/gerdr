@@ -9,8 +9,8 @@
 //! an answer, a comment) asks for the text on the phone, and gets it with
 //! the press. What gerdr says while it acts (its toasts) goes back as the
 //! answer. A confirm it asks is put to the phone: cancelled here, and
-//! pressed again with `confirm` it is answered Go, so no dialog waits on
-//! an empty desk.
+//! pressed again with `confirm` it is answered Go (or its other button), so
+//! no dialog waits on an empty desk.
 
 use serde_json::{Value, json};
 
@@ -666,7 +666,7 @@ impl Gerdr {
         } = asked;
         let key = (project.clone(), slug.clone());
         let (p, s) = key.clone();
-        let mut said = self.phone_said(false, move |g| {
+        let mut said = self.phone_said(None, move |g| {
             g.feature_created(project, title, slug, root, result);
             if g.feature(&p, &s).is_none() {
                 return;
@@ -954,13 +954,14 @@ impl Gerdr {
     }
 
     /// Do `act` to feature `slug`, for the phone. `confirm`: answer a
-    /// confirm it asks with Go, which the phone asked the user first.
+    /// confirm it asks so (Go, or its other button), as the phone asked the
+    /// user first.
     pub(crate) fn phone_act(
         &mut self,
         project: &str,
         slug: &str,
         act: PhoneAct,
-        confirm: bool,
+        confirm: Option<Outcome>,
     ) -> Value {
         if let Some(machine) = self.feature_writer(project, slug) {
             let why = format!("{machine} writes it: act there, or take it over on the desktop");
@@ -1107,9 +1108,9 @@ impl Gerdr {
     }
 
     /// Run `act`, and say what gerdr said while it did: its toasts, and
-    /// the confirm it asked, answered Go if `confirm`, else cancelled and
+    /// the confirm it asked, answered `confirm` if given, else cancelled and
     /// put to the phone.
-    fn phone_said(&mut self, confirm: bool, act: impl FnOnce(&mut Self)) -> Value {
+    fn phone_said(&mut self, confirm: Option<Outcome>, act: impl FnOnce(&mut Self)) -> Value {
         let last = self.toasts.iter().map(|t| t.id).max().unwrap_or(0);
         let asking = self.overlays.confirm.is_some();
         act(self);
@@ -1117,13 +1118,17 @@ impl Gerdr {
         // One open before was the desk's own, not this act's.
         let asked = (self.overlays.confirm.as_ref())
             .filter(|_| !asking)
-            .map(|d| json!({ "title": d.title, "body": d.body, "go": d.go }));
+            .map(|d| {
+                let other = d.other.as_ref().map(|(label, _)| *label);
+                json!({ "title": d.title, "body": d.body, "go": d.go, "other": other })
+            });
         if let Some(question) = asked {
-            if confirm {
-                self.apply_confirm(Outcome::Go);
-            } else {
-                asks = question;
-                self.apply_confirm(Outcome::Cancel);
+            match confirm {
+                Some(outcome) => self.apply_confirm(outcome),
+                None => {
+                    asks = question;
+                    self.apply_confirm(Outcome::Cancel);
+                }
             }
         }
         let said: Vec<Value> = (self.toasts.iter())

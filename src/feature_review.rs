@@ -31,6 +31,7 @@ use crate::{
     },
     feature_agents::Stamp,
     feature_diff::{COMMENTS, decide_first},
+    feature_fix::FixStart,
     features::{CardNote, Done, plural},
     menu::MenuAction,
     review,
@@ -974,7 +975,7 @@ impl Gerdr {
         self.findings_go(project, slug, true);
     }
 
-    fn findings_go(&mut self, project: &str, slug: &str, unplanned: bool) {
+    pub(crate) fn findings_go(&mut self, project: &str, slug: &str, unplanned: bool) {
         self.drop_fix_toasts(project, slug);
         // A toast's button can come while the open diff has comments unsaved.
         self.feature_save_review();
@@ -1019,12 +1020,13 @@ impl Gerdr {
             text.push_str(&own_comments_markdown(&own, &roots));
             what.push_str(&format!(" and {}", plural(comments, "comment")));
         }
+        let again = FixStart::Findings { unplanned };
         let plan = (unplanned && !review_import::needs_plan(&review.findings, comments))
             .then(|| review_import::fixes_plan(review, &title, f.many_repos()));
         let unplanned = plan.is_some();
         let started = match plan {
             Some(plan) => self
-                .fix_input(project, slug, &what, &text)
+                .fix_input(project, slug, &what, &text, Some(again))
                 .is_some_and(|input| {
                     self.start_unplanned_fix_round(
                         project,
@@ -1035,7 +1037,7 @@ impl Gerdr {
                         &plan,
                     )
                 }),
-            None => self.send_to_build(project, slug, Stage::AiReview, &what, text),
+            None => self.send_to_build(project, slug, Stage::AiReview, &what, text, Some(again)),
         };
         if !started {
             return;
@@ -1138,7 +1140,8 @@ impl Gerdr {
     ///
     /// It goes to `prompts/build-<n>-<what>-<k>.md`, and the agent is told
     /// where. Build stays done: the fixes' commits send the feature back to
-    /// it, and gerdr reads the code once the agent rests.
+    /// it, and gerdr reads the code once the agent rests. `again` is how
+    /// the user started it, to start it again from (`fix_input`).
     pub(crate) fn send_to_build(
         &mut self,
         project: &str,
@@ -1146,19 +1149,23 @@ impl Gerdr {
         asked: Stage,
         what: &str,
         text: String,
+        again: Option<FixStart>,
     ) -> bool {
-        self.fix_input(project, slug, what, &text)
+        self.fix_input(project, slug, what, &text, again)
             .is_some_and(|input| self.start_fix_round(project, slug, asked, what, input))
     }
 
     /// Where `text` went for a new fix round of feature `slug`: none if a
-    /// round can't start now, as is said.
+    /// round can't start now, as is said. Started by the user (`again`), it
+    /// can't either while they are asked which agent takes it: their answer
+    /// starts it again (`ask_fix_agent`).
     pub(crate) fn fix_input(
         &mut self,
         project: &str,
         slug: &str,
         what: &str,
         text: &str,
+        again: Option<FixStart>,
     ) -> Option<PathBuf> {
         let feature = self.feature(project, slug)?.clone();
         let title = &feature.title;
@@ -1170,6 +1177,11 @@ impl Gerdr {
         }
         if let Some(why) = self.fix_round_refusal(&feature) {
             self.show_warning(why);
+            return None;
+        }
+        if let Some(again) = again
+            && self.ask_fix_agent(&feature, again)
+        {
             return None;
         }
         let data = store::dir(None, project, slug);

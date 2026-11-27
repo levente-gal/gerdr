@@ -1536,6 +1536,69 @@ fn an_open_agents_card_says_how_full_its_context_is() {
 }
 
 #[test]
+fn the_fix_agent_choice_says_when_its_context_suggests_the_other() {
+    use crate::ai_work::context::Context;
+    let mut f = feature("b", vec![repo("api", true)], 5);
+    f.runs.insert(Stage::Build, agent_run(Some("p1"), None));
+    let n = f.runs[&Stage::Build].n;
+    let seen = ship::probe_seen(&f);
+    let probe = |used: u64| Probe {
+        contexts: [(
+            Stage::Build,
+            (
+                n,
+                Context {
+                    used,
+                    window: Some(1_000_000),
+                },
+            ),
+        )]
+        .into(),
+        ..seen.clone()
+    };
+    // The line right under the switch, if any.
+    let note = |f: &Feature, probe: &Probe| {
+        let state = PanelState {
+            probe: Some(probe),
+            fix_picks: vec![AgentChip {
+                icon: AgentIcon::from_agent("Claude Code"),
+                name: "Claude Code".into(),
+                lit: true,
+                off: false,
+            }],
+            ..PanelState::default()
+        };
+        let actions = page_actions(f, Stage::AiReview, RowCtx::default());
+        let page = stage_page(f, Stage::AiReview, &state, &actions, 2_000);
+        let at = (page.sections.iter())
+            .position(|s| matches!(s, PageSection::MilestoneMode { fixes: true, .. }))?;
+        match page.sections.get(at + 1)? {
+            PageSection::Lines { label, lines } if label.is_empty() => Some(lines.clone()),
+            _ => None,
+        }
+    };
+    // Kept, past 150k: a warning.
+    assert_eq!(
+        note(&f, &probe(160_000)),
+        Some(vec![line(
+            "context 160k / 1M: a fresh agent may fix better",
+            CheckTone::Blocker
+        )])
+    );
+    assert_eq!(note(&f, &probe(100_000)), None);
+    // A fresh one picked, the open one under 50k: a note.
+    f.fresh_fixes = true;
+    assert_eq!(
+        note(&f, &probe(30_000)),
+        Some(vec![line(
+            "context 30k / 1M: the open agent could take these fixes",
+            CheckTone::Note
+        )])
+    );
+    assert_eq!(note(&f, &probe(160_000)), None);
+}
+
+#[test]
 fn fix_pages_choose_the_open_build_agent_or_a_fresh_one() {
     let chip = AgentChip {
         icon: AgentIcon::from_agent("Claude Code"),

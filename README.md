@@ -135,8 +135,8 @@ claude = "claude --dangerously-skip-permissions"
 apps = ["cursor"]
 ```
 
-The other sections are `[git]`, `[inbox]`, `[services]`, `[t3]`, `[terminal]`
-and `[notifications]`. The comments at the top of `src/config.rs` and
+The other sections are `[git]`, `[inbox]`, `[services]`, `[t3]`, `[terminal]`,
+`[fixes]` and `[notifications]`. The comments at the top of `src/config.rs` and
 `src/keys.rs` describe every key.
 
 Other files:

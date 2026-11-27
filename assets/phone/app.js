@@ -92,8 +92,9 @@ async function ask(path, body) {
   let answer = await post(path, body);
   if (answer.asks) {
     const a = answer.asks;
-    if (!(await sheetAsk({ title: a.title, body: a.body, go: a.go || "Go" }))) return false;
-    answer = await post(path, { ...body, confirm: true });
+    const picked = await sheetAsk({ title: a.title, body: a.body, go: a.go || "Go", other: a.other });
+    if (!picked) return false;
+    answer = await post(path, { ...body, confirm: true, other: picked === "other" });
   }
   if (answer.error) { say([{ text: answer.error }], true); return false; }
   say(answer.said || []);
@@ -1051,18 +1052,19 @@ const here = () => {
 };
 
 // A question in a sheet over the page: a confirm with the button that
-// does it (`go`), or, with `field`, the text a button asks for. Its box
+// does it (`go`), and maybe a plain one doing the other way of it
+// (`other`, answered "other"), or, with `field`, the text a button asks for. Its box
 // grows as every box does; Enter breaks the line, the button sends, and
 // line breaks become spaces. Cancel (or Esc) keeps what was written as a
 // draft for the next time the same button asks. True, the text, or null.
 const sheet = document.getElementById("sheet");
 const drafts = new Map();
-function sheetAsk({ title, body, go, field, value = "", draft }) {
+function sheetAsk({ title, body, go, other, field, value = "", draft }) {
   const start = drafts.get(draft) ?? value;
   sheet.innerHTML = `<form method="dialog">${field ? `<label for="sheetText">${esc(title)}</label>
       <textarea id="sheetText" rows="1">${esc(start)}</textarea>`
     : `<h3 class="ask">${esc(title)}</h3>${body ? `<p>${esc(body)}</p>` : ""}`}
-    <div class="buttons"><button value="">Cancel</button><button class="primary" value="ok">${esc(go)}</button></div></form>`;
+    <div class="buttons"><button value="">Cancel</button>${other ? `<button value="other">${esc(other)}</button>` : ""}<button class="primary" value="ok">${esc(go)}</button></div></form>`;
   const box = sheet.querySelector("textarea");
   sheet.returnValue = "";
   sheet.showModal();
@@ -1073,7 +1075,7 @@ function sheetAsk({ title, body, go, field, value = "", draft }) {
   }
   return new Promise((done) => sheet.addEventListener("close", () => {
     const ok = sheet.returnValue === "ok";
-    if (!box) return done(ok || null);
+    if (!box) return done(sheet.returnValue === "other" ? "other" : ok || null);
     if (draft !== undefined) {
       if (ok || box.value === value) drafts.delete(draft);
       else drafts.set(draft, box.value);

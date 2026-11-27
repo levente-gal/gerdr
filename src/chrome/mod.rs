@@ -593,7 +593,9 @@ impl Chrome {
                 Kind::Confirm => {
                     let confirm = view.confirm.take().map(|confirm| {
                         let lines = confirm_body_lines(&confirm.body, output);
-                        let (loc, size) = shadowed(confirm_lines_layout(output, "", lines).panel);
+                        let labels = confirm.labels();
+                        let (loc, size) =
+                            shadowed(confirm_lines_layout(output, &labels, lines).panel);
                         ((confirm, output, theme, scale), loc, size)
                     });
                     let part = self
@@ -1428,7 +1430,7 @@ fn hit_rects(
     }
     if let Some(confirm) = &view.confirm {
         let lines = confirm_body_lines(&confirm.body, output);
-        rects.extend(confirm_lines_layout(output, "", lines).buttons);
+        rects.extend(confirm_lines_layout(output, &confirm.labels(), lines).buttons);
     }
     if let Some(quit) = &view.quit {
         let quit = quit_layout(output, quit.rows.len(), quit.switch_to.is_some());

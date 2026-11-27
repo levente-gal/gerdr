@@ -1056,6 +1056,7 @@ impl Gerdr {
             busy: &busy,
             names: self.projects.names(feature),
             probe,
+            fixes: self.settings.fixes,
             shipping,
             agent,
             agent_status,

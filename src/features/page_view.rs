@@ -75,7 +75,11 @@ pub(super) fn stage_page(
             fresh: feature.fresh_fixes,
             fixes: true,
         };
-        [card, switch]
+        let note = fix_agent_note(feature, state);
+        [Some(card), Some(switch), note]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
     });
     // A stage not reached yet may start by itself: its agent is picked ahead.
     if mark == StageMark::Later {
