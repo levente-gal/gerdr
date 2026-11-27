@@ -48,6 +48,7 @@ fn agent_card_at(
             buttons,
             picks,
             model: state.model.clone(),
+            effort: state.effort.clone(),
             waits: false,
         });
     };
@@ -119,6 +120,7 @@ fn agent_card_at(
         buttons,
         picks,
         model: state.model.clone(),
+        effort: state.effort.clone(),
         waits,
     })
 }
@@ -166,6 +168,7 @@ pub(super) fn own_cards(
             buttons,
             picks: Vec::new(),
             model: None,
+            effort: None,
             waits,
         }
     })
@@ -226,6 +229,7 @@ pub(super) fn research_cards(
                 buttons,
                 picks: Vec::new(),
                 model: None,
+                effort: None,
                 waits: run.done.is_none() && status == Some(AgentStatus::Blocked),
             }
         })
@@ -293,6 +297,7 @@ pub(super) fn resolving_card(
         buttons,
         picks: Vec::new(),
         model: None,
+        effort: None,
         waits,
     })
 }
@@ -356,6 +361,7 @@ pub(super) fn rework_card(
             buttons,
             picks: state.fix_picks.clone(),
             model: state.fix_model.clone(),
+            effort: state.fix_effort.clone(),
             waits: false,
         });
     };
@@ -371,12 +377,14 @@ pub(super) fn rework_card(
             status,
             picks,
             model,
+            effort,
             ..
         } = &mut card
         {
             *status = named(status);
             *picks = state.fix_picks.clone();
             *model = state.fix_model.clone();
+            *effort = state.fix_effort.clone();
         }
         return Some(card);
     }
@@ -400,6 +408,7 @@ pub(super) fn rework_card(
         buttons,
         picks: state.fix_picks.clone(),
         model: state.fix_model.clone(),
+        effort: state.fix_effort.clone(),
         waits: false,
     })
 }

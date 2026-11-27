@@ -143,6 +143,19 @@ impl Integration for Antigravity {
         commands::on_disk(cwd, homes, found);
     }
 
+    fn skill_dirs(&self, cwd: &Path, homes: &Homes, _config: &Path) -> Vec<PathBuf> {
+        // shortcut: plugins' skills are left out, as for Claude Code.
+        let cli = &homes.antigravity;
+        let gemini = cli.parent().unwrap_or(Path::new("/"));
+        vec![
+            cwd.join(".agents/skills"),
+            cwd.join(".agent/skills"),
+            gemini.join("config/skills"),
+            cli.join("skills"),
+            gemini.join("skills"),
+        ]
+    }
+
     fn hook_command(&self) -> Option<&'static str> {
         Some(live::HOOK_COMMAND)
     }

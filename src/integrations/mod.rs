@@ -347,6 +347,12 @@ pub trait Integration: Sync {
         _found: &mut Vec<Command>,
     ) {
     }
+    /// The folders it reads skills from (each skill a `<name>/SKILL.md` in
+    /// one), for folder `cwd`; `config` as in `disk_commands`. None: it
+    /// reads no skills.
+    fn skill_dirs(&self, _cwd: &Path, _homes: &Homes, _config: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
 
     // Live hooks.
 
@@ -405,6 +411,11 @@ pub trait Integration: Sync {
     /// Whether a stage's model can be picked for it.
     fn picks_model(&self) -> bool {
         self.takes_model()
+    }
+    /// Whether gerdr can start it on one of its `efforts`, with
+    /// `--effort <level>` (for that session only, its default kept).
+    fn takes_effort(&self) -> bool {
+        false
     }
     /// Whether a feature's stages are offered to it: one gerdr can go back
     /// to the chat of, or that starts in its app.
@@ -711,6 +722,10 @@ mod tests {
             (
                 "`picks_model`: a stage's model is picked",
                 yes(agent.picks_model()),
+            ),
+            (
+                "`takes_effort`: started on `--effort`",
+                yes(agent.takes_effort()),
             ),
             (
                 "`models_read`: its CLI lists its models",

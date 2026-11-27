@@ -34,7 +34,7 @@ use crate::{
         self, Feature, PerProject, Stage, Status,
         agents::{
             StageRun, Stop, T3Run, command_line, needs, resume_line, run_needs, session_file,
-            with_model, with_prompt,
+            with_effort, with_model, with_prompt,
         },
         artifacts,
         fix_round::FixPhase,
@@ -421,6 +421,17 @@ pub(crate) fn validate(
     let mut lacks = artifacts::check(stage, text).err().unwrap_or_default();
     if stage == Stage::Discover {
         lacks.extend(artifacts::citation_lacks(text, data));
+    }
+    if stage == Stage::Build && lacks.is_empty() {
+        let log = std::fs::read_to_string(data.join(artifacts::DECISIONS)).unwrap_or_default();
+        // shortcut: a repository's per-context `docs/adr/` (under `src/<ctx>/`)
+        // isn't looked in; add it if a project keeps them there.
+        let mut dirs: Vec<PathBuf> = feature
+            .touched()
+            .map(|r| r.worktree.join("docs/adr"))
+            .collect();
+        dirs.push(data.join(feature::memory::DIR).join("adr"));
+        lacks.extend(feature::memory::adr_lacks(&log, &feature.slug, &dirs));
     }
     if let Some(review) = review {
         for id in plan_review::unmapped(review, text) {
@@ -846,9 +857,29 @@ pub(crate) struct ModelSlot {
 
 /// The model picked for `agent` on `stage`, if any.
 fn picked_model(feature: &Feature, stage: Stage, agent: &str) -> Option<String> {
-    let models = feature.stage_models.get(&stage)?;
-    let (_, model) = models.iter().find(|(a, _)| a.eq_ignore_ascii_case(agent))?;
-    Some(model.clone())
+    picked_in(&feature.stage_models, stage, agent)
+}
+
+/// The effort picked for `agent` on `stage`, if any.
+fn picked_effort(feature: &Feature, stage: Stage, agent: &str) -> Option<String> {
+    picked_in(&feature.stage_efforts, stage, agent)
+}
+
+/// What `picks` has for `agent` on `stage`.
+fn picked_in(
+    picks: &BTreeMap<Stage, BTreeMap<String, String>>,
+    stage: Stage,
+    agent: &str,
+) -> Option<String> {
+    let (_, pick) = (picks.get(&stage)?.iter()).find(|(a, _)| a.eq_ignore_ascii_case(agent))?;
+    Some(pick.clone())
+}
+
+/// `base` of `agent` on `stage` with its picked model and effort.
+fn with_picks(feature: &Feature, stage: Stage, agent: &str, base: &str) -> String {
+    let model = picked_model(feature, stage, agent);
+    let effort = picked_effort(feature, stage, agent);
+    with_effort(&with_model(base, model.as_deref()), effort.as_deref())
 }
 
 /// `stage`'s `ModelSlot`, where its chips show: none on a stage no agent
@@ -869,6 +900,21 @@ pub(crate) fn stage_model_slot(
         picked: picked_model(feature, stage, &agent),
         agent,
         base,
+    })
+}
+
+/// `stage`'s slot of an effort, as `stage_model_slot` has its model's:
+/// `picked` is the effort. None for an agent gerdr can't start on one.
+pub(crate) fn stage_effort_slot(
+    feature: &Feature,
+    stage: Stage,
+    workflow: Option<&Workflow>,
+    installed: &[CliAgent],
+) -> Option<ModelSlot> {
+    let slot = stage_model_slot(feature, stage, workflow, installed)?;
+    by_command(&slot.base).takes_effort().then(|| ModelSlot {
+        picked: picked_effort(feature, stage, &slot.agent),
+        ..slot
     })
 }
 
@@ -1152,6 +1198,12 @@ pub(crate) fn vars(
         (
             "evidence.path",
             data.join(verify::EVIDENCE).display().to_string(),
+        ),
+        // Where Build keeps the memory that spans repositories, put into the
+        // home folder at ship (`feature::memory`).
+        (
+            "memory.path",
+            data.join(feature::memory::DIR).display().to_string(),
         ),
         ("branch", feature.branch()),
         (
@@ -1630,7 +1682,9 @@ impl Gerdr {
                     || run.asked_model != picked_model(feature, stage, &agent)
             }
             Pick::Agent(agent, base) => {
-                run.base != base || run.asked_model != picked_model(feature, stage, &agent)
+                run.base != base
+                    || run.asked_model != picked_model(feature, stage, &agent)
+                    || run.asked_effort != picked_effort(feature, stage, &agent)
             }
             _ => false,
         }
@@ -1646,6 +1700,19 @@ impl Gerdr {
         let workflow = self.projects.project(project).map(|p| &p.workflow);
         let feature = self.feature(project, slug)?;
         stage_model_slot(feature, stage, workflow, &self.launcher.cli_agents)
+    }
+
+    /// `stage`'s slot of an effort for feature `slug` (see
+    /// `stage_effort_slot`).
+    pub(crate) fn effort_slot_of(
+        &self,
+        project: &str,
+        slug: &str,
+        stage: Stage,
+    ) -> Option<ModelSlot> {
+        let workflow = self.projects.project(project).map(|p| &p.workflow);
+        let feature = self.feature(project, slug)?;
+        stage_effort_slot(feature, stage, workflow, &self.launcher.cli_agents)
     }
 
     /// Name the tab holding herdr pane `pane` after its agent and `stage`
@@ -1821,6 +1888,59 @@ impl Gerdr {
         }
     }
 
+    /// Open the picker of `stage`'s effort (its card's button,
+    /// Alt+Shift+E). An agent gerdr can't start on one is said so.
+    pub(crate) fn pick_stage_effort(&mut self, project: &str, slug: &str, stage: Stage) {
+        if let Some(slot) = self.effort_slot_of(project, slug, stage) {
+            let of = crate::switcher::ModelFor::StageEffort {
+                project: project.to_owned(),
+                slug: slug.to_owned(),
+                stage,
+            };
+            return self.open_model_picker(of, slot);
+        }
+        let chips = self.chips_of(project, slug, stage);
+        let Some(chip) = chips.iter().find(|c| c.lit) else {
+            return;
+        };
+        // Cursor's models carry it in their names.
+        let in_model = (self.model_slot_of(project, slug, stage))
+            .is_some_and(|slot| !by_command(&slot.base).in_app());
+        let why = match in_model {
+            true => format!("{} takes its effort with its model: pick that", chip.name),
+            false => format!(
+                "gerdr can't start {} on an effort: pick it in its tab",
+                chip.name
+            ),
+        };
+        self.show_warning(why);
+    }
+
+    /// Start `stage`'s `agent` on `effort` (none: its own default), from its
+    /// next start on, as `set_stage_model` does a model.
+    pub(crate) fn set_stage_effort(
+        &mut self,
+        project: &str,
+        slug: &str,
+        stage: Stage,
+        agent: &str,
+        effort: Option<String>,
+    ) {
+        let Some(feature) = self.feature_mut(project, slug) else {
+            return;
+        };
+        let efforts = feature.stage_efforts.entry(stage).or_default();
+        efforts.retain(|a, _| !a.eq_ignore_ascii_case(agent));
+        if let Some(effort) = effort {
+            efforts.insert(agent.to_owned(), effort);
+        }
+        if efforts.is_empty() {
+            feature.stage_efforts.remove(&stage);
+        }
+        self.save_feature(project, slug);
+        self.picked_now(project, slug, stage);
+    }
+
     /// Start `stage`'s `agent` on `model` (none: its own default), from its
     /// next start on: one that runs now goes on, and is said to.
     pub(crate) fn set_stage_model(
@@ -1949,8 +2069,7 @@ impl Gerdr {
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
         match stage_pick(feature, stage, workflow, &self.launcher.cli_agents) {
             Pick::Agent(agent, base) if !by_command(&base).in_app() => {
-                let model = picked_model(feature, stage, &agent);
-                let base = with_model(&base, model.as_deref());
+                let base = with_picks(feature, stage, &agent, &base);
                 Ok((agent, base))
             }
             Pick::Agent(..) => Err(match stage {
@@ -2071,7 +2190,8 @@ impl Gerdr {
             _ => (run.agent.clone(), run.base.clone()),
         };
         let model = picked_model(&feature, stage, &agent);
-        let moved = run.base != base || run.asked_model != model;
+        let effort = picked_effort(&feature, stage, &agent);
+        let moved = run.base != base || run.asked_model != model || run.asked_effort != effort;
         if !moved && let Some(pane) = (run.pane.clone()).filter(|p| self.pane_there(p)) {
             return self.focus_agent(&agents::AgentKey::Herdr(pane));
         }
@@ -2079,7 +2199,7 @@ impl Gerdr {
             return self.show_warning(why);
         }
         let line = command_line(
-            &with_model(&base, model.as_deref()),
+            &with_picks(&feature, stage, &agent, &base),
             &run.prompt,
             &feature.agent_dirs_for(&base, &store::dir(None, project, slug)),
         );
@@ -2112,6 +2232,7 @@ impl Gerdr {
                 r.base.clone_from(&base);
                 r.model.clone_from(&model);
                 r.asked_model.clone_from(&model);
+                r.asked_effort.clone_from(&effort);
                 r.nudged = false;
             }
             self.save_feature(project, slug);
@@ -2136,6 +2257,7 @@ impl Gerdr {
         r.base = base;
         r.model.clone_from(&model);
         r.asked_model.clone_from(&model);
+        r.asked_effort = effort;
         r.held = false;
         r.nudged = false;
         // Its work starts now: what it writes is new from here.
@@ -2245,8 +2367,8 @@ impl Gerdr {
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
         match stage_pick(feature, stage, workflow, &self.launcher.cli_agents) {
             Pick::Agent(agent, base) if by_command(&base).adds_dirs() => {
-                let model = picked_model(feature, stage, &agent);
-                Ok((agent, with_model(&base, model.as_deref())))
+                let base = with_picks(feature, stage, &agent, &base);
+                Ok((agent, base))
             }
             Pick::Agent(agent, _) => Err(format!(
                 "gerdr can't hand {agent} its question: pick Claude Code, Codex or Cursor for Discover"
@@ -2437,6 +2559,17 @@ impl Gerdr {
             "checks".into(),
             checks_list(&verify::checks(&feature, &config)),
         );
+        // shortcut: an agent on another machine is told no skills, as what
+        // is installed there isn't known here.
+        let skills = match machine {
+            None => {
+                let set = self.projects.workflows(&feature, |w| w.skills.clone()).home;
+                let wanted = feature::skills::wanted(&set, stage);
+                feature::skills::installed_for(by_command(&base), &feature.dir, &wanted)
+            }
+            Some(_) => Vec::new(),
+        };
+        values.insert("skills".into(), feature::skills::listed(&skills));
         for (key, value) in extra {
             values.insert((*key).to_owned(), value.clone());
         }
@@ -2444,10 +2577,15 @@ impl Gerdr {
             self.plan_review_starts(project, slug);
         }
         let version = prompts::builtin(need.template).map_or(0, |(_, v)| v);
+        let stamped = feature::skills::stamp(&skills, &feature::skills::lock_here());
         let asked_model = (by_command(&base).picks_model())
             .then(|| picked_model(&feature, stage, &agent))
             .flatten();
-        let waiting = takes_new_work(last, &base, asked_model.as_deref(), extra)
+        let asked_effort = (by_command(&base).takes_effort())
+            .then(|| picked_effort(&feature, stage, &agent))
+            .flatten();
+        let asked = (asked_model.as_deref(), asked_effort.as_deref());
+        let waiting = takes_new_work(last, &base, asked, extra)
             .filter(|r| r.machine == machine)
             .filter(|r| (r.pane.as_deref()).is_some_and(|p| self.pane_there(p)));
         let text = match prompts::render_builtin(need.template, &values) {
@@ -2488,7 +2626,7 @@ impl Gerdr {
         let command = if in_t3 {
             base.clone()
         } else {
-            let started = with_model(&base, asked_model.as_deref());
+            let started = with_picks(&feature, stage, &agent, &base);
             let line = command_line(&started, &prompt, &feature.agent_dirs_for(&base, &data));
             if at_once {
                 match self.start_line(&feature, project, slug, stage, &prompt) {
@@ -2568,6 +2706,7 @@ impl Gerdr {
                 })
                 .map(str::to_owned),
             asked_model,
+            asked_effort,
             n,
             agent: agent.clone(),
             command: job.as_ref().map_or(command, |job| job.command.clone()),
@@ -2576,7 +2715,7 @@ impl Gerdr {
             machine: machine.clone(),
             t3: in_t3.then_some(T3Run::Draft),
             prompt,
-            template: format!("builtin:{}@{version}", need.template),
+            template: format!("builtin:{}@{version}{stamped}", need.template),
             started: now,
             nudged: false,
             ready: None,
@@ -3419,7 +3558,8 @@ impl Gerdr {
                 return self.show_error(format!("Couldn't check the Plan agent's code: {why}"));
             }
         };
-        let mut changed: Vec<String> = reading.dirty.clone();
+        // Glossary and decision records may be left for Build to commit.
+        let mut changed: Vec<String> = reading.code_dirty();
         changed.extend(reading.stray.iter().cloned());
         changed.extend(
             reading
@@ -3650,7 +3790,7 @@ fn stop_is_new(stop: Option<Stop>, done: u32, total: u32) -> bool {
 fn takes_new_work<'a>(
     last: Option<&'a StageRun>,
     base: &str,
-    model: Option<&str>,
+    (model, effort): (Option<&str>, Option<&str>),
     extra: &[(&str, String)],
 ) -> Option<&'a StageRun> {
     last.filter(|r| {
@@ -3658,6 +3798,7 @@ fn takes_new_work<'a>(
             && r.waits_to_send()
             && r.base == base
             && r.asked_model.as_deref() == model
+            && r.asked_effort.as_deref() == effort
     })
 }
 
@@ -3847,31 +3988,45 @@ mod tests {
         };
         let fixes = [("fixes", String::from("x"))];
         assert_eq!(
-            takes_new_work(Some(&held), "claude", None, &fixes),
+            takes_new_work(Some(&held), "claude", (None, None), &fixes),
             Some(&held)
         );
         // A restart asks for a new agent, another command is another agent.
-        assert_eq!(takes_new_work(Some(&held), "claude", None, &[]), None);
         assert_eq!(
-            takes_new_work(Some(&held), "cursor-agent", None, &fixes),
+            takes_new_work(Some(&held), "claude", (None, None), &[]),
+            None
+        );
+        assert_eq!(
+            takes_new_work(Some(&held), "cursor-agent", (None, None), &fixes),
             None
         );
         // Another model was picked since: a tab can't change it, so a new one.
         assert_eq!(
-            takes_new_work(Some(&held), "claude", Some("opus"), &fixes),
+            takes_new_work(Some(&held), "claude", (Some("opus"), None), &fixes),
+            None
+        );
+        // Another effort too.
+        assert_eq!(
+            takes_new_work(Some(&held), "claude", (None, Some("max")), &fixes),
             None
         );
         let closed = StageRun {
             pane: None,
             ..held.clone()
         };
-        assert_eq!(takes_new_work(Some(&closed), "claude", None, &fixes), None);
+        assert_eq!(
+            takes_new_work(Some(&closed), "claude", (None, None), &fixes),
+            None
+        );
         let sent = StageRun {
             held: false,
             ..held
         };
-        assert_eq!(takes_new_work(Some(&sent), "claude", None, &fixes), None);
-        assert_eq!(takes_new_work(None, "claude", None, &fixes), None);
+        assert_eq!(
+            takes_new_work(Some(&sent), "claude", (None, None), &fixes),
+            None
+        );
+        assert_eq!(takes_new_work(None, "claude", (None, None), &fixes), None);
     }
 
     #[test]
@@ -3928,8 +4083,7 @@ mod tests {
     };
 
     const BRIEF: &str = "## Outcome\nx\n## In scope\n- a\n## Out of scope\n- b\n## Acceptance criteria\n- Given a, when b, then c\n";
-    const PLAN: &str =
-        "## Milestones\n- [ ] one\n  Seam: none: docs\n## Repositories\n- api\n## Merge order\napi\nMigrations: none\n";
+    const PLAN: &str = "## Milestones\n- [ ] one\n  Seam: none: docs\n## Repositories\n- api\n## Merge order\napi\nMigrations: none\n";
 
     fn run(ready: Option<u64>) -> StageRun {
         StageRun {
@@ -5343,6 +5497,32 @@ mod tests {
             stage_model_slot(&f, Stage::Discover, None, &installed),
             None
         );
+    }
+
+    #[test]
+    fn a_stages_effort_is_offered_for_claude_alone_and_goes_on_its_command() {
+        let installed = claude_and_cursor();
+        let mut f = feature("a", vec![repo("r", true)], 0);
+        f.stage_agents.insert(Stage::Plan, "Claude Code".into());
+        let slot = |f: &Feature| stage_effort_slot(f, Stage::Plan, None, &installed);
+        assert_eq!(slot(&f).expect("a slot").picked, None);
+        assert_eq!(
+            with_picks(&f, Stage::Plan, "Claude Code", "claude"),
+            "claude"
+        );
+        (f.stage_models.entry(Stage::Plan).or_default())
+            .insert("Claude Code".into(), "opus".into());
+        (f.stage_efforts.entry(Stage::Plan).or_default())
+            .insert("Claude Code".into(), "max".into());
+        assert_eq!(slot(&f).expect("a slot").picked.as_deref(), Some("max"));
+        assert_eq!(
+            with_picks(&f, Stage::Plan, "Claude Code", "claude"),
+            "claude --model opus --effort max"
+        );
+        // Cursor's effort is in its model's name: no button.
+        f.stage_agents.insert(Stage::Plan, "Cursor".into());
+        assert_eq!(slot(&f), None);
+        assert!(stage_model_slot(&f, Stage::Plan, None, &installed).is_some());
     }
 
     #[test]

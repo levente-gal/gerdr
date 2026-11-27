@@ -167,6 +167,13 @@ impl Integration for Claude {
         commands::on_disk(cwd, homes, found);
     }
 
+    fn skill_dirs(&self, cwd: &Path, homes: &Homes, _config: &Path) -> Vec<PathBuf> {
+        // shortcut: plugins' skills are left out; add them if a stage is to name one.
+        let mut dirs = vec![cwd.join(".claude/skills")];
+        dirs.extend(homes.claude.iter().map(|home| home.join("skills")));
+        dirs
+    }
+
     fn hook_command(&self) -> Option<&'static str> {
         Some(live::HOOK_COMMAND)
     }
@@ -192,6 +199,10 @@ impl Integration for Claude {
     }
 
     fn takes_model(&self) -> bool {
+        true
+    }
+
+    fn takes_effort(&self) -> bool {
         true
     }
 

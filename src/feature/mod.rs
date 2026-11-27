@@ -35,6 +35,7 @@ pub mod hook;
 pub mod layout;
 pub mod lease;
 pub mod manual;
+pub mod memory;
 pub mod page;
 pub mod patch;
 pub mod plan_review;
@@ -48,6 +49,7 @@ pub mod sandbox_pages;
 pub mod sandbox_run;
 pub mod setup;
 pub mod ship;
+pub mod skills;
 pub mod store;
 pub mod suggest;
 pub mod verify;
@@ -915,6 +917,10 @@ pub struct Feature {
     /// keeps its own, as a model of one means nothing to another.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stage_models: BTreeMap<Stage, BTreeMap<String, String>>,
+    /// The effort picked on a stage's page, by the agent it is for, as
+    /// `stage_models` keeps models: none starts it on its own default.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stage_efforts: BTreeMap<Stage, BTreeMap<String, String>>,
     /// The machine picked on a stage's page, by its id (`machines::Site::id`)
     /// or `machine_work::HERE`; over the project's `workflow.machines`, and
     /// only where it differs from what that gives.
@@ -2158,6 +2164,7 @@ pub(crate) mod tests {
             came_from: None,
             epoch: 0,
             stage_models: Default::default(),
+            stage_efforts: Default::default(),
             fresh_milestones: false,
             setup: None,
             checks: Default::default(),
@@ -2263,6 +2270,7 @@ pub(crate) mod tests {
             came_from: None,
             epoch: 0,
             stage_models: Default::default(),
+            stage_efforts: Default::default(),
             fresh_milestones: false,
             setup: None,
             checks: Default::default(),

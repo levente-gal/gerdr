@@ -784,6 +784,13 @@ pub(crate) enum Done {
         /// They are what finishes Ship: what follows it runs after.
         finishing: bool,
     },
+    /// What putting a shipped feature's memory into the home folder did
+    /// (`feature::memory::apply`).
+    MemoryKept {
+        project: String,
+        slug: String,
+        result: Result<Option<String>, String>,
+    },
     /// What removing a shipped feature's worktrees loses, as ticked.
     ShippedLosses {
         project: String,
@@ -1488,6 +1495,8 @@ pub enum PanelOutcome {
     PickAgent(Stage, String),
     /// Open the picker of the stage's model.
     PickModel(Stage),
+    /// Open the picker of the stage's effort.
+    PickEffort(Stage),
     /// Run this agent stage's next agent on the next machine that is up.
     CycleMachine(Stage),
     /// Stop this stage's agent, on another machine.

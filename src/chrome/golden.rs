@@ -3381,6 +3381,7 @@ pub(super) fn feature_tab() -> super::FeatureTabView {
                     buttons: vec![1, 2],
                     picks: Vec::new(),
                     model: None,
+                    effort: None,
                     waits: false,
                 },
                 PageSection::Lines {
@@ -3488,6 +3489,7 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
                 buttons: vec![1],
                 picks: Vec::new(),
                 model: None,
+                effort: None,
                 waits: false,
             },
             PageSection::File {
@@ -3626,6 +3628,7 @@ fn feature_tab_discover_brief() -> super::FeatureTabView {
                 buttons: vec![1],
                 picks: Vec::new(),
                 model: None,
+                effort: None,
                 waits: false,
             },
             PageSection::File {
@@ -3693,6 +3696,7 @@ fn feature_tab_discover_research() -> super::FeatureTabView {
         buttons,
         picks: Vec::new(),
         model: None,
+        effort: None,
         waits,
     };
     let cards = [
@@ -3782,6 +3786,7 @@ fn feature_tab_resume() -> super::FeatureTabView {
             buttons: vec![1],
             picks: Vec::new(),
             model: None,
+            effort: None,
             waits: false,
         }],
     };
@@ -4959,6 +4964,7 @@ fn feature_tab_start_over() -> super::FeatureTabView {
                 buttons: vec![1],
                 picks: Vec::new(),
                 model: None,
+                effort: None,
                 waits: false,
             },
             PageSection::File {
@@ -5052,6 +5058,7 @@ fn review_switch(view: super::ReviewView) -> super::ReviewSwitch {
         buttons: Vec::new(),
         picks: Vec::new(),
         model: None,
+        effort: None,
     }
 }
 
@@ -5367,6 +5374,7 @@ fn feature_tab_picks_later() -> super::FeatureTabView {
             buttons: Vec::new(),
             picks: agent_chips(1, true),
             model: None,
+            effort: None,
             waits: false,
         }],
     };
@@ -5399,6 +5407,22 @@ fn with_model_button(mut view: super::FeatureTabView, label: &str) -> super::Fea
         if let super::PageSection::Agent { stage, model, .. } = section {
             *model = Some(label.into());
             view.hover = Some(super::FeatureTabHit::AgentModel(*stage));
+        }
+    }
+    view
+}
+
+/// `view` with its agent cards' model and effort buttons, the pointer on
+/// the effort's.
+fn with_effort_button(view: super::FeatureTabView, effort: &str) -> super::FeatureTabView {
+    let mut view = with_model_button(view, "Model: opus");
+    for section in &mut view.page.sections {
+        if let super::PageSection::Agent {
+            stage, effort: e, ..
+        } = section
+        {
+            *e = Some(effort.into());
+            view.hover = Some(super::FeatureTabHit::AgentEffort(*stage));
         }
     }
     view
@@ -5464,6 +5488,7 @@ fn feature_tab_held() -> super::FeatureTabView {
             buttons: vec![0, 1],
             picks,
             model: None,
+            effort: None,
             waits: true,
         }],
     };
@@ -5635,6 +5660,7 @@ fn feature_tab_fixing() -> super::FeatureTabView {
                 buttons: vec![0],
                 picks: Vec::new(),
                 model: None,
+                effort: None,
                 waits: false,
             },
             PageSection::MilestoneMode {
@@ -5678,6 +5704,7 @@ pub(super) fn feature_tab_fix_picks() -> super::FeatureTabView {
                 buttons: vec![0],
                 picks: agent_chips(1, true),
                 model: None,
+                effort: None,
                 waits: false,
             },
             PageSection::Agent {
@@ -5690,6 +5717,7 @@ pub(super) fn feature_tab_fix_picks() -> super::FeatureTabView {
                 buttons: Vec::new(),
                 picks: agent_chips(0, false),
                 model: Some("Model: default".into()),
+                effort: None,
                 waits: false,
             },
             PageSection::Lines {
@@ -5719,6 +5747,7 @@ fn feature_tab_ship_picks() -> super::FeatureTabView {
             buttons: Vec::new(),
             picks: agent_chips(0, false),
             model: Some("Model: default".into()),
+            effort: None,
             waits: false,
         },
     );
@@ -5757,6 +5786,7 @@ fn feature_tab_t3_draft() -> super::FeatureTabView {
             buttons: Vec::new(),
             picks,
             model: None,
+            effort: None,
             waits: true,
         }],
     };
@@ -6585,7 +6615,7 @@ fn placed(mut view: super::FeatureTabView) -> super::FeatureTabView {
 }
 
 /// The feature tab's fixtures, by name.
-fn feature_tabs() -> [(&'static str, super::FeatureTabView); 60] {
+fn feature_tabs() -> [(&'static str, super::FeatureTabView); 61] {
     let views = [
         ("tab_build", feature_tab()),
         ("tab_verify_fixes", feature_tab_verify_fixes()),
@@ -6628,6 +6658,10 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 60] {
                 "Model: claude-opus-4-8[context=1m,effort=high,fast=false]",
             ),
         ),
+        (
+            "tab_effort_later",
+            with_effort_button(feature_tab_picks_later(), "Effort: high"),
+        ),
         ("tab_t3_draft", feature_tab_t3_draft()),
         ("tab_milestone_mode", feature_tab_milestone_mode()),
         ("tab_held", feature_tab_held()),
@@ -6661,7 +6695,7 @@ fn feature_tabs() -> [(&'static str, super::FeatureTabView); 60] {
 }
 
 /// Each fixture at the width it shows best at, and Build at all three.
-const TAB_SURFACES: [(&str, i32); 77] = [
+const TAB_SURFACES: [(&str, i32); 78] = [
     ("tab_build", 860),
     ("tab_build", 1180),
     ("tab_build", 1920),
@@ -6689,6 +6723,7 @@ const TAB_SURFACES: [(&str, i32); 77] = [
     ("tab_picks_running", 860),
     ("tab_model_later", 1180),
     ("tab_model_long", 860),
+    ("tab_effort_later", 1180),
     ("tab_t3_draft", 860),
     ("tab_milestone_mode", 1180),
     ("tab_milestone_mode", 860),
@@ -6741,7 +6776,7 @@ const TAB_SURFACES: [(&str, i32); 77] = [
     ("tab_discover_research", 860),
 ];
 
-const FEATURE_TAB: [&str; 77] = [
+const FEATURE_TAB: [&str; 78] = [
     "tab_build_860",
     "tab_build_1180",
     "tab_build_1920",
@@ -6769,6 +6804,7 @@ const FEATURE_TAB: [&str; 77] = [
     "tab_picks_running_860",
     "tab_model_later_1180",
     "tab_model_long_860",
+    "tab_effort_later_1180",
     "tab_t3_draft_860",
     "tab_milestone_mode_1180",
     "tab_milestone_mode_860",
@@ -6822,7 +6858,7 @@ const FEATURE_TAB: [&str; 77] = [
 ];
 
 /// The recorded hashes of `FEATURE_TAB`, per case in `CASES`.
-const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
+const GOLDEN_FEATURE_TAB: [[u64; 78]; 4] = [
     // Dark at 1
     [
         0xa85bec63adf6c004, // tab_build_860
@@ -6852,6 +6888,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0x53dead8f6dc0c522, // tab_picks_running_860
         0x3f6bb9eaf873caba, // tab_model_later_1180
         0xc0ebb3657f85499e, // tab_model_long_860
+        0xf50e2d406c345e07, // tab_effort_later_1180
         0x64897ab87ba9549e, // tab_t3_draft_860
         0x1898b8544317bfbc, // tab_milestone_mode_1180
         0x8debc81b08683f41, // tab_milestone_mode_860
@@ -6932,6 +6969,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xebaed4839e1a6b54, // tab_picks_running_860
         0xfb4bd096dfb10963, // tab_model_later_1180
         0x840a43f732f21705, // tab_model_long_860
+        0x3438282a547855db, // tab_effort_later_1180
         0xd334f28552de95e6, // tab_t3_draft_860
         0xc53297e40c183eb3, // tab_milestone_mode_1180
         0xdc715ca1649c9769, // tab_milestone_mode_860
@@ -7012,6 +7050,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0x9ee08d065c407d7a, // tab_picks_running_860
         0xf535e318b743105b, // tab_model_later_1180
         0xc1683c01713422b2, // tab_model_long_860
+        0xe703765c8566dba9, // tab_effort_later_1180
         0xa4a8a96de0e7ca65, // tab_t3_draft_860
         0xaf915c750571698f, // tab_milestone_mode_1180
         0xf99211ee19503732, // tab_milestone_mode_860
@@ -7092,6 +7131,7 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xb61f249d3fdf9ed4, // tab_picks_running_860
         0x558386a6e1a53356, // tab_model_later_1180
         0xfcbca7511da7d55f, // tab_model_long_860
+        0xec435506b607acd0, // tab_effort_later_1180
         0xcce4c7c6e2bd6253, // tab_t3_draft_860
         0xbe12144dace45346, // tab_milestone_mode_1180
         0xbf432d672e9beee5, // tab_milestone_mode_860
@@ -7813,6 +7853,7 @@ fn tab_plan_review(writing: bool) -> super::FeatureTabView {
         buttons: vec![if writing { 0 } else { 1 }],
         picks: Vec::new(),
         model: None,
+        effort: None,
         waits: false,
     });
     let (words, lines, decided) = match writing {

@@ -2696,6 +2696,7 @@ mod tests {
             setups_elsewhere: Vec::new(),
             came_from: None,
             stage_models: Default::default(),
+            stage_efforts: Default::default(),
             fresh_milestones: false,
             fresh_fixes: false,
             setup: None,

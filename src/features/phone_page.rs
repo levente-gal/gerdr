@@ -100,6 +100,7 @@ fn phone_quick(outcome: &PanelOutcome) -> bool {
         O::Manual(Manual::Toggle(_) | Manual::Clear(_) | Manual::Fail(..))
             | O::PickAgent(..)
             | O::PickModel(_)
+            | O::PickEffort(_)
             | O::FreshMilestones(_)
             | O::FreshFixes(_)
             | O::StartOver(_)
@@ -117,6 +118,7 @@ fn phone_asks(outcome: &PanelOutcome) -> Option<&'static str> {
         O::AskDismiss(_) => "Why dismiss it?",
         O::AddComment => "What should change?",
         O::PickModel(_) => "The model to start it on (none: the agent's own default)",
+        O::PickEffort(_) => "The effort to start it on (none: the agent's own default)",
         O::Manual(Manual::Write(_)) => "What went wrong?",
         _ => return None,
     })
@@ -244,8 +246,16 @@ impl PhonePage {
         let mut value = section_json(section)?;
         match section {
             S::Agent { buttons, .. } => {
-                let (models, picks): (Vec<&PhoneButton>, Vec<&PhoneButton>) =
-                    (self.added(i)).partition(|b| matches!(b.outcome, PanelOutcome::PickModel(_)));
+                let (models, picks): (Vec<&PhoneButton>, Vec<&PhoneButton>) = (self.added(i))
+                    .partition(|b| {
+                        matches!(
+                            b.outcome,
+                            PanelOutcome::PickModel(_) | PanelOutcome::PickEffort(_)
+                        )
+                    });
+                let (models, efforts): (Vec<&PhoneButton>, Vec<&PhoneButton>) = (models
+                    .into_iter())
+                .partition(|b| matches!(b.outcome, PanelOutcome::PickModel(_)));
                 value["buttons"] = self.at(buttons).into();
                 value["picks"] = picks
                     .into_iter()
@@ -253,6 +263,7 @@ impl PhonePage {
                     .collect::<Vec<_>>()
                     .into();
                 value["model"] = models.first().map(|b| b.json()).into();
+                value["effort"] = efforts.first().map(|b| b.json()).into();
                 let pane = self.panes.iter().find(|(at, _)| *at == i);
                 value["pane"] = pane.map(|(_, pane)| pane.as_str()).into();
             }
@@ -787,6 +798,7 @@ impl Gerdr {
                 stage,
                 picks,
                 model,
+                effort,
                 name,
                 dot,
                 ..
@@ -823,6 +835,12 @@ impl Gerdr {
             if let Some(label) = model {
                 let mut pick = PhoneButton::new(label, PanelOutcome::PickModel(*stage), false);
                 let slot = self.model_slot_of(project, slug, *stage);
+                pick.value = slot.and_then(|s| s.picked).unwrap_or_default();
+                extra.push((Some(i), pick));
+            }
+            if let Some(label) = effort {
+                let mut pick = PhoneButton::new(label, PanelOutcome::PickEffort(*stage), false);
+                let slot = self.effort_slot_of(project, slug, *stage);
                 pick.value = slot.and_then(|s| s.picked).unwrap_or_default();
                 extra.push((Some(i), pick));
             }
@@ -971,7 +989,10 @@ impl Gerdr {
                     }),
                     (Some(_), Some(text))
                         if !text.trim().is_empty()
-                            || matches!(button.outcome, PanelOutcome::PickModel(_)) =>
+                            || matches!(
+                                button.outcome,
+                                PanelOutcome::PickModel(_) | PanelOutcome::PickEffort(_)
+                            ) =>
                     {
                         self.phone_said(confirm, move |g| {
                             g.phone_wrote(&project, &slug, shown, button.outcome, text.trim());
@@ -1061,6 +1082,25 @@ impl Gerdr {
                 };
                 let model = (!text.is_empty()).then(|| text.to_owned());
                 self.set_stage_model(project, slug, stage, &slot.agent, model);
+            }
+            O::PickEffort(stage) => {
+                let Some(slot) = self.effort_slot_of(project, slug, stage) else {
+                    return self.show_warning(format!(
+                        "gerdr can't start {}'s agent on an effort",
+                        stage.label()
+                    ));
+                };
+                let levels = crate::integrations::by_command(&slot.base).efforts();
+                let effort = text.to_lowercase();
+                if !effort.is_empty() && !levels.contains(&effort.as_str()) {
+                    return self.show_warning(format!(
+                        "{} takes none of that: {}",
+                        slot.agent,
+                        levels.join(", ")
+                    ));
+                }
+                let effort = (!effort.is_empty()).then_some(effort);
+                self.set_stage_effort(project, slug, stage, &slot.agent, effort);
             }
             other => tracing::warn!("the phone wrote for {other:?} on {}", shown.label()),
         }

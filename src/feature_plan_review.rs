@@ -156,7 +156,7 @@ fn take_places(review: &mut PlanReview, placed: &BTreeMap<String, Placed>) {
 /// commits since the review started (`baseline`; none: it couldn't be read
 /// then, and commits can't be told apart from older ones).
 fn changed_code(reading: &Reading, baseline: Option<&str>) -> Vec<String> {
-    let mut changed: Vec<String> = reading.dirty.clone();
+    let mut changed: Vec<String> = reading.code_dirty();
     changed.extend(reading.stray.iter().cloned());
     if baseline.is_some_and(|b| b != reading.patch) {
         let commits = reading.commits.iter().filter(|(_, n)| **n > 0);

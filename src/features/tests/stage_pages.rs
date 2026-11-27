@@ -1809,6 +1809,28 @@ fn alt_shift_a_asks_for_the_model_on_an_agent_stage_only() {
 }
 
 #[test]
+fn alt_shift_e_asks_for_the_effort_on_an_agent_stage_only() {
+    let f = feature("a", vec![repo("r", true)], 0);
+    let mut panel = FeaturePanel {
+        slug: "a".into(),
+        ..FeaturePanel::default()
+    };
+    let mods = ModifiersState {
+        alt: true,
+        shift: true,
+        ..ModifiersState::default()
+    };
+    let ctx = RowCtx::default();
+    let press = |p: &mut FeaturePanel| p.key(&mods, Keysym::e, &f, &[], ctx, &[], &[], &[]);
+    assert_eq!(
+        press(&mut panel),
+        Some(PanelOutcome::PickEffort(Stage::Discover))
+    );
+    panel.pick(&f, Stage::Verify);
+    assert_eq!(press(&mut panel), None);
+}
+
+#[test]
 fn the_model_button_and_its_key_show_where_gerdr_can_tell_a_model() {
     let f = feature("a", vec![repo("r", true)], 0);
     let chip = AgentChip {

@@ -72,10 +72,14 @@ pub(super) struct PanelState<'a> {
     /// The button picking its model, where gerdr can start the agent on
     /// one (see `feature_agents::stage_model_slot`).
     pub(super) model: Option<String>,
+    /// The button picking its effort, where gerdr can start the agent on
+    /// one (see `feature_agents::stage_effort_slot`).
+    pub(super) effort: Option<String>,
     /// The same for the agent fixes go to (Build's), on a page sending
     /// them (`keys::fix_page`).
     pub(super) fix_picks: Vec<AgentChip>,
     pub(super) fix_model: Option<String>,
+    pub(super) fix_effort: Option<String>,
     /// What the button placing the next agent says, with machines to place it
     /// on (see `machine_work::place_label`).
     pub(super) place: Option<String>,
@@ -99,6 +103,11 @@ pub(super) struct PanelState<'a> {
 pub(super) fn model_label(picked: Option<&str>) -> String {
     let model = picked.map_or("default", crate::integrations::t3::launch::model_name);
     format!("Model: {model}")
+}
+
+/// What the button picking a stage's effort says.
+pub(super) fn effort_label(picked: Option<&str>) -> String {
+    format!("Effort: {}", picked.unwrap_or("default"))
 }
 
 /// `what` a task does as an inline status: "Setting up “T”" reads

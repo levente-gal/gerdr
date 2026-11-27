@@ -1327,6 +1327,7 @@ pub(super) fn tab_view(
                         false => Vec::new(),
                     },
                     model: state.fix_model.clone().filter(|_| code),
+                    effort: state.fix_effort.clone().filter(|_| code),
                 }
             });
     let test_strip = (!panel.keys && shows_criteria(feature, stage))
@@ -1388,9 +1389,11 @@ pub(super) fn tab_view(
                 AgentChoices {
                     picks: &state.picks,
                     model: state.model.is_some(),
+                    effort: state.effort.is_some(),
                     place: state.place.is_some(),
                     fix_picks: &state.fix_picks,
                     fix_model: state.fix_model.is_some(),
+                    fix_effort: state.fix_effort.is_some(),
                     fix_mode,
                 },
                 &state.plan,

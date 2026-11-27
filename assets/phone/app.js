@@ -337,6 +337,7 @@ function section(x, f, p, s) {
       // The agent its next start runs on is lit; its model, after them.
       const picks = (x.picks || []).map((b) => btn({ ...b, primary: false }, `pick${b.primary ? " lit" : ""}`));
       if (x.model) picks.push(btn(x.model, "pick"));
+      if (x.effort) picks.push(btn(x.effort, "pick"));
       return `<div class="${cls}">${top}${row(x.buttons)}${writable && picks.length ? `<div class="buttons picks">${picks.join("")}</div>` : ""}</div>`;
     }
     case "file":

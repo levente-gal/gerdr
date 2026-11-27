@@ -205,6 +205,44 @@ fn an_agent_waiting_on_you_has_its_card_stand_out() {
     assert_eq!(card(&f, None).map(|c| c.0), Some(false));
 }
 
+/// The Build agent's card at work on a later page picks the fixes' model
+/// and effort, not the page's own agent's.
+#[test]
+fn the_build_card_at_work_shows_the_fixes_effort() {
+    let stage = Stage::AiReview;
+    let mut f = feature("b", vec![repo("api", true)], 5);
+    let mut live = held_run(Some("p1"));
+    live.held = false;
+    f.runs.insert(Stage::Build, live);
+    let ctx = RowCtx {
+        fixing: Some(Dot::Working),
+        ..RowCtx::default()
+    };
+    let state = PanelState {
+        ctx,
+        model: Some("Model: opus".into()),
+        effort: Some("Effort: low".into()),
+        fix_model: Some("Model: sonnet".into()),
+        fix_effort: Some("Effort: max".into()),
+        ..PanelState::default()
+    };
+    let actions = page_actions(&f, stage, ctx);
+    let page = stage_page(&f, stage, &state, &actions, 2_000);
+    let build = page.sections.iter().find_map(|s| match s {
+        PageSection::Agent {
+            stage: Stage::Build,
+            model,
+            effort,
+            ..
+        } => Some((model.clone(), effort.clone())),
+        _ => None,
+    });
+    assert_eq!(
+        build,
+        Some((Some("Model: sonnet".into()), Some("Effort: max".into())))
+    );
+}
+
 #[test]
 fn work_sent_back_to_build_shows_on_the_page_of_the_stage_at_hand() {
     // At AI review, its findings sent, the Build agent back on them.
