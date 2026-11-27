@@ -7691,6 +7691,7 @@ fn new_gerdr(
         mouse: state::Mouse {
             drag: None,
             reorder: None,
+            reload_hold: None,
             pane_drop: None,
             chrome_cursor: CursorIcon::Default,
             pos: (0.0, 0.0).into(),
