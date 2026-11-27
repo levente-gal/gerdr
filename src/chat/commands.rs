@@ -46,11 +46,15 @@ pub fn here(kind: AgentKind, cwd: &Path) -> Vec<Command> {
     let Some(homes) = Homes::here() else {
         return Vec::new();
     };
-    let config = (std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
+    list(kind, cwd, &homes, &config_dir())
+}
+
+/// This machine's config folder: `$XDG_CONFIG_HOME`, else `~/.config`.
+pub fn config_dir() -> PathBuf {
+    (std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
         .filter(|dir| dir.is_absolute())
         .or_else(|| crate::home_dir().map(|home| home.join(".config")))
-        .unwrap_or_default();
-    list(kind, cwd, &homes, &config)
+        .unwrap_or_default()
 }
 
 /// What follows the `/` of a reply that is a command being typed: a `/`

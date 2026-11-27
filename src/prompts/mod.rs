@@ -27,8 +27,9 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "start" => (include_str!("../../assets/prompts/start.md"), 1),
         "agent" => (include_str!("../../assets/prompts/agent.md"), 2),
         "rules" => (include_str!("../../assets/prompts/rules.md"), 1),
-        "repos" => (include_str!("../../assets/prompts/repos.md"), 6),
+        "repos" => (include_str!("../../assets/prompts/repos.md"), 7),
         "memory" => (include_str!("../../assets/prompts/memory.md"), 1),
+        "skills" => (include_str!("../../assets/prompts/skills.md"), 1),
         "decisions" => (include_str!("../../assets/prompts/decisions.md"), 2),
         "research" => (include_str!("../../assets/prompts/research.md"), 1),
         "summary" => (include_str!("../../assets/prompts/summary.md"), 1),
@@ -155,6 +156,19 @@ mod tests {
     }
 
     #[test]
+    fn a_stage_names_its_skills_only_when_it_has_some() {
+        let mut v = vars(false, "");
+        let none = render_builtin("discover", &v).unwrap();
+        assert!(!none.contains("Skills installed"), "{none}");
+        v.insert("skills".into(), "- `grilling`".into());
+        let some = render_builtin("discover", &v).unwrap();
+        assert!(
+            some.contains("- `grilling`") && some.contains("come first"),
+            "{some}"
+        );
+    }
+
+    #[test]
     fn every_builtin_renders() {
         for name in [
             "discover",
@@ -174,6 +188,7 @@ mod tests {
             "rules",
             "repos",
             "memory",
+            "skills",
             "ai-review",
             "pr-review",
             "summary",

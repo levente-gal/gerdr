@@ -12,7 +12,10 @@ mod parse;
 mod screen;
 pub(crate) mod stats;
 
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use super::{
     DbChat, Integration, ModelSwitch, Parser, PickedFor, SidePanel, Store, common::install::Changed,
@@ -142,6 +145,22 @@ impl Integration for Cursor {
 
     fn disk_commands(&self, cwd: &Path, homes: &Homes, _config: &Path, found: &mut Vec<Command>) {
         commands::cursor_disk(cwd, homes, found);
+    }
+
+    fn skill_dirs(&self, cwd: &Path, homes: &Homes, _config: &Path) -> Vec<PathBuf> {
+        let mut dirs = vec![
+            cwd.join(".cursor/skills"),
+            cwd.join(".claude/skills"),
+            cwd.join(".agents/skills"),
+            homes.cursor.join("skills"),
+        ];
+        dirs.extend(
+            homes
+                .cursor
+                .parent()
+                .map(|home| home.join(".agents/skills")),
+        );
+        dirs
     }
 
     fn hook_command(&self) -> Option<&'static str> {

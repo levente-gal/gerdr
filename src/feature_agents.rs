@@ -2542,6 +2542,17 @@ impl Gerdr {
             "checks".into(),
             checks_list(&verify::checks(&feature, &config)),
         );
+        // shortcut: an agent on another machine is told no skills, as what
+        // is installed there isn't known here.
+        let skills = match machine {
+            None => {
+                let set = self.projects.workflows(&feature, |w| w.skills.clone()).home;
+                let wanted = feature::skills::wanted(&set, stage);
+                feature::skills::installed_for(by_command(&base), &feature.dir, &wanted)
+            }
+            Some(_) => Vec::new(),
+        };
+        values.insert("skills".into(), feature::skills::listed(&skills));
         for (key, value) in extra {
             values.insert((*key).to_owned(), value.clone());
         }
@@ -2549,6 +2560,7 @@ impl Gerdr {
             self.plan_review_starts(project, slug);
         }
         let version = prompts::builtin(need.template).map_or(0, |(_, v)| v);
+        let stamped = feature::skills::stamp(&skills, &feature::skills::lock_here());
         let asked_model = (by_command(&base).picks_model())
             .then(|| picked_model(&feature, stage, &agent))
             .flatten();
@@ -2686,7 +2698,7 @@ impl Gerdr {
             machine: machine.clone(),
             t3: in_t3.then_some(T3Run::Draft),
             prompt,
-            template: format!("builtin:{}@{version}", need.template),
+            template: format!("builtin:{}@{version}{stamped}", need.template),
             started: now,
             nudged: false,
             ready: None,
@@ -3529,7 +3541,8 @@ impl Gerdr {
                 return self.show_error(format!("Couldn't check the Plan agent's code: {why}"));
             }
         };
-        let mut changed: Vec<String> = reading.dirty.clone();
+        // Glossary and decision records may be left for Build to commit.
+        let mut changed: Vec<String> = reading.code_dirty();
         changed.extend(reading.stray.iter().cloned());
         changed.extend(
             reading
@@ -4053,8 +4066,7 @@ mod tests {
     };
 
     const BRIEF: &str = "## Outcome\nx\n## In scope\n- a\n## Out of scope\n- b\n## Acceptance criteria\n- Given a, when b, then c\n";
-    const PLAN: &str =
-        "## Milestones\n- [ ] one\n  Seam: none: docs\n## Repositories\n- api\n## Merge order\napi\nMigrations: none\n";
+    const PLAN: &str = "## Milestones\n- [ ] one\n  Seam: none: docs\n## Repositories\n- api\n## Merge order\napi\nMigrations: none\n";
 
     fn run(ready: Option<u64>) -> StageRun {
         StageRun {
