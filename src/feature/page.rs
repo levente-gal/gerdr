@@ -168,12 +168,17 @@ fn sent_notes(data: &Path, n: u32) -> Vec<crate::review::Comment> {
 const TOO_BIG: &str = "Too big to show here: use Review";
 
 /// The blocks of stage file `path` for its page, if it can be read. One
-/// `md_preview` wouldn't render either gets a note instead.
+/// `md_preview` wouldn't render either gets a note instead. Its relative
+/// links and images are to files in its folder.
 fn preview_of(path: &Path) -> Result<Vec<DocBlock>, std::io::Error> {
     if std::fs::metadata(path)?.len() > md_preview::FILE_MAX {
         return Ok(vec![DocBlock::Note(TOO_BIG.to_owned())]);
     }
-    Ok(md_blocks::blocks(&std::fs::read_to_string(path)?))
+    let text = std::fs::read_to_string(path)?;
+    Ok(match path.parent() {
+        Some(dir) => md_blocks::blocks_in(&text, dir),
+        None => md_blocks::blocks(&text),
+    })
 }
 
 /// The comments of the user's the diff of the feature with data dir `data`

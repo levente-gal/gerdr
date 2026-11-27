@@ -1,13 +1,18 @@
 //! A markdown file as plain blocks of text, for gerdr to paint itself: the
 //! read-only copy of a stage's file on its page (see `feature::page`). The
 //! file is parsed as `md_preview` parses it, by comrak with GitHub's
-//! extensions, and raw HTML is left out as there. What is inside a block
-//! is its words, with runs of them bold, code or a web link (`Inline`);
-//! the rest flattens: emphasis to plain words, an image to its alt text.
+//! extensions (and its alerts), and raw HTML is left out as there: a block
+//! of it keeps only its words, `<br>` its line break. A file's front matter
+//! is left out. What is inside a block is its words, with runs of them
+//! bold, italic, struck through, code or a link (`Inline`); an image alone
+//! in its paragraph is a block of its own, one among words its alt text.
 //! The page in a file's tab (`md_preview`) is still what shows it as GitHub
 //! would.
 
-use std::ops::Range;
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     highlight::{self, GRAMMAR_LINES},
@@ -15,7 +20,7 @@ use crate::{
 };
 use comrak::{
     Arena, Options,
-    nodes::{AstNode, ListType, NodeValue},
+    nodes::{AlertType, AstNode, ListType, NodeValue, TableAlignment},
     parse_document,
 };
 
@@ -30,14 +35,72 @@ pub enum ItemMark {
     Under,
 }
 
-/// How a run of a block's words is set, other than plain.
+/// How a run of a block's words is set, other than plain. A run is set
+/// one way: where they nest, the later one here wins (`Inline::over`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Inline {
+    Italic,
     Bold,
+    /// Struck through: what a plan or a list says is no longer so.
+    Strike,
     /// Inline code, in the monospace font.
     Code,
-    /// A link to a web page (`http` or `https`): other links stay plain.
+    /// A link to a web page (`http` or `https`) or a file (a path, maybe
+    /// with `#L12` or `:12`; see `file_target`). Other links (`mailto:`,
+    /// a heading's `#anchor`) stay plain.
     Link(String),
+}
+
+impl Inline {
+    fn rank(&self) -> u8 {
+        match self {
+            Inline::Italic => 0,
+            Inline::Bold => 1,
+            Inline::Strike => 2,
+            Inline::Code => 3,
+            Inline::Link(_) => 4,
+        }
+    }
+
+    /// How words set as `self` inside words set as `on` are set.
+    fn over<'a>(&'a self, on: Option<&'a Inline>) -> Option<&'a Inline> {
+        match on {
+            Some(on) if on.rank() > self.rank() => Some(on),
+            _ => Some(self),
+        }
+    }
+}
+
+/// How a table's column sets its cells' words.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Align {
+    #[default]
+    Left,
+    Centre,
+    Right,
+}
+
+/// What a GitHub alert (`> [!NOTE]`) says it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Alert {
+    Note,
+    Tip,
+    Important,
+    Warning,
+    Caution,
+}
+
+impl Alert {
+    /// The word heading it.
+    pub fn title(self) -> &'static str {
+        match self {
+            Alert::Note => "Note",
+            Alert::Tip => "Tip",
+            Alert::Important => "Important",
+            Alert::Warning => "Warning",
+            Alert::Caution => "Caution",
+        }
+    }
 }
 
 /// A block's words, and the runs of them set other than plain: by byte,
@@ -153,9 +216,30 @@ pub enum DocBlock {
         lines: Vec<String>,
         syntax: Vec<Spans>,
     },
-    Quote(Styled),
-    /// A table's rows of cells, the first its header.
-    Table(Vec<Vec<Styled>>),
+    /// A quote's blocks; a GitHub alert's, headed by its kind's word, or
+    /// the title it gives.
+    Quote {
+        alert: Option<(Alert, String)>,
+        blocks: Vec<DocBlock>,
+    },
+    /// A table's rows of cells, the first its header, and how each column
+    /// sets its words.
+    Table {
+        align: Vec<Align>,
+        rows: Vec<Vec<Styled>>,
+    },
+    /// Blocks other than paragraphs and lists in a list item (code, a
+    /// table, a quote), indented to its words, `depth` lists in.
+    Nested {
+        depth: u8,
+        blocks: Vec<DocBlock>,
+    },
+    /// An image alone in its paragraph: where it is (a web page's, a
+    /// file's; see `blocks_in`), and its alt text.
+    Image {
+        url: String,
+        alt: String,
+    },
     Rule,
     /// What gerdr says in the file's place: it isn't the file's own text.
     Note(String),
@@ -189,6 +273,8 @@ pub fn blocks(text: &str) -> Vec<DocBlock> {
     ext.tasklist = true;
     ext.autolink = true;
     ext.footnotes = true;
+    ext.alerts = true;
+    ext.front_matter_delimiter = Some("---".into());
     let arena = Arena::new();
     let root = parse_document(&arena, text, &options);
     hard_item_breaks(root);
@@ -248,7 +334,10 @@ fn block<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut Vec<DocBlock>) {
             level: heading.level,
             text: inline(node),
         }),
-        NodeValue::Paragraph => out.push(DocBlock::Para(inline(node))),
+        NodeValue::Paragraph => match images(node) {
+            Some(images) => out.extend(images),
+            None => out.push(DocBlock::Para(inline(node))),
+        },
         NodeValue::List(list) => {
             for (i, item) in node.children().enumerate() {
                 let value = item.data.borrow().value.clone();
@@ -265,19 +354,41 @@ fn block<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut Vec<DocBlock>) {
             let lang = code.info.split_whitespace().next().unwrap_or("");
             out.push(code_block(Some(lang), lines));
         }
-        NodeValue::BlockQuote => {
-            for child in node.children() {
-                let text = inline(child);
-                if !text.text.is_empty() {
-                    out.push(DocBlock::Quote(text));
-                }
-            }
+        NodeValue::BlockQuote => out.push(DocBlock::Quote {
+            alert: None,
+            blocks: inner(node),
+        }),
+        NodeValue::Alert(alert) => {
+            let kind = match alert.alert_type {
+                AlertType::Note => Alert::Note,
+                AlertType::Tip => Alert::Tip,
+                AlertType::Important => Alert::Important,
+                AlertType::Warning => Alert::Warning,
+                AlertType::Caution => Alert::Caution,
+            };
+            let title = (alert.title.as_deref().map(str::trim))
+                .filter(|t| !t.is_empty())
+                .unwrap_or(kind.title());
+            out.push(DocBlock::Quote {
+                alert: Some((kind, title.to_owned())),
+                blocks: inner(node),
+            });
         }
-        NodeValue::Table(_) => {
+        NodeValue::Table(table) => {
+            let align = (table.alignments.iter())
+                .map(|a| match a {
+                    TableAlignment::Center => Align::Centre,
+                    TableAlignment::Right => Align::Right,
+                    _ => Align::Left,
+                })
+                .collect();
             let rows = node
                 .children()
                 .map(|row| row.children().map(inline).collect());
-            out.push(DocBlock::Table(rows.collect()));
+            out.push(DocBlock::Table {
+                align,
+                rows: rows.collect(),
+            });
         }
         NodeValue::ThematicBreak => out.push(DocBlock::Rule),
         NodeValue::FootnoteDefinition(note) => {
@@ -288,8 +399,81 @@ fn block<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut Vec<DocBlock>) {
             ));
             out.push(DocBlock::Para(text));
         }
+        NodeValue::HtmlBlock(html) => {
+            let words = html_words(&html.literal);
+            if !words.is_empty() {
+                out.push(DocBlock::Para(words.into()));
+            }
+        }
         _ => {}
     }
+}
+
+/// The blocks inside container `node` (a quote's).
+fn inner<'a>(node: &'a AstNode<'a>) -> Vec<DocBlock> {
+    let mut blocks = Vec::new();
+    for child in node.children() {
+        block(child, 0, &mut blocks);
+    }
+    blocks
+}
+
+/// Paragraph `node`'s images as blocks of their own, when it has only
+/// images (and the space between them).
+fn images<'a>(node: &'a AstNode<'a>) -> Option<Vec<DocBlock>> {
+    let mut images = Vec::new();
+    for child in node.children() {
+        match &child.data.borrow().value {
+            NodeValue::Image(to) => images.push(DocBlock::Image {
+                url: to.url.clone(),
+                alt: inline(child).text,
+            }),
+            NodeValue::Text(t) if t.trim().is_empty() => {}
+            NodeValue::SoftBreak | NodeValue::LineBreak => {}
+            _ => return None,
+        }
+    }
+    (!images.is_empty()).then_some(images)
+}
+
+/// The words a block of raw HTML shows (a `<summary>`'s, a `<p>`'s), its
+/// tags, comments, scripts and styles left out; a line of them each line.
+fn html_words(html: &str) -> String {
+    let mut rest = html;
+    let mut text = String::new();
+    while let Some(at) = rest.find('<') {
+        text.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let lower = rest.to_ascii_lowercase();
+        let end = if lower.starts_with("<!--") {
+            lower.find("-->").map(|e| e + 3)
+        } else if let Some(tag) = ["<script", "<style"]
+            .iter()
+            .find(|t| lower.starts_with(**t))
+        {
+            let close = format!("</{}", &tag[1..]);
+            (lower.find(&close)).and_then(|e| lower[e..].find('>').map(|g| e + g + 1))
+        } else {
+            lower.find('>').map(|e| e + 1)
+        };
+        let Some(end) = end else {
+            rest = "";
+            break;
+        };
+        if lower.starts_with("<br") {
+            text.push('\n');
+        }
+        rest = &rest[end..];
+    }
+    text.push_str(rest);
+    let text = (text
+        .replace("&nbsp;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">"))
+    .replace("&quot;", "\"")
+    .replace("&amp;", "&");
+    let lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+    lines.collect::<Vec<_>>().join("\n")
 }
 
 /// List item `item`'s blocks onto `out`: its first paragraph after `mark`,
@@ -297,17 +481,27 @@ fn block<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut Vec<DocBlock>) {
 fn list_item<'a>(item: &'a AstNode<'a>, depth: u8, mark: ItemMark, out: &mut Vec<DocBlock>) {
     let mut mark = Some(mark);
     for child in item.children() {
-        if matches!(child.data.borrow().value, NodeValue::Paragraph) {
+        let value = child.data.borrow().value.clone();
+        if matches!(value, NodeValue::Paragraph) && images(child).is_none() {
             let text = inline(child);
             let mark = mark.take().unwrap_or(ItemMark::Under);
             out.push(DocBlock::Item { depth, mark, text });
-        } else {
-            // A list opening the item leaves its mark on an empty line.
-            if let Some(mark) = mark.take() {
-                let text = Styled::default();
-                out.push(DocBlock::Item { depth, mark, text });
-            }
+            continue;
+        }
+        // A list or a block opening the item leaves its mark on an empty
+        // line.
+        if let Some(mark) = mark.take() {
+            let text = Styled::default();
+            out.push(DocBlock::Item { depth, mark, text });
+        }
+        if matches!(value, NodeValue::List(_)) {
             block(child, depth.saturating_add(1), out);
+        } else {
+            let mut blocks = Vec::new();
+            block(child, 0, &mut blocks);
+            if !blocks.is_empty() {
+                out.push(DocBlock::Nested { depth, blocks });
+            }
         }
     }
     if let Some(mark) = mark {
@@ -337,31 +531,144 @@ fn inline<'a>(node: &'a AstNode<'a>) -> Styled {
     text.slice(start..end)
 }
 
-/// `inline` onto `text`, set as `on`. A link sets all inside it, then
-/// code, then bold.
+/// `inline` onto `text`, set as `on`; nested runs as `Inline::over` says.
+/// An image among words is its alt text, as a link to it.
 fn words<'a>(node: &'a AstNode<'a>, text: &mut Styled, on: Option<&Inline>) {
     for child in node.children() {
         match &child.data.borrow().value {
             NodeValue::Text(t) => text.push(t, on),
-            NodeValue::Code(code) => {
-                let on = match on {
-                    Some(Inline::Link(_)) => on,
-                    _ => Some(&Inline::Code),
-                };
-                text.push(&code.literal, on);
-            }
+            NodeValue::Code(code) => text.push(&code.literal, Inline::Code.over(on)),
             NodeValue::SoftBreak => text.push(" ", on),
             // The page breaks its line there (`doc_layout`).
             NodeValue::LineBreak => text.push("\n", None),
             NodeValue::FootnoteReference(note) => {
                 text.push(&format!("[{}]", note.name), on);
             }
-            NodeValue::HtmlInline(_) | NodeValue::Raw(_) => {}
-            NodeValue::Strong => words(child, text, on.or(Some(&Inline::Bold))),
-            NodeValue::Link(to) if crate::is_web_link(&to.url) => {
+            NodeValue::HtmlInline(html) => {
+                if html
+                    .trim_start_matches('<')
+                    .to_ascii_lowercase()
+                    .starts_with("br")
+                {
+                    text.push("\n", None);
+                }
+            }
+            NodeValue::Raw(_) => {}
+            NodeValue::Emph => words(child, text, Inline::Italic.over(on)),
+            NodeValue::Strong => words(child, text, Inline::Bold.over(on)),
+            NodeValue::Strikethrough => words(child, text, Inline::Strike.over(on)),
+            NodeValue::Link(to) | NodeValue::Image(to) if linkable(&to.url) => {
                 words(child, text, Some(&Inline::Link(to.url.to_string())));
             }
             _ => words(child, text, on),
+        }
+    }
+}
+
+/// Whether a link to `url` is one: a web page's or a file's.
+fn linkable(url: &str) -> bool {
+    crate::is_web_link(url) || file_link(url).is_some()
+}
+
+/// Where link `url` points as a file's: its path, and what follows its `#`.
+/// `None` for a web page's, another scheme's (`mailto:`), or a heading's
+/// (`#anchor`).
+fn file_link(url: &str) -> Option<(&str, &str)> {
+    let url = url.trim();
+    let url = url.strip_prefix("file://").unwrap_or(url);
+    // `mailto:`, not `foo.rs:12`'s line.
+    let scheme = url.split_once(':').is_some_and(|(s, rest)| {
+        s.len() > 1
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-".contains(c))
+            && !rest.starts_with(|c: char| c.is_ascii_digit())
+    });
+    if url.is_empty() || url.starts_with('#') || url.contains("://") || scheme {
+        return None;
+    }
+    Some(url.split_once('#').unwrap_or((url, "")))
+}
+
+/// The file link `url` opens, and its line: `#L12` (GitHub's) or `:12`
+/// after it, relative to `base` unless absolute. `None` for no file's.
+pub fn file_target(url: &str, base: Option<&Path>) -> Option<(PathBuf, Option<u32>)> {
+    let (path, fragment) = file_link(url)?;
+    let line = |s: &str| s.parse::<u32>().ok().filter(|n| *n > 0);
+    let from_fragment =
+        (fragment.strip_prefix('L')).and_then(|l| line(l.split(['-', 'C']).next().unwrap_or(l)));
+    let (path, at) = match path.rsplit_once(':') {
+        Some((p, n)) if line(n).is_some() => (p, line(n)),
+        _ => (path, None),
+    };
+    let path = PathBuf::from(unescaped(path));
+    let path = match base {
+        Some(base) if path.is_relative() => base.join(path),
+        _ => path,
+    };
+    Some((path, from_fragment.or(at)))
+}
+
+/// `text` with its `%XX` escapes (a link's `%20`) as the bytes they are.
+fn unescaped(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = (bytes[i] == b'%')
+            .then(|| text.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match hex {
+            Some(b) => {
+                out.push(b);
+                i += 3;
+            }
+            None => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `text`'s blocks, as `blocks`, for a file in folder `dir`: its links and
+/// images to relative paths made absolute in it, so they open (and show)
+/// wherever the blocks go.
+pub fn blocks_in(text: &str, dir: &Path) -> Vec<DocBlock> {
+    let mut blocks = blocks(text);
+    rebase(&mut blocks, dir);
+    blocks
+}
+
+fn rebase(blocks: &mut [DocBlock], dir: &Path) {
+    let to = |url: &mut String| {
+        if let Some((path, fragment)) = file_link(url)
+            && Path::new(path).is_relative()
+        {
+            let path = dir.join(unescaped(path)).to_string_lossy().into_owned();
+            *url = match fragment {
+                "" => path,
+                f => format!("{path}#{f}"),
+            };
+        }
+    };
+    let runs = |text: &mut Styled| {
+        for (_, on) in &mut text.runs {
+            if let Inline::Link(url) = on {
+                to(url);
+            }
+        }
+    };
+    for block in blocks {
+        match block {
+            DocBlock::Heading { text, .. } | DocBlock::Para(text) | DocBlock::Item { text, .. } => {
+                runs(text)
+            }
+            DocBlock::Quote { blocks, .. } | DocBlock::Nested { blocks, .. } => rebase(blocks, dir),
+            DocBlock::Table { rows, .. } => rows.iter_mut().flatten().for_each(runs),
+            DocBlock::Image { url, .. } => to(url),
+            DocBlock::Code { .. } | DocBlock::Rule | DocBlock::Note(_) => {}
         }
     }
 }
@@ -429,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn bold_code_and_web_links_keep_their_runs_the_rest_flattens() {
+    fn inline_runs_keep_how_they_are_set() {
         let link = || Inline::Link("https://x.y".into());
         assert_eq!(
             blocks("A **bold** _word_ `code` [a link](https://x.y) ![alt](i.png) ~~gone~~."),
@@ -437,52 +744,114 @@ mod tests {
                 "A bold word code a link alt gone.",
                 &[
                     ("bold", Inline::Bold),
+                    ("word", Inline::Italic),
                     ("code", Inline::Code),
                     ("a link", link()),
+                    ("alt", Inline::Link("i.png".into())),
+                    ("gone", Inline::Strike),
                 ]
             ))]
         );
-        // A link sets all of it; code beats bold; runs meet.
+        // A link sets all of it; code beats bold, bold italic; runs meet.
         assert_eq!(
-            blocks("[**go** `x`](https://x.y) **b `c` d**"),
+            blocks("[**go** `x`](https://x.y) **b `c` d** *e **f***"),
             [DocBlock::Para(styled(
-                "go x b c d",
+                "go x b c d e f",
                 &[
                     ("go x", link()),
                     ("b ", Inline::Bold),
                     ("c", Inline::Code),
                     (" d", Inline::Bold),
+                    ("e ", Inline::Italic),
+                    ("f", Inline::Bold),
                 ]
             ))]
         );
     }
 
     #[test]
-    fn only_web_links_are_links() {
+    fn web_and_file_links_are_links_others_not() {
         let page = "See [mail](mailto:a@b.c), [file](file:///etc), [rel](docs/x.md), \
-                    <https://y.z/q> and [js](javascript:alert(1)).";
+                    [line](src/a.rs:12), [top](#top), <https://y.z/q> and [js](javascript:alert(1)).";
         let Some(DocBlock::Para(text)) = blocks(page).into_iter().next() else {
             panic!("a paragraph");
         };
-        assert_eq!(text.text, "See mail, file, rel, https://y.z/q and js.");
         assert_eq!(
-            text.runs,
-            styled(
-                &text.text,
-                &[("https://y.z/q", Inline::Link("https://y.z/q".into()))]
-            )
-            .runs
+            text.text,
+            "See mail, file, rel, line, top, https://y.z/q and js."
+        );
+        let link = |url: &str| Inline::Link(url.into());
+        let want = [
+            ("file", link("file:///etc")),
+            ("rel", link("docs/x.md")),
+            ("line", link("src/a.rs:12")),
+            ("https://y.z/q", link("https://y.z/q")),
+        ];
+        assert_eq!(text.runs, styled(&text.text, &want).runs);
+    }
+
+    #[test]
+    fn a_file_link_opens_its_file_at_its_line() {
+        let base = Path::new("/r");
+        let at = |url| file_target(url, Some(base));
+        assert_eq!(at("docs/x.md"), Some(("/r/docs/x.md".into(), None)));
+        assert_eq!(at("src/a.rs#L12"), Some(("/r/src/a.rs".into(), Some(12))));
+        assert_eq!(at("src/a.rs#L3-L9"), Some(("/r/src/a.rs".into(), Some(3))));
+        assert_eq!(at("a.rs:40"), Some(("/r/a.rs".into(), Some(40))));
+        assert_eq!(at("x.md#usage"), Some(("/r/x.md".into(), None)));
+        assert_eq!(at("my%20notes.md"), Some(("/r/my notes.md".into(), None)));
+        assert_eq!(at("file:///etc/hosts"), Some(("/etc/hosts".into(), None)));
+        for not in ["https://x.y", "mailto:a@b.c", "#top", "javascript:x()", ""] {
+            assert_eq!(at(not), None, "{not}");
+        }
+    }
+
+    #[test]
+    fn a_files_relative_links_and_images_are_made_absolute_in_its_folder() {
+        let md =
+            "[a](b.md#L2) [w](https://x.y) [abs](/etc/x)\n\n![shot](img/s.png)\n\n> [c](c.md)\n";
+        let got = blocks_in(md, Path::new("/d"));
+        let DocBlock::Para(text) = &got[0] else {
+            panic!("{got:?}")
+        };
+        let urls: Vec<_> = (text.runs.iter())
+            .map(|(_, on)| match on {
+                Inline::Link(url) => url.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert_eq!(urls, ["/d/b.md#L2", "https://x.y", "/etc/x"]);
+        assert_eq!(
+            got[1],
+            DocBlock::Image {
+                url: "/d/img/s.png".into(),
+                alt: "shot".into()
+            }
+        );
+        let DocBlock::Quote { blocks, .. } = &got[2] else {
+            panic!("{got:?}")
+        };
+        assert_eq!(
+            blocks[0],
+            DocBlock::Para(styled("c", &[("c", Inline::Link("/d/c.md".into()))]))
         );
     }
 
     #[test]
-    fn a_table_keeps_its_cells_runs() {
+    fn a_table_keeps_its_cells_runs_and_alignment() {
         assert_eq!(
-            blocks("| a | b |\n|---|---|\n| 1 | **2** |\n"),
-            [DocBlock::Table(vec![
-                vec!["a".into(), "b".into()],
-                vec!["1".into(), styled("2", &[("2", Inline::Bold)])],
-            ])]
+            blocks("| a | b | c |\n|---|:-:|--:|\n| 1 | **2** | 3<br>4 |\n"),
+            [DocBlock::Table {
+                align: vec![Align::Left, Align::Centre, Align::Right],
+                rows: vec![
+                    vec!["a".into(), "b".into(), "c".into()],
+                    vec![
+                        "1".into(),
+                        styled("2", &[("2", Inline::Bold)]),
+                        "3\n4".into()
+                    ],
+                ],
+            }]
         );
     }
 
@@ -570,7 +939,10 @@ mod tests {
         assert_eq!(
             blocks("> said\n\n---\n\nSee[^n].\n\n[^n]: there\n"),
             [
-                DocBlock::Quote("said".into()),
+                DocBlock::Quote {
+                    alert: None,
+                    blocks: vec![para("said")],
+                },
                 DocBlock::Rule,
                 para("See[n]."),
                 para("[n] there"),
@@ -578,12 +950,98 @@ mod tests {
         );
     }
 
+    /// A quote keeps the blocks in it: code, a list, a quote.
     #[test]
-    fn raw_html_is_left_out() {
+    fn a_quote_keeps_its_blocks() {
+        let quote = |blocks| DocBlock::Quote {
+            alert: None,
+            blocks,
+        };
+        assert_eq!(
+            blocks("> Run:\n>\n> ```\n> ls\n> ```\n>\n> - one\n>\n> > deeper\n"),
+            [quote(vec![
+                para("Run:"),
+                code_block(Some(""), vec!["ls".into()]),
+                item(0, ItemMark::Bullet, "one"),
+                quote(vec![para("deeper")]),
+            ])]
+        );
+    }
+
+    #[test]
+    fn an_alert_says_its_kind() {
+        assert_eq!(
+            blocks("> [!WARNING]\n> Mind the gap.\n\n> [!TIP] Shortcut\n> Go.\n"),
+            [
+                DocBlock::Quote {
+                    alert: Some((Alert::Warning, "Warning".into())),
+                    blocks: vec![para("Mind the gap.")],
+                },
+                DocBlock::Quote {
+                    alert: Some((Alert::Tip, "Shortcut".into())),
+                    blocks: vec![para("Go.")],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn code_in_a_list_item_is_nested_under_it() {
+        assert_eq!(
+            blocks("1. Build:\n\n   ```sh\n   cargo build\n   ```\n2. Done\n"),
+            [
+                item(0, ItemMark::Number(1), "Build:"),
+                DocBlock::Nested {
+                    depth: 0,
+                    blocks: vec![code_block(Some("sh"), vec!["cargo build".into()])],
+                },
+                item(0, ItemMark::Number(2), "Done"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_image_alone_is_a_block_among_words_its_alt() {
+        assert_eq!(
+            blocks("![one](a.png) ![two](https://x.y/b.png)\n\nSee ![it](c.png).\n"),
+            [
+                DocBlock::Image {
+                    url: "a.png".into(),
+                    alt: "one".into()
+                },
+                DocBlock::Image {
+                    url: "https://x.y/b.png".into(),
+                    alt: "two".into()
+                },
+                DocBlock::Para(styled("See it.", &[("it", Inline::Link("c.png".into()))])),
+            ]
+        );
+    }
+
+    #[test]
+    fn front_matter_is_left_out() {
+        assert_eq!(
+            blocks("---\nname: x\ndescription: y\n---\n\n# Title\n"),
+            [DocBlock::Heading {
+                level: 1,
+                text: "Title".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn raw_html_is_left_out_but_its_words() {
         assert_eq!(
             blocks("<script>alert(1)</script>\n\nSafe <b>word</b>.\n"),
             [para("Safe word.")]
         );
+        assert_eq!(
+            blocks(
+                "<details>\n<summary>More &amp; less</summary>\n<!-- hid -->\n\nInside.\n\n</details>\n"
+            ),
+            [para("More & less"), para("Inside.")]
+        );
+        assert_eq!(blocks("a<br>b<br/>c\n"), [para("a\nb\nc")]);
     }
 
     #[test]

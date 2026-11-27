@@ -1955,6 +1955,35 @@ impl Gerdr {
     /// Open `path` in the active workspace's Zed, shown, when it has one;
     /// else with `xdg-open`, in `place`. `what` names it in a toast.
     pub(crate) fn open_in_zed(&mut self, path: &Path, place: Place, what: &str) {
+        if !self.in_workspace_zed(path, what) {
+            let open = format!("xdg-open {}", desktop::shell_quote(&path.to_string_lossy()));
+            self.launch(&open, place);
+        }
+    }
+
+    /// Open the file a link in a markdown file or a chat points to (see
+    /// `md_blocks::file_target`) at its line, in the active workspace's
+    /// Zed, else in a Zed of its own in a new tab: never `xdg-open`, as
+    /// the link is an agent's and could name a program. One that isn't
+    /// there says so.
+    pub(crate) fn open_linked_file(&mut self, (path, line): (PathBuf, Option<u32>)) {
+        if !path.exists() {
+            let shown = tilde(&path, home_dir().as_deref());
+            return self.show_warning(format!("No file at {shown}"));
+        }
+        let at = match line {
+            Some(n) => PathBuf::from(format!("{}:{n}", path.display())),
+            None => path,
+        };
+        if !self.in_workspace_zed(&at, "the file") {
+            let zed = format!("zed -n {}", desktop::shell_quote(&at.to_string_lossy()));
+            self.launch(&zed, Place::Tab);
+        }
+    }
+
+    /// Open `path` in the active workspace's Zed, shown; false when it has
+    /// none.
+    fn in_workspace_zed(&mut self, path: &Path, what: &str) -> bool {
         let zed = self.workspace().and_then(|ws| {
             ws.tabs.iter().enumerate().find_map(|(t, tab)| {
                 let pane = tab.panes.iter().find(|p| crate::is_zed(&p.window))?;
@@ -1962,8 +1991,7 @@ impl Gerdr {
             })
         });
         let Some((t, window, dir)) = zed else {
-            let open = format!("xdg-open {}", desktop::shell_quote(&path.to_string_lossy()));
-            return self.launch(&open, place);
+            return false;
         };
         self.switch_tab(t);
         self.focus(Some(window));
@@ -1976,6 +2004,7 @@ impl Gerdr {
         if self.spawn(zed, &dir, "zed").is_none() {
             self.toast(format!("Zed didn't open {what}"), Level::Error);
         }
+        true
     }
 
     /// How high the switcher's list may be.

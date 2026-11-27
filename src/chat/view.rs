@@ -1198,8 +1198,27 @@ fn blocks_text(blocks: &[DocBlock]) -> String {
             format!("{}{mark}{}", "  ".repeat(usize::from(*depth)), text.text)
         }
         DocBlock::Code { lines, .. } => format!("```\n{}\n```", lines.join("\n")),
-        DocBlock::Quote(text) => format!("> {}", text.text),
-        DocBlock::Table(rows) => {
+        DocBlock::Quote { alert, blocks } => {
+            let head = alert
+                .as_ref()
+                .map(|(kind, title)| match title == kind.title() {
+                    true => format!("[!{}]\n", kind.title().to_uppercase()),
+                    false => format!("[!{}] {title}\n", kind.title().to_uppercase()),
+                });
+            let text = head.unwrap_or_default() + &blocks_text(blocks);
+            (text.lines())
+                .map(|l| format!("> {l}").trim_end().to_owned())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        DocBlock::Nested { depth, blocks } => {
+            let indent = "  ".repeat(usize::from(*depth) + 1);
+            (blocks_text(blocks).lines())
+                .map(|l| format!("{indent}{l}").trim_end().to_owned())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        DocBlock::Table { rows, .. } => {
             let row = |cells: Vec<&str>| format!("| {} |", cells.join(" | "));
             let mut lines: Vec<String> = (rows.iter())
                 .map(|r| row(r.iter().map(|c| c.text.as_str()).collect()))
@@ -1209,6 +1228,7 @@ fn blocks_text(blocks: &[DocBlock]) -> String {
             }
             lines.join("\n")
         }
+        DocBlock::Image { url, alt } => format!("![{alt}]({url})"),
         DocBlock::Rule => "---".to_owned(),
         DocBlock::Note(text) => text.clone(),
     };
@@ -2701,6 +2721,19 @@ impl Gerdr {
         self.open_in_zed(&file, crate::launch::Place::Tab, "the file");
     }
 
+    /// Open link `url` in agent pane `pane_id`'s chat: a web page in a tab
+    /// of the workspace, a file in its Zed, a relative path in the
+    /// agent's folder.
+    fn chat_open_link(&mut self, pane_id: &str, url: String) {
+        if crate::is_web_link(&url) {
+            return self.open_page(self.active_workspace, url);
+        }
+        let cwd = self.chat_agent(pane_id).and_then(|a| a.cwd.clone());
+        if let Some(file) = crate::md_blocks::file_target(&url, cwd.as_deref()) {
+            self.open_linked_file(file);
+        }
+    }
+
     /// Whether herdr pane `pane_id`'s chat can be seen: painted in the active
     /// tab, and no panel or dialog over it (the feature panel, the
     /// repositories, the inbox…). An ask waits on its card only then.
@@ -2925,6 +2958,11 @@ impl Gerdr {
                     let note = crate::page_text::copied_note(&text);
                     self.copy_text(text);
                     self.show_success(note);
+                }
+            }
+            ChatHit::Link(item, k) => {
+                if let Some(url) = chrome::chat_link(&view, item, k) {
+                    self.chat_open_link(&pane_id, url);
                 }
             }
             ChatHit::Earlier => self.chat_earlier(&pane_id),

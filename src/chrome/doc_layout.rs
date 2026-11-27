@@ -2,17 +2,23 @@
 //! the copy of a stage's file on its feature page. What is laid out is
 //! pieces from `(0, 0)`, kept for a width (`laid_out`), so a page can put
 //! them where it will. Runs of a line (`md_blocks::Inline`) are set in
-//! their own face: bold in bold, code in the monospace font, a link in the
-//! accent.
+//! their own face: bold in bold, italic slanted, code in the monospace
+//! font, a link in the accent, struck through with a line through it.
 
-use std::{cell::RefCell, ops::Range, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    ops::Range,
+    path::{Path, PathBuf},
+    rc::Rc,
+    sync::Arc,
+};
 
 use smithay::utils::{Logical, Point, Rectangle};
 
 use super::features::{Font, Ink, StageMark, body_line, small_line, stage_dot, width_of};
 use super::glyphs::{self, Face};
 use super::{ButtonStyle, Canvas, Painter, Palette, Rect, Rgb, band, check, icon_sdf, rect_px};
-use crate::md_blocks::{DocBlock, Inline, ItemMark, Styled, spans};
+use crate::md_blocks::{Alert, Align, DocBlock, Inline, ItemMark, Styled, spans};
 use crate::syntax::{Kind, Spans};
 
 /// A file's blocks: the room above a block, its list items' indent and
@@ -33,6 +39,9 @@ const DOC_SPAN_PAD: f32 = 4.0;
 const DOC_SPAN_HIGH: f32 = 1.4;
 pub(super) const DOC_SPAN_TINT: f32 = 0.08;
 const DOC_RULE: i32 = 13;
+/// The highest an image in a file is drawn, in logical pixels: a tall one
+/// shrinks to it.
+const DOC_IMAGE_HIGH: i32 = 480;
 /// A table's cells: the room around their words, and the widest a
 /// column's longest word holds it open (past that the word breaks).
 const DOC_CELL_PAD_X: i32 = 8;
@@ -71,8 +80,10 @@ pub(super) enum DocPiece {
     /// The rounded ground behind an inline code span, as other markdown
     /// views have it: put before its line, so a pick or a find paints on it.
     CodeGround,
-    /// The bar beside a quote.
-    QuoteBar,
+    /// The bar beside a quote, in its alert's colour.
+    QuoteBar(Option<Alert>),
+    /// A PNG image of a file's, drawn to fit.
+    Image(PathBuf),
     /// A thematic break.
     Rule,
     /// A table cell's ground and lines: its top and left, and its right
@@ -113,6 +124,7 @@ pub(super) fn face(on: Option<&Inline>, bold: bool) -> Face {
         Some(Inline::Code) => Face::Mono,
         Some(Inline::Bold) => Face::Bold,
         _ if bold => Face::Bold,
+        Some(Inline::Italic) => Face::Italic,
         _ => Face::Ui,
     }
 }
@@ -161,7 +173,7 @@ pub(super) fn x_at(
     line_width(&text[..at], runs, bold, width) - run_pad(inside.map(|(_, on)| on))
 }
 
-/// The web link `x` logical pixels into line `text` with `runs`, in `font`,
+/// The link `x` logical pixels into line `text` with `runs`, in `font`,
 /// bold or not.
 pub(super) fn link_at<'a>(
     text: &str,
@@ -170,17 +182,29 @@ pub(super) fn link_at<'a>(
     bold: bool,
     x: f32,
 ) -> Option<&'a str> {
+    (link_spans(text, runs, font, bold).into_iter())
+        .find(|(span, _)| span.contains(&x))
+        .map(|(_, url)| url)
+}
+
+/// Where line `text` with `runs`'s links are along it, in logical pixels
+/// from its start, in `font`, bold or not.
+pub(super) fn link_spans<'a>(
+    text: &str,
+    runs: &'a [(Range<usize>, Inline)],
+    font: Font,
+    bold: bool,
+) -> Vec<(Range<f32>, &'a str)> {
     let mut pen = 0.0;
+    let mut links = Vec::new();
     for (range, on) in spans(text, runs) {
+        let from = pen;
         pen += width_in(&text[range], face(on, bold), font.size()) + 2.0 * run_pad(on);
-        if x < pen {
-            return match on {
-                Some(Inline::Link(url)) => Some(url),
-                _ => None,
-            };
+        if let Some(Inline::Link(url)) = on {
+            links.push((from..pen, url.as_str()));
         }
     }
-    None
+    links
 }
 
 /// `text` broken into lines no wider than `width` by `measure`, all of it
@@ -277,6 +301,10 @@ struct Column {
     y: i32,
     room: (i32, i32),
     pieces: Vec<(Rect, DocPiece)>,
+    /// How a line narrower than the column sits in it: a table cell's.
+    align: Align,
+    /// Inside a quote (not an alert's): its text muted.
+    quoted: bool,
 }
 
 impl Column {
@@ -288,6 +316,10 @@ impl Column {
 
     /// `text` as a file's text: all of its lines, a line `h` high each.
     fn text(&mut self, text: &Styled, font: Font, ink: Ink, bold: bool, h: i32) {
+        let ink = match ink {
+            Ink::Text if self.quoted => Ink::Muted,
+            ink => ink,
+        };
         let size = font.size();
         let measure = |t: &Styled| line_width(&t.text, &t.runs, bold, |t, f| width_in(t, f, size));
         // A hard break (`md_blocks`) starts a line of its own.
@@ -298,7 +330,21 @@ impl Column {
             lines.extend(doc_lines(&text.slice(part_at), self.w, measure));
             from += part.len() + 1;
         }
-        for Styled { text, runs } in lines {
+        for line in lines {
+            let shift = match self.align {
+                Align::Left => 0,
+                align => {
+                    let room = (self.w - measure(&line).ceil() as i32).max(0);
+                    if align == Align::Right {
+                        room
+                    } else {
+                        room / 2
+                    }
+                }
+            };
+            let Styled { text, runs } = line;
+            self.x += shift;
+            self.w -= shift;
             self.code_grounds(&text, &runs, size, bold, h);
             self.put(
                 h,
@@ -310,6 +356,8 @@ impl Column {
                     bold,
                 },
             );
+            self.x -= shift;
+            self.w += shift;
         }
     }
 
@@ -351,7 +399,7 @@ impl Column {
     /// A table's rows, its cells' words wrapped in them: as wide as its
     /// words, up to the column; wider, out into `room` centred on it, and
     /// wrapped to fit that.
-    fn table(&mut self, rows: &[Vec<Styled>]) {
+    fn table(&mut self, align: &[Align], rows: &[Vec<Styled>]) {
         let n = rows.iter().map(Vec::len).max().unwrap_or(0);
         if n == 0 {
             return;
@@ -396,7 +444,9 @@ impl Column {
             for (j, &cw) in widths.iter().enumerate() {
                 (self.x, self.w, self.y) = (cx + DOC_CELL_PAD_X, cw, top + DOC_CELL_PAD_Y);
                 if let Some(cell) = row.get(j) {
+                    self.align = align.get(j).copied().unwrap_or_default();
                     self.text(cell, Font::Small, Ink::Text, i == 0, small_line());
+                    self.align = Align::Left;
                 }
                 bottom = bottom.max(self.y);
                 cells.push((cx, cw + 2 * DOC_CELL_PAD_X));
@@ -442,14 +492,39 @@ impl Column {
         self.y = self.y.max(top + body_line());
     }
 
+    /// A file's blocks, from here down, with the room between them.
+    fn blocks(&mut self, blocks: &[DocBlock]) {
+        for (i, block) in blocks.iter().enumerate() {
+            if i > 0 {
+                self.y += match block {
+                    DocBlock::Heading { .. } => DOC_HEADING_GAP,
+                    DocBlock::Item {
+                        mark: ItemMark::Under,
+                        ..
+                    }
+                    | DocBlock::Nested { .. } => DOC_GAP / 2,
+                    DocBlock::Item { .. } if matches!(blocks[i - 1], DocBlock::Item { .. }) => {
+                        DOC_ITEM_GAP
+                    }
+                    _ => DOC_GAP,
+                };
+            }
+            self.block(block);
+        }
+    }
+
     /// A file's block, from here down.
     fn block(&mut self, block: &DocBlock) {
         match block {
-            DocBlock::Heading { level: 1, text } => {
-                self.text(text, Font::Heading, Ink::Text, true, body_line() + 6);
-            }
-            DocBlock::Heading { text, .. } => {
-                self.text(text, Font::Body, Ink::Text, true, body_line());
+            DocBlock::Heading { level, text } => {
+                let (font, ink, h) = match level {
+                    1 => (Font::Heading, Ink::Text, body_line() + 6),
+                    2 => (Font::Subheading, Ink::Text, body_line() + 3),
+                    3 | 4 => (Font::Body, Ink::Text, body_line()),
+                    5 => (Font::Small, Ink::Text, small_line()),
+                    _ => (Font::Small, Ink::Muted, small_line()),
+                };
+                self.text(text, font, ink, true, h);
             }
             DocBlock::Para(text) => self.text(text, Font::Body, Ink::Text, false, body_line()),
             DocBlock::Note(text) => {
@@ -486,20 +561,74 @@ impl Column {
                 }
                 edge(self, false);
             }
-            DocBlock::Quote(text) => {
+            DocBlock::Quote { alert, blocks } => {
                 let top = self.y;
+                let quoted = self.quoted;
                 self.indented(DOC_QUOTE, |s| {
-                    s.text(text, Font::Body, Ink::Muted, false, body_line());
+                    s.quoted = alert.is_none();
+                    if let Some((_, title)) = alert {
+                        s.text(
+                            &title.as_str().into(),
+                            Font::Body,
+                            Ink::Text,
+                            true,
+                            body_line(),
+                        );
+                        if !blocks.is_empty() {
+                            s.y += DOC_ITEM_GAP;
+                        }
+                    }
+                    s.blocks(blocks);
                 });
+                self.quoted = quoted;
                 let bar =
                     Rectangle::new((self.x, top).into(), (DOC_QUOTE_BAR, self.y - top).into());
-                self.pieces.push((bar, DocPiece::QuoteBar));
+                let kind = alert.as_ref().map(|(kind, _)| *kind);
+                self.pieces.push((bar, DocPiece::QuoteBar(kind)));
             }
-            DocBlock::Table(rows) => self.table(rows),
+            DocBlock::Nested { depth, blocks } => {
+                let indent = i32::from((*depth).min(DOC_DEPTH_MAX)) * DOC_INDENT + DOC_MARK;
+                self.indented(indent, |s| s.blocks(blocks));
+            }
+            DocBlock::Table { align, rows } => self.table(align, rows),
+            DocBlock::Image { url, alt } => self.image(url, alt),
             DocBlock::Rule => {
                 self.put(DOC_RULE, DocPiece::Rule);
             }
         }
+    }
+
+    /// An image alone in its paragraph: a PNG file's drawn, as wide as it
+    /// is up to the column and `DOC_IMAGE_HIGH`; any other (a web page's,
+    /// one that can't be read) its alt text as a link to it.
+    fn image(&mut self, url: &str, alt: &str) {
+        let path = Path::new(url);
+        let png =
+            path.is_absolute() && (path.extension()).is_some_and(|e| e.eq_ignore_ascii_case("png"));
+        let size = png.then(|| crate::shot_images::size(path)).flatten();
+        if let Some((w, h)) = size.filter(|(w, h)| *w > 0 && *h > 0) {
+            let (w, h) = (i64::from(w), i64::from(h));
+            let wide = w.min(i64::from(self.w.max(1)));
+            let high = (h * wide / w).max(1);
+            let (wide, high) = match high > i64::from(DOC_IMAGE_HIGH) {
+                true => (
+                    (wide * i64::from(DOC_IMAGE_HIGH) / high).max(1),
+                    i64::from(DOC_IMAGE_HIGH),
+                ),
+                false => (wide, high),
+            };
+            let rect = Rectangle::new((self.x, self.y).into(), (wide as i32, high as i32).into());
+            self.pieces.push((rect, DocPiece::Image(path.to_owned())));
+            self.y += high as i32;
+            return;
+        }
+        let words = match alt.trim() {
+            "" => url.rsplit('/').next().unwrap_or(url),
+            alt => alt,
+        };
+        let mut text = Styled::default();
+        text.push(words, Some(&Inline::Link(url.to_owned())));
+        self.text(&text, Font::Body, Ink::Text, false, body_line());
     }
 }
 
@@ -530,23 +659,10 @@ fn stack(blocks: &[DocBlock], w: i32, room: (i32, i32)) -> Column {
         y: 0,
         room,
         pieces: Vec::new(),
+        align: Align::Left,
+        quoted: false,
     };
-    for (i, block) in blocks.iter().enumerate() {
-        if i > 0 {
-            s.y += match block {
-                DocBlock::Heading { .. } => DOC_HEADING_GAP,
-                DocBlock::Item {
-                    mark: ItemMark::Under,
-                    ..
-                } => DOC_GAP / 2,
-                DocBlock::Item { .. } if matches!(blocks[i - 1], DocBlock::Item { .. }) => {
-                    DOC_ITEM_GAP
-                }
-                _ => DOC_GAP,
-            };
-        }
-        s.block(block);
-    }
+    s.blocks(blocks);
     s
 }
 
@@ -657,14 +773,21 @@ impl Painter {
                         Some(Inline::Link(_)) => p.accent,
                         _ => color,
                     };
+                    let from = pen;
                     pen = match face(on, *bold) {
                         Face::Mono => {
                             let pad = run_pad(on) * s;
                             pad + self.mono_text(c, run, size, pen + pad, end, b, scale, color)
                         }
-                        Face::Bold => self.bold_text(c, run, size, pen, end, b, scale, color),
-                        _ => self.text(c, run, size, pen, end, b, scale, color),
+                        face => self.face_text(face, c, run, size, pen, end, b, scale, color),
                     };
+                    if on == Some(&Inline::Strike) {
+                        // Through the middle of its small letters.
+                        let t = s.ceil() as i32;
+                        let y = b.0 + b.1 / 2 + (size * s * 0.05).round() as i32 - t / 2;
+                        let (from, to) = (from.round() as i32, pen.min(end).round() as i32);
+                        c.fill(from, y, to - from, t, color);
+                    }
                 }
             }
             DocPiece::ItemMark(mark) => {
@@ -704,9 +827,27 @@ impl Painter {
                 let (x, y, w, h) = rect_px(rect, scale);
                 c.rounded(x, y, w, h, super::CAP_RADIUS * s, code_ground(p));
             }
-            DocPiece::QuoteBar => {
+            DocPiece::QuoteBar(alert) => {
                 let (x, y, w, h) = rect_px(rect, scale);
-                c.rounded(x, y, w, h, w / 2.0, p.border);
+                let color = match alert {
+                    None => p.border,
+                    Some(Alert::Note | Alert::Important) => p.accent,
+                    Some(Alert::Tip) => p.success,
+                    Some(Alert::Warning) => p.warning,
+                    Some(Alert::Caution) => p.error,
+                };
+                c.rounded(x, y, w, h, w / 2.0, color);
+            }
+            DocPiece::Image(path) => {
+                let (x, y, w, h) = rect_px(rect, scale);
+                match crate::shot_images::picture(path, w.max(h).round() as usize) {
+                    Some(picture) => {
+                        let size = rect.size.w.max(rect.size.h);
+                        c.picture_sized(&picture, rect, scale, p.text, size);
+                    }
+                    // Its file is gone: a box where it was.
+                    None => c.rounded(x, y, w, h, 0.0, p.element),
+                }
             }
             DocPiece::Rule => {
                 let (x, y, w, h) = rect_px(rect, scale);
@@ -1049,13 +1190,16 @@ mod tests {
 
     #[test]
     fn a_tables_cells_sit_side_by_side_and_wrap_to_fit() {
-        let table = [DocBlock::Table(vec![
-            vec!["Case".into(), "Reply".into()],
-            vec![
-                "a long cell of many words that has to wrap".into(),
-                "401".into(),
+        let table = [DocBlock::Table {
+            align: Vec::new(),
+            rows: vec![
+                vec!["Case".into(), "Reply".into()],
+                vec![
+                    "a long cell of many words that has to wrap".into(),
+                    "401".into(),
+                ],
             ],
-        ])];
+        }];
         let texts = |pieces: &[(Rect, DocPiece)]| -> Vec<(Rect, String, bool)> {
             (pieces.iter())
                 .filter_map(|(r, p)| match p {
@@ -1084,5 +1228,127 @@ mod tests {
         assert!(edge <= Some(200), "{edge:?}");
         // Cells' grounds come before the words on them.
         assert!(matches!(narrow[0].1, DocPiece::Cell { head: true, .. }));
+    }
+
+    /// The texts `md` lays out at `w`: where each is, and what it says.
+    fn texts_of(md: &str, w: i32) -> Vec<(Rect, String)> {
+        let (pieces, _) = stack_of(&crate::md_blocks::blocks(md), w);
+        (pieces.into_iter())
+            .filter_map(|(r, p)| match p {
+                DocPiece::Text { text, .. } => Some((r, text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_columns_alignment_sets_where_its_words_sit() {
+        let words = texts_of(
+            "| left | mid | right |\n|:--|:-:|--:|\n| a | b | c |\n",
+            2000,
+        );
+        let at = |t: &str| words.iter().find(|(_, w)| w == t).expect(t).0;
+        assert_eq!(at("a").loc.x, at("left").loc.x);
+        let (mid, b) = (at("mid"), at("b"));
+        assert!(b.loc.x > mid.loc.x, "{b:?} {mid:?}");
+        let (right, c) = (at("right"), at("c"));
+        assert_eq!(c.loc.x + c.size.w, right.loc.x + right.size.w);
+        assert!(c.loc.x > right.loc.x);
+    }
+
+    #[test]
+    fn blocks_in_a_quote_or_a_list_item_sit_inside_it() {
+        let (pieces, _) = stack_of(
+            &crate::md_blocks::blocks("> ```\n> ls\n> ```\n\n- Run:\n\n  ```\n  ls\n  ```\n"),
+            400,
+        );
+        let codes: Vec<Rect> = (pieces.iter())
+            .filter(|(_, p)| matches!(p, DocPiece::CodeLine(..)))
+            .map(|(r, _)| *r)
+            .collect();
+        assert_eq!(codes.len(), 2, "{pieces:?}");
+        assert_eq!(codes[0].loc.x, DOC_QUOTE);
+        assert_eq!(codes[1].loc.x, DOC_MARK);
+        let bars: Vec<_> = (pieces.iter())
+            .filter(|(_, p)| matches!(p, DocPiece::QuoteBar(None)))
+            .collect();
+        assert_eq!(bars.len(), 1);
+        // The bar runs along all the quote's code.
+        assert!(bars[0].0.loc.y + bars[0].0.size.h >= codes[0].loc.y + codes[0].size.h);
+    }
+
+    #[test]
+    fn an_alert_has_its_title_and_its_colours_bar() {
+        let (pieces, _) = stack_of(&crate::md_blocks::blocks("> [!CAUTION]\n> Hot.\n"), 400);
+        assert!((pieces.iter()).any(|(_, p)| *p == DocPiece::QuoteBar(Some(Alert::Caution))));
+        let words: Vec<_> = (pieces.iter())
+            .filter_map(|(_, p)| match p {
+                DocPiece::Text {
+                    text, ink, bold, ..
+                } => Some((text.as_str(), *ink, *bold)),
+                _ => None,
+            })
+            .collect();
+        // An alert's words are not muted as a quote's are.
+        assert_eq!(
+            words,
+            [("Caution", Ink::Text, true), ("Hot.", Ink::Text, false)]
+        );
+        let (pieces, _) = stack_of(&crate::md_blocks::blocks("> Said.\n"), 400);
+        assert!((pieces.iter()).any(|(_, p)| matches!(
+            p,
+            DocPiece::Text {
+                ink: Ink::Muted,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn headings_step_down_in_size() {
+        let fonts: Vec<(Font, bool)> = (stack_of(
+            &crate::md_blocks::blocks("# a\n## b\n### c\n#### d\n##### e\n###### f\n"),
+            400,
+        )
+        .0
+        .into_iter())
+        .filter_map(|(_, p)| match p {
+            DocPiece::Text { font, bold, .. } => Some((font, bold)),
+            _ => None,
+        })
+        .collect();
+        let sizes: Vec<f32> = fonts.iter().map(|(f, _)| f.size()).collect();
+        assert!(fonts.iter().all(|(_, bold)| *bold));
+        assert!(sizes[0] > sizes[1] && sizes[1] > sizes[2], "{sizes:?}");
+        assert!(sizes[3] > sizes[4], "{sizes:?}");
+    }
+
+    #[test]
+    fn a_png_image_is_drawn_to_fit_others_are_their_alt_as_a_link() {
+        let dir = std::env::temp_dir().join(format!("gerdr-doc-image-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wide.png");
+        resvg::tiny_skia::Pixmap::new(800, 100)
+            .unwrap()
+            .save_png(&path)
+            .unwrap();
+        let md = format!("![wide]({})\n\n![web](https://x.y/a.png)\n", path.display());
+        let (pieces, h) = stack_of(&crate::md_blocks::blocks(&md), 400);
+        let image = (pieces.iter()).find(|(_, p)| matches!(p, DocPiece::Image(_)));
+        let (rect, _) = image.expect("drawn");
+        assert_eq!((rect.size.w, rect.size.h), (400, 50));
+        assert!(h > 50);
+        let web = (pieces.iter()).find_map(|(_, p)| match p {
+            DocPiece::Text { text, runs, .. } => Some((text.clone(), runs.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            web,
+            Some((
+                "web".into(),
+                vec![(0..3, Inline::Link("https://x.y/a.png".into()))]
+            ))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
