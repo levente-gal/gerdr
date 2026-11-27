@@ -23,6 +23,7 @@ mod confirm;
 mod consts;
 mod criteria_strip;
 mod doc_layout;
+mod doc_page;
 mod drop;
 mod features;
 mod finding_dialog;
@@ -83,6 +84,7 @@ pub use checkout::*;
 pub use confirm::*;
 pub use consts::*;
 pub use criteria_strip::*;
+pub use doc_page::*;
 pub use drop::*;
 pub use features::*;
 pub use finding_dialog::*;
@@ -229,6 +231,8 @@ pub struct ChromeView {
     pub doc_tab: Option<ReposView>,
     /// Where the review tab goes: the tab's place.
     pub doc_tab_rect: Rect,
+    /// The file's page in the review tab, in the place its panel leaves it.
+    pub doc_page: Option<DocPageView>,
     pub scale: f64,
 }
 
@@ -263,6 +267,7 @@ pub struct Chrome {
     worktrees: WorktreesLayers,
     repos: ReposLayers,
     doc: ReposLayers,
+    doc_page: Cached<(DocPageView, Theme, f64)>,
     inbox: InboxLayers,
     scrollback: ScrollbackLayers,
     stats: Overlay<(StatsView, Size<i32, Logical>, Theme, f64)>,
@@ -355,6 +360,7 @@ impl Chrome {
             worktrees: WorktreesLayers::default(),
             repos: ReposLayers::default(),
             doc: ReposLayers::default(),
+            doc_page: Cached::default(),
             inbox: InboxLayers::default(),
             scrollback: ScrollbackLayers::default(),
             stats: Overlay::default(),
@@ -745,15 +751,26 @@ impl Chrome {
                     now,
                     painter,
                 )),
-                // A file's tab, flat in the tab's place, under every popup.
-                Kind::Doc => parts.extend(self.doc.parts(
-                    view.doc_tab.take(),
-                    view.doc_tab_rect,
-                    theme,
-                    scale,
-                    now,
-                    painter,
-                )),
+                // A file's tab, flat in the tab's place, under every popup;
+                // its page under it, in the place it leaves.
+                Kind::Doc => {
+                    let page = view.doc_page.take().filter(|_| view.doc_tab.is_some());
+                    let p = theme.page_palette();
+                    parts.extend(self.doc.parts(
+                        view.doc_tab.take(),
+                        view.doc_tab_rect,
+                        theme,
+                        scale,
+                        now,
+                        painter,
+                    ));
+                    if let Some(page) = page.filter(|v| v.rect.size.w > 0 && v.rect.size.h > 0) {
+                        let rect = page.rect;
+                        let buffer = (self.doc_page)
+                            .get((page, theme, scale), |(v, ..)| painter.doc_page(v, scale, p));
+                        parts.push(Part::new(buffer, rect.loc, rect.size, 1.0));
+                    }
+                }
                 // The repositories panel, over nearly everything.
                 Kind::Repos => {
                     // A diff popped up over a page dims it, as dialogs do:

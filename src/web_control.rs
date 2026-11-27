@@ -16,12 +16,6 @@
 //! same; and with the version changed, while the worker's file's name
 //! does. Both follow the worker's content (see `install`).
 //!
-//! The extension also has a page of its own, `preview.html`, that shows a
-//! markdown file rendered (see `md_preview`): gerdr sends it the file's
-//! HTML on load and after each change, and it sends back the links clicked
-//! in it. In the file's tab (see `doc_tab`), gerdr tells it the line of the review's caret and the comments' lines
-//! to mark, and it sends back the line of a block clicked in it.
-//!
 //! A pane without a tab of the extension's (its browser was running
 //! before, or can't run the host, as from a Flatpak) is followed by
 //! `web_pages` still.
@@ -44,7 +38,6 @@ use smithay::reexports::calloop::channel;
 use crate::{
     Gerdr, desktop,
     feature::manual::{Area, Picked},
-    md_preview,
 };
 
 /// The extension's id, which the key in its manifest fixes.
@@ -63,35 +56,19 @@ const MANIFEST: &str = include_str!("../assets/web-extension/manifest.json");
 const WORKER: &str = include_str!("../assets/web-extension/worker.js");
 const OPEN_HTML: &str = include_str!("../assets/web-extension/open.html");
 const OPEN_JS: &str = include_str!("../assets/web-extension/open.js");
-/// Which block of a preview holds a line of its file.
-const BLOCKS_JS: &str = include_str!("../assets/web-extension/blocks.js");
+/// The extension's other files, by name: the page a tab opens on.
+const FILES: [(&str, &str); 2] = [("open.html", OPEN_HTML), ("open.js", OPEN_JS)];
 
-/// The extension's other files, by name: the preview page (see
-/// `md_preview`) and its styles.
-const FILES: [(&str, &str); 8] = [
-    ("open.html", OPEN_HTML),
-    ("open.js", OPEN_JS),
-    ("blocks.js", BLOCKS_JS),
-    (
-        "preview.html",
-        include_str!("../assets/web-extension/preview.html"),
-    ),
-    (
-        "preview.js",
-        include_str!("../assets/web-extension/preview.js"),
-    ),
-    (
-        "preview.css",
-        include_str!("../assets/web-extension/preview.css"),
-    ),
-    (
-        "markdown-light.css",
-        include_str!("../assets/web-extension/markdown-light.css"),
-    ),
-    (
-        "markdown-dark.css",
-        include_str!("../assets/web-extension/markdown-dark.css"),
-    ),
+/// Files the extension had once, and its folder no longer keeps: the
+/// markdown preview's page, gerdr painting it now (see `doc_page`).
+const GONE: [&str; 7] = [
+    "blocks.js",
+    "preview.html",
+    "preview.js",
+    "preview.css",
+    "markdown-light.css",
+    "markdown-dark.css",
+    "markdown-css-license",
 ];
 
 /// A message to the browser bigger than this ends the connection: the
@@ -162,15 +139,6 @@ enum FromBrowser {
     /// Selecting on the pane's page stopped with nothing selected:
     /// `cancelled`, `navigated`, or `error: …` saying why.
     Unselected { pane: String, reason: String },
-    /// A link clicked in the pane's preview (see `md_preview`).
-    Open { pane: String, url: String },
-    /// The pane's preview page loaded, and shows nothing yet.
-    Ready { pane: String },
-    /// A block clicked in the pane's preview, from this line of its file.
-    Line { pane: String, line: usize },
-    /// The pane's preview scrolled to this line of its file, to the
-    /// fraction, at its top (see `DiffView::top_line`).
-    Scroll { pane: String, line: f64 },
     /// T3 Code's app in the pane's tab started no new thread (see
     /// `Gerdr::t3_no_thread`): what went wrong, as a short word, and what
     /// the page showed.
@@ -192,10 +160,6 @@ impl FromBrowser {
             | Self::Shot { pane, .. }
             | Self::Selected { pane, .. }
             | Self::Unselected { pane, .. }
-            | Self::Open { pane, .. }
-            | Self::Ready { pane }
-            | Self::Line { pane, .. }
-            | Self::Scroll { pane, .. }
             | Self::NoThread { pane, .. } => pane,
         }
     }
@@ -258,31 +222,6 @@ enum ToBrowser<'a> {
         /// The model its draft is set to.
         #[serde(skip_serializing_if = "Option::is_none")]
         model: Option<DraftModel<'a>>,
-    },
-    /// Show a markdown file in the pane's preview page (see
-    /// `md_preview`): rendered as `html`, or `error` saying why it isn't.
-    Preview {
-        pane: String,
-        title: &'a str,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        html: Option<&'a str>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<&'a str>,
-        dark: bool,
-        /// The lines with review comments, and what each says.
-        marks: &'a [(usize, String)],
-    },
-    /// Mark the block of the pane's preview holding this line of its
-    /// file, where its review's caret is; none, no block.
-    Caret {
-        pane: String,
-        line: Option<usize>,
-    },
-    /// Scroll the pane's preview to this line of its file, to the
-    /// fraction, at its top: where its review beside it stands.
-    Scroll {
-        pane: String,
-        line: f64,
     },
     /// Send back what the pane's tab shows, as a PNG.
     Capture {
@@ -566,6 +505,12 @@ pub fn install(profile: &Path, socket: &Path) -> std::io::Result<PathBuf> {
     for (name, contents) in FILES {
         write_if_changed(&dir.join(name), contents.as_bytes())?;
     }
+    for name in GONE {
+        match std::fs::remove_file(dir.join(name)) {
+            Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(err),
+            _ => {}
+        }
+    }
 
     // A binary replaced while it runs reads as deleted.
     let exe = std::env::current_exe()?;
@@ -745,28 +690,7 @@ impl Gerdr {
                 if let Some(pane) = token_pane(&pane) {
                     control.panes.remove(&pane);
                     control.history.remove(&pane);
-                    self.web.preview_closed(pane);
                     self.page_closed(pane);
-                }
-            }
-            Event::Message(_, FromBrowser::Open { pane, url }) => {
-                if let Some(pane) = token_pane(&pane) {
-                    self.preview_link(pane, &url);
-                }
-            }
-            Event::Message(_, FromBrowser::Ready { pane }) => {
-                if let Some(pane) = token_pane(&pane) {
-                    self.preview_ready(pane);
-                }
-            }
-            Event::Message(_, FromBrowser::Line { pane, line }) => {
-                if let Some(pane) = token_pane(&pane) {
-                    self.preview_line(pane, line);
-                }
-            }
-            Event::Message(_, FromBrowser::Scroll { pane, line }) => {
-                if let Some(pane) = token_pane(&pane) {
-                    self.preview_scrolled(pane, line);
                 }
             }
             Event::Message(
@@ -850,7 +774,6 @@ impl Gerdr {
                 }
                 control.panes.insert(pane, id);
                 control.history.insert(pane, WebHistory { back, forward });
-                self.preview_page(pane, &url);
                 if crate::is_web_link(&url) {
                     self.t3_page(pane, &url);
                     self.set_web_page(pane, url);
@@ -965,39 +888,6 @@ impl Gerdr {
         self.send_to_browser(pane, &message)
     }
 
-    /// Show `shown` in `pane`'s preview page, if the extension follows
-    /// its tab; whether it was sent. One too big for a message says so
-    /// instead.
-    pub(crate) fn preview_to_browser(&mut self, pane: u32, shown: &md_preview::Shown) -> bool {
-        let body = shown.body.as_deref().map_err(String::as_str);
-        let message = preview_message(pane, shown, body).or_else(|| {
-            let name = shown.title.rsplit(" \u{b7} ").next().unwrap_or("The file");
-            let why = format!("{name} is too big to preview");
-            preview_message(pane, shown, Err(&why))
-        });
-        message.is_some_and(|message| self.web.send_bytes(pane, &message))
-    }
-
-    /// Mark the block holding `line` in `pane`'s preview page, if the
-    /// extension follows its tab; whether it was sent.
-    pub(crate) fn caret_to_browser(&mut self, pane: u32, line: Option<usize>) -> bool {
-        let message = ToBrowser::Caret {
-            pane: pane_token(pane),
-            line,
-        };
-        self.send_to_browser(pane, &message)
-    }
-
-    /// Scroll `pane`'s preview page to `line` of its file at its top, if
-    /// the extension follows its tab; whether it was sent.
-    pub(crate) fn scroll_to_browser(&mut self, pane: u32, line: f64) -> bool {
-        let message = ToBrowser::Scroll {
-            pane: pane_token(pane),
-            line,
-        };
-        self.send_to_browser(pane, &message)
-    }
-
     /// Ask for what `pane`'s tab shows, if the extension follows it; whether
     /// it was asked. It comes back to `Gerdr::web_pane_shot`.
     pub(crate) fn capture_web_pane(&mut self, pane: u32) -> bool {
@@ -1087,26 +977,6 @@ fn base64_decoded(text: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
-}
-
-/// The message showing `shown` in `pane`'s preview page, its body `body`
-/// (the rendered file, or why it isn't); `None` when it is bigger than a
-/// message may be.
-pub(crate) fn preview_message(
-    pane: u32,
-    shown: &md_preview::Shown,
-    body: Result<&str, &str>,
-) -> Option<Vec<u8>> {
-    let message = ToBrowser::Preview {
-        pane: pane_token(pane),
-        title: &shown.title,
-        html: body.ok(),
-        error: body.err(),
-        dark: shown.dark,
-        marks: &shown.marks,
-    };
-    let message = serde_json::to_vec(&message).ok()?;
-    (message.len() <= MESSAGE_MAX).then_some(message)
 }
 
 /// `dirs` as the extension takes them.
@@ -1447,6 +1317,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&profile);
         let dir = install(&profile, Path::new("/run/gerdr.sock")).unwrap();
         std::fs::write(dir.join("worker-old.js"), "").unwrap();
+        std::fs::write(dir.join("preview.html"), "").unwrap();
         install(&profile, Path::new("/run/gerdr.sock")).unwrap();
         let place = profile_hash(&profile);
         let worker = format!("worker-{:016x}.js", content_hash(WORKER.as_bytes()) ^ place);
@@ -1458,9 +1329,9 @@ mod tests {
         // another worker: the copy's stale registration isn't used.
         assert_ne!(place, profile_hash(&profile.join("copy")));
         assert!(dir.join(&worker).exists());
-        assert!(dir.join("preview.html").exists());
-        assert!(dir.join("markdown-dark.css").exists());
+        assert!(dir.join("open.html").exists());
         assert!(!dir.join("worker-old.js").exists());
+        assert!(!dir.join("preview.html").exists());
         let host = std::fs::read_to_string(dir.join("host")).unwrap();
         assert!(host.ends_with(" --web-host /run/gerdr.sock\n"));
         let hosts = profile.join("NativeMessagingHosts/dev.gerdr.web.json");
@@ -1468,129 +1339,5 @@ mod tests {
             serde_json::from_slice(&std::fs::read(hosts).unwrap()).unwrap();
         assert_eq!(hosts["path"], dir.join("host").to_string_lossy().as_ref());
         std::fs::remove_dir_all(&profile).unwrap();
-    }
-
-    #[test]
-    fn a_preview_marks_the_block_of_its_reviews_caret() {
-        let caret = ToBrowser::Caret {
-            pane: pane_token(4),
-            line: Some(12),
-        };
-        let caret = serde_json::to_value(&caret).unwrap();
-        assert_eq!(caret["type"], "caret");
-        assert_eq!(caret["line"], 12);
-        let none = ToBrowser::Caret {
-            pane: pane_token(4),
-            line: None,
-        };
-        assert!(serde_json::to_value(&none).unwrap()["line"].is_null());
-        // A click on a block puts the caret on the line clicked.
-        let token = pane_token(4);
-        let clicked = format!(r#"{{"type":"line","pane":"{token}","line":7}}"#);
-        let FromBrowser::Line { pane, line } = serde_json::from_str(&clicked).unwrap() else {
-            panic!("not a line");
-        };
-        assert_eq!((token_pane(&pane), line), (Some(4), 7));
-    }
-
-    #[test]
-    fn a_preview_scrolls_with_its_review() {
-        let to = ToBrowser::Scroll {
-            pane: pane_token(4),
-            line: 12.5,
-        };
-        let to = serde_json::to_value(&to).unwrap();
-        assert_eq!(
-            (to["type"].as_str(), to["line"].as_f64()),
-            (Some("scroll"), Some(12.5))
-        );
-        let token = pane_token(4);
-        let from = format!(r#"{{"type":"scroll","pane":"{token}","line":3.75}}"#);
-        let FromBrowser::Scroll { pane, line } = serde_json::from_str(&from).unwrap() else {
-            panic!("not a scroll");
-        };
-        assert_eq!((token_pane(&pane), line), (Some(4), 3.75));
-    }
-
-    /// The page's lookup of the block holding a line, run by node if it
-    /// is here.
-    #[test]
-    fn a_line_is_in_its_innermost_block() {
-        let Ok(node) = which_node() else {
-            eprintln!("no node: skipped");
-            return;
-        };
-        let check = r#"
-const { sourceLines, pickBlock, lineY, yLine, clickedLine } = require(process.argv[1]);
-const assert = require("assert");
-assert.deepStrictEqual(sourceLines("3:1-5:20"), [3, 5]);
-assert.strictEqual(sourceLines("x"), null);
-// A list (lines 3-6) with items 3 and 4-6, a paragraph at 8.
-const blocks = [[1, 1, "h1"], [3, 6, "ul"], [3, 3, "li1"], [4, 6, "li2"], [8, 9, "p"]];
-assert.strictEqual(pickBlock(blocks, 1), "h1");
-assert.strictEqual(pickBlock(blocks, 5), "li2");
-assert.strictEqual(pickBlock(blocks, 3), "li1");
-// A blank line between blocks: the one before it.
-assert.strictEqual(pickBlock(blocks, 7), "li2");
-assert.strictEqual(pickBlock(blocks, 2), "h1");
-assert.strictEqual(pickBlock([[2, 2, "p"]], 1), null);
-// A heading (line 1) at 0-40, a list (3-6) at 60-160 with items 3 and
-// 4-6, a paragraph (8-9) at 180-220.
-const spans = [[1, 1, 0, 40], [3, 6, 60, 100], [3, 3, 60, 25], [4, 6, 85, 75], [8, 9, 180, 40]];
-assert.strictEqual(lineY(spans, 1), 0);
-assert.strictEqual(lineY(spans, 1.5), 20);
-assert.strictEqual(lineY(spans, 5), 85 + 25);
-// Between blocks, between the end of one and the start of the next.
-assert.strictEqual(lineY(spans, 2), 40);
-assert.strictEqual(lineY(spans, 2.5), 50);
-assert.strictEqual(lineY(spans, 7.5), 170);
-assert.strictEqual(lineY(spans, 50), 220);
-// Turned round, the place gives its line back.
-for (const line of [1, 1.5, 2.5, 3, 5, 7.5, 8.25]) {
-  assert.ok(Math.abs(yLine(spans, lineY(spans, line)) - line) < 1e-9, String(line));
-}
-assert.strictEqual(yLine(spans, 1000), 10);
-// Above the first block, the line before it, from the page's top.
-const low = [[1, 1, 32, 40], [3, 3, 100, 20]];
-assert.strictEqual(lineY(low, 0), 0);
-assert.strictEqual(lineY(low, 0.5), 16);
-assert.strictEqual(lineY(low, -2), 0);
-assert.strictEqual(yLine(low, 0), 0);
-assert.strictEqual(yLine(low, 16), 0.5);
-assert.strictEqual(lineY([], 3), 0);
-assert.strictEqual(yLine([], 3), 1);
-// A click lands on the line under it: lines 10 to 19, 20 px each, from 100.
-assert.strictEqual(clickedLine(10, 19, 100, 200, 100), 10);
-assert.strictEqual(clickedLine(10, 19, 100, 200, 155), 12);
-assert.strictEqual(clickedLine(10, 19, 100, 200, 299), 19);
-// Off its edges, it stays in the block.
-assert.strictEqual(clickedLine(10, 19, 100, 200, 300), 19);
-assert.strictEqual(clickedLine(10, 19, 100, 200, 90), 10);
-"#;
-        let blocks = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/assets/web-extension/blocks.js"
-        );
-        let out = std::process::Command::new(node)
-            .args(["-e", check, blocks])
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-
-    fn which_node() -> Result<std::path::PathBuf, ()> {
-        let home = std::env::var_os("HOME").ok_or(())?;
-        let mise =
-            std::path::Path::new(&home).join(".local/share/mise/installs/node/latest/bin/node");
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        std::env::split_paths(&path)
-            .map(|dir| dir.join("node"))
-            .chain([mise])
-            .find(|node| node.is_file())
-            .ok_or(())
     }
 }

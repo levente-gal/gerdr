@@ -4,7 +4,7 @@
 //! the test and copy the table it prints).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use super::{
@@ -8042,7 +8042,7 @@ fn finding_dialog_reject() -> super::FindingDialogView {
 fn doc_suggestions() -> super::ReposView {
     use super::{DetailRow, FindingHead, Hint, ReposButton, RowMark, Tone};
     use crate::diff::LineKind::Added;
-    let mut view = doc_tab(1, 1.0, Vec::new(), false);
+    let mut view = doc_tab(1, 1.0, false);
     // Only Review: the plan is approved, and only read here.
     view.modes = None;
     let hint = |button: ReposButton, label: &str, key: &str| Hint {
@@ -8373,7 +8373,7 @@ fn dump_plan_review() {
 
 /// A feature's brief in its tab, as `doc_tab_view` lays it out: the mode
 /// switch on the title row, the finishing actions at the foot.
-fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposView {
+fn doc_tab(on: usize, share: f64, wide: bool) -> super::ReposView {
     use super::{DetailRow, DetailView, Hint, ModeSwitch, ReposButton, ReposView};
     use crate::diff::LineKind::Added;
     let hint = |button: ReposButton, key: &str| Hint {
@@ -8444,7 +8444,7 @@ fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposVi
     ReposView {
         flat: true,
         detail_share: share,
-        modes: Some(ModeSwitch { labels, on, off }),
+        modes: Some(ModeSwitch { labels, on }),
         ..ReposView::diff_only(title, summary, None, hints, detail, None, density)
     }
 }
@@ -8453,8 +8453,8 @@ fn doc_tab(on: usize, share: f64, off: Vec<usize>, wide: bool) -> super::ReposVi
 /// comments, no Approve, no Preview (`DocFile::ChatPlan`).
 fn doc_chat_plan() -> super::ReposView {
     use super::ReposButton;
-    let mut view = doc_tab(0, 1.0, Vec::new(), false);
-    let mut review = doc_tab(1, 1.0, Vec::new(), false);
+    let mut view = doc_tab(0, 1.0, false);
+    let mut review = doc_tab(1, 1.0, false);
     review.hints.retain(|h| h.button != ReposButton::Approve);
     review
         .detail
@@ -8479,7 +8479,7 @@ fn doc_chat_plan() -> super::ReposView {
 /// (`locked`), and goes on to Plan either way.
 fn doc_tab_closed(locked: bool) -> super::ReposView {
     use super::{Hint, ReposButton};
-    let mut view = doc_tab(1, 1.0, Vec::new(), false);
+    let mut view = doc_tab(1, 1.0, false);
     let hint = |button: ReposButton, key: &str, label: &str| Hint {
         button,
         label: label.into(),
@@ -8515,7 +8515,7 @@ fn doc_tab_closed(locked: bool) -> super::ReposView {
 /// row lit with a selection, the caret, a place found and a comment's dot.
 fn code_diff() -> super::ReposView {
     use super::{DetailRow, RowMark};
-    let mut view = doc_tab(1, 1.0, Vec::new(), false);
+    let mut view = doc_tab(1, 1.0, false);
     let text = [
         "diff --git a/src/git.rs b/src/git.rs",
         "--- a/src/git.rs",
@@ -8569,7 +8569,7 @@ fn code_diff() -> super::ReposView {
 /// in each of their looks, the cursor on the first finding.
 fn findings_view() -> super::ReposView {
     use super::{DetailRow, FindingHead, Hint, ReposButton, RowMark, Tone};
-    let mut view = doc_tab(1, 1.0, Vec::new(), false);
+    let mut view = doc_tab(1, 1.0, false);
     let hint = |button: ReposButton, label: &str| Hint {
         button,
         label: label.into(),
@@ -8801,18 +8801,13 @@ fn findings_popup(at: u8) -> super::ReposView {
     view
 }
 
-fn doc_tabs() -> [(&'static str, super::ReposView, i32); 17] {
+fn doc_tabs() -> [(&'static str, super::ReposView, i32); 16] {
     [
-        ("doc_preview_1180", doc_tab(0, 0.0, Vec::new(), false), 1180),
-        ("doc_review_1180", doc_tab(1, 1.0, Vec::new(), false), 1180),
-        (
-            "doc_review_no_browser",
-            doc_tab(1, 1.0, vec![0, 2], true),
-            1920,
-        ),
-        ("doc_preview_1920", doc_tab(0, 0.0, Vec::new(), true), 1920),
-        ("doc_split_1920", doc_tab(2, 0.45, Vec::new(), true), 1920),
-        ("doc_review_850", doc_tab(1, 1.0, Vec::new(), false), 850),
+        ("doc_preview_1180", doc_tab(0, 0.0, false), 1180),
+        ("doc_review_1180", doc_tab(1, 1.0, false), 1180),
+        ("doc_preview_1920", doc_tab(0, 0.0, true), 1920),
+        ("doc_split_1920", doc_tab(2, 0.45, true), 1920),
+        ("doc_review_850", doc_tab(1, 1.0, false), 850),
         ("doc_approved_1180", doc_tab_closed(false), 1180),
         ("doc_locked_1180", doc_tab_closed(true), 1180),
         ("findings_1180", findings_view(), 1180),
@@ -8896,10 +8891,9 @@ fn listed_review(flat: bool) -> super::ReposView {
     }
 }
 
-const DOC_TAB: [&str; 17] = [
+const DOC_TAB: [&str; 16] = [
     "doc_preview_1180",
     "doc_review_1180",
-    "doc_review_no_browser",
     "doc_preview_1920",
     "doc_split_1920",
     "doc_review_850",
@@ -8935,12 +8929,11 @@ fn paint_doc_tab(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `DOC_TAB`, per case in `CASES`.
-const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
+const GOLDEN_DOC_TAB: [[u64; 16]; 4] = [
     // Dark at 1
     [
         0x3e3caa00b704f035, // doc_preview_1180
         0x5f0eea2202df9b97, // doc_review_1180
-        0xca9d36ec30eeccaf, // doc_review_no_browser
         0x0463a0b03be2a38c, // doc_preview_1920
         0x114502515cb1a37f, // doc_split_1920
         0x5f9babd357bac1db, // doc_review_850
@@ -8960,7 +8953,6 @@ const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
     [
         0x292ac6088287de97, // doc_preview_1180
         0x5da6716a91f71517, // doc_review_1180
-        0x266066e6b0250b3b, // doc_review_no_browser
         0xc2ddd112e79328e1, // doc_preview_1920
         0x06ee5eb2e0540777, // doc_split_1920
         0x491594bd2e15d83f, // doc_review_850
@@ -8980,7 +8972,6 @@ const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
     [
         0x1b7f0b8bd316796d, // doc_preview_1180
         0x4ef27507c8d38c48, // doc_review_1180
-        0x0694f0ceb17f3448, // doc_review_no_browser
         0x394a68b69f77168f, // doc_preview_1920
         0x1b572e5fe4c415c0, // doc_split_1920
         0x0927fe767505b3c0, // doc_review_850
@@ -9000,7 +8991,6 @@ const GOLDEN_DOC_TAB: [[u64; 17]; 4] = [
     [
         0xab656728d65fc54f, // doc_preview_1180
         0x6af7e329886f8680, // doc_review_1180
-        0x0fcabb5c88553110, // doc_review_no_browser
         0x8fc4208ea0a15206, // doc_preview_1920
         0x424849e04413924d, // doc_split_1920
         0x149009729a0727b0, // doc_review_850
@@ -9043,6 +9033,81 @@ fn dump_doc_tab() {
                 buffer,
                 width,
             );
+        }
+    }
+}
+
+/// A file's page in its tab (`DocPageView`): across a 1180 wide tab with
+/// the caret's bar and a comment's dot, and beside its review in Split,
+/// scrolled.
+fn doc_pages() -> [(&'static str, super::DocPageView); 2] {
+    let md = "# Log in with a password\n\nPeople sign in with an **email** and a password, and stay \
+              signed in. See [the plan](plan.md#L3).\n\n- [x] A wrong password says so\n- [ ] Five \
+              tries wait a minute\n\n```rust\nfn wait() -> Duration {\n    MINUTE\n}\n```\n\n> [!NOTE]\n> \
+              Kept for a day.\n\n| Tries | Wait |\n|---|---|\n| 5 | 1 min |\n";
+    let blocks = Arc::new(crate::md_blocks::blocks(md));
+    let page = |w: i32, top: f64| super::DocPageView {
+        rect: smithay::utils::Rectangle::from_size((w, 560).into()),
+        blocks: blocks.clone(),
+        top,
+        caret: Some(1),
+        said: vec![1, 3],
+    };
+    [("doc_page_1180", page(1180, 0.0)), ("doc_page_split", page(560, 60.0))]
+}
+
+const DOC_PAGE: [&str; 2] = ["doc_page_1180", "doc_page_split"];
+
+fn paint_doc_page(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
+    (doc_pages().iter())
+        .map(|(_, view)| hash(painter.doc_page(view, scale, theme.page_palette())))
+        .collect()
+}
+
+/// The recorded hashes of `DOC_PAGE`, per case in `CASES`.
+const GOLDEN_DOC_PAGE: [[u64; 2]; 4] = [
+    // Dark at 1
+    [
+        0x555d4b0ebc5cc968, // doc_page_1180
+        0x25446eeda828ab53, // doc_page_split
+    ],
+    // Dark at 2
+    [
+        0x40f953273ede19ca, // doc_page_1180
+        0x0a70a973382bdad0, // doc_page_split
+    ],
+    // Light at 1
+    [
+        0x0199c30af8b5c8d6, // doc_page_1180
+        0xc78babb88fe708e3, // doc_page_split
+    ],
+    // Light at 2
+    [
+        0x954ac83cf276674b, // doc_page_1180
+        0xd1d94fc1e9cf0354, // doc_page_split
+    ],
+];
+
+#[test]
+fn the_doc_page_paints_the_same_pixels() {
+    let golden: Vec<&[u64]> = GOLDEN_DOC_PAGE.iter().map(|row| row.as_slice()).collect();
+    check(&DOC_PAGE, &golden, paint_doc_page);
+}
+
+/// With `GERDR_DUMP_DIR` set, write every doc page fixture there.
+#[test]
+fn dump_doc_page() {
+    let Some(dir) = std::env::var_os("GERDR_DUMP_DIR") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let painter = Painter::new();
+    for (theme, scale) in CASES {
+        for (name, view) in doc_pages() {
+            let width = (view.rect.size.w as f64 * scale).round() as usize;
+            let buffer = painter.doc_page(&view, scale, theme.page_palette());
+            dump(&dir, &format!("{name}_{}_{}", theme.name(), scale), buffer, width);
         }
     }
 }

@@ -132,6 +132,7 @@ impl Gerdr {
             self.inbox_scroll_tick(now),
             self.scrollback_scroll_tick(now),
             self.feature_tab_scroll_tick(now),
+            self.doc_page_scroll_tick(now),
             self.sidebar_scroll_tick(now),
         ]
         .contains(&true);

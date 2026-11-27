@@ -391,7 +391,7 @@ pub struct Life {
     pub previous_project: Option<String>,
 }
 
-/// Web panes steered through the browser extension, and page previews.
+/// Web panes steered through the browser extension.
 #[derive(Default)]
 pub struct Web {
     /// A read of where the web pages are is under way (see `watch_web_pages`).
@@ -399,8 +399,6 @@ pub struct Web {
     /// The browsers following and steering the web pages (see
     /// `web_control`).
     pub control: web_control::WebControl,
-    /// The web tabs showing a markdown file's preview (see `md_preview`).
-    pub previews: md_preview::Previews,
 }
 
 /// Cursor agent chats read from Cursor's database.

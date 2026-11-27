@@ -585,7 +585,7 @@ impl Gerdr {
                     steered
                 }
                 // The extension's own pages show nothing without it: no
-                // command, which doesn't start (see `steers`).
+                // command, which doesn't start.
                 None if site == format!("-{}_", web_control::EXTENSION_ID) => {
                     app_id = site;
                     String::new()
@@ -658,13 +658,6 @@ impl Gerdr {
             desktop::shell_quote(&web_control::boot_url(pane, url.trim()))
         );
         web.contains(&app).then(|| web.replacen(&app, &boot, 1))
-    }
-
-    /// Whether `command`, run in folder `dir`, opens through gerdr's
-    /// extension (see `steered`): one of its own pages needs it.
-    pub(crate) fn steers(&self, command: &str, dir: &Path) -> bool {
-        let app_id = self.prepare(command, dir, Some(0)).app_id;
-        app_id == format!("-{}_", web_control::EXTENSION_ID)
     }
 
     /// Make `profile`, the one `command` runs with (see `own_instance`),
@@ -857,7 +850,8 @@ const CHROMIUMS: &[&str] = &[
 fn web_app(url: &str, opener: &str) -> Option<(String, String)> {
     let url = url.trim();
     let (scheme, rest) = url.split_once("://")?;
-    // A page of gerdr's extension too, as the preview (see `md_preview`).
+    // A page of gerdr's extension too, as an older gerdr saved its markdown
+    // preview: with no command, it starts nothing.
     let own = scheme == "chrome-extension"
         && rest.starts_with(&format!("{}/", web_control::EXTENSION_ID));
     if !own && !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {

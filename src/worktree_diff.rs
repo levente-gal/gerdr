@@ -41,7 +41,7 @@ use crate::{
     diff::FileDiff,
     diff_view::{self, CheckOf, DiffView, Keys, NoteOf, Outcome, Section},
     doc_review::DocFile,
-    doc_tab::DocMode,
+    doc_tab::{DocMode, PREVIEW_KEY},
     feature::fix_round::FixPhase,
     feature::review_import::Decision,
     feature::review_items::ItemOf,
@@ -51,7 +51,6 @@ use crate::{
     git::Change,
     git_ops::Since,
     key_table::{self, Binding},
-    md_preview::PREVIEW_KEY,
     repos::{Grouping, f1_lines, help_title, key, key_name, scroll_lines, sheet_step, unpad},
     review::Review,
     scroll::Motion,
@@ -2846,6 +2845,10 @@ impl crate::Gerdr {
             }
             return None;
         }
+        // In Preview the file's page moves by the keys.
+        if self.doc_page_key(mods, sym) {
+            return None;
+        }
         let env = self.worktree_env();
         let done = self.wd_mut()?.key(mods, sym, typed, env);
         self.worktree_done(done)
@@ -4308,7 +4311,7 @@ pub(crate) mod tests {
             waits,
         };
         let text = "# Cache the tokens\nStep one.\n";
-        let doc = crate::doc_review::chat_plan_doc("p", 7, chat, text);
+        let doc = crate::doc_review::chat_plan_doc("p", 7, chat, text, Path::new("/w"));
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok(text.into()), ENV);
         wd

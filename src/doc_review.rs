@@ -222,7 +222,7 @@ impl DocFile {
             DocFile::ConflictPlan(n) => Some(dir.join(format!("conflicts-{n}.md"))),
             DocFile::Research(id) => Some(artifacts::research_path(dir, id)),
             DocFile::Findings => Some(findings_path(dir)),
-            DocFile::ChatPlan(key) => Some(crate::chat::plan_review::path(key)),
+            DocFile::ChatPlan(_) => None,
             _ => Some(dir.join(self.name()?)),
         }
     }
@@ -272,15 +272,22 @@ pub fn chat_plan_title(text: &str) -> String {
 }
 
 /// The review of plan item `chat.item_id` of a chat in `project`'s
-/// workspace, its snapshot at `key`: only commented on, never closed, of no
-/// feature.
-pub fn chat_plan_doc(project: &str, key: u64, chat: ChatPlanOf, text: &str) -> DocOf {
+/// workspace, keyed `key`, its agent in folder `dir`: only commented on,
+/// never closed, of no feature. It is no file: its text is the card's, and
+/// its links go from `dir`.
+pub fn chat_plan_doc(
+    project: &str,
+    key: u64,
+    chat: ChatPlanOf,
+    text: &str,
+    dir: &Path,
+) -> DocOf {
     let file = DocFile::ChatPlan(key);
     DocOf {
         project: project.to_owned(),
         slug: String::new(),
         file,
-        path: crate::chat::plan_review::path(key),
+        path: dir.join(CHAT_PLAN_NAME),
         comments: crate::chat::plan_review::comments_path(key),
         title: chat_plan_title(text),
         state: chat_plan_state(chat.waits),
@@ -854,7 +861,7 @@ impl Gerdr {
                     DocFile::ConflictPlan(_) => {
                         Failed::Warning("The plan isn't written yet".into())
                     }
-                    DocFile::ChatPlan(_) => Failed::Error("The plan's copy is gone".into()),
+                    DocFile::ChatPlan(_) => Failed::Warning("A chat's plan opens from its chat".into()),
                     DocFile::Stage(_) | DocFile::FixPlan => {
                         Failed::Error(format!("No {name} yet for \u{201c}{title}\u{201d}"))
                     }
@@ -927,6 +934,10 @@ impl Gerdr {
         let Some(doc) = self.doc_of() else {
             return;
         };
+        // A chat's plan is its card's text: no file to read again.
+        if let DocFile::ChatPlan(_) = doc.file {
+            return self.doc_stand();
+        }
         let read = read(&doc.path, &doc.name());
         // The plan the changes are against may have changed too.
         let base = (doc.file == DocFile::PlanChanges).then(|| {
@@ -946,8 +957,6 @@ impl Gerdr {
             return;
         };
         wd.set_doc(read, env);
-        // Its preview shows an edit at once.
-        self.refresh_previews();
     }
 
     /// Save the review comments on the file under review, if they
@@ -1441,18 +1450,20 @@ mod tests {
             item_id: "toolu_1".into(),
             waits,
         };
-        let doc = chat_plan_doc("p", 7, chat(false), "Intro\n## Cache the tokens\n");
+        let dir = Path::new("/w/app");
+        let doc = chat_plan_doc("p", 7, chat(false), "Intro\n## Cache the tokens\n", dir);
         assert_eq!(doc.file, DocFile::ChatPlan(7));
         assert_eq!((doc.project.as_str(), doc.slug.as_str()), ("p", ""));
         assert_eq!(doc.title, "Cache the tokens");
         assert_eq!(doc.state, "comments go to the agent as a message");
         assert_eq!(doc.locked, Some(CHAT_PLAN_READ_ONLY));
         assert_eq!(doc.standing, Standing::Open);
-        assert_eq!(doc.path, crate::chat::plan_review::path(7));
+        assert_eq!(doc.path.parent(), Some(dir));
+        assert_eq!(DocFile::ChatPlan(7).path(dir), None);
         assert_eq!(doc.comments, crate::chat::plan_review::comments_path(7));
         assert_eq!(doc.name(), "your plan");
         assert!(!doc.only_read() && !doc.closed());
-        let waiting = chat_plan_doc("p", 7, chat(true), "");
+        let waiting = chat_plan_doc("p", 7, chat(true), "", dir);
         assert_eq!(waiting.state, "waiting for your answer");
         assert_eq!(waiting.title, "Plan");
         assert_eq!(chat_plan_title("#\n# \n"), "Plan");

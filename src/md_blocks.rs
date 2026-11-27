@@ -6,8 +6,8 @@
 //! is left out. What is inside a block is its words, with runs of them
 //! bold, italic, struck through, code or a link (`Inline`); an image alone
 //! in its paragraph is a block of its own, one among words its alt text.
-//! The page in a file's tab (`md_preview`) is still what shows it as GitHub
-//! would.
+//! Each block knows the lines of its file it comes from (`lined`), so a
+//! file's page beside its review follows it (see `doc_page`).
 
 use std::{
     ops::Range,
@@ -266,6 +266,15 @@ pub fn code_block(lang: Option<&str>, lines: Vec<String>) -> DocBlock {
 
 /// `text`'s blocks, in order.
 pub fn blocks(text: &str) -> Vec<DocBlock> {
+    lined(text).0
+}
+
+/// The lines of its file each of a file's blocks comes from, first and
+/// last, counted from 1 (as `blocks` gives them, one each).
+pub type Lines = Vec<(usize, usize)>;
+
+/// `text`'s blocks, in order, and the lines each comes from.
+pub fn lined(text: &str) -> (Vec<DocBlock>, Lines) {
     let mut options = Options::default();
     let ext = &mut options.extension;
     ext.table = true;
@@ -278,11 +287,19 @@ pub fn blocks(text: &str) -> Vec<DocBlock> {
     let arena = Arena::new();
     let root = parse_document(&arena, text, &options);
     hard_item_breaks(root);
-    let mut out = Vec::new();
+    let (mut out, mut lines) = (Vec::new(), Vec::new());
     for node in root.children() {
-        block(node, 0, &mut out);
+        block(node, 0, &mut out, &mut lines);
     }
-    out
+    (out, lines)
+}
+
+/// The blocks put on `out` since `lines` was last filled come from `node`'s
+/// lines.
+fn fill<'a>(out: &[DocBlock], lines: &mut Lines, node: &'a AstNode<'a>) {
+    let pos = node.data.borrow().sourcepos;
+    let span = (pos.start.line, pos.end.line.max(pos.start.line));
+    lines.resize(out.len(), span);
 }
 
 /// Make each line break inside a list item a hard one, so lines like a plan
@@ -326,8 +343,15 @@ fn starts_labelled<'a>(node: &'a AstNode<'a>) -> bool {
         && label.chars().all(worded)
 }
 
-/// `node`'s blocks onto `out`, `depth` lists in.
-fn block<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut Vec<DocBlock>) {
+/// `node`'s blocks onto `out`, `depth` lists in, and their lines onto
+/// `lines`.
+fn block<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut Vec<DocBlock>, lines: &mut Lines) {
+    put(node, depth, out, lines);
+    fill(out, lines, node);
+}
+
+/// `block`'s blocks, their lines but those of a list's items left to fill.
+fn put<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut Vec<DocBlock>, lines: &mut Lines) {
     let value = node.data.borrow().value.clone();
     match value {
         NodeValue::Heading(heading) => out.push(DocBlock::Heading {
@@ -346,7 +370,7 @@ fn block<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut Vec<DocBlock>) {
                     _ if list.list_type == ListType::Ordered => ItemMark::Number(list.start + i),
                     _ => ItemMark::Bullet,
                 };
-                list_item(item, depth, mark, out);
+                list_item(item, depth, mark, out, lines);
             }
         }
         NodeValue::CodeBlock(code) => {
@@ -411,9 +435,9 @@ fn block<'a>(node: &'a AstNode<'a>, depth: u8, out: &mut Vec<DocBlock>) {
 
 /// The blocks inside container `node` (a quote's).
 fn inner<'a>(node: &'a AstNode<'a>) -> Vec<DocBlock> {
-    let mut blocks = Vec::new();
+    let (mut blocks, mut lines) = (Vec::new(), Vec::new());
     for child in node.children() {
-        block(child, 0, &mut blocks);
+        block(child, 0, &mut blocks, &mut lines);
     }
     blocks
 }
@@ -478,7 +502,13 @@ fn html_words(html: &str) -> String {
 
 /// List item `item`'s blocks onto `out`: its first paragraph after `mark`,
 /// the rest under it.
-fn list_item<'a>(item: &'a AstNode<'a>, depth: u8, mark: ItemMark, out: &mut Vec<DocBlock>) {
+fn list_item<'a>(
+    item: &'a AstNode<'a>,
+    depth: u8,
+    mark: ItemMark,
+    out: &mut Vec<DocBlock>,
+    lines: &mut Lines,
+) {
     let mut mark = Some(mark);
     for child in item.children() {
         let value = child.data.borrow().value.clone();
@@ -486,6 +516,7 @@ fn list_item<'a>(item: &'a AstNode<'a>, depth: u8, mark: ItemMark, out: &mut Vec
             let text = inline(child);
             let mark = mark.take().unwrap_or(ItemMark::Under);
             out.push(DocBlock::Item { depth, mark, text });
+            fill(out, lines, child);
             continue;
         }
         // A list or a block opening the item leaves its mark on an empty
@@ -493,20 +524,23 @@ fn list_item<'a>(item: &'a AstNode<'a>, depth: u8, mark: ItemMark, out: &mut Vec
         if let Some(mark) = mark.take() {
             let text = Styled::default();
             out.push(DocBlock::Item { depth, mark, text });
+            fill(out, lines, child);
         }
         if matches!(value, NodeValue::List(_)) {
-            block(child, depth.saturating_add(1), out);
+            block(child, depth.saturating_add(1), out, lines);
         } else {
-            let mut blocks = Vec::new();
-            block(child, 0, &mut blocks);
+            let (mut blocks, mut inner) = (Vec::new(), Vec::new());
+            block(child, 0, &mut blocks, &mut inner);
             if !blocks.is_empty() {
                 out.push(DocBlock::Nested { depth, blocks });
+                fill(out, lines, child);
             }
         }
     }
     if let Some(mark) = mark {
         let text = Styled::default();
         out.push(DocBlock::Item { depth, mark, text });
+        fill(out, lines, item);
     }
 }
 
@@ -636,9 +670,14 @@ fn unescaped(text: &str) -> String {
 /// images to relative paths made absolute in it, so they open (and show)
 /// wherever the blocks go.
 pub fn blocks_in(text: &str, dir: &Path) -> Vec<DocBlock> {
-    let mut blocks = blocks(text);
+    lined_in(text, dir).0
+}
+
+/// `blocks_in`, with the lines each block comes from (see `lined`).
+pub fn lined_in(text: &str, dir: &Path) -> (Vec<DocBlock>, Lines) {
+    let (mut blocks, lines) = lined(text);
     rebase(&mut blocks, dir);
-    blocks
+    (blocks, lines)
 }
 
 fn rebase(blocks: &mut [DocBlock], dir: &Path) {
@@ -679,6 +718,18 @@ mod tests {
 
     fn para(text: &str) -> DocBlock {
         DocBlock::Para(text.into())
+    }
+
+    #[test]
+    fn each_block_knows_the_lines_it_comes_from() {
+        let md = "---\ntitle: x\n---\n# Head\n\nOne\ntwo\n\n- a\n- b\n  - c\n\n  ```\n  ls\n  ```\n\n> q\n> r\n\n| h |\n|---|\n| d |\n";
+        let (blocks, lines) = lined(md);
+        assert_eq!(blocks.len(), lines.len());
+        assert_eq!(
+            lines,
+            [(4, 4), (6, 7), (9, 9), (10, 10), (11, 11), (13, 15), (17, 18), (20, 22)]
+        );
+        assert!(matches!(blocks[5], DocBlock::Nested { .. }));
     }
 
     /// `text` with `runs`, each the bytes of its first `&str` found in it.
