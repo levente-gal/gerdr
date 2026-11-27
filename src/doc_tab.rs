@@ -92,7 +92,8 @@ impl DocMode {
             | DocFile::Research(_)
             | DocFile::Findings
             | DocFile::FixPlan
-            | DocFile::ConflictPlan(_) => &DocMode::ALL,
+            | DocFile::ConflictPlan(_)
+            | DocFile::Retro => &DocMode::ALL,
             DocFile::PlanChanges | DocFile::DraftChanges(..) | DocFile::Suggestions => {
                 &[DocMode::Review]
             }
@@ -116,6 +117,7 @@ impl DocMode {
             DocFile::Stage(_)
             | DocFile::FixPlan
             | DocFile::ConflictPlan(_)
+            | DocFile::Retro
             | DocFile::ChatPlan(_) => DocMode::Review,
             DocFile::Evidence | DocFile::Decisions | DocFile::Research(_) | DocFile::Findings => {
                 DocMode::Preview
@@ -134,6 +136,7 @@ impl DocMode {
             DocFile::Stage(_)
             | DocFile::FixPlan
             | DocFile::ConflictPlan(_)
+            | DocFile::Retro
             | DocFile::ChatPlan(_)
                 if wide =>
             {
@@ -532,6 +535,7 @@ impl Gerdr {
             DocFile::Stage(_)
             | DocFile::FixPlan
             | DocFile::ConflictPlan(_)
+            | DocFile::Retro
             | DocFile::ChatPlan(_) => review::load_file(&doc.comments),
             DocFile::Evidence
             | DocFile::Decisions

@@ -442,6 +442,29 @@ pub struct Workflow {
     /// refuses, as a model reviewing its own code misses what it missed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_same_reviewer: bool,
+    /// When a shipped feature's retro runs (see `feature_retro`).
+    #[serde(default, skip_serializing_if = "Retro::is_offer")]
+    pub retro: Retro,
+}
+
+/// When a shipped feature's retro runs: its agent proposes what would stop
+/// the feature's problems happening again, as a new feature's brief.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Retro {
+    /// Never: its Ship page has no Retro.
+    Off,
+    /// When the user presses Retro on its Ship page.
+    #[default]
+    Offer,
+    /// As soon as it has shipped, while its worktrees stay.
+    Auto,
+}
+
+impl Retro {
+    fn is_offer(&self) -> bool {
+        *self == Retro::Offer
+    }
 }
 
 impl Workflow {
@@ -2008,6 +2031,16 @@ mod tests {
 
     // Above the kernel's pid limit, so `/proc` has nothing for them.
     const NO_PID: i32 = 2_000_000_000;
+
+    #[test]
+    fn a_workflows_retro_is_offered_unless_it_says_otherwise() {
+        let workflow: Workflow = serde_json::from_str("{}").unwrap();
+        assert_eq!(workflow.retro, Retro::Offer);
+        assert_eq!(serde_json::to_string(&workflow).unwrap(), "{}");
+        let auto: Workflow = serde_json::from_str(r#"{"retro":"auto"}"#).unwrap();
+        assert_eq!(auto.retro, Retro::Auto);
+        assert!(!auto.is_empty());
+    }
 
     #[test]
     fn a_workflow_keeps_its_skills_and_any_one_setting_counts() {

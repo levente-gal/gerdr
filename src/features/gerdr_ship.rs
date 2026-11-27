@@ -749,6 +749,7 @@ impl Gerdr {
         } else {
             self.close_shipped_now(project, slug);
         }
+        self.retro_after_ship(project, slug, plan.remove_worktrees);
         (!t3.is_empty()).then(|| t3.join("; "))
     }
 

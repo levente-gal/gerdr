@@ -2698,6 +2698,7 @@ mod tests {
             stage_models: Default::default(),
             stage_efforts: Default::default(),
             effort_defaults: false,
+            retro_into: None,
             fresh_milestones: false,
             fresh_fixes: false,
             setup: None,

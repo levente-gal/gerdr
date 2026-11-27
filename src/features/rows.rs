@@ -195,6 +195,11 @@ pub struct RowCtx {
     /// Skills its stages name aren't installed for their agents, as last
     /// probed (`Probe::skills`): Discover's page offers to install them.
     pub skills_missing: bool,
+    /// Its project's `retro` isn't off: a done feature's Ship page offers
+    /// its retro.
+    pub retro_offered: bool,
+    /// Its retro's agent wrote it (`retro::FILE`), as last probed.
+    pub retro_written: bool,
 }
 
 impl RowCtx {

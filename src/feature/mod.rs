@@ -926,6 +926,10 @@ pub struct Feature {
     /// pick in `stage_efforts` is the agent's own. New features have it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub effort_defaults: bool,
+    /// The feature its approved retro became, by slug (see
+    /// `feature_retro`): it has none to approve again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retro_into: Option<String>,
     /// The machine picked on a stage's page, by its id (`machines::Site::id`)
     /// or `machine_work::HERE`; over the project's `workflow.machines`, and
     /// only where it differs from what that gives.
@@ -2171,6 +2175,7 @@ pub(crate) mod tests {
             stage_models: Default::default(),
             stage_efforts: Default::default(),
             effort_defaults: false,
+            retro_into: None,
             fresh_milestones: false,
             setup: None,
             checks: Default::default(),
@@ -2278,6 +2283,7 @@ pub(crate) mod tests {
             stage_models: Default::default(),
             stage_efforts: Default::default(),
             effort_defaults: false,
+            retro_into: None,
             fresh_milestones: false,
             setup: None,
             checks: Default::default(),
