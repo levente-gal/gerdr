@@ -13,10 +13,11 @@ use super::{AgentKind, locate, observe, thread};
 use crate::feature::{Feature, Stage};
 
 /// What an agent's last turn sent, and how much its model takes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Context {
     pub used: u64,
     /// None where neither the transcript nor the model's name says it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<u64>,
 }
 

@@ -943,6 +943,9 @@ pub struct Feature {
     /// going on through them all.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fresh_milestones: bool,
+    /// What Build's milestones took, in the order they were ticked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub milestone_tokens: Vec<agents::MilestoneTokens>,
     /// Its worktrees' setup, once started (see `setup`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<setup::SetupRun>,
@@ -1410,6 +1413,69 @@ impl Feature {
         {
             trail.from = heads.clone();
         }
+    }
+
+    /// Its open agents' contexts are `contexts` (by stage, with the run each
+    /// was read of), and Build's milestones `milestones` (`true` = ticked):
+    /// kept on the runs, on the newest fix round the Build run makes fixes
+    /// for, and on each milestone first seen ticked. Whether it changed
+    /// enough to save: a milestone or round got its first, or a context
+    /// moved by `SAVE_STEP`; smaller moves go with the next save.
+    pub fn contexts_read(
+        &mut self,
+        contexts: &BTreeMap<Stage, (u32, crate::ai_work::context::Context)>,
+        milestones: &[(bool, String)],
+    ) -> bool {
+        use crate::ai_work::context::Context;
+        const SAVE_STEP: u64 = 10_000;
+        let moved = |old: Option<Context>, new: Context| {
+            old.is_none_or(|old| {
+                old.used.abs_diff(new.used) >= SAVE_STEP || old.window != new.window
+            })
+        };
+        let mut save = false;
+        for (stage, (n, context)) in contexts {
+            if let Some(run) = self.runs.get_mut(stage).filter(|r| r.n == *n) {
+                save |= moved(run.context, *context);
+                run.context = Some(*context);
+            }
+        }
+        let Some(&(n, context)) = contexts.get(&Stage::Build) else {
+            return save;
+        };
+        // Rounds kept by the same agent share its run: the newest is at work.
+        let newest = (self.fix_round.iter())
+            .chain(&self.last_fix_round)
+            .chain(&self.past_rounds)
+            .filter(|r| r.trail.build_run == Some(n))
+            .map(|r| r.n)
+            .max();
+        let rounds = (self.fix_round.iter_mut())
+            .chain(self.last_fix_round.iter_mut())
+            .chain(self.past_rounds.iter_mut());
+        for round in rounds.filter(|r| Some(r.n) == newest) {
+            save |= moved(round.trail.context, context);
+            round.trail.context = Some(context);
+        }
+        let new: Vec<String> = (milestones.iter())
+            .filter(|(done, name)| *done && !self.milestone_tokens.iter().any(|m| &m.name == name))
+            .map(|(_, name)| name.clone())
+            .collect();
+        let before = (self.milestone_tokens.iter().rev())
+            .find(|m| m.run == n)
+            .map_or(0, |m| m.context.used);
+        // A context that shrank was compacted: all it holds is the milestone's.
+        let used =
+            (new.len() == 1).then(|| context.used.checked_sub(before).unwrap_or(context.used));
+        save |= !new.is_empty();
+        self.milestone_tokens
+            .extend(new.into_iter().map(|name| agents::MilestoneTokens {
+                name,
+                run: n,
+                context,
+                used,
+            }));
+        save
     }
 
     /// Its code reads `heads` (by `Repo::key`) at unix seconds `at`: the
@@ -1934,6 +2000,84 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn contexts_stay_on_runs_rounds_and_milestones() {
+        use crate::ai_work::context::Context;
+        let ctx = |used| Context {
+            used,
+            window: Some(1_000_000),
+        };
+        let mut f = feature("x", 0);
+        let run = |n| agents::StageRun {
+            n,
+            ..Default::default()
+        };
+        f.runs.insert(Stage::Build, run(1));
+        let read = |n, used| BTreeMap::from([(Stage::Build, (n, ctx(used)))]);
+        let ms = |ticked: usize| -> Vec<(bool, String)> {
+            ["API", "UI", "Docs"]
+                .iter()
+                .enumerate()
+                .map(|(i, m)| (i < ticked, m.to_string()))
+                .collect()
+        };
+        // Nothing ticked: the run keeps it, nothing more.
+        assert!(f.contexts_read(&read(1, 20_000), &ms(0)));
+        assert_eq!(f.runs[&Stage::Build].context, Some(ctx(20_000)));
+        assert!(f.milestone_tokens.is_empty());
+        // A small move isn't worth a save, but is kept.
+        assert!(!f.contexts_read(&read(1, 25_000), &ms(0)));
+        assert_eq!(f.runs[&Stage::Build].context, Some(ctx(25_000)));
+        // The first milestone took all the run's context; the next, its growth.
+        assert!(f.contexts_read(&read(1, 50_000), &ms(1)));
+        assert!(f.contexts_read(&read(1, 80_000), &ms(2)));
+        let used: Vec<_> = f
+            .milestone_tokens
+            .iter()
+            .map(|m| (m.name.as_str(), m.used))
+            .collect();
+        assert_eq!(used, [("API", Some(50_000)), ("UI", Some(30_000))]);
+        // A fresh run counts from nothing; a read of another run is not its.
+        f.runs.insert(Stage::Build, run(2));
+        assert!(!f.contexts_read(&read(1, 90_000), &ms(2)));
+        assert!(f.contexts_read(&read(2, 40_000), &ms(3)));
+        assert_eq!(f.milestone_tokens[2].used, Some(40_000));
+        assert_eq!(f.runs[&Stage::Build].context, Some(ctx(40_000)));
+        // Two first seen ticked at once can't be told apart.
+        let mut g = feature("y", 0);
+        g.runs.insert(Stage::Build, run(1));
+        g.contexts_read(&read(1, 60_000), &ms(2));
+        assert!(g.milestone_tokens.iter().all(|m| m.used.is_none()));
+        // A fix round made by run 2 keeps its context, the newest of them.
+        let round = |n| fix_round::FixRound {
+            n,
+            what: String::new(),
+            input: "/i".into(),
+            stage: Stage::AiReview,
+            phase: fix_round::FixPhase::Fixing,
+            sent_back: 0,
+            asked: 0,
+            ready: None,
+            stalled: None,
+            give_back: fix_round::GiveBack::Nothing,
+            items: Vec::new(),
+            done: 0,
+            ended: None,
+            trail: fix_round::Trail {
+                build_run: Some(2),
+                ..Default::default()
+            },
+        };
+        f.past_rounds.push(round(1));
+        f.fix_round = Some(round(2));
+        assert!(f.contexts_read(&read(2, 70_000), &ms(3)));
+        assert_eq!(
+            f.fix_round.as_ref().unwrap().trail.context,
+            Some(ctx(70_000))
+        );
+        assert_eq!(f.past_rounds[0].trail.context, None);
+    }
+
+    #[test]
     fn fix_rounds_keep_where_the_code_stood_when_their_fixes_went_and_ended() {
         let mut f = feature("x", 0);
         f.fix_round = Some(fix_round::FixRound {
@@ -2177,6 +2321,7 @@ pub(crate) mod tests {
             effort_defaults: false,
             retro_into: None,
             fresh_milestones: false,
+            milestone_tokens: Vec::new(),
             setup: None,
             checks: Default::default(),
             skip_checks: Default::default(),
@@ -2285,6 +2430,7 @@ pub(crate) mod tests {
             effort_defaults: false,
             retro_into: None,
             fresh_milestones: false,
+            milestone_tokens: Vec::new(),
             setup: None,
             checks: Default::default(),
             skip_checks: Default::default(),

@@ -75,6 +75,7 @@ pub(crate) fn feature(slug: &str, repos: Vec<Repo>, done: usize) -> Feature {
         effort_defaults: false,
         retro_into: None,
         fresh_milestones: false,
+        milestone_tokens: Vec::new(),
         fresh_fixes: false,
         setup: None,
         checks: Default::default(),

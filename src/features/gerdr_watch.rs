@@ -341,6 +341,12 @@ impl Gerdr {
     /// sends it back, its squash merged makes it done.
     pub(super) fn feature_probed(&mut self, project: &str, slug: &str, mut probe: Probe) {
         self.feature_models_are(project, slug, std::mem::take(&mut probe.models));
+        let milestones = probe.docs.milestones.get(&Stage::Build);
+        if let Some(f) = self.feature_mut(project, slug)
+            && f.contexts_read(&probe.contexts, milestones.map_or(&[], Vec::as_slice))
+        {
+            self.save_feature(project, slug);
+        }
         (self.features.skills_there).append(&mut probe.skills.there);
         let key = (project.to_owned(), slug.to_owned());
         // The diff's comments may be others now: the keyboard stays on its card.

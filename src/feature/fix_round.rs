@@ -212,6 +212,10 @@ pub struct Trail {
     /// fresh one. None until one starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub build_run: Option<u32>,
+    /// How full the context of the Build agent making its fixes was when
+    /// last read: once it is over, how full it ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::ai_work::context::Context>,
 }
 
 impl Trail {
