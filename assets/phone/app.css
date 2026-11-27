@@ -298,11 +298,14 @@ body.with-bar #note { bottom: calc(var(--kb, 0px) + var(--bar-h, calc(104px + en
 #bar form { display: flex; gap: 8px; align-items: flex-end; }
 #bar .keys { display: flex; gap: 6px; margin-top: 8px; }
 /* The agent's modes: a segmented choice, the one it is in lit. */
-#bar .modes-row { display: flex; gap: 8px; margin-top: 8px; }
+#bar .modes-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
 #bar .modes-row .context { align-self: center; margin-right: auto; color: var(--quiet); font-size: 12px; white-space: nowrap; }
-#bar .modes { display: flex; flex: 1; min-width: 0; padding: 2px; border: 1px solid var(--line); border-radius: 10px; }
+/* The modes keep their width: what doesn't fit beside them goes to a line of its own. */
+#bar .modes { display: flex; flex: 1 0 auto; min-width: 0; padding: 2px; border: 1px solid var(--line); border-radius: 10px; }
 #bar button.effort { flex: 0 0 auto; max-width: 25%; min-height: 46px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--raised); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#bar button.compact { flex: 0 0 auto; margin-left: auto; min-height: 46px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--raised); white-space: nowrap; }
 #bar button.model { flex: 0 1 auto; max-width: 45%; min-height: 46px; padding: 4px 12px; border: 1px solid var(--line); border-radius: 10px;
   background: var(--raised); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* An agent's own model menu, read off its screen: its rows to tap. Replies

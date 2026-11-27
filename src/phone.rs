@@ -493,6 +493,9 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
             if !text("effort_menu").is_empty() {
                 return agent_effort_menu(&project, &slug, &pane);
             }
+            if !text("compact").is_empty() {
+                return agent_compact(&project, &slug, &pane);
+            }
             let (row, typed) = (text("pick"), text("type"));
             if !row.is_empty() || !typed.is_empty() || erase > 0 {
                 return agent_menu(&project, &slug, &pane, &row, &typed, erase);
@@ -794,6 +797,26 @@ fn agent_effort(project: &str, slug: &str, pane: &str, level: &str) -> Reply {
         );
     }
     match herdr.send_agent_line(pane, &crate::chat::pick::effort_line(level)) {
+        Ok(()) => Reply::json(&json!({ "said": [] })),
+        Err(err) => Reply::error(502, &format!("Couldn't reach the agent: {err}")),
+    }
+}
+
+/// Have the agent in `pane` compact its context, as the desktop chat's
+/// Compact does (`chat::commands::compact_now`).
+fn agent_compact(project: &str, slug: &str, pane: &str) -> Reply {
+    let (mut herdr, agent) = match pane_agent(project, slug, pane) {
+        Ok(found) => found,
+        Err(reply) => return reply,
+    };
+    let Some(agent) = agent else {
+        return Reply::error(404, "No agent runs there");
+    };
+    let line = match crate::chat::commands::compact_now(&agent) {
+        Ok(line) => line,
+        Err(why) => return Reply::error(409, &format!("Couldn't compact: {why}")),
+    };
+    match herdr.send_agent_line(pane, &line) {
         Ok(()) => Reply::json(&json!({ "said": [] })),
         Err(err) => Reply::error(502, &format!("Couldn't reach the agent: {err}")),
     }
@@ -1580,6 +1603,10 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     let agent_of_kind = agent_kind.map(integrations::of);
     let efforts = agent_of_kind.map_or(&[][..], |a| a.efforts());
     let effort_menu = agent_of_kind.is_some_and(|a| a.effort_line().is_some());
+    // Compact, for an agent with a command for it.
+    let compact = agent_kind
+        .and_then(crate::chat::commands::compact_line)
+        .is_some();
     let effort = match agent_of_kind {
         Some(a) if a.effort_switch().typed() => a.effort_now(transcript.as_deref()),
         _ => effort_on,
@@ -1593,6 +1620,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
         reply["efforts"] = json!(efforts);
         reply["effort_menu"] = json!(effort_menu);
         reply["effort"] = json!(effort);
+        reply["compact"] = json!(compact);
         reply
     };
     // How full its context is, as gerdr's chat head says it.

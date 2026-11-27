@@ -671,10 +671,12 @@ async function pane(p, s, id) {
     + (d.effort_menu ? opener("effort", d.effort || "Effort", "data-effort-menu") : "");
   // How full its context is, as gerdr's chat head says it.
   const context = d.context ? `<span class="context">${esc(d.context)}</span>` : "";
-  const modes = group || model || context ? `<div class="modes-row">${group}${context}${model}</div>` : "";
+  // Compact: the agent's own /compact (Cursor's /summarize), as gerdr's chat has.
+  const compact = d.compact ? `<button type="button" class="compact" data-compact>Compact</button>` : "";
+  const modes = group || model || context || compact ? `<div class="modes-row">${group}${context}${compact}${model}</div>` : "";
   return { title: d.title ? `${d.label} · ${d.title}` : d.label, back: s ? href("f", p, s) : "#/", html: `${above}<div class="term-box"><pre class="term">${text}</pre>${working}</div>`, pane: true, since,
     said: d.said || [], ask, askId: a?.ask || "", asking: !!a?.questions?.length, suggestion: d.suggestion || "",
-    modes, modesKey: JSON.stringify([d.modes, d.mode, d.models, d.model, d.model_id, d.menu, d.context, d.efforts, d.effort, d.effort_menu]),
+    modes, modesKey: JSON.stringify([d.modes, d.mode, d.models, d.model, d.model_id, d.menu, d.context, d.efforts, d.effort, d.effort_menu, d.compact]),
     picker: d.picker || listMenu(), pickerKey: JSON.stringify(d.picker || listMenu()),
     sides: sideCard(id, d.sides),
     bar: `<div id="picker"></div><div id="asked"></div><div id="sides"></div><button type="button" id="suggest" hidden></button><div id="files" hidden></div><form id="say"><ul id="slash" hidden></ul><textarea id="line" rows="1" enterkeyhint="enter" autocomplete="off" aria-label="Reply to the agent" placeholder="Reply to the agent"></textarea>
@@ -1093,7 +1095,7 @@ document.addEventListener("pointerdown", (e) => {
 });
 
 document.addEventListener("click", async (e) => {
-  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push], button[data-answer], button[data-mode], button[data-hide-sides], button[data-menu-pick], button[data-model-menu], button[data-effort-menu], button[data-list], button[data-list-pick], button[data-list-close]");
+  const b = e.target.closest("button[data-press], button[data-sendback], button[data-key], button[data-push], button[data-answer], button[data-mode], button[data-hide-sides], button[data-menu-pick], button[data-model-menu], button[data-effort-menu], button[data-compact], button[data-list], button[data-list-pick], button[data-list-close]");
   if (!b || b.disabled) return;
   const [, p, s, pane] = here();
   if (b.dataset.hideSides) {
@@ -1157,6 +1159,10 @@ document.addEventListener("click", async (e) => {
       if (a.error) say([{ text: a.error }], true);
       else { listOpen = null; listShow(); }
       setTimeout(() => render(false, true), 400);
+    } else if (b.dataset.compact !== undefined) {
+      const a = await post("/api/agent", { p, s, pane, compact: "1" });
+      say([{ text: a.error || "Compacting the agent's context" }], !!a.error);
+      setTimeout(() => render(false, true), 800);
     } else if (b.dataset.effortMenu !== undefined) {
       // Its own effort menu opens, which then shows here as its screen does.
       const a = await post("/api/agent", { p, s, pane, effort_menu: "1" });
