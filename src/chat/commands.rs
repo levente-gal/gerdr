@@ -49,6 +49,15 @@ pub fn here(kind: AgentKind, cwd: &Path) -> Vec<Command> {
     list(kind, cwd, &homes, &config_dir())
 }
 
+/// The line agent `kind` compacts its context with: its own built-in
+/// `/compact`, else `/summarize` (Cursor's); none for an agent without.
+pub fn compact_line(kind: AgentKind) -> Option<String> {
+    let builtins = crate::integrations::of(kind).builtins();
+    (["compact", "summarize"].into_iter())
+        .find(|name| builtins.iter().any(|(b, _)| b == name))
+        .map(|name| format!("/{name}"))
+}
+
 /// This machine's config folder: `$XDG_CONFIG_HOME`, else `~/.config`.
 pub fn config_dir() -> PathBuf {
     (std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
@@ -315,6 +324,23 @@ pub(crate) mod tests {
         assert!(names(&agy).contains(&"test"));
         assert!(!names(&agy).contains(&"pane"));
         assert!(names(&agy).contains(&"rewind"));
+    }
+
+    #[test]
+    fn every_agent_compacts_with_its_own_command() {
+        for kind in [
+            AgentKind::Claude,
+            AgentKind::Codex,
+            AgentKind::OpenCode,
+            AgentKind::Pi,
+            AgentKind::Antigravity,
+        ] {
+            assert_eq!(compact_line(kind).as_deref(), Some("/compact"), "{kind:?}");
+        }
+        assert_eq!(
+            compact_line(AgentKind::Cursor).as_deref(),
+            Some("/summarize")
+        );
     }
 
     #[test]

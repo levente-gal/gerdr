@@ -108,8 +108,13 @@ pub struct ChatView {
     /// "Effort".
     pub effort: Option<String>,
     /// How full its agent's context is, in words ("context 84k / 1M"),
-    /// where its chat says: in the head, before the status word.
+    /// where its chat says: in the head, before the status word, and left
+    /// of Compact under the reply box.
     pub context: Option<String>,
+    /// Whether its agent compacts its context on a command of its own
+    /// (`chat::commands::compact_line`): Compact under the reply box, left
+    /// of the model's button.
+    pub compact: bool,
     /// The user's picks on the card of the ask's questions, while it asks
     /// some.
     pub card: Option<CardView>,
@@ -185,6 +190,7 @@ impl PartialEq for ChatView {
             && self.model == other.model
             && self.effort == other.effort
             && self.context == other.context
+            && self.compact == other.compact
             && self.card == other.card
             && self.picker == other.picker
     }
@@ -261,6 +267,8 @@ pub enum ChatHit {
     /// agent's model; the effort's, of its effort.
     Model,
     Effort,
+    /// Compact under the reply box: has the agent compact its context.
+    Compact,
     /// A part of the card of the ask's questions.
     Card(CardHit),
     /// "Copy" on code block `.1` of item `.0` (its place among the item's
@@ -326,6 +334,9 @@ impl ChatLayout {
         }
         if parts.effort.is_some_and(on) {
             return Some(ChatHit::Effort);
+        }
+        if parts.compact.is_some_and(on) {
+            return Some(ChatHit::Compact);
         }
         if let Some((key, _)) = parts.keys.iter().find(|(_, rect)| on(*rect)) {
             return Some(ChatHit::Key(*key));
@@ -819,7 +830,14 @@ struct Parts {
     /// effort's, right of it.
     model: Option<Rect>,
     effort: Option<Rect>,
+    /// Compact, left of the model's button, and how full the context is,
+    /// left of it while the modes leave room.
+    compact: Option<Rect>,
+    context: Option<Rect>,
 }
+
+/// Compact's label.
+const COMPACT: &str = "Compact";
 
 /// What ends a file's chip: a press on it takes the file off the reply.
 const CHIP_X: &str = "\u{00d7}";
@@ -876,7 +894,12 @@ fn parts(view: &ChatView) -> Parts {
         let mw = key_width(label).min(w / 2);
         rect(right - mw, y, mw, row_button())
     });
-    let end = model.or(effort).map_or(x + w, |m| m.loc.x - FIELD_GAP);
+    let right = model.or(effort).map_or(x + w, |m| m.loc.x - FIELD_GAP);
+    let compact = view.compact.then(|| {
+        let cw = key_width(COMPACT);
+        rect(right - cw, y, cw, row_button())
+    });
+    let end = compact.map_or(right, |c| c.loc.x - FIELD_GAP);
     if !view.modes.is_empty() {
         let mut sx = x + MODE_INSET;
         for (i, mode) in view.modes.iter().enumerate() {
@@ -890,7 +913,13 @@ fn parts(view: &ChatView) -> Parts {
         }
         mode_track = Some(rect(x, y, sx + MODE_INSET - x, row_button()));
     }
-    if !view.modes.is_empty() || model.is_some() || effort.is_some() {
+    // How full the context is, right after the modes, when it fits whole.
+    let context = (view.context.as_ref()).and_then(|said| {
+        let cw = width_in(said, Face::Ui, small_font_size()).ceil() as i32;
+        let start = mode_track.map_or(x, |t| t.loc.x + t.size.w + FIELD_GAP);
+        (start + cw <= end).then(|| rect(end - cw, y, cw, row_button()))
+    });
+    if !view.modes.is_empty() || model.is_some() || effort.is_some() || compact.is_some() {
         modes_h = row_button() + PART_GAP / 2;
     }
     let composer = Rectangle::new(
@@ -1052,6 +1081,8 @@ fn parts(view: &ChatView) -> Parts {
         modes,
         model,
         effort,
+        compact,
+        context,
     }
 }
 
@@ -1807,6 +1838,13 @@ pub fn chat_mode_at(view: &ChatView, pos: Point<f64, Logical>) -> Option<(usize,
 /// The model's button, if `pos` is on it.
 pub fn chat_model_at(view: &ChatView, pos: Point<f64, Logical>) -> Option<Rect> {
     parts(view).model.filter(|rect| rect.to_f64().contains(pos))
+}
+
+/// Compact, if `pos` is on it.
+pub fn chat_compact_at(view: &ChatView, pos: Point<f64, Logical>) -> Option<Rect> {
+    parts(view)
+        .compact
+        .filter(|rect| rect.to_f64().contains(pos))
 }
 
 /// The effort's button, if `pos` is on it.
@@ -2915,6 +2953,17 @@ impl Painter {
                 self.button(&mut c, label, here(rect), (lit, false), style, scale, p);
             }
         }
+        if let Some(rect) = parts.compact {
+            let lit = view.hover == Some(ChatHit::Compact);
+            let style = ButtonStyle::Plain;
+            self.button(&mut c, COMPACT, here(rect), (lit, false), style, scale, p);
+        }
+        if let (Some(rect), Some(said)) = (parts.context, &view.context) {
+            let (cx, cend) = phys(here(rect), scale);
+            let b = band(here(rect), scale);
+            let size = small_font_size();
+            self.text(&mut c, said, size, cx, cend, b, scale, p.muted);
+        }
 
         if let Some(slash) = &view.slash {
             let rows = (parts.slash.as_slice(), parts.slash_skip);
@@ -3249,6 +3298,7 @@ pub(super) mod tests {
             model: None,
             effort: None,
             context: None,
+            compact: false,
             card: None,
             picker: None,
         }

@@ -57,6 +57,7 @@ table by hand: run `the_chat_doc_says_what_caps_say` in
 | Effort picker (Alt+Shift+E) | gerdr's list, types `/effort level` (low … max) | `/model`, then Enter on the current model: its effort step, mirrored | `/variants`, mirrored | — (the effort is part of the model's name) | `/thinking`, mirrored | `/effort` slider, mirrored as a list (← →) |
 | Mode switcher (Shift+Tab) | Auto / Manual / Edits / Plan | Build / Plan | Build / Plan, plus the user's own agents | Agent / Plan / Debug / Ask | — | Auto / Plan / Default / Edits |
 | Context "84k / 1M" | ✓ | ✓ | — | ✓ | ✓ | — |
+| Compact button (Alt+Shift+C) | `/compact` | `/compact` | `/compact` | `/summarize` | `/compact` | `/compact` |
 
 These work the same for all six: image paste, file attach, pinned prompt, the
 ↓ button, the working row with its turn clock, and lines sent with Enter
