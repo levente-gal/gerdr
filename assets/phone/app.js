@@ -1155,6 +1155,15 @@ document.addEventListener("submit", async (e) => {
   if (!line.value.trim() && !files.length) return;
   const [, p, s, pane] = here();
   document.getElementById("slash").hidden = true;
+  // A bare /model opens the model list, as a tap on it does (Claude, Cursor).
+  const models = document.querySelector("select.model");
+  if (line.value.trim() === "/model" && !files.length && models) {
+    line.value = "";
+    fit(line);
+    models.focus();
+    try { models.showPicker(); } catch { /* old browser: focused only */ }
+    return;
+  }
   // The files' paths go after the words: the agent reads each from its path.
   const text = [line.value.trim(), ...files.map((f) => f.path)].filter(Boolean).join(" ");
   const a = await post("/api/agent", { p, s, pane, text });

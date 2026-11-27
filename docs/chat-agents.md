@@ -58,7 +58,8 @@ table by hand: run `the_chat_doc_says_what_caps_say` in
 
 These work the same for all six: image paste, file attach, pinned prompt, the
 ↓ button, the working row with its turn clock, and lines sent with Enter
-apart. The phone shows the same rows through `src/phone.rs`, gated by the same
+apart. A bare `/model` sent from the reply box opens the model picker, as its
+button does (on the phone, Claude's and Cursor's model list). The phone shows the same rows through `src/phone.rs`, gated by the same
 checks.
 
 ## Starting the agent

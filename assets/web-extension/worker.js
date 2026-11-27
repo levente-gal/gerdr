@@ -937,7 +937,7 @@ async function command(message) {
         }
         break;
       case "reload":
-        await chrome.tabs.reload(tab);
+        await chrome.tabs.reload(tab, { bypassCache: !!message.bypassCache });
         break;
       case "scope":
         scopes[tab] = { origin: message.origin, dirs: message.dirs };

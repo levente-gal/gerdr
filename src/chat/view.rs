@@ -2029,6 +2029,16 @@ impl Gerdr {
         if line.is_empty() {
             return;
         }
+        // A bare `/model` typed opens the model button's picker instead.
+        let kind = self.chat_agent(pane_id).and_then(super::source::kind);
+        if line.trim() == model_menu::LINE
+            && kind.is_some_and(|kind| caps(kind).model != ModelSwitch::None)
+        {
+            if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
+                chat.draft.clear();
+            }
+            return self.chat_open_model_picker(pane_id);
+        }
         match self.send_line(pane_id, &line) {
             Ok(()) => {
                 if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {

@@ -426,6 +426,9 @@ fn app_bar_content(pane: &Pane) -> BarContent {
     }
 }
 
+/// How long a press on a web pane's Reload is held to open its menu.
+const RELOAD_HOLD: Duration = Duration::from_millis(500);
+
 /// The address of the web page `pane` shows, if it shows one.
 fn web_page(pane: &Pane) -> Option<&str> {
     let url = pane.app_command.as_deref()?;
@@ -512,7 +515,10 @@ pub fn button_tooltip(button: BarButton, rect: Rect, help: &Help) -> Tooltip {
         ),
         BarButton::Close => ("Close pane", Some(Action::ClosePane)),
     };
-    let tip = Tooltip::new(text, rect);
+    let mut tip = Tooltip::new(text, rect);
+    if button == BarButton::Reload {
+        tip = tip.fields(vec![("Hold".into(), "reload without cache…".into())]);
+    }
     match what.and_then(|what| hint_for(help, what)) {
         Some(key) => tip.key(&key),
         None => tip,
@@ -522,6 +528,25 @@ pub fn button_tooltip(button: BarButton, rect: Rect, help: &Help) -> Tooltip {
 /// The menu a right press at `at` on the bar of pane `id` (showing
 /// `content`) opens: splits, moves to other tabs, then what runs in it or
 /// where its web page goes.
+/// A web pane's reload rows: again as it is, and past the browser's
+/// cache, whose key is Chromium's own in the page.
+fn reload_rows(id: u32, enabled: bool, help: &Help) -> [MenuItem; 2] {
+    let reload = MenuItem::new("Reload", MenuAction::WebStep(id, WebStep::Reload));
+    let reload = match hint_for(help, Action::RestartPane) {
+        Some(key) => reload.hint(&key),
+        None => reload,
+    };
+    [
+        reload.enabled(enabled),
+        MenuItem::new(
+            "Reload without cache",
+            MenuAction::WebStep(id, WebStep::HardReload),
+        )
+        .hint("Ctrl+Shift+R")
+        .enabled(enabled),
+    ]
+}
+
 pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &Help) -> MenuSpec {
     let item = |label: &str, action, what, enabled| {
         let item = MenuItem::new(label, action).enabled(enabled);
@@ -574,18 +599,16 @@ pub fn bar_menu(at: Point<f64, Logical>, id: u32, content: &BarContent, help: &H
         )
     }));
     match content.buttons {
-        BarButtons::Web { .. } => items.extend([
-            MenuItem::new("Back", MenuAction::WebStep(id, WebStep::Back)).enabled(content.can_back),
-            MenuItem::new("Forward", MenuAction::WebStep(id, WebStep::Forward))
-                .enabled(content.can_forward),
-            item(
-                "Reload",
-                MenuAction::WebStep(id, WebStep::Reload),
-                Action::RestartPane,
-                content.can_restart,
-            ),
-            MenuItem::new("Copy URL", MenuAction::CopyPaneUrl(id)),
-        ]),
+        BarButtons::Web { .. } => {
+            items.extend([
+                MenuItem::new("Back", MenuAction::WebStep(id, WebStep::Back))
+                    .enabled(content.can_back),
+                MenuItem::new("Forward", MenuAction::WebStep(id, WebStep::Forward))
+                    .enabled(content.can_forward),
+            ]);
+            items.extend(reload_rows(id, content.can_restart, help));
+            items.push(MenuItem::new("Copy URL", MenuAction::CopyPaneUrl(id)));
+        }
         buttons => items.extend(
             (buttons.buttons().contains(&BarButton::SendPrompt))
                 .then(|| {
@@ -891,7 +914,6 @@ impl Gerdr {
         let tab = self.tab()?;
         let pane = tab.panes.iter().find(|p| p.id == id)?;
         let content = self.pane_bar_of(pane);
-        let kind = content.buttons;
         let (_, rect) = tab
             .shown_rects(self.content_rect())
             .into_iter()
@@ -907,9 +929,7 @@ impl Gerdr {
                 .and_then(|r| Some(!r.skip.contains(r.command.as_ref()?)));
             return Some(label_tooltip(&content.label, bar, restart));
         };
-        let (_, rect) = chrome::pane_bar_buttons(bar, kind, tab.bar_zoom(id))
-            .into_iter()
-            .find(|(b, _)| *b == button)?;
+        let rect = self.bar_button_rect(id, button)?;
         let tip = button_tooltip(button, rect, &self.key_state.keymap.help());
         Some(match button_unavailable(button, &content) {
             Some(why) => tip.fields(vec![("Unavailable".into(), why.into())]),
@@ -960,7 +980,7 @@ impl Gerdr {
             BarButton::Chat | BarButton::Screen => return self.toggle_pane_chat(id),
             BarButton::Back => WebStep::Back,
             BarButton::Forward => WebStep::Forward,
-            BarButton::Reload => WebStep::Reload,
+            BarButton::Reload => return self.hold_reload(id),
             BarButton::CopyUrl => return self.copy_pane_url(id),
             BarButton::Scrollback => return self.open_scrollback(id),
             BarButton::Zoom | BarButton::Unzoom => return self.zoom_pane(id),
@@ -979,6 +999,70 @@ impl Gerdr {
             }
         };
         self.web_pane_step(id, step);
+    }
+
+    /// Where `button` is on pane `id`'s bar in the active tab.
+    fn bar_button_rect(&self, id: u32, button: BarButton) -> Option<Rect> {
+        let tab = self.tab()?;
+        let pane = tab.panes.iter().find(|p| p.id == id)?;
+        let (_, rect) = tab
+            .shown_rects(self.content_rect())
+            .into_iter()
+            .find(|(pane, _)| *pane == id)?;
+        let bar = chrome::pane_bar_rects(rect).0;
+        let kind = self.pane_bar_of(pane).buttons;
+        chrome::pane_bar_buttons(bar, kind, tab.bar_zoom(id))
+            .into_iter()
+            .find(|(b, _)| *b == button)
+            .map(|(_, rect)| rect)
+    }
+
+    /// The left button went down on pane `id`'s Reload: let go before
+    /// `RELOAD_HOLD`, the page reloads (see `release_reload`); held on,
+    /// a menu offers reloading past the browser's cache too.
+    fn hold_reload(&mut self, id: u32) {
+        let since = Instant::now();
+        self.mouse.reload_hold = Some((id, since));
+        let open = move |_, _: &mut (), state: &mut Gerdr| {
+            // Let go already, or held again since: not this hold's menu.
+            if state.mouse.reload_hold == Some((id, since)) {
+                state.mouse.reload_hold = None;
+                state.open_reload_menu(id);
+            }
+            TimeoutAction::Drop
+        };
+        if let Err(err) = self
+            .loop_handle
+            .insert_source(Timer::from_duration(RELOAD_HOLD), open)
+        {
+            tracing::warn!("timing the reload hold: {err}");
+        }
+    }
+
+    /// The left button came up: a Reload pressed and let go soon reloads
+    /// its page; whether one was held.
+    pub(crate) fn release_reload(&mut self) -> bool {
+        let Some((id, _)) = self.mouse.reload_hold.take() else {
+            return false;
+        };
+        self.web_pane_step(id, WebStep::Reload);
+        true
+    }
+
+    /// The menu under pane `id`'s Reload, held down.
+    fn open_reload_menu(&mut self, id: u32) {
+        let Some(anchor) = self.bar_button_rect(id, BarButton::Reload) else {
+            return;
+        };
+        let Some(pane) = self
+            .tab()
+            .and_then(|tab| tab.panes.iter().find(|p| p.id == id))
+        else {
+            return;
+        };
+        let enabled = self.pane_bar_of(pane).can_restart;
+        let items = reload_rows(id, enabled, &self.key_state.keymap.help()).into();
+        self.open_menu(MenuSpec { anchor, items });
     }
 
     /// Copy the address of the web page pane `id` of the active tab shows.
@@ -1940,11 +2024,17 @@ mod tests {
                 ("Back", &MenuAction::WebStep(3, WebStep::Back), true),
                 ("Forward", &MenuAction::WebStep(3, WebStep::Forward), false),
                 ("Reload", &MenuAction::WebStep(3, WebStep::Reload), true),
+                (
+                    "Reload without cache",
+                    &MenuAction::WebStep(3, WebStep::HardReload),
+                    true,
+                ),
                 ("Copy URL", &MenuAction::CopyPaneUrl(3), true),
                 ("Close pane", &MenuAction::ClosePane(3), true),
             ]
         );
         // Reload is what the restart key does on a web page.
         assert_eq!(menu.items[7].hint.as_deref(), Some("Ctrl+B A"));
+        assert_eq!(menu.items[8].hint.as_deref(), Some("Ctrl+Shift+R"));
     }
 }
