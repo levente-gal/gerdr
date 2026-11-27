@@ -80,6 +80,9 @@ pub(super) struct PanelState<'a> {
     pub(super) fix_picks: Vec<AgentChip>,
     pub(super) fix_model: Option<String>,
     pub(super) fix_effort: Option<String>,
+    /// The `[fixes]` settings: when the agent the fixes go to is worth a
+    /// note (`fix_round::agent_hint`).
+    pub(super) fixes: crate::config::FixesSettings,
     /// What the button placing the next agent says, with machines to place it
     /// on (see `machine_work::place_label`).
     pub(super) place: Option<String>,

@@ -93,6 +93,16 @@
 //! # writes this key.
 //! live_config_reload = false
 //!
+//! [fixes]
+//! # Tokens in the Build agent's context past which its fix page warns that
+//! # a fresh agent may fix better, and a fix round sent to it asks first.
+//! # By default 150000.
+//! fresh_above = 200000
+//! # Tokens under which a fix round sent to a fresh agent asks first whether
+//! # the open Build agent should take it, as it knows the code. By default
+//! # 50000.
+//! same_below = 30000
+//!
 //! [notifications]
 //! # Desktop notifications: of agents that need you, finished test runs and
 //! # the services' errors. On by default.
@@ -154,6 +164,7 @@ struct Config {
     services: ServicesConfig,
     t3: T3Config,
     terminal: TerminalConfig,
+    fixes: FixesConfig,
     notifications: NotificationsConfig,
 }
 
@@ -209,6 +220,44 @@ pub fn terminal_from_text(text: &str) -> TerminalSettings {
         live_config_reload: table
             .live_config_reload
             .unwrap_or(TerminalSettings::default().live_config_reload),
+    }
+}
+
+/// The `[fixes]` table, as written.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct FixesConfig {
+    fresh_above: Option<u64>,
+    same_below: Option<u64>,
+}
+
+/// Which agent the context of the Build agent suggests for fix rounds,
+/// from the `[fixes]` table (see `feature::fix_round::agent_hint`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FixesSettings {
+    /// Tokens from which the open agent is better left for a fresh one.
+    pub fresh_above: u64,
+    /// Tokens under which the open agent is better kept.
+    pub same_below: u64,
+}
+
+impl Default for FixesSettings {
+    fn default() -> Self {
+        Self {
+            fresh_above: 150_000,
+            same_below: 50_000,
+        }
+    }
+}
+
+/// The `[fixes]` settings `text` describes. What is wrong with them is
+/// `from_text`'s to say.
+pub fn fixes_from_text(text: &str) -> FixesSettings {
+    let table = Config::read(text, &mut Vec::new()).fixes;
+    let default = FixesSettings::default();
+    FixesSettings {
+        fresh_above: table.fresh_above.unwrap_or(default.fresh_above),
+        same_below: table.same_below.unwrap_or(default.same_below),
     }
 }
 
@@ -642,7 +691,7 @@ pub fn services_from_text(text: &str) -> (Services, Vec<String>) {
 const KEYS_PROBLEM: &str = "[keys] ";
 
 /// The tables the file may have.
-const TABLES: [&str; 12] = [
+const TABLES: [&str; 13] = [
     "keys",
     "apps",
     "ui",
@@ -654,6 +703,7 @@ const TABLES: [&str; 12] = [
     "services",
     "t3",
     "terminal",
+    "fixes",
     "notifications",
 ];
 
@@ -676,7 +726,7 @@ impl Config {
         let (keys, apps, ui, git) = (take("keys"), take("apps"), take("ui"), take("git"));
         let (keep, inbox, agents) = (take("keep"), take("inbox"), take("agents"));
         let (services, t3, notifications) = (take("services"), take("t3"), take("notifications"));
-        let (terminal, machines) = (take("terminal"), take("machines"));
+        let (terminal, machines, fixes) = (take("terminal"), take("machines"), take("fixes"));
         Self {
             keys: table("keys", keys, problems),
             apps: table("apps", apps, problems),
@@ -689,6 +739,7 @@ impl Config {
             services: table("services", services, problems),
             t3: table("t3", t3, problems),
             terminal: table("terminal", terminal, problems),
+            fixes: table("fixes", fixes, problems),
             notifications: table("notifications", notifications, problems),
         }
     }
@@ -895,6 +946,8 @@ pub struct Settings {
     pub t3: T3Settings,
     /// How the Alacrittys gerdr starts behave.
     pub terminal: TerminalSettings,
+    /// Which agent fix rounds are offered by its context.
+    pub fixes: FixesSettings,
     /// Whether and how desktop notifications show.
     pub notifications: Notifications,
     /// The sounds of agents that need the user or finish.
@@ -928,6 +981,7 @@ pub fn load() -> Settings {
     problems.extend(service_problems);
     let t3 = t3_from_text(&text);
     let terminal = terminal_from_text(&text);
+    let fixes = fixes_from_text(&text);
     let notifications = notifications_from_text(&text);
     let sounds = sounds_from_text(&text);
     let machines = Config::read(&text, &mut Vec::new()).machines;
@@ -949,6 +1003,7 @@ pub fn load() -> Settings {
         services,
         t3,
         terminal,
+        fixes,
         notifications,
         sounds,
         problems,
@@ -1229,6 +1284,16 @@ const TEMPLATE: &str = "\
 # # writes this key.
 # live_config_reload = false
 #
+# [fixes]
+# # Tokens in the Build agent's context past which its fix page warns that
+# # a fresh agent may fix better, and a fix round sent to it asks first.
+# # By default 150000.
+# fresh_above = 200000
+# # Tokens under which a fix round sent to a fresh agent asks first whether
+# # the open Build agent should take it, as it knows the code. By default
+# # 50000.
+# same_below = 30000
+#
 # [notifications]
 # # Desktop notifications: of agents that need you, finished test runs and
 # # the services' errors. On by default.
@@ -1442,6 +1507,7 @@ impl Gerdr {
         self.t3.auto_update = settings.t3.updates;
         // Terminals read it when they start: only new ones change.
         self.settings.live_config_reload = settings.terminal.live_config_reload;
+        self.settings.fixes = settings.fixes;
         self.arrange();
         settings.problems
     }
@@ -1581,6 +1647,12 @@ mod tests {
         assert!(!services.patterns.is_error("a 500 FATAL"));
         assert!(!super::t3_from_text(&examples).updates);
         assert!(super::t3_from_text(TEMPLATE).updates);
+        assert_eq!(
+            super::fixes_from_text(TEMPLATE),
+            super::FixesSettings::default()
+        );
+        let set = super::fixes_from_text("[fixes]\nfresh_above = 90000\n");
+        assert_eq!((set.fresh_above, set.same_below), (90_000, 50_000));
         let machines = super::Config::read(&examples, &mut Vec::new()).machines;
         assert_eq!(machines["build-box"], "ana@10.0.0.5".into());
         assert_eq!(machines["ZenBook"].0.len(), 2);

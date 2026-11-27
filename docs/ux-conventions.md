@@ -164,7 +164,9 @@ and Ctrl+C or `y` copies what it says.
   in the error colour; an action that goes on in the flow (Ship, Approve,
   Finish, Change decisions) is the primary button, so red keeps meaning
   "lost". Neither is the default: Enter on a dialog means Cancel until the
-  user moves to its action.
+  user moves to its action. A confirm offering two ways on (`ask_or`: a fix
+  round's "Keep this agent" or "Fresh agent") puts the other way between
+  them as a plain button; the phone's sheet shows it too.
 - A dialog asking for text is a form, not a confirm: Enter sends it,
   Shift+Enter breaks the line, Esc keeps what was typed as a draft for the
   next opening. That covers a finding's fix or dismissal, and a squash's

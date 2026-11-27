@@ -20,6 +20,11 @@ pub struct Context {
     pub window: Option<u64>,
 }
 
+/// `n` tokens, short: "84k", "1M"; a whole figure needs no ".0".
+pub fn short(n: u64) -> String {
+    crate::stats_panel::tokens(n).replace(".0", "")
+}
+
 impl Context {
     /// Whether it is close to full: the agent soon compacts or gets lost.
     pub fn nearly_full(&self) -> bool {
@@ -28,8 +33,6 @@ impl Context {
 
     /// In words: "context 84k / 1M", with ", nearly full" when it is.
     pub fn said(&self) -> String {
-        // "84k", "1M": a whole figure needs no ".0".
-        let short = |n| crate::stats_panel::tokens(n).replace(".0", "");
         let mut said = match self.window {
             Some(window) => format!("context {} / {}", short(self.used), short(window)),
             None => format!("context {}", short(self.used)),

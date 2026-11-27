@@ -78,6 +78,9 @@ pub enum Request {
         text: Option<String>,
         #[serde(default)]
         confirm: bool,
+        /// With `confirm`: answered by the confirm's other button, not Go.
+        #[serde(default)]
+        other: bool,
     },
     /// Send the stage's file back to its agent.
     SendBack {
@@ -365,9 +368,14 @@ impl Gerdr {
                 id,
                 text,
                 confirm,
+                other,
             } => {
                 let act = PhoneAct::Press { stage, id, text };
-                self.phone_act(&project, &slug, act, confirm)
+                let answer = match other {
+                    true => crate::confirm::Outcome::Other,
+                    false => crate::confirm::Outcome::Go,
+                };
+                self.phone_act(&project, &slug, act, confirm.then_some(answer))
             }
             Request::SendBack {
                 project,
@@ -376,7 +384,8 @@ impl Gerdr {
                 confirm,
             } => {
                 // Empty, it may still have line comments to send.
-                self.phone_act(&project, &slug, PhoneAct::SendBack(text), confirm)
+                let answer = confirm.then_some(crate::confirm::Outcome::Go);
+                self.phone_act(&project, &slug, PhoneAct::SendBack(text), answer)
             }
         };
         // The phone may have given up on it.
@@ -437,7 +446,8 @@ mod tests {
                 stage: Some(4),
                 id: "RerunCheck(1)".into(),
                 text: None,
-                confirm: false
+                confirm: false,
+                other: false,
             }
         );
         let back: Request = serde_json::from_str(

@@ -96,6 +96,9 @@ pub(crate) struct BuildState {
     fixing: BTreeMap<Key, Fixing>,
     /// The open fix rounds' watches (see `feature_fix`).
     pub(crate) fix_watches: BTreeMap<Key, crate::feature_fix::FixWatch>,
+    /// The user just picked the agent of the fix round starting again: it
+    /// isn't asked once more (see `Gerdr::fix_agent_picked`).
+    pub(crate) fix_agent_picked: bool,
 }
 
 impl BuildState {

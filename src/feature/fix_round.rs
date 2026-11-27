@@ -42,7 +42,7 @@ use super::{
     review_import::{AiReview, FindingState},
     verify::{Evidence, VerifyRun},
 };
-use crate::herdr::AgentStatus;
+use crate::{ai_work::context::Context, config::FixesSettings, herdr::AgentStatus};
 
 /// The plan the agent writes, in the feature data dir.
 pub const FILE: &str = "fix-plan.md";
@@ -949,9 +949,74 @@ pub fn plan_next(seen: Seen, since: Duration, rested: Duration, written: bool) -
     }
 }
 
+/// What the context of the open Build agent says of the agent picked for
+/// the next fix round, by the `[fixes]` settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentHint {
+    /// It is kept and its context is past `fresh_above`: a fresh agent may
+    /// fix better.
+    Full(Context),
+    /// A fresh one is picked and the open one's context is under
+    /// `same_below`: it could take the fixes, knowing the code.
+    Small(Context),
+}
+
+/// The hint for the next round's pick: `fresh` the feature's `fresh_fixes`,
+/// `context` the open Build agent's, none when there is none or it couldn't
+/// be read.
+pub fn agent_hint(
+    fresh: bool,
+    context: Option<&Context>,
+    limits: FixesSettings,
+) -> Option<AgentHint> {
+    let context = *context?;
+    match fresh {
+        false if context.used >= limits.fresh_above => Some(AgentHint::Full(context)),
+        true if context.used < limits.same_below => Some(AgentHint::Small(context)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hint_follows_the_context_of_the_agent_open() {
+        let limits = FixesSettings::default();
+        let at = |used| Context {
+            used,
+            window: Some(200_000),
+        };
+        // Kept: full from 150k on.
+        assert_eq!(agent_hint(false, Some(&at(149_999)), limits), None);
+        assert_eq!(
+            agent_hint(false, Some(&at(150_000)), limits),
+            Some(AgentHint::Full(at(150_000)))
+        );
+        // A fresh one picked: the open one is small under 50k.
+        assert_eq!(
+            agent_hint(true, Some(&at(49_999)), limits),
+            Some(AgentHint::Small(at(49_999)))
+        );
+        assert_eq!(agent_hint(true, Some(&at(50_000)), limits), None);
+        // No agent open, or none read: nothing to say.
+        assert_eq!(agent_hint(false, None, limits), None);
+        assert_eq!(agent_hint(true, None, limits), None);
+        // The settings' figures are the ones taken.
+        let set = FixesSettings {
+            fresh_above: 10,
+            same_below: 5,
+        };
+        assert_eq!(
+            agent_hint(false, Some(&at(10)), set),
+            Some(AgentHint::Full(at(10)))
+        );
+        assert_eq!(
+            agent_hint(true, Some(&at(4)), set),
+            Some(AgentHint::Small(at(4)))
+        );
+    }
 
     #[test]
     fn a_round_names_the_criteria_its_fixes_changed() {

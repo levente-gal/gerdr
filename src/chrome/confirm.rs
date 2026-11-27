@@ -39,7 +39,10 @@ pub struct ConfirmView {
     pub body: String,
     /// The label of the button doing it.
     pub go: &'static str,
-    /// The selected button: 0 Cancel, 1 the one doing it.
+    /// The label of a button doing the other way of it, between Cancel and
+    /// `go`, plain (the fix round's "Keep this agent").
+    pub other: Option<&'static str>,
+    /// The selected button, in `labels`: 0 Cancel, the last the one doing it.
     pub selected: usize,
     /// The button under the pointer.
     pub hover: Option<usize>,
@@ -48,14 +51,24 @@ pub struct ConfirmView {
     pub loses: bool,
 }
 
+impl ConfirmView {
+    /// Its buttons' labels, left to right: Cancel, `other`, `go`.
+    pub fn labels(&self) -> Vec<&'static str> {
+        std::iter::once("Cancel")
+            .chain(self.other)
+            .chain([self.go])
+            .collect()
+    }
+}
+
 /// Where the parts of the confirm dialog go, in output coordinates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConfirmLayout {
     pub panel: Rect,
     pub title: Rect,
     pub body: Rect,
-    /// Cancel, then the one doing it.
-    pub buttons: [Rect; 2],
+    /// Cancel, then the other way if there is one, then the one doing it.
+    pub buttons: Vec<Rect>,
 }
 
 /// Where the confirm dialog's parts go, centred on an output of `size`,
@@ -70,7 +83,7 @@ pub fn confirm_layout(size: Size<i32, Logical>) -> ConfirmLayout {
 /// its button doing it labelled `go`, its body one line.
 #[cfg(test)]
 pub fn confirm_dialog_layout(size: Size<i32, Logical>, go: &str) -> ConfirmLayout {
-    confirm_lines_layout(size, go, 1)
+    confirm_lines_layout(size, &["Cancel", go], 1)
 }
 
 /// The confirm dialog's `body` as painted on an output of `size`: each of
@@ -91,9 +104,13 @@ pub fn confirm_body_lines(body: &str, size: Size<i32, Logical>) -> usize {
 }
 
 /// Where the confirm dialog's parts go, centred on an output of `size`,
-/// its button doing it labelled `go`, its body `lines` lines high (one
-/// for every dialog but the Ship sheet).
-pub fn confirm_lines_layout(size: Size<i32, Logical>, go: &str, lines: usize) -> ConfirmLayout {
+/// its buttons labelled `labels` (`ConfirmView::labels`), its body `lines`
+/// lines high (one for every dialog but the Ship sheet).
+pub fn confirm_lines_layout(
+    size: Size<i32, Logical>,
+    labels: &[&str],
+    lines: usize,
+) -> ConfirmLayout {
     let body_h = quit_body() * lines.max(1) as i32;
     let height = 2 * QUIT_PADDING
         + quit_title()
@@ -115,12 +132,11 @@ pub fn confirm_lines_layout(size: Size<i32, Logical>, go: &str, lines: usize) ->
     let title = Rectangle::new((x, y).into(), (inner, quit_title()).into());
     let body_y = y + quit_title() + QUIT_LINE_GAP;
     let body = Rectangle::new((x, body_y).into(), (inner, body_h).into());
-    let buttons = dialog_buttons(panel, &["Cancel", go]);
     ConfirmLayout {
         panel,
         title,
         body,
-        buttons: [buttons[0], buttons[1]],
+        buttons: dialog_buttons(panel, labels),
     }
 }
 
@@ -171,7 +187,8 @@ impl Painter {
         p: &Palette,
     ) -> MemoryRenderBuffer {
         let rows = confirm_body_rows(&view.body, size);
-        let layout = confirm_lines_layout(size, view.go, rows.len());
+        let labels = view.labels();
+        let layout = confirm_lines_layout(size, &labels, rows.len());
         let panel = layout.panel;
         let mut c = self.popup(panel.size, POPUP_RADIUS, scale, p);
         // Rects relative to the buffer, which starts `SHADOW` before the panel.
@@ -217,24 +234,23 @@ impl Painter {
 
         // Its keys at the left of its buttons, as every dialog has them:
         // Enter presses the one selected, which is Cancel at first.
-        let enter = match view.selected {
-            1 => view.go,
-            _ => "Cancel",
-        };
+        let enter = labels.get(view.selected).copied().unwrap_or("Cancel");
         let hints = [("Tab", "switch"), ("Esc", "cancel")];
         let first = shift(layout.buttons[0]);
         let left = shift(layout.title).loc.x;
         let row = Rectangle::new((left, first.loc.y).into(), (0, first.size.h).into());
         let end = first.loc.x - QUIT_BUTTON_GAP;
         self.dialog_keys(&mut c, &hints, Some(enter), row, end, scale, p);
-        for (i, rect) in layout.buttons.iter().enumerate() {
-            let (label, style) = if i == 1 && view.loses {
-                (view.go, ButtonStyle::Destructive)
-            } else if i == 1 {
-                (view.go, ButtonStyle::Primary)
+        let last = layout.buttons.len().saturating_sub(1);
+        for (i, (rect, label)) in layout.buttons.iter().zip(&labels).enumerate() {
+            let style = if i == last && view.loses {
+                ButtonStyle::Destructive
+            } else if i == last {
+                ButtonStyle::Primary
             } else {
-                ("Cancel", ButtonStyle::Plain)
+                ButtonStyle::Plain
             };
+            let label = *label;
             let state = (view.hover == Some(i), view.selected == i);
             self.button(&mut c, label, shift(*rect), state, style, scale, p);
         }
@@ -295,8 +311,8 @@ mod tests {
     fn a_body_of_several_lines_makes_the_dialog_taller() {
         let size = (1920, 1080).into();
         let one = confirm_dialog_layout(size, "Ship");
-        assert_eq!(one, confirm_lines_layout(size, "Ship", 1));
-        let three = confirm_lines_layout(size, "Ship", 3);
+        assert_eq!(one, confirm_lines_layout(size, &["Cancel", "Ship"], 1));
+        let three = confirm_lines_layout(size, &["Cancel", "Ship"], 3);
         assert_eq!(three.body.size.h, 3 * one.body.size.h);
         assert_eq!(three.panel.size.h - one.panel.size.h, 2 * quit_body());
         assert!(three.buttons[0].loc.y >= three.body.loc.y + three.body.size.h);

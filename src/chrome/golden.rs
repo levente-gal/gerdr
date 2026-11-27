@@ -1247,6 +1247,7 @@ fn dump_overlays() {
             title: "Close \u{201c}claude\u{201d}?".into(),
             body: "It is working: closing its pane stops it".into(),
             go: "Close pane",
+            other: None,
             selected: 1,
             hover: None,
             loses: true,
@@ -1264,6 +1265,7 @@ fn dump_overlays() {
                    api has uncommitted changes"
                 .into(),
             go: "Finish",
+            other: None,
             selected: 1,
             hover: None,
             loses: false,
@@ -1281,6 +1283,7 @@ fn dump_overlays() {
                    codex \u{b7} Build\nand 2 more"
                 .into(),
             go: "Close tabs",
+            other: None,
             selected: 1,
             hover: None,
             loses: true,
@@ -1289,6 +1292,23 @@ fn dump_overlays() {
             &dir,
             &format!("confirm_old_agents_{tag}"),
             painter.confirm_dialog(&old_agents, (800, 600).into(), scale, p),
+            px(confirm_w + shadow),
+        );
+        // A third, plain button between Cancel and the one doing it.
+        let fix_agent = super::ConfirmView {
+            title: "Fix with a fresh agent?".into(),
+            body: "The Build agent is at context 162k / 1M, past the 150k set for fixes: a fresh one starts clean"
+                .into(),
+            go: "Fresh agent",
+            other: Some("Keep this agent"),
+            selected: 2,
+            hover: None,
+            loses: false,
+        };
+        dump(
+            &dir,
+            &format!("confirm_fix_agent_{tag}"),
+            painter.confirm_dialog(&fix_agent, (800, 600).into(), scale, p),
             px(confirm_w + shadow),
         );
         let row = |path: &str, files, link, clash| super::CheckoutRow {

@@ -2174,10 +2174,7 @@ pub(super) fn doc_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection>
 /// last probe read it of that run: "context 84k / 1M", with "nearly full"
 /// from 80%. A run it wasn't read of, or can't be, says nothing more.
 fn with_context(status: String, feature: &Feature, stage: Stage, state: &PanelState) -> String {
-    let run = feature.runs.get(&stage).filter(|r| r.live());
-    let read = (state.probe.and_then(|p| p.contexts.get(&stage)))
-        .filter(|(n, _)| run.is_some_and(|r| r.n == *n));
-    let Some((_, context)) = read else {
+    let Some(context) = state.probe.and_then(|p| p.context_of(feature, stage)) else {
         return status;
     };
     let said = context.said();
@@ -2185,6 +2182,28 @@ fn with_context(status: String, feature: &Feature, stage: Stage, state: &PanelSt
         true => said,
         false => format!("{status} \u{b7} {said}"),
     }
+}
+
+/// The line under the choice of the agent the next fixes go to, when the
+/// open Build agent's context says the other choice may be better: a
+/// warning for a kept one past `[fixes] fresh_above`, a note for a fresh
+/// pick while the open one is under `same_below`.
+pub(super) fn fix_agent_note(feature: &Feature, state: &PanelState) -> Option<PageSection> {
+    use feature::fix_round::{AgentHint, agent_hint};
+    let context = state
+        .probe
+        .and_then(|p| p.context_of(feature, Stage::Build));
+    let (text, tone) = match agent_hint(feature.fresh_fixes, context, state.fixes)? {
+        AgentHint::Full(c) => (
+            format!("{}: a fresh agent may fix better", c.said()),
+            CheckTone::Blocker,
+        ),
+        AgentHint::Small(c) => (
+            format!("{}: the open agent could take these fixes", c.said()),
+            CheckTone::Note,
+        ),
+    };
+    Some(lines("", vec![line(text, tone)]))
 }
 
 /// Whether `stage`'s page has the choice of the agent its fixes go to, as
