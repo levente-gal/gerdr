@@ -267,6 +267,9 @@ pub struct Site {
     pub id: String,
     /// Its clock, in Unix seconds.
     pub now: i64,
+    /// Those of `AGENT_ENV` its login shell sets: where its agent CLIs keep
+    /// their folders, when not where they do by default.
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 impl Site {
@@ -307,6 +310,7 @@ pick() {{ printf '%s\n' "$e" | sed -n "s/^$1=//p" | tail -n 1; }}
 p=$(pick PATH); d=$(pick XDG_DATA_HOME); c=$(pick XDG_CONFIG_HOME)
 d=${{d:-$HOME/.local/share}}; c=${{c:-$HOME/.config}}
 echo "HOME=$HOME"; echo "DATA=$d"; echo "CONFIG=$c"
+for n in {agent_env}; do echo "ENV_$n=$(pick "$n")"; done
 h=$(PATH="$p:$HOME/.local/bin:$HOME/.cargo/bin:$PATH"; export PATH; command -v herdr)
 echo "HERDR=$h"
 if [ -n "$h" ]; then echo "VERSION=$("$h" --version 2>/dev/null)"; fi
@@ -314,7 +318,8 @@ f="$d/gerdr/machine-id"
 mkdir -p "$d/gerdr" && {{ [ -s "$f" ] || echo {new_id} > "$f"; }}
 {leave}echo "MACHINE=$(cat "$f" 2>/dev/null)"
 echo "NOW=$(date +%s)"
-"#
+"#,
+        agent_env = crate::ai_work::locate::AGENT_ENV.join(" ")
     )
 }
 
@@ -346,6 +351,10 @@ pub fn parse_site(text: &str) -> Site {
             }
             "MACHINE" => site.id = value.to_owned(),
             "NOW" => site.now = value.parse().unwrap_or_default(),
+            _ if !value.is_empty() && key.starts_with("ENV_") => {
+                site.env
+                    .insert(key["ENV_".len()..].to_owned(), value.to_owned());
+            }
             _ => {}
         }
     }
@@ -2129,10 +2138,11 @@ mod tests {
         std::fs::write(&fake, "#!/bin/sh\necho herdr 0.9.5\n").unwrap();
         std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
-        // A login "shell" whose env says where herdr is, past some noise.
+        // A login "shell" whose env says where herdr and Codex's home are,
+        // past some noise.
         let shell = home.join("shell");
         let script = format!(
-            "#!/bin/sh\necho hello from a profile\nexec env PATH={}:/usr/bin:/bin\n",
+            "#!/bin/sh\necho hello from a profile\nexec env PATH={}:/usr/bin:/bin CODEX_HOME=/srv/codex\n",
             bin.display()
         );
         std::fs::write(&shell, script).unwrap();
@@ -2152,6 +2162,8 @@ mod tests {
         assert_eq!(site.id, "newid");
         assert_eq!(site.data, format!("{}/.local/share", home.display()));
         assert!(site.now > 0);
+        let codex = ("CODEX_HOME".to_owned(), "/srv/codex".to_owned());
+        assert_eq!(site.env, [codex].into());
         // Asked again, it keeps its id.
         let out = Command::new("/bin/sh")
             .args(["-c", &look_script("other", "")])

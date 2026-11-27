@@ -439,18 +439,20 @@ pub(super) fn file_card(
     }
 }
 
-/// The card of the skills `missing` for the stages' agents, in the warning
-/// colour, with its Install skills in `actions`; none while none are.
+/// The card of the skills `checked` found missing for the stages' agents,
+/// and the machines it couldn't check, in the warning colour, with its
+/// Install skills in `actions`; none while there is nothing to say.
 pub(super) fn skills_card(
-    missing: &[feature::skills::Missing],
+    checked: &feature::skills::Checked,
     actions: &[(PageButton, PanelOutcome)],
 ) -> Option<PageSection> {
-    if missing.is_empty() {
+    let said = feature::skills::checked_words(checked);
+    if said.is_empty() {
         return None;
     }
     Some(PageSection::File {
         name: "Skills".to_owned(),
-        state: line(feature::skills::missing_words(missing), CheckTone::Blocker),
+        state: line(said, CheckTone::Blocker),
         buttons: (actions.iter().enumerate())
             .filter(|(_, (_, o))| *o == PanelOutcome::InstallSkills)
             .map(|(i, _)| i)

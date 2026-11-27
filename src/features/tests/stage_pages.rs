@@ -2997,19 +2997,20 @@ fn a_pushed_bases_ci_shows_on_ship_with_its_failed_runs_to_run_again() {
 }
 
 /// Skills its stages name that their agents lack show first on Discover's
-/// page, in the warning colour, with the button installing them; other
-/// pages don't say.
+/// page, in the warning colour, with the button installing them, and so
+/// does a machine they weren't checked on; other pages don't say.
 #[test]
 fn discover_warns_of_missing_skills_with_a_button_to_install_them() {
     use crate::feature::skills::Missing;
     let f = feature("s", vec![repo("api", true)], 0);
     let mut probe = probe(None);
-    probe.skills = vec![Missing {
+    probe.skills.missing = vec![Missing {
         agent: "Claude Code".into(),
         id: "claude-code",
         names: vec!["grilling".into(), "tdd".into()],
         there: None,
     }];
+    probe.skills.unchecked = vec!["Not checked on desk: it isn't connected".into()];
     let state = PanelState {
         probe: Some(&probe),
         ..PanelState::default()
@@ -3028,7 +3029,8 @@ fn discover_warns_of_missing_skills_with_a_button_to_install_them() {
         PageSection::File {
             name: "Skills".into(),
             state: line(
-                "Not installed for Claude Code: grilling, tdd",
+                "Not installed for Claude Code: grilling, tdd. \
+                 Not checked on desk: it isn't connected",
                 CheckTone::Blocker
             ),
             buttons: vec![at],

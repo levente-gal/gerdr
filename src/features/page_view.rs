@@ -425,8 +425,8 @@ pub(super) fn stage_page(
     }
     // The first page says what the agents lack, at its top, before they start.
     if stage == Stage::Discover {
-        let missing = state.probe.map_or(&[][..], |p| &p.skills);
-        sections.splice(0..0, skills_card(missing, actions));
+        let checked = state.probe.map(|p| &p.skills);
+        sections.splice(0..0, checked.and_then(|c| skills_card(c, actions)));
     }
     // The agent's card says what it does: the status line needn't again.
     let carded = |l: &CheckLine| {

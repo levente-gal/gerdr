@@ -78,22 +78,33 @@ pub struct Remote {
 }
 
 /// A stage's agent, for the skills check: its picker name and command,
-/// the skills it names, and where it runs when that isn't here, with the
-/// home, config folder and feature folder it has there.
+/// the skills it names, and the machine it runs on.
 #[derive(Clone, Debug)]
 pub struct Ask {
     pub agent: String,
     pub base: String,
     pub names: Vec<String>,
-    pub there: Option<(Remote, Folders)>,
+    pub on: On,
 }
 
-/// The folders of another machine its skills are read under.
+/// The machine a stage's agent runs on, for the skills check.
+#[derive(Clone, Debug)]
+pub enum On {
+    Here,
+    /// Another, which is up, with the folders it has there.
+    There(Remote, Folders),
+    /// Another, by its name, which isn't up: it can't be asked.
+    Away(String),
+}
+
+/// The folders of another machine its skills are read under, and the
+/// agent CLIs' settings in its login shell (`Site::env`).
 #[derive(Clone, Debug)]
 pub struct Folders {
     pub home: String,
     pub config: String,
     pub cwd: String,
+    pub env: BTreeMap<String, String>,
 }
 
 /// Skills a feature's stages name that aren't installed for the agent CLI
@@ -107,75 +118,96 @@ pub struct Missing {
     pub there: Option<Remote>,
 }
 
-/// What the skills check found: those `missing`, and, by machine id and
-/// the `skills` CLI's name for the agent, those installed on other
-/// machines (their stages' prompts name only those).
+/// What the skills check found: those `missing`; by machine id and the
+/// `skills` CLI's name for the agent, those installed on other machines
+/// (their stages' prompts name only those); and why a machine wasn't
+/// checked, a sentence each.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Checked {
     pub missing: Vec<Missing>,
     pub there: BTreeMap<(String, String), Vec<String>>,
+    pub unchecked: Vec<String>,
 }
 
 /// Of `asks`, the skills not installed for each agent, in folder `cwd`
 /// here or its own folder on the machine it runs on, by agent and machine,
 /// in their order. An agent the `skills` CLI can't install for is left
-/// out, and so is a name that isn't a plain folder name, and a machine
-/// that couldn't be asked (logged).
+/// out, and so is a name that isn't a plain folder name. A machine that
+/// isn't up or couldn't be asked is in `unchecked`.
 pub fn check(cwd: &Path, asks: &[Ask]) -> Checked {
     let mut out = Checked::default();
+    let mut unchecked = |why: String| {
+        if !out.unchecked.contains(&why) {
+            out.unchecked.push(why);
+        }
+    };
+    let mut found_there = BTreeMap::new();
+    let mut missing: Vec<Missing> = Vec::new();
     for ask in asks {
         let cli = crate::integrations::by_command(&ask.base);
         let Some(id) = cli.skills_agent() else {
             continue;
         };
-        let found = match &ask.there {
-            None => {
+        let found = match &ask.on {
+            On::Away(name) => {
+                unchecked(format!("Not checked on {name}: it isn't connected"));
+                continue;
+            }
+            On::Here => {
                 let Some(homes) = Homes::here() else {
                     continue;
                 };
                 let config = crate::chat::commands::config_dir();
                 installed(&ask.names, &cli.skill_dirs(cwd, &homes, &config))
             }
-            Some((remote, folders)) => {
-                let homes = Homes::under(Path::new(&folders.home));
+            On::There(remote, folders) => {
+                let env = |name: &str| folders.env.get(name).map(PathBuf::from);
+                let homes = Homes::with_env(Path::new(&folders.home), env);
                 let dirs =
                     cli.skill_dirs(Path::new(&folders.cwd), &homes, Path::new(&folders.config));
                 match installed_there(remote, &ask.names, &dirs) {
                     Ok(found) => {
                         let key = (remote.id.clone(), id.to_owned());
-                        out.there.insert(key, found.clone());
+                        found_there.insert(key, found.clone());
                         found
                     }
                     Err(why) => {
-                        tracing::warn!("couldn't read the skills on {}: {why}", remote.name);
+                        unchecked(format!("Couldn't check {}: {why}", remote.name));
                         continue;
                     }
                 }
             }
         };
         let gone = (ask.names.iter()).filter(|n| plain(n) && !found.contains(n));
-        let there = ask.there.as_ref().map(|(remote, _)| remote.clone());
-        let at = match (out.missing.iter()).position(|m| m.agent == ask.agent && m.there == there) {
+        let there = match &ask.on {
+            On::There(remote, _) => Some(remote.clone()),
+            _ => None,
+        };
+        let at = match (missing.iter()).position(|m| m.agent == ask.agent && m.there == there) {
             Some(at) => at,
             None => {
                 let (agent, names) = (ask.agent.clone(), Vec::new());
-                out.missing.push(Missing {
+                missing.push(Missing {
                     agent,
                     id,
                     names,
                     there,
                 });
-                out.missing.len() - 1
+                missing.len() - 1
             }
         };
         for name in gone {
-            if !out.missing[at].names.contains(name) {
-                out.missing[at].names.push(name.clone());
+            if !missing[at].names.contains(name) {
+                missing[at].names.push(name.clone());
             }
         }
     }
-    out.missing.retain(|m| !m.names.is_empty());
-    out
+    missing.retain(|m| !m.names.is_empty());
+    Checked {
+        missing,
+        there: found_there,
+        ..out
+    }
 }
 
 /// Those of `names` with a `<name>/SKILL.md` in one of `dirs` on `remote`,
@@ -236,6 +268,17 @@ pub fn missing_words(missing: &[Missing]) -> String {
         })
         .collect();
     format!("Not installed for {}", each.join(" \u{b7} "))
+}
+
+/// What the Discover page says of `checked`: its `missing_words`, then
+/// each machine not checked. Empty when there is nothing to say.
+pub fn checked_words(checked: &Checked) -> String {
+    let mut said = Vec::new();
+    if !checked.missing.is_empty() {
+        said.push(missing_words(&checked.missing));
+    }
+    said.extend(checked.unchecked.iter().cloned());
+    said.join(". ")
 }
 
 /// The lines that install `missing` from `source`, one per machine, this
@@ -402,13 +445,22 @@ mod tests {
             agent: agent.into(),
             base: base.into(),
             names: names(of),
-            there: None,
+            on: On::Here,
         };
         let asks = [
             ask("Claude Code", "claude", &["tdd", gone]),
             ask("Claude Code", "claude", &[gone, "../x"]),
             // The skills CLI can't install for it: not told.
             ask("Mine", "my-agent", &[gone]),
+            // On a machine that isn't up: not checked, twice said once.
+            Ask {
+                on: On::Away("desk".into()),
+                ..ask("Codex", "codex", &[gone])
+            },
+            Ask {
+                on: On::Away("desk".into()),
+                ..ask("Pi", "pi", &[gone])
+            },
         ];
         let checked = check(&cwd, &asks);
         assert_eq!(
@@ -421,6 +473,16 @@ mod tests {
             }]
         );
         assert!(checked.there.is_empty());
+        assert_eq!(
+            checked.unchecked,
+            ["Not checked on desk: it isn't connected"]
+        );
+        assert_eq!(
+            checked_words(&checked),
+            format!(
+                "Not installed for Claude Code: {gone}. Not checked on desk: it isn't connected"
+            )
+        );
         std::fs::remove_dir_all(cwd).unwrap();
     }
 

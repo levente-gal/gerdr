@@ -912,17 +912,19 @@ impl Gerdr {
                 if names.is_empty() || by_command(&base).in_app() {
                     return None;
                 }
-                // A machine not connected can't be asked.
-                let there = match self.placed(feature, stage) {
-                    Placed::Here => None,
-                    Placed::There(id) => Some(self.skills_folders(feature, &id)?),
-                    Placed::Away(_) => return None,
+                let on = match self.placed(feature, stage) {
+                    Placed::Here => feature::skills::On::Here,
+                    Placed::There(id) => {
+                        let (remote, folders) = self.skills_folders(feature, &id)?;
+                        feature::skills::On::There(remote, folders)
+                    }
+                    Placed::Away(name) => feature::skills::On::Away(name),
                 };
                 Some(feature::skills::Ask {
                     agent,
                     base,
                     names,
-                    there,
+                    on,
                 })
             })
             .collect()
@@ -944,8 +946,14 @@ impl Gerdr {
             control: work.info.control.clone(),
         };
         let site = &work.info.site;
-        let (home, config) = (site.home.clone(), site.config.clone());
-        Some((remote, feature::skills::Folders { home, config, cwd }))
+        let (home, config, env) = (site.home.clone(), site.config.clone(), site.env.clone());
+        let folders = feature::skills::Folders {
+            home,
+            config,
+            cwd,
+            env,
+        };
+        Some((remote, folders))
     }
 }
 
@@ -2631,8 +2639,8 @@ impl Gerdr {
         let wanted = feature::skills::wanted(&set, &self.settings.skills, stage);
         let skills = match &machine {
             None => feature::skills::installed_for(by_command(&base), &feature.dir, &wanted),
-            // shortcut: another machine's are as Discover's check last found
-            // them, none before one ran since gerdr started.
+            // shortcut: another machine's are as the probe last found them,
+            // none in the seconds after gerdr starts before it has asked.
             Some(id) => {
                 let cli = by_command(&base).skills_agent().unwrap_or_default();
                 let found = self

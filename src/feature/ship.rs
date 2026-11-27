@@ -386,12 +386,10 @@ pub struct Probe {
     /// The CI of the bases shipping pushed lately, by `Repo::key`, when read
     /// this time (`read_base_ci`): read as often as `prs`.
     pub base_ci: Option<BTreeMap<String, BaseCi>>,
-    /// While Discover is its current stage: the skills its stages name that
-    /// aren't installed for their agents (`skills::missing`).
-    pub skills: Vec<super::skills::Missing>,
-    /// The skills found installed on other machines then, by machine id and
-    /// agent (`skills::Checked::there`).
-    pub skills_there: BTreeMap<(String, String), Vec<String>>,
+    /// While Discover is its current stage: what the skills check found of
+    /// the skills its stages name. Past it, only of other machines not yet
+    /// asked since gerdr started.
+    pub skills: super::skills::Checked,
 }
 
 /// How long after shipping pushed a base its CI is read: by then it ran.
@@ -625,8 +623,7 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
         bases: BTreeMap::new(),
         resolution: None,
         base_ci: None,
-        skills: Vec::new(),
-        skills_there: BTreeMap::new(),
+        skills: Default::default(),
     }
 }
 
@@ -648,8 +645,7 @@ pub fn probe_seen(feature: &Feature) -> Probe {
         bases: BTreeMap::new(),
         resolution: None,
         base_ci: None,
-        skills: Vec::new(),
-        skills_there: BTreeMap::new(),
+        skills: Default::default(),
     }
 }
 
@@ -674,8 +670,7 @@ pub fn probe_finished(feature: &Feature) -> Probe {
         bases: BTreeMap::new(),
         resolution: None,
         base_ci: None,
-        skills: Vec::new(),
-        skills_there: BTreeMap::new(),
+        skills: Default::default(),
     }
 }
 

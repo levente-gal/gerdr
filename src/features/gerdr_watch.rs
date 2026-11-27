@@ -211,11 +211,22 @@ impl Gerdr {
         }
         let data = store::dir(None, project, slug);
         // The first page tells the skills missing, while it is the stage at.
-        let skill_asks =
-            match feature.current() == Some(Stage::Discover) && feature.writer.is_none() {
-                true => self.skill_asks(&feature),
-                false => Vec::new(),
-            };
+        // Past it, another machine is asked once since start: the prompts
+        // of its stages name the skills it has.
+        let at_discover = feature.current() == Some(Stage::Discover);
+        let known = &self.features.skills_there;
+        let unknown = |ask: &feature::skills::Ask| match &ask.on {
+            feature::skills::On::There(remote, _) => (crate::integrations::by_command(&ask.base)
+                .skills_agent())
+            .is_some_and(|id| !known.contains_key(&(remote.id.clone(), id.to_owned()))),
+            _ => false,
+        };
+        let skill_asks = match feature.writer {
+            Some(_) => Vec::new(),
+            None => (self.skill_asks(&feature).into_iter())
+                .filter(|ask| at_discover || unknown(ask))
+                .collect(),
+        };
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(None, move |_| {
             let skills = feature::skills::check(&feature.dir, &skill_asks);
@@ -236,8 +247,7 @@ impl Gerdr {
                             false => BTreeMap::new(),
                         },
                         resolution: ship::read_resolution(&feature, &data),
-                        skills: skills.missing,
-                        skills_there: skills.there,
+                        skills,
                         ..ship::probe(&feature, &modes)
                     },
                 }),
@@ -254,7 +264,7 @@ impl Gerdr {
     pub(crate) fn install_skills(&mut self, project: &str, slug: &str) {
         let key = (project.to_owned(), slug.to_owned());
         let probed = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
-        let missing = probed.map(|p| p.skills.clone()).unwrap_or_default();
+        let missing = probed.map(|p| p.skills.missing.clone()).unwrap_or_default();
         if missing.is_empty() {
             return self.show_notice("Its stages' skills are installed".to_owned());
         }
@@ -331,7 +341,7 @@ impl Gerdr {
     /// sends it back, its squash merged makes it done.
     pub(super) fn feature_probed(&mut self, project: &str, slug: &str, mut probe: Probe) {
         self.feature_models_are(project, slug, std::mem::take(&mut probe.models));
-        (self.features.skills_there).append(&mut probe.skills_there);
+        (self.features.skills_there).append(&mut probe.skills.there);
         let key = (project.to_owned(), slug.to_owned());
         // The diff's comments may be others now: the keyboard stays on its card.
         let on_tab =

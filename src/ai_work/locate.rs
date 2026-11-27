@@ -90,16 +90,29 @@ pub struct Homes {
     pub antigravity: PathBuf,
 }
 
+/// The settings that move an agent CLI's folders away from its default,
+/// as `Homes::with_env` reads them.
+pub const AGENT_ENV: [&str; 4] = [
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
+    "PI_CODING_AGENT_DIR",
+    "PI_CODING_AGENT_SESSION_DIR",
+];
+
 impl Homes {
     /// This machine's. None without a home.
     pub fn here() -> Option<Self> {
         let home = crate::home_dir()?;
-        let env = |name: &str| {
-            std::env::var_os(name)
-                .map(PathBuf::from)
-                .filter(|dir| dir.is_absolute())
-        };
-        let mut homes = Self::under(&home);
+        let mut homes = Self::with_env(&home, |name| std::env::var_os(name).map(PathBuf::from));
+        homes.t3 = crate::t3_agents::home();
+        Some(homes)
+    }
+
+    /// Those under home folder `home` where `env` gives the settings that
+    /// move them (`AGENT_ENV`, `XDG_DATA_HOME`); no T3 Code.
+    pub fn with_env(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Self {
+        let env = |name: &str| env(name).filter(|dir| dir.is_absolute());
+        let mut homes = Self::under(home);
         if let Some(config) = env("CLAUDE_CONFIG_DIR")
             && !homes.claude.contains(&config)
         {
@@ -116,8 +129,7 @@ impl Homes {
         } else if let Some(agent) = env("PI_CODING_AGENT_DIR") {
             homes.pi = agent.join("sessions");
         }
-        homes.t3 = crate::t3_agents::home();
-        Some(homes)
+        homes
     }
 
     /// All of them under home folder `home`, as each CLI keeps them by

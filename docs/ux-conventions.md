@@ -213,12 +213,15 @@ and Ctrl+C or `y` copies what it says.
 - While Discover is the stage a feature is at, its page says first, in the
   warning colour, which skills its stages name (`[skills]` in Settings, a
   project's `skills`) aren't installed for the agent CLI each stage runs,
-  on the machine it runs on ("Codex on desk: tdd"; one not connected isn't
-  asked). Its Install skills types the `npx skills add … -g` line in a new
+  on the machine it runs on ("Codex on desk: tdd"), in the folders its
+  login shell gives those CLIs there (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+  pi's). A machine not connected, or one that couldn't be asked, is said
+  ("Not checked on desk: it isn't connected"). Its Install skills types the `npx skills add … -g` line in a new
   terminal tab of the workspace, one per machine, another machine's over
   SSH in its login shell, so what runs shows (on the clipboard with no
   workspace); the card goes once a probe finds them installed. Another
-  machine's agent is told the skills that check last found there. A missing
+  machine's agent is told the skills last found there: past Discover, gerdr
+  asks each machine a stage is placed on once after it starts. A missing
   skill is only left out of the stage's prompt: nothing waits for it.
 - A later AI review reads only what changed since the last one, in the
   feature's own files, and leaves out the repositories that didn't change.
