@@ -1649,7 +1649,7 @@ impl Gerdr {
         std::thread::spawn(move || {
             let result = {
                 let _turn = Turn::take(&item.common, "a worktree squash");
-                crate::git_ops::squash_commit(&item.main, &branch, &msg)
+                crate::git_ops::squash_commit(&item.main, &branch, &msg, &[])
             };
             let result = result.map(|_| ()).map_err(|failed| match failed.failure {
                 crate::git_ops::Failure::Conflict(files) if !files.is_empty() => {

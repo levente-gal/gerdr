@@ -1798,6 +1798,9 @@ pub struct Squashed {
     pub failed: Option<(String, String)>,
     /// Those a commit hook changed as they were committed, by key.
     pub hooked: Vec<(String, Hooked)>,
+    /// Decision records renamed to the next free numbers, as the base had
+    /// theirs taken since (`memory::adr_moves`): key, from, to.
+    pub renumbered: Vec<(String, String, String)>,
 }
 
 /// What a commit hook changed in a squash: the files whose content isn't
@@ -1811,8 +1814,9 @@ pub struct Hooked {
 
 /// What a commit hook changed in the squash of `branch` just committed in
 /// `dir`, against merging it into the commit before (`git merge-tree`):
-/// none when nothing did, or that couldn't be read.
-fn hooked(dir: &Path, branch: &str) -> Option<Hooked> {
+/// none when nothing did, or that couldn't be read. The files of `moves`,
+/// the squash's own renames, don't count.
+fn hooked(dir: &Path, branch: &str, moves: &[(String, String)]) -> Option<Hooked> {
     let merged = git(dir, &["merge-tree", "--write-tree", "HEAD~1", branch]).ok()?;
     let want = merged.lines().next()?.trim().to_owned();
     let have = git(dir, &["rev-parse", "HEAD^{tree}"])
@@ -1825,8 +1829,12 @@ fn hooked(dir: &Path, branch: &str) -> Option<Hooked> {
     let names = git(dir, &["diff", "--name-only", &want, &have]).ok()?;
     let files: Vec<String> = (names.lines())
         .filter(|l| !l.is_empty())
+        .filter(|l| !moves.iter().any(|(from, to)| l == from || l == to))
         .map(str::to_owned)
         .collect();
+    if files.is_empty() {
+        return None;
+    }
     // A file gone or new on one side reads as empty there: content, not layout.
     let squeezed = |tree: &str, file: &str| {
         (git(dir, &["show", &format!("{tree}:{file}")]).ok()).map(|text| {
@@ -1849,24 +1857,32 @@ pub fn squash(feature: &Feature, trees: &[(String, PathBuf)], msg: &str) -> Squa
     let branch = feature.branch();
     let mut out = Squashed::default();
     for (key, dir) in trees {
-        let one = || -> Result<String, String> {
+        let one = || -> Result<(String, Vec<(String, String)>), String> {
             let common = git(
                 dir,
                 &["rev-parse", "--path-format=absolute", "--git-common-dir"],
             )?;
             let _turn = git_ops::Turn::take(Path::new(common.trim()), "the squash");
-            git_ops::squash_commit(dir, &branch, msg).map_err(|failed| match failed.failure {
-                git_ops::Failure::Conflict(files) if !files.is_empty() => {
-                    format!("it conflicts in {}", files.join(", "))
+            // shortcut: only a squash renumbers; a pull request's
+            // decision records go as numbered, a clash there fixed by hand.
+            let moves = super::memory::adr_moves(dir, &branch);
+            git_ops::squash_commit(dir, &branch, msg, &moves).map_err(|failed| {
+                match failed.failure {
+                    git_ops::Failure::Conflict(files) if !files.is_empty() => {
+                        format!("it conflicts in {}", files.join(", "))
+                    }
+                    _ => failed.why,
                 }
-                _ => failed.why,
             })?;
-            Ok(git(dir, &["rev-parse", "HEAD"])?.trim().to_owned())
+            Ok((git(dir, &["rev-parse", "HEAD"])?.trim().to_owned(), moves))
         };
         match one() {
-            Ok(sha) => {
-                if let Some(changed) = hooked(dir, &branch) {
+            Ok((sha, moves)) => {
+                if let Some(changed) = hooked(dir, &branch, &moves) {
                     out.hooked.push((key.clone(), changed));
+                }
+                for (from, to) in moves {
+                    out.renumbered.push((key.clone(), from, to));
                 }
                 out.went.push((key.clone(), sha));
             }

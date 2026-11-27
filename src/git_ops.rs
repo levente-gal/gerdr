@@ -1126,11 +1126,12 @@ pub fn begin_merge(dir: &Path, base: &str) -> Result<Vec<String>, Failed> {
 }
 
 /// Squash `branch` into the checked-out branch and commit it with `msg`:
-/// `merge --squash`, then `commit`. Changes staged already would go into
+/// `merge --squash`, then `git mv` each of `moves` (from, to), then
+/// `commit`. Changes staged already would go into
 /// that commit, so they stop it. A squash that stops part-way (on
 /// conflicts, at a commit hook) is undone with `reset --merge`: the
 /// worktree is as it was, other changes in it kept.
-pub fn squash_commit(dir: &Path, branch: &str, msg: &str) -> OpResult {
+pub fn squash_commit(dir: &Path, branch: &str, msg: &str, moves: &[(String, String)]) -> OpResult {
     let mut op = Op::new(dir);
     if head_oid(dir).is_none() {
         return Err(op.blocked("no commits yet"));
@@ -1139,6 +1140,11 @@ pub fn squash_commit(dir: &Path, branch: &str, msg: &str) -> OpResult {
         return Err(op.blocked("it has staged changes"));
     }
     let mut went = op.run(&["merge", "--squash", "--no-autostash", branch]);
+    for (from, to) in moves {
+        if went.is_ok() {
+            went = op.run(&["mv", from, to]);
+        }
+    }
     if went.is_ok() {
         went = op.run(&["commit", "-m", msg]);
     }
@@ -2510,12 +2516,23 @@ mod tests {
         git(&fx.repo, &["switch", "-q", "main"]);
         let main = rev(&fx.repo, "main");
         write(&fx.repo, "a", "mine, not staged");
-        squash_commit(&fx.repo, "feat", "Title\n\nBody").unwrap();
+        squash_commit(&fx.repo, "feat", "Title\n\nBody", &[]).unwrap();
         assert_eq!(rev(&fx.repo, "main~1"), main);
         let msg = git(&fx.repo, &["log", "-1", "--format=%B"]);
         assert_eq!(msg.trim(), "Title\n\nBody");
         assert_eq!(read(&fx.repo, "c"), "two");
         assert_eq!(read(&fx.repo, "a"), "mine, not staged");
+    }
+
+    #[test]
+    fn a_squash_moves_files_before_it_commits() {
+        let fx = Fx::local();
+        git(&fx.repo, &["switch", "-q", "-c", "feat"]);
+        commit(&fx.repo, "b", "one");
+        git(&fx.repo, &["switch", "-q", "main"]);
+        squash_commit(&fx.repo, "feat", "m", &[("b".into(), "c".into())]).unwrap();
+        let files = git(&fx.repo, &["show", "--name-only", "--format=", "HEAD"]);
+        assert_eq!(files.trim(), "c");
     }
 
     #[test]
@@ -2528,7 +2545,7 @@ mod tests {
         commit(&fx.repo, "a", "ours");
         write(&fx.repo, "z", "untouched");
         let main = rev(&fx.repo, "main");
-        let failed = squash_commit(&fx.repo, "feat", "m").unwrap_err();
+        let failed = squash_commit(&fx.repo, "feat", "m", &[]).unwrap_err();
         assert_eq!(failed.failure, Failure::Conflict(vec!["a".into()]));
         assert_eq!(rev(&fx.repo, "HEAD"), main);
         assert_eq!(read(&fx.repo, "a"), "ours");
@@ -2539,7 +2556,7 @@ mod tests {
         // Staged changes would go into the squash: they stop it.
         write(&fx.repo, "a", "staged");
         git(&fx.repo, &["add", "a"]);
-        let failed = squash_commit(&fx.repo, "feat", "m").unwrap_err();
+        let failed = squash_commit(&fx.repo, "feat", "m", &[]).unwrap_err();
         assert_eq!(failed.why, "it has staged changes");
     }
 
@@ -2557,7 +2574,7 @@ mod tests {
         let hooks = hook.parent().unwrap().to_str().unwrap();
         git(&fx.repo, &["config", "core.hooksPath", hooks]);
         TIMEOUT.with(|t| t.set(Some(Duration::from_millis(300))));
-        let failed = squash_commit(&fx.repo, "feat", "m").unwrap_err();
+        let failed = squash_commit(&fx.repo, "feat", "m", &[]).unwrap_err();
         TIMEOUT.with(|t| t.set(None));
         assert_eq!(failed.failure, Failure::Timeout);
         assert!(failed.why.starts_with("timed out"), "{}", failed.why);
