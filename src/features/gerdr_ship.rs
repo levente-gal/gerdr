@@ -457,6 +457,10 @@ impl Gerdr {
         for (key, _) in &done.went {
             feature.log(now, format!("Squashed into the base of {key}"));
         }
+        for (key, from, to) in &done.renumbered {
+            let text = format!("Renumbered {from} to {to} in {key}: the base has its number since");
+            feature.log(now, text);
+        }
         // A commit hook changed what went in: said, as the squash then
         // isn't what Verify and the reviews saw.
         let hooked: Vec<(String, bool)> = (done.hooked.iter())

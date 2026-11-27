@@ -5,7 +5,9 @@
 //! the terms merged into its `GLOSSARY.md` by name, the decisions numbered
 //! on in its `docs/adr/`, and each repository's own glossary named in its
 //! `GLOSSARY-MAP.md`. In a home repository, just those files are committed.
-//! A single repository's memory is in the feature's own diff instead.
+//! A single repository's memory is in the feature's own diff instead; its
+//! squash renumbers a decision record whose number the base took since
+//! (`adr_moves`).
 //!
 //! The Build check: every decision marked `ADR: yes` in the decision log
 //! has a decision record whose `Source:` line names it (`adr_lacks`).
@@ -86,6 +88,61 @@ pub fn next_adr(dir: &Path) -> u32 {
     (names.filter_map(|e| adr_number(&e.file_name().to_string_lossy())))
         .max()
         .map_or(1, |n| n + 1)
+}
+
+/// The renames that keep the decision records `branch` adds to
+/// `docs/adr/` from taking a number that `dir`'s HEAD has since (another
+/// feature shipped one): each (from, to), to the next free numbers. None
+/// when nothing clashes, or git couldn't say.
+pub fn adr_moves(dir: &Path, branch: &str) -> Vec<(String, String)> {
+    let names = |args: &[&str]| -> Vec<String> {
+        match git(dir, args) {
+            Ok(out) => out.lines().map(str::to_owned).collect(),
+            Err(why) => {
+                tracing::warn!("reading decision records in {}: {why}", dir.display());
+                Vec::new()
+            }
+        }
+    };
+    let have = names(&["ls-tree", "--name-only", "HEAD", "docs/adr/"]);
+    let since = format!("HEAD...{branch}");
+    let added = names(&[
+        "diff",
+        "--name-only",
+        "--diff-filter=A",
+        &since,
+        "--",
+        "docs/adr/",
+    ]);
+    renumber(&have, &added)
+}
+
+/// `adr_moves` on the paths there (`have`) and those the branch adds.
+fn renumber(have: &[String], added: &[String]) -> Vec<(String, String)> {
+    let number = |path: &str| {
+        let name = path.strip_prefix("docs/adr/")?;
+        adr_number(name).filter(|_| !name.contains('/'))
+    };
+    let mut used: Vec<u32> = have.iter().filter_map(|p| number(p)).collect();
+    let mut ours: Vec<(u32, &String)> = (added.iter())
+        .filter(|p| !have.contains(p))
+        .filter_map(|p| Some((number(p)?, p)))
+        .collect();
+    ours.sort();
+    let mut next = (used.iter().chain(ours.iter().map(|(n, _)| n)).max()).map_or(1, |n| n + 1);
+    let mut moves = Vec::new();
+    for (n, path) in ours {
+        if !used.contains(&n) {
+            used.push(n);
+            continue;
+        }
+        let (_, rest) = path["docs/adr/".len()..]
+            .split_once('-')
+            .unwrap_or_default();
+        moves.push((path.clone(), format!("docs/adr/{next:04}-{rest}")));
+        next += 1;
+    }
+    moves
 }
 
 fn adr_number(name: &str) -> Option<u32> {
@@ -284,6 +341,58 @@ mod tests {
             merged,
             "# Shop\n\n## Language\n\n**Order**: what a **Customer** buys.\n\n**Cart**:\nA basket.\n\n**Invoice**: a request for payment for an **Order**.\n  _Avoid_: bill.\n"
         );
+    }
+
+    #[test]
+    fn decision_records_taken_since_move_to_free_numbers() {
+        let paths = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let have = paths(&[
+            "docs/adr/0006-a.md",
+            "docs/adr/0007-b.md",
+            "docs/adr/README.md",
+        ]);
+        // 0007 is taken, 0008 isn't, and a second 0008 of its own clashes too.
+        let added = paths(&[
+            "docs/adr/0007-csv.md",
+            "docs/adr/0008-tax.md",
+            "docs/adr/0008-vat.md",
+            "docs/adr/old/0001-x.md",
+            "docs/adr/0007-b.md",
+        ]);
+        assert_eq!(
+            renumber(&have, &added),
+            [
+                ("docs/adr/0007-csv.md".into(), "docs/adr/0009-csv.md".into()),
+                ("docs/adr/0008-vat.md".into(), "docs/adr/0010-vat.md".into()),
+            ]
+        );
+        assert!(renumber(&have, &paths(&["docs/adr/0008-tax.md"])).is_empty());
+    }
+
+    #[test]
+    fn a_branch_whose_record_number_was_taken_since_moves_it() {
+        let root = std::env::temp_dir().join(format!("gerdr-memory-moves-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("docs/adr")).unwrap();
+        let run = |args: &[&str]| git(&root, args).unwrap();
+        let add = |name: &str| {
+            std::fs::write(root.join("docs/adr").join(name), name).unwrap();
+            run(&["add", "."]);
+            run(&["commit", "-q", "-m", name]);
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        add("0001-a.md");
+        run(&["switch", "-q", "-c", "feat"]);
+        add("0002-csv.md");
+        run(&["switch", "-q", "main"]);
+        assert!(adr_moves(&root, "feat").is_empty());
+        add("0002-tax.md");
+        assert_eq!(
+            adr_moves(&root, "feat"),
+            [("docs/adr/0002-csv.md".into(), "docs/adr/0003-csv.md".into())]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
