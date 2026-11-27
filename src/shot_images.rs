@@ -5,9 +5,15 @@
 //! and SVG are read, picked by the file's extension.
 
 use std::{
+    cell::Cell,
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{LazyLock, Mutex},
+    sync::{
+        LazyLock, Mutex,
+        atomic::{AtomicU64, Ordering},
+        mpsc::Sender,
+    },
+    time::{Duration, Instant},
 };
 
 use resvg::{tiny_skia, usvg};
@@ -29,7 +35,7 @@ type Sizes = HashMap<PathBuf, Option<(u32, u32)>>;
 
 static SIZES: LazyLock<Mutex<Sizes>> = LazyLock::new(Default::default);
 /// By file and the longer side's pixels.
-static SCALED: Kept<(PathBuf, usize)> = LazyLock::new(Default::default);
+static SCALED: Kept<Key> = LazyLock::new(Default::default);
 static WHOLE: Kept<PathBuf> = LazyLock::new(Default::default);
 
 /// The width and height of the picture at `path`; `None` when it can't be read.
@@ -287,15 +293,43 @@ fn draw_svg(path: &Path, px: usize) -> Option<AppIcon> {
     Some(AppIcon::from_rgba(w as usize, h as usize, pixmap.take()))
 }
 
-/// The picture at `path` scaled so its longer side is `px` pixels;
-/// `None` when it can't be read.
-// shortcut: read and decoded on the paint thread, some tens of ms the first
-// time one shows (a 2 MP WebP some 140); move to a worker if pages stutter.
+/// The picture at `path` scaled so its longer side is `px` pixels, once
+/// the worker has decoded it; meanwhile the same picture kept at another
+/// size, or `None` (as for one that can't be read). A buffer drawn while
+/// one was missing is drawn again when it comes (`drawing`).
 pub fn picture(path: &Path, px: usize) -> Option<AppIcon> {
     let key = (path.to_owned(), px);
     if let Some(found) = take(&SCALED, &key) {
         return Some(found);
     }
+    // Tests draw at once, as their pixels are compared.
+    if cfg!(test) {
+        return scaled(path, px);
+    }
+    later(key)
+}
+
+/// `key` sent to the worker, and its picture kept at another size till
+/// then; `None` when there is none, or it couldn't be read a moment ago.
+fn later(key: Key) -> Option<AppIcon> {
+    if failed(&key) {
+        return None;
+    }
+    let path = key.0.clone();
+    WAITED.set(true);
+    ask(key);
+    SCALED
+        .lock()
+        .ok()?
+        .iter()
+        .find(|((p, _), _)| *p == path)
+        .map(|(_, icon)| icon.clone())
+}
+
+/// The picture at `path` read, scaled so its longer side is `px` pixels and
+/// kept; `None` when it can't be read.
+fn scaled(path: &Path, px: usize) -> Option<AppIcon> {
+    let key = (path.to_owned(), px);
     if format(path).as_deref() == Some("svg") {
         let drawn = draw_svg(path, px)?;
         keep(&SCALED, key, drawn.clone(), KEEP_SCALED);
@@ -313,6 +347,109 @@ pub fn picture(path: &Path, px: usize) -> Option<AppIcon> {
     let scaled = AppIcon::from_rgba(w, h, rgba);
     keep(&SCALED, key, scaled.clone(), KEEP_SCALED);
     Some(scaled)
+}
+
+/// A picture by its file and the longer side's pixels.
+type Key = (PathBuf, usize);
+
+/// How long a picture that couldn't be read is left before it is tried
+/// again: its file may be written by then.
+const RETRY: Duration = Duration::from_secs(2);
+
+/// How many pictures the worker has done, read or not.
+static DONE: AtomicU64 = AtomicU64::new(0);
+/// Pictures sent to the worker and not done yet.
+static ASKED: Mutex<Vec<Key>> = Mutex::new(Vec::new());
+/// Pictures the worker couldn't read, and when.
+static FAILED: Mutex<Vec<(Key, Instant)>> = Mutex::new(Vec::new());
+/// Where pictures go to be decoded; `None` when its thread couldn't start.
+static WORKER: LazyLock<Option<Sender<Key>>> = LazyLock::new(|| {
+    let (tx, rx) = std::sync::mpsc::channel::<Key>();
+    let worker = std::thread::Builder::new().name("pictures".into());
+    let started = worker.spawn(move || {
+        for key in rx {
+            // A decoder's panic costs this picture, not the worker.
+            let read = || scaled(&key.0, key.1);
+            let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(read))
+                .ok()
+                .flatten();
+            if drawn.is_none()
+                && let Ok(mut failed) = FAILED.lock()
+            {
+                failed.retain(|(_, at)| at.elapsed() < RETRY);
+                failed.push((key.clone(), Instant::now()));
+            }
+            if let Ok(mut asked) = ASKED.lock() {
+                asked.retain(|k| *k != key);
+            }
+            DONE.fetch_add(1, Ordering::Release);
+        }
+    });
+    match started {
+        Ok(_) => Some(tx),
+        Err(err) => {
+            tracing::warn!("pictures are decoded on the paint thread: {err}");
+            None
+        }
+    }
+});
+
+thread_local! {
+    /// Whether a picture asked for on this thread wasn't decoded yet.
+    static WAITED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// `draw` run, and, when it asked for a picture not decoded yet, how many
+/// the worker had done before it: what it drew is to be drawn again once
+/// `done` has moved past that.
+pub fn drawing<T>(draw: impl FnOnce() -> T) -> (T, Option<u64>) {
+    let before = done();
+    let outer = WAITED.replace(false);
+    let drawn = draw();
+    let waited = WAITED.get();
+    WAITED.set(outer || waited);
+    (drawn, waited.then_some(before))
+}
+
+/// How many pictures the worker has done (see `drawing`).
+pub fn done() -> u64 {
+    DONE.load(Ordering::Acquire)
+}
+
+/// Send `key` to the worker, unless it is there already.
+fn ask(key: Key) {
+    let Some(worker) = WORKER.as_ref() else {
+        scaled(&key.0, key.1);
+        DONE.fetch_add(1, Ordering::Release);
+        return;
+    };
+    let Ok(mut asked) = ASKED.lock() else {
+        return;
+    };
+    if asked.contains(&key) {
+        return;
+    }
+    asked.push(key.clone());
+    if let Err(err) = worker.send(key) {
+        let key = err.0;
+        asked.retain(|k| *k != key);
+        drop(asked);
+        tracing::warn!(
+            "the picture worker stopped; {} is read here",
+            key.0.display()
+        );
+        scaled(&key.0, key.1);
+        DONE.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// Whether the worker couldn't read `key` a moment ago.
+fn failed(key: &Key) -> bool {
+    FAILED.lock().is_ok_and(|failed| {
+        failed
+            .iter()
+            .any(|(k, at)| k == key && at.elapsed() < RETRY)
+    })
 }
 
 /// What `cache` keeps under `key`, moved to the front.
@@ -336,6 +473,46 @@ fn keep<K>(cache: &Mutex<Vec<(K, AppIcon)>>, key: K, icon: AppIcon, most: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Waits until `done()` passes `from`, for at most 10 s.
+    fn wait_past(from: u64) {
+        let start = Instant::now();
+        while done() == from && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_picture_not_decoded_yet_comes_from_the_worker_and_says_it_did() {
+        let dir = std::env::temp_dir().join(format!("gerdr-later-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("later.png");
+        tiny_skia::Pixmap::new(40, 20)
+            .unwrap()
+            .save_png(&path)
+            .unwrap();
+        let key = (path.clone(), 10);
+
+        let (first, waits) = drawing(|| later(key.clone()));
+        assert!(first.is_none(), "nothing kept at another size yet");
+        let before = waits.expect("the draw is told it waited");
+        wait_past(before);
+        let got = take(&SCALED, &key).expect("the worker kept it");
+        assert_eq!(got.size(), (10, 5));
+
+        // At another size, the one kept stands in while it is decoded.
+        let (stand_in, waits) = drawing(|| later((path.clone(), 30)));
+        assert_eq!(stand_in.map(|icon| icon.size()), Some((10, 5)));
+        assert!(waits.is_some());
+
+        // One that can't be read isn't asked for again at once.
+        let gone = (dir.join("gone.png"), 10);
+        let (_, waits) = drawing(|| later(gone.clone()));
+        wait_past(waits.unwrap());
+        let (none, waits) = drawing(|| later(gone));
+        assert!(none.is_none() && waits.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn a_pngs_size_comes_from_its_header_and_its_picture_scales_to_fit() {

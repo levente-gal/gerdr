@@ -197,6 +197,9 @@ pub(super) struct RowCache<K> {
 struct Row<K> {
     key: K,
     buffer: MemoryRenderBuffer,
+    /// Drawn while a picture was decoding: redrawn once the worker has done
+    /// more than this many (`shot_images::drawing`).
+    waits: Option<u64>,
     bytes: usize,
     seen: u64,
 }
@@ -228,13 +231,21 @@ impl<K: PartialEq> RowCache<K> {
             self.text = text;
         }
         let frame = self.frame;
-        let row = match self.rows.iter().position(|r| r.key == key) {
+        let done = crate::shot_images::done();
+        let kept = self
+            .rows
+            .iter()
+            .position(|r| r.key == key && r.waits.is_none_or(|waits| waits == done));
+        let row = match kept {
             Some(i) => self.rows.remove(i),
             None => {
+                self.rows.retain(|r| r.key != key);
                 self.drawn.set(self.drawn.get() + 1);
                 let px = physical(size, scale);
+                let (buffer, waits) = crate::shot_images::drawing(|| draw(&key));
                 Row {
-                    buffer: draw(&key),
+                    buffer,
+                    waits,
                     key,
                     bytes: (px.w.max(0) * px.h.max(0) * 4) as usize,
                     seen: frame,
