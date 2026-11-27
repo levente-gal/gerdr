@@ -332,7 +332,9 @@ impl ChatLayout {
                 _ => ChatHit::AskFold,
             });
         }
-        if let Some((at, laid)) = &parts.menu {
+        if let Some((at, laid)) = &parts.menu
+            && on(*at)
+        {
             let pos = pos - at.loc.to_f64();
             return (laid.spots.iter())
                 .find(|(rect, _)| rect.to_f64().contains(pos))
@@ -3472,6 +3474,12 @@ pub(super) mod tests {
                 Some(ChatHit::Key(WaitKey::Digit(n)))
             );
         }
+        // The list above it still takes presses: its folds and links.
+        let x = (p.column.0 + 20) as f64;
+        assert!(
+            (layout.list.loc.y..panel.loc.y)
+                .any(|y| layout.hit(&v, Point::from((x, y as f64))).is_some())
+        );
         // The one under the arrow is lit, its words bold.
         assert!(
             laid.bits.iter().any(|(r, bit)| *bit == Bit::Picked
