@@ -142,8 +142,8 @@ impl SlashView {
             .map(|c| {
                 let name = match c.hint.is_empty() {
                     _ if slash.files.is_some() => c.name.clone(),
-                    true => format!("/{}", c.name),
-                    false => format!("/{} {}", c.name, c.hint),
+                    true => c.line(),
+                    false => format!("{} {}", c.line(), c.hint),
                 };
                 (name, c.about.clone())
             })

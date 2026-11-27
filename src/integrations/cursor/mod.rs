@@ -103,7 +103,7 @@ impl Integration for Cursor {
         true
     }
 
-    fn context(&self, path: &Path) -> Option<Context> {
+    fn context(&self, path: &Path, _id: &str) -> Option<Context> {
         stats::cursor_context(path)
     }
 

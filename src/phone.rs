@@ -1511,7 +1511,7 @@ fn commands(project: &str, slug: &str, pane: &str) -> Reply {
         })
         .unwrap_or_default();
     let listed: Vec<Value> = (listed.iter())
-        .map(|c| json!({ "name": c.name, "about": c.about, "hint": c.hint }))
+        .map(|c| json!({ "name": c.name, "line": c.line(), "about": c.about, "hint": c.hint }))
         .collect();
     Reply::json(&Value::Array(listed))
 }
@@ -1628,7 +1628,7 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
         .and_then(|agent| {
             let homes = crate::ai_work::locate::Homes::here()?;
             let source = crate::chat::source::find(agent, &homes).ok()?;
-            crate::ai_work::context::read(source.agent, &source.path)
+            crate::ai_work::context::read(source.agent, &source.path, &source.id)
         })
         .map(|context| context.said());
     if let Some(path) = &chat

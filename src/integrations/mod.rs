@@ -250,8 +250,8 @@ pub trait Integration: Sync {
     fn context_in(&self, _tail: &[u8]) -> Option<Context> {
         None
     }
-    /// The context of its chat kept at `path`. Reads the file.
-    fn context(&self, path: &Path) -> Option<Context> {
+    /// The context of its chat `id` kept at `path`. Reads the file.
+    fn context(&self, path: &Path, _id: &str) -> Option<Context> {
         self.context_in(&tail_of(path)?)
     }
     /// The messages of its transcript `raw`, for their tokens.

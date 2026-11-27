@@ -147,8 +147,9 @@ impl Integration for Codex {
         commands::CODEX
     }
 
-    fn disk_commands(&self, _cwd: &Path, homes: &Homes, _config: &Path, found: &mut Vec<Command>) {
-        commands::codex_disk(homes, found);
+    fn disk_commands(&self, cwd: &Path, homes: &Homes, config: &Path, found: &mut Vec<Command>) {
+        let dirs = self.skill_dirs(cwd, homes, config);
+        commands::codex_disk(homes, &dirs, found);
     }
 
     fn skills_agent(&self) -> Option<&'static str> {

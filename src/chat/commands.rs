@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ai_work::{AgentKind, locate::Homes};
 
-/// A command offered: typed as `/<name>`.
+/// A command offered: typed as `/<name>`, or `$<name>` when a mention.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Command {
     pub name: String,
@@ -14,6 +14,16 @@ pub struct Command {
     pub about: String,
     /// What it takes after it (`argument-hint`); may be empty.
     pub hint: String,
+    /// Typed as `$<name>`: a skill Codex takes as a mention, not a command.
+    pub mention: bool,
+}
+
+impl Command {
+    /// How it is typed: `/<name>`, or `$<name>` when a mention.
+    pub fn line(&self) -> String {
+        let sigil = if self.mention { '$' } else { '/' };
+        format!("{sigil}{}", self.name)
+    }
 }
 
 /// Whether agent `kind` takes side questions: a `/btw` of its own.
@@ -34,9 +44,10 @@ pub fn list(kind: AgentKind, cwd: &Path, homes: &Homes, config: &Path) -> Vec<Co
         name: (*name).to_owned(),
         about: (*about).to_owned(),
         hint: String::new(),
+        mention: false,
     }));
     let mut seen = std::collections::HashSet::new();
-    found.retain(|c| seen.insert(c.name.clone()));
+    found.retain(|c| seen.insert(c.line()));
     found.sort_by(|a, b| a.name.cmp(&b.name));
     found
 }
@@ -277,8 +288,18 @@ pub(crate) mod tests {
             &home.join(".codex/prompts/draft.md"),
             "---\ndescription: Draft\n---\n",
         );
+        write(
+            &cwd.join(".agents/skills/review/SKILL.md"),
+            "---\ndescription: Review it\n---\n",
+        );
         let codex = list(AgentKind::Codex, &cwd, &homes, &config);
         assert_eq!(find(&codex, "prompts:draft").about, "Draft");
+        assert_eq!(find(&codex, "prompts:draft").line(), "/prompts:draft");
+        // A skill is a mention, beside the built-in of its name.
+        let review: Vec<_> = codex.iter().filter(|c| c.name == "review").collect();
+        let lines: Vec<_> = review.iter().map(|c| c.line()).collect();
+        assert_eq!(lines, ["$review", "/review"]);
+        assert_eq!(review[0].about, "Review it");
 
         assert!(list(AgentKind::Unknown, &cwd, &homes, &config).is_empty());
     }
@@ -288,6 +309,7 @@ pub(crate) mod tests {
             name: name.into(),
             about: String::new(),
             hint: String::new(),
+            mention: false,
         }
     }
 

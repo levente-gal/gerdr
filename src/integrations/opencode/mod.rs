@@ -1,7 +1,8 @@
 //! OpenCode. Its chats are sessions in its database,
 //! `~/.local/share/opencode/opencode.db`, read by what changed. Its live
 //! word comes from a plugin in its TUI (`~/.config/opencode/gerdr-live/`)
-//! that tells gerdr's socket itself.
+//! that tells gerdr's socket itself. How full its context is comes from
+//! the tokens kept on each answer.
 
 mod commands;
 mod db;
@@ -9,6 +10,7 @@ mod find;
 mod live;
 pub(crate) mod parse;
 mod screen;
+mod stats;
 
 use std::{
     collections::HashSet,
@@ -22,6 +24,7 @@ use super::{
 use crate::{
     ai_work::{
         AgentKind, Chat,
+        context::Context,
         locate::{Found, Homes, Span},
     },
     chat::{commands::Command, menu::Menu},
@@ -73,6 +76,14 @@ impl Integration for OpenCode {
         span: Span,
     ) -> Result<Option<Found>, String> {
         find::find(&homes.opencode, chat, claimed, span)
+    }
+
+    fn has_context(&self) -> bool {
+        true
+    }
+
+    fn context(&self, path: &Path, id: &str) -> Option<Context> {
+        stats::context(path, id)
     }
 
     fn modes(&self) -> &'static [&'static str] {

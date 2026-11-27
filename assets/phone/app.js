@@ -1342,8 +1342,8 @@ async function slashMenu(box) {
   const starts = all.filter((c) => c.name.toLowerCase().startsWith(t));
   const holds = all.filter((c) => !starts.includes(c) && c.name.toLowerCase().includes(t));
   const shown = [...starts, ...holds].slice(0, 8);
-  menu.innerHTML = shown.map((c) => `<li><button type="button" data-command="${esc(c.name)}">
-    <b>/${esc(c.name)}</b>${c.hint ? ` <span class="quiet">${esc(c.hint)}</span>` : ""}
+  menu.innerHTML = shown.map((c) => `<li><button type="button" data-command="${esc(c.line)}">
+    <b>${esc(c.line)}</b>${c.hint ? ` <span class="quiet">${esc(c.hint)}</span>` : ""}
     ${c.about ? `<span class="about small quiet">${esc(c.about)}</span>` : ""}</button></li>`).join("");
   menu.hidden = !shown.length;
 }
@@ -1371,7 +1371,7 @@ document.addEventListener("click", (e) => {
   const b = e.target.closest?.("[data-command]");
   if (!b) return;
   const line = document.getElementById("line");
-  line.value = `/${b.dataset.command} `;
+  line.value = `${b.dataset.command} `;
   fit(line);
   line.focus();
   document.getElementById("slash").hidden = true;

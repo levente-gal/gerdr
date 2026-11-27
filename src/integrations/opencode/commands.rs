@@ -71,6 +71,7 @@ fn json(path: &Path, found: &mut Vec<Command>) {
             name: name.clone(),
             about: one_line(command["description"].as_str().unwrap_or("")),
             hint: String::new(),
+            mention: false,
         });
     }
 }

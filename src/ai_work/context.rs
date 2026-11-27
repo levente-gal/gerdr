@@ -1,7 +1,8 @@
 //! How full an agent's context is, from the end of its transcript: what its
 //! last turn sent the model, and the model's window. Claude Code says it in
 //! each answer's usage, Codex in its `token_count` events, Cursor in its
-//! chat database's root blob; T3 Code isn't read.
+//! chat database's root blob, OpenCode in its last answer's tokens; T3 Code
+//! isn't read.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -94,15 +95,15 @@ pub fn read_contexts(feature: &Feature, dir: &Path) -> BTreeMap<Stage, (u32, Con
             let claimed = thread::claimed(dir, &chat);
             let chat = thread::with_known_id(dir, &chat);
             let found = locate::find(&homes, &chat, &claimed).ok()??;
-            Some((*stage, (run.n, read(found.agent, &found.main)?)))
+            Some((*stage, (run.n, read(found.agent, &found.main, &found.id)?)))
         })
         .collect()
 }
 
-/// The context of `agent`'s chat kept at `path`: its transcript, or a
-/// Cursor chat's `store.db`. Reads the file.
-pub fn read(agent: AgentKind, path: &Path) -> Option<Context> {
-    crate::integrations::of(agent).context(path)
+/// The context of `agent`'s chat `id` kept at `path`: its transcript, a
+/// Cursor chat's `store.db`, or `opencode.db`. Reads the file.
+pub fn read(agent: AgentKind, path: &Path, id: &str) -> Option<Context> {
+    crate::integrations::of(agent).context(path, id)
 }
 
 #[cfg(test)]

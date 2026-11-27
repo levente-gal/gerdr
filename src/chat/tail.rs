@@ -671,7 +671,11 @@ impl Chat {
                 agent.model_in_chat(&self.reader),
                 agent.effort_in_chat(&self.reader),
             );
-            let context = crate::ai_work::context::read(self.source.agent, &self.source.path);
+            let context = crate::ai_work::context::read(
+                self.source.agent,
+                &self.source.path,
+                &self.source.id,
+            );
             out.push(Event::Items {
                 pane_id: pane_id.to_owned(),
                 source: self.source.clone(),

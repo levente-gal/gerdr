@@ -90,6 +90,7 @@ pub fn read_md(path: &Path, name: String) -> Command {
         name,
         about: field("description"),
         hint: field("argument-hint"),
+        mention: false,
     }
 }
 

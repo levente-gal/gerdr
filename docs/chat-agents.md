@@ -29,7 +29,7 @@ table by hand: run `the_chat_doc_says_what_caps_say` in
 | `effort`: effort picker | typed | own menu | own menu | — | own menu | own menu |
 | `side`: `/btw` side panel | ✓ | — | ✓ | ✓ | — | ✓ |
 | `suggests`: prompt suggestion | ✓ | — | — | — | — | — |
-| `context`: context size | ✓ | ✓ | — | ✓ | ✓ | — |
+| `context`: context size | ✓ | ✓ | ✓ | ✓ | ✓ | — |
 <!-- caps:end -->
 
 ## Every feature
@@ -50,18 +50,19 @@ table by hand: run `the_chat_doc_says_what_caps_say` in
 | Native question cards (AskUserQuestion) | ✓ | — | — | — | — | — |
 | Waiting panel (menu read off the screen) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `/` menu, built-in commands | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `/` menu, commands found on disk | commands, skills, plugins | prompts only | command dirs, `opencode.json` | `.cursor` and `.claude` commands, skills | prompts, skills (no extension commands) | skills, including plugins' |
+| `/` menu, commands found on disk | commands, skills, plugins | prompts, skills (as `$name` mentions) | command dirs, `opencode.json` | `.cursor` and `.claude` commands, skills | prompts, skills (no extension commands) | skills, including plugins' |
 | `/btw` side panel | ✓ | — (CLI has no `/btw`) | ✓ | ✓ | — (CLI has no `/btw`) | ✓ |
 | Prompt suggestion (Left fills it) | ✓ | — | — | — | — | — |
 | Model picker | gerdr's list, types `/model id` | agent's own menu, mirrored | agent's own menu, mirrored | gerdr's list, types `/model id` | agent's own menu, mirrored | agent's own menu, mirrored |
 | Effort picker (Alt+Shift+E) | gerdr's list, types `/effort level` (low … max) | `/model`, then Enter on the current model: its effort step, mirrored | `/variants`, mirrored | — (the effort is part of the model's name) | `/thinking`, mirrored | `/effort` slider, mirrored as a list (← →) |
 | Mode switcher (Shift+Tab) | Auto / Manual / Edits / Plan | Build / Plan | Build / Plan, plus the user's own agents | Agent / Plan / Debug / Ask | — | Auto / Plan / Default / Edits |
-| Context "84k / 1M" | ✓ | ✓ | — | ✓ | ✓ | — |
+| Context "84k / 1M" | ✓ | ✓ | ✓ (no window: "context 76k") | ✓ | ✓ | — |
 | Compact button (Alt+Shift+C) | `/compact` | `/compact` | `/compact` | `/summarize` | `/compact` | `/compact` |
 
 These work the same for all six: image paste, file attach, pinned prompt, the
-↓ button, the working row with its turn clock, and lines sent with Enter
-apart. Both pickers show in the same panel over the reply box for every agent,
+↓ button, the working row with its turn clock, lines sent with Enter apart,
+and markdown with tables, code blocks headed by their language with Copy,
+italic, strike, alerts, file links and images. Both pickers show in the same panel over the reply box for every agent,
 desktop and phone: gerdr's own list or the agent's menu read off its screen.
 A bare `/model` sent from the reply box opens the model picker, as its button
 does, and the agent's bare effort line (`/effort`, `/variants`, `/thinking`)
@@ -146,9 +147,10 @@ shared engine reads what they give. `<agent>/` below is any agent's folder.
 - **Codex is the thinnest:**
   - It has no live events, so no tool-running row from hooks and no
     Allow/Deny. The chat has only its transcript and herdr's status.
-  - It has no subagents, and its only commands from disk are `prompts/`.
-- **Context:** OpenCode and agy show none. OpenCode's database probably
-  stores token counts on its messages; not checked.
+  - It has no subagents.
+- **Context:** agy shows none; its transcript wasn't checked for tokens.
+  OpenCode shows what its last answer sent (`tokens` on the message) but
+  not its window, which its database doesn't keep.
 - **Plan cards:** OpenCode, pi and agy have none. agy's `PLANNER_RESPONSE`
   steps become plain rows, not plans.
 - **Cursor subagents:** each one is its own chat, and the hook's `agentId`

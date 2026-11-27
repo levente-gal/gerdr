@@ -1096,7 +1096,7 @@ fn chat_key(
     if chat.focus == ChatFocus::Composer
         && let Some(slash) = chat.slash.as_mut().filter(|slash| slash.open())
     {
-        let name = slash.picked().map(|c| c.name.clone()).unwrap_or_default();
+        let line = slash.picked().map(Command::line).unwrap_or_default();
         match key_table::press(SLASH_KEYS, &(), mods, sym) {
             Some(SlashKey::Next) => slash.step(1),
             Some(SlashKey::Previous) => slash.step(-1),
@@ -1105,9 +1105,9 @@ fn chat_key(
                 let picked = slash.picked;
                 attach_from_menu(chat, picked);
             }
-            Some(SlashKey::Fill) => chat.draft.set(&format!("/{name} ")),
+            Some(SlashKey::Fill) => chat.draft.set(&format!("{line} ")),
             Some(SlashKey::Run) => {
-                chat.draft.set(&format!("/{name}"));
+                chat.draft.set(&line);
                 return Some(ChatDo::Send);
             }
             None => return composer_key(chat, mods, sym, typed),
@@ -3044,10 +3044,10 @@ impl Gerdr {
                 }
             }
             ChatHit::Command(i) => {
-                let name = (chat.slash.as_ref())
-                    .and_then(|slash| slash.shown.get(i).map(|c| slash.all[*c].name.clone()));
-                if let Some(name) = name {
-                    chat.draft.set(&format!("/{name} "));
+                let line = (chat.slash.as_ref())
+                    .and_then(|slash| slash.shown.get(i).map(|c| slash.all[*c].line()));
+                if let Some(line) = line {
+                    chat.draft.set(&format!("{line} "));
                     chat.focus = ChatFocus::Composer;
                     chat.slash = None;
                 }
@@ -3424,6 +3424,7 @@ mod tests {
             name: (*name).into(),
             about: String::new(),
             hint: String::new(),
+            mention: false,
         };
         slash_sync(chat, None, || all.iter().map(cmd).collect());
     }

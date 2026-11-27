@@ -70,6 +70,7 @@ fn cursor_commands(dir: &Path, found: &mut Vec<Command>) {
             name,
             about: one_line(first.trim_start_matches('#')),
             hint: String::new(),
+            mention: false,
         });
     }
 }
