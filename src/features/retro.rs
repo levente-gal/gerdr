@@ -99,8 +99,8 @@ impl Gerdr {
     }
 
     /// Feature `slug`'s retro is approved: a new feature of the same
-    /// repositories is made off the thread, the retro its brief
-    /// (`retro_created`), and the review closes.
+    /// repositories, its linked projects' too, is made off the thread, the
+    /// retro its brief (`retro_created`), and the review closes.
     pub(crate) fn approve_retro(&mut self, project: &str, slug: &str) {
         let Some(feature) = self.feature(project, slug).cloned() else {
             return self.show_warning("That feature is gone".into());
@@ -123,12 +123,37 @@ impl Gerdr {
         };
         let search = texts::root_search(p);
         let others = self.other_projects_dirs(project);
-        // shortcut: only the home project's repositories come along; link
-        // the others on its page if a proposal needs them.
-        let named: Vec<String> = (feature.touched())
-            .filter(|r| r.project.is_none())
-            .map(|r| r.name.clone())
-            .collect();
+        let named = |of: Option<&str>| -> Vec<String> {
+            (feature.touched())
+                .filter(|r| r.project.as_deref() == of)
+                .map(|r| r.name.clone())
+                .collect()
+        };
+        let home = named(None);
+        // Each linked project the feature touched comes along, found as the
+        // new feature dialog finds it.
+        let mut linked = Vec::new();
+        for link in &feature.links {
+            let touched = named(Some(&link.project));
+            let Some(lp) = self.projects.project(&link.project) else {
+                continue;
+            };
+            if touched.is_empty() {
+                continue;
+            }
+            let (search, others) = (
+                texts::root_search(lp),
+                self.other_projects_dirs(&link.project),
+            );
+            linked.push((
+                link.project.clone(),
+                lp.name.clone(),
+                link.root.clone(),
+                search,
+                others,
+                touched,
+            ));
+        }
         let title = retro_title(&feature.title);
         let new = self.new_feature_slug(project, &title);
         let key = (project.to_owned(), new.clone());
@@ -146,9 +171,24 @@ impl Gerdr {
         };
         let (from, project) = (feature.root.clone(), project.to_owned());
         self.feature_work(Some(busy), move |_| {
-            let (root, result) = match phone_page::phone_root(&from, &search, &others, &named) {
-                Ok((root, touched)) => {
-                    let result = layout::create_spanning(&root, &new, &touched, &[]);
+            let links = linked
+                .into_iter()
+                .map(|(project, name, root, search, others, named)| {
+                    let (root, touched) = phone_page::phone_root(&root, &search, &others, &named)
+                        .map_err(|why| format!("{name}: {why}"))?;
+                    Ok(layout::LinkSpec {
+                        project,
+                        name,
+                        root,
+                        touched,
+                    })
+                });
+            let links: Result<Vec<_>, String> = links.collect();
+            let made = phone_page::phone_root(&from, &search, &others, &home)
+                .and_then(|(root, touched)| Ok((root, touched, links?)));
+            let (root, result) = match made {
+                Ok((root, touched, links)) => {
+                    let result = layout::create_spanning(&root, &new, &touched, &links);
                     (root, result)
                 }
                 Err(why) => {

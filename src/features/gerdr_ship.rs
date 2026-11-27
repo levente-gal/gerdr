@@ -592,6 +592,10 @@ impl Gerdr {
                 let removing = check.is_some_and(|c| ship::removable(&feature, c));
                 let running = self.ending_running(project, slug);
                 steps.extend(ship_after_line(&feature, removing, &running));
+                let no_retro = removing
+                    && feature.ship_plan.remove_worktrees
+                    && self.retro_setting(&feature) != crate::projects::Retro::Off;
+                steps.extend(no_retro.then(|| super::ship_page::NO_RETRO.to_owned()));
                 let squashes = (asked.actions.iter()).any(|a| matches!(a, Action::Squash { .. }));
                 self.features.asked.insert(key, asked);
                 if !squashes {

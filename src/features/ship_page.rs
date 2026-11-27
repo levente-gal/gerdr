@@ -901,12 +901,19 @@ pub(super) fn ship_sections(
                 remove || !feature.ship_plan.keep_workspace,
                 remove.then_some(REMOVING_CLOSES),
             ),
-            after(
-                ShipAfter::Remove,
-                remove_label,
-                remove,
-                (!removable).then_some(ONLY_ONCE_MERGING),
-            ),
+            chrome::ShipStepRow {
+                // Not why it can't be: a note on what ticking it costs.
+                detail: (remove && state.ctx.retro_offered).then(|| CheckLine {
+                    text: NO_RETRO.to_owned(),
+                    tone: CheckTone::Note,
+                }),
+                ..after(
+                    ShipAfter::Remove,
+                    remove_label,
+                    remove,
+                    (!removable).then_some(ONLY_ONCE_MERGING),
+                )
+            },
         ],
         selected: None,
     }));
@@ -1051,6 +1058,9 @@ pub(super) fn pull_first_of(
 
 /// Why the workspace's tick can't go with the worktrees' on.
 pub(super) const REMOVING_CLOSES: &str = "Removing the worktrees closes it";
+/// What removing a shipped feature's worktrees costs where its project
+/// offers retros: the page that offers it goes with them (ADR 0001).
+pub(super) const NO_RETRO: &str = "No retro then: its page goes with them";
 
 /// Why the worktrees can't go with what is ticked.
 pub(super) const ONLY_ONCE_MERGING: &str = "Only when every repository merges into its base";
