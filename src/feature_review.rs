@@ -466,6 +466,10 @@ impl Gerdr {
         let review = f.review.get_or_insert_with(AiReview::default);
         review.posts = posts;
         let got = review_import::import(review, n, raws, &repos, &read.diff);
+        // A review of what changed since may not say it again.
+        if let Some(danger) = read.text.as_deref().ok().and_then(review_import::danger) {
+            review.danger = Some(danger);
+        }
         review.reviewed = read.heads.clone();
         review.patch = Some(patch.clone());
         let waiting = waiting_text(&title, review);

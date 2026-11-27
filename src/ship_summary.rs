@@ -72,6 +72,11 @@ impl Gerdr {
             data.join(SUMMARY_FILE).display().to_string(),
         );
         values.insert("summary.diffs".into(), diffs(&feature));
+        let danger = (feature.review.as_ref()).and_then(|r| r.danger.as_ref());
+        values.insert(
+            "summary.danger".into(),
+            danger.map(|d| d.said()).unwrap_or_default(),
+        );
         let text = match prompts::render_builtin("summary", &values) {
             Ok(text) => text,
             Err(err) => return say(self, format!("its prompt couldn't be written: {err}")),
