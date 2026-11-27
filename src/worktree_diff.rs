@@ -41,7 +41,7 @@ use crate::{
     diff::FileDiff,
     diff_view::{self, CheckOf, DiffView, Keys, NoteOf, Outcome, Section},
     doc_review::DocFile,
-    doc_tab::DocMode,
+    doc_tab::{DocMode, PREVIEW_KEY},
     feature::fix_round::FixPhase,
     feature::review_import::Decision,
     feature::review_items::ItemOf,
@@ -51,7 +51,6 @@ use crate::{
     git::Change,
     git_ops::Since,
     key_table::{self, Binding},
-    md_preview::PREVIEW_KEY,
     repos::{Grouping, f1_lines, help_title, key, key_name, scroll_lines, sheet_step, unpad},
     review::Review,
     scroll::Motion,
@@ -1358,7 +1357,25 @@ impl WorktreeDiff {
             )],
             false => &[],
         };
-        let own = f1_lines(own.into_iter().chain(list).chain(on_page.iter().copied()));
+        // A file with a Preview: its page's own keys there (`doc_tab::page_key`).
+        let preview = (self.doc.as_ref())
+            .is_some_and(|d| DocMode::choices(d.file).contains(&DocMode::Preview));
+        let page: &[(&str, &str)] = match preview {
+            true => &[
+                (
+                    "Up / Down, Home / End",
+                    "in Preview, scroll the page, to its top or end",
+                ),
+                ("Space / Shift+Space", "in Preview, a page down, up"),
+            ],
+            false => &[],
+        };
+        let own = f1_lines(
+            own.into_iter()
+                .chain(list)
+                .chain(on_page.iter().copied())
+                .chain(page.iter().copied()),
+        );
         own.into_iter().chain(diff).collect()
     }
 
@@ -2846,6 +2863,10 @@ impl crate::Gerdr {
             }
             return None;
         }
+        // In Preview the file's page moves by the keys.
+        if self.doc_page_key(mods, sym) {
+            return None;
+        }
         let env = self.worktree_env();
         let done = self.wd_mut()?.key(mods, sym, typed, env);
         self.worktree_done(done)
@@ -3877,6 +3898,19 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_file_with_a_preview_lists_its_page_keys() {
+        let scrolls = |wd: &WorktreeDiff| {
+            (wd.help_lines().iter()).any(|(_, what, _)| what == "in Preview, a page down, up")
+        };
+        let mut wd = doc();
+        assert!(!scrolls(&wd));
+        if let Some(d) = wd.doc.as_mut() {
+            d.file = DocFile::Research(1);
+        }
+        assert!(scrolls(&wd));
+    }
+
+    #[test]
     fn the_comment_hint_says_what_the_key_will_take() {
         let label = |wd: &WorktreeDiff| {
             let hints = wd.hints();
@@ -4308,7 +4342,7 @@ pub(crate) mod tests {
             waits,
         };
         let text = "# Cache the tokens\nStep one.\n";
-        let doc = crate::doc_review::chat_plan_doc("p", 7, chat, text);
+        let doc = crate::doc_review::chat_plan_doc("p", 7, chat, text, Path::new("/w"));
         let mut wd = WorktreeDiff::of_doc(doc, 2, Review::default());
         wd.set_doc(Ok(text.into()), ENV);
         wd

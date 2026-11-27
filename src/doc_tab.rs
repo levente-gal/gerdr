@@ -5,23 +5,20 @@
 //! read, so its tab is for working on it. The switch in the header and
 //! Ctrl+Shift+V move between them. It is the same review as ever
 //! (`WorktreeDiff`, painted by the repositories panel's own `ReposLayers`),
-//! and the same page (`md_preview`) in the tab's one pane, a web window
-//! laid out where the flat panel leaves a hole (`ReposLayout::page`).
+//! and the file's page (`doc_page`) is painted by gerdr where the flat panel
+//! leaves a hole (`ReposLayout::page`).
 //!
-//! The review owns the keys but in Preview, where the page has them and
-//! only what acts on the file is taken (`doc_preview_key`). The pointer
-//! over the page is the browser's: a click on a block puts the review's
-//! caret on its first line, and the two scroll together, each telling the
-//! other the line of the file at its top (`DiffView::top_line`). The gap
-//! between them drags their split, kept in `state.json`.
+//! The review owns the keys, but in Preview, where the page scrolls by them
+//! and only what acts on the file reaches the review (`page_key`). A click
+//! on a block of the page puts the review's caret on the line clicked, and
+//! the two scroll together, each standing with the line of the file the
+//! other has at its top (`DiffView::top_line`); a caret moved off the page
+//! moves the page as little as shows its block. The gap between them drags
+//! their split, kept in `state.json`.
 //!
-//! The page opens when first wanted, on the frame its tab shows, so a
-//! restored tab starts no browser and takes no focus until it is looked
-//! at. Without gerdr's extension the review still works:
-//! the switch's other choices are off, with a tooltip saying why. The tab
-//! is saved and comes back on its file and mode; one whose feature is gone
-//! doesn't. Esc goes back to the feature's tab and closes the file's, but
-//! for one with a comment being written: the page opens it again.
+//! The tab is saved and comes back on its file and mode; one whose feature
+//! is gone doesn't. Esc goes back to the feature's tab and closes the
+//! file's, but for one with a comment being written.
 
 use std::path::Path;
 
@@ -30,26 +27,31 @@ use smithay::{
     input::keyboard::{Keysym, ModifiersState},
     utils::{Logical, Point},
 };
+use std::time::Instant;
 
 use crate::{
     Drag, Gerdr, Tab, TabKind,
     chat::plan_review,
     chrome::{
-        self, DOCK_MIN_WIDTH, DOCK_SHARE_MAX, DOCK_SHARE_MIN, DetailView, ModeSwitch, Rect,
-        ReposButton, ReposView,
+        self, DOCK_MIN_WIDTH, DOCK_SHARE_MAX, DOCK_SHARE_MIN, DetailView, DocPageHit, DocPageView,
+        ModeSwitch, Rect, ReposButton, ReposView,
     },
+    doc_page::{self, DocPage},
     doc_review::{self, DocFile, Failed},
-    md_preview::{self, NO_EXTENSION},
     review::{self, Review},
+    scroll::Motion,
+    tooltip::Tooltip,
     worktree_diff::{ChatPlanOf, DRAFT_OPEN, DocOf, Env, WorktreeDiff},
 };
 
+/// The key going round a file's tab's modes.
+pub const PREVIEW_KEY: &str = "Ctrl+Shift+V";
+
 /// How far, in lines, the review may move before its page follows.
 const SCROLL_STILL: f64 = 0.01;
-
-/// The line of a file under review its caret is on, and its comments by
-/// the line they end on.
-pub type ReviewMarks = (Option<usize>, Vec<(usize, String)>);
+/// How far a line key moves the page, in logical pixels; a page key moves
+/// it a page less this.
+const LINE_STEP: f64 = 40.0;
 
 /// What a file's tab shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,14 +164,13 @@ pub struct DocRecord {
 pub struct ReviewTab {
     pub mode: DocMode,
     pub wd: WorktreeDiff,
-    /// Where the page's window goes, as the view was laid out last: none
-    /// in Review, where it hides.
+    /// Where the file's page goes, as the view was laid out last: none in
+    /// Review, where it hides.
     pub page: Option<Rect>,
-    /// The page can't open: no gerdr extension to steer it.
-    pub no_browser: bool,
-    /// Its page was opened, or tried: one gone since doesn't come back by
-    /// itself.
-    pub page_asked: bool,
+    pub doc: DocPage,
+    /// The block of the page the review's caret was in last: the page shows
+    /// one it moved to.
+    caret: Option<usize>,
     /// Closed by the user: it goes with its panes (see `Gerdr::prune`).
     pub closing: bool,
 }
@@ -180,8 +181,8 @@ impl ReviewTab {
             mode,
             wd,
             page: None,
-            no_browser: false,
-            page_asked: false,
+            doc: DocPage::default(),
+            caret: None,
             closing: false,
         }
     }
@@ -196,17 +197,39 @@ impl std::fmt::Debug for ReviewTab {
     }
 }
 
-/// Whether Preview takes this key from the page: only what acts on the
-/// file, the page keeping the rest.
-pub fn doc_preview_key(mods: &ModifiersState, sym: Keysym) -> bool {
+/// What a key does in Preview: moves the page, goes on to the review (only
+/// what acts on the file), or nothing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PageKey {
+    /// By as many lines (`LINE_STEP`), down positive.
+    Lines(f64),
+    /// By as many pages.
+    Pages(f64),
+    /// To its top, or (`true`) its end.
+    End(bool),
+    Review,
+    Nothing,
+}
+
+/// What `sym` does in Preview: the keys a browser's page scrolls by, and
+/// what acts on the file.
+pub fn page_key(mods: &ModifiersState, sym: Keysym) -> PageKey {
     let shift = mods.shift;
     let plain = !mods.ctrl && !mods.alt && !mods.logo;
     let ctrl = mods.ctrl && !mods.alt && !mods.logo;
     match sym {
-        Keysym::Escape | Keysym::F1 => plain && !shift,
-        Keysym::v | Keysym::V => ctrl && shift,
-        Keysym::Return | Keysym::KP_Enter => ctrl,
-        _ => false,
+        Keysym::Escape | Keysym::F1 if plain && !shift => PageKey::Review,
+        Keysym::v | Keysym::V if ctrl && shift => PageKey::Review,
+        Keysym::Return | Keysym::KP_Enter if ctrl => PageKey::Review,
+        _ if !plain => PageKey::Nothing,
+        Keysym::Up | Keysym::KP_Up => PageKey::Lines(-1.0),
+        Keysym::Down | Keysym::KP_Down => PageKey::Lines(1.0),
+        Keysym::Page_Up | Keysym::KP_Page_Up => PageKey::Pages(-1.0),
+        Keysym::Page_Down | Keysym::KP_Page_Down => PageKey::Pages(1.0),
+        Keysym::space => PageKey::Pages(if shift { -1.0 } else { 1.0 }),
+        Keysym::Home | Keysym::KP_Home => PageKey::End(false),
+        Keysym::End | Keysym::KP_End => PageKey::End(true),
+        _ => PageKey::Nothing,
     }
 }
 
@@ -221,33 +244,41 @@ pub fn detail_share(mode: DocMode, wide: bool, split: f64) -> f64 {
     }
 }
 
-/// What a file's tab has to show its mode switch in.
-#[derive(Clone, Copy, Debug)]
-pub struct ModeRoom {
-    /// The output is wide enough for Split.
-    pub wide: bool,
-    /// The page can't be had: what needs it is off.
-    pub without_page: bool,
-}
-
-/// The switch of `file`'s tab: Split only on an output wide enough, and
-/// what needs the page off without it. None with nothing to go to.
-pub fn mode_switch(file: DocFile, mode: DocMode, room: ModeRoom) -> Option<ModeSwitch> {
-    let ModeRoom { wide, without_page } = room;
+/// The switch of `file`'s tab: Split only on an output `wide` enough. None
+/// with nothing to go to.
+pub fn mode_switch(file: DocFile, mode: DocMode, wide: bool) -> Option<ModeSwitch> {
     let shown = (DocMode::choices(file).iter().copied())
         .filter(|m| wide || *m != DocMode::Split || mode == DocMode::Split);
     let shown: Vec<DocMode> = shown.collect();
     (shown.len() > 1).then(|| ModeSwitch {
         labels: shown.iter().map(|m| m.label().to_owned()).collect(),
         on: shown.iter().position(|m| *m == mode).unwrap_or(0),
-        off: match without_page {
-            true => (shown.iter().enumerate())
-                .filter(|(_, m)| **m != DocMode::Review)
-                .map(|(i, _)| i)
-                .collect(),
-            false => Vec::new(),
-        },
     })
+}
+
+/// The block of `tab`'s page its review's caret is in, and those with
+/// comments with what they say, by their index among its blocks.
+fn page_marks(tab: &ReviewTab) -> (Option<usize>, Vec<(usize, String)>) {
+    let lines = &tab.doc.lines;
+    let caret = (tab.wd.diff.cursor_line()).and_then(|line| doc_page::pick_block(lines, line));
+    let comments = match tab.wd.doc.as_ref().is_some_and(DocOf::only_read) {
+        true => Vec::new(),
+        false => tab.wd.diff.comment_lines(),
+    };
+    let mut said: Vec<(usize, String)> = Vec::new();
+    for (line, text) in comments {
+        let Some(b) = doc_page::pick_block(lines, line) else {
+            continue;
+        };
+        match said.iter_mut().find(|(at, _)| *at == b) {
+            Some((_, all)) => {
+                all.push_str("\n\n");
+                all.push_str(&text);
+            }
+            None => said.push((b, text)),
+        }
+    }
+    (caret, said)
 }
 
 impl Gerdr {
@@ -280,7 +311,7 @@ impl Gerdr {
         let area = self.content_rect();
         let share = match mode {
             DocMode::Preview => 1.0,
-            _ => detail_share(mode, self.doc_wide(), self.web.previews.share),
+            _ => detail_share(mode, self.doc_wide(), self.doc_share),
         };
         let (left, ..) = chrome::split_rects(area, share);
         Env {
@@ -302,9 +333,8 @@ impl Gerdr {
         let mut view = tab.wd.repos_view(self.doc_env(tab.mode));
         let wide = self.doc_wide();
         view.flat = true;
-        view.detail_share = detail_share(tab.mode, wide, self.web.previews.share);
-        let without_page = tab.no_browser;
-        view.modes = mode_switch(file, tab.mode, ModeRoom { wide, without_page });
+        view.detail_share = detail_share(tab.mode, wide, self.doc_share);
+        view.modes = mode_switch(file, tab.mode, wide);
         if tab.mode == DocMode::Preview {
             view.detail = DetailView::default();
             (view.hints)
@@ -314,9 +344,8 @@ impl Gerdr {
     }
 
     /// Bring the shown file's tab up to date, every frame: read when it
-    /// comes to show; its page opened if wanted and its window laid out
-    /// where the view leaves room for it; what the page marks and where it
-    /// stands sent on.
+    /// comes to show; its page laid out where the view leaves room for it,
+    /// standing where its review does.
     pub(crate) fn sync_doc_tab(&mut self) -> Option<ReposView> {
         let shown = self.tab().filter(|t| t.review().is_some()).map(|t| t.id);
         if shown != self.doc_tab_shown {
@@ -330,97 +359,31 @@ impl Gerdr {
                 self.probe_feature(&project, &slug);
             }
         }
-        self.sync_preview_marks();
         // No file's tab: a feature's review on its page paints the same way.
         if shown.is_none() {
             return self.sync_inline_review();
         }
         self.doc_stand();
-        let (w, t) = (self.active_workspace, self.workspace()?.active_tab);
         let workspace = self.active_workspace;
         let env = self.doc_env(self.review_tab()?.mode);
         let review = self.review_tab_mut()?;
         review.wd.workspace = workspace;
         // Its lines wrap at the width it shows in, as the gap is dragged too.
         review.wd.with_diff(env, |diff, ctx| diff.rewrap(ctx));
-        self.open_wanted_page(w, t);
         let view = self.doc_tab_view()?;
         let page = chrome::repos_layout(&view, self.content_rect()).page;
         let review = self.review_tab_mut()?;
-        if review.page != page {
-            review.page = page;
-            self.arrange();
-            self.refresh_pointer_focus();
-        }
-        self.sync_doc_scroll();
+        review.page = page;
+        let doc = review.wd.doc.as_ref()?;
+        let text = doc.text.as_deref().ok_or("The file can't be read");
+        let dir = doc.path.parent().map(Path::to_path_buf);
+        review.doc.set_text(text, dir.as_deref());
+        self.sync_doc_scroll(env);
         Some(view)
     }
 
-    /// Open the page of the file's tab `t` of workspace `w` when its mode
-    /// wants it and there is none. One asked for and gone (its window
-    /// closed, the browser quit) isn't opened again: back to the review.
-    fn open_wanted_page(&mut self, w: usize, t: usize) {
-        let Some(tab) = self.workspaces.get_mut(w).and_then(|ws| ws.tabs.get_mut(t)) else {
-            return;
-        };
-        let empty = tab.layout.is_none() && tab.expected.is_empty();
-        let Some(review) = tab.review_mut() else {
-            return;
-        };
-        if review.mode == DocMode::Review || !empty {
-            return;
-        }
-        let asked = std::mem::replace(&mut review.page_asked, true);
-        if (asked || !self.ensure_doc_page(w, t))
-            && let Some(review) = self.review_tab_mut()
-        {
-            review.mode = DocMode::Review;
-        }
-    }
-
-    /// The page of the file's tab `t` of workspace `w`, opened if it has
-    /// none. Without gerdr's extension it can't: an error says so, and the
-    /// switch's choices needing it go off.
-    fn ensure_doc_page(&mut self, w: usize, t: usize) -> bool {
-        let Some(ws) = self.workspaces.get(w) else {
-            return false;
-        };
-        let Some(tab) = ws.tabs.get(t) else {
-            return false;
-        };
-        if tab.layout.is_some() || !tab.expected.is_empty() {
-            return true;
-        }
-        let Some(doc) = tab.review().and_then(|r| r.wd.doc.as_ref()) else {
-            return false;
-        };
-        let url = md_preview::page_url(&doc.path);
-        let dir = ws.dir.clone();
-        let steers = self.steers(&url, &dir);
-        if let Some(review) = (self.workspaces.get_mut(w))
-            .and_then(|ws| ws.tabs.get_mut(t))
-            .and_then(Tab::review_mut)
-        {
-            review.no_browser = !steers;
-        }
-        if !steers {
-            crate::problems::report(md_preview::PROBLEM, NO_EXTENSION);
-            self.show_error(NO_EXTENSION.into());
-            return false;
-        }
-        crate::problems::clear(md_preview::PROBLEM);
-        self.launch_into(w, t, None, &url).is_some()
-    }
-
-    /// Show `mode` in the shown file's tab: a draft comment stays on show,
-    /// and what needs the page says when it can't have it.
+    /// Show `mode` in the shown file's tab: a draft comment stays on show.
     pub(crate) fn set_doc_mode(&mut self, mode: DocMode) {
-        let (w, Some(t)) = (
-            self.active_workspace,
-            self.workspace().map(|ws| ws.active_tab),
-        ) else {
-            return;
-        };
         let Some(review) = self.review_tab() else {
             return;
         };
@@ -430,20 +393,9 @@ impl Gerdr {
         if mode == DocMode::Preview && review.wd.diff.editing.is_some() {
             return self.show_warning(DRAFT_OPEN.into());
         }
-        if mode != DocMode::Review && !self.ensure_doc_page(w, t) {
-            return;
-        }
         if let Some(review) = self.review_tab_mut() {
             review.mode = mode;
-            review.page_asked = true;
         }
-        // Only Preview leaves the keys to the page.
-        let page = self.tab().and_then(|tab| tab.panes.first());
-        let window = page
-            .filter(|_| mode == DocMode::Preview)
-            .map(|pane| pane.window.clone());
-        self.focus(window);
-        self.refresh_pointer_focus();
     }
 
     /// Ctrl+Shift+V in a file's tab: the next mode round.
@@ -468,29 +420,22 @@ impl Gerdr {
                 .is_some_and(|tab| tab.wd.diff.editing.is_none() && !tab.wd.diff.search_focused())
     }
 
-    /// Whether the shown file's tab has the keys now: not in Preview, where
-    /// the page has them, unless a sheet of its own is open.
+    /// Whether the shown file's tab has the keys now: a feature's review on
+    /// its page once pressed on, a file's tab always.
     pub(crate) fn doc_tab_takes_keys(&self) -> bool {
         if let Some(wd) = self.inline_wd() {
             let rail = self.features.panel.as_ref().is_some_and(|p| p.rail_keys);
             return !rail || wd.sheet(self.inline_env()).is_some();
         }
-        self.review_tab().is_some_and(|tab| {
-            tab.mode != DocMode::Preview || tab.wd.sheet(self.doc_env(tab.mode)).is_some()
-        })
+        self.review_tab().is_some()
     }
 
-    /// Whether the shown file's tab takes the pointer at `pos`: over its
-    /// page, the browser does, unless a sheet of its own is open.
+    /// Whether the shown file's tab takes the pointer at `pos`.
     pub(crate) fn doc_tab_covers(&self, pos: Point<f64, Logical>) -> bool {
-        let Some(tab) = self.review_tab() else {
-            return self.inline_wd().is_some() && self.review_area().to_f64().contains(pos);
-        };
-        if !self.content_rect().to_f64().contains(pos) {
-            return false;
+        match self.review_tab() {
+            Some(_) => self.content_rect().to_f64().contains(pos),
+            None => self.inline_wd().is_some() && self.review_area().to_f64().contains(pos),
         }
-        let on_page = tab.page.is_some_and(|page| page.to_f64().contains(pos));
-        !on_page || tab.wd.sheet(self.doc_env(tab.mode)).is_some()
     }
 
     /// Show `file` of feature `slug` in its tab: one already open as it
@@ -525,12 +470,11 @@ impl Gerdr {
         let key = plan_review::key(item_id);
         let file = DocFile::ChatPlan(key);
         let open = self.doc_tab_in(w, file);
-        if open.is_none()
-            && let Err(err) = plan_review::snapshot(key, &text)
-        {
-            tracing::warn!("keeping plan {item_id} of pane {pane_id}: {err}");
-            return self.show_error(format!("Couldn't keep a copy of the plan: {err}"));
+        if open.is_none() {
+            plan_review::tidy(key);
         }
+        let dir =
+            (self.chat_agent(pane_id).and_then(|a| a.cwd.clone())).unwrap_or_else(plan_review::dir);
         self.close_panels_for_tab();
         let t = open.unwrap_or_else(|| {
             let chat = ChatPlanOf {
@@ -539,7 +483,7 @@ impl Gerdr {
                 waits: self.plan_ask_waits(pane_id, item_id),
             };
             let project = self.project.clone().unwrap_or_default();
-            let doc = doc_review::chat_plan_doc(&project, key, chat, &text);
+            let doc = doc_review::chat_plan_doc(&project, key, chat, &text, &dir);
             self.insert_doc_tab(w, doc, text, DocMode::opens_on(file, self.doc_wide()))
         });
         self.switch_workspace(w);
@@ -729,7 +673,7 @@ impl Gerdr {
     pub(crate) fn doc_drag_to(&mut self, pos: Point<f64, Logical>) {
         let area = self.content_rect();
         let share = (pos.x - area.loc.x as f64) / area.size.w.max(1) as f64;
-        self.web.previews.share = share.clamp(DOCK_SHARE_MIN, DOCK_SHARE_MAX);
+        self.doc_share = share.clamp(DOCK_SHARE_MIN, DOCK_SHARE_MAX);
     }
 
     /// Where the repositories panel goes: centred in the output; the
@@ -749,87 +693,226 @@ impl Gerdr {
         (on_page.and_then(|panel| panel.review_rect)).unwrap_or_else(|| self.content_rect())
     }
 
-    /// The review of `file`, any tab's: its caret's line and its comments.
-    pub(crate) fn review_marks(&self, file: &Path) -> Option<ReviewMarks> {
-        let tabs = self.workspaces.iter().flat_map(|ws| &ws.tabs);
-        let wd = tabs
-            .filter_map(Tab::review)
-            .map(|review| &review.wd)
-            .find(|wd| wd.doc.as_ref().is_some_and(|doc| doc.path == file))?;
-        let comments = match wd.doc.as_ref().is_some_and(DocOf::only_read) {
-            true => Vec::new(),
-            false => wd.diff.comment_lines(),
-        };
-        Some((wd.diff.cursor_line(), comments))
+    /// The shown file's tab's page, as the chrome paints it: none in
+    /// Review, where it hides.
+    pub(crate) fn doc_page_view(&self) -> Option<DocPageView> {
+        let tab = self.review_tab()?;
+        let (caret, said) = page_marks(tab);
+        Some(DocPageView {
+            rect: tab.page?,
+            blocks: tab.doc.blocks.clone(),
+            top: tab.doc.top(),
+            caret,
+            said: said.into_iter().map(|(b, _)| b).collect(),
+        })
     }
 
-    /// Scroll the shown file's page to where its review stands, if that
-    /// moved since they last stood together and both are in use.
-    fn sync_doc_scroll(&mut self) {
-        let Some(tab) = self.tab() else {
+    /// Stand the shown file's page and its review together: the one moved
+    /// since they last stood so takes the other along, the review when
+    /// both did (as a new text has the page stand where its review does).
+    /// Then a caret moved to a block out of view moves the page as little
+    /// as shows it, and the review stays where it is.
+    fn sync_doc_scroll(&mut self, env: Env) {
+        let Some(tab) = self.review_tab_mut() else {
             return;
         };
-        let Some(pane) = tab.panes.first().map(|p| p.id) else {
+        let Some(rect) = tab.page else {
+            tab.doc.stood = None;
+            tab.caret = None;
             return;
         };
-        let Some(top) = (tab.review())
-            .filter(|r| r.mode != DocMode::Review)
-            .and_then(|r| r.wd.diff.top_line())
-        else {
-            return;
+        let (h, spans) = chrome::doc_page_spans(&tab.doc.blocks, rect);
+        let b = doc_page::bounds(h, f64::from(rect.size.h));
+        let lines = tab.doc.lines.clone();
+        let page_line = |doc: &DocPage| doc_page::y_line(&lines, &spans, doc.top());
+        let review = tab.wd.diff.top_line();
+        let moved = |was: f64, now: f64| (was - now).abs() >= SCROLL_STILL;
+        let (page, review) = match (tab.doc.stood, review) {
+            (Some((p, r)), Some(now)) if !moved(r, now) && moved(p, page_line(&tab.doc)) => {
+                let line = page_line(&tab.doc);
+                let top = tab.wd.with_diff(env, |diff, ctx| {
+                    diff.stand_at_line(line, ctx);
+                    diff.top_line()
+                });
+                (line, top.unwrap_or(line))
+            }
+            (Some((p, r)), Some(now)) if !moved(r, now) => (p, r),
+            (_, Some(now)) => {
+                let y = doc_page::line_y(&lines, &spans, now);
+                tab.doc.scroll.jump(y.clamp(0.0, b.max));
+                (page_line(&tab.doc), now)
+            }
+            (_, None) => (page_line(&tab.doc), 1.0),
         };
-        if (self.web.previews.top(pane)).is_some_and(|was| (was - top).abs() < SCROLL_STILL) {
+        tab.doc.stood = Some((page, review));
+        let caret = page_marks(tab).0;
+        if std::mem::replace(&mut tab.caret, caret) == caret {
             return;
         }
-        if self.scroll_to_browser(pane, top) {
-            self.web.previews.set_top(pane, top);
-        }
-    }
-
-    /// The file's tab whose page is pane `pane`, with the view's numbers
-    /// for its mode.
-    fn review_of_page(&mut self, pane: u32) -> Option<(&mut ReviewTab, Env)> {
-        let (w, t) = self.pane_place(pane)?;
-        let mode = self.workspaces.get(w)?.tabs.get(t)?.review()?.mode;
-        let env = self.doc_env(mode);
-        let review = self.workspaces[w].tabs[t].review_mut()?;
-        Some((review, env))
-    }
-
-    /// The page `pane` scrolled to `line` of its file at its top: its
-    /// review stands there too.
-    pub(crate) fn preview_scrolled(&mut self, pane: u32, line: f64) {
-        if !line.is_finite() {
-            return;
-        }
-        let Some((review, env)) = self.review_of_page(pane) else {
+        let Some(&(top, bottom)) = caret.and_then(|c| spans.get(c)) else {
             return;
         };
-        let top = review.wd.with_diff(env, |diff, ctx| {
-            diff.stand_at_line(line, ctx);
-            diff.top_line()
-        });
-        // What the review stands at is what the page shows: not sent back.
-        self.web.previews.set_top(pane, top.unwrap_or(line));
+        // The page's content starts this far down it.
+        let (top, bottom) = (f64::from(top), f64::from(bottom) + chrome::DOC_PAGE_ROOM);
+        let (shown, view) = (
+            tab.doc.top(),
+            f64::from(rect.size.h) - chrome::DOC_PAGE_ROOM,
+        );
+        let to = match () {
+            _ if top < shown => top,
+            _ if bottom > shown + view => (bottom - view).min(top),
+            _ => return,
+        };
+        tab.doc.scroll.jump(to.clamp(0.0, b.max));
+        tab.doc.stood = Some((page_line(&tab.doc), review));
     }
 
-    /// A block clicked in `pane`'s page, at `line` of its file: its
-    /// review's caret goes there.
-    pub(crate) fn preview_line(&mut self, pane: u32, line: usize) {
-        let Some((review, env)) = self.review_of_page(pane) else {
-            return;
+    /// Move the shown file's page on to `now`. Whether it still moves.
+    pub(crate) fn doc_page_scroll_tick(&mut self, now: Instant) -> bool {
+        let Some(tab) = self.review_tab_mut() else {
+            return false;
         };
-        let top = review.wd.with_diff(env, |diff, ctx| {
+        let Some(rect) = tab.page else {
+            return false;
+        };
+        let (h, _) = chrome::doc_page_spans(&tab.doc.blocks, rect);
+        tab.doc
+            .scroll
+            .tick(now, doc_page::bounds(h, f64::from(rect.size.h)))
+    }
+
+    /// The wheel or the touchpad moved the shown file's page, if `pos` is
+    /// on it. Whether it was.
+    pub(crate) fn doc_page_scroll(&mut self, pos: Point<f64, Logical>, motion: Motion) -> bool {
+        let Some(tab) = self.review_tab_mut() else {
+            return false;
+        };
+        let Some(rect) = tab.page.filter(|r| r.to_f64().contains(pos)) else {
+            return false;
+        };
+        let (h, _) = chrome::doc_page_spans(&tab.doc.blocks, rect);
+        doc_page::scroll(
+            &mut tab.doc,
+            motion,
+            doc_page::bounds(h, f64::from(rect.size.h)),
+        );
+        true
+    }
+
+    /// A key in Preview: the page moves by it, or it goes on to the review
+    /// (only what acts on the file), or it does nothing. Whether the page
+    /// took it.
+    pub(crate) fn doc_page_key(&mut self, mods: &ModifiersState, sym: Keysym) -> bool {
+        let env = self.doc_env(DocMode::Preview);
+        let Some(tab) = self.review_tab_mut() else {
+            return false;
+        };
+        if tab.mode != DocMode::Preview || tab.wd.sheet(env).is_some() {
+            return false;
+        }
+        let Some(rect) = tab.page else {
+            return false;
+        };
+        let (h, _) = chrome::doc_page_spans(&tab.doc.blocks, rect);
+        let b = doc_page::bounds(h, f64::from(rect.size.h));
+        let page = (f64::from(rect.size.h) - LINE_STEP).max(LINE_STEP);
+        let top = tab.doc.scroll.pos();
+        let to = match page_key(mods, sym) {
+            PageKey::Review => return false,
+            PageKey::Nothing => return true,
+            PageKey::Lines(n) => top + n * LINE_STEP,
+            PageKey::Pages(n) => top + n * page,
+            PageKey::End(end) => match end {
+                true => b.max,
+                false => 0.0,
+            },
+        };
+        tab.doc
+            .scroll
+            .glide_to(to.clamp(0.0, b.max), Instant::now(), b);
+        true
+    }
+
+    /// A press at `pos` on the shown file's page, if it is on it: a link
+    /// opens, a code block's "Copy" copies it, and a block puts the review's
+    /// caret on the line pressed. The page stays where it is, and so does
+    /// the review: a double click or a drag would land on what moved under
+    /// it. Whether it was on the page.
+    pub(crate) fn doc_page_click(&mut self, pos: Point<f64, Logical>) -> bool {
+        let Some(view) = self.doc_page_view() else {
+            return false;
+        };
+        if !view.rect.to_f64().contains(pos) {
+            return false;
+        }
+        let Some(hit) = chrome::doc_page_hit(&view, pos) else {
+            return true;
+        };
+        let (b, y) = match hit {
+            DocPageHit::Link(url) => {
+                self.doc_page_link(url);
+                return true;
+            }
+            DocPageHit::Copy(text) => {
+                let note = crate::page_text::copied_note(&text);
+                self.copy_text(text);
+                self.show_success(note);
+                return true;
+            }
+            DocPageHit::Said(b) => (b, None),
+            DocPageHit::Block(b, y) => (b, Some(y)),
+        };
+        let env = self.doc_env(self.review_tab().map_or(DocMode::Review, |t| t.mode));
+        let rect = view.rect;
+        let Some(tab) = self.review_tab_mut() else {
+            return true;
+        };
+        let (_, spans) = chrome::doc_page_spans(&tab.doc.blocks, rect);
+        let lines = tab.doc.lines.clone();
+        let line = match y {
+            Some(y) => doc_page::clicked_line(&lines, &spans, b, y),
+            None => lines.get(b).map_or(1, |l| l.0),
+        };
+        let top = tab.wd.with_diff(env, |diff, ctx| {
             if let Some(row) = diff.row_of_line(line) {
                 diff.caret_to(row, 0, ctx);
             }
             diff.top_line()
         });
-        // The review moved to show its caret; the page, clicked, stays where
-        // it is, with text being chosen in it: this isn't sent to it.
-        if let Some(top) = top {
-            self.web.previews.set_top(pane, top);
+        let page = doc_page::y_line(&lines, &spans, tab.doc.top());
+        tab.doc.stood = top.map(|top| (page, top));
+        tab.caret = page_marks(tab).0;
+        true
+    }
+
+    /// Link `url` pressed on the shown file's page: a web page opens in a
+    /// tab of the workspace, a file in Zed.
+    fn doc_page_link(&mut self, url: String) {
+        if crate::is_web_link(&url) {
+            return self.open_page(self.active_workspace, url);
         }
+        if let Some(file) = crate::md_blocks::file_target(&url, None) {
+            self.open_linked_file(file);
+        }
+    }
+
+    /// What the pointer at `pos` over the shown file's page offers: a dot's
+    /// comments. `None` when it isn't on the page.
+    pub(crate) fn doc_page_hover(&mut self, pos: Point<f64, Logical>) -> Option<Option<Tooltip>> {
+        let view = self.doc_page_view()?;
+        if !view.rect.to_f64().contains(pos) {
+            return None;
+        }
+        if let Some(tab) = self.review_tab_mut() {
+            tab.wd.hover = None;
+        }
+        let Some(DocPageHit::Said(b)) = chrome::doc_page_hit(&view, pos) else {
+            return Some(None);
+        };
+        let said = page_marks(self.review_tab()?).1;
+        let text = said.into_iter().find(|(at, _)| *at == b)?.1;
+        let at = Rect::new(pos.to_i32_round(), (1, 1).into());
+        Some(Some(Tooltip::new(&text, at)))
     }
 }
 
@@ -912,19 +995,30 @@ mod tests {
     }
 
     #[test]
-    fn preview_takes_only_the_keys_acting_on_the_file() {
+    fn preview_scrolls_by_a_pages_keys_and_passes_on_what_acts_on_the_file() {
         let plain = mods(false, false);
-        assert!(doc_preview_key(&plain, Keysym::Escape));
-        assert!(doc_preview_key(&plain, Keysym::F1));
-        assert!(doc_preview_key(&mods(true, true), Keysym::V));
-        assert!(doc_preview_key(&mods(true, false), Keysym::Return));
-        assert!(doc_preview_key(&mods(true, true), Keysym::Return));
+        let shift = ModifiersState {
+            shift: true,
+            ..plain
+        };
+        assert_eq!(page_key(&plain, Keysym::Escape), PageKey::Review);
+        assert_eq!(page_key(&plain, Keysym::F1), PageKey::Review);
+        assert_eq!(page_key(&mods(true, true), Keysym::V), PageKey::Review);
+        assert_eq!(
+            page_key(&mods(true, false), Keysym::Return),
+            PageKey::Review
+        );
+        assert_eq!(page_key(&mods(true, true), Keysym::Return), PageKey::Review);
         // The page's own.
-        assert!(!doc_preview_key(&plain, Keysym::v));
-        assert!(!doc_preview_key(&plain, Keysym::Return));
-        assert!(!doc_preview_key(&mods(true, false), Keysym::v));
-        assert!(!doc_preview_key(&mods(true, false), Keysym::c));
-        assert!(!doc_preview_key(&plain, Keysym::Down));
+        assert_eq!(page_key(&plain, Keysym::Down), PageKey::Lines(1.0));
+        assert_eq!(page_key(&plain, Keysym::Page_Up), PageKey::Pages(-1.0));
+        assert_eq!(page_key(&shift, Keysym::space), PageKey::Pages(-1.0));
+        assert_eq!(page_key(&plain, Keysym::End), PageKey::End(true));
+        // What would act on the hidden review does nothing.
+        assert_eq!(page_key(&plain, Keysym::v), PageKey::Nothing);
+        assert_eq!(page_key(&plain, Keysym::Return), PageKey::Nothing);
+        assert_eq!(page_key(&mods(true, false), Keysym::v), PageKey::Nothing);
+        assert_eq!(page_key(&mods(true, false), Keysym::Down), PageKey::Nothing);
     }
 
     #[test]
@@ -938,20 +1032,9 @@ mod tests {
         assert_eq!(detail_share(DocMode::Split, false, 0.4), 1.0);
     }
 
-    /// An output wide enough for Split, one too narrow, and a wide one
-    /// without the page.
-    const WIDE: ModeRoom = ModeRoom {
-        wide: true,
-        without_page: false,
-    };
-    const NARROW: ModeRoom = ModeRoom {
-        wide: false,
-        without_page: false,
-    };
-    const NO_PAGE: ModeRoom = ModeRoom {
-        wide: true,
-        without_page: true,
-    };
+    /// An output wide enough for Split, and one too narrow.
+    const WIDE: bool = true;
+    const NARROW: bool = false;
 
     #[test]
     fn the_switch_says_what_can_be_had() {
@@ -959,15 +1042,11 @@ mod tests {
         let wide = mode_switch(evidence, DocMode::Review, WIDE).unwrap();
         assert_eq!(wide.labels, ["Preview", "Review", "Split"]);
         assert_eq!(wide.on, 1);
-        assert!(wide.off.is_empty());
         // No room for Split, unless it is what shows.
         let narrow = mode_switch(evidence, DocMode::Preview, NARROW).unwrap();
         assert_eq!(narrow.labels, ["Preview", "Review"]);
         let still = mode_switch(evidence, DocMode::Split, NARROW).unwrap();
         assert_eq!(still.on, 2);
-        // Without the extension only the review is there.
-        let off = mode_switch(evidence, DocMode::Review, NO_PAGE).unwrap();
-        assert_eq!(off.off, [0, 2]);
     }
 
     #[test]
@@ -976,8 +1055,6 @@ mod tests {
         let wide = mode_switch(brief, DocMode::Review, WIDE).unwrap();
         assert_eq!(wide.labels, ["Review", "Split"]);
         assert_eq!(wide.on, 0);
-        let off = mode_switch(brief, DocMode::Review, NO_PAGE).unwrap();
-        assert_eq!(off.off, [1]);
         // Nothing to go to, so no switch.
         assert_eq!(mode_switch(brief, DocMode::Review, NARROW), None);
         // Split showing when the output narrowed: the way back stays.

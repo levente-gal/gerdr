@@ -2,13 +2,12 @@
 //! a feature's plan is: its markdown beside its page, line comments, Send
 //! back. The plan is never edited there: only commented on.
 //!
-//! Its text is a snapshot of the card's, written as the review opens
-//! (`<state dir>/chat-plans/<key>.md`), so Claude, Cursor and Codex go one
-//! way (Codex writes no file; Claude rewrites its own in place), and the
-//! comments stay on the version they were made on: a plan written again is
-//! a new card with a review of its own. Its comments are kept beside it
-//! (`<key>-comments.json`); snapshots and comments untouched for
-//! `KEEP` go as the next one is written.
+//! Its text is the card's, held by the review as it opens, so Claude,
+//! Cursor and Codex go one way (Codex writes no file; Claude rewrites its
+//! own in place), and the comments stay on the version they were made on: a
+//! plan written again is a new card with a review of its own. Its comments
+//! are kept in `<state dir>/chat-plans/<key>-comments.json`; the files there
+//! untouched for `KEEP` go as the next review opens (`tidy`).
 //!
 //! Sending it back: while the agent waits on that plan (Claude's
 //! `ExitPlanMode`), the ask is denied with the comments as why, so Claude
@@ -43,28 +42,14 @@ pub fn dir() -> PathBuf {
     crate::state_dir().join("chat-plans")
 }
 
-/// The snapshot of the plan of `key`.
-pub fn path(key: u64) -> PathBuf {
-    dir().join(format!("{key:016x}.md"))
-}
-
 /// Where the review comments on the plan of `key` are kept.
 pub fn comments_path(key: u64) -> PathBuf {
     dir().join(format!("{key:016x}-comments.json"))
 }
 
-/// Write `text` as the snapshot of the plan of `key`, the old files
-/// pruned. Where it went.
-pub fn snapshot(key: u64, text: &str) -> io::Result<PathBuf> {
-    snapshot_in(&dir(), key, text, SystemTime::now())
-}
-
-fn snapshot_in(dir: &Path, key: u64, text: &str, now: SystemTime) -> io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let path = dir.join(format!("{key:016x}.md"));
-    std::fs::write(&path, text)?;
-    prune(dir, key, now);
-    Ok(path)
+/// The plan of `key` comes under review: the old files of others go.
+pub fn tidy(key: u64) {
+    prune(&dir(), key, SystemTime::now());
 }
 
 /// Delete the files of `dir` untouched for `KEEP` by `now`, but those of
@@ -87,7 +72,7 @@ fn prune(dir: &Path, key: u64, now: SystemTime) {
 }
 
 /// Write `comments` (Markdown) sent back on the plan of `key` to a file of
-/// their own, next to its snapshot. Where it went.
+/// their own, next to its comments. Where it went.
 pub fn write_back(key: u64, comments: &str) -> io::Result<PathBuf> {
     write_back_in(&dir(), key, comments)
 }
@@ -215,22 +200,24 @@ mod tests {
     fn a_key_is_stable_and_names_the_files() {
         assert_eq!(key("toolu_1"), key("toolu_1"));
         assert_ne!(key("toolu_1"), key("toolu_2"));
-        let name = path(key("toolu_1"));
-        assert!(name.ends_with(format!("chat-plans/{:016x}.md", key("toolu_1"))));
         assert!(comments_path(1).ends_with("chat-plans/0000000000000001-comments.json"));
     }
 
     #[test]
-    fn a_snapshot_prunes_old_files_and_a_back_file_takes_the_next_name() {
+    fn old_files_are_pruned_and_a_back_file_takes_the_next_name() {
         let dir = std::env::temp_dir().join(format!("gerdr-chat-plans-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let old = dir.join("old.md");
+        let (old, own) = (
+            dir.join("old.md"),
+            dir.join(format!("{:016x}-comments.json", 7)),
+        );
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&old, "x").unwrap();
+        std::fs::write(&own, "{}").unwrap();
         let later = SystemTime::now() + KEEP + Duration::from_secs(60);
-        let at = snapshot_in(&dir, 7, "# Plan\n", later).unwrap();
-        assert_eq!(std::fs::read_to_string(&at).unwrap(), "# Plan\n");
+        prune(&dir, 7, later);
         assert!(!old.exists(), "pruned");
+        assert!(own.exists(), "under review again");
 
         let one = write_back_in(&dir, 7, "- fix it").unwrap();
         let two = write_back_in(&dir, 7, "- and this").unwrap();

@@ -45,6 +45,7 @@ mod desktop;
 mod diff;
 mod diff_edit;
 mod diff_view;
+mod doc_page;
 mod doc_review;
 mod doc_tab;
 mod feature;
@@ -544,8 +545,11 @@ impl Expected {
                 .and_then(program)
                 .unwrap_or_else(|| "app".into()),
             // A browser's app window is named by its id, not for people.
-            other if other.contains(web_control::EXTENSION_ID) => "the preview".into(),
-            other if other.starts_with("chrome-") || other.starts_with("chromium-") => {
+            other
+                if other.contains(web_control::EXTENSION_ID)
+                    || other.starts_with("chrome-")
+                    || other.starts_with("chromium-") =>
+            {
                 "the browser".into()
             }
             other => other.to_owned(),
@@ -743,13 +747,15 @@ impl Tab {
     /// What to remember of the tab: its layout, with each leaf named by what
     /// fills it. Windows gerdr can't bring back are left out.
     fn save(&self) -> Option<TabRecord> {
-        // A file's tab comes back on its file: its page opens when shown.
+        // A file's tab comes back on its file (`doc`): its layout holds
+        // nothing to start.
         if let Some(review) = self.review() {
             let doc = review.wd.doc.as_ref()?;
-            let command = md_preview::page_url(&doc.path);
             return Some(TabRecord {
                 herdr_tab: None,
-                layout: SavedNode::Leaf(SavedLeaf::App { command }),
+                layout: SavedNode::Leaf(SavedLeaf::App {
+                    command: String::new(),
+                }),
                 label: None,
                 doc: Some(doc_tab::DocRecord {
                     file: doc.file,
@@ -1675,6 +1681,8 @@ pub struct Gerdr {
     /// The file's tab showing as of the last frame, by id: one coming to
     /// show reads its file again (see `doc_tab`).
     pub doc_tab_shown: Option<u64>,
+    /// The review's share of a file's tab's width beside its page.
+    pub doc_share: f64,
     /// The notes shown over the apps, oldest first (see `toast`).
     pub toasts: VecDeque<Toast>,
     /// Counts the times gerdr's processes were ended, to name the Ghostty
@@ -5654,8 +5662,8 @@ impl Gerdr {
                         .map(|p| p.window.clone()),
                 );
             }
-            // A file's page while its review has the whole tab.
-            if tab.review().is_some_and(|review| review.page.is_none()) {
+            // A file's tab has none: gerdr paints its page.
+            if tab.review().is_some() {
                 hidden.extend(tab.panes.iter().map(|p| p.window.clone()));
             }
             // A pane shown as a chat: the chat is painted in its place.
@@ -6736,7 +6744,7 @@ impl Gerdr {
         self.projects.window_size = Some((size.w, size.h));
         // Kept at the default text size, so it opens as many characters wide.
         self.projects.sidebar_width = Some(from_text(self.sidebar_width));
-        self.projects.dock_share = Some(self.web.previews.share);
+        self.projects.dock_share = Some(self.doc_share);
         self.keep_nav(true);
         self.projects.save();
         self.close_cursor_socket();
@@ -6926,6 +6934,7 @@ impl Gerdr {
         self.expire_toasts(now);
         self.t3_seen();
         let mut doc_tab = self.sync_doc_tab();
+        let doc_page = self.doc_page_view();
         let flat = doc_tab.is_some();
         // Under a dialog or a panel (a fix's commit over the review) the
         // file's tab takes no keys: its footer offers none, as the page's.
@@ -7043,6 +7052,7 @@ impl Gerdr {
             size: self.output_size(),
             repos_rect: self.repos_rect(),
             doc_tab_rect: self.review_area(),
+            doc_page,
             scale: self.scale(),
         }
     }
@@ -7632,6 +7642,7 @@ fn new_gerdr(
         projects: projects::Store::default(),
         project: None,
         doc_tab_shown: None,
+        doc_share: chrome::DOCK_SHARE,
         criteria_strip: Default::default(),
         chats: Default::default(),
         toasts: VecDeque::new(),
@@ -7802,7 +7813,6 @@ fn new_gerdr(
         web: state::Web {
             pending: false,
             control: web_control::WebControl::default(),
-            previews: md_preview::Previews::default(),
         },
         cursor: state::CursorWatch {
             reads: Default::default(),
@@ -8018,7 +8028,7 @@ fn start(
 ) {
     // The first run turns the session gerdr used before projects into one.
     if let Some(share) = store.dock_share {
-        state.web.previews.share = share.clamp(chrome::DOCK_SHARE_MIN, chrome::DOCK_SHARE_MAX);
+        state.doc_share = share.clamp(chrome::DOCK_SHARE_MIN, chrome::DOCK_SHARE_MAX);
     }
     state.projects = store;
     state.nav.restore_nav(&state.projects.nav);

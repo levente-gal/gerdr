@@ -321,8 +321,6 @@ pub struct ModeSwitch {
     pub labels: Vec<String>,
     /// The choice shown, by index into `labels`.
     pub on: usize,
-    /// The choices that can't be had now: a tooltip says why.
-    pub off: Vec<usize>,
 }
 
 impl ReposView {
@@ -3386,8 +3384,8 @@ impl Painter {
                     Some(ReposHit::Mode(i)) => Some(i),
                     _ => None,
                 };
-                let state = (switch.on, hover, &switch.off[..]);
-                self.segmented_off(&mut c, shift(*track), &segments, state, scale, p);
+                let track = shift(*track);
+                self.segmented(&mut c, track, &segments, switch.on, hover, scale, p);
             }
             across(&mut c, px(header.loc.y + header.size.h) - border);
         }

@@ -512,16 +512,6 @@ impl Gerdr {
                             state.repeat_key(code, *mods, sym, typed, took);
                             return FilterResult::Intercept(out);
                         }
-                        // A file's tab showing its page takes what acts on
-                        // the file: the page has all else.
-                        if state.review_tab().is_some()
-                            && crate::doc_tab::doc_preview_key(mods, sym)
-                        {
-                            state.key_state.suppressed_keys.push(code);
-                            let typed = handle.modified_sym();
-                            let out = state.overlay_key(Overlay::Repos, mods, sym, typed);
-                            return FilterResult::Intercept(out);
-                        }
                         // Esc takes down the tooltip and the pinned help,
                         // and still goes on to the app: it may be what
                         // leaves a mode there.

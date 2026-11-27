@@ -305,6 +305,9 @@ struct Column {
     align: Align,
     /// Inside a quote (not an alert's): its text muted.
     quoted: bool,
+    /// Where each of the file's own blocks went, top and bottom: none for
+    /// those inside a block.
+    spans: Option<Vec<(i32, i32)>>,
 }
 
 impl Column {
@@ -494,6 +497,8 @@ impl Column {
 
     /// A file's blocks, from here down, with the room between them.
     fn blocks(&mut self, blocks: &[DocBlock]) {
+        // Taken, so the blocks inside these see none.
+        let mut spans = self.spans.take();
         for (i, block) in blocks.iter().enumerate() {
             if i > 0 {
                 self.y += match block {
@@ -509,8 +514,13 @@ impl Column {
                     _ => DOC_GAP,
                 };
             }
+            let top = self.y;
             self.block(block);
+            if let Some(spans) = &mut spans {
+                spans.push((top, self.y));
+            }
         }
+        self.spans = spans;
     }
 
     /// A file's block, from here down.
@@ -661,6 +671,7 @@ fn stack(blocks: &[DocBlock], w: i32, room: (i32, i32)) -> Column {
         pieces: Vec::new(),
         align: Align::Left,
         quoted: false,
+        spans: Some(Vec::new()),
     };
     s.blocks(blocks);
     s
@@ -674,6 +685,7 @@ struct DocMemo {
     w: i32,
     pieces: Rc<Vec<(Rect, DocPiece)>>,
     h: i32,
+    spans: Rc<Vec<(i32, i32)>>,
 }
 
 /// How many files `DOC_MEMO` holds: the stages looked between.
@@ -686,6 +698,20 @@ thread_local! {
 /// `blocks` laid out for a column `w` wide: the pieces from `(0, 0)`, and
 /// how high they all are.
 pub(super) fn laid_out(blocks: &Arc<Vec<DocBlock>>, w: i32) -> (Rc<Vec<(Rect, DocPiece)>>, i32) {
+    let laid = laid_spans(blocks, w);
+    (laid.pieces, laid.h)
+}
+
+/// A file laid out (see `laid_out`).
+pub(super) struct Laid {
+    pub(super) pieces: Rc<Vec<(Rect, DocPiece)>>,
+    pub h: i32,
+    /// Where each block went, top and bottom, as `blocks` has them.
+    pub spans: Rc<Vec<(i32, i32)>>,
+}
+
+/// `laid_out`, with where each block went.
+pub(super) fn laid_spans(blocks: &Arc<Vec<DocBlock>>, w: i32) -> Laid {
     DOC_MEMO.with_borrow_mut(|memo| {
         let memo = super::sized(memo);
         let found = (memo.iter()).position(|m| m.w == w && Arc::ptr_eq(&m.blocks, blocks));
@@ -698,10 +724,15 @@ pub(super) fn laid_out(blocks: &Arc<Vec<DocBlock>>, w: i32) -> (Rc<Vec<(Rect, Do
                     w,
                     h: s.y,
                     pieces: Rc::new(s.pieces),
+                    spans: Rc::new(s.spans.unwrap_or_default()),
                 }
             }
         };
-        let laid = (entry.pieces.clone(), entry.h);
+        let laid = Laid {
+            pieces: entry.pieces.clone(),
+            h: entry.h,
+            spans: entry.spans.clone(),
+        };
         memo.insert(0, entry);
         memo.truncate(DOC_MEMOS);
         laid

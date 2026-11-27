@@ -1142,7 +1142,6 @@ impl Gerdr {
     /// A Git status read came in.
     pub fn repos_read(&mut self) {
         self.worktree_diff_read();
-        self.refresh_previews();
         if self.repos.panel.is_none() && self.repos.batch.is_none() {
             return;
         }
@@ -1276,6 +1275,9 @@ impl Gerdr {
         // The gap beside the file's preview drags their split.
         if let Some(drag) = self.doc_gap_at(pos) {
             self.mouse.drag = Some(drag);
+            return;
+        }
+        if self.doc_page_click(pos) {
             return;
         }
         let layout = chrome::repos_layout(&view, self.repos_rect());
@@ -1682,6 +1684,9 @@ impl Gerdr {
 
     /// The pointer moved while the panel is open.
     pub fn repos_hover(&mut self, pos: Point<f64, Logical>) -> Option<Tooltip> {
+        if let Some(tip) = self.doc_page_hover(pos) {
+            return tip;
+        }
         let view = self.repos_view()?;
         let size = self.repos_rect();
         if self.on_inline_review()
@@ -1699,10 +1704,6 @@ impl Gerdr {
             wd.hover = hit;
             return match hit? {
                 ReposHit::Search(part) => search_tip(&layout, part),
-                ReposHit::Mode(i) if view.modes.as_ref().is_some_and(|m| m.off.contains(&i)) => {
-                    let part = layout.modes.as_ref()?.1.get(i)?;
-                    Some(Tooltip::new(crate::md_preview::NO_EXTENSION, *part))
-                }
                 ReposHit::Button(_) | ReposHit::DiffRestore(_) => button_tip(&view, &layout, pos),
                 ReposHit::Tool(tool) => tool_tip(&layout, tool),
                 _ => None,
@@ -1828,6 +1829,9 @@ impl Gerdr {
     /// branch menu's, the detail's, else the tree's. What is under the
     /// pointer is left as it was while it moves.
     pub fn repos_scroll(&mut self, motion: crate::scroll::Motion) {
+        if self.doc_page_scroll(self.pointer().current_location(), motion) {
+            return;
+        }
         if self.wd().is_some() {
             return self.worktree_diff_scroll(motion);
         }
