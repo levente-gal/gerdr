@@ -1,6 +1,8 @@
-//! The screenshots of a manual test as the feature tab's page shows them:
-//! each one's size, read from its PNG's header, and its picture at the size
-//! it is drawn, both kept a while so a page drawn again reads no file.
+//! Pictures on disk as gerdr's pages show them: a manual test's
+//! screenshots and a doc's images. Each one's size, read from its file's
+//! header, and its picture at the size it is drawn, both kept a while so a
+//! page drawn again reads no file. PNG, JPEG, WebP, GIF (its first frame)
+//! and SVG are read, picked by the file's extension.
 
 use std::{
     collections::HashMap,
@@ -8,7 +10,7 @@ use std::{
     sync::{LazyLock, Mutex},
 };
 
-use resvg::tiny_skia;
+use resvg::{tiny_skia, usvg};
 
 use crate::app_icons::AppIcon;
 
@@ -22,7 +24,7 @@ const KEEP_WHOLE: usize = 2;
 /// Pictures kept by what they are of, the last drawn first.
 type Kept<K> = LazyLock<Mutex<Vec<(K, AppIcon)>>>;
 
-/// Each PNG's width and height, `None` for one that can't be read.
+/// Each picture's width and height, `None` for one that can't be read.
 type Sizes = HashMap<PathBuf, Option<(u32, u32)>>;
 
 static SIZES: LazyLock<Mutex<Sizes>> = LazyLock::new(Default::default);
@@ -30,8 +32,9 @@ static SIZES: LazyLock<Mutex<Sizes>> = LazyLock::new(Default::default);
 static SCALED: Kept<(PathBuf, usize)> = LazyLock::new(Default::default);
 static WHOLE: Kept<PathBuf> = LazyLock::new(Default::default);
 
-/// The width and height of the PNG at `path`; `None` when it can't be read.
+/// The width and height of the picture at `path`; `None` when it can't be read.
 pub fn size(path: &Path) -> Option<(u32, u32)> {
+    format(path)?;
     if let Some(size) = SIZES.lock().ok()?.get(path) {
         return *size;
     }
@@ -43,9 +46,43 @@ pub fn size(path: &Path) -> Option<(u32, u32)> {
     size
 }
 
+/// The picture formats read, by their files' extensions.
+pub const FORMATS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "webp", "svg"];
+
+/// The format of the picture at `path`, by its extension in lower case.
+fn format(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    FORMATS.contains(&ext.as_str()).then_some(ext)
+}
+
+/// A picture's width and height, from its file's header; an SVG's from
+/// its document, rounded to whole pixels.
+fn read_size(path: &Path) -> Option<(u32, u32)> {
+    let open = || std::fs::File::open(path).ok().map(std::io::BufReader::new);
+    match format(path)?.as_str() {
+        "png" => png_size(path),
+        "jpg" | "jpeg" => {
+            let mut jpeg = zune_jpeg::JpegDecoder::new(open()?);
+            jpeg.decode_headers().ok()?;
+            let info = jpeg.info()?;
+            Some((u32::from(info.width), u32::from(info.height)))
+        }
+        "gif" => {
+            let gif = gif::DecodeOptions::new().read_info(open()?).ok()?;
+            Some((u32::from(gif.width()), u32::from(gif.height())))
+        }
+        "webp" => Some(image_webp::WebPDecoder::new(open()?).ok()?.dimensions()),
+        _ => {
+            let size = svg(path)?.size();
+            let px = |side: f32| side.round().max(1.0) as u32;
+            Some((px(size.width()), px(size.height())))
+        }
+    }
+}
+
 /// A PNG's width and height, from its header: 8 bytes of signature, then
 /// the IHDR chunk's length and name, then the two as big-endian words.
-fn read_size(path: &Path) -> Option<(u32, u32)> {
+fn png_size(path: &Path) -> Option<(u32, u32)> {
     use std::io::Read;
     let mut head = [0u8; 24];
     std::fs::File::open(path).ok()?.read_exact(&mut head).ok()?;
@@ -56,25 +93,116 @@ fn read_size(path: &Path) -> Option<(u32, u32)> {
     Some((word(16), word(20)))
 }
 
-/// The screenshot at `path` scaled so its longer side is `px` pixels;
+// shortcut: resvg is built without its text feature, so an SVG's text isn't
+// drawn; turn it on (a second font stack beside cosmic-text's) if docs'
+// diagrams need labels.
+fn svg(path: &Path) -> Option<usvg::Tree> {
+    let data = std::fs::read(path).ok()?;
+    usvg::Tree::from_data(&data, &usvg::Options::default()).ok()
+}
+
+/// The raster picture at `path` whole, its pixels premultiplied.
+// shortcut: a JPEG's EXIF rotation isn't applied, so a phone photo may lie
+// on its side; read the Orientation tag if docs show photos.
+fn decode(path: &Path) -> Option<AppIcon> {
+    let data = std::fs::read(path).ok()?;
+    let (w, h, mut rgba) = match format(path)?.as_str() {
+        "png" => {
+            let pixmap = tiny_skia::Pixmap::decode_png(&data).ok()?;
+            let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
+            return Some(AppIcon::from_rgba(w, h, pixmap.take()));
+        }
+        "jpg" | "jpeg" => {
+            let options = zune_jpeg::zune_core::options::DecoderOptions::default()
+                .jpeg_set_out_colorspace(zune_jpeg::zune_core::colorspace::ColorSpace::RGBA);
+            let cursor = zune_jpeg::zune_core::bytestream::ZCursor::new(&data);
+            let mut jpeg = zune_jpeg::JpegDecoder::new_with_options(cursor, options);
+            let rgba = jpeg.decode().ok()?;
+            let info = jpeg.info()?;
+            (usize::from(info.width), usize::from(info.height), rgba)
+        }
+        "gif" => {
+            let mut options = gif::DecodeOptions::new();
+            options.set_color_output(gif::ColorOutput::RGBA);
+            let mut gif = options.read_info(data.as_slice()).ok()?;
+            let (w, h) = (usize::from(gif.width()), usize::from(gif.height()));
+            let frame = gif.read_next_frame().ok()??;
+            // The first frame may cover only part of the screen; the rest stays clear.
+            let mut rgba = vec![0u8; w * h * 4];
+            let (left, top, fw) = (
+                frame.left as usize,
+                frame.top as usize,
+                frame.width as usize,
+            );
+            for (y, row) in frame.buffer.chunks_exact(fw * 4).enumerate() {
+                let (y, cut) = (top + y, fw.min(w.saturating_sub(left)));
+                if y < h && cut > 0 {
+                    let at = (y * w + left) * 4;
+                    rgba[at..at + cut * 4].copy_from_slice(&row[..cut * 4]);
+                }
+            }
+            (w, h, rgba)
+        }
+        "webp" => {
+            let mut webp = image_webp::WebPDecoder::new(std::io::Cursor::new(&data)).ok()?;
+            let (w, h) = webp.dimensions();
+            let mut pixels = vec![0u8; webp.output_buffer_size()?];
+            webp.read_image(&mut pixels).ok()?;
+            let rgba = match webp.has_alpha() {
+                true => pixels,
+                false => (pixels.as_chunks::<3>().0.iter())
+                    .flat_map(|&[r, g, b]| [r, g, b, 255])
+                    .collect(),
+            };
+            (w as usize, h as usize, rgba)
+        }
+        _ => return None,
+    };
+    if rgba.len() != w * h * 4 {
+        return None;
+    }
+    for [r, g, b, a] in rgba.as_chunks_mut::<4>().0 {
+        for c in [r, g, b] {
+            *c = (u16::from(*c) * u16::from(*a) / 255) as u8;
+        }
+    }
+    Some(AppIcon::from_rgba(w, h, rgba))
+}
+
+/// The SVG at `path` drawn so its longer side is `px` pixels.
+fn draw_svg(path: &Path, px: usize) -> Option<AppIcon> {
+    let tree = svg(path)?;
+    let size = tree.size();
+    let fit = px as f32 / size.width().max(size.height());
+    let w = (size.width() * fit).round().max(1.0) as u32;
+    let h = (size.height() * fit).round().max(1.0) as u32;
+    let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(fit, fit),
+        &mut pixmap.as_mut(),
+    );
+    Some(AppIcon::from_rgba(w as usize, h as usize, pixmap.take()))
+}
+
+/// The picture at `path` scaled so its longer side is `px` pixels;
 /// `None` when it can't be read.
 // shortcut: read and decoded on the paint thread, some tens of ms the first
-// time one shows; move to a worker if pages with many screenshots stutter.
+// time one shows (a 2 MP WebP some 140); move to a worker if pages stutter.
 pub fn picture(path: &Path, px: usize) -> Option<AppIcon> {
     let key = (path.to_owned(), px);
     if let Some(found) = take(&SCALED, &key) {
         return Some(found);
     }
+    if format(path).as_deref() == Some("svg") {
+        let drawn = draw_svg(path, px)?;
+        keep(&SCALED, key, drawn.clone(), KEEP_SCALED);
+        return Some(drawn);
+    }
     let whole = match take(&WHOLE, &key.0) {
         Some(whole) => whole,
         None => {
-            let data = std::fs::read(path).ok()?;
-            let pixmap = tiny_skia::Pixmap::decode_png(&data).ok()?;
-            let whole = AppIcon::from_rgba(
-                pixmap.width() as usize,
-                pixmap.height() as usize,
-                pixmap.take(),
-            );
+            let whole = decode(path)?;
             keep(&WHOLE, key.0.clone(), whole.clone(), KEEP_WHOLE);
             whole
         }
@@ -120,6 +248,38 @@ mod tests {
         let gone = dir.join("gone.png");
         assert_eq!(size(&gone), None);
         assert!(super::picture(&gone, 10).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn jpeg_gif_webp_and_svg_pictures_are_read_too() {
+        let dir = std::env::temp_dir().join(format!("gerdr-pictures-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#3080c0"/></svg>"##;
+        let files: [(&str, &[u8]); 4] = [
+            ("a.JPG", include_bytes!("../assets/test-pictures/a.jpg")),
+            ("a.gif", include_bytes!("../assets/test-pictures/a.gif")),
+            ("a.webp", include_bytes!("../assets/test-pictures/a.webp")),
+            ("a.svg", svg),
+        ];
+        for (name, data) in files {
+            let path = dir.join(name);
+            std::fs::write(&path, data).unwrap();
+            assert_eq!(size(&path), Some((40, 20)), "{name}");
+            let picture = picture(&path, 10).unwrap();
+            assert_eq!(picture.size(), (10, 5), "{name}");
+        }
+        // The WebP is #3080c0 at half alpha, kept premultiplied as all pictures are.
+        let (_, _, rgba) = decode(&dir.join("a.webp")).unwrap().scaled(40);
+        let near = |a: u8, b: u8| a.abs_diff(b) <= 2;
+        assert!(
+            near(rgba[0], 24) && near(rgba[1], 64) && near(rgba[2], 96) && near(rgba[3], 128),
+            "{:?}",
+            &rgba[..4]
+        );
+        let other = dir.join("a.bmp");
+        std::fs::write(&other, b"BM").unwrap();
+        assert_eq!(size(&other), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
