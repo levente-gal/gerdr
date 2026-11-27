@@ -86,6 +86,7 @@ the table it prints.
 | `asks_trust`: started with `--trust` | — | — | — | ✓ | — | — | — |
 | `takes_model`: started on `--model` | ✓ | — | — | ✓ | — | — | — |
 | `picks_model`: a stage's model is picked | ✓ | — | — | ✓ | — | — | ✓ |
+| `takes_effort`: started on `--effort` | ✓ | — | — | — | — | — | — |
 | `models_read`: its CLI lists its models | — | — | — | ✓ | — | — | — |
 | `resumes`: its chat is gone back to | ✓ | — | — | ✓ | — | — | — |
 | `retells_model`: told its model again then | — | — | — | ✓ | — | — | — |
@@ -134,10 +135,10 @@ shared engine reads what they give. `<agent>/` below is any agent's folder.
 | Modes | `modes`, `mode_shown` | `<agent>/screen.rs` | `src/chat/mode.rs` |
 | Context | `has_context`, `context_in`, `context` | `<agent>/stats.rs` | `src/ai_work/context.rs` |
 | Launcher | `command`, `label`, `in_app` | `<agent>/mod.rs` | `src/cli_agents.rs` (`known`) |
-| Command line of a stage | `adds_dirs`, `add_dirs`, `adds_roots`, `asks_trust`, `takes_model`, `new_chat` | `claude/launch.rs`, `cursor/launch.rs` | `src/feature/agents.rs` (`command_line`, `allowed_into`), `src/integrations/common/launch.rs` |
-| Going back to a chat | `resumes`, `retells_model`, `launcher_script` | `cursor/launch.rs` | `src/feature/agents.rs` (`resume_base`, `rerun_argv`) |
+| Command line of a stage | `adds_dirs`, `add_dirs`, `adds_roots`, `asks_trust`, `takes_model`, `takes_effort`, `new_chat` | `claude/launch.rs`, `cursor/launch.rs` | `src/feature/agents.rs` (`command_line`, `allowed_into`), `src/integrations/common/launch.rs` |
+| Going back to a chat | `resumes`, `retells_model`, `takes_effort`, `launcher_script` | `cursor/launch.rs` | `src/feature/agents.rs` (`resume_base`, `rerun_argv`) |
 | Stage chips and Discover | `runs_stages`, `picks_model`, `adds_dirs` | | `src/feature_agents.rs` |
-| Stage model picker | `offers`, `models_read`, `list_models`, `model_hint`, `reading_hint`, `run_model` | `claude/launch.rs`, `cursor/launch.rs`, `t3/launch.rs` | `src/switcher.rs`, `src/stage_models.rs` |
+| Stage model and effort pickers | `offers`, `models_read`, `list_models`, `model_hint`, `reading_hint`, `run_model`, `takes_effort`, `efforts` | `claude/launch.rs`, `cursor/launch.rs`, `t3/launch.rs` | `src/switcher.rs`, `src/stage_models.rs` |
 
 ## Gaps
 

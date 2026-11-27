@@ -195,6 +195,10 @@ impl Integration for Claude {
         true
     }
 
+    fn takes_effort(&self) -> bool {
+        true
+    }
+
     /// It takes a chat id of our choosing (`new_chat`). Its chat, gone back
     /// to, keeps its model (tried on 2.1.318): one changed there with
     /// `/model` must stay.

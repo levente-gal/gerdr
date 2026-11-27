@@ -1010,6 +1010,7 @@ fn a_running_build_shows_its_agent_then_its_milestones() {
                 buttons: vec![0, 1],
                 picks: Vec::new(),
                 model: None,
+                effort: None,
                 waits: false,
             },
             PageSection::MilestoneMode {

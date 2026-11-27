@@ -642,6 +642,7 @@ impl Gerdr {
             }
             PanelOutcome::CycleAgent(stage) => self.cycle_stage_agent(&project, &slug, stage),
             PanelOutcome::PickModel(stage) => self.pick_stage_model(&project, &slug, stage),
+            PanelOutcome::PickEffort(stage) => self.pick_stage_effort(&project, &slug, stage),
             PanelOutcome::CycleMachine(stage) => self.cycle_stage_machine(&project, &slug, stage),
             PanelOutcome::StopOnMachine(stage) => {
                 self.ask_stop_on_machine(&project, &slug, stage);

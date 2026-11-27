@@ -166,12 +166,24 @@ pub enum ModelFor {
     /// The agent CLI `command`, to start now in a new tab of workspace
     /// `workspace` (see `Gerdr::new_agent`).
     Free { workspace: usize, command: String },
+    /// The effort of `stage` of feature `slug`, from its next start on:
+    /// the pick's `model` is the effort.
+    StageEffort {
+        project: String,
+        slug: String,
+        stage: Stage,
+    },
 }
 
 impl ModelPick {
     /// Whether it starts a new agent rather than set a stage's model.
     fn free(&self) -> bool {
         matches!(self.of, ModelFor::Free { .. })
+    }
+    /// Whether it sets a stage's effort: one of the agent's levels, none
+    /// typed.
+    fn effort(&self) -> bool {
+        matches!(self.of, ModelFor::StageEffort { .. })
     }
 }
 
@@ -609,7 +621,8 @@ impl Switcher {
             selected = at(&found, best).unwrap_or(0);
         }
         // A model no row offers goes last, chosen only when nothing matches.
-        if self.model_slot.is_some() && !command.is_empty() {
+        let typed_too = (self.model_slot.as_ref()).is_some_and(|p| !p.effort());
+        if typed_too && !command.is_empty() {
             let typed = &self.items[0].target;
             if !self.items[1..].iter().any(|item| item.target == *typed) {
                 found.push(Match {
@@ -990,6 +1003,38 @@ fn model_rows(slot: &ModelSlot, pick: &ModelPick, listed: &[Offer]) -> Vec<Item>
     items
 }
 
+/// The rows of the picker of `slot`'s effort for `pick`: the agent's own
+/// choice, then its `levels`, in their order.
+fn effort_rows(slot: &ModelSlot, pick: &ModelPick, levels: &[&str]) -> Vec<Item> {
+    let icon = AgentIcon::from_agent(&slot.agent)
+        .picture()
+        .map_or(ItemIcon::Command, |picture| {
+            ItemIcon::Picture(picture.clone())
+        });
+    let own = format!("{}'s own choice", slot.agent);
+    let rows = std::iter::once(("Default".to_owned(), own, None)).chain(
+        levels
+            .iter()
+            .map(|l| (l.to_string(), "effort".to_owned(), Some(l.to_string()))),
+    );
+    rows.map(|(label, detail, effort)| {
+        let detail = match effort == slot.picked {
+            true => format!("{detail} \u{b7} picked"),
+            false => detail,
+        };
+        Item::new(
+            icon.clone(),
+            label,
+            detail,
+            Target::StageModel(ModelPick {
+                model: effort,
+                ..pick.clone()
+            }),
+        )
+    })
+    .collect()
+}
+
 /// The picker of a model for starting the agent CLI `command` in workspace
 /// `w`, named as `agents` name it; none for a CLI gerdr can't tell a model,
 /// which starts at once.
@@ -1042,6 +1087,14 @@ fn frecency_key(
         Target::Tab(w, t) => format!("tab:{}:{t}", workspace_dir(*w)?.display()),
         Target::Agent(key) => format!("agent:{key}"),
         Target::NewAgent(_, command) => format!("agent-cli:{command}"),
+        Target::StageModel(
+            pick @ ModelPick {
+                of: ModelFor::StageEffort { .. },
+                ..
+            },
+        ) => {
+            format!("effort:{}:{}", pick.agent, pick.model.as_ref()?)
+        }
         Target::StageModel(pick) => format!("model:{}:{}", pick.agent, pick.model.as_ref()?),
         Target::T3(_) => "t3".to_owned(),
         Target::Project(id) => format!("project:{id}"),
@@ -1231,7 +1284,9 @@ impl Gerdr {
     /// Open the switcher as the picker of a model for what `of` says, for
     /// the agent of `slot`, on the row of the model picked now.
     pub(crate) fn open_model_picker(&mut self, of: ModelFor, slot: ModelSlot) {
-        if integrations::by_command(&slot.base).models_read() {
+        if !matches!(of, ModelFor::StageEffort { .. })
+            && integrations::by_command(&slot.base).models_read()
+        {
             self.read_listed_models(&slot.base);
         }
         self.make_room_for_switcher();
@@ -1270,6 +1325,11 @@ impl Gerdr {
                 base: command.clone(),
                 picked: None,
             }),
+            ModelFor::StageEffort {
+                project,
+                slug,
+                stage,
+            } => self.effort_slot_of(project, slug, *stage),
         });
         if let (Some(slot), Some(of)) = (slot, switcher.model_slot.as_ref().map(|p| p.of.clone())) {
             switcher.model_hint = self.model_hint(&slot, &of);
@@ -1282,6 +1342,9 @@ impl Gerdr {
     /// says: a stage, a new agent or a chat's.
     fn model_hint(&self, slot: &ModelSlot, of: &ModelFor) -> &'static str {
         let agent = integrations::by_command(&slot.base);
+        if matches!(of, ModelFor::StageEffort { .. }) {
+            return "Effort for this stage's next start…";
+        }
         let models = &self.features.listed_models;
         if agent.models_read() && models.offers.is_empty() {
             return match models.reading {
@@ -1291,7 +1354,7 @@ impl Gerdr {
             };
         }
         let of = match of {
-            ModelFor::Stage { .. } => PickedFor::Stage,
+            ModelFor::Stage { .. } | ModelFor::StageEffort { .. } => PickedFor::Stage,
             ModelFor::Free { .. } => PickedFor::Start,
         };
         agent.model_hint(of).unwrap_or(match of {
@@ -1306,6 +1369,9 @@ impl Gerdr {
             return Vec::new();
         };
         let agent = integrations::by_command(&slot.base);
+        if matches!(pick.of, ModelFor::StageEffort { .. }) {
+            return effort_rows(slot, pick, agent.efforts());
+        }
         let listed = match (agent.models_read(), agent.in_app()) {
             (true, _) => self.features.listed_models.offers.clone(),
             (false, true) => {
@@ -1888,6 +1954,11 @@ impl Gerdr {
                     workspace,
                     &crate::feature::agents::with_model(&command, pick.model.as_deref()),
                 ),
+                ModelFor::StageEffort {
+                    project,
+                    slug,
+                    stage,
+                } => self.set_stage_effort(&project, &slug, stage, &pick.agent, pick.model),
             },
             Target::Settings => self.open_settings(place),
             Target::ProjectFile(id) => self.open_project_file(&id),
@@ -2579,6 +2650,34 @@ mod tests {
             agent: "Claude Code".into(),
             model: model.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn the_effort_picker_lists_the_levels_in_order_and_takes_none_typed() {
+        let slot = ModelSlot {
+            agent: "Claude Code".into(),
+            base: "claude".into(),
+            picked: Some("high".into()),
+        };
+        let pick = ModelPick {
+            of: ModelFor::StageEffort {
+                project: "p".into(),
+                slug: "s".into(),
+                stage: Stage::Plan,
+            },
+            ..model_pick(None)
+        };
+        let rows = effort_rows(&slot, &pick, &["low", "high"]);
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["Default", "low", "high"]);
+        assert!(rows[2].detail.ends_with("picked"));
+        assert!(!rows[1].detail.ends_with("picked"));
+        let mut switcher = Switcher::new(Vec::new(), false, Place::Tab);
+        switcher.model_slot = Some(pick);
+        switcher.set_items(rows);
+        switcher.query = "huge".into();
+        switcher.refilter();
+        assert!(switcher.matches.is_empty(), "no typed effort row");
     }
 
     fn cli(name: &str, start: Start) -> CliAgent {

@@ -205,6 +205,9 @@ impl Gerdr {
             FeatureTabHit::AgentModel(stage) => (self.features.panel.as_ref())
                 .filter(|p| !p.keys)
                 .map(|_| PanelOutcome::PickModel(stage)),
+            FeatureTabHit::AgentEffort(stage) => (self.features.panel.as_ref())
+                .filter(|p| !p.keys)
+                .map(|_| PanelOutcome::PickEffort(stage)),
             FeatureTabHit::Hint(i) => {
                 let keys = self
                     .feature_tab_view()
@@ -799,6 +802,36 @@ impl Gerdr {
                 };
                 Some(Tooltip::new(&text, spot))
             }
+            FeatureTabHit::AgentEffort(stage) => {
+                let on_bar = (layout.review_switch.as_ref())
+                    .and_then(|s| s.effort)
+                    .filter(|_| stage == Stage::Build && view.review_page);
+                let spot = match on_bar {
+                    Some(spot) => spot,
+                    None => {
+                        let (_, mut spot) =
+                            *layout.agent_effort.iter().find(|(s, _)| *s == stage)?;
+                        spot.loc.y -= view.scroll[TabColumn::Page as usize].round() as i32;
+                        spot
+                    }
+                };
+                let feature = self.features.panel_feature()?;
+                let page = self.features.panel.as_ref()?.page_stage(feature);
+                let keyed = |findings| keys::keyed_stage(feature, page, findings) == Some(stage);
+                let key = match (keyed(false), keyed(true)) {
+                    (true, _) => format!(" ({EFFORT_KEY})"),
+                    (false, true) => format!(" ({EFFORT_KEY} from the findings)"),
+                    _ => String::new(),
+                };
+                let whose = match stage == Stage::Build && page != Stage::Build {
+                    true => "the next fixes start",
+                    false => "its next start uses",
+                };
+                let text = format!(
+                    "The effort {whose}, for that session only; an agent already open keeps its own{key}"
+                );
+                Some(Tooltip::new(&text, spot))
+            }
             FeatureTabHit::ReviewView(i) => {
                 let spots = layout.review_switch.as_ref()?;
                 let spot = *spots.segments.get(i)?;
@@ -1068,6 +1101,12 @@ impl Gerdr {
             fix_model: (self.model_slot_of(&panel.project, &panel.slug, Stage::Build))
                 .filter(|_| keys::fix_page(feature, panel.page_stage(feature)))
                 .map(|slot| model_label(slot.picked.as_deref())),
+            effort: self
+                .effort_slot_of(&panel.project, &panel.slug, panel.page_stage(feature))
+                .map(|slot| effort_label(slot.picked.as_deref())),
+            fix_effort: (self.effort_slot_of(&panel.project, &panel.slug, Stage::Build))
+                .filter(|_| keys::fix_page(feature, panel.page_stage(feature)))
+                .map(|slot| effort_label(slot.picked.as_deref())),
             place: self.place_label(feature, panel.page_stage(feature)),
             machine_line: self.machine_line(feature, panel.page_stage(feature)),
             fix_place: self.place_label(feature, Stage::Build),

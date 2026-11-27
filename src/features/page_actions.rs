@@ -71,6 +71,8 @@ pub(super) const START_OVER_KEY: &str = "Ctrl+Shift+Del";
 /// picking the agent: its own, as Ctrl+Shift+I shows the setup log on the
 /// same pages (and Alt+A amends in the repositories panel).
 pub(super) const MODEL_KEY: &str = "Alt+Shift+A";
+/// The key picking its effort, as the chat's Alt+Shift+E does there.
+pub(super) const EFFORT_KEY: &str = "Alt+Shift+E";
 /// The key abandoning the feature (or removing a done one's worktrees),
 /// asking first. Del alone never does: it is the focused card's or row's
 /// (and Alt+Del deletes a branch in the repositories panel).

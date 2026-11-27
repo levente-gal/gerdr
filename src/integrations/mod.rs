@@ -406,6 +406,11 @@ pub trait Integration: Sync {
     fn picks_model(&self) -> bool {
         self.takes_model()
     }
+    /// Whether gerdr can start it on one of its `efforts`, with
+    /// `--effort <level>` (for that session only, its default kept).
+    fn takes_effort(&self) -> bool {
+        false
+    }
     /// Whether a feature's stages are offered to it: one gerdr can go back
     /// to the chat of, or that starts in its app.
     fn runs_stages(&self) -> bool {
@@ -711,6 +716,10 @@ mod tests {
             (
                 "`picks_model`: a stage's model is picked",
                 yes(agent.picks_model()),
+            ),
+            (
+                "`takes_effort`: started on `--effort`",
+                yes(agent.takes_effort()),
             ),
             (
                 "`models_read`: its CLI lists its models",

@@ -220,6 +220,7 @@ first message as its last argument, no flag, no going back to its chat.
 | `adds_roots` | It also gets each repository of a folder that holds several, and the main checkouts of the others (Cursor). | no |
 | `takes_model` | It starts on a model with `--model`. | no |
 | `picks_model` | A stage's model can be picked for it. | `takes_model` |
+| `takes_effort` | It starts on one of its `efforts` with `--effort <level>`, for that session only: a stage's effort can be picked for it, and its chat gone back to is told it again. | no |
 | `resumes` | gerdr keeps its chat's id, to go back to it with `--resume <id>`. | no |
 | `new_chat` | The words that make its new chat's id known, kept beside the prompt, for one that `resumes`. | none |
 | `retells_model` | Gone back to, its chat is told its model again. | no: it keeps its own |

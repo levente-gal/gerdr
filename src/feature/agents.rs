@@ -151,6 +151,15 @@ pub fn with_model(base: &str, model: Option<&str>) -> String {
     }
 }
 
+/// `line` started on `effort`, for a CLI that can be told one.
+pub fn with_effort(line: &str, effort: Option<&str>) -> String {
+    let agent = by_command(line);
+    match effort.filter(|e| agent.takes_effort() && agent.efforts().contains(e)) {
+        Some(effort) => format!("{} --effort {effort}", line.trim()),
+        None => line.trim().to_owned(),
+    }
+}
+
 /// The command `line` told `text` as it starts: it is its first message, with
 /// no waiting for the CLI to be ready. A CLI gerdr knows gets `--` before it,
 /// so `--add-dir` can't take it for a folder; another gets it as its last
@@ -164,12 +173,13 @@ pub fn with_prompt(line: &str, text: &str) -> String {
 }
 
 /// What `run`'s chat is resumed with: told its model again by an agent
-/// that `retells_model`, as it was.
+/// that `retells_model`, as it was, and its effort, which lasts a session.
 pub fn resume_base(run: &StageRun) -> String {
-    match by_command(&run.base).retells_model() {
+    let base = match by_command(&run.base).retells_model() {
         true => with_model(&run.base, run.asked_model.as_deref()),
         false => run.base.clone(),
-    }
+    };
+    with_effort(&base, run.asked_effort.as_deref())
 }
 
 /// The shell command that goes back to chat `session` of `base`, in the
@@ -346,6 +356,9 @@ pub struct StageRun {
     /// it went on to use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked_model: Option<String>,
+    /// The effort it was picked to start on, if one was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asked_effort: Option<String>,
     /// The herdr pane it runs in, while known: `<machine id>/<pane>` on
     /// another machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -640,6 +653,31 @@ mod tests {
         assert_eq!(by_command(&line).kind(), crate::ai_work::AgentKind::Claude);
         let argv: Vec<&str> = line.split_whitespace().collect();
         assert_eq!(rerun_argv(&argv)[..3], ["claude", "--model", "opus"]);
+    }
+
+    #[test]
+    fn a_picked_effort_goes_on_the_command_of_a_cli_that_takes_one() {
+        let line = with_effort(&with_model("claude", Some("opus")), Some("high"));
+        assert_eq!(line, "claude --model opus --effort high");
+        assert_eq!(with_effort("claude", None), "claude");
+        // A level the CLI doesn't offer, or a CLI that takes none, gets none.
+        assert_eq!(with_effort("claude", Some("huge")), "claude");
+        assert_eq!(with_effort("cursor-agent", Some("high")), "cursor-agent");
+        assert_eq!(with_effort("codex", Some("high")), "codex");
+        // A rerun keeps it, as it keeps the model.
+        let line = command_line(&line, Path::new("/p.md"), &[]);
+        let argv: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(
+            rerun_argv(&argv)[..5],
+            ["claude", "--model", "opus", "--effort", "high"]
+        );
+        // A resumed chat is told it again: it lasts a session.
+        let run = StageRun {
+            base: "claude".into(),
+            asked_effort: Some("max".into()),
+            ..StageRun::default()
+        };
+        assert_eq!(resume_base(&run), "claude --effort max");
     }
 
     #[test]

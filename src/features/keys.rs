@@ -1432,6 +1432,12 @@ pub(super) fn chain<'a>() -> &'a [Link<'a>] {
                         .map(|s| TabKey::Out(PanelOutcome::PickModel(s)))
                 ),
                 row!(
+                    EFFORT_KEY,
+                    "pick the effort of the stage's agent, or of the one its fixes go to",
+                    |t| keyed_stage(t.feature, t.stage, t.findings())
+                        .map(|s| TabKey::Out(PanelOutcome::PickEffort(s)))
+                ),
+                row!(
                     "Ctrl+Shift+W",
                     "pick the machine the stage's next agent or check run goes on",
                     |t| {
@@ -1869,12 +1875,15 @@ pub(super) struct AgentChoices<'a> {
     pub(super) picks: &'a [AgentChip],
     /// Its model too.
     pub(super) model: bool,
+    /// Its effort too.
+    pub(super) effort: bool,
     /// The machine it runs on too.
     pub(super) place: bool,
     /// The same of the agent fixes go to, on a page that sends them
     /// (`fix_page`).
     pub(super) fix_picks: &'a [AgentChip],
     pub(super) fix_model: bool,
+    pub(super) fix_effort: bool,
     /// The choice of a fresh agent for the fixes, or the one open.
     pub(super) fix_mode: bool,
 }
@@ -2302,14 +2311,23 @@ fn page_hints(f: &Footer, choices: AgentChoices) -> Vec<(String, String)> {
             // have the keyboard.
             let fixes = stage != Stage::Build
                 && keyed_stage(feature, stage, t.findings()) == Some(Stage::Build);
-            let (picks, model, agent_word, model_word) = match fixes {
+            let (picks, model, effort, agent_word, model_word, effort_word) = match fixes {
                 true => (
                     choices.fix_picks,
                     choices.fix_model,
+                    choices.fix_effort,
                     "pick fixes' agent",
                     "pick fixes' model",
+                    "pick fixes' effort",
                 ),
-                false => (choices.picks, choices.model, "pick agent", "pick model"),
+                false => (
+                    choices.picks,
+                    choices.model,
+                    choices.effort,
+                    "pick agent",
+                    "pick model",
+                    "pick effort",
+                ),
             };
             let picks = picks.iter().filter(|c| !c.off).count() > 1;
             h.extend(f.says("Ctrl+Shift+A", agent_word, |k| {
@@ -2317,6 +2335,9 @@ fn page_hints(f: &Footer, choices: AgentChoices) -> Vec<(String, String)> {
             }));
             h.extend(f.says(MODEL_KEY, model_word, |k| {
                 model && matches!(k, TabKey::Out(_))
+            }));
+            h.extend(f.says(EFFORT_KEY, effort_word, |k| {
+                effort && matches!(k, TabKey::Out(_))
             }));
             h.extend(f.says("Ctrl+Shift+W", "pick machine", |k| {
                 choices.place && matches!(k, TabKey::Out(_))
