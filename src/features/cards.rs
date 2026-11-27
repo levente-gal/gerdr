@@ -377,12 +377,14 @@ pub(super) fn rework_card(
             status,
             picks,
             model,
+            effort,
             ..
         } = &mut card
         {
             *status = named(status);
             *picks = state.fix_picks.clone();
             *model = state.fix_model.clone();
+            *effort = state.fix_effort.clone();
         }
         return Some(card);
     }

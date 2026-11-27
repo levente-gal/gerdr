@@ -824,7 +824,7 @@ impl Gerdr {
                     _ => String::new(),
                 };
                 let whose = match stage == Stage::Build && page != Stage::Build {
-                    true => "the next fixes start",
+                    true => "the next fixes start on",
                     false => "its next start uses",
                 };
                 let text = format!(

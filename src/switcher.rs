@@ -197,6 +197,7 @@ impl Target {
             Target::Project(_) => Section::Projects,
             Target::App(_) => Section::Apps,
             Target::Folder(_) => Section::Folders,
+            Target::StageModel(pick) if pick.effort() => Section::Efforts,
             Target::StageModel(_) => Section::Models,
             Target::Welcome
             | Target::Shortcuts
@@ -237,6 +238,7 @@ impl Target {
             Target::Project(_) => "project",
             Target::App(_) => "app",
             Target::Folder(_) => "folder",
+            Target::StageModel(pick) if pick.effort() => "effort",
             Target::StageModel(_) => "model",
             Target::Welcome
             | Target::Shortcuts
@@ -282,6 +284,7 @@ pub enum Section {
     Folders,
     Commands,
     Models,
+    Efforts,
 }
 
 impl Section {
@@ -297,6 +300,7 @@ impl Section {
             Section::Folders => "Recent folders",
             Section::Commands => "Commands",
             Section::Models => "Models",
+            Section::Efforts => "Effort",
         }
     }
 
@@ -1012,15 +1016,15 @@ fn effort_rows(slot: &ModelSlot, pick: &ModelPick, levels: &[&str]) -> Vec<Item>
             ItemIcon::Picture(picture.clone())
         });
     let own = format!("{}'s own choice", slot.agent);
-    let rows = std::iter::once(("Default".to_owned(), own, None)).chain(
-        levels
-            .iter()
-            .map(|l| (l.to_string(), "effort".to_owned(), Some(l.to_string()))),
-    );
+    let levels = levels
+        .iter()
+        .map(|l| (l.to_string(), String::new(), Some(l.to_string())));
+    let rows = std::iter::once(("Default".to_owned(), own, None)).chain(levels);
     rows.map(|(label, detail, effort)| {
-        let detail = match effort == slot.picked {
-            true => format!("{detail} \u{b7} picked"),
-            false => detail,
+        let detail = match (effort == slot.picked, detail.is_empty()) {
+            (true, true) => "picked".to_owned(),
+            (true, false) => format!("{detail} \u{b7} picked"),
+            (false, _) => detail,
         };
         Item::new(
             icon.clone(),
@@ -2670,8 +2674,10 @@ mod tests {
         let rows = effort_rows(&slot, &pick, &["low", "high"]);
         let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
         assert_eq!(labels, ["Default", "low", "high"]);
-        assert!(rows[2].detail.ends_with("picked"));
-        assert!(!rows[1].detail.ends_with("picked"));
+        assert_eq!(rows[2].detail, "picked");
+        assert_eq!(rows[1].detail, "");
+        assert!(rows.iter().all(|r| r.section == Section::Efforts));
+        assert_eq!(rows[1].target.kind(), "effort");
         let mut switcher = Switcher::new(Vec::new(), false, Place::Tab);
         switcher.model_slot = Some(pick);
         switcher.set_items(rows);
