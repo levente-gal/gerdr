@@ -1888,9 +1888,11 @@ impl FeatureTabLayout {
         let apart = |t: &PageText| {
             let r = rect(t);
             let dy = (r.loc.y - at.y).max(at.y - (r.loc.y + r.size.h - 1)).max(0);
-            let (text, font, bold, runs) =
-                piece_text(&pieces[t.piece].1).unwrap_or(("", Font::Body, false, &[]));
-            let end = r.loc.x + text_width_of(text, font, bold, runs).ceil() as i32;
+            let (text, font, bold, runs, code) =
+                piece_text(&pieces[t.piece].1).unwrap_or(("", Font::Body, false, &[], false));
+            // A code block's room before its text is on the line, as its ground is.
+            let end =
+                r.loc.x + inset(code) + text_width_of(text, font, bold, runs, code).ceil() as i32;
             let dx = (r.loc.x - at.x).max(at.x - end).max(0);
             (dy, dx)
         };
@@ -1898,8 +1900,9 @@ impl FeatureTabLayout {
         if !near && apart(t) != (0, 0) {
             return None;
         }
-        let (r, (text, font, bold, runs)) = (rect(t), piece_text(&pieces[t.piece].1)?);
-        let ch = char_at_x(text, font, bold, runs, (at.x - r.loc.x) as f32);
+        let (r, (text, font, bold, runs, code)) = (rect(t), piece_text(&pieces[t.piece].1)?);
+        let x = (at.x - r.loc.x - inset(code)) as f32;
+        let ch = char_at_x(text, font, bold, runs, code, x);
         Some(TextSpot { line, ch })
     }
 
@@ -2527,13 +2530,14 @@ pub(super) enum Piece {
     },
     /// The ground of the chars `range` of the line of text after it,
     /// selected: `text` in `font`, bold or not, with `runs`, as that line
-    /// has it.
+    /// has it (a code block's line, `code`, in mono past its block's room).
     Picked {
         text: String,
         font: Font,
         bold: bool,
         runs: Vec<(std::ops::Range<usize>, Inline)>,
         range: std::ops::Range<usize>,
+        code: bool,
     },
     /// The card of the user's comment on a finding, behind its text.
     YourComment,
@@ -5392,7 +5396,7 @@ fn mark_page(
                 .count();
             card = Some((n, rect));
         }
-        let Some((text, font, bold, runs)) = piece_text(&piece) else {
+        let Some((text, font, bold, runs, code)) = piece_text(&piece) else {
             out.push((rect, piece));
             continue;
         };
@@ -5415,6 +5419,7 @@ fn mark_page(
                         bold,
                         runs,
                         range,
+                        code,
                     },
                 ));
             }
@@ -5454,42 +5459,55 @@ fn mark_page(
 /// A line's runs, as `md_blocks::Styled` has them.
 type Runs = [(std::ops::Range<usize>, Inline)];
 
-/// A piece's line of text, its font, whether bold and its runs: what can
-/// be selected on the page.
-fn piece_text(piece: &Piece) -> Option<(&str, Font, bool, &Runs)> {
+/// A piece's line of text, its font, whether bold, its runs and whether
+/// a code block's line: what can be selected on the page.
+fn piece_text(piece: &Piece) -> Option<(&str, Font, bool, &Runs, bool)> {
     match piece {
         Piece::Text {
             text, font, bold, ..
         }
         | Piece::Found {
             text, font, bold, ..
-        } => Some((text, *font, *bold, &[])),
+        } => Some((text, *font, *bold, &[], false)),
         Piece::Doc(DocPiece::Text {
             text,
             runs,
             font,
             bold,
             ..
-        }) => Some((text, *font, *bold, runs)),
+        }) => Some((text, *font, *bold, runs, false)),
+        Piece::Doc(DocPiece::CodeLine(text, _)) => Some((text, Font::Small, false, &[], true)),
         _ => None,
     }
 }
 
-/// How wide `text` with `runs` is in `font`, bold or not, in logical
-/// pixels.
-fn text_width_of(text: &str, font: Font, bold: bool, runs: &Runs) -> f32 {
+/// How far in from its piece's left a line's text starts: a code block's
+/// past the block's room (`Painter::code_line`).
+fn inset(code: bool) -> i32 {
+    if code { DOC_CODE_PAD } else { 0 }
+}
+
+/// `face`, or mono for a code block's line.
+fn mono(code: bool, face: glyphs::Face) -> glyphs::Face {
+    if code { glyphs::Face::Mono } else { face }
+}
+
+/// How wide `text` with `runs` is in `font`, bold or not (mono for a code
+/// block's line), in logical pixels.
+fn text_width_of(text: &str, font: Font, bold: bool, runs: &Runs, code: bool) -> f32 {
     doc_layout::line_width(text, runs, bold, |t, face| {
-        doc_layout::width_in(t, face, font.size())
+        doc_layout::width_in(t, mono(code, face), font.size())
     })
 }
 
-/// The char of `text` (with `runs`) nearest `x`, its first at 0: the one
-/// whose middle `x` is before, else past the last.
-fn char_at_x(text: &str, font: Font, bold: bool, runs: &Runs, x: f32) -> usize {
+/// The char of `text` (with `runs`, mono for a code block's line) nearest
+/// `x`, its first at 0: the one whose middle `x` is before, else past the
+/// last.
+fn char_at_x(text: &str, font: Font, bold: bool, runs: &Runs, code: bool, x: f32) -> usize {
     let mut pen = 0.0;
     let mut i = 0;
     for (range, on) in spans(text, runs) {
-        let face = doc_layout::face(on, bold);
+        let face = mono(code, doc_layout::face(on, bold));
         let pad = doc_layout::run_pad(on);
         pen += pad;
         for ch in text[range].chars() {
@@ -7924,9 +7942,17 @@ impl Painter {
                     c.rounded(x, y, (w * f).max(h), h, h / 2.0, p.success);
                 }
             }
+            Piece::Doc(DocPiece::CodeHead { lang, .. }) => {
+                let page = &l.pieces[TabColumn::Page as usize];
+                let lit = matches!(view.hover, Some(FeatureTabHit::CopyCode(k))
+                    if page.get(k).is_some_and(|(_, at)| std::ptr::eq(at, piece)));
+                self.code_head(c, rect, lang, lit, scale, p);
+            }
             Piece::Doc(piece) => self.doc_piece(c, rect, piece, scale, p),
             Piece::OutputLine(text) => {
                 let ground = mix(p.background, p.text, OUTPUT_GROUND);
+                let (x, y, w, h) = rect_px(rect, scale);
+                c.fill(x as i32, y as i32, w as i32, h as i32, ground);
                 self.code_line(c, rect, (text, &[]), ground, scale, p);
             }
             Piece::YourComment => {
@@ -8471,13 +8497,15 @@ impl Painter {
                 bold,
                 runs,
                 range,
+                code,
             } => {
                 let (x, end) = phys(rect, scale);
+                let x = x + inset(*code) as f32 * s;
                 let (y, h) = band(rect, scale);
                 let px = font.size() * s;
                 // Measured physical, as painted; the runs' room is logical.
                 let width = |at: usize| {
-                    let measure = |t: &str, face| glyphs::width(t, face, px) / s;
+                    let measure = |t: &str, face| glyphs::width(t, mono(*code, face), px) / s;
                     doc_layout::x_at(text, runs, *bold, at, measure) * s
                 };
                 let byte = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(b, _)| b);
@@ -9882,7 +9910,12 @@ mod tests {
         // Under ACTIVITY_BELOW the rows go to the page, and it scrolls.
         let narrow = tab_at(&view, 1000);
         assert_eq!(narrow.scroll_room(TabColumn::Activity), 0);
-        assert!(narrow.scroll_room(TabColumn::Page) > room, "{} vs {room}, page {}", narrow.scroll_room(TabColumn::Page), narrow.content[TabColumn::Page as usize]);
+        assert!(
+            narrow.scroll_room(TabColumn::Page) > room,
+            "{} vs {room}, page {}",
+            narrow.scroll_room(TabColumn::Page),
+            narrow.content[TabColumn::Page as usize]
+        );
     }
 
     /// `view`'s page carrying `blocks` as its file.
@@ -9913,6 +9946,53 @@ mod tests {
         // Its language's side copies nothing.
         let left = Point::from((r.loc.x + 2, r.loc.y + r.size.h / 2));
         assert_ne!(l.hit(&view, left), Some(FeatureTabHit::CopyCode(k)));
+    }
+
+    #[test]
+    fn a_code_blocks_lines_select_as_text() {
+        let mut view = tab_view();
+        view.page.sections.clear();
+        let blocks = crate::md_blocks::blocks("```sh\ncargo build\ncargo test\n```\n");
+        let mut view = with_doc(view, blocks);
+        let l = tab_at(&view, 1200);
+        let line = (0..l.texts.len())
+            .find(|&n| l.line_text(n) == Some("cargo build"))
+            .expect("the block's first line");
+        assert_eq!(l.line_text(line + 1), Some("cargo test"));
+        // Its text starts past the block's room; a press in that room picks its first char.
+        let r = l.pieces[TabColumn::Page as usize][l.texts[line].piece].0;
+        let x = r.loc.x + DOC_CODE_PAD;
+        let at = |x: i32| l.text_at(&view, (x, r.loc.y + r.size.h / 2).into(), false);
+        assert_eq!(at(x + 1), Some(TextSpot { line, ch: 0 }));
+        assert_eq!(at(x - DOC_CODE_PAD / 2).map(|s| s.ch), Some(0));
+        let (from, to) = (
+            TextSpot { line, ch: 6 },
+            TextSpot {
+                line: line + 1,
+                ch: 8,
+            },
+        );
+        view.marks.pick = Some(TextPick {
+            anchor: from,
+            cursor: to,
+            said: ["cargo build".into(), "cargo test".into()],
+        });
+        assert_eq!(l.picked_text(&view).as_deref(), Some("build\ncargo te"));
+        // Each pick's ground paints over its line's code ground, under its text.
+        let laid = tab_at(&view, 1200);
+        let pieces = &laid.pieces[TabColumn::Page as usize];
+        let picked: Vec<usize> = (pieces.iter().enumerate())
+            .filter(|(_, (_, p))| matches!(p, Piece::Picked { code: true, .. }))
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(picked.len(), 2);
+        for k in picked {
+            assert!(matches!(pieces[k - 1].1, Piece::Doc(DocPiece::CodeFill)));
+            assert!(matches!(
+                pieces[k + 1].1,
+                Piece::Doc(DocPiece::CodeLine(..))
+            ));
+        }
     }
 
     fn says(piece: &Piece, what: &str) -> bool {

@@ -11,7 +11,7 @@ use smithay::utils::{Logical, Point, Rectangle};
 
 use super::features::{Font, Ink, StageMark, body_line, small_line, stage_dot, width_of};
 use super::glyphs::{self, Face};
-use super::{Canvas, Painter, Palette, Rect, Rgb, band, check, icon_sdf, rect_px};
+use super::{ButtonStyle, Canvas, Painter, Palette, Rect, Rgb, band, check, icon_sdf, rect_px};
 use crate::md_blocks::{DocBlock, Inline, ItemMark, Styled, spans};
 use crate::syntax::{Kind, Spans};
 
@@ -55,9 +55,12 @@ pub(super) enum DocPiece {
     },
     /// What a list item starts with, right in its gutter.
     ItemMark(ItemMark),
-    /// A line of a code block, cut where the column ends, on the block's
-    /// ground, in its language's colours.
+    /// A line of a code block, cut where the column ends, in its language's
+    /// colours, on the `CodeFill` before it.
     CodeLine(String, Spans),
+    /// A code block's ground behind one of its lines: put before the line,
+    /// so a pick paints on it.
+    CodeFill,
     /// The room above (`top`) or below a code block's lines, with the
     /// ground's rounded corners.
     CodeEdge { top: bool },
@@ -84,13 +87,18 @@ pub(super) enum DocPiece {
 /// What a code block's head offers, to copy its lines.
 pub(super) const COPY_CODE: &str = "Copy";
 
-/// Where a press on code block head `rect`'s "Copy" copies it: the word and
-/// the block's room around it, the head's height.
+/// Code block head `rect`'s "Copy" button, where a press copies its lines:
+/// the word with the block's room either side, half that room in from the
+/// head's right, top and bottom.
 pub(super) fn copy_spot(rect: Rect) -> Rect {
     let wide = width_in(COPY_CODE, Face::Ui, Font::Small.size()).ceil() as i32 + 2 * DOC_CODE_PAD;
-    let wide = wide.min(rect.size.w);
-    let x = rect.loc.x + rect.size.w - wide;
-    Rectangle::new((x, rect.loc.y).into(), (wide, rect.size.h).into())
+    let m = DOC_CODE_PAD / 2;
+    let wide = wide.min(rect.size.w - 2 * m);
+    let x = rect.loc.x + rect.size.w - m - wide;
+    Rectangle::new(
+        (x, rect.loc.y + m).into(),
+        (wide, rect.size.h - 2 * m).into(),
+    )
 }
 
 /// A code block's ground, as an inline code span's: off `element` too, as
@@ -464,12 +472,16 @@ impl Column {
                 match lang {
                     Some(lang) => {
                         let (lang, text) = (lang.clone(), lines.join("\n"));
-                        self.put(small_line(), DocPiece::CodeHead { lang, text });
+                        // Room around its Copy button (`copy_spot`).
+                        let h = small_line() + DOC_CODE_PAD;
+                        self.put(h, DocPiece::CodeHead { lang, text });
                     }
                     None => edge(self, true),
                 }
                 for (i, code) in lines.iter().enumerate() {
                     let spans = syntax.get(i).cloned().unwrap_or_default();
+                    let at = Rectangle::new((self.x, self.y).into(), (self.w, small_line()).into());
+                    self.pieces.push((at, DocPiece::CodeFill));
                     self.put(small_line(), DocPiece::CodeLine(code.clone(), spans));
                 }
                 edge(self, false);
@@ -682,18 +694,12 @@ impl Painter {
             DocPiece::CodeLine(text, spans) => {
                 self.code_line(c, rect, (text, spans), code_ground(p), scale, p);
             }
-            DocPiece::CodeEdge { top } => code_edge(c, rect, *top, scale, p),
-            DocPiece::CodeHead { lang, .. } => {
-                code_edge(c, rect, true, scale, p);
-                let (x, end) = super::phys(rect, scale);
-                let b = band(rect, scale);
-                let size = Font::Small.size();
-                let pad = (f64::from(DOC_CODE_PAD) * scale) as f32;
-                let copy = super::phys(copy_spot(rect), scale).0;
-                self.text(c, lang, size, x + pad, copy, b, scale, p.text);
-                let from = end - pad - width_in(COPY_CODE, Face::Ui, size) * s;
-                self.text(c, COPY_CODE, size, from, end, b, scale, p.text);
+            DocPiece::CodeFill => {
+                let (x, y, w, h) = rect_px(rect, scale);
+                c.fill(x as i32, y as i32, w as i32, h as i32, code_ground(p));
             }
+            DocPiece::CodeEdge { top } => code_edge(c, rect, *top, scale, p),
+            DocPiece::CodeHead { lang, .. } => self.code_head(c, rect, lang, false, scale, p),
             DocPiece::CodeGround => {
                 let (x, y, w, h) = rect_px(rect, scale);
                 c.rounded(x, y, w, h, super::CAP_RADIUS * s, code_ground(p));
@@ -735,9 +741,48 @@ impl Painter {
         }
     }
 
-    /// A line of a code block in `rect`, on `ground`, its runs `spans`
-    /// (by char) in code's colours. On whole pixels, so a block's lines
-    /// meet with no seam.
+    /// A code block's head in `rect`: the top of its ground, the language
+    /// its fence names on the left, and its Copy button on the right, `lit`
+    /// while the pointer is on it.
+    pub(super) fn code_head(
+        &self,
+        c: &mut Canvas,
+        rect: Rect,
+        lang: &str,
+        lit: bool,
+        scale: f64,
+        p: &Palette,
+    ) {
+        code_edge(c, rect, true, scale, p);
+        let x = super::phys(rect, scale).0;
+        let pad = (f64::from(DOC_CODE_PAD) * scale) as f32;
+        let copy = copy_spot(rect);
+        let end = super::phys(copy, scale).0 - pad;
+        let size = Font::Small.size();
+        self.text(
+            c,
+            lang,
+            size,
+            x + pad,
+            end,
+            band(rect, scale),
+            scale,
+            p.text,
+        );
+        self.button(
+            c,
+            COPY_CODE,
+            copy,
+            (lit, false),
+            ButtonStyle::Plain,
+            scale,
+            p,
+        );
+    }
+
+    /// A line of a code block in `rect`, its runs `spans` (by char) in
+    /// code's colours for `ground`, which is painted before it (whole
+    /// pixels, so a block's lines meet with no seam).
     pub(super) fn code_line(
         &self,
         c: &mut Canvas,
@@ -747,8 +792,7 @@ impl Painter {
         scale: f64,
         p: &Palette,
     ) {
-        let (x, y, w, h) = rect_px(rect, scale);
-        c.fill(x as i32, y as i32, w as i32, h as i32, ground);
+        let (x, _, w, _) = rect_px(rect, scale);
         let pad = (f64::from(DOC_CODE_PAD) * scale) as f32;
         let (mut pen, to) = (x + pad, x + w - pad);
         let b = band(rect, scale);

@@ -354,7 +354,8 @@ impl ChatLayout {
         if bottom_button(view, &parts, content).is_some_and(on) {
             return Some(ChatHit::Bottom);
         }
-        if let Some((i, ..)) = pinned(view, &parts, &items, content).filter(|(_, bar, _)| on(*bar)) {
+        if let Some((i, ..)) = pinned(view, &parts, &items, content).filter(|(_, bar, _)| on(*bar))
+        {
             return Some(ChatHit::Pinned(i));
         }
         let top = top_of(view, content, self.list.size.h);
@@ -1728,7 +1729,12 @@ fn pinned(
     });
     let (i, text) = last?;
     let laid = lay_pinned(text, parts.column.1);
-    let bar = rect(parts.column.0, list.loc.y + PART_GAP / 2, parts.column.1, laid.h);
+    let bar = rect(
+        parts.column.0,
+        list.loc.y + PART_GAP / 2,
+        parts.column.1,
+        laid.h,
+    );
     // Over half the list, it would hide what it is there to help read; and
     // it would hide the user's next words starting under it.
     let under = next.is_some_and(|(n, _)| items[n].0 < top + bar.size.h + PART_GAP);
@@ -2659,7 +2665,13 @@ impl Painter {
                 let at = parts.list.loc;
                 let strip = rect(at.x, at.y, parts.list.size.w, bar.size.h + PART_GAP);
                 let (x, y, w, h) = rect_px(here(strip), scale);
-                c.fill(x as i32, y as i32, w as i32, h as i32, p.terminal_background);
+                c.fill(
+                    x as i32,
+                    y as i32,
+                    w as i32,
+                    h as i32,
+                    p.terminal_background,
+                );
                 rule(&mut c, strip.loc.y + strip.size.h - 1);
                 let lit = matches!(view.hover, Some(ChatHit::Pinned(_)));
                 for (rect, bit) in &laid.bits {
@@ -2716,10 +2728,7 @@ impl Painter {
                         _ => {}
                     }
                 }
-                for (rect, bit) in &laid.bits {
-                    let rect = Rectangle::new(rect.loc + at, rect.size);
-                    self.chat_bit(&mut c, rect, bit, scale, p);
-                }
+                self.laid_bits(&mut c, view, (None, laid), at, scale, p);
                 let buttons = ask_buttons(view);
                 let ready = view.card.as_ref().is_none_or(CardView::ready);
                 for (hit, rect) in &parts.answers {
@@ -2958,9 +2967,32 @@ impl Painter {
         );
         let hover = if hovered { 1.0 } else { 0.0 };
         self.row_highlight(c, ground, (view.picked == Some(i), hover), scale, p);
+        self.laid_bits(c, view, (Some(i), laid), at, scale, p);
+    }
+
+    /// `laid`'s bits with its `(0, 0)` at `at`: of row `item`, or the
+    /// asking card's (`None`), each code block's Copy lit while the pointer
+    /// is on it (`ChatHit::CopyCode`).
+    fn laid_bits(
+        &self,
+        c: &mut Canvas,
+        view: &ChatView,
+        (item, laid): (Option<usize>, &Laid),
+        at: Point<i32, Logical>,
+        scale: f64,
+        p: &Palette,
+    ) {
+        let mut code = 0;
         for (rect, bit) in &laid.bits {
             let rect = Rectangle::new(rect.loc + at, rect.size);
-            self.chat_bit(c, rect, bit, scale, p);
+            match bit {
+                Bit::Doc(DocPiece::CodeHead { lang, .. }) => {
+                    let lit = view.hover == Some(ChatHit::CopyCode(item, code));
+                    code += 1;
+                    self.code_head(c, rect, lang, lit, scale, p);
+                }
+                bit => self.chat_bit(c, rect, bit, scale, p),
+            }
         }
     }
 
@@ -3373,10 +3405,18 @@ pub(super) mod tests {
             })
             .collect();
         assert_eq!(rows, (1..=8).map(WaitKey::Row).collect::<Vec<_>>());
-        assert!(!laid.bits.iter().any(|(_, bit)| matches!(bit, Bit::Label { text, .. } if text == "1.")));
+        assert!(
+            !laid
+                .bits
+                .iter()
+                .any(|(_, bit)| matches!(bit, Bit::Label { text, .. } if text == "1."))
+        );
         let layout = chat_layout(&v);
         let second = Rectangle::new(laid.spots[1].0.loc + at.loc, laid.spots[1].0.size);
-        assert_eq!(layout.hit(&v, middle(second)), Some(ChatHit::Key(WaitKey::Row(2))));
+        assert_eq!(
+            layout.hit(&v, middle(second)),
+            Some(ChatHit::Key(WaitKey::Row(2)))
+        );
         // Its effort moves with Left and Right.
         let keys: Vec<WaitKey> = p.keys.iter().map(|(key, _)| *key).collect();
         assert!(keys.contains(&WaitKey::Left) && keys.contains(&WaitKey::Enter));
@@ -3394,10 +3434,16 @@ pub(super) mod tests {
                 _ => None,
             })
             .collect();
-        assert!(shown.len() < 8 && shown.contains(&WaitKey::Row(2)), "{shown:?}");
+        assert!(
+            shown.len() < 8 && shown.contains(&WaitKey::Row(2)),
+            "{shown:?}"
+        );
         // It goes before what the agent waits on.
         v.waiting = Some(screen());
-        assert_eq!(parts(&v).menu.map(|(_, l)| l.spots.len()), Some(shown.len()));
+        assert_eq!(
+            parts(&v).menu.map(|(_, l)| l.spots.len()),
+            Some(shown.len())
+        );
     }
 
     #[test]
@@ -4309,8 +4355,7 @@ pub(super) mod tests {
             let row = rows
                 .last()
                 .is_some_and(|(_, l)| l.bits.iter().any(|(_, b)| *b == Bit::Spinner));
-            !row && chat_spinners(v).is_empty()
-                && chat_clocks(v, 73_000).is_empty()
+            !row && chat_spinners(v).is_empty() && chat_clocks(v, 73_000).is_empty()
         };
         for status in [AgentStatus::Idle, AgentStatus::Blocked, AgentStatus::Done] {
             assert!(still(&ChatView { status, ..view() }), "{status:?}");
