@@ -58,6 +58,8 @@ pub struct Settings {
     /// The agent CLI commands the config file names (see `cli_agents`),
     /// and the agent CLIs installed, as of the last look.
     pub agent_config: std::collections::BTreeMap<String, String>,
+    /// The skills feature stages name, from the config file's `[skills]`.
+    pub skills: crate::feature::skills::Settings,
 }
 
 /// The keyboard: the keymap, the prefix, and keys held or repeating.

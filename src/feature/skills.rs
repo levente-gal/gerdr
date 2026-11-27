@@ -1,5 +1,6 @@
 //! The skills a stage's agent is told to use: named per stage in the
-//! project's `workflow.skills`, else `DEFAULTS`. Only those installed for
+//! project's `workflow.skills`, else the config file's `[skills]`, else
+//! `DEFAULTS`. Only those installed for
 //! the agent's CLI are named, and gerdr never copies a skill's text: a
 //! skill renamed or gone upstream is simply left out. Each one named is
 //! stamped on the run with its folder hash from the `skills` CLI's lock
@@ -22,15 +23,132 @@ pub const DEFAULTS: &[(Stage, &[&str])] = &[
     (Stage::AiReview, &["codebase-design"]),
 ];
 
-/// The skills `stage` names: `set`'s for it where it has an entry (an
-/// empty one for none), else `DEFAULTS`'.
-pub fn wanted(set: &BTreeMap<Stage, Vec<String>>, stage: Stage) -> Vec<String> {
-    if let Some(names) = set.get(&stage) {
-        return names.clone();
+/// Where "Install skills" gets the skills from when `[skills]` names no
+/// `source`: a GitHub repository, as `npx skills add` takes it.
+pub const SOURCE: &str = "mattpocock/skills";
+
+/// The config file's `[skills]`: where they are installed from, and the
+/// skills each stage names, `DEFAULTS`' for a stage it gives none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Settings {
+    pub source: String,
+    pub stages: BTreeMap<Stage, Vec<String>>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self::with(None, BTreeMap::new())
     }
-    (DEFAULTS.iter().find(|(s, _)| *s == stage))
-        .map(|(_, names)| names.iter().map(|n| (*n).to_owned()).collect())
+}
+
+impl Settings {
+    /// `source` (else `SOURCE`), and `stages` over `DEFAULTS`.
+    pub fn with(source: Option<String>, stages: BTreeMap<Stage, Vec<String>>) -> Self {
+        let mut all: BTreeMap<Stage, Vec<String>> = (DEFAULTS.iter())
+            .map(|(stage, names)| (*stage, names.iter().map(|n| (*n).to_owned()).collect()))
+            .collect();
+        all.extend(stages);
+        Self {
+            source: source.unwrap_or_else(|| SOURCE.to_owned()),
+            stages: all,
+        }
+    }
+}
+
+/// The skills `stage` names: the project's `set` for it where it has an
+/// entry (an empty one for none), else `settings`'.
+pub fn wanted(
+    set: &BTreeMap<Stage, Vec<String>>,
+    settings: &Settings,
+    stage: Stage,
+) -> Vec<String> {
+    (set.get(&stage).or_else(|| settings.stages.get(&stage)))
+        .cloned()
         .unwrap_or_default()
+}
+
+/// Skills a feature's stages name that aren't installed for the agent CLI
+/// running them: `agent` by its picker name, `id` the `skills` CLI's name
+/// for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Missing {
+    pub agent: String,
+    pub id: &'static str,
+    pub names: Vec<String>,
+}
+
+/// Of `asks`, each stage's agent (its picker name and command) with the
+/// skills it names, those not installed for it in folder `cwd`, by agent,
+/// in their order. An agent the `skills` CLI can't install for is left
+/// out, and so is a name that isn't a plain folder name.
+pub fn missing(cwd: &Path, asks: &[(String, String, Vec<String>)]) -> Vec<Missing> {
+    let Some(homes) = Homes::here() else {
+        return Vec::new();
+    };
+    let config = crate::chat::commands::config_dir();
+    let mut out: Vec<Missing> = Vec::new();
+    for (agent, base, names) in asks {
+        let cli = crate::integrations::by_command(base);
+        let Some(id) = cli.skills_agent() else {
+            continue;
+        };
+        let found = installed(names, &cli.skill_dirs(cwd, &homes, &config));
+        let gone = (names.iter()).filter(|n| plain(n) && !found.contains(n));
+        let at = match out.iter().position(|m| m.agent == *agent) {
+            Some(at) => at,
+            None => {
+                out.push(Missing {
+                    agent: agent.clone(),
+                    id,
+                    names: Vec::new(),
+                });
+                out.len() - 1
+            }
+        };
+        for name in gone {
+            if !out[at].names.contains(name) {
+                out[at].names.push(name.clone());
+            }
+        }
+    }
+    out.retain(|m| !m.names.is_empty());
+    out
+}
+
+/// What the Discover page says of `missing`: "Not installed for Claude
+/// Code: grilling, tdd".
+pub fn missing_words(missing: &[Missing]) -> String {
+    let each: Vec<String> = (missing.iter())
+        .map(|m| format!("{}: {}", m.agent, m.names.join(", ")))
+        .collect();
+    format!("Not installed for {}", each.join(" \u{b7} "))
+}
+
+/// The line that installs `missing` from `source` for every agent of it,
+/// for all projects (`-g`), with the `skills` CLI.
+pub fn install_line(source: &str, missing: &[Missing]) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    let mut ids: Vec<&str> = Vec::new();
+    for m in missing {
+        for name in &m.names {
+            if !names.contains(&name.as_str()) {
+                names.push(name);
+            }
+        }
+        if !ids.contains(&m.id) {
+            ids.push(m.id);
+        }
+    }
+    let names: Vec<String> = names
+        .iter()
+        .map(|n| crate::desktop::shell_quote(n))
+        .collect();
+    format!(
+        "npx -y skills@latest add {} -g -s {} -a {} -y",
+        crate::desktop::shell_quote(source),
+        names.join(" "),
+        ids.join(" ")
+    )
 }
 
 /// Those of `names` with a `<name>/SKILL.md` in one of `dirs`, in their
@@ -56,7 +174,8 @@ pub fn installed_for(agent: &dyn Integration, cwd: &Path, names: &[String]) -> V
     installed(names, &agent.skill_dirs(cwd, &homes, &config))
 }
 
-fn plain(name: &str) -> bool {
+/// Whether `name` can be a skill's folder.
+pub fn plain(name: &str) -> bool {
     !name.is_empty()
         && name != "."
         && name != ".."
@@ -112,18 +231,73 @@ mod tests {
     }
 
     #[test]
-    fn a_stage_names_the_projects_skills_else_the_defaults() {
+    fn a_stage_names_the_projects_skills_else_the_config_files_else_the_defaults() {
         let mut set = BTreeMap::new();
+        let config = Settings::with(None, BTreeMap::from([(Stage::Plan, names(&["mine"]))]));
+        assert_eq!(config.source, SOURCE);
         assert_eq!(
-            wanted(&set, Stage::Build),
+            wanted(&set, &config, Stage::Build),
             names(&["tdd", "diagnosing-bugs"])
         );
-        assert!(wanted(&set, Stage::Verify).is_empty());
+        assert_eq!(wanted(&set, &config, Stage::Plan), names(&["mine"]));
+        assert!(wanted(&set, &config, Stage::Verify).is_empty());
         set.insert(Stage::Build, names(&["tests-first"]));
         set.insert(Stage::Discover, Vec::new());
-        assert_eq!(wanted(&set, Stage::Build), names(&["tests-first"]));
+        assert_eq!(wanted(&set, &config, Stage::Build), names(&["tests-first"]));
         // An empty entry names none, over the defaults.
-        assert!(wanted(&set, Stage::Discover).is_empty());
+        assert!(wanted(&set, &config, Stage::Discover).is_empty());
+    }
+
+    #[test]
+    fn a_skill_is_missing_for_an_agent_that_reads_none_of_that_name() {
+        let cwd = std::env::temp_dir().join(format!("gerdr-missing-{}", std::process::id()));
+        let skill = cwd.join(".claude/skills/tdd");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: tdd\n---\n").unwrap();
+        let gone = "gerdr-no-such-skill";
+        let asks = [
+            ("Claude Code".into(), "claude".into(), names(&["tdd", gone])),
+            (
+                "Claude Code".into(),
+                "claude".into(),
+                names(&[gone, "../x"]),
+            ),
+            // The skills CLI can't install for it: not told.
+            ("Mine".into(), "my-agent".into(), names(&[gone])),
+        ];
+        assert_eq!(
+            missing(&cwd, &asks),
+            [Missing {
+                agent: "Claude Code".into(),
+                id: "claude-code",
+                names: names(&[gone])
+            }]
+        );
+        std::fs::remove_dir_all(cwd).unwrap();
+    }
+
+    #[test]
+    fn missing_skills_install_in_one_line_for_every_agent_without_them() {
+        let missing = [
+            Missing {
+                agent: "Claude Code".into(),
+                id: "claude-code",
+                names: names(&["tdd", "grilling"]),
+            },
+            Missing {
+                agent: "Codex".into(),
+                id: "codex",
+                names: names(&["tdd"]),
+            },
+        ];
+        assert_eq!(
+            install_line("mattpocock/skills", &missing),
+            "npx -y skills@latest add mattpocock/skills -g -s tdd grilling -a claude-code codex -y"
+        );
+        assert_eq!(
+            missing_words(&missing),
+            "Not installed for Claude Code: tdd, grilling \u{b7} Codex: tdd"
+        );
     }
 
     #[test]

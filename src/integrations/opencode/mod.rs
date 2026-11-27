@@ -119,6 +119,10 @@ impl Integration for OpenCode {
         commands::on_disk(cwd, config, found);
     }
 
+    fn skills_agent(&self) -> Option<&'static str> {
+        Some("opencode")
+    }
+
     fn skill_dirs(&self, cwd: &Path, homes: &Homes, config: &Path) -> Vec<PathBuf> {
         let mut dirs = vec![
             cwd.join(".opencode/skills"),

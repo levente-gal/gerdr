@@ -2697,6 +2697,7 @@ mod tests {
             came_from: None,
             stage_models: Default::default(),
             stage_efforts: Default::default(),
+            effort_defaults: false,
             fresh_milestones: false,
             fresh_fixes: false,
             setup: None,

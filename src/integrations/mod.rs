@@ -353,6 +353,11 @@ pub trait Integration: Sync {
     fn skill_dirs(&self, _cwd: &Path, _homes: &Homes, _config: &Path) -> Vec<PathBuf> {
         Vec::new()
     }
+    /// Its name to the `skills` CLI (`npx skills add -a <name>`), which
+    /// installs skills for it; none for one that CLI doesn't know.
+    fn skills_agent(&self) -> Option<&'static str> {
+        None
+    }
 
     // Live hooks.
 

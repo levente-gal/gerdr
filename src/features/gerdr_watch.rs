@@ -210,6 +210,11 @@ impl Gerdr {
             probed.fetch_at = Some(now);
         }
         let data = store::dir(None, project, slug);
+        // The first page tells the skills missing, while it is the stage at.
+        let skill_asks = match feature.current() == Some(Stage::Discover) {
+            true => self.skill_asks(&feature),
+            false => Vec::new(),
+        };
         let (project, slug) = (project.to_owned(), slug.to_owned());
         self.feature_work(None, move |_| Done::Probed {
             probe: Box::new(match feature.writer {
@@ -228,12 +233,35 @@ impl Gerdr {
                         false => BTreeMap::new(),
                     },
                     resolution: ship::read_resolution(&feature, &data),
+                    skills: feature::skills::missing(&feature.dir, &skill_asks),
                     ..ship::probe(&feature, &modes)
                 },
             }),
             project,
             slug,
         });
+    }
+
+    /// Install the skills feature `slug`'s stages name that their agents
+    /// lack, as last probed, in a new tab typed at its shell, so what runs
+    /// shows. With no workspace to open it in, the line goes on the
+    /// clipboard. The next probe sees them installed.
+    pub(crate) fn install_skills(&mut self, project: &str, slug: &str) {
+        let key = (project.to_owned(), slug.to_owned());
+        let probed = (self.features.probes.get(&key)).and_then(|p| p.last.as_ref());
+        let missing = probed.map(|p| p.skills.clone()).unwrap_or_default();
+        if missing.is_empty() {
+            return self.show_notice("Its stages' skills are installed".to_owned());
+        }
+        let line = feature::skills::install_line(&self.settings.skills.source, &missing);
+        if self.workspace().is_none() {
+            self.copy_text(line);
+            let text = "No workspace to install the skills in: its command is on the clipboard";
+            return self.show_warning(text.to_owned());
+        }
+        let w = self.active_workspace;
+        let dir = self.workspaces[w].dir.clone();
+        self.new_tab_running(w, &dir, line);
     }
 
     /// Read feature `slug`'s pull requests on GitHub again now, with the

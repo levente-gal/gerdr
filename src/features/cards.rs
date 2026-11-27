@@ -439,6 +439,25 @@ pub(super) fn file_card(
     }
 }
 
+/// The card of the skills `missing` for the stages' agents, in the warning
+/// colour, with its Install skills in `actions`; none while none are.
+pub(super) fn skills_card(
+    missing: &[feature::skills::Missing],
+    actions: &[(PageButton, PanelOutcome)],
+) -> Option<PageSection> {
+    if missing.is_empty() {
+        return None;
+    }
+    Some(PageSection::File {
+        name: "Skills".to_owned(),
+        state: line(feature::skills::missing_words(missing), CheckTone::Blocker),
+        buttons: (actions.iter().enumerate())
+            .filter(|(_, (_, o))| *o == PanelOutcome::InstallSkills)
+            .map(|(i, _)| i)
+            .collect(),
+    })
+}
+
 /// The card of Discover's decision log, holding `n` decisions, with its
 /// Open in `actions`; none while it holds none.
 pub(super) fn decisions_card(

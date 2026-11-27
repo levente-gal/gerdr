@@ -1507,6 +1507,9 @@ pub enum PanelOutcome {
     /// Hand a feature written here back to the machine it was taken over from:
     /// that machine's gerdr takes it (see `machine_handback`).
     HandBack,
+    /// Install the skills its stages name that its agents lack, in a new
+    /// terminal tab (see `skills::install_line`).
+    InstallSkills,
     /// Pick the next agent this agent stage's chips offer.
     CycleAgent(Stage),
     /// Build with a fresh agent per milestone, or one through them all.

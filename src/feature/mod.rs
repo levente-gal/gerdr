@@ -921,6 +921,11 @@ pub struct Feature {
     /// `stage_models` keeps models: none starts it on its own default.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub stage_efforts: BTreeMap<Stage, BTreeMap<String, String>>,
+    /// A stage with no effort picked starts on gerdr's default for it
+    /// (`feature_agents::default_effort`), not its agent's own; an empty
+    /// pick in `stage_efforts` is the agent's own. New features have it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub effort_defaults: bool,
     /// The machine picked on a stage's page, by its id (`machines::Site::id`)
     /// or `machine_work::HERE`; over the project's `workflow.machines`, and
     /// only where it differs from what that gives.
@@ -2165,6 +2170,7 @@ pub(crate) mod tests {
             epoch: 0,
             stage_models: Default::default(),
             stage_efforts: Default::default(),
+            effort_defaults: false,
             fresh_milestones: false,
             setup: None,
             checks: Default::default(),
@@ -2271,6 +2277,7 @@ pub(crate) mod tests {
             epoch: 0,
             stage_models: Default::default(),
             stage_efforts: Default::default(),
+            effort_defaults: false,
             fresh_milestones: false,
             setup: None,
             checks: Default::default(),

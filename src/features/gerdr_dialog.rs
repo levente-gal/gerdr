@@ -538,6 +538,7 @@ impl Gerdr {
             epoch: 0,
             stage_models: Default::default(),
             stage_efforts: Default::default(),
+            effort_defaults: true,
             // A fresh agent per milestone keeps each one's context small;
             // Ctrl+Shift+B on its page turns it off.
             fresh_milestones: true,

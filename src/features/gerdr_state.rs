@@ -1044,6 +1044,7 @@ impl Gerdr {
             decisions: docs.map_or(0, |d| d.decisions),
             dirty: (self.feature_reading(&feature.project, &feature.slug))
                 .is_some_and(|r| !r.dirty.is_empty()),
+            skills_missing: last.is_some_and(|p| !p.skills.is_empty()),
         }
     }
 }

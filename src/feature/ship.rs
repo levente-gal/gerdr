@@ -386,6 +386,9 @@ pub struct Probe {
     /// The CI of the bases shipping pushed lately, by `Repo::key`, when read
     /// this time (`read_base_ci`): read as often as `prs`.
     pub base_ci: Option<BTreeMap<String, BaseCi>>,
+    /// While Discover is its current stage: the skills its stages name that
+    /// aren't installed for their agents (`skills::missing`).
+    pub skills: Vec<super::skills::Missing>,
 }
 
 /// How long after shipping pushed a base its CI is read: by then it ran.
@@ -619,6 +622,7 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
         bases: BTreeMap::new(),
         resolution: None,
         base_ci: None,
+        skills: Vec::new(),
     }
 }
 
@@ -640,6 +644,7 @@ pub fn probe_seen(feature: &Feature) -> Probe {
         bases: BTreeMap::new(),
         resolution: None,
         base_ci: None,
+        skills: Vec::new(),
     }
 }
 
@@ -664,6 +669,7 @@ pub fn probe_finished(feature: &Feature) -> Probe {
         bases: BTreeMap::new(),
         resolution: None,
         base_ci: None,
+        skills: Vec::new(),
     }
 }
 

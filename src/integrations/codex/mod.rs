@@ -151,6 +151,10 @@ impl Integration for Codex {
         commands::codex_disk(homes, found);
     }
 
+    fn skills_agent(&self) -> Option<&'static str> {
+        Some("codex")
+    }
+
     fn skill_dirs(&self, cwd: &Path, homes: &Homes, _config: &Path) -> Vec<PathBuf> {
         let mut dirs = vec![cwd.join(".agents/skills"), homes.codex.join("skills")];
         dirs.extend(

@@ -106,6 +106,18 @@
 //! # Files to play instead (Ogg, WAV or FLAC; ~ is your home folder).
 //! sound-blocked = "~/sounds/knock.oga"
 //! sound-done = "~/sounds/ding.oga"
+//!
+//! [skills]
+//! # The skills a feature stage's agent is told to use, by name, where
+//! # they are installed for its CLI (a project's file names its own under
+//! # "skills"); [] names none. A stage left out keeps gerdr's: discover
+//! # grilling and domain-modeling, plan and ai-review codebase-design,
+//! # build tdd and diagnosing-bugs.
+//! discover = ["grilling", "domain-modeling"]
+//! build = ["tdd"]
+//! # Where the Discover page's "Install skills" gets missing ones from,
+//! # with `npx skills add`. By default mattpocock/skills.
+//! source = "mattpocock/skills"
 //! ```
 //!
 //! Each table is read on its own, and a key that can't be read on its
@@ -155,6 +167,17 @@ struct Config {
     t3: T3Config,
     terminal: TerminalConfig,
     notifications: NotificationsConfig,
+    skills: SkillsConfig,
+}
+
+/// The `[skills]` table, as written: `source`, and each stage's names by
+/// its kebab-case name.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SkillsConfig {
+    source: Option<String>,
+    #[serde(flatten)]
+    stages: BTreeMap<crate::feature::Stage, Vec<String>>,
 }
 
 /// The `[t3]` table, as written.
@@ -504,6 +527,30 @@ impl Default for Sounds {
 
 /// The sounds `text`'s `[notifications]` table asks for; the rest of the
 /// file is `from_text`'s, which tells its mistakes.
+/// The skills `text`'s `[skills]` names, each stage's without the names
+/// that can't be a skill's folder, which go to `problems`.
+pub fn skills_from_text(
+    text: &str,
+    problems: &mut Vec<String>,
+) -> crate::feature::skills::Settings {
+    let table = Config::read(text, &mut Vec::new()).skills;
+    let mut stages = table.stages;
+    for (stage, names) in &mut stages {
+        names.retain(|name| {
+            let plain = crate::feature::skills::plain(name);
+            if !plain {
+                problems.push(format!(
+                    "[skills] {}: `{name}` isn't a skill's name",
+                    stage.label()
+                ));
+            }
+            plain
+        });
+    }
+    let source = (table.source.map(|s| s.trim().to_owned())).filter(|s| !s.is_empty());
+    crate::feature::skills::Settings::with(source, stages)
+}
+
 pub fn sounds_from_text(text: &str) -> Sounds {
     let table = Config::read(text, &mut Vec::new()).notifications;
     let home = home_dir().unwrap_or_default();
@@ -642,7 +689,7 @@ pub fn services_from_text(text: &str) -> (Services, Vec<String>) {
 const KEYS_PROBLEM: &str = "[keys] ";
 
 /// The tables the file may have.
-const TABLES: [&str; 12] = [
+const TABLES: [&str; 13] = [
     "keys",
     "apps",
     "ui",
@@ -655,6 +702,7 @@ const TABLES: [&str; 12] = [
     "t3",
     "terminal",
     "notifications",
+    "skills",
 ];
 
 impl Config {
@@ -676,7 +724,7 @@ impl Config {
         let (keys, apps, ui, git) = (take("keys"), take("apps"), take("ui"), take("git"));
         let (keep, inbox, agents) = (take("keep"), take("inbox"), take("agents"));
         let (services, t3, notifications) = (take("services"), take("t3"), take("notifications"));
-        let (terminal, machines) = (take("terminal"), take("machines"));
+        let (terminal, machines, skills) = (take("terminal"), take("machines"), take("skills"));
         Self {
             keys: table("keys", keys, problems),
             apps: table("apps", apps, problems),
@@ -690,6 +738,7 @@ impl Config {
             t3: table("t3", t3, problems),
             terminal: table("terminal", terminal, problems),
             notifications: table("notifications", notifications, problems),
+            skills: table("skills", skills, problems),
         }
     }
 }
@@ -899,6 +948,8 @@ pub struct Settings {
     pub notifications: Notifications,
     /// The sounds of agents that need the user or finish.
     pub sounds: Sounds,
+    /// The skills feature stages name, and where they are installed from.
+    pub skills: crate::feature::skills::Settings,
     /// What is wrong with the file, as sentences for the user.
     pub problems: Vec<String>,
 }
@@ -930,6 +981,7 @@ pub fn load() -> Settings {
     let terminal = terminal_from_text(&text);
     let notifications = notifications_from_text(&text);
     let sounds = sounds_from_text(&text);
+    let skills = skills_from_text(&text, &mut problems);
     let machines = Config::read(&text, &mut Vec::new()).machines;
     // `Keymap::new` keeps its own under "keys": only the rest here.
     crate::problems::clear("config");
@@ -951,6 +1003,7 @@ pub fn load() -> Settings {
         terminal,
         notifications,
         sounds,
+        skills,
         problems,
     }
 }
@@ -1430,6 +1483,7 @@ impl Gerdr {
             notifier.set_settings(settings.notifications);
         }
         self.settings.sounds = settings.sounds;
+        self.settings.skills = settings.skills;
         if settings.notifications.enabled != self.settings.notify {
             self.settings.notify = settings.notifications.enabled;
             // The bus source lets go once the notifier is gone.
@@ -1596,6 +1650,36 @@ mod tests {
         assert!(problems.is_empty(), "{problems:?}");
         let (.., problems, _, _) = from_text("[terminal]\nlive_reload = false\n");
         assert_eq!(problems.len(), 1, "{problems:?}");
+    }
+
+    #[test]
+    fn skills_default_to_gerdrs_and_the_file_changes_each_stage_it_names() {
+        use crate::feature::{Stage, skills::SOURCE};
+        let read = |text: &str| {
+            let mut problems = Vec::new();
+            (super::skills_from_text(text, &mut problems), problems)
+        };
+        let (none, problems) = read("");
+        assert_eq!(none, crate::feature::skills::Settings::default());
+        assert!(problems.is_empty());
+        assert_eq!(none.stages[&Stage::Build], ["tdd", "diagnosing-bugs"]);
+        let text =
+            "[skills]\nsource = \"me/skills\"\nbuild = [\"tdd\", \"../x\"]\nai-review = []\n";
+        let (set, problems) = read(text);
+        assert_eq!(set.source, "me/skills");
+        assert_eq!(set.stages[&Stage::Build], ["tdd"]);
+        assert!(set.stages[&Stage::AiReview].is_empty());
+        assert_eq!(
+            set.stages[&Stage::Discover],
+            ["grilling", "domain-modeling"]
+        );
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(from_text(text).5.is_empty(), "{:?}", from_text(text).5);
+        // A stage gerdr doesn't have is told; the rest stands.
+        let (set, _) = read("[skills]\nbiuld = [\"x\"]\nplan = [\"mine\"]\n");
+        assert_eq!(set.source, SOURCE);
+        assert_eq!(set.stages[&Stage::Plan], ["mine"]);
+        assert_eq!(from_text("[skills]\nbiuld = [\"x\"]\n").5.len(), 1);
     }
 
     #[test]

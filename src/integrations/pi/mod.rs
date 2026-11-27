@@ -125,6 +125,10 @@ impl Integration for Pi {
         commands::on_disk(cwd, homes, found);
     }
 
+    fn skills_agent(&self) -> Option<&'static str> {
+        Some("pi")
+    }
+
     fn skill_dirs(&self, cwd: &Path, homes: &Homes, _config: &Path) -> Vec<PathBuf> {
         let agent = homes.pi.parent().unwrap_or(Path::new("/"));
         let mut dirs = vec![cwd.join(".pi/skills"), cwd.join(".agents/skills")];

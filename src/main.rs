@@ -7584,6 +7584,7 @@ fn new_gerdr(
         terminal,
         notifications,
         sounds,
+        skills,
         problems: settings_problems,
     } = settings;
     anim::set_motion(ui.motion);
@@ -7684,6 +7685,7 @@ fn new_gerdr(
             show_footer: ui.footer,
             t3_log: false,
             agent_config,
+            skills,
         },
         key_state: state::KeyState {
             suppressed_keys: Vec::new(),

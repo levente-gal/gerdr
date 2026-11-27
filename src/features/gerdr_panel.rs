@@ -434,6 +434,7 @@ impl Gerdr {
             // Only offered on what another machine writes, above.
             PanelOutcome::TakeOver => {}
             PanelOutcome::HandBack => self.hand_back(&project, &slug),
+            PanelOutcome::InstallSkills => self.install_skills(&project, &slug),
             PanelOutcome::Tick => self.tick_current(&project, &slug),
             PanelOutcome::Ship | PanelOutcome::Finish => self.ask_ship_feature(&project, &slug),
             PanelOutcome::ShipRoute(repo, route) => {
