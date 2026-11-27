@@ -606,6 +606,15 @@ pub(crate) const EFFORT_KEYS: &[Binding<(), ()>] = &[Binding {
     f1: "pick the effort the agent reasons with",
 }];
 
+/// The compact key, from the list and the reply box alike (also Compact
+/// under the reply box).
+pub(crate) const COMPACT_KEYS: &[Binding<(), ()>] = &[Binding {
+    chord: "Alt+Shift+C",
+    does: |_| Some(()),
+    footer: true,
+    f1: "have the agent compact its context (its /compact; Cursor's /summarize)",
+}];
+
 /// Whether `line` is agent `kind`'s bare effort line (`/effort`,
 /// `/thinking`, `/variants`): the chat's effort picker opens instead.
 fn effort_typed(kind: AgentKind, line: &str) -> bool {
@@ -859,7 +868,13 @@ pub(crate) fn footer(
 /// The footer's key hints of `chat` (K3): its ask card's, or its questions'
 /// card's while that has the keys, then those of where its keys are, but
 /// for a key the card took.
-fn chat_footer(chat: &PaneChat, modes: bool, models: bool, efforts: bool) -> Vec<(String, String)> {
+fn chat_footer(
+    chat: &PaneChat,
+    modes: bool,
+    models: bool,
+    efforts: bool,
+    compacts: bool,
+) -> Vec<(String, String)> {
     let ask = chat.live.ask.as_ref();
     let questions = ask.filter(|a| !a.questions.is_empty());
     let card = questions.filter(|_| chat.focus == ChatFocus::List);
@@ -888,6 +903,9 @@ fn chat_footer(chat: &PaneChat, modes: bool, models: bool, efforts: bool) -> Vec
             let attach = key_table::hints(ATTACH_KEYS, &(), |_| "attach".to_owned());
             let effort = (key_table::hints(EFFORT_KEYS, &(), |_| "effort".to_owned()).into_iter())
                 .filter(|_| efforts);
+            let compact = (key_table::hints(COMPACT_KEYS, &(), |_| "compact".to_owned()))
+                .into_iter()
+                .filter(|_| compacts);
             footer(
                 chat.focus,
                 chat.draft.line().text.is_empty(),
@@ -897,7 +915,7 @@ fn chat_footer(chat: &PaneChat, modes: bool, models: bool, efforts: bool) -> Vec
             )
             .into_iter()
             .chain(
-                (effort.chain(unattach).chain(attach))
+                (effort.chain(compact).chain(unattach).chain(attach))
                     .map(|(chord, said)| (chord.to_owned(), said)),
             )
             .collect()
@@ -937,6 +955,8 @@ enum ChatDo {
     /// Open the picker of the agent's model, or its effort.
     PickModel,
     PickEffort,
+    /// Have the agent compact its context.
+    Compact,
     /// Open plan item `.0`'s review.
     Review(String),
     /// Open the file picker, to attach files to the reply.
@@ -1066,6 +1086,9 @@ fn chat_key(
     }
     if key_table::press(EFFORT_KEYS, &(), mods, sym).is_some() {
         return Some(ChatDo::PickEffort);
+    }
+    if key_table::press(COMPACT_KEYS, &(), mods, sym).is_some() {
+        return Some(ChatDo::Compact);
     }
     if key_table::press(ATTACH_KEYS, &(), mods, sym).is_some() {
         return Some(ChatDo::PickFiles);
@@ -1966,6 +1989,7 @@ impl Gerdr {
             Some(ChatDo::NextMode) => self.chat_next_mode(&pane_id),
             Some(ChatDo::PickModel) => self.chat_open_model_picker(&pane_id),
             Some(ChatDo::PickEffort) => self.chat_open_effort_picker(&pane_id),
+            Some(ChatDo::Compact) => self.chat_compact(&pane_id),
             Some(ChatDo::Review(item_id)) => self.open_chat_plan(&pane_id, &item_id),
             Some(ChatDo::PickFiles) => self.chat_pick_files(&pane_id),
             Some(ChatDo::MenuKey(key)) => self.chat_menu_press(&pane_id, Press::Key(key)),
@@ -2403,6 +2427,37 @@ impl Gerdr {
         agent_in_front(&herdr.process_info(pane_id))
     }
 
+    /// Have pane `pane_id`'s agent compact its context: its own command,
+    /// typed as a reply is. Refused while it works or waits on an answer:
+    /// the line would join its turn or answer its menu.
+    pub(crate) fn chat_compact(&mut self, pane_id: &str) {
+        let agent = self.chat_agent(pane_id);
+        let status = agent.map(|a| a.agent_status);
+        let Some(line) = (agent.and_then(super::source::kind)).and_then(commands::compact_line)
+        else {
+            return;
+        };
+        let sent = match status {
+            Some(AgentStatus::Working) => {
+                Err("the agent is still working; compact once it is done".into())
+            }
+            Some(AgentStatus::Blocked) => Err("the agent waits on an answer first".into()),
+            _ => self.send_line(pane_id, &line),
+        };
+        match sent {
+            Ok(()) => {
+                if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
+                    chat.stick = true;
+                }
+                self.show_success("Compacting the agent's context".into());
+            }
+            Err(why) => {
+                tracing::warn!("compacting the agent in pane {pane_id}: {why}");
+                self.show_error(format!("Couldn't compact: {why}"));
+            }
+        }
+    }
+
     /// Open the picker of pane `pane_id`'s agent's model, on the one its
     /// chat says it is on: its own menu, or gerdr's list of them for one
     /// that takes it on a typed line; nothing for one gerdr can't switch.
@@ -2806,6 +2861,9 @@ impl Gerdr {
                 let effort = (super::source::kind(agent))
                     .filter(|kind| caps(*kind).effort != ModelSwitch::None)
                     .map(|_| chat.effort.clone().unwrap_or_else(|| "Effort".to_owned()));
+                let compact = (super::source::kind(agent))
+                    .and_then(commands::compact_line)
+                    .is_some();
                 let modes = (super::source::kind(agent))
                     .filter(|kind| caps(*kind).modes)
                     .map_or_else(Vec::new, |kind| {
@@ -2830,7 +2888,13 @@ impl Gerdr {
                         .then(|| self.chats.waiting.get(pane_id).cloned())
                         .flatten(),
                     suggestion: chat.suggestion.clone(),
-                    hints: chat_footer(chat, !modes.is_empty(), model.is_some(), effort.is_some()),
+                    hints: chat_footer(
+                        chat,
+                        !modes.is_empty(),
+                        model.is_some(),
+                        effort.is_some(),
+                        compact,
+                    ),
                     slash: (chat.slash.as_ref())
                         .filter(|slash| slash.open())
                         .map(chrome::SlashView::of),
@@ -2853,6 +2917,7 @@ impl Gerdr {
                     model,
                     effort,
                     context: chat.context.map(|c| c.said()),
+                    compact,
                     picker: chat.picker.clone(),
                 };
                 view.hover = pointer
@@ -2895,6 +2960,10 @@ impl Gerdr {
         if let Some(rect) = chrome::chat_effort_at(&view, pos) {
             let tip = "Pick the effort the agent reasons with";
             return Some(crate::tooltip::Tooltip::new(tip, rect).key(EFFORT_KEYS[0].chord));
+        }
+        if let Some(rect) = chrome::chat_compact_at(&view, pos) {
+            let tip = "Have the agent compact its context, keeping a summary";
+            return Some(crate::tooltip::Tooltip::new(tip, rect).key(COMPACT_KEYS[0].chord));
         }
         let button = chrome::chat_bottom_button(&view)?;
         (button.to_f64().contains(pos))
@@ -3004,6 +3073,7 @@ impl Gerdr {
             }
             ChatHit::Model => self.chat_open_model_picker(&pane_id),
             ChatHit::Effort => self.chat_open_effort_picker(&pane_id),
+            ChatHit::Compact => self.chat_compact(&pane_id),
             ChatHit::Answer(reply) => self.chat_answer(&pane_id, reply, None),
             ChatHit::Card(hit) => {
                 let answers = card_press(chat, hit);
@@ -3465,7 +3535,7 @@ mod tests {
     }
 
     fn footer_of(chat: &PaneChat) -> Vec<(String, String)> {
-        chat_footer(chat, false, false, false)
+        chat_footer(chat, false, false, false, false)
     }
 
     #[test]
@@ -3582,7 +3652,7 @@ mod tests {
         assert_eq!(chat.draft, "kept");
         // Left and Right only where they change its effort.
         assert_eq!(press(&mut chat, "Left", '\0'), None);
-        let hinted = |chat: &PaneChat| chat_footer(chat, true, true, true);
+        let hinted = |chat: &PaneChat| chat_footer(chat, true, true, true, true);
         assert!(!hinted(&chat).iter().any(|(_, said)| said == "effort"));
         assert!(!hinted(&chat).iter().any(|(_, said)| said == "send"));
         chat.picker = Some(Arc::new(Menu {
@@ -3674,7 +3744,7 @@ mod tests {
         assert_eq!(chat.draft, "hi");
         // Hinted only where gerdr can switch the agent's effort.
         let has = |chat: &PaneChat, efforts| {
-            (chat_footer(chat, false, false, efforts).iter())
+            (chat_footer(chat, false, false, efforts, false).iter())
                 .any(|(k, said)| k == "Alt+Shift+E" && said == "effort")
         };
         assert!(has(&chat, true) && !has(&chat, false));
@@ -3696,6 +3766,33 @@ mod tests {
     }
 
     #[test]
+    fn alt_shift_c_compacts_from_the_list_and_the_reply_box() {
+        let mut chat = with_items(vec![user("u1", "one")]);
+        assert_eq!(press(&mut chat, "Alt+Shift+C", 'C'), Some(ChatDo::Compact));
+        chat.focus = ChatFocus::Composer;
+        chat.draft.set("hi");
+        assert_eq!(press(&mut chat, "Alt+Shift+C", 'C'), Some(ChatDo::Compact));
+        assert_eq!(chat.draft, "hi");
+        // Hinted only for an agent that compacts.
+        let has = |chat: &PaneChat, compacts| {
+            (chat_footer(chat, false, false, false, compacts).iter())
+                .any(|(k, said)| k == "Alt+Shift+C" && said == "compact")
+        };
+        assert!(has(&chat, true) && !has(&chat, false));
+        let others: Vec<&str> = (LIST_KEYS.iter().map(|b| b.chord))
+            .chain(COMPOSER_KEYS.iter().map(|b| b.chord))
+            .chain(SLASH_KEYS.iter().map(|b| b.chord))
+            .chain(ASK_KEYS.iter().map(|b| b.chord))
+            .chain(MODE_KEYS.iter().map(|b| b.chord))
+            .chain(MODEL_KEYS.iter().map(|b| b.chord))
+            .chain(EFFORT_KEYS.iter().map(|b| b.chord))
+            .chain(ATTACH_KEYS.iter().map(|b| b.chord))
+            .collect();
+        assert!(!others.contains(&COMPACT_KEYS[0].chord));
+        assert!(crate::keys::hint_key(COMPACT_KEYS[0].chord).is_some());
+    }
+
+    #[test]
     fn gerdrs_list_has_the_keys_and_the_footer_of_an_agents_menu() {
         let mut chat = with_items(vec![user("u1", "one")]);
         let list = pick::List::new(pick::What::Effort, pick::levels(&["low", "high"]), None);
@@ -3710,7 +3807,7 @@ mod tests {
             Some(ChatDo::MenuText("h".into()))
         );
         assert!(
-            chat_footer(&chat, false, true, true)
+            chat_footer(&chat, false, true, true, false)
                 .iter()
                 .any(|(_, said)| said == "pick")
         );
@@ -3785,7 +3882,7 @@ mod tests {
     #[test]
     fn ctrl_shift_o_reviews_the_picked_plan_or_the_one_waited_on() {
         let review = |chat: &PaneChat| {
-            (chat_footer(chat, false, false, false).iter())
+            (chat_footer(chat, false, false, false, false).iter())
                 .any(|(k, said)| k == "Ctrl+Shift+O" && said == "review plan")
         };
         let plan = |id: &str| crate::chat::parse::plan_item(id.into(), None, "# Plan\n");
@@ -4005,7 +4102,7 @@ mod tests {
         // While the card has the keys, the list's hints lose its keys.
         let mut chat = with_items(Vec::new());
         chat.live.ask = Some(ask);
-        let hints = chat_footer(&chat, false, false, false);
+        let hints = chat_footer(&chat, false, false, false, false);
         assert!(hints.iter().all(|(k, s)| k != "Space" || s != "fold"));
         assert!(hints.iter().any(|(k, _)| k == "Y"));
     }

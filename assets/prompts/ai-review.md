@@ -31,11 +31,28 @@ Your job: find what is wrong with the change before a person reviews it.
 {{/if}}
 
    Read the files around the change too, as much as you need.
-3. Look for bugs, acceptance criteria the change doesn't meet, security
-   holes, data loss, broken error handling, and broken guidance rules. Go
-   through the brief's criteria {{#if review.again}}that the change since
-   touches{{else}}one by one{{/if}}. Code that goes against a decision in
-   the decision log is a finding too: name the decision (D2).
+3. Review it on two axes, apart, so one doesn't crowd out the other. If
+   you can start subagents, give each axis to one of its own, in parallel,
+   with the brief, the plan and the diffs, and merge what they find; else
+   go through one axis, then the other.
+   - Spec: does the change do what the brief says, and only that? Go
+     through the brief's criteria {{#if review.again}}that the change since
+     touches{{else}}one by one{{/if}}. A criterion not met, a case the
+     brief names that goes wrong, and work the brief puts under
+     `## Out of scope` or never asks for are findings. Code that goes
+     against a decision in the decision log is a finding too: name the
+     decision (D2).
+   - Standards: is it built the way this code is meant to be built? Hold
+     it to the guidance files, `CODING_STANDARDS.md` or `CONTRIBUTING.md`
+     where there, the glossary's terms and the decision records. Look for
+     bugs, security holes, data loss and broken error handling, and for
+     code that will be hard to change: the same logic copied, a module that
+     only passes calls on, a test that only repeats the code.
+{{#if multi_repo}}
+     Read what Build kept for the project's home folder under
+     {{memory.path}}, where there: a wrong term or decision there is a
+     finding, with `file` its path there and no `repo`.
+{{/if}}
    Leave out style nits and matters of taste.
 
    Check each finding in the code before you raise it. A finding needs a
@@ -74,10 +91,12 @@ it again with the same `id`, so it keeps its place:
    It must look like this:
 
    {"findings": [
-     {"id": "r1-2", "severity": "high", "repo": "api", "file": "src/a.rs",
-      "line": 12, "title": "…", "body": "…", "fix": "…"}
-   ]}
+     {"id": "r1-2", "axis": "spec", "severity": "high", "repo": "api",
+      "file": "src/a.rs", "line": 12, "title": "…", "body": "…", "fix": "…"}
+   ],
+    "danger": {"door": "two-way", "blast": "small", "why": "…"}}
 
+   - `axis`: `spec` or `standards`, the one that found it.
    - `severity`: `high`, `medium` or `low`.
    - `repo`: the repository's name as listed above (`project:repository`
      for another project's). It may be left out when the feature has one
@@ -92,8 +111,15 @@ it again with the same `id`, so it keeps its place:
      one. Leave it out for a new one: gerdr gives it its own. Review the
      change since the last review first (the `git diff` given for it);
      look at the rest only for what it touches.
+   - `danger`: what merging the whole change risks, not only the change
+     since, which tells the user how closely to look before they merge.
+     `door`: `one-way` when it can't be walked back once merged (data
+     dropped or rewritten, mail or messages sent, a public API or file
+     format others rely on), else `two-way`. `blast`: `small`, `medium` or
+     `large`, for how much breaks, and for whom, if it is wrong. `why`: one
+     sentence naming what makes it so.
 
-   Found nothing that matters? Write `{"findings": []}`.
+   Found nothing that matters? Write `{"findings": [], "danger": …}`.
 
 Rules from gerdr, which runs this feature's stages:
 

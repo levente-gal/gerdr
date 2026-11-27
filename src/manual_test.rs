@@ -1415,7 +1415,7 @@ impl Gerdr {
     /// agent: through a fix plan, or with none (`unplanned`), the plan gerdr
     /// writes of them waiting as an agent's would until it is told to make
     /// it (see `findings_go`).
-    fn send_manual_fixes(&mut self, project: &str, slug: &str, unplanned: bool) {
+    pub(crate) fn send_manual_fixes(&mut self, project: &str, slug: &str, unplanned: bool) {
         let Some(feature) = self.feature(project, slug) else {
             return;
         };
@@ -1443,11 +1443,12 @@ impl Gerdr {
             (0, _) => "manual test issues",
             _ => "manual test failures and issues",
         };
+        let again = Some(crate::feature_fix::FixStart::ManualTest { unplanned });
         let started = match unplanned {
-            false => self.send_to_build(project, slug, Stage::ManualTest, what, text),
+            false => self.send_to_build(project, slug, Stage::ManualTest, what, text, again),
             true => {
                 let plan = manual::fixes_plan(test, &criteria, &title);
-                self.fix_input(project, slug, what, &text)
+                self.fix_input(project, slug, what, &text, again)
                     .is_some_and(|input| {
                         let asked = Stage::ManualTest;
                         self.start_unplanned_fix_round(project, slug, asked, what, input, &plan)

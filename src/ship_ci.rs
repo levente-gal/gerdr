@@ -137,11 +137,12 @@ impl Gerdr {
             self.save_feature(project, slug);
         }
         let text = failures_text(&title, &failing);
+        let again = Some(crate::feature_fix::FixStart::ShipCi { planning });
         let started = match planning {
-            true => self.send_to_build(project, slug, Stage::Ship, WHAT, text),
+            true => self.send_to_build(project, slug, Stage::Ship, WHAT, text, again),
             false => {
                 let plan = fixes_plan(&title, &failing);
-                (self.fix_input(project, slug, WHAT, &text)).is_some_and(|input| {
+                (self.fix_input(project, slug, WHAT, &text, again)).is_some_and(|input| {
                     self.start_unplanned_fix_round(project, slug, Stage::Ship, WHAT, input, &plan)
                 })
             }

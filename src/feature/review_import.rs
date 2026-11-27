@@ -17,6 +17,13 @@
 //!   the diff, 1-based; may be left out for the whole file.
 //! - `id`: only to raise a finding of an earlier run again (the prompt
 //!   lists them); gerdr gives new ones their own, `r<run>-<k>`.
+//! - `axis`: `spec` (against the brief, its scope and decisions) or
+//!   `standards` (against the guidance files): its title then starts
+//!   `Spec: ` or `Standards: `. Anything else is left out.
+//!
+//! Beside the findings, `"danger"`: what merging the whole change risks,
+//! `{"door": "one-way", "blast": "small", "why": "…"}` (`Danger`), kept
+//! on the review until a later one says it again; left out, it is none.
 //!
 //! The file is untrusted: it is capped (`MAX_BYTES`, `MAX_FINDINGS`, each
 //! text `MAX_TEXT` characters), control characters and HTML tags are taken
@@ -224,6 +231,87 @@ pub struct AiReview {
     /// review to be submitted, not for AI review.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub posts: bool,
+    /// What the latest review that said it says merging the change risks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub danger: Option<Danger>,
+}
+
+/// What merging a feature's change risks, as its reviewer says.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Danger {
+    /// Whether it can't be walked back once merged: data gone, mail sent.
+    pub one_way: bool,
+    pub blast: Blast,
+    /// Why, in a sentence.
+    pub why: String,
+}
+
+/// How much goes wrong if a change does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Blast {
+    Small,
+    Medium,
+    Large,
+}
+
+impl Danger {
+    /// It, for the pages and the summary: “one-way door, small blast
+    /// radius: …”.
+    pub fn said(&self) -> String {
+        let door = if self.one_way { "one-way" } else { "two-way" };
+        let blast = match self.blast {
+            Blast::Small => "small",
+            Blast::Medium => "medium",
+            Blast::Large => "large",
+        };
+        match self.why.is_empty() {
+            true => format!("{door} door, {blast} blast radius"),
+            false => format!("{door} door, {blast} blast radius: {}", self.why),
+        }
+    }
+
+    /// Whether it asks for a close look: one-way, or a large blast radius.
+    pub fn grave(&self) -> bool {
+        self.one_way || self.blast == Blast::Large
+    }
+}
+
+/// The `"danger"` of `review.json` reading `text`, cleaned; none when it
+/// isn't there or doesn't read as one.
+pub fn danger(text: &str) -> Option<Danger> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let obj = value.get("danger")?.as_object()?;
+    let word = |key: &str| obj.get(key)?.as_str().map(str::to_lowercase);
+    let one_way = match word("door")?.replace([' ', '_'], "-").as_str() {
+        "one-way" => true,
+        "two-way" => false,
+        _ => return None,
+    };
+    let blast = match word("blast")?.as_str() {
+        "small" => Blast::Small,
+        "medium" => Blast::Medium,
+        "large" => Blast::Large,
+        _ => return None,
+    };
+    let why = obj.get("why").and_then(Value::as_str).unwrap_or("");
+    let why: String = clean(why, false).chars().take(400).collect();
+    Some(Danger {
+        one_way,
+        blast,
+        why,
+    })
+}
+
+/// `title` under its axis, once: `Spec: …`.
+fn on_axis(axis: &str, title: String) -> String {
+    match title
+        .strip_prefix(axis)
+        .is_some_and(|t| t.starts_with(": "))
+    {
+        true => title,
+        false => format!("{axis}: {title}"),
+    }
 }
 
 /// Where `f` goes in a review's list, the findings of a run being stable
@@ -400,6 +488,15 @@ pub fn parse(text: &str) -> Result<Vec<Raw>, Vec<String>> {
                     None
                 }
             },
+        };
+        let title = match obj.get("axis").and_then(Value::as_str) {
+            Some(a) if a.eq_ignore_ascii_case("spec") && !title.is_empty() => {
+                on_axis("Spec", title)
+            }
+            Some(a) if a.eq_ignore_ascii_case("standards") && !title.is_empty() => {
+                on_axis("Standards", title)
+            }
+            _ => title,
         };
         let some = |s: String| Some(s).filter(|s| !s.is_empty());
         out.push(Raw {
@@ -1356,6 +1453,47 @@ mod tests {
         // Nothing changed, or a repository not read yet: not tests only.
         assert!(!since(&[], false).tests_only());
         assert!(!since(&["tests/test_a.py"], true).tests_only());
+    }
+
+    #[test]
+    fn a_findings_axis_heads_its_title_once() {
+        let text = r#"{"findings": [
+            {"axis": "spec", "file": "a.rs", "title": "Builds the export too"},
+            {"axis": "Standards", "file": "a.rs", "title": "Standards: any in a type"},
+            {"axis": "taste", "file": "a.rs", "title": "Long name"}]}"#;
+        let titles: Vec<String> = parse(text).unwrap().into_iter().map(|r| r.title).collect();
+        assert_eq!(
+            titles,
+            [
+                "Spec: Builds the export too",
+                "Standards: any in a type",
+                "Long name"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_reviews_danger_is_read_when_it_says_one() {
+        let text = r#"{"findings": [], "danger": {"door": "One-way", "blast": "large", "why": "drops <b>the</b> old table"}}"#;
+        let d = danger(text).unwrap();
+        assert!(d.one_way && d.blast == Blast::Large && d.grave());
+        assert_eq!(
+            d.said(),
+            "one-way door, large blast radius: drops the old table"
+        );
+        let two = r#"{"danger": {"door": "two-way", "blast": "small"}}"#;
+        assert_eq!(
+            danger(two).unwrap().said(),
+            "two-way door, small blast radius"
+        );
+        assert!(!danger(two).unwrap().grave());
+        for bad in [
+            r#"{"findings": []}"#,
+            r#"{"danger": {"door": "open", "blast": "small"}}"#,
+            "x",
+        ] {
+            assert_eq!(danger(bad), None, "{bad}");
+        }
     }
 
     #[test]

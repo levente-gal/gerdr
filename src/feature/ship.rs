@@ -388,6 +388,20 @@ pub struct Probe {
     pub base_ci: Option<BTreeMap<String, BaseCi>>,
 }
 
+impl Probe {
+    /// How full the context of `feature`'s open `stage` agent is, as read
+    /// of that very run: none for one closed or started since.
+    pub fn context_of(
+        &self,
+        feature: &Feature,
+        stage: Stage,
+    ) -> Option<&crate::ai_work::context::Context> {
+        let run = feature.runs.get(&stage).filter(|r| r.live())?;
+        let (n, context) = self.contexts.get(&stage)?;
+        (*n == run.n).then_some(context)
+    }
+}
+
 /// How long after shipping pushed a base its CI is read: by then it ran.
 pub const BASE_CI_FOR: u64 = 2 * 86_400;
 

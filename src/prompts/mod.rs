@@ -15,7 +15,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "plan-review-back" => (include_str!("../../assets/prompts/plan-review-back.md"), 1),
         "plan-final" => (include_str!("../../assets/prompts/plan-final.md"), 1),
         "build" => (include_str!("../../assets/prompts/build.md"), 12),
-        "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 6),
+        "ai-review" => (include_str!("../../assets/prompts/ai-review.md"), 7),
         "pr-review" => (include_str!("../../assets/prompts/pr-review.md"), 2),
         "fix-plan" => (include_str!("../../assets/prompts/fix-plan.md"), 3),
         "fix-go" => (include_str!("../../assets/prompts/fix-go.md"), 5),
@@ -32,7 +32,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "skills" => (include_str!("../../assets/prompts/skills.md"), 1),
         "decisions" => (include_str!("../../assets/prompts/decisions.md"), 2),
         "research" => (include_str!("../../assets/prompts/research.md"), 1),
-        "summary" => (include_str!("../../assets/prompts/summary.md"), 1),
+        "summary" => (include_str!("../../assets/prompts/summary.md"), 2),
         "conflicts" => (include_str!("../../assets/prompts/conflicts.md"), 1),
         "conflicts-plan" => (include_str!("../../assets/prompts/conflicts-plan.md"), 1),
         "sandbox-fix" => (include_str!("../../assets/prompts/sandbox-fix.md"), 1),
@@ -389,8 +389,10 @@ mod tests {
             "/d/bulk-edit/review.json",
             "`git diff abc123...HEAD`",
             "read-only",
-            "{\"findings\": []}",
+            "{\"findings\": [], \"danger\"",
             "\"severity\": \"high\"",
+            "`## Out of scope`",
+            "/d/bulk-edit/memory",
         ] {
             assert!(first.contains(words), "{words}: {first}");
         }
@@ -412,7 +414,7 @@ mod tests {
             "- r1-3: Slow",
             // Later, only what changed since is read again.
             "Don't read those files through again",
-            "criteria that the change since\n   touches",
+            "criteria that the change since\n     touches",
         ] {
             assert!(later.contains(words), "{words}: {later}");
         }

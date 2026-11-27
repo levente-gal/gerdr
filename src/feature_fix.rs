@@ -19,7 +19,9 @@ use crate::{
     doc_review::DocFile,
     feature::{
         self, Feature, Stage, Status,
-        fix_round::{self, Asked, Compact, FixPhase, FixRound, Fixes, GiveBack, Plan, VerifyFix},
+        fix_round::{
+            self, AgentHint, Asked, Compact, FixPhase, FixRound, Fixes, GiveBack, Plan, VerifyFix,
+        },
         store,
     },
     feature_agents::{stamp, vars, write_prompt},
@@ -63,7 +65,103 @@ impl Default for FixWatch {
     }
 }
 
+/// A fix round the user started, as their press started it: it starts so
+/// again once they picked its agent (`Gerdr::ask_fix_agent`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FixStart {
+    /// AI review's findings (`findings_go`).
+    Findings { unplanned: bool },
+    /// Verify's failures (`verify_fixes_go`).
+    Verify { unplanned: bool },
+    /// Manual test's failures (`send_manual_fixes`).
+    ManualTest { unplanned: bool },
+    /// Code review's comments, as sent (`feature_send_back`).
+    CodeReview(String),
+    /// Ship's failed CI (`fix_ship_ci`).
+    ShipCi { planning: bool },
+    /// What stopped shipping (`fix_ship_problem`).
+    ShipProblem { planning: bool },
+}
+
 impl Gerdr {
+    /// Start the fix round `start` of feature `slug` again.
+    fn start_fixes(&mut self, project: &str, slug: &str, start: FixStart) {
+        match start {
+            FixStart::Findings { unplanned } => self.findings_go(project, slug, unplanned),
+            FixStart::Verify { unplanned } => self.verify_fixes_go(project, slug, unplanned),
+            FixStart::ManualTest { unplanned } => {
+                self.send_manual_fixes(project, slug, unplanned);
+            }
+            FixStart::CodeReview(text) => self.feature_send_back(text),
+            FixStart::ShipCi { planning } => self.fix_ship_ci(project, slug, planning),
+            FixStart::ShipProblem { planning } => self.fix_ship_problem(project, slug, planning),
+        }
+    }
+
+    /// Before the round the user started (`again`) goes to an agent: when
+    /// the open Build agent's context says the other pick may be better
+    /// (`fix_round::agent_hint`), ask which one takes it. Whether it asked.
+    pub(crate) fn ask_fix_agent(&mut self, feature: &Feature, again: FixStart) -> bool {
+        if self.features.build.fix_agent_picked {
+            return false;
+        }
+        let context = (self.last_probe(&feature.project, &feature.slug))
+            .and_then(|p| p.context_of(feature, Stage::Build));
+        let limits = self.settings.fixes;
+        let Some(hint) = fix_round::agent_hint(feature.fresh_fixes, context, limits) else {
+            return false;
+        };
+        let short = crate::ai_work::context::short;
+        let (title, body, other, go) = match hint {
+            AgentHint::Full(c) => (
+                "Fix with a fresh agent?",
+                format!(
+                    "The Build agent is at {}, past the {} set for fixes: a fresh one starts clean",
+                    c.said(),
+                    short(limits.fresh_above)
+                ),
+                "Keep this agent",
+                "Fresh agent",
+            ),
+            AgentHint::Small(c) => (
+                "Fix with the open agent?",
+                format!(
+                    "The Build agent is only at {}, under the {} set for fixes: it knows the code already",
+                    c.said(),
+                    short(limits.same_below)
+                ),
+                "Fresh agent",
+                "Open agent",
+            ),
+        };
+        // Go switches the pick; the other button keeps it.
+        let then = |fresh| Then::FixAgent {
+            project: feature.project.clone(),
+            slug: feature.slug.clone(),
+            fresh,
+            again: again.clone(),
+        };
+        let (keep, switch) = (then(feature.fresh_fixes), then(!feature.fresh_fixes));
+        self.ask_or(title.to_owned(), body, Some((other, keep)), go, switch);
+        true
+    }
+
+    /// The user picked the agent of the fix round `again` of feature `slug`
+    /// (`ask_fix_agent`): a fresh one each round or the open one, as the
+    /// page's switch picks it, and the round starts again without asking.
+    pub(crate) fn fix_agent_picked(
+        &mut self,
+        project: &str,
+        slug: &str,
+        fresh: bool,
+        again: FixStart,
+    ) {
+        self.set_fresh_fixes(project, slug, fresh);
+        self.features.build.fix_agent_picked = true;
+        self.start_fixes(project, slug, again);
+        self.features.build.fix_agent_picked = false;
+    }
+
     /// Why feature's fix work can't go to its Build agent now. None: it can.
     pub(crate) fn fix_round_refusal(&self, feature: &Feature) -> Option<String> {
         let title = &feature.title;
@@ -1307,7 +1405,8 @@ impl Gerdr {
                 "\u{201c}{title}\u{201d} has no failed checks to fix"
             ));
         };
-        self.verify_fixes_of(project, slug, failures, unplanned);
+        let again = Some(FixStart::Verify { unplanned });
+        self.verify_fixes_of(project, slug, failures, unplanned, again);
     }
 
     /// A check of feature `slug`'s Verify run failed for its code while
@@ -1332,7 +1431,8 @@ impl Gerdr {
             return;
         }
         let failures = feature::verify::code_failures(run);
-        self.verify_fixes_of(project, slug, failures, false);
+        // Not the user's press: it goes to the agent picked, unasked.
+        self.verify_fixes_of(project, slug, failures, false, None);
     }
 
     /// What feature `slug`'s Verify run failed for its code that its open
@@ -1399,6 +1499,7 @@ impl Gerdr {
         slug: &str,
         failures: Vec<String>,
         unplanned: bool,
+        again: Option<FixStart>,
     ) {
         let Some(feature) = self.feature(project, slug) else {
             return;
@@ -1420,11 +1521,11 @@ impl Gerdr {
         let started = match unplanned {
             true => {
                 let plan = feature::verify::fixes_plan(&failures, &title, &evidence);
-                (self.fix_input(project, slug, what, &text)).is_some_and(|input| {
+                (self.fix_input(project, slug, what, &text, again)).is_some_and(|input| {
                     self.start_unplanned_fix_round(project, slug, Stage::Verify, what, input, &plan)
                 })
             }
-            false => self.send_to_build(project, slug, Stage::Verify, what, text),
+            false => self.send_to_build(project, slug, Stage::Verify, what, text, again),
         };
         if !started {
             return;

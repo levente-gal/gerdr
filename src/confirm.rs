@@ -11,7 +11,8 @@
 //!
 //! Left/Right and Tab move between the buttons, Enter presses the selected
 //! one (Cancel, by default: the action is never a slip of Enter), Esc
-//! cancels.
+//! cancels. A dialog may have a plain button between the two, doing the
+//! other way of it (`ask_or`).
 
 use smithay::{
     input::keyboard::Keysym,
@@ -30,8 +31,6 @@ use crate::{
 
 /// Cancel, the first and the default.
 const CANCEL: usize = 0;
-/// The button doing it, after Cancel.
-const GO: usize = 1;
 
 /// What confirming does.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,6 +156,14 @@ pub enum Then {
     MakeFixes { project: String, slug: String },
     /// Drop this feature's open fix plan (see `Gerdr::drop_fix_plan`).
     DropFixPlan { project: String, slug: String },
+    /// Send this feature's fixes to a fresh Build agent or to the open one
+    /// (`fresh`), and start them again (see `Gerdr::fix_agent_picked`).
+    FixAgent {
+        project: String,
+        slug: String,
+        fresh: bool,
+        again: crate::feature_fix::FixStart,
+    },
     /// Allow the plan of this chat item its pane's agent waits on, its
     /// review comments deleted unsent (see `Gerdr::allow_chat_plan_now`).
     AllowChatPlan { pane_id: String, item_id: String },
@@ -229,7 +236,10 @@ pub struct ConfirmDialog {
     /// The label of the button doing it.
     pub go: &'static str,
     pub then: Then,
-    /// The selected button: 0 Cancel, 1 the one doing it.
+    /// A plain button between Cancel and `go`, doing the other way of it.
+    pub other: Option<(&'static str, Then)>,
+    /// The selected button: 0 Cancel, then `other` if there is one, the
+    /// last the one doing it.
     pub selected: usize,
     /// The button under the pointer.
     pub hover: Option<usize>,
@@ -252,6 +262,7 @@ impl Then {
                 | Then::PushPr { .. }
                 | Then::FixHere { .. }
                 | Then::MakeFixes { .. }
+                | Then::FixAgent { .. }
                 | Then::ApproveStage { .. }
                 | Then::AllowChatPlan { .. }
                 | Then::ReopenStage { .. }
@@ -269,6 +280,8 @@ impl Then {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Go,
+    /// Its `other` button.
+    Other,
     Cancel,
 }
 
@@ -279,6 +292,7 @@ impl ConfirmDialog {
             title: self.title.clone(),
             body: self.body.clone(),
             go: self.go,
+            other: self.other.as_ref().map(|(label, _)| *label),
             selected: self.selected,
             hover: self.hover,
             loses: self.then.loses(),
@@ -288,14 +302,19 @@ impl ConfirmDialog {
     /// Where its parts go on an output of `size`.
     fn layout(&self, size: smithay::utils::Size<i32, Logical>) -> chrome::ConfirmLayout {
         let lines = chrome::confirm_body_lines(&self.body, size);
-        chrome::confirm_lines_layout(size, self.go, lines)
+        chrome::confirm_lines_layout(size, &self.view().labels(), lines)
+    }
+
+    /// How many buttons it has: Cancel, `other`, the one doing it.
+    fn buttons(&self) -> usize {
+        2 + usize::from(self.other.is_some())
     }
 
     fn press(&self, button: usize) -> Outcome {
-        if button == GO {
-            Outcome::Go
-        } else {
-            Outcome::Cancel
+        match button {
+            CANCEL => Outcome::Cancel,
+            b if b + 1 == self.buttons() => Outcome::Go,
+            _ => Outcome::Other,
         }
     }
 
@@ -304,12 +323,12 @@ impl ConfirmDialog {
         match sym {
             Keysym::Escape => return Some(Outcome::Cancel),
             Keysym::Return | Keysym::KP_Enter => return Some(self.press(self.selected)),
-            Keysym::Left
-            | Keysym::KP_Left
-            | Keysym::ISO_Left_Tab
-            | Keysym::Right
-            | Keysym::KP_Right
-            | Keysym::Tab => self.selected = 1 - self.selected,
+            Keysym::Left | Keysym::KP_Left | Keysym::ISO_Left_Tab => {
+                self.selected = (self.selected + self.buttons() - 1) % self.buttons();
+            }
+            Keysym::Right | Keysym::KP_Right | Keysym::Tab => {
+                self.selected = (self.selected + 1) % self.buttons();
+            }
             _ => {}
         }
         None
@@ -831,12 +850,26 @@ impl Gerdr {
     /// Open the confirm dialog: `title`, `body` under it, and the `go`
     /// button doing `then`. Cancel is selected.
     pub(crate) fn ask(&mut self, title: String, body: String, go: &'static str, then: Then) {
+        self.ask_or(title, body, None, go, then);
+    }
+
+    /// `ask`, with `other`, a plain button doing the other way of it,
+    /// between Cancel and `go`.
+    pub(crate) fn ask_or(
+        &mut self,
+        title: String,
+        body: String,
+        other: Option<(&'static str, Then)>,
+        go: &'static str,
+        then: Then,
+    ) {
         self.overlays.context_menu = None;
         self.overlays.confirm = Some(ConfirmDialog {
             title,
             body,
             go,
             then,
+            other,
             selected: CANCEL,
             hover: None,
         });
@@ -870,15 +903,20 @@ impl Gerdr {
         };
         // Gone, what is under the pointer gets it back.
         self.refresh_pointer_focus();
-        if outcome == Outcome::Cancel {
-            // Not now, but still once its threads are done.
-            if dialog.then == Then::RestartT3 && self.t3.restart_at.is_some() {
-                let text = "T3 Code restarts once its threads are done".to_owned();
-                self.show_notice(text);
+        let then = match (outcome, dialog.other) {
+            (Outcome::Go, _) => dialog.then,
+            (Outcome::Other, Some((_, then))) => then,
+            (Outcome::Other, None) => return,
+            (Outcome::Cancel, _) => {
+                // Not now, but still once its threads are done.
+                if dialog.then == Then::RestartT3 && self.t3.restart_at.is_some() {
+                    let text = "T3 Code restarts once its threads are done".to_owned();
+                    self.show_notice(text);
+                }
+                return;
             }
-            return;
-        }
-        match dialog.then {
+        };
+        match then {
             // As it is now: it may have stopped running since.
             Then::CloseAgent(key) => {
                 if let Some(card) = self.agent_card(&key) {
@@ -983,6 +1021,12 @@ impl Gerdr {
             Then::StopResolving { project, slug } => self.stop_resolving(&project, &slug),
             Then::MakeFixes { project, slug } => self.make_fixes_now(&project, &slug),
             Then::DropFixPlan { project, slug } => self.drop_fix_plan(&project, &slug),
+            Then::FixAgent {
+                project,
+                slug,
+                fresh,
+                again,
+            } => self.fix_agent_picked(&project, &slug, fresh, again),
             Then::AllowChatPlan { pane_id, item_id } => {
                 self.allow_chat_plan_now(&pane_id, &item_id)
             }
@@ -1139,6 +1183,7 @@ mod tests {
             body: String::new(),
             go: "Close pane",
             then: Then::CloseAgent(AgentKey::Herdr("p1".into())),
+            other: None,
             selected: CANCEL,
             hover: None,
         }
@@ -1151,6 +1196,23 @@ mod tests {
         assert_eq!(d.key(Keysym::Tab), None);
         assert_eq!(d.key(Keysym::Return), Some(Outcome::Go));
         assert_eq!(d.key(Keysym::Escape), Some(Outcome::Cancel));
+    }
+
+    #[test]
+    fn a_third_button_sits_between_cancel_and_the_action() {
+        let mut d = dialog();
+        d.other = Some(("Keep", Then::RestartT3));
+        assert_eq!(d.view().labels(), ["Cancel", "Keep", "Close pane"]);
+        assert_eq!(d.key(Keysym::Return), Some(Outcome::Cancel));
+        assert_eq!(d.key(Keysym::Tab), None);
+        assert_eq!(d.key(Keysym::Return), Some(Outcome::Other));
+        assert_eq!(d.key(Keysym::Tab), None);
+        assert_eq!(d.key(Keysym::Return), Some(Outcome::Go));
+        // Round again, and back the other way.
+        assert_eq!(d.key(Keysym::Tab), None);
+        assert_eq!(d.key(Keysym::Return), Some(Outcome::Cancel));
+        assert_eq!(d.key(Keysym::Left), None);
+        assert_eq!(d.key(Keysym::Return), Some(Outcome::Go));
     }
 
     #[test]

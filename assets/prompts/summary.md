@@ -6,6 +6,9 @@ Read the brief at {{brief.path}} and the plan at {{plan.path}}. Then read what t
 Write the summary to exactly {{summary.path}}, in Markdown, and nothing else in that file:
 - First a paragraph of two or three sentences: what the feature does for its users, in plain words.
 - Then a paragraph on how it is built: the main changes and where they are, and what a reviewer should look at closely.
+{{#if summary.danger}}
+- Then a last line, word for word: `Merge danger: {{summary.danger}}`
+{{/if}}
 - No headings, no lists of files, and nothing the diff doesn't show.
 
 Do not change any code, do not commit and do not push. Then stop.

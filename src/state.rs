@@ -47,6 +47,8 @@ pub struct Settings {
     pub sounds: config::Sounds,
     /// Whether new Alacrittys reload their config file (`[terminal]`).
     pub live_config_reload: bool,
+    /// Which agent fix rounds are offered by its context (`[fixes]`).
+    pub fixes: config::FixesSettings,
     /// When the config file was last read as written (see
     /// `Gerdr::watch_settings`).
     pub settings_modified: Option<std::time::SystemTime>,

@@ -1247,6 +1247,7 @@ fn dump_overlays() {
             title: "Close \u{201c}claude\u{201d}?".into(),
             body: "It is working: closing its pane stops it".into(),
             go: "Close pane",
+            other: None,
             selected: 1,
             hover: None,
             loses: true,
@@ -1264,6 +1265,7 @@ fn dump_overlays() {
                    api has uncommitted changes"
                 .into(),
             go: "Finish",
+            other: None,
             selected: 1,
             hover: None,
             loses: false,
@@ -1281,6 +1283,7 @@ fn dump_overlays() {
                    codex \u{b7} Build\nand 2 more"
                 .into(),
             go: "Close tabs",
+            other: None,
             selected: 1,
             hover: None,
             loses: true,
@@ -1289,6 +1292,23 @@ fn dump_overlays() {
             &dir,
             &format!("confirm_old_agents_{tag}"),
             painter.confirm_dialog(&old_agents, (800, 600).into(), scale, p),
+            px(confirm_w + shadow),
+        );
+        // A third, plain button between Cancel and the one doing it.
+        let fix_agent = super::ConfirmView {
+            title: "Fix with a fresh agent?".into(),
+            body: "The Build agent is at context 162k / 1M, past the 150k set for fixes: a fresh one starts clean"
+                .into(),
+            go: "Fresh agent",
+            other: Some("Keep this agent"),
+            selected: 2,
+            hover: None,
+            loses: false,
+        };
+        dump(
+            &dir,
+            &format!("confirm_fix_agent_{tag}"),
+            painter.confirm_dialog(&fix_agent, (800, 600).into(), scale, p),
             px(confirm_w + shadow),
         );
         let row = |path: &str, files, link, clash| super::CheckoutRow {
@@ -9966,6 +9986,7 @@ fn chat_view(i: usize) -> super::ChatView {
         },
         2 => super::ChatView {
             context: Some("context 84k / 1M".into()),
+            compact: true,
             ..v
         },
         3 => super::ChatView {
@@ -10296,7 +10317,8 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
-        // Claude's effort's button right of its model's, hovered.
+        // Claude's effort's button right of its model's, hovered; Compact
+        // and the context left of them.
         24 => super::ChatView {
             status: AgentStatus::Idle,
             hints: crate::chat::footer(ChatFocus::List, true, false, true, true),
@@ -10304,6 +10326,8 @@ fn chat_view(i: usize) -> super::ChatView {
             mode: Some("Auto".into()),
             model: Some("Opus 5.5".into()),
             effort: Some("high".into()),
+            context: Some("context 84k / 1M".into()),
+            compact: true,
             hover: Some(ChatHit::Effort),
             ..v
         },
@@ -10351,7 +10375,7 @@ const GOLDEN_CHATS: [[u64; 26]; 4] = [
     [
         0x0a7677a974e281be, // chat_finding
         0x7a9fcfede9da1605, // chat_missing
-        0x8cd5d31c65224028, // chat
+        0x54f32ae4cfcef764, // chat
         0xeebe00d66241c59a, // chat_waiting
         0xfcee252b39911591, // chat_composer
         0x9f2b511598932ed8, // chat_picked
@@ -10373,14 +10397,14 @@ const GOLDEN_CHATS: [[u64; 26]; 4] = [
         0x9d46099149c7521b, // chat_model_menu
         0xb4e6941a645e46de, // chat_files
         0xe4886dc64a7203b3, // chat_table
-        0x6ffa9b0cacc0429f, // chat_effort
+        0x63feafd170e927d5, // chat_effort
         0x25005ed5b3cfddfd, // chat_list
     ],
     // Dark at 2
     [
         0x4a86fd0e1e2f44ef, // chat_finding
         0x0f61142377a0643c, // chat_missing
-        0x6ca1121a35bb0379, // chat
+        0xd66f3f7fd2a709e5, // chat
         0x2166d4ce59f2555d, // chat_waiting
         0x7a31fcad10540eb9, // chat_composer
         0xe83966eadd35996c, // chat_picked
@@ -10402,14 +10426,14 @@ const GOLDEN_CHATS: [[u64; 26]; 4] = [
         0xfd239912a53a3cf4, // chat_model_menu
         0x71f900cb53bc021a, // chat_files
         0xf31cc7ab03ca5e67, // chat_table
-        0xe985bd072881cd91, // chat_effort
+        0x915d84a2a6b6bd76, // chat_effort
         0xd6a81dbe07381ed4, // chat_list
     ],
     // Light at 1
     [
         0xac583ef579dff97f, // chat_finding
         0x6aa135b94a597f5f, // chat_missing
-        0x57fb346c48a1c5e1, // chat
+        0xe4fdad25311e7bbf, // chat
         0x6393738317e10388, // chat_waiting
         0x7625d29c81f371e4, // chat_composer
         0x8a081e82e4545590, // chat_picked
@@ -10431,14 +10455,14 @@ const GOLDEN_CHATS: [[u64; 26]; 4] = [
         0x40d01b84708b7e1c, // chat_model_menu
         0xae2d4968fbca1ce4, // chat_files
         0xebd9bfddd16bcdc3, // chat_table
-        0x85b09efaf1588343, // chat_effort
+        0x767bc3e79e5fd6b9, // chat_effort
         0x67281575a4dfa600, // chat_list
     ],
     // Light at 2
     [
         0xda45ba16191a45b1, // chat_finding
         0xe51e01ed1f9a96fe, // chat_missing
-        0x8925263dacc371df, // chat
+        0x00b08adfe754ad7a, // chat
         0x065e5e77cbce0654, // chat_waiting
         0xd302a097e3ce9b59, // chat_composer
         0x813045c3dd4ecd3e, // chat_picked
@@ -10460,7 +10484,7 @@ const GOLDEN_CHATS: [[u64; 26]; 4] = [
         0x91dd6af6606f7220, // chat_model_menu
         0xdd94da6ab7198e47, // chat_files
         0xe8309b7e36a93063, // chat_table
-        0xf78a17223d0c7786, // chat_effort
+        0x72a65f4c870148f2, // chat_effort
         0xa4e6e1c59b18a84d, // chat_list
     ],
 ];
