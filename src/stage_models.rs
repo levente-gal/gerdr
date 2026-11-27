@@ -103,6 +103,7 @@ impl Gerdr {
             }
         }
         self.refresh_model_picker();
+        self.refresh_chat_lists();
     }
 }
 

@@ -31,6 +31,15 @@ pub(crate) fn codex_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
     })
 }
 
+/// Codex's effort, after its model in that same row.
+pub(crate) fn codex_effort<'a>(rows: &[&'a str]) -> Option<&'a str> {
+    rows.iter().find_map(|row| {
+        let (model, place) = row.split_once(" · ")?;
+        let effort = model.rsplit(' ').next()?;
+        (place.starts_with(['~', '/']) && EFFORTS.contains(&effort)).then_some(effort)
+    })
+}
+
 /// The reasoning efforts Codex writes after its model.
 const EFFORTS: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 

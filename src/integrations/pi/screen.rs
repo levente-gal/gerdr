@@ -2,7 +2,7 @@
 
 use crate::{
     chat::menu::Menu,
-    integrations::common::screen::{asked, choice},
+    integrations::common::screen::{asked, choice, wide_split},
     scrollback::Styled,
 };
 
@@ -15,6 +15,19 @@ pub(crate) fn model_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
         let right = row.rsplit("  ").next()?.trim();
         let (_, model) = right.strip_prefix('(')?.split_once(") ")?;
         Some(model.split(" • ").next().unwrap_or(model))
+    })
+}
+
+/// pi's thinking level, after its model: "claude-opus-5-5 • medium".
+pub(crate) fn effort_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
+    rows.iter().take(2).find_map(|row| {
+        let right = row.rsplit("  ").next()?.trim();
+        right
+            .strip_prefix('(')?
+            .split_once(") ")?
+            .1
+            .split_once(" • ")
+            .map(|(_, e)| e)
     })
 }
 
@@ -42,6 +55,12 @@ pub(crate) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
         .trim_start_matches('>')
         .trim()
         .to_owned();
+    // Its `/thinking` selector: "Thinking Level" over its search, each level
+    // with what it is for.
+    let thinking = (rows[..field].iter().rev())
+        .filter(|(t, _)| !t.trim().is_empty())
+        .take(3)
+        .any(|(t, _)| t.trim() == "Thinking Level");
     let choices = (rows[start..count].iter())
         .map(|(t, _)| t.trim())
         .filter(|t| !t.is_empty())
@@ -55,6 +74,7 @@ pub(crate) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
                 None => (false, t),
             };
             let (label, detail) = match t.strip_suffix(']').and_then(|t| t.rsplit_once(" [")) {
+                _ if thinking => wide_split(t),
                 Some((label, provider)) => (label.to_owned(), provider.to_owned()),
                 None => (t.to_owned(), String::new()),
             };
@@ -62,7 +82,15 @@ pub(crate) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
         })
         .collect();
     Some(Menu {
-        ask: asked("Select model", &search, None),
+        ask: asked(
+            if thinking {
+                "Thinking level"
+            } else {
+                "Select model"
+            },
+            &search,
+            None,
+        ),
         choices,
         search: true,
         ..Menu::default()

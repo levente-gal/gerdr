@@ -105,6 +105,18 @@ impl Integration for Pi {
         screen::model_now(rows)
     }
 
+    fn effort_switch(&self) -> ModelSwitch {
+        ModelSwitch::OwnMenu
+    }
+
+    fn effort_line(&self) -> Option<(&'static str, bool)> {
+        Some(("/thinking", false))
+    }
+
+    fn effort_on_screen<'a>(&self, rows: &[&'a str]) -> Option<&'a str> {
+        screen::effort_now(rows)
+    }
+
     fn builtins(&self) -> &'static [(&'static str, &'static str)] {
         commands::BUILTINS
     }

@@ -28,7 +28,7 @@ use super::{
     files,
     live::{Answers, AskReply, PendingAsk, Question},
     menu::{self, ChoiceKind, Menu},
-    mode, model, model_menu,
+    mode, model, model_menu, pick,
     questions::Card,
     rows::{rows, unread},
     tail::Tail,
@@ -38,7 +38,7 @@ use crate::{
     ai_work::AgentKind,
     chrome::{self, CardHit, ChatHit, ChatLayout, ChatView, FieldSpot, WaitKey},
     herdr::{AgentInfo, AgentSession, AgentStatus, Herdr, ProcessInfo},
-    integrations::{ModelSwitch, caps},
+    integrations::{ModelSwitch, PickedFor, caps},
     key_table::{self, Binding},
     md_blocks::{DocBlock, ItemMark},
     prepare::{self, Step},
@@ -598,6 +598,27 @@ pub(crate) const MODEL_KEYS: &[Binding<(), ()>] = &[Binding {
     f1: "pick the model the agent runs on",
 }];
 
+/// The effort key, from the list and the reply box alike.
+pub(crate) const EFFORT_KEYS: &[Binding<(), ()>] = &[Binding {
+    chord: "Alt+Shift+E",
+    does: |_| Some(()),
+    footer: true,
+    f1: "pick the effort the agent reasons with",
+}];
+
+/// Whether `line` is agent `kind`'s bare effort line (`/effort`,
+/// `/thinking`, `/variants`): the chat's effort picker opens instead.
+fn effort_typed(kind: AgentKind, line: &str) -> bool {
+    let agent = crate::integrations::of(kind);
+    match agent.effort_switch() {
+        ModelSwitch::None => false,
+        ModelSwitch::Typed => line == "/effort",
+        ModelSwitch::OwnMenu => agent
+            .effort_line()
+            .is_some_and(|(l, in_model)| !in_model && l == line),
+    }
+}
+
 /// The file picker's key, from the list and the reply box alike: its
 /// files are attached to the reply (also the Attach button).
 const ATTACH_KEYS: &[Binding<(), ()>] = &[Binding {
@@ -838,7 +859,7 @@ pub(crate) fn footer(
 /// The footer's key hints of `chat` (K3): its ask card's, or its questions'
 /// card's while that has the keys, then those of where its keys are, but
 /// for a key the card took.
-fn chat_footer(chat: &PaneChat, modes: bool, models: bool) -> Vec<(String, String)> {
+fn chat_footer(chat: &PaneChat, modes: bool, models: bool, efforts: bool) -> Vec<(String, String)> {
     let ask = chat.live.ask.as_ref();
     let questions = ask.filter(|a| !a.questions.is_empty());
     let card = questions.filter(|_| chat.focus == ChatFocus::List);
@@ -865,6 +886,8 @@ fn chat_footer(chat: &PaneChat, modes: bool, models: bool) -> Vec<(String, Strin
             .into_iter()
             .filter(|_| chat.focus == ChatFocus::Composer);
             let attach = key_table::hints(ATTACH_KEYS, &(), |_| "attach".to_owned());
+            let effort = (key_table::hints(EFFORT_KEYS, &(), |_| "effort".to_owned()).into_iter())
+                .filter(|_| efforts);
             footer(
                 chat.focus,
                 chat.draft.line().text.is_empty(),
@@ -873,7 +896,10 @@ fn chat_footer(chat: &PaneChat, modes: bool, models: bool) -> Vec<(String, Strin
                 models,
             )
             .into_iter()
-            .chain((unattach.chain(attach)).map(|(chord, said)| (chord.to_owned(), said)))
+            .chain(
+                (effort.chain(unattach).chain(attach))
+                    .map(|(chord, said)| (chord.to_owned(), said)),
+            )
             .collect()
         }
     };
@@ -908,8 +934,9 @@ enum ChatDo {
     Page(i8),
     /// Step the agent to its next mode.
     NextMode,
-    /// Open the picker of the agent's model.
+    /// Open the picker of the agent's model, or its effort.
     PickModel,
+    PickEffort,
     /// Open plan item `.0`'s review.
     Review(String),
     /// Open the file picker, to attach files to the reply.
@@ -1036,6 +1063,9 @@ fn chat_key(
     }
     if key_table::press(MODEL_KEYS, &(), mods, sym).is_some() {
         return Some(ChatDo::PickModel);
+    }
+    if key_table::press(EFFORT_KEYS, &(), mods, sym).is_some() {
+        return Some(ChatDo::PickEffort);
     }
     if key_table::press(ATTACH_KEYS, &(), mods, sym).is_some() {
         return Some(ChatDo::PickFiles);
@@ -1272,14 +1302,19 @@ fn take_event<'a>(
             items,
             earlier,
             model,
+            effort,
             context,
             ..
         } => {
             chat.context = context;
             // Another chat in the pane (another agent, a new session): its
-            // own model, not the last one's.
-            if model.is_some() || chat.source.as_ref() != Some(&source) {
+            // own model and effort, not the last one's.
+            let other = chat.source.as_ref() != Some(&source);
+            if model.is_some() || other {
                 chat.model = model;
+            }
+            if effort.is_some() || other {
+                chat.effort = effort;
             }
             let n = rows(&items, &chat.unfolded).len();
             chat.picked = chat.picked.filter(|i| *i < n);
@@ -1291,12 +1326,12 @@ fn take_event<'a>(
         }
         Event::Missing { why, .. } => {
             chat.reading = Reading::Missing(why);
-            chat.model = None;
+            (chat.model, chat.effort) = (None, None);
             chat.context = None;
         }
         Event::Failed { error, .. } => {
             chat.reading = Reading::Failed(error);
-            chat.model = None;
+            (chat.model, chat.effort) = (None, None);
             chat.context = None;
         }
     }
@@ -1910,6 +1945,7 @@ impl Gerdr {
             }
             Some(ChatDo::NextMode) => self.chat_next_mode(&pane_id),
             Some(ChatDo::PickModel) => self.chat_open_model_picker(&pane_id),
+            Some(ChatDo::PickEffort) => self.chat_open_effort_picker(&pane_id),
             Some(ChatDo::Review(item_id)) => self.open_chat_plan(&pane_id, &item_id),
             Some(ChatDo::PickFiles) => self.chat_pick_files(&pane_id),
             Some(ChatDo::MenuKey(key)) => self.chat_menu_press(&pane_id, Press::Key(key)),
@@ -2009,15 +2045,19 @@ impl Gerdr {
         if line.is_empty() {
             return;
         }
-        // A bare `/model` typed opens the model button's picker instead.
+        // A bare `/model` typed opens the model button's picker instead, and
+        // the agent's effort line its effort's.
         let kind = self.chat_agent(pane_id).and_then(super::source::kind);
-        if line.trim() == model_menu::LINE
-            && kind.is_some_and(|kind| caps(kind).model != ModelSwitch::None)
-        {
+        let models = kind.is_some_and(|kind| caps(kind).model != ModelSwitch::None);
+        let effort = kind.is_some_and(|kind| effort_typed(kind, line.trim()));
+        if (models && line.trim() == model_menu::LINE) || effort {
             if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
                 chat.draft.clear();
             }
-            return self.chat_open_model_picker(pane_id);
+            return match effort {
+                true => self.chat_open_effort_picker(pane_id),
+                false => self.chat_open_model_picker(pane_id),
+            };
         }
         match self.send_line(pane_id, &line) {
             Ok(()) => {
@@ -2177,24 +2217,51 @@ impl Gerdr {
         herdr.send_agent_line(pane_id, line)
     }
 
-    /// The model menu pane `pane_id`'s agent of `kind` shows on its screen
-    /// `rows`, if any, and the model they say it is on; one that doesn't
-    /// say keeps the last it said.
+    /// The model or effort menu pane `pane_id`'s agent of `kind` shows on
+    /// its screen `rows`, if any, and the model and effort they say it is
+    /// on; one that doesn't say keeps the last it said. gerdr's own list
+    /// (`pick`) stays as it is.
     fn chat_take_picker(&mut self, pane_id: &str, kind: AgentKind, rows: &ChatRows) {
         let picker = model_menu::read(kind, rows);
         let texts: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
-        let now = model_menu::now(kind, &texts);
+        let (now, effort) = (
+            model_menu::now(kind, &texts),
+            model_menu::effort_now(kind, &texts),
+        );
         if picker.is_some() {
             self.chats.model_asked.remove(pane_id);
+        }
+        // Its efforts asked for in its model menu: Enter on the model it is
+        // on there shows them.
+        let asked =
+            (self.chats.effort_asked.get(pane_id)).is_some_and(|at| at.elapsed() < MENU_TAKES);
+        if let Some(m) = picker.as_ref().filter(|_| asked) {
+            self.chats.effort_asked.remove(pane_id);
+            let current = (m.choices.iter()).find(|c| c.label.ends_with("(current)"));
+            let keys = current.and_then(|c| model_menu::keys_to(m, &c.label));
+            let sent = match (keys, self.session.herdr.as_mut()) {
+                (Some(keys), Some(herdr)) => herdr.send_keys(pane_id, &keys),
+                (None, _) => Err("its menu shows no current model".into()),
+                (_, None) => Err("herdr isn't connected".into()),
+            };
+            if let Err(why) = sent {
+                tracing::warn!("opening the efforts of the agent in pane {pane_id}: {why}");
+                self.show_error(format!("Couldn't open the agent's efforts: {why}"));
+            }
+            self.read_rows(pane_id.to_owned(), MENU_SHOWS);
+            return;
         }
         let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
             return;
         };
-        if chat.picker.as_deref() != picker.as_ref() {
+        if chat.list.is_none() && chat.picker.as_deref() != picker.as_ref() {
             chat.picker = picker.map(Arc::new);
         }
         if now.is_some() {
             chat.model = now;
+        }
+        if effort.is_some() {
+            chat.effort = effort;
         }
     }
 
@@ -2317,40 +2384,141 @@ impl Gerdr {
     }
 
     /// Open the picker of pane `pane_id`'s agent's model, on the one its
-    /// chat says it is on; nothing for an agent gerdr can't switch.
+    /// chat says it is on: its own menu, or gerdr's list of them for one
+    /// that takes it on a typed line; nothing for one gerdr can't switch.
     pub(crate) fn chat_open_model_picker(&mut self, pane_id: &str) {
-        let kind = self.chat_agent(pane_id).and_then(super::source::kind);
-        if kind.is_some_and(|kind| caps(kind).model == ModelSwitch::OwnMenu) {
-            return self.chat_open_model_menu(pane_id);
-        }
-        let Some(slot) = self.chat_model_slot(pane_id) else {
+        let Some(kind) = self.chat_agent(pane_id).and_then(super::source::kind) else {
             return;
         };
-        let of = crate::switcher::ModelFor::Chat {
-            pane: pane_id.to_owned(),
-        };
-        self.open_model_picker(of, slot);
+        match caps(kind).model {
+            ModelSwitch::None => {}
+            ModelSwitch::OwnMenu => self.chat_open_own_menu(pane_id, model_menu::LINE, false),
+            ModelSwitch::Typed => {
+                if model::read(kind) {
+                    self.read_listed_models(model::base(kind));
+                }
+                let now = chat_mut(&mut self.workspaces, pane_id).and_then(|c| c.model.clone());
+                let offers = self.chat_model_offers(kind);
+                let picked = now.and_then(|now| model::picked(&offers, &now));
+                let mut list = pick::List::new(pick::What::Model, offers, picked);
+                list.note = self.chat_models_note(kind);
+                // Where its `/model` keeps the pick as its default too.
+                let hint = crate::integrations::of(kind).model_hint(PickedFor::Chat);
+                list.hint = hint.map(|h| h.trim_end_matches('…').to_owned());
+                self.chat_show_list(pane_id, list);
+            }
+        }
     }
 
-    /// Open pane `pane_id`'s agent's own model menu, its `/model` typed:
-    /// the chat shows it once its screen does (`model_menu`).
-    fn chat_open_model_menu(&mut self, pane_id: &str) {
+    /// Open the picker of pane `pane_id`'s agent's effort, as the model's.
+    pub(crate) fn chat_open_effort_picker(&mut self, pane_id: &str) {
+        let Some(kind) = self.chat_agent(pane_id).and_then(super::source::kind) else {
+            return;
+        };
+        let agent = crate::integrations::of(kind);
+        match (agent.effort_switch(), agent.effort_line()) {
+            (ModelSwitch::OwnMenu, Some((line, in_model))) => {
+                self.chat_open_own_menu(pane_id, line, in_model)
+            }
+            (ModelSwitch::Typed, _) => {
+                let now = chat_mut(&mut self.workspaces, pane_id).and_then(|c| c.effort.clone());
+                let list = pick::List::new(pick::What::Effort, pick::levels(agent.efforts()), now);
+                self.chat_show_list(pane_id, list);
+            }
+            _ => {}
+        }
+    }
+
+    /// The models pane chats offer for agent `kind`: its own choice first.
+    fn chat_model_offers(&self, kind: AgentKind) -> Vec<crate::stage_models::Offer> {
+        let agent = crate::integrations::of(kind);
+        let listed = model::offers(kind, &self.features.listed_models.offers);
+        agent.own_model().into_iter().chain(listed).collect()
+    }
+
+    /// Why a list of agent `kind`'s models shows none: they are being read,
+    /// or the read failed.
+    fn chat_models_note(&self, kind: AgentKind) -> Option<String> {
+        use crate::stage_models::Reading;
+        let name = model::name(kind);
+        match self.features.listed_models.reading {
+            Reading::Failed => Some(format!("Couldn't read {name}'s models")),
+            _ if model::read(kind) => Some(format!("Reading {name}'s models…")),
+            _ => None,
+        }
+    }
+
+    /// Show gerdr's list `list` in pane `pane_id`'s chat, in its agent's
+    /// own menu's place, with the keys.
+    fn chat_show_list(&mut self, pane_id: &str, list: pick::List) {
+        let Some(chat) = chat_mut(&mut self.workspaces, pane_id) else {
+            return;
+        };
+        if chat.picker.is_some() && chat.list.is_none() {
+            return; // The agent's own menu shows.
+        }
+        chat.picker = Some(Arc::new(list.menu()));
+        chat.list = Some(list);
+    }
+
+    /// Bring the chats' lists of models up to date, after a read of them.
+    pub(crate) fn refresh_chat_lists(&mut self) {
+        let mut kinds = Vec::new();
+        for (pane_id, chat) in chats_mut(&mut self.workspaces) {
+            if (chat.list.as_ref()).is_some_and(|l| l.what == pick::What::Model) {
+                kinds.push(pane_id.to_owned());
+            }
+        }
+        for pane_id in kinds {
+            let Some(kind) = self.chat_agent(&pane_id).and_then(super::source::kind) else {
+                continue;
+            };
+            let (offers, note) = (self.chat_model_offers(kind), self.chat_models_note(kind));
+            if let Some(chat) = chat_mut(&mut self.workspaces, &pane_id)
+                && let Some(list) = chat.list.as_mut()
+            {
+                list.refresh(offers);
+                list.note = note;
+                chat.picker = Some(Arc::new(list.menu()));
+            }
+        }
+    }
+
+    /// Open pane `pane_id`'s agent's own model or effort menu, its `line`
+    /// typed: the chat shows it once its screen does (`model_menu`). One
+    /// `in_model` is the second step of its model menu.
+    fn chat_open_own_menu(&mut self, pane_id: &str, line: &str, in_model: bool) {
         if chat_mut(&mut self.workspaces, pane_id).is_some_and(|chat| chat.picker.is_some()) {
             return;
         }
-        let sent = (self.mode_key_goes(pane_id))
-            .and_then(|()| self.send_to_agent(pane_id, model_menu::LINE));
+        let sent = (self.mode_key_goes(pane_id)).and_then(|()| self.send_to_agent(pane_id, line));
         if let Err(why) = sent {
-            tracing::warn!("opening the model menu of the agent in pane {pane_id}: {why}");
-            return self.show_error(format!("Couldn't open the agent's model menu: {why}"));
+            tracing::warn!("opening the menu of the agent in pane {pane_id}: {why}");
+            return self.show_error(format!("Couldn't open the agent's menu: {why}"));
         }
         (self.chats.model_asked).insert(pane_id.to_owned(), Instant::now());
+        if in_model {
+            (self.chats.effort_asked).insert(pane_id.to_owned(), Instant::now());
+        }
         self.read_rows(pane_id.to_owned(), MENU_SHOWS);
     }
 
     /// Press `press` in pane `pane_id`'s agent's model menu, from its
     /// chat's keys; its screen is read again soon, as the menu moves.
+    /// gerdr's own list takes it itself.
     fn chat_menu_press(&mut self, pane_id: &str, press: Press) {
+        if let Some(chat) = chat_mut(&mut self.workspaces, pane_id)
+            && let Some(list) = chat.list.as_mut()
+        {
+            let step = match press {
+                Press::Key(key) => list.press(key),
+                Press::Text(text) => {
+                    list.typed(text);
+                    pick::Step::Stay
+                }
+            };
+            return self.chat_list_step(pane_id, step);
+        }
         if self.pane_paused(pane_id) {
             return self.show_error("Couldn't press the key: the agent is paused".into());
         }
@@ -2368,10 +2536,54 @@ impl Gerdr {
         self.read_rows(pane_id.to_owned(), mode::READ_EVERY);
     }
 
+    /// What a key or a pick did to pane `pane_id`'s gerdr list: it stays
+    /// (drawn again), closes, or types its line to the agent and closes.
+    /// A line refused keeps the list open.
+    fn chat_list_step(&mut self, pane_id: &str, step: pick::Step) {
+        let close = |me: &mut Self| {
+            if let Some(chat) = chat_mut(&mut me.workspaces, pane_id) {
+                (chat.list, chat.picker) = (None, None);
+            }
+        };
+        match step {
+            pick::Step::Stay => {
+                if let Some(chat) = chat_mut(&mut self.workspaces, pane_id)
+                    && let Some(list) = &chat.list
+                {
+                    chat.picker = Some(Arc::new(list.menu()));
+                }
+            }
+            pick::Step::Close => close(self),
+            pick::Step::Pick { line, name } => {
+                let what = chat_mut(&mut self.workspaces, pane_id)
+                    .and_then(|c| c.list.as_ref())
+                    .map(|l| l.what);
+                let sent =
+                    (self.mode_key_goes(pane_id)).and_then(|()| self.send_to_agent(pane_id, &line));
+                if let Err(why) = sent {
+                    tracing::warn!("typing {line} to the agent in pane {pane_id}: {why}");
+                    return self.show_error(format!("Couldn't switch the agent to {name}: {why}"));
+                }
+                close(self);
+                // Its button says it till its chat says what it is on.
+                if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
+                    match what {
+                        Some(pick::What::Effort) => chat.effort = Some(name),
+                        _ => chat.model = Some(name),
+                    }
+                }
+            }
+        }
+    }
+
     /// Pick row `n` (from 1) of pane `pane_id`'s agent's model menu, as the
     /// chat shows it: its arrow moved onto it on the screen as it is now,
-    /// then Enter.
+    /// then Enter. gerdr's own list types its line.
     fn chat_pick_row(&mut self, pane_id: &str, n: u8) {
+        if let Some(list) = chat_mut(&mut self.workspaces, pane_id).and_then(|c| c.list.as_ref()) {
+            let step = list.pick(usize::from(n).wrapping_sub(1));
+            return self.chat_list_step(pane_id, step);
+        }
         let kind = self.chat_agent(pane_id).and_then(super::source::kind);
         let shown = chat_mut(&mut self.workspaces, pane_id).and_then(|chat| chat.picker.clone());
         let (Some(kind), Some(shown)) = (kind, shown) else {
@@ -2398,44 +2610,6 @@ impl Gerdr {
             self.show_error(format!("Couldn't pick {label}: {why}"));
         }
         self.read_rows(pane_id.to_owned(), mode::READ_EVERY);
-    }
-
-    /// The agent of pane `pane_id`'s chat, for the picker of its model;
-    /// none for one gerdr can't switch.
-    pub(crate) fn chat_model_slot(
-        &mut self,
-        pane_id: &str,
-    ) -> Option<crate::feature_agents::ModelSlot> {
-        let kind = (self.chat_agent(pane_id).and_then(super::source::kind))
-            .filter(|kind| caps(*kind).model.typed())?;
-        let now = chat_mut(&mut self.workspaces, pane_id).and_then(|chat| chat.model.clone());
-        let offers = model::offers(kind, &self.features.listed_models.offers);
-        Some(crate::feature_agents::ModelSlot {
-            agent: model::name(kind).to_owned(),
-            base: model::base(kind).to_owned(),
-            picked: now.and_then(|now| model::picked(&offers, &now)),
-        })
-    }
-
-    /// Switch pane `pane_id`'s agent to model `id`, picked in its chat:
-    /// its `/model` line typed into its pane. Its button says `id`'s name
-    /// till its chat says what it is on.
-    pub(crate) fn chat_pick_model(&mut self, pane_id: &str, id: &str) {
-        let Some(kind) = self.chat_agent(pane_id).and_then(super::source::kind) else {
-            return;
-        };
-        let sent = (self.mode_key_goes(pane_id))
-            .and_then(|()| self.send_to_agent(pane_id, &model::line(id)));
-        if let Err(why) = sent {
-            tracing::warn!("switching the agent in pane {pane_id} to model {id}: {why}");
-            return self.show_error(format!("Couldn't switch the agent to {id}: {why}"));
-        }
-        let mut offers = model::offers(kind, &self.features.listed_models.offers);
-        offers.extend(crate::integrations::of(kind).own_model());
-        let name = (offers.iter().find(|o| o.id == id)).map_or(id, |o| o.name.as_str());
-        if let Some(chat) = chat_mut(&mut self.workspaces, pane_id) {
-            chat.model = Some(name.to_owned());
-        }
     }
 
     /// Switching pane `pane_id`'s agent to mode `want` failed for `why`.
@@ -2595,6 +2769,10 @@ impl Gerdr {
                 let model = (super::source::kind(agent))
                     .filter(|kind| caps(*kind).model != ModelSwitch::None)
                     .map(|_| chat.model.clone().unwrap_or_else(|| "Model".to_owned()));
+                // Its effort's, right of it: what its chat or screen says.
+                let effort = (super::source::kind(agent))
+                    .filter(|kind| caps(*kind).effort != ModelSwitch::None)
+                    .map(|_| chat.effort.clone().unwrap_or_else(|| "Effort".to_owned()));
                 let modes = (super::source::kind(agent))
                     .filter(|kind| caps(*kind).modes)
                     .map_or_else(Vec::new, |kind| {
@@ -2619,7 +2797,7 @@ impl Gerdr {
                         .then(|| self.chats.waiting.get(pane_id).cloned())
                         .flatten(),
                     suggestion: chat.suggestion.clone(),
-                    hints: chat_footer(chat, !modes.is_empty(), model.is_some()),
+                    hints: chat_footer(chat, !modes.is_empty(), model.is_some(), effort.is_some()),
                     slash: (chat.slash.as_ref())
                         .filter(|slash| slash.open())
                         .map(chrome::SlashView::of),
@@ -2640,6 +2818,7 @@ impl Gerdr {
                     modes,
                     mode: self.chats.modes.get(pane_id).cloned(),
                     model,
+                    effort,
                     context: chat.context.map(|c| c.said()),
                     picker: chat.picker.clone(),
                 };
@@ -2679,6 +2858,10 @@ impl Gerdr {
         if let Some(rect) = chrome::chat_model_at(&view, pos) {
             let tip = "Pick the model the agent runs on";
             return Some(crate::tooltip::Tooltip::new(tip, rect).key(MODEL_KEYS[0].chord));
+        }
+        if let Some(rect) = chrome::chat_effort_at(&view, pos) {
+            let tip = "Pick the effort the agent reasons with";
+            return Some(crate::tooltip::Tooltip::new(tip, rect).key(EFFORT_KEYS[0].chord));
         }
         let button = chrome::chat_bottom_button(&view)?;
         (button.to_f64().contains(pos))
@@ -2782,6 +2965,7 @@ impl Gerdr {
                 }
             }
             ChatHit::Model => self.chat_open_model_picker(&pane_id),
+            ChatHit::Effort => self.chat_open_effort_picker(&pane_id),
             ChatHit::Answer(reply) => self.chat_answer(&pane_id, reply, None),
             ChatHit::Card(hit) => {
                 let answers = card_press(chat, hit);
@@ -3040,6 +3224,7 @@ mod tests {
             items: Arc::new(vec![user("u1", "hi")]),
             earlier: true,
             model: Some("Opus 5.5".into()),
+            effort: None,
             context: Some(crate::ai_work::context::Context {
                 used: 84_000,
                 window: Some(1_000_000),
@@ -3242,7 +3427,7 @@ mod tests {
     }
 
     fn footer_of(chat: &PaneChat) -> Vec<(String, String)> {
-        chat_footer(chat, false, false)
+        chat_footer(chat, false, false, false)
     }
 
     #[test]
@@ -3359,7 +3544,7 @@ mod tests {
         assert_eq!(chat.draft, "kept");
         // Left and Right only where they change its effort.
         assert_eq!(press(&mut chat, "Left", '\0'), None);
-        let hinted = |chat: &PaneChat| chat_footer(chat, true, true);
+        let hinted = |chat: &PaneChat| chat_footer(chat, true, true, true);
         assert!(!hinted(&chat).iter().any(|(_, said)| said == "effort"));
         assert!(!hinted(&chat).iter().any(|(_, said)| said == "send"));
         chat.picker = Some(Arc::new(Menu {
@@ -3436,6 +3621,64 @@ mod tests {
     }
 
     #[test]
+    fn alt_shift_e_picks_the_effort_from_the_list_and_the_reply_box() {
+        let mut chat = with_items(vec![user("u1", "one")]);
+        assert_eq!(
+            press(&mut chat, "Alt+Shift+E", 'E'),
+            Some(ChatDo::PickEffort)
+        );
+        chat.focus = ChatFocus::Composer;
+        chat.draft.set("hi");
+        assert_eq!(
+            press(&mut chat, "Alt+Shift+E", 'E'),
+            Some(ChatDo::PickEffort)
+        );
+        assert_eq!(chat.draft, "hi");
+        // Hinted only where gerdr can switch the agent's effort.
+        let has = |chat: &PaneChat, efforts| {
+            (chat_footer(chat, false, false, efforts).iter())
+                .any(|(k, said)| k == "Alt+Shift+E" && said == "effort")
+        };
+        assert!(has(&chat, true) && !has(&chat, false));
+        let others: Vec<&str> = (LIST_KEYS.iter().map(|b| b.chord))
+            .chain(COMPOSER_KEYS.iter().map(|b| b.chord))
+            .chain(SLASH_KEYS.iter().map(|b| b.chord))
+            .chain(ASK_KEYS.iter().map(|b| b.chord))
+            .chain(MODE_KEYS.iter().map(|b| b.chord))
+            .chain(MODEL_KEYS.iter().map(|b| b.chord))
+            .chain(ATTACH_KEYS.iter().map(|b| b.chord))
+            .collect();
+        assert!(!others.contains(&EFFORT_KEYS[0].chord));
+        assert!(crate::keys::hint_key(EFFORT_KEYS[0].chord).is_some());
+        // Typed bare, each agent's effort line opens the picker instead.
+        assert!(effort_typed(AgentKind::Claude, "/effort"));
+        assert!(effort_typed(AgentKind::Pi, "/thinking"));
+        assert!(!effort_typed(AgentKind::Codex, "/model"));
+        assert!(!effort_typed(AgentKind::Cursor, "/effort"));
+    }
+
+    #[test]
+    fn gerdrs_list_has_the_keys_and_the_footer_of_an_agents_menu() {
+        let mut chat = with_items(vec![user("u1", "one")]);
+        let list = pick::List::new(pick::What::Effort, pick::levels(&["low", "high"]), None);
+        chat.picker = Some(Arc::new(list.menu()));
+        chat.list = Some(list);
+        assert_eq!(
+            press(&mut chat, "Down", '\0'),
+            Some(ChatDo::MenuKey("Down"))
+        );
+        assert_eq!(
+            press(&mut chat, "h", 'h'),
+            Some(ChatDo::MenuText("h".into()))
+        );
+        assert!(
+            chat_footer(&chat, false, true, true)
+                .iter()
+                .any(|(_, said)| said == "pick")
+        );
+    }
+
+    #[test]
     fn left_fills_the_empty_reply_with_the_suggestion() {
         let mut chat = with_items(vec![user("u1", "one")]);
         // None waits: Left does nothing and isn't hinted.
@@ -3504,7 +3747,7 @@ mod tests {
     #[test]
     fn ctrl_shift_o_reviews_the_picked_plan_or_the_one_waited_on() {
         let review = |chat: &PaneChat| {
-            (chat_footer(chat, false, false).iter())
+            (chat_footer(chat, false, false, false).iter())
                 .any(|(k, said)| k == "Ctrl+Shift+O" && said == "review plan")
         };
         let plan = |id: &str| crate::chat::parse::plan_item(id.into(), None, "# Plan\n");
@@ -3724,7 +3967,7 @@ mod tests {
         // While the card has the keys, the list's hints lose its keys.
         let mut chat = with_items(Vec::new());
         chat.live.ask = Some(ask);
-        let hints = chat_footer(&chat, false, false);
+        let hints = chat_footer(&chat, false, false, false);
         assert!(hints.iter().all(|(k, s)| k != "Space" || s != "fold"));
         assert!(hints.iter().any(|(k, _)| k == "Y"));
     }

@@ -38,11 +38,23 @@ pub(super) fn model_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
     })
 }
 
+/// The Antigravity CLI's effort, after its model on that same row.
+pub(super) fn effort_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
+    rows.iter().take(2).find_map(|row| {
+        let right = row.rsplit("  ").next()?.trim();
+        let mut parts = right.split(" · ").peekable();
+        parts.next_if(|p| ["auto", "plan", "accept-edits"].contains(p));
+        parts.nth(1)
+    })
+}
+
 /// Antigravity's: "Switch Model", "Search:", the models (> on the arrow's,
 /// "(current)" after the current one), and an effort slider (◉ over its
 /// level) that ←/→ move while no search is typed.
 pub(super) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
-    let top = (rows.iter()).rposition(|(t, _)| t.trim() == "Switch Model")?;
+    let Some(top) = (rows.iter()).rposition(|(t, _)| t.trim() == "Switch Model") else {
+        return effort_menu(rows);
+    };
     let mut search = String::new();
     let mut choices = Vec::new();
     let mut effort = None;
@@ -85,6 +97,12 @@ pub(super) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
 /// row `levels` nearest it.
 fn level(slider: &str, levels: &str) -> Option<String> {
     let knob = slider.chars().position(|c| c == '◉')?;
+    let nearest = (words(levels).into_iter()).min_by_key(|(mid, _)| mid.abs_diff(knob))?;
+    Some(nearest.1)
+}
+
+/// The words of row `levels`, each with the column of its middle.
+fn words(levels: &str) -> Vec<(usize, String)> {
     let mut words = Vec::new();
     let mut start = None;
     for (i, c) in levels.chars().chain([' ']).enumerate() {
@@ -98,10 +116,42 @@ fn level(slider: &str, levels: &str) -> Option<String> {
             _ => {}
         }
     }
-    let nearest = words
-        .into_iter()
-        .min_by_key(|(mid, _)| mid.abs_diff(knob))?;
-    Some(nearest.1)
+    words
+}
+
+/// Its `/effort` slider: "Set Effort", the slider (◉ on the level under
+/// it) over its levels' words, what that level is for under them, with
+/// "(current)" while it is the one set. ←/→ move it, Enter sets it.
+fn effort_menu(rows: &[(String, Styled)]) -> Option<Menu> {
+    let top = (rows.iter()).rposition(|(t, _)| t.trim() == "Set Effort")?;
+    let at = top + (rows[top..].iter()).position(|(t, _)| t.contains('◉'))?;
+    let [(slider, _), (levels, _)] = rows.get(at..at + 2)? else {
+        return None;
+    };
+    let under = level(slider, levels)?;
+    let about = (rows[at + 2..].iter())
+        .map(|(t, _)| t.trim())
+        .find(|t| !t.is_empty() && !t.starts_with("Keyboard:"))
+        .unwrap_or("");
+    let set = about.ends_with("(current)");
+    let choices = (words(levels).into_iter())
+        .map(|(_, word)| {
+            let picked = word == under;
+            let detail = match picked {
+                true => about.trim_end_matches("(current)").trim().to_owned(),
+                false => String::new(),
+            };
+            choice(word, detail, picked, picked && set)
+        })
+        .collect();
+    Some(Menu {
+        ask: asked("Set effort", "", None),
+        choices,
+        // Its arrow is the knob: Left and Right move it.
+        sideways: true,
+        across: true,
+        ..Menu::default()
+    })
 }
 
 // shortcut: its side panel's marks are as Antigravity CLI 1.5.17 drew them (2026-11-25);

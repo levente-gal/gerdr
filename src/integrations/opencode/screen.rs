@@ -29,19 +29,33 @@ pub(super) fn model_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
     })
 }
 
+/// OpenCode's variant (its effort), after the model on that same line.
+pub(super) fn effort_now<'a>(rows: &[&'a str]) -> Option<&'a str> {
+    rows.iter()
+        .find_map(|row| row.strip_prefix('┃')?.split(" · ").nth(2))
+}
+
+/// The titles of its dialogs gerdr shows: its models, its variants.
+const TITLES: [&str; 2] = ["Select model", "Select variant"];
+
 /// OpenCode's dialog over its chat: "Select model … esc", its search
 /// field, then models under headings (Recent, each provider); the current
 /// one marked ●, the arrow's on a ground of its own.
 pub(super) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
     let top = rows.iter().rposition(|(t, _)| {
         let t = t.trim();
-        t.starts_with("Select model") && t.ends_with("esc")
+        TITLES.iter().any(|w| t.starts_with(w)) && t.ends_with("esc")
     })?;
     let (title, title_styles) = &rows[top];
-    let left = col_of(title, "Select model")?;
+    let named = *TITLES.iter().find(|w| title.trim().starts_with(*w))?;
+    let left = col_of(title, named)?;
     let right = col_of(title, "esc")? + 3;
     // The dialog's own ground: the arrow's row has another.
     let ground = style_at(title_styles, left).and_then(|s| s.bg);
+    // Its left edge: the first column on that ground.
+    let edge = (0..left)
+        .find(|col| style_at(title_styles, *col).and_then(|s| s.bg) == ground)
+        .unwrap_or(left);
     let mut search = None;
     let mut choices = Vec::new();
     for (text, styles) in &rows[top + 1..] {
@@ -50,6 +64,12 @@ pub(super) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
         if words.contains("ctrl+") {
             break;
         }
+        // Past the dialog's ground at its left edge: its variants' has no
+        // keys row under it.
+        if ground.is_some() && style_at(styles, edge).and_then(|s| s.bg) != ground {
+            break;
+        }
+        let at = style_at(styles, left).copied().unwrap_or_default();
         if words.is_empty() {
             continue;
         }
@@ -61,7 +81,6 @@ pub(super) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
         if words == "No results found" {
             continue;
         }
-        let at = style_at(styles, left).copied().unwrap_or_default();
         let picked = at.bg.is_some() && at.bg != ground;
         // A heading: bold on the dialog's ground.
         if at.bold && !picked {
@@ -73,7 +92,7 @@ pub(super) fn model_menu(rows: &[(String, Styled)]) -> Option<Menu> {
     }
     let search = search?;
     Some(Menu {
-        ask: asked("Select model", &search, None),
+        ask: asked(named, &search, None),
         choices,
         search: true,
         ..Menu::default()

@@ -9783,7 +9783,7 @@ fn dump_ship_squash() {
 /// top of a list scrolled up past them, and an agent's own model menu in
 /// the waiting panel's place, a row hovered, and the agent's tables in a
 /// wide pane: one as wide as its words, one reaching out of the column.
-const CHATS: [&str; 24] = [
+const CHATS: [&str; 26] = [
     "chat_finding",
     "chat_missing",
     "chat",
@@ -9808,6 +9808,8 @@ const CHATS: [&str; 24] = [
     "chat_model_menu",
     "chat_files",
     "chat_table",
+    "chat_effort",
+    "chat_list",
 ];
 
 fn chat_view(i: usize) -> super::ChatView {
@@ -10157,6 +10159,39 @@ fn chat_view(i: usize) -> super::ChatView {
                 ..v
             }
         }
+        // Claude's effort's button right of its model's, hovered.
+        24 => super::ChatView {
+            status: AgentStatus::Idle,
+            hints: crate::chat::footer(ChatFocus::List, true, false, true, true),
+            modes: ["Auto", "Manual", "Edits", "Plan"].map(String::from).into(),
+            mode: Some("Auto".into()),
+            model: Some("Opus 5.5".into()),
+            effort: Some("high".into()),
+            hover: Some(ChatHit::Effort),
+            ..v
+        },
+        // Claude's models in gerdr's own list, as an agent's menu shows.
+        25 => {
+            use crate::chat::pick::{List, What};
+            let offers = ["Default", "Fable", "Opus", "Sonnet", "Haiku"].map(|name| {
+                crate::stage_models::Offer {
+                    id: name.to_lowercase(),
+                    name: name.into(),
+                }
+            });
+            let mut list = List::new(What::Model, offers.into(), Some("opus".into()));
+            list.hint = Some("Model for this agent; Claude Code may keep it as its default".into());
+            super::ChatView {
+                status: AgentStatus::Idle,
+                hints: crate::chat::picker_footer(false),
+                modes: ["Auto", "Manual", "Edits", "Plan"].map(String::from).into(),
+                mode: Some("Auto".into()),
+                model: Some("Opus 5.5".into()),
+                effort: Some("high".into()),
+                picker: Some(std::sync::Arc::new(list.menu())),
+                ..v
+            }
+        }
         // A shorter pane, for the list to scroll.
         _ => super::ChatView {
             rect: super::Rect::new(v.rect.loc, (v.rect.size.w, 460).into()),
@@ -10174,7 +10209,7 @@ fn paint_chats(painter: &Painter, theme: Theme, scale: f64) -> Vec<u64> {
 }
 
 /// The recorded hashes of `CHATS`, per case in `CASES`.
-const GOLDEN_CHATS: [[u64; 24]; 4] = [
+const GOLDEN_CHATS: [[u64; 26]; 4] = [
     // Dark at 1
     [
         0x0a7677a974e281be, // chat_finding
@@ -10201,6 +10236,8 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
         0x9d46099149c7521b, // chat_model_menu
         0xb4e6941a645e46de, // chat_files
         0xe4886dc64a7203b3, // chat_table
+        0x6ffa9b0cacc0429f, // chat_effort
+        0x25005ed5b3cfddfd, // chat_list
     ],
     // Dark at 2
     [
@@ -10228,6 +10265,8 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
         0xfd239912a53a3cf4, // chat_model_menu
         0x71f900cb53bc021a, // chat_files
         0xf31cc7ab03ca5e67, // chat_table
+        0xe985bd072881cd91, // chat_effort
+        0xd6a81dbe07381ed4, // chat_list
     ],
     // Light at 1
     [
@@ -10255,6 +10294,8 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
         0x40d01b84708b7e1c, // chat_model_menu
         0xae2d4968fbca1ce4, // chat_files
         0xebd9bfddd16bcdc3, // chat_table
+        0x85b09efaf1588343, // chat_effort
+        0x67281575a4dfa600, // chat_list
     ],
     // Light at 2
     [
@@ -10282,6 +10323,8 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
         0x91dd6af6606f7220, // chat_model_menu
         0xdd94da6ab7198e47, // chat_files
         0xe8309b7e36a93063, // chat_table
+        0xf78a17223d0c7786, // chat_effort
+        0xa4e6e1c59b18a84d, // chat_list
     ],
 ];
 

@@ -18,6 +18,7 @@ pub mod mode;
 pub mod model;
 pub mod model_menu;
 pub mod parse;
+pub mod pick;
 pub mod plan_review;
 pub mod questions;
 pub mod rows;
@@ -213,9 +214,17 @@ pub struct PaneChat {
     /// The model its agent is on, as its chat last said or as last picked
     /// here (`model`), or as its screen says (`model_menu::now`).
     pub model: Option<String>,
-    /// The agent's own model menu while its screen shows it
-    /// (`model_menu`): the chat shows it, and its keys go to it.
+    /// The effort its agent is on, as its chat or its screen last said,
+    /// or as last picked here.
+    pub effort: Option<String>,
+    /// The agent's own model or effort menu while its screen shows it
+    /// (`model_menu`), or gerdr's list of them (`list`): the chat shows
+    /// it, and its keys go to it.
     pub picker: Option<Arc<menu::Menu>>,
+    /// gerdr's list of the agent's models or efforts while it shows, for
+    /// an agent that takes them on a typed line (`pick`): `picker` is its
+    /// menu.
+    pub list: Option<pick::List>,
     /// How full its agent's context is, as its chat last said.
     pub context: Option<crate::ai_work::context::Context>,
 }
@@ -271,6 +280,8 @@ pub enum Event {
         /// The model the agent is on, where its chat or config says
         /// (`model`).
         model: Option<String>,
+        /// The effort it is on, where its chat says.
+        effort: Option<String>,
         /// How full its context is, where its chat says.
         context: Option<crate::ai_work::context::Context>,
     },

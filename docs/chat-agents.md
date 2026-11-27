@@ -26,6 +26,7 @@ table by hand: run `the_chat_doc_says_what_caps_say` in
 | `earlier`: earlier messages on ask | ✓ | ✓ | — | — | ✓ | ✓ |
 | `modes`: mode switcher | ✓ | ✓ | ✓ | ✓ | — | ✓ |
 | `model`: model picker | typed | own menu | own menu | typed | own menu | own menu |
+| `effort`: effort picker | typed | own menu | own menu | — | own menu | own menu |
 | `side`: `/btw` side panel | ✓ | — | ✓ | ✓ | — | ✓ |
 | `suggests`: prompt suggestion | ✓ | — | — | — | — | — |
 | `context`: context size | ✓ | ✓ | — | ✓ | ✓ | — |
@@ -53,13 +54,17 @@ table by hand: run `the_chat_doc_says_what_caps_say` in
 | `/btw` side panel | ✓ | — (CLI has no `/btw`) | ✓ | ✓ | — (CLI has no `/btw`) | ✓ |
 | Prompt suggestion (Left fills it) | ✓ | — | — | — | — | — |
 | Model picker | gerdr's list, types `/model id` | agent's own menu, mirrored | agent's own menu, mirrored | gerdr's list, types `/model id` | agent's own menu, mirrored | agent's own menu, mirrored |
+| Effort picker (Alt+Shift+E) | gerdr's list, types `/effort level` (low … max) | `/model`, then Enter on the current model: its effort step, mirrored | `/variants`, mirrored | — (the effort is part of the model's name) | `/thinking`, mirrored | `/effort` slider, mirrored as a list (← →) |
 | Mode switcher (Shift+Tab) | Auto / Manual / Edits / Plan | Build / Plan | Build / Plan, plus the user's own agents | Agent / Plan / Debug / Ask | — | Auto / Plan / Default / Edits |
 | Context "84k / 1M" | ✓ | ✓ | — | ✓ | ✓ | — |
 
 These work the same for all six: image paste, file attach, pinned prompt, the
 ↓ button, the working row with its turn clock, and lines sent with Enter
-apart. A bare `/model` sent from the reply box opens the model picker, as its
-button does (on the phone, Claude's and Cursor's model list). The phone shows the same rows through `src/phone.rs`, gated by the same
+apart. Both pickers show in the same panel over the reply box for every agent,
+desktop and phone: gerdr's own list or the agent's menu read off its screen.
+A bare `/model` sent from the reply box opens the model picker, as its button
+does, and the agent's bare effort line (`/effort`, `/variants`, `/thinking`)
+the effort picker. The phone shows the same rows through `src/phone.rs`, gated by the same
 checks.
 
 ## Starting the agent

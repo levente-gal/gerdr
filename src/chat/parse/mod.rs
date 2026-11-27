@@ -89,6 +89,11 @@ impl Reader {
         self.p.model()
     }
 
+    /// The effort the chat is on, as its lines read so far last said.
+    pub fn effort(&self) -> Option<String> {
+        self.p.effort()
+    }
+
     /// The items read so far, in order.
     pub fn items(&self) -> &[Item] {
         self.b.items()

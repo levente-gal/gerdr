@@ -44,14 +44,14 @@ pub enum Store {
     Database,
 }
 
-/// How a chat switches its agent's model.
+/// How a chat switches its agent's model, or its effort.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelSwitch {
     /// It can't.
     None,
-    /// gerdr types `/model <id>`.
+    /// gerdr types `/model <id>` (`/effort <level>`).
     Typed,
-    /// `/model` opens a menu of the agent's own, mirrored in the chat.
+    /// A line of the agent's opens a menu of its own, mirrored in the chat.
     OwnMenu,
 }
 
@@ -105,6 +105,8 @@ pub struct Caps {
     /// It has modes to step through.
     pub modes: bool,
     pub model: ModelSwitch,
+    /// How its reasoning effort is switched.
+    pub effort: ModelSwitch,
     /// It takes side questions (`/btw`).
     pub side: bool,
     /// Its screen suggests what to say next.
@@ -225,6 +227,15 @@ pub trait Integration: Sync {
     fn model_now(&self, _chat: Option<&Path>) -> Option<String> {
         None
     }
+    /// The effort its chat is on, as `reader` read it.
+    fn effort_in_chat(&self, reader: &Reader) -> Option<String> {
+        reader.effort()
+    }
+    /// The effort its chat is on with no reader, by the end of its
+    /// transcript `chat`.
+    fn effort_now(&self, _chat: Option<&Path>) -> Option<String> {
+        None
+    }
     /// The transcript of its chat in herdr pane `pane`, read for the
     /// pane's words when herdr keeps it no scrollback (the alternate
     /// screen).
@@ -276,7 +287,24 @@ pub trait Integration: Sync {
     fn models_read(&self) -> bool {
         false
     }
-    /// Its own model menu, as its screen `rows` show it at their bottom.
+    fn effort_switch(&self) -> ModelSwitch {
+        ModelSwitch::None
+    }
+    /// The efforts a chat offers, for one switched by a typed line.
+    fn efforts(&self) -> &'static [&'static str] {
+        &[]
+    }
+    /// The line that opens its own effort menu, and whether that is its
+    /// model menu, the effort its second step (Enter on the current model).
+    fn effort_line(&self) -> Option<(&'static str, bool)> {
+        None
+    }
+    /// The effort its screen says it is on; `rows` as `model_on_screen`.
+    fn effort_on_screen<'a>(&self, _rows: &[&'a str]) -> Option<&'a str> {
+        None
+    }
+    /// Its own model or effort menu, as its screen `rows` show it at their
+    /// bottom.
     fn model_menu(&self, _rows: &[(String, Styled)]) -> Option<Menu> {
         None
     }
@@ -438,6 +466,7 @@ pub trait Integration: Sync {
             earlier: self.store() == Some(Store::Lines),
             modes: !self.modes().is_empty(),
             model: self.model_switch(),
+            effort: self.effort_switch(),
             side: self.side_panel().is_some(),
             suggests: self.suggests(),
             context: self.has_context(),
@@ -458,6 +487,10 @@ pub trait Parser: Send {
     fn subagent(&mut self, _b: &mut Builder, _agent: &str, _call: &str, _lines: &[u8]) {}
     /// The model the chat is on, as its lines read so far last said.
     fn model(&self) -> Option<String> {
+        None
+    }
+    /// The effort the chat is on, as its lines read so far last said.
+    fn effort(&self) -> Option<String> {
         None
     }
     /// The conversations results named as subagents that aren't taken as
@@ -583,18 +616,19 @@ mod tests {
 
     /// Each field of `caps` as the doc's table says it: a new field won't
     /// build here until it has its row.
-    fn caps_rows(caps: Caps) -> [(&'static str, &'static str); 7] {
+    fn caps_rows(caps: Caps) -> [(&'static str, &'static str); 8] {
         let Caps {
             chat,
             earlier,
             modes,
             model,
+            effort,
             side,
             suggests,
             context,
         } = caps;
         let yes = |on: bool| if on { "✓" } else { "—" };
-        let model = match model {
+        let switch = |by: ModelSwitch| match by {
             ModelSwitch::None => "—",
             ModelSwitch::Typed => "typed",
             ModelSwitch::OwnMenu => "own menu",
@@ -603,7 +637,8 @@ mod tests {
             ("`chat`: gerdr reads its chats", yes(chat)),
             ("`earlier`: earlier messages on ask", yes(earlier)),
             ("`modes`: mode switcher", yes(modes)),
-            ("`model`: model picker", model),
+            ("`model`: model picker", switch(model)),
+            ("`effort`: effort picker", switch(effort)),
             ("`side`: `/btw` side panel", yes(side)),
             ("`suggests`: prompt suggestion", yes(suggests)),
             ("`context`: context size", yes(context)),

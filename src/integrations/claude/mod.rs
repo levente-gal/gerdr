@@ -94,6 +94,10 @@ impl Integration for Claude {
         parse::last_in(&tail_of(chat?)?)
     }
 
+    fn effort_now(&self, chat: Option<&Path>) -> Option<String> {
+        parse::effort_in(&tail_of(chat?)?)
+    }
+
     fn pane_transcript(&self, herdr: &mut Herdr, pane: &str) -> Option<PathBuf> {
         find::claude_chat(herdr, pane)
     }
@@ -124,6 +128,15 @@ impl Integration for Claude {
 
     fn offers(&self, _listed: &[Offer]) -> Vec<Offer> {
         launch::offers()
+    }
+
+    fn effort_switch(&self) -> ModelSwitch {
+        ModelSwitch::Typed
+    }
+
+    /// `/effort`'s levels, the same for each model (2.1.332).
+    fn efforts(&self) -> &'static [&'static str] {
+        &["low", "medium", "high", "xhigh", "max"]
     }
 
     /// `/model default`: Claude Code's own choice.

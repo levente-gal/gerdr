@@ -413,6 +413,9 @@ pub struct Chats {
     /// The panes whose agent's own model menu was asked for (`/model`
     /// sent), when: their screen is read often till it shows.
     pub model_asked: HashMap<String, std::time::Instant>,
+    /// The panes whose agent's effort was asked for in its model menu
+    /// (Codex): Enter on its current model there shows its efforts.
+    pub effort_asked: HashMap<String, std::time::Instant>,
     /// Where those switches come back to, as (pane, mode, how it went).
     pub mode_tx: Option<channel::Sender<ModeSwitched>>,
 }

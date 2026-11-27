@@ -486,6 +486,13 @@ fn act(target: &str, body: &[u8], host: &str, from: &str) -> Reply {
             if !picked.is_empty() {
                 return agent_model(&project, &slug, &pane, &picked);
             }
+            let effort = text("effort");
+            if !effort.is_empty() {
+                return agent_effort(&project, &slug, &pane, &effort);
+            }
+            if !text("effort_menu").is_empty() {
+                return agent_effort_menu(&project, &slug, &pane);
+            }
             let (row, typed) = (text("pick"), text("type"));
             if !row.is_empty() || !typed.is_empty() || erase > 0 {
                 return agent_menu(&project, &slug, &pane, &row, &typed, erase);
@@ -750,6 +757,98 @@ fn agent_model(project: &str, slug: &str, pane: &str, id: &str) -> Reply {
     }
 }
 
+/// The agent in `pane` of `project`, by what herdr says runs there, and
+/// herdr to reach it by.
+fn pane_agent(project: &str, slug: &str, pane: &str) -> Result<(Herdr, Option<AgentInfo>), Reply> {
+    let (project, _) = agent_of(project, slug, pane)?;
+    let mut herdr = Herdr::on_socket(herdr::socket_path(&project.session));
+    match herdr.agent_list() {
+        Ok(agents) => Ok((herdr, agents.into_iter().find(|a| a.pane_id == pane))),
+        Err(err) => Err(Reply::error(
+            502,
+            &format!("Couldn't reach the agent: {err}"),
+        )),
+    }
+}
+
+/// Set the effort of the agent in `pane` to `level`, as the desktop chat
+/// does: its `/effort <level>` typed, for one that takes it so; `level`
+/// one of those it offers.
+fn agent_effort(project: &str, slug: &str, pane: &str, level: &str) -> Reply {
+    let (mut herdr, agent) = match pane_agent(project, slug, pane) {
+        Ok(found) => found,
+        Err(reply) => return reply,
+    };
+    let Some(kind) = (agent.as_ref().and_then(crate::chat::source::kind))
+        .filter(|k| integrations::caps(*k).effort.typed())
+    else {
+        return Reply::error(404, "No agent whose effort gerdr can set runs there");
+    };
+    if !integrations::of(kind).efforts().contains(&level) {
+        return Reply::error(400, "Not an effort the agent offers");
+    }
+    if agent.is_some_and(|a| a.agent_status == AgentStatus::Blocked) {
+        return Reply::error(
+            409,
+            "Couldn't set the effort: the agent waits on an answer first",
+        );
+    }
+    match herdr.send_agent_line(pane, &crate::chat::pick::effort_line(level)) {
+        Ok(()) => Reply::json(&json!({ "said": [] })),
+        Err(err) => Reply::error(502, &format!("Couldn't reach the agent: {err}")),
+    }
+}
+
+/// Open the effort menu of the agent in `pane`, for one with a menu of its
+/// own: its line typed, and where that is its model menu (Codex), Enter on
+/// the model it is on once the menu shows.
+fn agent_effort_menu(project: &str, slug: &str, pane: &str) -> Reply {
+    let (mut herdr, agent) = match pane_agent(project, slug, pane) {
+        Ok(found) => found,
+        Err(reply) => return reply,
+    };
+    let kind = agent.as_ref().and_then(crate::chat::source::kind);
+    let Some((kind, (line, in_model))) =
+        kind.and_then(|k| Some((k, integrations::of(k).effort_line()?)))
+    else {
+        return Reply::error(404, "No agent with an effort menu runs there");
+    };
+    if agent.is_some_and(|a| a.agent_status == AgentStatus::Blocked) {
+        return Reply::error(
+            409,
+            "Couldn't open its efforts: the agent waits on an answer first",
+        );
+    }
+    if let Err(err) = herdr.send_agent_line(pane, line) {
+        return Reply::error(502, &format!("Couldn't reach the agent: {err}"));
+    }
+    if !in_model {
+        return Reply::json(&json!({ "said": [] }));
+    }
+    // Its model menu takes a moment to show.
+    for _ in 0..20 {
+        std::thread::sleep(crate::chat::mode::READ_EVERY);
+        let Ok(rows) = crate::chat::screen_rows(&mut herdr, pane, MENU_ROWS) else {
+            continue;
+        };
+        let Some(m) = model_menu::read(kind, &rows) else {
+            continue;
+        };
+        let current = (m.choices.iter()).find(|c| c.label.ends_with("(current)"));
+        let Some(keys) = current.and_then(|c| model_menu::keys_to(&m, &c.label)) else {
+            return Reply::error(
+                409,
+                "Couldn't open its efforts: its menu shows no current model",
+            );
+        };
+        return match herdr.send_keys(pane, &keys) {
+            Ok(()) => Reply::json(&json!({ "said": [] })),
+            Err(err) => Reply::error(502, &format!("Couldn't reach the agent: {err}")),
+        };
+    }
+    Reply::error(504, "Couldn't open its efforts: its menu didn't show")
+}
+
 /// In the model menu of the agent in `pane` (`model_menu`): pick the row
 /// labelled `row`, its arrow moved onto it on the screen as it is now, then
 /// Enter; or take back `erase` letters of its search and type `typed`.
@@ -802,22 +901,30 @@ fn agent_menu(project: &str, slug: &str, pane: &str, row: &str, typed: &str, era
     }
 }
 
-/// The model menu agent `kind` in `pane` shows, as the page draws it
-/// (`{ask, rows: [{label, detail, at}], sideways}`), or null; and the
-/// model its screen says it is on. Nothing for an agent without one.
-fn pane_menu(herdr: &mut Herdr, pane: &str, kind: Option<AgentKind>) -> (Value, Option<String>) {
+/// The model or effort menu agent `kind` in `pane` shows, as the page
+/// draws it (`{ask, rows: [{label, detail, at}], sideways}`), or null; and
+/// the model and effort its screen says it is on. Nothing for an agent
+/// without one.
+fn pane_menu(
+    herdr: &mut Herdr,
+    pane: &str,
+    kind: Option<AgentKind>,
+) -> (Value, Option<String>, Option<String>) {
     let Some(kind) = kind.filter(|k| integrations::caps(*k).model == ModelSwitch::OwnMenu) else {
-        return (Value::Null, None);
+        return (Value::Null, None, None);
     };
     let rows = match crate::chat::screen_rows(herdr, pane, MENU_ROWS) {
         Ok(rows) => rows,
         Err(why) => {
             tracing::debug!("phone: the model menu of pane {pane}: {why}");
-            return (Value::Null, None);
+            return (Value::Null, None, None);
         }
     };
     let texts: Vec<&str> = rows.iter().map(|(text, _)| text.as_str()).collect();
-    let now = model_menu::now(kind, &texts);
+    let (now, effort) = (
+        model_menu::now(kind, &texts),
+        model_menu::effort_now(kind, &texts),
+    );
     let menu = model_menu::read(kind, &rows).map(|m| {
         let rows: Vec<Value> = (m.choices.iter())
             .map(|c| json!({ "label": c.label, "detail": c.detail, "at": c.picked }))
@@ -825,7 +932,7 @@ fn pane_menu(herdr: &mut Herdr, pane: &str, kind: Option<AgentKind>) -> (Value, 
         let ask: Vec<&str> = m.ask.iter().map(|(text, _)| text.as_str()).collect();
         json!({ "ask": ask, "rows": rows, "sideways": m.sideways, "search": m.search })
     });
-    (menu.unwrap_or(Value::Null), now)
+    (menu.unwrap_or(Value::Null), now, effort)
 }
 
 /// What a new feature can be started on: each project with a workspace
@@ -1466,14 +1573,26 @@ fn pane(project: &str, slug: &str, pane: &str, lines: &str) -> Reply {
     let read = agent_kind.is_some_and(model::read);
     // An agent picking its model in a menu of its own: the menu while it
     // shows, the model it is on, a button that opens the menu.
-    let (picker, on) = pane_menu(&mut herdr, pane, agent_kind);
+    let (picker, on, effort_on) = pane_menu(&mut herdr, pane, agent_kind);
     let menu = agent_kind.is_some_and(|k| integrations::caps(k).model == ModelSwitch::OwnMenu);
+    // Its effort: the levels a typed one offers, or that it has a menu of
+    // its own; and the one it is on, by its transcript or its screen.
+    let agent_of_kind = agent_kind.map(integrations::of);
+    let efforts = agent_of_kind.map_or(&[][..], |a| a.efforts());
+    let effort_menu = agent_of_kind.is_some_and(|a| a.effort_line().is_some());
+    let effort = match agent_of_kind {
+        Some(a) if a.effort_switch().typed() => a.effort_now(transcript.as_deref()),
+        _ => effort_on,
+    };
     let with_menu = |mut reply: Value| {
         reply["picker"] = picker.clone();
         reply["menu"] = json!(menu);
         if menu {
             reply["model"] = json!(on);
         }
+        reply["efforts"] = json!(efforts);
+        reply["effort_menu"] = json!(effort_menu);
+        reply["effort"] = json!(effort);
         reply
     };
     // How full its context is, as gerdr's chat head says it.

@@ -119,6 +119,18 @@ impl Integration for Antigravity {
         screen::model_now(rows)
     }
 
+    fn effort_switch(&self) -> ModelSwitch {
+        ModelSwitch::OwnMenu
+    }
+
+    fn effort_line(&self) -> Option<(&'static str, bool)> {
+        Some(("/effort", false))
+    }
+
+    fn effort_on_screen<'a>(&self, rows: &[&'a str]) -> Option<&'a str> {
+        screen::effort_now(rows)
+    }
+
     fn side_panel(&self) -> Option<SidePanel> {
         Some(screen::SIDE_PANEL)
     }

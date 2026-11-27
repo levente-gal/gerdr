@@ -31,6 +31,8 @@ pub(crate) struct Claude {
     agent_calls: HashMap<String, String>,
     /// The model the chat is on, as its lines last said.
     model: Option<String>,
+    /// The effort it is on, as its last `/effort` said.
+    effort: Option<String>,
 }
 
 impl Parser for Claude {
@@ -39,6 +41,9 @@ impl Parser for Claude {
         if line["isSidechain"] != true {
             if let Some(model) = of_line(line) {
                 self.model = Some(model);
+            }
+            if let Some(effort) = effort_of_line(line) {
+                self.effort = Some(effort);
             }
             return self.sub_line(b, line);
         }
@@ -123,6 +128,10 @@ impl Parser for Claude {
 
     fn model(&self) -> Option<String> {
         self.model.clone()
+    }
+
+    fn effort(&self) -> Option<String> {
+        self.effort.clone()
     }
 }
 
@@ -379,6 +388,24 @@ fn of_line(line: &Value) -> Option<String> {
     let mut chars = set.chars();
     let first = chars.next()?;
     Some(first.to_uppercase().chain(chars).collect())
+}
+
+// shortcut: as Claude Code 2.1.332 says it; recheck when it updates.
+/// The effort Claude Code's transcript line `line` says `/effort` set:
+/// "Set effort level to medium (saved as your default…): …".
+fn effort_of_line(line: &Value) -> Option<String> {
+    let text = line["message"]["content"].as_str()?;
+    let (_, out) = text.split_once("<local-command-stdout>Set effort level to ")?;
+    let level = out.split([' ', '<', ':']).next()?;
+    Some(level.to_owned()).filter(|level| !level.is_empty())
+}
+
+/// The effort the Claude Code transcript ending in `tail` is on, by its
+/// last `/effort`.
+pub(crate) fn effort_in(tail: &[u8]) -> Option<String> {
+    (tail.split(|b| *b == b'\n').rev())
+        .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+        .find_map(|line| effort_of_line(&line))
 }
 
 /// The model the Claude Code transcript ending in `tail` is on, by its last
@@ -934,5 +961,22 @@ mod tests {
         let older = [set("\u{1b}[1mopus\u{1b}[22m")];
         assert_eq!(last_in(&tail(&older)).as_deref(), Some("Opus"));
         assert_eq!(last_in(b"{\"type\":\"user\"}\n"), None);
+    }
+
+    #[test]
+    fn the_effort_is_what_the_last_effort_said() {
+        let said = |out: &str| json!({ "type": "user", "message": { "content": format!("<local-command-stdout>{out}</local-command-stdout>") } });
+        let lines = [
+            said("Set effort level to medium (saved as your default for new sessions): Balanced"),
+            said("Set model to Haiku 5.5"),
+        ];
+        assert_eq!(read(&lines).effort().as_deref(), Some("medium"));
+        let lines = [
+            lines[0].clone(),
+            said("Set effort level to max (this session only): Maximum capability"),
+        ];
+        assert_eq!(read(&lines).effort().as_deref(), Some("max"));
+        assert_eq!(effort_in(&jsonl(&lines)).as_deref(), Some("max"));
+        assert_eq!(read(&[said("Set model to opus")]).effort(), None);
     }
 }

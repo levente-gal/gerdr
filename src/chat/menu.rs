@@ -20,6 +20,9 @@ pub struct Menu {
     pub arrows: bool,
     /// Left and Right change something of it: Antigravity's effort.
     pub sideways: bool,
+    /// Its arrow moves with Left and Right, not Up and Down: a slider
+    /// (Antigravity's effort).
+    pub across: bool,
     /// Letters typed search it: an agent's model menu with a search box.
     pub search: bool,
 }

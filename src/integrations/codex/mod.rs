@@ -127,6 +127,18 @@ impl Integration for Codex {
         screen::codex_now(rows)
     }
 
+    fn effort_switch(&self) -> ModelSwitch {
+        ModelSwitch::OwnMenu
+    }
+
+    fn effort_line(&self) -> Option<(&'static str, bool)> {
+        Some(("/model", true))
+    }
+
+    fn effort_on_screen<'a>(&self, rows: &[&'a str]) -> Option<&'a str> {
+        screen::codex_effort(rows)
+    }
+
     fn plan_menu(&self) -> Option<(&'static str, &'static str, &'static str)> {
         Some(screen::PLAN_MENU)
     }

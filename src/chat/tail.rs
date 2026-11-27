@@ -666,7 +666,11 @@ impl Chat {
         if self.sent.as_deref().map(Vec::as_slice) != Some(now) {
             let items = Arc::new(now.to_vec());
             self.sent = Some(items.clone());
-            let model = crate::integrations::of(self.source.agent).model_in_chat(&self.reader);
+            let agent = crate::integrations::of(self.source.agent);
+            let (model, effort) = (
+                agent.model_in_chat(&self.reader),
+                agent.effort_in_chat(&self.reader),
+            );
             let context = crate::ai_work::context::read(self.source.agent, &self.source.path);
             out.push(Event::Items {
                 pane_id: pane_id.to_owned(),
@@ -674,6 +678,7 @@ impl Chat {
                 items,
                 earlier: self.from > 0,
                 model,
+                effort,
                 context,
             });
         }

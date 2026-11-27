@@ -103,6 +103,10 @@ pub struct ChatView {
     /// agent whose model gerdr can switch (`chat::model`): the model it is
     /// on, else "Model".
     pub model: Option<String>,
+    /// The label of its effort's button, right of the model's, for an
+    /// agent whose effort gerdr can switch: the effort it is on, else
+    /// "Effort".
+    pub effort: Option<String>,
     /// How full its agent's context is, in words ("context 84k / 1M"),
     /// where its chat says: in the head, before the status word.
     pub context: Option<String>,
@@ -179,6 +183,7 @@ impl PartialEq for ChatView {
             && self.modes == other.modes
             && self.mode == other.mode
             && self.model == other.model
+            && self.effort == other.effort
             && self.context == other.context
             && self.card == other.card
             && self.picker == other.picker
@@ -253,8 +258,9 @@ pub enum ChatHit {
     /// `ChatView::modes`: switches the agent to it.
     Mode(usize),
     /// The model's button under the reply box: opens the picker of the
-    /// agent's model.
+    /// agent's model; the effort's, of its effort.
     Model,
+    Effort,
     /// A part of the card of the ask's questions.
     Card(CardHit),
     /// "Copy" on code block `.1` of item `.0` (its place among the item's
@@ -313,6 +319,9 @@ impl ChatLayout {
         }
         if parts.model.is_some_and(on) {
             return Some(ChatHit::Model);
+        }
+        if parts.effort.is_some_and(on) {
+            return Some(ChatHit::Effort);
         }
         if let Some((key, _)) = parts.keys.iter().find(|(_, rect)| on(*rect)) {
             return Some(ChatHit::Key(*key));
@@ -790,8 +799,10 @@ struct Parts {
     /// that fits, by its place in `ChatView::modes`.
     mode_track: Option<Rect>,
     modes: Vec<(usize, Rect)>,
-    /// The model's button, at the right end of the modes' row.
+    /// The model's button, at the right end of the modes' row but for the
+    /// effort's, right of it.
     model: Option<Rect>,
+    effort: Option<Rect>,
 }
 
 /// What ends a file's chip: a press on it takes the file off the reply.
@@ -838,12 +849,18 @@ fn parts(view: &ChatView) -> Parts {
     // left of the model's button.
     let (mut mode_track, mut modes, mut modes_h) = (None, Vec::new(), 0);
     let y = hints.loc.y - PART_GAP / 2 - row_button();
+    // The effort's button at the right end, the model's left of it.
+    let effort = (view.effort.as_ref()).map(|label| {
+        let ew = key_width(label).min(w / 4);
+        rect(x + w - ew, y, ew, row_button())
+    });
+    let right = effort.map_or(x + w, |e| e.loc.x - FIELD_GAP);
     let model = (view.model.as_ref()).map(|label| {
         // A long name is cut short: the modes keep their room.
         let mw = key_width(label).min(w / 2);
-        rect(x + w - mw, y, mw, row_button())
+        rect(right - mw, y, mw, row_button())
     });
-    let end = model.map_or(x + w, |m| m.loc.x - FIELD_GAP);
+    let end = model.or(effort).map_or(x + w, |m| m.loc.x - FIELD_GAP);
     if !view.modes.is_empty() {
         let mut sx = x + MODE_INSET;
         for (i, mode) in view.modes.iter().enumerate() {
@@ -857,7 +874,7 @@ fn parts(view: &ChatView) -> Parts {
         }
         mode_track = Some(rect(x, y, sx + MODE_INSET - x, row_button()));
     }
-    if !view.modes.is_empty() || model.is_some() {
+    if !view.modes.is_empty() || model.is_some() || effort.is_some() {
         modes_h = row_button() + PART_GAP / 2;
     }
     let composer = Rectangle::new(
@@ -1018,6 +1035,7 @@ fn parts(view: &ChatView) -> Parts {
         mode_track,
         modes,
         model,
+        effort,
     }
 }
 
@@ -1773,6 +1791,13 @@ pub fn chat_mode_at(view: &ChatView, pos: Point<f64, Logical>) -> Option<(usize,
 /// The model's button, if `pos` is on it.
 pub fn chat_model_at(view: &ChatView, pos: Point<f64, Logical>) -> Option<Rect> {
     parts(view).model.filter(|rect| rect.to_f64().contains(pos))
+}
+
+/// The effort's button, if `pos` is on it.
+pub fn chat_effort_at(view: &ChatView, pos: Point<f64, Logical>) -> Option<Rect> {
+    parts(view)
+        .effort
+        .filter(|rect| rect.to_f64().contains(pos))
 }
 
 /// The list's scrollbar in the room right of its items, while they don't
@@ -2840,17 +2865,16 @@ impl Painter {
             };
             self.segmented(&mut c, here(track), &segments, on, hover, scale, p);
         }
-        if let (Some(rect), Some(label)) = (parts.model, view.model.as_deref()) {
-            let lit = view.hover == Some(ChatHit::Model);
-            self.button(
-                &mut c,
-                label,
-                here(rect),
-                (lit, false),
-                ButtonStyle::Plain,
-                scale,
-                p,
-            );
+        let buttons = [
+            (parts.model, view.model.as_deref(), ChatHit::Model),
+            (parts.effort, view.effort.as_deref(), ChatHit::Effort),
+        ];
+        for (rect, label, hit) in buttons {
+            if let (Some(rect), Some(label)) = (rect, label) {
+                let lit = view.hover == Some(hit);
+                let style = ButtonStyle::Plain;
+                self.button(&mut c, label, here(rect), (lit, false), style, scale, p);
+            }
         }
 
         if let Some(slash) = &view.slash {
@@ -3184,6 +3208,7 @@ pub(super) mod tests {
             modes: Vec::new(),
             mode: None,
             model: None,
+            effort: None,
             context: None,
             card: None,
             picker: None,

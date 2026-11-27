@@ -1,0 +1,45 @@
+[2m    [38;5;2m✓[39m auto (user) ~/.agents/skills/ponytail-gain/SKILL.md[0m
+[2m    [38;5;3m✗[39m ~/.pi/agent/git/github.com/DietrichGebert/ponytail/skills/ponytail-gain/SKILL.md (skipped)[0m
+[38;5;3m  "ponytail-help" collision:[39m
+[2m    [38;5;2m✓[39m auto (user) ~/.agents/skills/ponytail-help/SKILL.md[0m
+[2m    [38;5;3m✗[39m ~/.pi/agent/git/github.com/DietrichGebert/ponytail/skills/ponytail-help/SKILL.md (skipped)[0m
+[38;5;3m  "ponytail-review" collision:[39m
+[2m    [38;5;2m✓[39m auto (user) ~/.agents/skills/ponytail-review/SKILL.md[0m
+[2m    [38;5;3m✗[39m ~/.pi/agent/git/github.com/DietrichGebert/ponytail/skills/ponytail-review/SKILL.md (skipped)[0m
+[38;5;3m  "ponytail" collision:[39m
+[2m    [38;5;2m✓[39m auto (user) ~/.agents/skills/ponytail/SKILL.md[0m
+[2m    [38;5;3m✗[39m ~/.pi/agent/git/github.com/DietrichGebert/ponytail/skills/ponytail/SKILL.md (skipped)[0m
+
+
+ [2mPonytail loaded: full[0m
+
+ [38;5;3mWarning: Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage
+[39m [38;5;3mextra usage at https://claude.ai/settings/usage. Disable this warning in /settings.[39m
+
+ [38;5;3mWarning: tmux extended-keys is off. Modified Enter keys may not work. Add `set -g extended-keys on` to ~/.tmux.conf and restart tmux.[39m
+
+[38;5;3m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;5;3mUpdate Available[0m
+ [2mNew version 1.6.1 is available. Run [0m[38;5;5mpi update[39m
+ [2mChangelog: [0m[38;5;5mhttps://pi.dev/changelog[39m
+[38;5;3m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+[38;5;4m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+[39mThinking Level
+
+Shift+Tab cycles thinking levels in-session
+
+> [7m [0m
+
+    low[2m       Light reasoning (~2k tokens)[0m
+[38;5;5m→ ✓ medium    Moderate reasoning (~8k tokens) · default[39m
+    high[2m      Deep reasoning (~16k tokens)[0m
+    xhigh[2m     Extra-high reasoning (~32k tokens)[0m
+    max[2m       Maximum reasoning[0m
+
+[2m  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel[0m
+[38;5;4m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[2m[39m~/work[0m
+[2m$0.000 (sub) 0.0%/1.0M (auto)                                                                                               (anthropic) claude-opus-5-5 • medium
+○[0m 🐴 [2mponytail: [0m⚡ FULL
