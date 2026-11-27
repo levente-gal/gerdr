@@ -93,13 +93,58 @@ fn png_size(path: &Path) -> Option<(u32, u32)> {
     Some((word(16), word(20)))
 }
 
-// shortcut: resvg is built without its text feature, so an SVG's text isn't
-// drawn; turn it on (a second font stack beside cosmic-text's) if docs'
-// diagrams need labels.
 fn svg(path: &Path) -> Option<usvg::Tree> {
     let data = std::fs::read(path).ok()?;
-    usvg::Tree::from_data(&data, &usvg::Options::default()).ok()
+    let mut options = usvg::Options::default();
+    // Only an SVG with text waits for the system's fonts to be read.
+    if data.windows(5).any(|w| w == b"<text") {
+        options.fontdb = SVG_FONTS.clone();
+    }
+    usvg::Tree::from_data(&data, &options).ok()
 }
+
+/// The system's fonts for an SVG's text, read once. resvg keeps its own
+/// font list beside cosmic-text's, the two crates being on other fontdb
+/// versions.
+// shortcut: read on the paint thread the first time an SVG with text shows,
+// some 100 ms; move to a worker if pages stutter.
+static SVG_FONTS: LazyLock<std::sync::Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
+    use usvg::fontdb::Database;
+    let mut fonts = Database::new();
+    fonts.load_system_fonts();
+    // fontdb's own names for serif, sans-serif… (Times New Roman, Arial…)
+    // may not be installed; fontconfig says what stands for them here.
+    let generics = [
+        (
+            "serif",
+            Database::set_serif_family as fn(&mut Database, String),
+        ),
+        ("sans-serif", Database::set_sans_serif_family),
+        ("monospace", Database::set_monospace_family),
+        ("cursive", Database::set_cursive_family),
+        ("fantasy", Database::set_fantasy_family),
+    ];
+    for (generic, set) in generics {
+        let out = std::process::Command::new("fc-match")
+            .args(["-f", "%{family[0]}", generic])
+            .output();
+        match out {
+            Err(e) => {
+                tracing::warn!("can't run fc-match for SVG fonts: {e}");
+                break;
+            }
+            Ok(out) => {
+                if let Ok(name) = String::from_utf8(out.stdout)
+                    && out.status.success()
+                    && !name.is_empty()
+                {
+                    set(&mut fonts, name);
+                }
+            }
+        }
+    }
+    std::sync::Arc::new(fonts)
+});
 
 /// The raster picture at `path` whole, its pixels premultiplied.
 // shortcut: a JPEG's EXIF rotation isn't applied, so a phone photo may lie
@@ -277,6 +322,15 @@ mod tests {
             "{:?}",
             &rgba[..4]
         );
+        // An SVG's text is drawn, in the system's sans-serif when the named font is missing.
+        let text = dir.join("text.svg");
+        std::fs::write(
+            &text,
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><text x="2" y="16" font-size="16" font-family="No Such Font, sans-serif">Hi</text></svg>"#,
+        )
+        .unwrap();
+        let (_, _, rgba) = picture(&text, 40).unwrap().scaled(40);
+        assert!(rgba.as_chunks::<4>().0.iter().any(|p| p[3] > 0));
         let other = dir.join("a.bmp");
         std::fs::write(&other, b"BM").unwrap();
         assert_eq!(size(&other), None);
