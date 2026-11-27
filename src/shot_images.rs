@@ -155,9 +155,16 @@ fn has_char(fonts: &usvg::fontdb::Database, id: usvg::fontdb::ID, c: char) -> bo
         .is_some()
 }
 
-/// The system's fonts for an SVG's text, read once.
-// shortcut: read on the paint thread the first time an SVG with text shows,
-// some 100 ms; move to a worker if pages stutter.
+/// Read the fonts for an SVG's text on a thread of its own, some 100 ms (most
+/// of it fc-match), so the first page with one doesn't stall a frame.
+pub fn warm() {
+    let warm = std::thread::Builder::new().name("svg fonts".into());
+    if let Err(err) = warm.spawn(|| LazyLock::force(&SVG_FONTS)) {
+        tracing::warn!("reading SVG fonts ahead: {err}");
+    }
+}
+
+/// The system's fonts for an SVG's text, read once (`warm`).
 static SVG_FONTS: LazyLock<std::sync::Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
     use usvg::fontdb::Database;
     let mut fonts = Database::new();

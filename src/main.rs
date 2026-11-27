@@ -7346,6 +7346,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut state, saved_machines, settings_problems) =
         new_gerdr(&event_loop, dh, backend, wayland, settings, &store, &args);
     state.rescale();
+    shot_images::warm();
     register_sources(&event_loop, socket, display, winit_loop, output)?;
     start(
         &mut state,
