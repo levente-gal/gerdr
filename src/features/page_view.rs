@@ -197,6 +197,7 @@ pub(super) fn stage_page(
                 sections.extend(setup_sections(feature, state, actions));
             }
             Stage::CodeReview => {
+                sections.extend(danger_section(feature));
                 // The switcher above says it, where there is one.
                 if mark == StageMark::Current && !crate::feature_diff::review_views(feature) {
                     let text = (state.code_review.clone())
@@ -280,6 +281,7 @@ pub(super) fn stage_page(
             }
             Stage::Ship => {
                 sections.extend(card());
+                sections.extend(danger_section(feature));
                 sections.extend(resolving_card(feature, state, actions, now));
                 let check = check_lines(feature, state.probe, state.shipping, now);
                 if !check.is_empty() {
@@ -1430,5 +1432,45 @@ pub(super) fn tab_bounds(layout: &chrome::FeatureTabLayout, col: TabColumn) -> B
         next: 1.0,
         prev: 1.0,
         view: f64::from(view),
+    }
+}
+
+/// What AI review says merging `feature` risks, where it says it: in the
+/// warning colour when it is a one-way door or its blast radius is large.
+fn danger_section(feature: &Feature) -> Option<PageSection> {
+    let danger = feature.review.as_ref()?.danger.as_ref()?;
+    let tone = match danger.grave() {
+        true => CheckTone::Blocker,
+        false => CheckTone::Note,
+    };
+    Some(lines("Merge danger", vec![line(danger.said(), tone)]))
+}
+
+#[cfg(test)]
+mod danger_tests {
+    use super::*;
+    use crate::feature::review_import::{AiReview, Blast, Danger};
+
+    #[test]
+    fn a_grave_merge_danger_shows_in_the_warning_colour() {
+        let mut feature = Feature::default();
+        assert!(danger_section(&feature).is_none());
+        let danger = Danger {
+            one_way: true,
+            blast: Blast::Small,
+            why: "drops a column".into(),
+        };
+        feature.review = Some(AiReview {
+            danger: Some(danger),
+            ..AiReview::default()
+        });
+        let want = lines(
+            "Merge danger",
+            vec![line(
+                "one-way door, small blast radius: drops a column",
+                CheckTone::Blocker,
+            )],
+        );
+        assert_eq!(danger_section(&feature), Some(want));
     }
 }
