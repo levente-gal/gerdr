@@ -343,6 +343,10 @@ pub struct OwnRun {
     pub pane: Option<String>,
     /// Unix seconds.
     pub started: u64,
+    /// The built-in prompt it was started on for a task ("retro"); None:
+    /// the user's to direct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
 }
 
 /// A question Discover's agent asked to have researched (`research.md`),

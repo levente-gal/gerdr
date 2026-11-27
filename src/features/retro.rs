@@ -255,17 +255,60 @@ impl Gerdr {
     }
 
     /// Send feature `slug`'s retro back with `comments` (Markdown), kept
-    /// beside it: a new retro agent writes it again with them.
+    /// beside it: pasted into its retro agent while that still runs, as a
+    /// stage's file goes back, else a new retro agent writes it again.
     pub(crate) fn send_back_retro(&mut self, project: &str, slug: &str, comments: String) {
-        if (self.feature(project, slug)).is_some_and(|f| f.retro_into.is_some()) {
+        let Some(feature) = self.feature(project, slug).cloned() else {
+            return self.show_warning("That feature is gone".into());
+        };
+        if feature.retro_into.is_some() {
             return self.show_warning(MADE.into());
         }
-        let sent = store::dir(None, project, slug).join(SENT);
+        let data = store::dir(None, project, slug);
+        let sent = data.join(SENT);
         if let Err(err) = crate::projects::write_atomic(&sent, comments.as_bytes()) {
             tracing::warn!("writing {}: {err}", sent.display());
             return self.show_error(format!("Couldn't keep the comments: {err}"));
         }
         self.doc_done(project, slug, DocFile::Retro);
-        self.start_retro(project, slug, Some(sent));
+        let last = (feature.own_agents.iter().rev())
+            .find(|a| a.task.as_deref() == Some("retro"))
+            .and_then(|a| Some((a.n, a.agent.clone(), a.pane.clone()?)));
+        let told = last.and_then(|(n, agent, pane)| {
+            let values = [
+                ("artifact.path", data.join(FILE).display().to_string()),
+                ("comments.path", sent.display().to_string()),
+            ];
+            let values = values.into_iter().map(|(k, v)| (k.to_owned(), v)).collect();
+            let line = crate::prompts::render_builtin("send-back", &values).ok()?;
+            self.tell_own_agent(&pane, line.trim()).ok()?;
+            Some((n, agent))
+        });
+        let Some((n, agent)) = told else {
+            return self.start_retro(project, slug, Some(sent));
+        };
+        if let Some(f) = self.feature_mut(project, slug) {
+            f.log(
+                feature::now(),
+                format!("Retro sent back: {agent} (agent {n})"),
+            );
+            self.save_feature(project, slug);
+        }
+        self.show_success(format!("Sent the retro back to {agent}"));
+    }
+
+    /// Type `line` into own agent pane `pane` while an agent still runs
+    /// there: one back at its shell's prompt would run it as a command.
+    fn tell_own_agent(&mut self, pane: &str, line: &str) -> Result<(), String> {
+        if !self.pane_there(pane) || crate::machine_work::split_pane(pane).is_some() {
+            return Err(crate::feature_build::TAB_GONE.into());
+        }
+        let Some(herdr) = self.session.herdr.as_mut() else {
+            return Err("herdr isn't connected".into());
+        };
+        if crate::prepare::step(&herdr.process_info(pane)) != crate::prepare::Step::Busy {
+            return Err(crate::feature_build::AGENT_QUIT.into());
+        }
+        herdr.send_agent_line(pane, line)
     }
 }

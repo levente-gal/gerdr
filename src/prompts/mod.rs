@@ -37,7 +37,7 @@ pub fn builtin(name: &str) -> Option<(&'static str, u32)> {
         "conflicts-plan" => (include_str!("../../assets/prompts/conflicts-plan.md"), 1),
         "sandbox-fix" => (include_str!("../../assets/prompts/sandbox-fix.md"), 1),
         "ship-fix" => (include_str!("../../assets/prompts/ship-fix.md"), 1),
-        "retro" => (include_str!("../../assets/prompts/retro.md"), 1),
+        "retro" => (include_str!("../../assets/prompts/retro.md"), 2),
         _ => return None,
     })
 }

@@ -232,8 +232,9 @@ and Ctrl+C or `y` copies what it says.
   the evidence, `Blocked:` notes) and writes `retro.md`, shaped as a brief:
   each proposal in scope, with its acceptance criteria and the evidence
   behind it, a check before a line of guidance. Review retro opens it as a
-  stage's file is reviewed: Send back has a new retro agent write it again
-  with the comments; Approve makes it a new feature, "Retro: <title>", of
+  stage's file is reviewed: Send back pastes the comments into its retro
+  agent while that still runs, else a new retro agent writes it again with
+  them; Approve makes it a new feature, "Retro: <title>", of
   the repositories the feature touched, in its project and the projects it
   links, its brief the retro and Discover approved (ADR 0001). Retro again writes it afresh. A retro made into a
   feature only reads. The project's `retro` is `offer` by default; `auto`

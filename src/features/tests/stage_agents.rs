@@ -1155,6 +1155,7 @@ fn own_agents_with_a_tab_show_on_the_page_of_the_stage_it_is_at() {
         agent: "Claude Code".into(),
         pane: pane.map(str::to_owned),
         started: 1_000,
+        task: None,
     };
     // The second's tab is closed: nothing to show.
     f.own_agents = vec![own(1, Some("p1")), own(2, None), own(3, Some("p3"))];
