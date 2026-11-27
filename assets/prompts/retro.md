@@ -23,7 +23,8 @@ there:
   round's `trail.context`, the same for the agent that made its fixes.
 
 {{> repos}}
-The feature's code is merged: read it in the repositories' main checkouts.
+The repository folders above hold the feature's code as it shipped. It is
+merged, so the main checkouts have it too, with what came after it.
 
 {{#if retro.comments}}
 The user sent your last retro back. Read their comments in

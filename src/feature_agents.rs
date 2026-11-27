@@ -1841,6 +1841,7 @@ impl Gerdr {
             return true;
         }
         let called = task.as_ref().map_or("Own agent", |t| t.called);
+        let template = task.as_ref().map(|t| t.template.to_owned());
         let line = match told {
             true => match self.own_agent_prompt(&feature, project, slug, n, task) {
                 Ok(start) => with_prompt(&line, &start),
@@ -1869,6 +1870,7 @@ impl Gerdr {
             agent: agent.clone(),
             pane: Some(pane),
             started: now,
+            task: template,
         });
         f.log(now, format!("{called} started: {agent} (agent {n})"));
         self.save_feature(project, slug);
