@@ -29,6 +29,9 @@ pub(super) enum Face {
     Mono,
     /// Terminal text drawn bold.
     MonoBold,
+    /// The UI font slanted, for a file's emphasis: its italic face, or
+    /// its upright one sheared where it has none.
+    Italic,
 }
 
 /// The weight bold text is drawn at, from a font with a weight axis.
@@ -39,7 +42,7 @@ const MONO_BOLD_WEIGHT: u16 = 700;
 impl Face {
     fn weight(self) -> Weight {
         match self {
-            Face::Ui | Face::Mono => Weight::NORMAL,
+            Face::Ui | Face::Mono | Face::Italic => Weight::NORMAL,
             Face::Bold => Weight(BOLD_WEIGHT),
             Face::MonoBold => Weight(MONO_BOLD_WEIGHT),
         }
@@ -47,6 +50,13 @@ impl Face {
 
     fn mono(self) -> bool {
         matches!(self, Face::Mono | Face::MonoBold)
+    }
+
+    fn style(self) -> fontdb::Style {
+        match self {
+            Face::Italic => fontdb::Style::Italic,
+            _ => fontdb::Style::Normal,
+        }
     }
 }
 
@@ -227,6 +237,7 @@ fn face_id(face: Face) -> Option<fontdb::ID> {
     fonts.db.query(&fontdb::Query {
         families: &[fontdb::Family::Name(family)],
         weight: face.weight(),
+        style: face.style(),
         ..fontdb::Query::default()
     })
 }
@@ -263,6 +274,7 @@ fn attrs(face: Face) -> Attrs<'static> {
     Attrs::new()
         .family(family.map_or(Family::SansSerif, Family::Name))
         .weight(face.weight())
+        .style(face.style())
         // As gerdr drew text before: unhinted, at the pen's fraction.
         .cache_key_flags(CacheKeyFlags::DISABLE_HINTING)
 }

@@ -37,7 +37,7 @@ pub fn size(path: &Path) -> Option<(u32, u32)> {
     }
     let size = read_size(path);
     if size.is_none() {
-        tracing::warn!("can't read the screenshot {}", path.display());
+        tracing::warn!("can't read the picture {}", path.display());
     }
     SIZES.lock().ok()?.insert(path.to_owned(), size);
     size

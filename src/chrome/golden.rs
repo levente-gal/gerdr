@@ -3502,7 +3502,7 @@ fn feature_tab_plan_ready() -> super::FeatureTabView {
 
 /// A brief as a file's page shows it, every kind of block in it.
 fn doc_blocks() -> Vec<crate::md_blocks::DocBlock> {
-    use crate::md_blocks::{DocBlock, ItemMark, Styled, blocks};
+    use crate::md_blocks::{Align, DocBlock, ItemMark, Styled, blocks};
     // Markdown's words with their runs: bold, code and links.
     let styled = |md: &str| match blocks(md).remove(0) {
         DocBlock::Para(text) => text,
@@ -3548,7 +3548,20 @@ fn doc_blocks() -> Vec<crate::md_blocks::DocBlock> {
             ItemMark::Task(false),
             "See https://example.com/a-link-too-long-to-fit-on-any-line-of-this-column-so-it-breaks-where-it-must-to-keep-all-of-it",
         ),
-        DocBlock::Quote("Nobody asked for a second factor yet, and this doesn't add one.".into()),
+        DocBlock::Quote {
+            alert: None,
+            blocks: vec![DocBlock::Para(
+                "Nobody asked for a second factor yet, and this doesn't add one.".into(),
+            )],
+        },
+    ]
+    .into_iter()
+    .chain(blocks(
+        "### Not now\n\nA *remember me* box ~~for each device~~ waits for a brief of its own.\n\n\
+         > [!WARNING]\n> Tries count **per account**: one guessing at many accounts isn't slowed.\n\n\
+         1. Reset the tries:\n\n   ```sh\n   gerdr-auth reset a@b.c\n   ```\n",
+    ))
+    .chain([
         crate::md_blocks::code_block(
             Some("rust"),
             vec![
@@ -3559,17 +3572,21 @@ fn doc_blocks() -> Vec<crate::md_blocks::DocBlock> {
                 "}".into(),
             ],
         ),
-        DocBlock::Table(vec![
+        DocBlock::Table {
+            align: vec![Align::Left, Align::Right],
+            rows: vec![
             vec!["Case".into(), "Reply".into()],
             vec!["Wrong password".into(), "401".into()],
             vec![
                 "Too many tries, a while after the last one".into(),
                 "429".into(),
             ],
-        ]),
+        ],
+        },
         DocBlock::Rule,
         DocBlock::Note("Too big to show here: use Review".into()),
-    ]
+    ])
+    .collect()
 }
 
 /// Discover's brief ready: the page reads it, a button reviews it.
@@ -6844,12 +6861,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xfe631416ff8a726a, // tab_fixing_1180
         0x4557b19df663481c, // tab_fixed_code_1180
         0x75d914171e4d41b1, // tab_fixed_code_860
-        0xcbe2f40d9b759f81, // tab_approved_1180
-        0x3c58e9980fe4be25, // tab_locked_1180
-        0x7cf84d81c6be958a, // tab_start_over_1180
-        0x2bb8500d58438a36, // tab_discover_brief_1180
-        0xbb2e82b3b2d15fbd, // tab_discover_brief_860
-        0x733bf35270616490, // tab_plan_long_1180
+        0x1df34311352b2ea4, // tab_approved_1180
+        0xae34eff8e7e674e4, // tab_locked_1180
+        0x0075052f347feadb, // tab_start_over_1180
+        0x2ab22ca214e4f057, // tab_discover_brief_1180
+        0x7f8fc5d0720d4441, // tab_discover_brief_860
+        0x9c0891da7d84e0a4, // tab_plan_long_1180
         0x0b214bda6b3e0445, // tab_manual_test_1180
         0xfeffbb22941e4803, // tab_manual_note_860
         0x845eeaaddaa14ba2, // tab_review_rounds_1180
@@ -6882,9 +6899,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0x0d29fb85dd2ec61f, // tab_ship_checking_1180
         0xd79f2ae07b504dcb, // tab_verify_regressed_1180
         0x4b2e2423c7e42e6c, // tab_verify_machine_860
-        0xe7e7ea2279405790, // tab_discover_decisions_860
-        0xa1f4c188b9ced4cf, // tab_discover_research_1180
-        0x649d0e00118eb3e6, // tab_discover_research_860
+        0xc3868ce0d6243c20, // tab_discover_decisions_860
+        0x5a2d9ac0f1b74707, // tab_discover_research_1180
+        0x0ae0337e7259e196, // tab_discover_research_860
     ],
     // Dark at 2
     [
@@ -6924,12 +6941,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xc5af43845efbbd0a, // tab_fixing_1180
         0x11c447d3ca9faf40, // tab_fixed_code_1180
         0xcbf66f0aa859084e, // tab_fixed_code_860
-        0x09b9afd99c3d60fb, // tab_approved_1180
-        0x12087316135c07ef, // tab_locked_1180
-        0xfa7cc41e4c0de95c, // tab_start_over_1180
-        0x1aa01120561a3f55, // tab_discover_brief_1180
-        0x7a95f5b498b9e7f0, // tab_discover_brief_860
-        0xcd1834cd7a044c1a, // tab_plan_long_1180
+        0x83656450917cc668, // tab_approved_1180
+        0x15d8503806d3b154, // tab_locked_1180
+        0xf7ace1692eb30fd3, // tab_start_over_1180
+        0xd607ef6c8c62344e, // tab_discover_brief_1180
+        0x8734d42aef5541af, // tab_discover_brief_860
+        0x61d8517fd1ab1711, // tab_plan_long_1180
         0x0e23b2d60cac83bb, // tab_manual_test_1180
         0x84f84a785822fb5f, // tab_manual_note_860
         0xe95dc57e85689675, // tab_review_rounds_1180
@@ -6962,9 +6979,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0x7bf7bd484bd1418c, // tab_ship_checking_1180
         0xb57df7a155554e8c, // tab_verify_regressed_1180
         0x6be6e8dccf97d26e, // tab_verify_machine_860
-        0x0faa678360971772, // tab_discover_decisions_860
-        0x370ab417928e4ab7, // tab_discover_research_1180
-        0x0085e3e5184b8e4c, // tab_discover_research_860
+        0x9f4670a527e0ba62, // tab_discover_decisions_860
+        0x920957666f5e581f, // tab_discover_research_1180
+        0x0c04535be02ce43c, // tab_discover_research_860
     ],
     // Light at 1
     [
@@ -7004,12 +7021,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xabe0576b6b74ca5d, // tab_fixing_1180
         0x1e5cfaad2f0deae0, // tab_fixed_code_1180
         0x815a0155066889a5, // tab_fixed_code_860
-        0x0f2e35c64904cff6, // tab_approved_1180
-        0x726f62e574291cf3, // tab_locked_1180
-        0x23be97429d11df7b, // tab_start_over_1180
-        0xdd0ae56b078b1cc6, // tab_discover_brief_1180
-        0xd7c7d3fe6d6400b2, // tab_discover_brief_860
-        0x3b6b8e21d146d52c, // tab_plan_long_1180
+        0x6b2fee3a0eb957a3, // tab_approved_1180
+        0x7bc5951f29a33726, // tab_locked_1180
+        0x4241a094603d640f, // tab_start_over_1180
+        0x8ea8b6f2f02d31a6, // tab_discover_brief_1180
+        0x7fc02400e01437c8, // tab_discover_brief_860
+        0x9b0762bab13f5446, // tab_plan_long_1180
         0x1b64f6d06930bdb7, // tab_manual_test_1180
         0xd9031b2f93e41891, // tab_manual_note_860
         0xb9053095cee7e231, // tab_review_rounds_1180
@@ -7042,9 +7059,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xb095820b01c1f30f, // tab_ship_checking_1180
         0xfcff387c15772795, // tab_verify_regressed_1180
         0x5d49ce354f5d4282, // tab_verify_machine_860
-        0x8f805118e668e316, // tab_discover_decisions_860
-        0x548229d2797ef7cf, // tab_discover_research_1180
-        0x76d0f0f177115169, // tab_discover_research_860
+        0x0b32b6f132cdf366, // tab_discover_decisions_860
+        0xaab217e59c9c5d67, // tab_discover_research_1180
+        0x920bfd77e5ad8079, // tab_discover_research_860
     ],
     // Light at 2
     [
@@ -7084,12 +7101,12 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xe3d9cba5348d3167, // tab_fixing_1180
         0x477e5a5bec46210a, // tab_fixed_code_1180
         0xdf43b26432f54d2d, // tab_fixed_code_860
-        0xc4c6ba35db24c927, // tab_approved_1180
-        0xd45f0ecb66deab22, // tab_locked_1180
-        0x1a0e0c5f7c8136be, // tab_start_over_1180
-        0xc4aa1b96df817b43, // tab_discover_brief_1180
-        0x329d10dbf311306b, // tab_discover_brief_860
-        0x2c77fbd91932ee3c, // tab_plan_long_1180
+        0x7db3e24375ebc529, // tab_approved_1180
+        0xce0d768c69b84b4c, // tab_locked_1180
+        0x48cd808f80d85173, // tab_start_over_1180
+        0x4cc8b8ef1eb10e7e, // tab_discover_brief_1180
+        0x162cebd9860c8825, // tab_discover_brief_860
+        0xb9d4ebc8fff801cc, // tab_plan_long_1180
         0x8394e4a5692e0044, // tab_manual_test_1180
         0x5778ee0ab01e5928, // tab_manual_note_860
         0xe6c794c1d80467ba, // tab_review_rounds_1180
@@ -7122,9 +7139,9 @@ const GOLDEN_FEATURE_TAB: [[u64; 77]; 4] = [
         0xfb149b0388901b80, // tab_ship_checking_1180
         0x3ffeb089fc4e2b3e, // tab_verify_regressed_1180
         0x42271a11cd38aa76, // tab_verify_machine_860
-        0xaed5345ca6197474, // tab_discover_decisions_860
-        0x230a8161a0a057cb, // tab_discover_research_1180
-        0xba74a1c96c9863ad, // tab_discover_research_860
+        0xf1f2494afdc1ec8c, // tab_discover_decisions_860
+        0x22e124ca6e06deeb, // tab_discover_research_1180
+        0x4561857028d4d6bd, // tab_discover_research_860
     ],
 ];
 
@@ -8231,7 +8248,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
         0xf2ed7f905e36a836, // doc_suggestions_1180
         0xa2d01c7198efce5a, // doc_suggestions_850
         0xef29518e2dc79076, // finding_dialog_reject
-        0x4ec131380a047f3a, // tab_plan_review_final_1180
+        0x9fc7376886be3df9, // tab_plan_review_final_1180
         0x24898c7773397449, // doc_chat_plan_1180
     ],
     // Dark at 2
@@ -8242,7 +8259,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
         0x4a3da7479ece1f73, // doc_suggestions_1180
         0xd0ff3ff64d0737ab, // doc_suggestions_850
         0xb606ef86798ca204, // finding_dialog_reject
-        0xae12d085dfbc332d, // tab_plan_review_final_1180
+        0x027036ce84f72c2b, // tab_plan_review_final_1180
         0xe91a16683836648b, // doc_chat_plan_1180
     ],
     // Light at 1
@@ -8253,7 +8270,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
         0x5fb392f855584e45, // doc_suggestions_1180
         0x2d929b2a87c88b65, // doc_suggestions_850
         0x6b76f1508ea97daa, // finding_dialog_reject
-        0xda67a5b9f0a35948, // tab_plan_review_final_1180
+        0x0a732aca0df03278, // tab_plan_review_final_1180
         0xdc713deadf09a62a, // doc_chat_plan_1180
     ],
     // Light at 2
@@ -8264,7 +8281,7 @@ const GOLDEN_PLAN_REVIEW: [[u64; 8]; 4] = [
         0x2d7a66fa40ec984f, // doc_suggestions_1180
         0x99b85378c2ada16f, // doc_suggestions_850
         0x31b7feb26a182cfc, // finding_dialog_reject
-        0x208181d0e4c95926, // tab_plan_review_final_1180
+        0x79d32ae44f9ffb86, // tab_plan_review_final_1180
         0x90f049b49dd93e07, // doc_chat_plan_1180
     ],
 ];
@@ -9044,8 +9061,8 @@ const GOLDEN_REVIEW_VIEWS: [[u64; 6]; 4] = [
     // Dark at 1
     [
         0x62f6f85f3a60b617, // tab_review_code_1180
-        0x85bc729394e8f1ce, // tab_review_fixes_1180
-        0xcd92bd515ca8867a, // tab_review_fixes_860
+        0x43ece3db4a5e5a76, // tab_review_fixes_1180
+        0x1de4c8717d7bf44a, // tab_review_fixes_860
         0xe05245efbb5b11e7, // tab_review_ready_1180
         0xc94990ce159c02a0, // tab_review_code_860
         0x3668bc5f50af56a4, // tab_review_done_1180
@@ -9053,8 +9070,8 @@ const GOLDEN_REVIEW_VIEWS: [[u64; 6]; 4] = [
     // Dark at 2
     [
         0xf7f60c588b7eb13f, // tab_review_code_1180
-        0xdd849879fb6d4d08, // tab_review_fixes_1180
-        0x8627240adb1eada6, // tab_review_fixes_860
+        0x60270529af32bbf0, // tab_review_fixes_1180
+        0xd19d9ceab66b641e, // tab_review_fixes_860
         0xf894411f017c2d28, // tab_review_ready_1180
         0xa73fb1716ae29198, // tab_review_code_860
         0x59df8f706350c267, // tab_review_done_1180
@@ -9062,8 +9079,8 @@ const GOLDEN_REVIEW_VIEWS: [[u64; 6]; 4] = [
     // Light at 1
     [
         0xb08db80788540323, // tab_review_code_1180
-        0xdf7f19326facf602, // tab_review_fixes_1180
-        0xb0af4749c60070e4, // tab_review_fixes_860
+        0xaba1aeb92693095a, // tab_review_fixes_1180
+        0x56978570cebfe9b4, // tab_review_fixes_860
         0xcccc4a32c90995f6, // tab_review_ready_1180
         0x9c31cafd6be51f40, // tab_review_code_860
         0x0713518e4a40ffd4, // tab_review_done_1180
@@ -9071,8 +9088,8 @@ const GOLDEN_REVIEW_VIEWS: [[u64; 6]; 4] = [
     // Light at 2
     [
         0xec449ce8d5e4036d, // tab_review_code_1180
-        0x5e151559414544ee, // tab_review_fixes_1180
-        0x29f3ff7ca98c3c6d, // tab_review_fixes_860
+        0xd4d97d47c88792de, // tab_review_fixes_1180
+        0xbd4fbab3f663a705, // tab_review_fixes_860
         0x8b101ecc2f108a00, // tab_review_ready_1180
         0xb458c47bada68cff, // tab_review_code_860
         0xb60e1fe2694fb7ff, // tab_review_done_1180
@@ -10120,27 +10137,33 @@ fn chat_view(i: usize) -> super::ChatView {
             use crate::chat::Item;
             use crate::md_blocks::DocBlock;
             let row = |cells: &[&str]| cells.iter().map(|c| (*c).into()).collect();
-            let small = DocBlock::Table(vec![
-                row(&["Case", "Reply"]),
-                row(&["Wrong password", "401"]),
-                row(&["Too many tries", "429"]),
-            ]);
-            let wide = DocBlock::Table(vec![
-                row(&["Stage", "What it does", "Who", "When it is done"]),
-                row(&[
-                    "Discover",
-                    "Talks it through with you and writes the brief, with what is in and out",
-                    "agent",
-                    "you approve brief.md",
-                ]),
-                row(&[
-                    "Build",
-                    "Makes the plan's milestones one by one, commits each, and stops after \
+            let small = DocBlock::Table {
+                align: Vec::new(),
+                rows: vec![
+                    row(&["Case", "Reply"]),
+                    row(&["Wrong password", "401"]),
+                    row(&["Too many tries", "429"]),
+                ],
+            };
+            let wide = DocBlock::Table {
+                align: Vec::new(),
+                rows: vec![
+                    row(&["Stage", "What it does", "Who", "When it is done"]),
+                    row(&[
+                        "Discover",
+                        "Talks it through with you and writes the brief, with what is in and out",
+                        "agent",
+                        "you approve brief.md",
+                    ]),
+                    row(&[
+                        "Build",
+                        "Makes the plan's milestones one by one, commits each, and stops after \
                      each for you to look before it goes on to the next one",
-                    "agent",
-                    "every milestone is ticked and the code is committed",
-                ]),
-            ]);
+                        "agent",
+                        "every milestone is ticked and the code is committed",
+                    ]),
+                ],
+            };
             let said = Item::Assistant {
                 id: "tables".into(),
                 at: None,
@@ -10192,8 +10215,8 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
         0x7f88523887899fe1, // chat_suggested
         0xa7603553713e7c66, // chat_modes
         0x8009f466f4efb1bc, // chat_side
-        0x19f8b04189b9ba2c, // chat_plan
-        0x2768ef97f057a16f, // chat_plan_open
+        0xcde924c2132da03e, // chat_plan
+        0x0b8d97c724b6bd94, // chat_plan_open
         0x3ae26f49a32456a9, // chat_plan_ask
         0x59029832d62dd7fd, // chat_model
         0x0d9d640a038fcfed, // chat_pinned
@@ -10219,8 +10242,8 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
         0x4d25b58bf6add3bc, // chat_suggested
         0x5f78544330c66ed9, // chat_modes
         0x0ca5a15678b84e87, // chat_side
-        0x92cbff3387e8820d, // chat_plan
-        0x67f417b6bca59eb4, // chat_plan_open
+        0x78126f08fa2c2395, // chat_plan
+        0xba6db4db60dbf660, // chat_plan_open
         0x687bcf5f00a1e5b4, // chat_plan_ask
         0x540eb1c26667c705, // chat_model
         0x81a83e3228349375, // chat_pinned
@@ -10246,8 +10269,8 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
         0xd04a5402c3f08ca6, // chat_suggested
         0xabf29f5ba37b6fe7, // chat_modes
         0xe7deedef9f56f42f, // chat_side
-        0x79a167e8e4833c43, // chat_plan
-        0x982a8b1b63b85ff4, // chat_plan_open
+        0x934995c2a5cc17a1, // chat_plan
+        0x3219c82513aa557d, // chat_plan_open
         0x24ade1aaa9d5d729, // chat_plan_ask
         0xbf0516a4fc5d07c6, // chat_model
         0xbc341c99b133556d, // chat_pinned
@@ -10273,8 +10296,8 @@ const GOLDEN_CHATS: [[u64; 24]; 4] = [
         0x5876be43da1ae84d, // chat_suggested
         0xc95d98ad3777feaa, // chat_modes
         0x72a8fc9a637a56e0, // chat_side
-        0x7da69b79d0c09162, // chat_plan
-        0x7ad1c62ece940522, // chat_plan_open
+        0x88314bbfc424fe70, // chat_plan
+        0xedbf8ec17c1292fb, // chat_plan_open
         0xc997e09d481140d0, // chat_plan_ask
         0x11ddf9e2d02a7f24, // chat_model
         0x86ff847aaa2d3229, // chat_pinned

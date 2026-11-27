@@ -260,6 +260,10 @@ pub enum ChatHit {
     /// "Copy" on code block `.1` of item `.0` (its place among the item's
     /// blocks with a head), or of the ask's card's plan with no item.
     CopyCode(Option<usize>, usize),
+    /// Link `.1` in the words of item `.0` (its place among the item's
+    /// links), or of the ask's card's plan with no item: opens its page or
+    /// its file.
+    Link(Option<usize>, usize),
 }
 
 /// What is under the pointer on the card of an ask's questions.
@@ -329,6 +333,7 @@ impl ChatLayout {
                 Spot::Plan => ChatHit::AskPlan,
                 Spot::Review => ChatHit::AskReview,
                 Spot::Copy(k) => ChatHit::CopyCode(None, *k),
+                Spot::Link(k) => ChatHit::Link(None, *k),
                 _ => ChatHit::AskFold,
             });
         }
@@ -385,6 +390,7 @@ impl ChatLayout {
             Some(Spot::Plan) => ChatHit::AskPlan,
             Some(Spot::Review) => ChatHit::ReviewPlan(i),
             Some(Spot::Copy(k)) => ChatHit::CopyCode(Some(i), k),
+            Some(Spot::Link(k)) => ChatHit::Link(Some(i), k),
             None => ChatHit::Item(i),
         })
     }
@@ -393,15 +399,25 @@ impl ChatLayout {
 /// What "Copy" on code block `k` copies (`ChatHit::CopyCode`): of item
 /// `item`, or of the ask's card with none.
 pub fn chat_code(view: &ChatView, item: Option<usize>, k: usize) -> Option<String> {
+    laid_of(view, item, |laid| laid.codes.get(k).cloned())
+}
+
+/// Where link `k` of item `item` goes (`ChatHit::Link`), or of the ask's
+/// card's with none: as the words have it, a path maybe relative.
+pub fn chat_link(view: &ChatView, item: Option<usize>, k: usize) -> Option<String> {
+    laid_of(view, item, |laid| laid.links.get(k).cloned())
+}
+
+/// `of` item `item` laid out, or the ask's card with none.
+fn laid_of<T>(view: &ChatView, item: Option<usize>, of: impl Fn(&Laid) -> Option<T>) -> Option<T> {
     let parts = parts(view);
-    let codes = match item {
-        None => parts.card?.1.codes,
+    match item {
+        None => of(&parts.card?.1),
         Some(i) => {
             let (items, _) = stacked(view, parts.column.1);
-            items.get(i)?.1.codes.clone()
+            of(&items.get(i)?.1)
         }
-    };
-    codes.into_iter().nth(k)
+    }
 }
 
 /// Where `view`'s parts go.
@@ -1099,7 +1115,7 @@ fn lay_menu(m: &Menu, w: i32, more: bool) -> Laid {
     for (text, bold) in &m.ask {
         let block = match bold {
             true => DocBlock::Heading {
-                level: 2,
+                level: 3,
                 text: text.as_str().into(),
             },
             false => DocBlock::Para(text.as_str().into()),
@@ -1256,7 +1272,7 @@ fn lay_question(view: &ChatView, qs: &[Question], card: &CardView, w: i32, more:
         y = l.h + PART_GAP;
     }
     let block = DocBlock::Heading {
-        level: 2,
+        level: 3,
         text: q.question.as_str().into(),
     };
     let (pieces, h) = doc_layout::stack_of(&[block], w);
@@ -1800,6 +1816,8 @@ enum Spot {
     Review,
     /// A code block's "Copy": copies `Laid::codes`' that one.
     Copy(usize),
+    /// A link in the words: opens `Laid::links`' that one.
+    Link(usize),
 }
 
 /// A colour of a card's words.
@@ -1892,6 +1910,8 @@ struct Laid {
     spots: Vec<(Rect, Spot)>,
     /// Its code blocks' lines, as their "Copy" copies them (`Spot::Copy`).
     codes: Vec<String>,
+    /// Where its words' links go (`Spot::Link`).
+    links: Vec<String>,
     h: i32,
 }
 
@@ -2001,10 +2021,29 @@ impl Laid {
     fn doc(&mut self, pieces: Vec<(Rect, DocPiece)>, at: (i32, i32)) {
         for (rect, piece) in pieces {
             let rect = Rectangle::new(rect.loc + Point::from(at), rect.size);
-            if let DocPiece::CodeHead { text, .. } = &piece {
-                let spot = doc_layout::copy_spot(rect);
-                self.spots.push((spot, Spot::Copy(self.codes.len())));
-                self.codes.push(text.clone());
+            match &piece {
+                DocPiece::CodeHead { text, .. } => {
+                    let spot = doc_layout::copy_spot(rect);
+                    self.spots.push((spot, Spot::Copy(self.codes.len())));
+                    self.codes.push(text.clone());
+                }
+                DocPiece::Text {
+                    text,
+                    runs,
+                    font,
+                    bold,
+                    ..
+                } => {
+                    for (span, url) in doc_layout::link_spans(text, runs, *font, *bold) {
+                        let x = rect.loc.x + span.start.floor() as i32;
+                        let w =
+                            (rect.loc.x + span.end.ceil() as i32).min(rect.loc.x + rect.size.w) - x;
+                        let spot = Rectangle::new((x, rect.loc.y).into(), (w, rect.size.h).into());
+                        self.spots.push((spot, Spot::Link(self.links.len())));
+                        self.links.push(url.to_owned());
+                    }
+                }
+                _ => {}
             }
             self.put(rect, Bit::Doc(piece));
         }
@@ -3026,8 +3065,8 @@ impl Painter {
                     (Face::Mono | Face::MonoBold, _) => {
                         self.mono_text(c, text, *size, x, end, b, scale, color);
                     }
-                    (Face::Ui, _) => {
-                        self.text(c, text, *size, x, end, b, scale, color);
+                    (face @ (Face::Ui | Face::Italic), _) => {
+                        self.face_text(*face, c, text, *size, x, end, b, scale, color);
                     }
                 }
             }
@@ -3782,6 +3821,40 @@ pub(super) mod tests {
         let ran = laid(&tool, (500, 0), 0, &open, None);
         assert!(ran.codes.is_empty());
         assert!(!ran.spots.iter().any(|(_, s)| matches!(s, Spot::Copy(_))));
+    }
+
+    /// A link in the agent's words is pressed where it is drawn: its
+    /// page's or its file's.
+    #[test]
+    fn a_link_in_the_words_is_pressed_where_it_is() {
+        let mut v = view();
+        let md = "See [the client](src/upload.rs#L12) and <https://x.y>.";
+        v.items = Arc::new(vec![Item::Assistant {
+            id: "said".into(),
+            at: None,
+            blocks: Arc::new(crate::md_blocks::blocks(md)),
+        }]);
+        v.top = f64::MAX;
+        v.status = AgentStatus::Idle;
+        let layout = chat_layout(&v);
+        let p = parts(&v);
+        let (shown, content) = stacked(&v, p.column.1);
+        let (top, said) = &shown[0];
+        assert_eq!(said.links, ["src/upload.rs#L12", "https://x.y"]);
+        let scrolled = top_of(&v, content, layout.list.size.h);
+        let at = |spot: &Rect, dx: i32| {
+            Point::from((
+                (p.column.0 + spot.loc.x + dx) as f64,
+                (layout.list.loc.y + top + spot.loc.y + spot.size.h / 2 - scrolled) as f64,
+            ))
+        };
+        let (spot, _) = (said.spots.iter())
+            .find(|(_, s)| *s == Spot::Link(0))
+            .expect("the first link");
+        assert_eq!(layout.hit(&v, at(spot, 2)), Some(ChatHit::Link(Some(0), 0)));
+        // Off it, the words pick their item.
+        assert_eq!(layout.hit(&v, at(spot, -4)), Some(ChatHit::Item(0)));
+        assert_eq!(chat_link(&v, Some(0), 1).as_deref(), Some("https://x.y"));
     }
 
     #[test]
@@ -4671,10 +4744,13 @@ pub(super) mod tests {
         let item = Item::Assistant {
             id: "t".into(),
             at: None,
-            blocks: Arc::new(vec![DocBlock::Table(vec![
-                vec!["Case".into(), "Reply".into()],
-                vec![wide.into(), wide.into()],
-            ])]),
+            blocks: Arc::new(vec![DocBlock::Table {
+                align: Vec::new(),
+                rows: vec![
+                    vec!["Case".into(), "Reply".into()],
+                    vec![wide.into(), wide.into()],
+                ],
+            }]),
         };
         let none = HashSet::new();
         let span = |l: &Laid| {

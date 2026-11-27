@@ -315,9 +315,9 @@ impl Gerdr {
         edge != 0.0
     }
 
-    /// See `Features::release_page_text`. A click on a web link in a file
-    /// on the page, not a drag from it, opens its page in the feature's
-    /// workspace.
+    /// See `Features::release_page_text`. A click on a link in a file on
+    /// the page, not a drag from it, opens its web page in the feature's
+    /// workspace, or its file in Zed (`open_linked_file`).
     pub(crate) fn release_page_text(&mut self) {
         let click = (self.features.panel.as_ref())
             .filter(|p| p.picking && p.pick.as_ref().is_none_or(|k| k.anchor == k.cursor))
@@ -329,8 +329,14 @@ impl Gerdr {
         let pos = self.pointer().current_location().to_i32_round();
         let url = (self.feature_tab_parts())
             .and_then(|(view, layout)| layout.link_at(&view, pos).map(str::to_owned));
-        if let Some(url) = url {
-            self.open_feature_page(&project, &slug, url);
+        match url {
+            Some(url) if crate::is_web_link(&url) => self.open_feature_page(&project, &slug, url),
+            Some(url) => {
+                if let Some(file) = crate::md_blocks::file_target(&url, None) {
+                    self.open_linked_file(file);
+                }
+            }
+            None => {}
         }
     }
 

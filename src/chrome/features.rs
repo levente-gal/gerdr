@@ -2405,6 +2405,8 @@ const MAX_WRAP: usize = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Font {
     Heading,
+    /// A file's second level heading: between `Heading` and `Body`.
+    Subheading,
     Body,
     Small,
     Detail,
@@ -2417,6 +2419,7 @@ impl Font {
     pub(super) fn size(self) -> f32 {
         match self {
             Self::Heading => title_font_size(),
+            Self::Subheading => (title_font_size() + label_font_size()) / 2.0,
             Self::Body => label_font_size(),
             Self::Small => font_size(),
             Self::Detail => detail_font_size(),

@@ -1219,6 +1219,23 @@ impl Painter {
         text_in(Face::Bold, c, text, size, x, max_x, band, scale, color)
     }
 
+    /// Draw `text` in `face` as `text` does. Returns where it ends.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn face_text(
+        &self,
+        face: Face,
+        c: &mut Canvas,
+        text: &str,
+        size: f32,
+        x: f32,
+        max_x: f32,
+        band: (i32, i32),
+        scale: f64,
+        color: Rgb,
+    ) -> f32 {
+        text_in(face, c, text, size, x, max_x, band, scale, color)
+    }
+
     /// The byte `line`'s view starts at in a field `room` physical pixels
     /// wide: where it started (`Line::scroll`), moved only as far as the
     /// caret needs to be in view, and back for the text's end to fill the
