@@ -1436,8 +1436,11 @@ impl Feature {
         let mut save = false;
         for (stage, (n, context)) in contexts {
             if let Some(run) = self.runs.get_mut(stage).filter(|r| r.n == *n) {
-                save |= moved(run.context, *context);
+                // Its agent gone, this reading is its last: kept at once.
+                let last = !run.live() && !run.context_last;
+                save |= last || moved(run.context, *context);
                 run.context = Some(*context);
+                run.context_last |= last;
             }
         }
         let Some(&(n, context)) = contexts.get(&Stage::Build) else {
@@ -2009,10 +2012,20 @@ pub(crate) mod tests {
         let mut f = feature("x", 0);
         let run = |n| agents::StageRun {
             n,
+            pane: Some("p".into()),
             ..Default::default()
         };
         f.runs.insert(Stage::Build, run(1));
         let read = |n, used| BTreeMap::from([(Stage::Build, (n, ctx(used)))]);
+        // Once its agent is gone, one more read is its last: kept however small.
+        let mut h = feature("z", 0);
+        h.runs.insert(Stage::Build, run(1));
+        assert!(h.contexts_read(&read(1, 20_000), &[]));
+        h.runs.get_mut(&Stage::Build).unwrap().pane = None;
+        assert!(h.contexts_read(&read(1, 21_000), &[]));
+        let last = &h.runs[&Stage::Build];
+        assert_eq!((last.context, last.context_last), (Some(ctx(21_000)), true));
+        assert!(!h.contexts_read(&read(1, 22_000), &[]));
         let ms = |ticked: usize| -> Vec<(bool, String)> {
             ["API", "UI", "Docs"]
                 .iter()

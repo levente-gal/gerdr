@@ -71,14 +71,21 @@ pub(crate) fn tail_of(path: &Path) -> Option<Vec<u8>> {
 
 /// How full the context of each of `feature`'s open agents is, by stage,
 /// with the run each read was of; `dir` is its data dir, which keeps the
-/// chat ids AI work found. Reads files, so not on the UI thread. Runs on
-/// another machine and chats that can't be read say nothing.
+/// chat ids AI work found. A run whose agent is gone is read once more
+/// (`StageRun::context_last`), for its last turn. Reads files, so not on
+/// the UI thread. Runs on another machine and chats that can't be read say
+/// nothing.
 pub fn read_contexts(feature: &Feature, dir: &Path) -> BTreeMap<Stage, (u32, Context)> {
     let Some(homes) = locate::Homes::here() else {
         return BTreeMap::new();
     };
     (feature.runs.iter())
-        .filter(|(_, run)| run.live() && run.machine.is_none())
+        // shortcut: a gone agent's chat that can't be read is tried again each
+        // probe, until its run is replaced; mark it read if that shows up.
+        .filter(|(_, run)| {
+            let last = run.context.is_some() && !run.context_last;
+            (run.live() || last) && run.machine.is_none()
+        })
         .filter_map(|(stage, run)| {
             let chat = observe::chat(feature, *stage, run, run.session());
             if !crate::integrations::of(chat.agent).caps().context {

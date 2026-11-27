@@ -459,6 +459,10 @@ pub struct StageRun {
     /// how full it ended.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<crate::ai_work::context::Context>,
+    /// Whether `context` was read again once its agent was gone: then it
+    /// holds the agent's last turn too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub context_last: bool,
 }
 
 impl StageRun {
