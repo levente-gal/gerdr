@@ -211,34 +211,39 @@ impl Gerdr {
         }
         let data = store::dir(None, project, slug);
         // The first page tells the skills missing, while it is the stage at.
-        let skill_asks = match feature.current() == Some(Stage::Discover) {
-            true => self.skill_asks(&feature),
-            false => Vec::new(),
-        };
+        let skill_asks =
+            match feature.current() == Some(Stage::Discover) && feature.writer.is_none() {
+                true => self.skill_asks(&feature),
+                false => Vec::new(),
+            };
         let (project, slug) = (project.to_owned(), slug.to_owned());
-        self.feature_work(None, move |_| Done::Probed {
-            probe: Box::new(match feature.writer {
-                Some(_) => Probe {
-                    docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
-                    ..ship::probe_seen(&feature)
-                },
-                None => Probe {
-                    docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
-                    models: feature::agents::read_models(&feature),
-                    contexts: crate::ai_work::context::read_contexts(&feature, &data),
-                    prs: read_prs.then(|| ship::read_prs(&feature, "gh")),
-                    base_ci: read_base_ci.then(|| ship::read_base_ci(&feature, secs)),
-                    bases: match feature.ships() || fetch {
-                        true => ship::read_bases(&feature, fetch),
-                        false => BTreeMap::new(),
+        self.feature_work(None, move |_| {
+            let skills = feature::skills::check(&feature.dir, &skill_asks);
+            Done::Probed {
+                probe: Box::new(match feature.writer {
+                    Some(_) => Probe {
+                        docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
+                        ..ship::probe_seen(&feature)
                     },
-                    resolution: ship::read_resolution(&feature, &data),
-                    skills: feature::skills::missing(&feature.dir, &skill_asks),
-                    ..ship::probe(&feature, &modes)
-                },
-            }),
-            project,
-            slug,
+                    None => Probe {
+                        docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
+                        models: feature::agents::read_models(&feature),
+                        contexts: crate::ai_work::context::read_contexts(&feature, &data),
+                        prs: read_prs.then(|| ship::read_prs(&feature, "gh")),
+                        base_ci: read_base_ci.then(|| ship::read_base_ci(&feature, secs)),
+                        bases: match feature.ships() || fetch {
+                            true => ship::read_bases(&feature, fetch),
+                            false => BTreeMap::new(),
+                        },
+                        resolution: ship::read_resolution(&feature, &data),
+                        skills: skills.missing,
+                        skills_there: skills.there,
+                        ..ship::probe(&feature, &modes)
+                    },
+                }),
+                project,
+                slug,
+            }
         });
     }
 
@@ -253,15 +258,17 @@ impl Gerdr {
         if missing.is_empty() {
             return self.show_notice("Its stages' skills are installed".to_owned());
         }
-        let line = feature::skills::install_line(&self.settings.skills.source, &missing);
+        let lines = feature::skills::install_lines(&self.settings.skills.source, &missing);
         if self.workspace().is_none() {
-            self.copy_text(line);
-            let text = "No workspace to install the skills in: its command is on the clipboard";
+            self.copy_text(lines.join("\n"));
+            let text = "No workspace to install the skills in: its commands are on the clipboard";
             return self.show_warning(text.to_owned());
         }
         let w = self.active_workspace;
         let dir = self.workspaces[w].dir.clone();
-        self.new_tab_running(w, &dir, line);
+        for line in lines {
+            self.new_tab_running(w, &dir, line);
+        }
     }
 
     /// Read feature `slug`'s pull requests on GitHub again now, with the
@@ -324,6 +331,7 @@ impl Gerdr {
     /// sends it back, its squash merged makes it done.
     pub(super) fn feature_probed(&mut self, project: &str, slug: &str, mut probe: Probe) {
         self.feature_models_are(project, slug, std::mem::take(&mut probe.models));
+        (self.features.skills_there).append(&mut probe.skills_there);
         let key = (project.to_owned(), slug.to_owned());
         // The diff's comments may be others now: the keyboard stays on its card.
         let on_tab =

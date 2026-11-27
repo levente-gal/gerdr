@@ -868,17 +868,11 @@ fn picked_effort(feature: &Feature, stage: Stage, agent: &str, base: &str) -> Op
         // Picked back to the agent's own, over gerdr's default.
         Some(pick) => Some(pick).filter(|p| !p.is_empty()),
         None => (feature.effort_defaults && by_command(base).takes_effort())
-            .then(|| default_effort(feature, stage).to_owned()),
-    }
-}
-
-/// gerdr's effort for `stage` of `feature`: high for the reviews and for a
-/// fix round's Build, which must get right what went wrong, else medium.
-fn default_effort(feature: &Feature, stage: Stage) -> &'static str {
-    match stage {
-        Stage::PlanReview | Stage::AiReview => "high",
-        Stage::Build if feature.fix_round.is_some() => "high",
-        _ => "medium",
+            .then(|| {
+                let defaults = feature::agents::effort_defaults();
+                defaults.of(stage, feature.fix_round.is_some()).to_owned()
+            })
+            .filter(|effort| !effort.is_empty()),
     }
 }
 
@@ -903,23 +897,55 @@ impl Gerdr {
     /// Each stage of `feature` still to run with skills to name: its agent
     /// (picker name and command) and those skills, for `skills::missing`.
     /// An agent in an app is left out: its skills aren't read here.
-    pub(crate) fn skill_asks(&self, feature: &Feature) -> Vec<(String, String, Vec<String>)> {
+    pub(crate) fn skill_asks(&self, feature: &Feature) -> Vec<feature::skills::Ask> {
         let workflow = self.projects.project(&feature.project).map(|p| &p.workflow);
         let set = self.projects.workflows(feature, |w| w.skills.clone()).home;
         (Stage::ALL.into_iter())
             .filter(|stage| fires(feature, *stage))
             .filter_map(|stage| {
                 let names = feature::skills::wanted(&set, &self.settings.skills, stage);
-                match stage_pick(feature, stage, workflow, &self.launcher.cli_agents) {
-                    Pick::Agent(agent, base)
-                        if !names.is_empty() && !by_command(&base).in_app() =>
-                    {
-                        Some((agent, base, names))
-                    }
-                    _ => None,
+                let Pick::Agent(agent, base) =
+                    stage_pick(feature, stage, workflow, &self.launcher.cli_agents)
+                else {
+                    return None;
+                };
+                if names.is_empty() || by_command(&base).in_app() {
+                    return None;
                 }
+                // A machine not connected can't be asked.
+                let there = match self.placed(feature, stage) {
+                    Placed::Here => None,
+                    Placed::There(id) => Some(self.skills_folders(feature, &id)?),
+                    Placed::Away(_) => return None,
+                };
+                Some(feature::skills::Ask {
+                    agent,
+                    base,
+                    names,
+                    there,
+                })
             })
             .collect()
+    }
+
+    /// Machine `id`, which is up, as the skills check reaches it, with its
+    /// folders for `feature`.
+    fn skills_folders(
+        &self,
+        feature: &Feature,
+        id: &str,
+    ) -> Option<(feature::skills::Remote, feature::skills::Folders)> {
+        let work = self.machines.work_of(id)?;
+        let cwd = self.machine_paths(id, Some(feature))?.there(&feature.dir);
+        let remote = feature::skills::Remote {
+            id: id.to_owned(),
+            name: self.machines.machine_name(id),
+            target: work.target.clone(),
+            control: work.info.control.clone(),
+        };
+        let site = &work.info.site;
+        let (home, config) = (site.home.clone(), site.config.clone());
+        Some((remote, feature::skills::Folders { home, config, cwd }))
     }
 }
 
@@ -2601,15 +2627,21 @@ impl Gerdr {
             "checks".into(),
             checks_list(&verify::checks(&feature, &config)),
         );
-        // shortcut: an agent on another machine is told no skills, as what
-        // is installed there isn't known here.
-        let skills = match machine {
-            None => {
-                let set = self.projects.workflows(&feature, |w| w.skills.clone()).home;
-                let wanted = feature::skills::wanted(&set, &self.settings.skills, stage);
-                feature::skills::installed_for(by_command(&base), &feature.dir, &wanted)
+        let set = self.projects.workflows(&feature, |w| w.skills.clone()).home;
+        let wanted = feature::skills::wanted(&set, &self.settings.skills, stage);
+        let skills = match &machine {
+            None => feature::skills::installed_for(by_command(&base), &feature.dir, &wanted),
+            // shortcut: another machine's are as Discover's check last found
+            // them, none before one ran since gerdr started.
+            Some(id) => {
+                let cli = by_command(&base).skills_agent().unwrap_or_default();
+                let found = self
+                    .features
+                    .skills_there
+                    .get(&(id.clone(), cli.to_owned()));
+                let found = found.map_or(&[][..], Vec::as_slice);
+                wanted.into_iter().filter(|n| found.contains(n)).collect()
             }
-            Some(_) => Vec::new(),
         };
         values.insert("skills".into(), feature::skills::listed(&skills));
         for (key, value) in extra {

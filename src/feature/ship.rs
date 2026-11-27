@@ -389,6 +389,9 @@ pub struct Probe {
     /// While Discover is its current stage: the skills its stages name that
     /// aren't installed for their agents (`skills::missing`).
     pub skills: Vec<super::skills::Missing>,
+    /// The skills found installed on other machines then, by machine id and
+    /// agent (`skills::Checked::there`).
+    pub skills_there: BTreeMap<(String, String), Vec<String>>,
 }
 
 /// How long after shipping pushed a base its CI is read: by then it ran.
@@ -623,6 +626,7 @@ pub fn probe(feature: &Feature, modes: &Modes) -> Probe {
         resolution: None,
         base_ci: None,
         skills: Vec::new(),
+        skills_there: BTreeMap::new(),
     }
 }
 
@@ -645,6 +649,7 @@ pub fn probe_seen(feature: &Feature) -> Probe {
         resolution: None,
         base_ci: None,
         skills: Vec::new(),
+        skills_there: BTreeMap::new(),
     }
 }
 
@@ -670,6 +675,7 @@ pub fn probe_finished(feature: &Feature) -> Probe {
         resolution: None,
         base_ci: None,
         skills: Vec::new(),
+        skills_there: BTreeMap::new(),
     }
 }
 

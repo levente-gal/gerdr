@@ -3008,6 +3008,7 @@ fn discover_warns_of_missing_skills_with_a_button_to_install_them() {
         agent: "Claude Code".into(),
         id: "claude-code",
         names: vec!["grilling".into(), "tdd".into()],
+        there: None,
     }];
     let state = PanelState {
         probe: Some(&probe),

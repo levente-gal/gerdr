@@ -7585,9 +7585,11 @@ fn new_gerdr(
         notifications,
         sounds,
         skills,
+        effort,
         problems: settings_problems,
     } = settings;
     anim::set_motion(ui.motion);
+    feature::agents::set_effort_defaults(effort);
     chrome::set_text_size(f32::from(ui.text_size));
     let mut state = Gerdr {
         start_time: Instant::now(),

@@ -324,6 +324,7 @@ fn probe(ship: Option<ShipCheck>) -> Probe {
         resolution: None,
         base_ci: None,
         skills: Vec::new(),
+        skills_there: BTreeMap::new(),
         ship,
         merged: false,
         stats: BTreeMap::new(),

@@ -160,6 +160,57 @@ pub fn with_effort(line: &str, effort: Option<&str>) -> String {
     }
 }
 
+/// The config file's `[effort]`: the effort a stage starts on with none
+/// picked on its page, in a feature that takes gerdr's
+/// (`Feature::effort_defaults`). An empty one leaves it to the agent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffortDefaults {
+    /// Each stage's, where it has its own.
+    pub stages: BTreeMap<Stage, String>,
+    /// That of a stage without its own.
+    pub other: String,
+    /// Build's in a fix round, which must get right what went wrong.
+    pub fix: String,
+}
+
+impl Default for EffortDefaults {
+    fn default() -> Self {
+        Self {
+            stages: BTreeMap::from([
+                (Stage::PlanReview, "high".to_owned()),
+                (Stage::AiReview, "high".to_owned()),
+            ]),
+            other: "medium".to_owned(),
+            fix: "high".to_owned(),
+        }
+    }
+}
+
+impl EffortDefaults {
+    /// `stage`'s, Build's while `fixing` the fix round's.
+    pub fn of(&self, stage: Stage, fixing: bool) -> &str {
+        match stage {
+            Stage::Build if fixing => &self.fix,
+            _ => self.stages.get(&stage).unwrap_or(&self.other),
+        }
+    }
+}
+
+static EFFORT_DEFAULTS: std::sync::RwLock<Option<EffortDefaults>> = std::sync::RwLock::new(None);
+
+/// Use `defaults` for every `effort_defaults()` after, as the config file says.
+pub fn set_effort_defaults(defaults: EffortDefaults) {
+    if let Ok(mut set) = EFFORT_DEFAULTS.write() {
+        *set = Some(defaults);
+    }
+}
+
+/// The efforts stages start on with none picked, as the config file last said.
+pub fn effort_defaults() -> EffortDefaults {
+    let set = EFFORT_DEFAULTS.read().ok().and_then(|set| set.clone());
+    set.unwrap_or_default()
+}
+
 /// The command `line` told `text` as it starts: it is its first message, with
 /// no waiting for the CLI to be ready. A CLI gerdr knows gets `--` before it,
 /// so `--add-dir` can't take it for a folder; another gets it as its last

@@ -67,66 +67,209 @@ pub fn wanted(
         .unwrap_or_default()
 }
 
+/// Another machine a stage's agent runs on, as the skills check reaches
+/// it: its id and name, and its link's SSH target and master socket.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Remote {
+    pub id: String,
+    pub name: String,
+    pub target: String,
+    pub control: PathBuf,
+}
+
+/// A stage's agent, for the skills check: its picker name and command,
+/// the skills it names, and where it runs when that isn't here, with the
+/// home, config folder and feature folder it has there.
+#[derive(Clone, Debug)]
+pub struct Ask {
+    pub agent: String,
+    pub base: String,
+    pub names: Vec<String>,
+    pub there: Option<(Remote, Folders)>,
+}
+
+/// The folders of another machine its skills are read under.
+#[derive(Clone, Debug)]
+pub struct Folders {
+    pub home: String,
+    pub config: String,
+    pub cwd: String,
+}
+
 /// Skills a feature's stages name that aren't installed for the agent CLI
 /// running them: `agent` by its picker name, `id` the `skills` CLI's name
-/// for it.
+/// for it, and the machine it runs on when that isn't this one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Missing {
     pub agent: String,
     pub id: &'static str,
     pub names: Vec<String>,
+    pub there: Option<Remote>,
 }
 
-/// Of `asks`, each stage's agent (its picker name and command) with the
-/// skills it names, those not installed for it in folder `cwd`, by agent,
+/// What the skills check found: those `missing`, and, by machine id and
+/// the `skills` CLI's name for the agent, those installed on other
+/// machines (their stages' prompts name only those).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Checked {
+    pub missing: Vec<Missing>,
+    pub there: BTreeMap<(String, String), Vec<String>>,
+}
+
+/// Of `asks`, the skills not installed for each agent, in folder `cwd`
+/// here or its own folder on the machine it runs on, by agent and machine,
 /// in their order. An agent the `skills` CLI can't install for is left
-/// out, and so is a name that isn't a plain folder name.
-pub fn missing(cwd: &Path, asks: &[(String, String, Vec<String>)]) -> Vec<Missing> {
-    let Some(homes) = Homes::here() else {
-        return Vec::new();
-    };
-    let config = crate::chat::commands::config_dir();
-    let mut out: Vec<Missing> = Vec::new();
-    for (agent, base, names) in asks {
-        let cli = crate::integrations::by_command(base);
+/// out, and so is a name that isn't a plain folder name, and a machine
+/// that couldn't be asked (logged).
+pub fn check(cwd: &Path, asks: &[Ask]) -> Checked {
+    let mut out = Checked::default();
+    for ask in asks {
+        let cli = crate::integrations::by_command(&ask.base);
         let Some(id) = cli.skills_agent() else {
             continue;
         };
-        let found = installed(names, &cli.skill_dirs(cwd, &homes, &config));
-        let gone = (names.iter()).filter(|n| plain(n) && !found.contains(n));
-        let at = match out.iter().position(|m| m.agent == *agent) {
+        let found = match &ask.there {
+            None => {
+                let Some(homes) = Homes::here() else {
+                    continue;
+                };
+                let config = crate::chat::commands::config_dir();
+                installed(&ask.names, &cli.skill_dirs(cwd, &homes, &config))
+            }
+            Some((remote, folders)) => {
+                let homes = Homes::under(Path::new(&folders.home));
+                let dirs =
+                    cli.skill_dirs(Path::new(&folders.cwd), &homes, Path::new(&folders.config));
+                match installed_there(remote, &ask.names, &dirs) {
+                    Ok(found) => {
+                        let key = (remote.id.clone(), id.to_owned());
+                        out.there.insert(key, found.clone());
+                        found
+                    }
+                    Err(why) => {
+                        tracing::warn!("couldn't read the skills on {}: {why}", remote.name);
+                        continue;
+                    }
+                }
+            }
+        };
+        let gone = (ask.names.iter()).filter(|n| plain(n) && !found.contains(n));
+        let there = ask.there.as_ref().map(|(remote, _)| remote.clone());
+        let at = match (out.missing.iter()).position(|m| m.agent == ask.agent && m.there == there) {
             Some(at) => at,
             None => {
-                out.push(Missing {
-                    agent: agent.clone(),
+                let (agent, names) = (ask.agent.clone(), Vec::new());
+                out.missing.push(Missing {
+                    agent,
                     id,
-                    names: Vec::new(),
+                    names,
+                    there,
                 });
-                out.len() - 1
+                out.missing.len() - 1
             }
         };
         for name in gone {
-            if !out[at].names.contains(name) {
-                out[at].names.push(name.clone());
+            if !out.missing[at].names.contains(name) {
+                out.missing[at].names.push(name.clone());
             }
         }
     }
-    out.retain(|m| !m.names.is_empty());
+    out.missing.retain(|m| !m.names.is_empty());
     out
 }
 
+/// Those of `names` with a `<name>/SKILL.md` in one of `dirs` on `remote`,
+/// asked over its link's master.
+fn installed_there(
+    remote: &Remote,
+    names: &[String],
+    dirs: &[PathBuf],
+) -> Result<Vec<String>, String> {
+    let Some(script) = there_script(names, dirs) else {
+        return Ok(Vec::new());
+    };
+    let reach = super::remote::Reach {
+        target: remote.target.clone(),
+        control: remote.control.clone(),
+    };
+    let said = (reach.script(&script, &std::sync::atomic::AtomicBool::new(false)))
+        .map_err(|trouble| trouble.text().to_owned())?;
+    Ok(found_in(names, &said))
+}
+
+/// The `sh` script printing those of `names` with a `<name>/SKILL.md` in
+/// one of `dirs`, a line each; none with no plain name to look for.
+fn there_script(names: &[String], dirs: &[PathBuf]) -> Option<String> {
+    let names: Vec<&str> = (names.iter())
+        .filter(|n| plain(n))
+        .map(String::as_str)
+        .collect();
+    if names.is_empty() || dirs.is_empty() {
+        return None;
+    }
+    let dirs: Vec<String> = (dirs.iter())
+        .map(|d| crate::desktop::shell_quote(&d.to_string_lossy()))
+        .collect();
+    Some(format!(
+        "for d in {}; do for n in {}; do [ -f \"$d/$n/SKILL.md\" ] && echo \"$n\"; done; done; true\n",
+        dirs.join(" "),
+        names.join(" ")
+    ))
+}
+
+/// Those of `names` that `said` (`there_script`'s output) names, in their order.
+fn found_in(names: &[String], said: &str) -> Vec<String> {
+    let found: Vec<&str> = said.lines().map(str::trim).collect();
+    (names.iter())
+        .filter(|n| plain(n) && found.contains(&n.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// What the Discover page says of `missing`: "Not installed for Claude
-/// Code: grilling, tdd".
+/// Code: grilling, tdd · Codex on desk: tdd".
 pub fn missing_words(missing: &[Missing]) -> String {
     let each: Vec<String> = (missing.iter())
-        .map(|m| format!("{}: {}", m.agent, m.names.join(", ")))
+        .map(|m| match &m.there {
+            None => format!("{}: {}", m.agent, m.names.join(", ")),
+            Some(remote) => format!("{} on {}: {}", m.agent, remote.name, m.names.join(", ")),
+        })
         .collect();
     format!("Not installed for {}", each.join(" \u{b7} "))
 }
 
-/// The line that installs `missing` from `source` for every agent of it,
-/// for all projects (`-g`), with the `skills` CLI.
-pub fn install_line(source: &str, missing: &[Missing]) -> String {
+/// The lines that install `missing` from `source`, one per machine, this
+/// one first: for every agent of it there, for all projects (`-g`), with
+/// the `skills` CLI. Another machine's runs over SSH in a login shell
+/// there, which finds `npx` as its terminals do.
+pub fn install_lines(source: &str, missing: &[Missing]) -> Vec<String> {
+    let mut machines: Vec<Option<&Remote>> = Vec::new();
+    for m in missing {
+        if !machines.contains(&m.there.as_ref()) {
+            machines.push(m.there.as_ref());
+        }
+    }
+    machines.sort_by_key(Option::is_some);
+    (machines.into_iter())
+        .map(|on| {
+            let here: Vec<&Missing> = missing.iter().filter(|m| m.there.as_ref() == on).collect();
+            let line = install_line(source, &here);
+            let quote = crate::desktop::shell_quote;
+            match on {
+                None => line,
+                Some(remote) => format!(
+                    "ssh -t -S {} -o ControlMaster=no {} {}",
+                    quote(&remote.control.to_string_lossy()),
+                    quote(&remote.target),
+                    quote(&format!("exec \"$SHELL\" -ilc {}", quote(&line))),
+                ),
+            }
+        })
+        .collect()
+}
+
+/// The line installing `missing` from `source` for every agent of it.
+fn install_line(source: &str, missing: &[&Missing]) -> String {
     let mut names: Vec<&str> = Vec::new();
     let mut ids: Vec<&str> = Vec::new();
     for m in missing {
@@ -255,48 +398,79 @@ mod tests {
         std::fs::create_dir_all(&skill).unwrap();
         std::fs::write(skill.join("SKILL.md"), "---\nname: tdd\n---\n").unwrap();
         let gone = "gerdr-no-such-skill";
+        let ask = |agent: &str, base: &str, of: &[&str]| Ask {
+            agent: agent.into(),
+            base: base.into(),
+            names: names(of),
+            there: None,
+        };
         let asks = [
-            ("Claude Code".into(), "claude".into(), names(&["tdd", gone])),
-            (
-                "Claude Code".into(),
-                "claude".into(),
-                names(&[gone, "../x"]),
-            ),
+            ask("Claude Code", "claude", &["tdd", gone]),
+            ask("Claude Code", "claude", &[gone, "../x"]),
             // The skills CLI can't install for it: not told.
-            ("Mine".into(), "my-agent".into(), names(&[gone])),
+            ask("Mine", "my-agent", &[gone]),
         ];
+        let checked = check(&cwd, &asks);
         assert_eq!(
-            missing(&cwd, &asks),
+            checked.missing,
             [Missing {
                 agent: "Claude Code".into(),
                 id: "claude-code",
-                names: names(&[gone])
+                names: names(&[gone]),
+                there: None,
             }]
         );
+        assert!(checked.there.is_empty());
         std::fs::remove_dir_all(cwd).unwrap();
     }
 
     #[test]
-    fn missing_skills_install_in_one_line_for_every_agent_without_them() {
+    fn another_machines_skills_are_found_by_a_script_run_there() {
+        let root = std::env::temp_dir().join(format!("gerdr-there-{}", std::process::id()));
+        let skill = root.join("b/grilling");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "x").unwrap();
+        let dirs = [root.join("a dir"), root.join("b")];
+        let wanted = names(&["tdd", "grilling", "../b/grilling"]);
+        let script = there_script(&wanted, &dirs).expect("a script");
+        let out = (std::process::Command::new("sh").arg("-c").arg(&script))
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(found_in(&wanted, &said), names(&["grilling"]));
+        assert_eq!(there_script(&names(&["../x"]), &dirs), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_skills_install_in_one_line_per_machine_for_every_agent_without_them() {
+        let desk = Remote {
+            id: "m1".into(),
+            name: "desk".into(),
+            target: "ana@desk".into(),
+            control: PathBuf::from("/run/c/desk"),
+        };
+        let gone = |agent: &str, id, of: &[&str], there: Option<&Remote>| Missing {
+            agent: agent.into(),
+            id,
+            names: names(of),
+            there: there.cloned(),
+        };
         let missing = [
-            Missing {
-                agent: "Claude Code".into(),
-                id: "claude-code",
-                names: names(&["tdd", "grilling"]),
-            },
-            Missing {
-                agent: "Codex".into(),
-                id: "codex",
-                names: names(&["tdd"]),
-            },
+            gone("Pi", "pi", &["tdd"], Some(&desk)),
+            gone("Claude Code", "claude-code", &["tdd", "grilling"], None),
+            gone("Codex", "codex", &["tdd"], None),
         ];
         assert_eq!(
-            install_line("mattpocock/skills", &missing),
-            "npx -y skills@latest add mattpocock/skills -g -s tdd grilling -a claude-code codex -y"
+            install_lines("mattpocock/skills", &missing),
+            [
+                "npx -y skills@latest add mattpocock/skills -g -s tdd grilling -a claude-code codex -y",
+                r#"ssh -t -S /run/c/desk -o ControlMaster=no ana@desk 'exec "$SHELL" -ilc '\''npx -y skills@latest add mattpocock/skills -g -s tdd -a pi -y'\'''"#,
+            ]
         );
         assert_eq!(
             missing_words(&missing),
-            "Not installed for Claude Code: tdd, grilling \u{b7} Codex: tdd"
+            "Not installed for Pi on desk: tdd \u{b7} Claude Code: tdd, grilling \u{b7} Codex: tdd"
         );
     }
 
