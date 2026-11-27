@@ -2806,6 +2806,7 @@ impl Gerdr {
             sent_back: last.map_or(0, |r| r.sent_back),
             stop: None,
             context: None,
+            context_last: false,
             blocked: None,
             held: !in_t3 && !sent,
         };

@@ -330,6 +330,11 @@ impl Gerdr {
             probe: Box::new(Probe {
                 docs: feature::page::read_docs(&data).with_comment_fixes(&data, &feature),
                 models: feature::agents::read_models(&feature),
+                // Its last agents may have closed as it finished.
+                contexts: match feature.writer {
+                    Some(_) => BTreeMap::new(),
+                    None => crate::ai_work::context::read_contexts(&feature, &data),
+                },
                 ..ship::probe_finished(&feature)
             }),
             project,
