@@ -2431,18 +2431,12 @@ impl Gerdr {
     /// typed as a reply is. Refused while it works or waits on an answer:
     /// the line would join its turn or answer its menu.
     pub(crate) fn chat_compact(&mut self, pane_id: &str) {
-        let agent = self.chat_agent(pane_id);
-        let status = agent.map(|a| a.agent_status);
-        let Some(line) = (agent.and_then(super::source::kind)).and_then(commands::compact_line)
-        else {
+        let Some(now) = self.chat_agent(pane_id).map(commands::compact_now) else {
             return;
         };
-        let sent = match status {
-            Some(AgentStatus::Working) => {
-                Err("the agent is still working; compact once it is done".into())
-            }
-            Some(AgentStatus::Blocked) => Err("the agent waits on an answer first".into()),
-            _ => self.send_line(pane_id, &line),
+        let sent = match now {
+            Ok(line) => self.send_line(pane_id, &line),
+            Err(why) => Err(why.into()),
         };
         match sent {
             Ok(()) => {

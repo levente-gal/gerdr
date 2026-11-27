@@ -58,6 +58,20 @@ pub fn compact_line(kind: AgentKind) -> Option<String> {
         .map(|name| format!("/{name}"))
 }
 
+/// The line `agent` compacts its context with now, or why it can't: none
+/// while it works (the line would join its turn) or waits on an answer
+/// (it would answer its menu). The desktop chat's and the phone's Compact.
+pub fn compact_now(agent: &crate::herdr::AgentInfo) -> Result<String, &'static str> {
+    use crate::herdr::AgentStatus;
+    let line = (super::source::kind(agent).and_then(compact_line))
+        .ok_or("the agent has no command to compact with")?;
+    match agent.agent_status {
+        AgentStatus::Working => Err("the agent is still working; compact once it is done"),
+        AgentStatus::Blocked => Err("the agent waits on an answer first"),
+        _ => Ok(line),
+    }
+}
+
 /// This machine's config folder: `$XDG_CONFIG_HOME`, else `~/.config`.
 pub fn config_dir() -> PathBuf {
     (std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
@@ -341,6 +355,28 @@ pub(crate) mod tests {
             compact_line(AgentKind::Cursor).as_deref(),
             Some("/summarize")
         );
+    }
+
+    #[test]
+    fn compact_goes_only_while_the_agent_is_free() {
+        let agent = |name: &str, status: &str| -> crate::herdr::AgentInfo {
+            serde_json::from_value(serde_json::json!({
+                "pane_id": "p", "terminal_id": "t", "workspace_id": "w", "tab_id": "b",
+                "agent": name, "agent_status": status,
+            }))
+            .unwrap()
+        };
+        assert_eq!(
+            compact_now(&agent("cursor", "idle")).as_deref(),
+            Ok("/summarize")
+        );
+        assert_eq!(
+            compact_now(&agent("claude", "done")).as_deref(),
+            Ok("/compact")
+        );
+        assert!(compact_now(&agent("claude", "working")).is_err());
+        assert!(compact_now(&agent("codex", "blocked")).is_err());
+        assert!(compact_now(&agent("t3", "idle")).is_err());
     }
 
     #[test]
