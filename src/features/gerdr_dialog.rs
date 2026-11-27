@@ -543,6 +543,7 @@ impl Gerdr {
             // A fresh agent per milestone keeps each one's context small;
             // Ctrl+Shift+B on its page turns it off.
             fresh_milestones: true,
+            milestone_tokens: Vec::new(),
             fresh_fixes: false,
             setup: None,
             checks: Default::default(),

@@ -17,6 +17,10 @@ there:
 - `evidence.md`: what Verify's checks showed.
 - `feature.json` and `history.jsonl`: what happened when: fix rounds and
   what asked for them, Manual test results, stages sent back.
+- What the agents took, in `feature.json`: `milestone_tokens`, the
+  tokens each Build milestone took (`used`) and the context it was at;
+  each stage run's `context`, how full its agent's context ended; each fix
+  round's `trail.context`, the same for the agent that made its fixes.
 
 {{> repos}}
 The feature's code is merged: read it in the repositories' main checkouts.
@@ -29,7 +33,8 @@ The user sent your last retro back. Read their comments in
 Look for what repeats or what a check could have caught early: a finding
 of the same kind in more than one round, a review comment the guidance
 files already answer, a fix round the plan could have avoided, a check that
-failed late, a term used two ways. Leave out one-off slips with no lesson.
+failed late, a term used two ways, a milestone that took far more tokens
+than the others, an agent whose context came near full. Leave out one-off slips with no lesson.
 
 Prefer, in this order, a proposal that a machine enforces:
 

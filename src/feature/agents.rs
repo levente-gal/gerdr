@@ -451,6 +451,10 @@ pub struct StageRun {
     /// picked its model. Never for one in T3 Code: that one has its draft.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held: bool,
+    /// How full its context was when last read: once its agent is gone,
+    /// how full it ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::ai_work::context::Context>,
 }
 
 impl StageRun {
@@ -544,6 +548,23 @@ pub struct Stop {
     pub total: u32,
     /// Unix seconds.
     pub at: u64,
+}
+
+/// What one of Build's milestones took, read when the build log was first
+/// seen with it ticked.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MilestoneTokens {
+    /// The milestone, as the build log names it.
+    pub name: String,
+    /// The Build run that ticked it.
+    pub run: u32,
+    /// How full that agent's context was then.
+    pub context: crate::ai_work::context::Context,
+    /// How much its context grew for it: since the run's last milestone, or
+    /// since the run started. None when more than one was first seen ticked
+    /// at once, which can't be told apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used: Option<u64>,
 }
 
 #[cfg(test)]

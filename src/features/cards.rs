@@ -933,6 +933,21 @@ pub(super) fn items_running(
 }
 
 impl PageSection {
+    /// This group of Build's list with each ticked milestone saying the
+    /// tokens it took, as `feature` kept them: "API · 42k tokens".
+    pub(super) fn with_tokens(mut self, feature: &Feature) -> Self {
+        if let Self::Milestones { items, .. } = &mut self {
+            for (_, text) in items.iter_mut().filter(|(done, _)| *done) {
+                let kept = feature.milestone_tokens.iter().find(|m| &m.name == text);
+                if let Some(used) = kept.and_then(|m| m.used) {
+                    let short = crate::ai_work::context::short(used);
+                    text.push_str(&format!(" \u{b7} {short} tokens"));
+                }
+            }
+        }
+        self
+    }
+
     /// This group of Build's list with `items` in `running` blinking.
     fn running(mut self, items: Vec<usize>) -> Self {
         if let Self::Milestones { running, .. } = &mut self {
@@ -1371,6 +1386,7 @@ fn fix_card(
             meta.push(format!("took {}", took(went, over)));
         }
     }
+    meta.extend(round.trail.context.map(|c| c.said()));
     // Verify's next run says whether the fixes did it.
     if let Some((n, passed)) = verify.and_then(|fix| fix.next) {
         let how = if passed { "passed" } else { "failed" };
@@ -2191,11 +2207,17 @@ pub(super) fn doc_of(probe: Option<&Probe>, stage: Stage) -> Option<PageSection>
 
 /// Whether `stage`'s page of `feature` offers the choice of one agent or a
 /// fresh one per milestone: Build's, until it is done.
-/// `status` and how full the context of `stage`'s open agent is, as the
-/// last probe read it of that run: "context 84k / 1M", with "nearly full"
-/// from 80%. A run it wasn't read of, or can't be, says nothing more.
+/// `status` and how full the context of `stage`'s agent is, as the last
+/// probe read it of that run, or as it was kept once the agent is gone:
+/// "context 84k / 1M", with "nearly full" from 80%. A run it wasn't read
+/// of, or can't be, says nothing more.
 fn with_context(status: String, feature: &Feature, stage: Stage, state: &PanelState) -> String {
-    let Some(context) = state.probe.and_then(|p| p.context_of(feature, stage)) else {
+    // Its agent gone, the context it ended with.
+    let kept = || feature.runs.get(&stage).and_then(|r| r.context.as_ref());
+    let Some(context) = (state.probe)
+        .and_then(|p| p.context_of(feature, stage))
+        .or_else(kept)
+    else {
         return status;
     };
     let said = context.said();

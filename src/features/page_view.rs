@@ -191,7 +191,8 @@ pub(super) fn stage_page(
                 let started = feature.runs.contains_key(&stage);
                 sections.extend(
                     (milestones_of(state.probe, stage, building).or(counted))
-                        .or_else(|| planned_milestones(state.probe, started)),
+                        .or_else(|| planned_milestones(state.probe, started))
+                        .map(|m| m.with_tokens(feature)),
                 );
                 sections.extend(setup_sections(feature, state, actions));
             }
