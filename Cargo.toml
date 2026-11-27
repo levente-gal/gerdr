@@ -28,7 +28,9 @@ serde_norway = "0.9.42"
 p256 = { version = "0.13", features = ["ecdh", "ecdsa", "std"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
-cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "fontconfig"] }
+# shortcut: unreleased main, pinned, as 0.19 is on fontdb 0.23 and resvg 0.48 on
+# 0.24 (a second font stack); go back to crates.io at cosmic-text 0.20.
+cosmic-text = { git = "https://github.com/pop-os/cosmic-text", rev = "b07cb90a872cb9fec7fea1c72d734f81907fe3ad", default-features = false, features = ["std", "swash", "fontconfig"] }
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
 # Pictures in docs beside PNG: the decoders resvg itself uses for raster-images.
 zune-jpeg = "0.5.9"

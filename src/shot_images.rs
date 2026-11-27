@@ -103,9 +103,7 @@ fn svg(path: &Path) -> Option<usvg::Tree> {
     usvg::Tree::from_data(&data, &options).ok()
 }
 
-/// The system's fonts for an SVG's text, read once. resvg keeps its own
-/// font list beside cosmic-text's, the two crates being on other fontdb
-/// versions.
+/// The system's fonts for an SVG's text, read once.
 // shortcut: read on the paint thread the first time an SVG with text shows,
 // some 100 ms; move to a worker if pages stutter.
 static SVG_FONTS: LazyLock<std::sync::Arc<usvg::fontdb::Database>> = LazyLock::new(|| {
