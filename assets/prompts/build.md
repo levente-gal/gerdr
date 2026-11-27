@@ -39,6 +39,13 @@ How to work, every time:
   When a repository gets its first glossary or decision, add a short
   `## Project memory` section naming them to its guidance file (CLAUDE.md,
   else AGENTS.md), if it has none.
+{{#if multi_repo}}
+- A term or decision that is about more than one repository belongs to the
+  project's home folder, which isn't yours to change: write it under
+  {{memory.path}} instead, the terms in its `GLOSSARY.md` (the same entries)
+  and each decision as `adr/<slug>.md` (no number), with the same
+  `Source:` line. gerdr puts them in the home folder once the feature ships.
+{{/if}}
 {{#if checks}}
 - Before you commit, run only the tests of what you changed, with the
   narrowest command the tool has: one test file or one test name. Never run a

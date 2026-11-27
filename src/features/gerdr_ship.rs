@@ -722,6 +722,7 @@ impl Gerdr {
     /// open, every tab but the feature tab closes. What keeps running, if
     /// anything: a T3 Code thread, which gerdr can't stop.
     pub(crate) fn after_ship(&mut self, project: &str, slug: &str) -> Option<String> {
+        self.keep_memory(project, slug);
         let feature = self.feature(project, slug)?;
         let plan = feature.ship_plan.clone();
         if feature.sandbox.is_some() {
@@ -749,6 +750,35 @@ impl Gerdr {
             self.close_shipped_now(project, slug);
         }
         (!t3.is_empty()).then(|| t3.join("; "))
+    }
+
+    /// Shipped multi-repository feature `slug`'s memory that spans its
+    /// repositories goes into the project's home folder, off the UI thread
+    /// (`feature::memory`). Not for a feature finished without shipping.
+    fn keep_memory(&mut self, project: &str, slug: &str) {
+        let Some(feature) = self.feature(project, slug) else {
+            return;
+        };
+        let unshipped = (feature.marks.get(&Stage::Ship))
+            .is_some_and(|m| m.note == super::ship_page::FINISHED_UNSHIPPED);
+        let data = feature::store::dir(None, project, slug);
+        if !feature.multi || unshipped || !data.join(feature::memory::DIR).is_dir() {
+            return;
+        }
+        // Read now: the worktrees may go before the work runs.
+        let repos: Vec<String> = (feature.touched())
+            .filter(|r| r.project.is_none() && r.worktree.join("GLOSSARY.md").is_file())
+            .map(|r| r.name.clone())
+            .collect();
+        let root = feature.root.clone();
+        let title = self.projects.names(feature).home;
+        let message = format!("Project memory from feature {}", feature.title);
+        let (project, slug) = (project.to_owned(), slug.to_owned());
+        self.feature_work(None, move |_| Done::MemoryKept {
+            result: feature::memory::apply(&root, &data, &title, &repos, &message),
+            project,
+            slug,
+        });
     }
 
     /// The tick removing the worktrees holds only as long as what is ticked

@@ -494,6 +494,20 @@ pub fn decision_ids(text: &str) -> BTreeSet<u32> {
     decision_entries(text).into_iter().map(|(n, _)| n).collect()
 }
 
+/// The decisions of decision log `text` marked `ADR: yes` for a decision
+/// record, leaving out those replaced since.
+pub fn adr_decisions(text: &str) -> Vec<u32> {
+    (decision_entries(text).into_iter())
+        .filter(|(_, body)| {
+            let marked = body
+                .iter()
+                .any(|l| labelled(l, "ADR").is_some_and(|v| v.eq_ignore_ascii_case("yes")));
+            marked && !body.iter().any(|l| labelled(l, "Replaced by").is_some())
+        })
+        .map(|(n, _)| n)
+        .collect()
+}
+
 /// Whether decision log `text` is good: at least one entry, none twice,
 /// each with a `Decided:` line; else what it lacks, one line each.
 pub fn check_decisions(text: &str) -> Result<(), Vec<String>> {
