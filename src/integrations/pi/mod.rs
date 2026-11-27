@@ -125,6 +125,19 @@ impl Integration for Pi {
         commands::on_disk(cwd, homes, found);
     }
 
+    fn skill_dirs(&self, cwd: &Path, homes: &Homes, _config: &Path) -> Vec<PathBuf> {
+        let agent = homes.pi.parent().unwrap_or(Path::new("/"));
+        let mut dirs = vec![cwd.join(".pi/skills"), cwd.join(".agents/skills")];
+        dirs.push(agent.join("skills"));
+        dirs.extend(
+            homes
+                .cursor
+                .parent()
+                .map(|home| home.join(".agents/skills")),
+        );
+        dirs
+    }
+
     fn install_live(&self, home: &Path) -> Vec<Result<Option<Changed>, String>> {
         live::install(home)
     }

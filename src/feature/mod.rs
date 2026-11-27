@@ -48,6 +48,7 @@ pub mod sandbox_pages;
 pub mod sandbox_run;
 pub mod setup;
 pub mod ship;
+pub mod skills;
 pub mod store;
 pub mod suggest;
 pub mod verify;

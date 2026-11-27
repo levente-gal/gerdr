@@ -10,7 +10,10 @@ mod live;
 pub(crate) mod parse;
 mod screen;
 
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use super::{
     DbChat, Integration, ModelSwitch, Parser, SidePanel, Store,
@@ -114,6 +117,19 @@ impl Integration for OpenCode {
 
     fn disk_commands(&self, cwd: &Path, _homes: &Homes, config: &Path, found: &mut Vec<Command>) {
         commands::on_disk(cwd, config, found);
+    }
+
+    fn skill_dirs(&self, cwd: &Path, homes: &Homes, config: &Path) -> Vec<PathBuf> {
+        let mut dirs = vec![
+            cwd.join(".opencode/skills"),
+            cwd.join(".claude/skills"),
+            cwd.join(".agents/skills"),
+            config.join("opencode/skills"),
+        ];
+        if let Some(home) = homes.cursor.parent() {
+            dirs.extend([home.join(".claude/skills"), home.join(".agents/skills")]);
+        }
+        dirs
     }
 
     fn install_live(&self, home: &Path) -> Vec<Result<Option<Changed>, String>> {

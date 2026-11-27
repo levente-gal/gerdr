@@ -372,6 +372,11 @@ pub struct Workflow {
     /// A feature's own pick on a stage's page goes over it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub agents: std::collections::BTreeMap<crate::feature::Stage, String>,
+    /// The skills each stage's agent is told to use, by name, where they
+    /// are installed for its CLI; an empty list for none. A stage without
+    /// an entry names `feature::skills::DEFAULTS`'.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub skills: std::collections::BTreeMap<crate::feature::Stage, Vec<String>>,
     /// The machine each stage's agent, Verify's checks or the sandbox runs on, by
     /// its name in `[machines]` or `least busy`; without one, this machine. A
     /// feature's own pick on a stage's page goes over it.
@@ -458,22 +463,8 @@ impl Workflow {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.ignore.is_empty()
-            && self.base.is_empty()
-            && self.ship.is_none()
-            && self.agents.is_empty()
-            && self.setup.is_empty()
-            && self.cleanup.is_empty()
-            && self.copy.is_empty()
-            && self.verify.is_empty()
-            && self.verify_timeout.is_none()
-            && self.run.is_empty()
-            && self.prepare.is_empty()
-            && self.sandbox_env.is_empty()
-            && self.sandbox_outside.is_empty()
-            && self.sandbox_url.is_none()
-            && self.sandbox_pages.is_empty()
-            && !self.allow_same_reviewer
+        // All of it: a field left out here would be dropped on save.
+        *self == Self::default()
     }
 }
 
@@ -2017,6 +2008,23 @@ mod tests {
 
     // Above the kernel's pid limit, so `/proc` has nothing for them.
     const NO_PID: i32 = 2_000_000_000;
+
+    #[test]
+    fn a_workflow_keeps_its_skills_and_any_one_setting_counts() {
+        use crate::feature::Stage;
+        let json = r#"{"skills":{"discover":["grilling"],"build":[]}}"#;
+        let workflow: Workflow = serde_json::from_str(json).unwrap();
+        assert_eq!(workflow.skills[&Stage::Discover], ["grilling"]);
+        assert!(workflow.skills[&Stage::Build].is_empty());
+        assert_eq!(serde_json::to_string(&workflow).unwrap(), json);
+        assert!(!workflow.is_empty());
+        // Machines alone were dropped on save once.
+        let machines = Workflow {
+            machines: [(Stage::Build, "box".to_owned())].into(),
+            ..Workflow::default()
+        };
+        assert!(!machines.is_empty() && Workflow::default().is_empty());
+    }
 
     #[test]
     fn a_machine_renamed_is_renamed_in_the_workflow() {

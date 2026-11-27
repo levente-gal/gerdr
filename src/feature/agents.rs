@@ -360,7 +360,8 @@ pub struct StageRun {
     pub t3: Option<T3Run>,
     /// The rendered prompt.
     pub prompt: PathBuf,
-    /// The template it was rendered from: `builtin:plan@1`.
+    /// The template it was rendered from, and the skills it named with
+    /// their folder hashes: `builtin:plan@1 skills:tdd@667dbdd`.
     pub template: String,
     /// Unix seconds.
     pub started: u64,

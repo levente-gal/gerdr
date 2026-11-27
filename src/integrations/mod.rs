@@ -347,6 +347,12 @@ pub trait Integration: Sync {
         _found: &mut Vec<Command>,
     ) {
     }
+    /// The folders it reads skills from (each skill a `<name>/SKILL.md` in
+    /// one), for folder `cwd`; `config` as in `disk_commands`. None: it
+    /// reads no skills.
+    fn skill_dirs(&self, _cwd: &Path, _homes: &Homes, _config: &Path) -> Vec<PathBuf> {
+        Vec::new()
+    }
 
     // Live hooks.
 

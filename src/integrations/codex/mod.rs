@@ -150,4 +150,15 @@ impl Integration for Codex {
     fn disk_commands(&self, _cwd: &Path, homes: &Homes, _config: &Path, found: &mut Vec<Command>) {
         commands::codex_disk(homes, found);
     }
+
+    fn skill_dirs(&self, cwd: &Path, homes: &Homes, _config: &Path) -> Vec<PathBuf> {
+        let mut dirs = vec![cwd.join(".agents/skills"), homes.codex.join("skills")];
+        dirs.extend(
+            homes
+                .cursor
+                .parent()
+                .map(|home| home.join(".agents/skills")),
+        );
+        dirs
+    }
 }

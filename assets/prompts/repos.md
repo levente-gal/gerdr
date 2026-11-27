@@ -70,3 +70,4 @@ feature under Repositories on the feature tab (Ctrl+Shift+L).
 {{/if}}
 
 {{> memory}}
+{{> skills}}

@@ -31,6 +31,10 @@ pub struct Reading {
     /// Repositories the feature doesn't touch whose worktree has changes,
     /// by `Repo::key`: those wouldn't ship.
     pub stray: Vec<String>,
+    /// Those of `dirty` whose uncommitted changes are all to the project's
+    /// memory files (`memory_file`): a stage that may not change the code
+    /// can still leave them, for Build to commit.
+    pub memory_only: Vec<String>,
     /// Per touched repository by `Repo::key`, its commits not in its base.
     pub commits: BTreeMap<String, usize>,
     /// Per touched repository by `Repo::key`, its HEAD: where a fix round's
@@ -63,7 +67,7 @@ pub fn read(feature: &Feature) -> Result<Reading, String> {
     for repo in feature.repos_by_key() {
         let name = &repo.key();
         if !repo.touched {
-            if repo.worktree.is_dir() && changed(repo)? {
+            if repo.worktree.is_dir() && changed(repo)?.is_some() {
                 reading.stray.push(name.clone());
             }
             continue;
@@ -84,8 +88,11 @@ pub fn read(feature: &Feature) -> Result<Reading, String> {
         let head = git(&repo.worktree, &["rev-parse", "HEAD"])
             .map_err(|err| format!("{name}: couldn't read its HEAD: {err}"))?;
         reading.heads.insert(name.clone(), head.trim().to_owned());
-        if changed(repo)? {
+        if let Some(memory) = changed(repo)? {
             reading.dirty.push(name.clone());
+            if memory {
+                reading.memory_only.push(name.clone());
+            }
         }
     }
     let hash = git_bytes(
@@ -250,12 +257,47 @@ fn odd_base(feature: &Feature, repo: &Repo) -> Option<(String, String)> {
     (!held).then_some((branch, oid))
 }
 
+impl Reading {
+    /// Those of `dirty` with changes besides memory files: what a stage that
+    /// may not change the code is refused for.
+    pub fn code_dirty(&self) -> Vec<String> {
+        (self.dirty.iter())
+            .filter(|repo| !self.memory_only.contains(repo))
+            .cloned()
+            .collect()
+    }
+}
+
 /// Whether `repo`'s worktree has uncommitted changes, untracked files
-/// included.
-fn changed(repo: &Repo) -> Result<bool, String> {
-    git(&repo.worktree, &["status", "--porcelain"])
-        .map(|out| !out.trim().is_empty())
-        .map_err(|err| format!("{}: couldn't tell what it has: {err}", repo.key()))
+/// included: none for none, else whether they are all to memory files.
+fn changed(repo: &Repo) -> Result<Option<bool>, String> {
+    git(
+        &repo.worktree,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )
+    .map(|out| only_memory(&out))
+    .map_err(|err| format!("{}: couldn't tell what it has: {err}", repo.key()))
+}
+
+/// What `git status --porcelain` output `status` says: none for no
+/// changes, else whether every changed path is a memory file.
+fn only_memory(status: &str) -> Option<bool> {
+    let mut paths = (status.lines())
+        .filter(|line| line.len() > 3)
+        .flat_map(|line| line[3..].split(" -> "))
+        .peekable();
+    paths.peek()?;
+    Some(paths.all(|path| memory_file(path.trim_matches('"'))))
+}
+
+/// Whether `path`, from its repository's top, is one of the project's
+/// memory files: a `GLOSSARY.md` or `GLOSSARY-MAP.md`, or under a
+/// `docs/adr/` (see `assets/prompts/memory.md`).
+fn memory_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    matches!(name, "GLOSSARY.md" | "GLOSSARY-MAP.md")
+        || path.starts_with("docs/adr/")
+        || path.contains("/docs/adr/")
 }
 
 #[cfg(test)]
@@ -264,6 +306,23 @@ mod tests {
 
     use super::*;
     use crate::feature::tests::{Temp, commit, feature_over, link_over, run};
+
+    #[test]
+    fn changes_only_to_memory_files_are_told_apart() {
+        assert_eq!(only_memory(""), None);
+        assert_eq!(
+            only_memory("?? GLOSSARY.md\n M docs/adr/0001-csv.md\n"),
+            Some(true)
+        );
+        assert_eq!(only_memory("?? src/ordering/GLOSSARY.md\n"), Some(true));
+        assert_eq!(only_memory(" M GLOSSARY.md\n M src/main.rs\n"), Some(false));
+        // A rename counts both of its paths.
+        assert_eq!(
+            only_memory("R  src/a.rs -> docs/adr/0002-a.md\n"),
+            Some(false)
+        );
+        assert!(!memory_file("docs/adrs.md") && !memory_file("MY-GLOSSARY.md"));
+    }
 
     fn wt(f: &Feature, name: &str) -> PathBuf {
         f.repos
