@@ -30,6 +30,10 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "fontconfig"] }
 syntect = { version = "5.3.0", default-features = false, features = ["default-syntaxes", "regex-fancy"] }
+# Pictures in docs beside PNG: the decoders resvg itself uses for raster-images.
+zune-jpeg = "0.5.9"
+image-webp = "0.2.4"
+gif = "0.14.1"
 
 # For trying a change: a one-file rebuild takes about a quarter of what
 # --release does, with paint about twice as slow. install.sh stays on release.

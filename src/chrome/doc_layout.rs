@@ -608,14 +608,15 @@ impl Column {
         }
     }
 
-    /// An image alone in its paragraph: a PNG file's drawn, as wide as it
-    /// is up to the column and `DOC_IMAGE_HIGH`; any other (a web page's,
-    /// one that can't be read) its alt text as a link to it.
+    /// An image alone in its paragraph: a picture file's drawn (one of
+    /// `shot_images::FORMATS`), as wide as it is up to the column and
+    /// `DOC_IMAGE_HIGH`; any other (a web page's, one that can't be read)
+    /// its alt text as a link to it.
     fn image(&mut self, url: &str, alt: &str) {
         let path = Path::new(url);
-        let png =
-            path.is_absolute() && (path.extension()).is_some_and(|e| e.eq_ignore_ascii_case("png"));
-        let size = png.then(|| crate::shot_images::size(path)).flatten();
+        let size = (path.is_absolute())
+            .then(|| crate::shot_images::size(path))
+            .flatten();
         if let Some((w, h)) = size.filter(|(w, h)| *w > 0 && *h > 0) {
             let (w, h) = (i64::from(w), i64::from(h));
             let wide = w.min(i64::from(self.w.max(1)));
@@ -1355,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn a_png_image_is_drawn_to_fit_others_are_their_alt_as_a_link() {
+    fn a_picture_file_is_drawn_to_fit_others_are_their_alt_as_a_link() {
         let dir = std::env::temp_dir().join(format!("gerdr-doc-image-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("wide.png");
@@ -1363,11 +1364,20 @@ mod tests {
             .unwrap()
             .save_png(&path)
             .unwrap();
-        let md = format!("![wide]({})\n\n![web](https://x.y/a.png)\n", path.display());
+        let svg = dir.join("tall.svg");
+        let doc = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="200"/>"#;
+        std::fs::write(&svg, doc).unwrap();
+        let md = format!(
+            "![wide]({})\n\n![tall]({})\n\n![web](https://x.y/a.png)\n",
+            path.display(),
+            svg.display()
+        );
         let (pieces, h) = stack_of(&crate::md_blocks::blocks(&md), 400);
-        let image = (pieces.iter()).find(|(_, p)| matches!(p, DocPiece::Image(_)));
-        let (rect, _) = image.expect("drawn");
-        assert_eq!((rect.size.w, rect.size.h), (400, 50));
+        let images: Vec<_> = (pieces.iter())
+            .filter(|(_, p)| matches!(p, DocPiece::Image(_)))
+            .map(|(r, _)| (r.size.w, r.size.h))
+            .collect();
+        assert_eq!(images, [(400, 50), (100, 200)]);
         assert!(h > 50);
         let web = (pieces.iter()).find_map(|(_, p)| match p {
             DocPiece::Text { text, runs, .. } => Some((text.clone(), runs.clone())),
