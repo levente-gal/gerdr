@@ -174,8 +174,9 @@ pub(super) struct Shaped {
     pub(super) w: f32,
 }
 
-/// What a shaped line is kept by: its text, face and size in pixels.
-type Key = (String, Face, u32);
+/// Shaped lines by face and size in pixels, then by text: a line is looked
+/// up by its `&str`, with no `String` made for it.
+type Lines = HashMap<(Face, u32), HashMap<String, Rc<Shaped>>>;
 
 /// How many shaped lines a thread keeps; past it, they are all let go.
 // shortcut: the cache empties at once when full; keep the lines used last if a
@@ -185,7 +186,7 @@ const SHAPED_MAX: usize = 20_000;
 struct Shaper {
     fs: FontSystem,
     swash: SwashCache,
-    lines: HashMap<Key, Rc<Shaped>>,
+    lines: Lines,
     /// The cap height of each face at a size: what text is centred on.
     caps: HashMap<(Face, u32), f32>,
     /// Each face's em per pixel of line height (`em_per_px`).
@@ -281,15 +282,16 @@ fn attrs(face: Face) -> Attrs<'static> {
 
 impl Shaper {
     fn shaped(&mut self, text: &str, face: Face, px: f32) -> Rc<Shaped> {
-        let key = (text.to_owned(), face, px.to_bits());
-        if let Some(found) = self.lines.get(&key) {
+        let size = (face, px.to_bits());
+        if let Some(found) = self.lines.get(&size).and_then(|by| by.get(text)) {
             return found.clone();
         }
         let shaped = Rc::new(self.shape(text, face, px));
-        if self.lines.len() >= SHAPED_MAX {
+        if self.lines.values().map(HashMap::len).sum::<usize>() >= SHAPED_MAX {
             self.lines.clear();
         }
-        self.lines.insert(key, shaped.clone());
+        let by = self.lines.entry(size).or_default();
+        by.insert(text.to_owned(), shaped.clone());
         shaped
     }
 
